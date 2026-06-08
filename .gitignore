@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+obj/
+
+# Visual Studio / Rider / IDE
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.csproj.user
+
+# Tooling caches
+.serena/
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
