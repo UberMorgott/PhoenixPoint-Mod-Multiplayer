@@ -14,60 +14,68 @@ namespace Multipleer.UI
     {
         public static MultiplayerUI Instance { get; private set; }
 
-        // ─── Dedicated mod uGUI root (Canvas + raycaster) ───────────────────
-        // The mod GameObject (ModGO) is NOT a Canvas, so uGUI graphics parented to it
-        // would never render and never receive clicks. All mod UI is parented under
-        // this overlay Canvas instead, which is valid at the MAIN MENU (before any
-        // campaign scene exists) and persists with ModGO across the menu→geoscape load.
-        private Canvas _canvas;
-        private Transform _uiRoot;
+        // ─── Minimal mod canvas — IN-GAME STATUS BAR ONLY ──────────────────
+        // The lobby + save-picker now clone NATIVE widgets and parent under the game's
+        // own main-menu Canvas (captured in OnMenuReady), so they need no overlay canvas.
+        // The in-game status bar, however, is an in-GEOSCAPE element: the menu Canvas dies
+        // on the menu→geoscape scene load, so the bar keeps a tiny dedicated overlay Canvas
+        // that lives with ModGO. This is the only remaining from-code canvas.
+        private Canvas _barCanvas;
+        private Transform _barRoot;
 
         // ─── In-game bottom bar ─────────────────────────────────────────────
         private GameObject _inGameBar;
         private Text _barStatusText;
 
-        // ─── Lobby panel (built once, shown for both host and client) ───────
+        // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
         private SavePickerPanel _savePicker;
+        private bool _panelsBuilt;
 
         private void Awake()
         {
             Instance = this;
 
-            // Build the Canvas/EventSystem FIRST so every panel below has a valid
-            // render+raycast root regardless of which scene we are in.
-            EnsureUiRoot();
-
+            // Bar canvas first so the in-geoscape status bar has a valid render root.
+            EnsureBarCanvas();
             CreateInGameBar();
             _inGameBar.SetActive(false);
 
+            // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
-            _lobby.Build(_uiRoot);
-
             _savePicker = new SavePickerPanel();
-            _savePicker.Build(_uiRoot);
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        //  uGUI root (Canvas + GraphicRaycaster + EventSystem)
+        //  Menu hook — native Canvas captured by InjectNetworkButtonPatch
         // ═══════════════════════════════════════════════════════════════════
 
-        // Lazily create a dedicated overlay Canvas (idempotent) and guarantee an
-        // EventSystem. Returns the Transform that all mod panels parent under.
-        private Transform EnsureUiRoot()
+        // Called from InjectNetworkButtonPatch.Postfix once the main-menu Canvas + native
+        // button template are captured. Builds the lobby + save-picker as cloned NATIVE
+        // widgets parented to the menu's own Canvas (native look + correct CanvasScaler/sort).
+        public void OnMenuReady(Canvas menuCanvas)
         {
-            if (_uiRoot != null) return _uiRoot;
+            if (_panelsBuilt || menuCanvas == null) return;
+            _lobby.Build(menuCanvas);
+            _savePicker.Build(menuCanvas);
+            _panelsBuilt = true;
+        }
 
-            var go = new GameObject("MultipleerCanvas");
-            // Parent under ModGO so the Canvas shares the mod's lifetime (ModGO is
-            // persistent). Overlay canvases render in screen space regardless of the
-            // parent transform, so nesting under a non-canvas object is safe.
+        // ═══════════════════════════════════════════════════════════════════
+        //  Minimal overlay Canvas for the in-game status bar
+        // ═══════════════════════════════════════════════════════════════════
+
+        private Transform EnsureBarCanvas()
+        {
+            if (_barRoot != null) return _barRoot;
+
+            var go = new GameObject("MultipleerBarCanvas");
+            // Parent under ModGO so the Canvas shares the mod's persistent lifetime.
             go.transform.SetParent(transform, false);
 
-            _canvas = go.AddComponent<Canvas>();
-            _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            // High sorting order so the lobby sits ABOVE native menu/HUD canvases.
-            _canvas.sortingOrder = 5000;
+            _barCanvas = go.AddComponent<Canvas>();
+            _barCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _barCanvas.sortingOrder = 5000;
 
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
@@ -75,27 +83,8 @@ namespace Multipleer.UI
             scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
             scaler.matchWidthOrHeight = 0.5f;
 
-            // Required for pointer clicks / InputField focus on our graphics.
-            go.AddComponent<GraphicRaycaster>();
-
-            _uiRoot = go.transform;
-
-            EnsureEventSystem();
-            return _uiRoot;
-        }
-
-        // uGUI Buttons / InputFields need an active EventSystem + input module to
-        // receive clicks and typing. The native menu usually has one; only create a
-        // self-sufficient fallback if none exists (never add a second EventSystem).
-        private static void EnsureEventSystem()
-        {
-            if (EventSystem.current != null) return;
-
-            var es = new GameObject("MultipleerEventSystem");
-            es.AddComponent<EventSystem>();
-            es.AddComponent<StandaloneInputModule>();
-            // Survive the menu→geoscape scene load so input keeps working after BEGIN.
-            DontDestroyOnLoad(es);
+            _barRoot = go.transform;
+            return _barRoot;
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -357,7 +346,7 @@ namespace Multipleer.UI
         private void CreateInGameBar()
         {
             var bar = new GameObject("MultipleerStatusBar");
-            bar.transform.SetParent(EnsureUiRoot(), false);
+            bar.transform.SetParent(EnsureBarCanvas(), false);
             var rect = bar.AddComponent<RectTransform>();
             rect.anchorMin = new Vector2(0, 0);
             rect.anchorMax = new Vector2(1, 0);

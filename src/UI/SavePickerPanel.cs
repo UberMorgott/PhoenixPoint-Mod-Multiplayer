@@ -34,12 +34,12 @@ namespace Multipleer.UI
 
         public bool IsVisible => _root != null && _root.activeSelf;
 
-        public void Build(Transform parent)
+        public void Build(Canvas menuCanvas)
         {
-            if (_root != null) return;
+            if (_root != null || menuCanvas == null) return;
 
             _root = new GameObject("MultipleerSavePicker");
-            _root.transform.SetParent(parent, false);
+            _root.transform.SetParent(menuCanvas.transform, false);
 
             var rect = _root.AddComponent<RectTransform>();
             rect.anchorMin = new Vector2(0.5f, 0.5f);
@@ -64,10 +64,25 @@ namespace Multipleer.UI
             listRect.sizeDelta = new Vector2(RowWidth, MaxRows * RowHeight);
             listRect.anchoredPosition = new Vector2(0, -64);
 
-            // Cancel button (bottom-center).
-            UiToolkit.CreateButton(_root, "CancelBtn", "CANCEL",
-                new Vector2(0, 18), new Vector2(160, 40), new Vector2(0.5f, 0f),
-                Hide);
+            // Cancel button (bottom-center) — native clone, fallback to from-code button.
+            var cancel = NativeWidgetFactory.CloneMenuButton(_root.transform, "CancelBtn", "CANCEL", Hide);
+            if (cancel != null)
+            {
+                var crt = cancel.transform as RectTransform;
+                if (crt != null)
+                {
+                    crt.anchorMin = new Vector2(0.5f, 0f);
+                    crt.anchorMax = new Vector2(0.5f, 0f);
+                    crt.pivot = new Vector2(0.5f, 0f);
+                    crt.anchoredPosition = new Vector2(0, 18);
+                }
+            }
+            else
+            {
+                UiToolkit.CreateButton(_root, "CancelBtn", "CANCEL",
+                    new Vector2(0, 18), new Vector2(160, 40), new Vector2(0.5f, 0f),
+                    Hide);
+            }
 
             _root.SetActive(false);
         }
@@ -108,9 +123,35 @@ namespace Multipleer.UI
             for (var i = 0; i < saves.Count && i < MaxRows; i++)
             {
                 var meta = saves[i];
-                var label = DescribeSave(meta);
                 var captured = meta;
 
+                // Prefer a cloned NATIVE save row (UIModuleSaveGameSlot): native name/date/
+                // location/icon visuals. InitUsedSaveSlot re-wires its OnLoad/OnDelete delegates
+                // (-= then +=), so the cloned row does NOT carry the native single-player load.
+                if (meta is PPSavegameMetaData pp)
+                {
+                    var row = NativeWidgetFactory.CloneSaveRow(_listArea.transform);
+                    if (row != null)
+                    {
+                        var rt = row.transform as RectTransform;
+                        if (rt != null)
+                        {
+                            rt.anchorMin = new Vector2(0.5f, 1f);
+                            rt.anchorMax = new Vector2(0.5f, 1f);
+                            rt.pivot = new Vector2(0.5f, 1f);
+                            rt.anchoredPosition = new Vector2(0, -i * RowHeight);
+                        }
+                        // isInSaveWindow:false → shows the Load button; route it to our pick;
+                        // overwrite/delete are no-ops; suppress the load confirmation popup.
+                        row.InitUsedSaveSlot(pp, false,
+                            _ => { }, _ => OnPick(captured), _ => { }, false);
+                        _rows.Add(row.gameObject);
+                        continue;
+                    }
+                }
+
+                // Fallback (native save-row prefab not capturable): from-code labeled button.
+                var label = DescribeSave(meta);
                 var btn = UiToolkit.CreateButton(_listArea, $"SaveRow{i}", label,
                     new Vector2(0, -i * RowHeight), new Vector2(RowWidth, RowHeight - 4),
                     new Vector2(0.5f, 1f), () => OnPick(captured));

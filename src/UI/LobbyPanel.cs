@@ -21,12 +21,12 @@ namespace Multipleer.UI
         private readonly MultiplayerUI _owner;
 
         private GameObject _root;
-        private Text _titleText;
         private Text _roleText;
         private Text _connectText;
 
         // Interactive controls (T3).
         private InputField _nameField;
+        private Button _leaveButton;
         private Button _readyButton;
         private Text _readyButtonLabel;
         private Button _playButton;
@@ -56,34 +56,36 @@ namespace Multipleer.UI
 
         // ─── Build (once) ──────────────────────────────────────────────────
 
-        public void Build(Transform parent)
+        // Build under the native main-menu Canvas. Buttons are cloned native widgets
+        // (TemplateMenuButton via NativeWidgetFactory) so they match the game's look; the
+        // panel background, roster rows and nickname field stay from-code (documented
+        // per-widget fallbacks — no cheap native template at the menu for these).
+        public void Build(Canvas menuCanvas)
         {
-            if (_root != null) return;
+            if (_root != null || menuCanvas == null) return;
 
             _root = new GameObject("MultipleerLobbyPanel");
-            _root.transform.SetParent(parent, false);
+            _root.transform.SetParent(menuCanvas.transform, false);
 
             var rect = _root.AddComponent<RectTransform>();
-            // Centered panel, fixed size.
-            rect.anchorMin = new Vector2(0.5f, 0.5f);
-            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            // Large centered panel: stretch anchors covering ~85% of the screen, zero offsets.
+            rect.anchorMin = new Vector2(0.075f, 0.075f);
+            rect.anchorMax = new Vector2(0.925f, 0.925f);
             rect.pivot = new Vector2(0.5f, 0.5f);
-            rect.sizeDelta = new Vector2(560, 420);
-            rect.anchoredPosition = Vector2.zero;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
 
+            // Background panel: from-code styled Image (no standalone native panel template).
             var bg = _root.AddComponent<Image>();
             bg.color = new Color(0.05f, 0.06f, 0.08f, 0.92f);
 
-            _titleText = UiToolkit.CreateText(_root, "Title",
-                new Vector2(0, -28), new Vector2(540, 30), "MULTIPLAYER LOBBY",
-                18, TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
-
+            // Functional header lines (role + connect info), top-anchored. No decorative title.
             _roleText = UiToolkit.CreateText(_root, "Role",
-                new Vector2(0, -64), new Vector2(540, 24), "",
+                new Vector2(0, -28), new Vector2(540, 24), "",
                 14, TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
 
             _connectText = UiToolkit.CreateText(_root, "Connect",
-                new Vector2(0, -94), new Vector2(540, 24), "",
+                new Vector2(0, -58), new Vector2(540, 24), "",
                 12, TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
 
             // Roster area: rows are created lazily in RefreshRoster, anchored top-center.
@@ -96,30 +98,52 @@ namespace Multipleer.UI
             rosterRect.sizeDelta = new Vector2(RowWidth, 260);
             rosterRect.anchoredPosition = new Vector2(0, -RosterTop);
 
-            // Nickname label + edit field (just under the connect line, top area).
+            // Nickname label + edit field (from-code: no native input template at the menu).
             UiToolkit.CreateText(_root, "NameLabel", new Vector2(20, -110),
                 new Vector2(90, 24), "Nickname:", 12, TextAnchor.MiddleLeft, new Vector2(0f, 1f));
             _nameField = UiToolkit.CreateInputField(_root, "NameField", "",
                 new Vector2(110, -110), new Vector2(220, 26), new Vector2(0f, 1f),
                 v => _owner.OnLobbyRename(v));
 
-            // Leave button (bottom-left).
-            UiToolkit.CreateButton(_root, "LeaveBtn", "LEAVE",
+            // Leave button (bottom-left) — native clone, fallback to from-code button.
+            _leaveButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "LeaveBtn", "LEAVE",
+                () => _owner.OnLobbyLeave());
+            if (_leaveButton != null) AnchorButton(_leaveButton, new Vector2(0f, 0f), new Vector2(20, 20));
+            else UiToolkit.CreateButton(_root, "LeaveBtn", "LEAVE",
                 new Vector2(20, 20), new Vector2(140, 40), new Vector2(0f, 0f),
                 () => _owner.OnLobbyLeave());
 
-            // Ready toggle (bottom-center).
-            _readyButton = UiToolkit.CreateButton(_root, "ReadyBtn", "READY",
+            // Ready button (bottom-center): a button whose label flips READY/NOT-READY
+            // (the plan's simpler-than-a-Toggle path, preserving current behavior).
+            _readyButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "ReadyBtn", "READY",
+                () => _owner.OnLobbyToggleReady());
+            if (_readyButton != null) AnchorButton(_readyButton, new Vector2(0.5f, 0f), new Vector2(0, 20));
+            else _readyButton = UiToolkit.CreateButton(_root, "ReadyBtn", "READY",
                 new Vector2(0, 20), new Vector2(160, 40), new Vector2(0.5f, 0f),
                 () => _owner.OnLobbyToggleReady());
-            _readyButtonLabel = _readyButton.GetComponentInChildren<Text>();
+            _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
 
             // Play button (bottom-right, host only — gated on all-ready).
-            _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY",
+            _playButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "PlayBtn", "PLAY",
+                () => _owner.OnLobbyPlay());
+            if (_playButton != null) AnchorButton(_playButton, new Vector2(1f, 0f), new Vector2(-20, 20));
+            else _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY",
                 new Vector2(-20, 20), new Vector2(140, 40), new Vector2(1f, 0f),
                 () => _owner.OnLobbyPlay());
 
             _root.SetActive(false);
+        }
+
+        // Position a cloned native button: anchor its root RectTransform to a corner of the
+        // panel without resizing it (the native prefab carries its own size/visuals).
+        private static void AnchorButton(Button btn, Vector2 anchor, Vector2 offset)
+        {
+            var rt = btn.transform as RectTransform;
+            if (rt == null) return;
+            rt.anchorMin = anchor;
+            rt.anchorMax = anchor;
+            rt.pivot = anchor;
+            rt.anchoredPosition = offset;
         }
 
         // ─── Show / Hide ───────────────────────────────────────────────────
@@ -200,12 +224,14 @@ namespace Multipleer.UI
                 _readyButtonLabel.text = (me != null && me.Ready) ? "READY ✓" : "NOT READY";
 
             // Play button: host only, enabled when host is ready AND every remote client is ready.
+            // Cloned native buttons self-manage their disabled visuals from Button.interactable
+            // (UIInteractableColorController/Animator on the prefab), so gate via interactable.
             if (_playButton != null)
             {
                 var playable = engine.IsHost && AllReady(roster);
                 if (_playButton.gameObject.activeSelf != engine.IsHost)
                     _playButton.gameObject.SetActive(engine.IsHost);
-                UiToolkit.SetButtonInteractable(_playButton, playable);
+                _playButton.interactable = playable;
             }
         }
 

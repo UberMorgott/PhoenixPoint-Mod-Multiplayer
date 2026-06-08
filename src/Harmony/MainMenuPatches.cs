@@ -35,6 +35,14 @@ namespace Multipleer.Harmony
                 var group = groupField?.GetValue(__instance) as GameObject;
                 if (template == null || group == null) return;
 
+                // Hand the native button template + the menu Canvas to the widget factory so the
+                // lobby/save-picker can clone native widgets onto the menu's own canvas (same
+                // proven path used for the network button below). Then (re)build the panels.
+                var menuCanvas = group.GetComponentInParent<Canvas>();
+                NativeWidgetFactory.CaptureFromMainMenu(template, menuCanvas);
+                if (menuCanvas != null)
+                    MultiplayerUI.Instance?.OnMenuReady(menuCanvas);
+
                 if (group.transform.Find("MultipleerNetworkBtn") != null) return;
 
                 var obj = UnityEngine.Object.Instantiate(template, group.transform);
