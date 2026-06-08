@@ -3,8 +3,13 @@ setlocal enabledelayedexpansion
 REM ============================================================================
 REM  Make a PATH-ISOLATED 2nd copy of Phoenix Point for a Goldberg-faked
 REM  instance #2 (see SECOND-INSTANCE-SETUP.md). ADDITIVE: never touches the
-REM  original install. Mirrors the install with robocopy (~35 GB) then
-REM  pre-creates the steam_settings folder + text files in the copy.
+REM  original install. Mirrors the install with robocopy (Mods\ EXCLUDED, so
+REM  noticeably smaller than the full ~35 GB) then pre-creates the
+REM  steam_settings folder + text files in the copy.
+REM  Mods are SHARED, not copied: the copy's Mods\ is filled with DIRECTORY
+REM  JUNCTIONS (mklink /J) to the original install's local mods AND to the
+REM  subscribed Workshop mods. Update/deploy a mod ONCE (to the original
+REM  install Mods\, or via Steam for a workshop mod) and BOTH instances see it.
 REM  You still drop Goldberg's steam_api64.dll yourself (Step 2/3 in the doc).
 REM ============================================================================
 
@@ -13,8 +18,10 @@ set "SRC=D:\Steam\steamapps\common\Phoenix Point"
 REM  Workshop content for appid 839770 (subscribed mods, e.g. TFTV). Lives OUTSIDE
 REM  the install, so /MIR does NOT copy it. Goldberg returns no subscribed UGC, so
 REM  the SteamWorkshopModLoader (SteamUGC.GetSubscribedItemsInstallInfo) finds
-REM  nothing in the copy. We therefore copy the enabled workshop mods into the
+REM  nothing in the copy. We therefore JUNCTION each enabled workshop mod into the
 REM  copy's LOCAL Mods\ folder, which PPModLoader scans by FOLDER regardless of Steam.
+REM  A junction is seen by Directory.GetDirectories as a normal directory, so the
+REM  mod loads fine; updating the workshop folder (Steam) is seen by BOTH instances.
 set "WORKSHOP=D:\Steam\steamapps\workshop\content\839770"
 
 REM  The original Steam identity. PP stores its per-user config (Options.jopt with
@@ -33,22 +40,27 @@ if not exist "%SRC%\PhoenixPointWin64.exe" (
 
 echo(
 echo  Source : %SRC%
-echo  Size   : ~35 GB. The copy needs that much FREE space at the destination.
+echo  Size   : ~35 GB MINUS the Mods\ folder (Mods are SHARED via junctions, not
+echo           copied), so the copy is somewhat smaller. Still needs most of that
+echo           much FREE space at the destination.
 echo(
 set "DEST="
 set /p "DEST=Enter destination folder for the 2nd copy (e.g. D:\PP-Instance2): "
 if not defined DEST ( echo Aborted - no destination given. & pause & exit /b 1 )
 
 echo(
-echo  About to MIRROR ~35 GB:
+echo  About to MIRROR the install (Mods\ EXCLUDED, ~35 GB minus mods):
 echo      "%SRC%"  -->  "%DEST%"
+echo  Mods will be SHARED via directory junctions afterwards (not copied).
 echo  The original install is NOT modified. This can take several minutes.
 echo(
 set "OK="
 set /p "OK=Type  YES  to proceed: "
 if /i not "%OK%"=="YES" ( echo Aborted. & pause & exit /b 1 )
 
-robocopy "%SRC%" "%DEST%" /MIR /MT:16 /R:1 /W:1
+REM  /XD excludes the install's Mods\ from the mirror: real mod files are NOT
+REM  duplicated into the copy. They are shared via junctions below instead.
+robocopy "%SRC%" "%DEST%" /MIR /XD "%SRC%\Mods" /MT:16 /R:1 /W:1
 REM robocopy exit codes 0-7 are success; 8+ are errors.
 if %ERRORLEVEL% GEQ 8 (
     echo ERROR: robocopy failed (code %ERRORLEVEL%).
@@ -84,36 +96,59 @@ if exist "%IFACE_SRC%" (
     echo           Goldberg may fail to expose the right interfaces without it.
 )
 
-REM --- bring Steam Workshop mods into the copy's LOCAL Mods\ ------------------
-REM  Under Goldberg the SteamWorkshopModLoader enumerates nothing (no real UGC),
-REM  so subscribed mods like TFTV would be missing. PPModLoader scans the copy's
-REM  own <install>\Mods\ folder by FOLDER (no Steam), so we mirror each workshop
-REM  mod (a folder containing meta.json) into "%DEST%\Mods\" under its folder id.
-REM  ADDITIVE: only writes into the COPY's Mods\; never touches the workshop source.
+REM --- SHARE mods via directory junctions into the copy's LOCAL Mods\ ---------
+REM  Mods are NOT copied. Instead the copy's Mods\ holds a JUNCTION (mklink /J)
+REM  to each live source, so updating/deploying a mod ONCE is seen by BOTH
+REM  instances (no double-deploy, no stale copies). A junction is reported by
+REM  Directory.GetDirectories as a normal directory, so PPModLoader's FOLDER scan
+REM  (PPModLoader.DiscoverMods) loads a junctioned mod exactly like a real one.
+REM  ADDITIVE/SAFE: we only ever write under "%DEST%". Removing a stale link uses
+REM  a PLAIN rmdir (NO /s) which deletes only the JUNCTION, never the target's
+REM  contents. We NEVER rmdir /s anything, and NEVER touch "%SRC%" / the workshop.
+REM  mklink /J needs no admin. Junctions to another local NTFS volume work too;
+REM  here SRC + workshop are on D:, so a DEST on D: is fully local-to-local.
 set "DEST_MODS=%DEST%\Mods"
 if not exist "%DEST_MODS%" mkdir "%DEST_MODS%"
+
+REM  (a) Local install mods: one junction per subfolder of the original Mods\.
+echo  Junctioning the original install's local mods into the copy's Mods\ ...
+for /d %%M in ("%SRC%\Mods\*") do (
+    if exist "%DEST_MODS%\%%~nxM" rmdir "%DEST_MODS%\%%~nxM"
+    echo    local %%~nxM  -^>  Mods\%%~nxM
+    mklink /J "%DEST_MODS%\%%~nxM" "%%M" >nul
+)
+
+REM  (b) Workshop mods: one junction per workshop folder that contains a meta.json
+REM  (skip any without one, e.g. non-mod UGC). Skip if the name collides with a
+REM  local-mod junction already created above (local mods win).
 if exist "%WORKSHOP%" (
-    echo  Copying Steam Workshop mods into the copy's local Mods\ ...
+    echo  Junctioning subscribed Workshop mods into the copy's Mods\ ...
     for /d %%W in ("%WORKSHOP%\*") do (
         if exist "%%W\meta.json" (
-            echo    workshop %%~nxW  -^>  Mods\%%~nxW
-            robocopy "%%W" "%DEST_MODS%\%%~nxW" /MIR /MT:8 /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+            if exist "%DEST_MODS%\%%~nxW" (
+                echo    skip workshop %%~nxW  ^(name already present in Mods\^)
+            ) else (
+                echo    workshop %%~nxW  -^>  Mods\%%~nxW
+                mklink /J "%DEST_MODS%\%%~nxW" "%%W" >nul
+            )
         )
     )
-    echo  Workshop mods copied (incl. TFTV if subscribed). They now load via the
-    echo  folder-scanning PPModLoader regardless of Goldberg/offline Steam.
+    echo  Workshop mods junctioned (incl. TFTV if subscribed). They load via the
+    echo  folder-scanning PPModLoader regardless of Goldberg/offline Steam, and
+    echo  Steam updates to the workshop folder are seen by BOTH instances.
 ) else (
-    echo  NOTE: workshop folder "%WORKSHOP%" not found - no workshop mods to copy.
-    echo        If you use workshop mods (e.g. TFTV), copy each folder that contains
-    echo        a meta.json into "%DEST_MODS%\" by hand so the copy can discover them.
+    echo  NOTE: workshop folder "%WORKSHOP%" not found - no workshop mods to link.
+    echo        If you use workshop mods (e.g. TFTV), junction each folder that
+    echo        contains a meta.json:  mklink /J "%DEST_MODS%\<id>" "<workshop folder>"
 )
 
 echo(
 echo  Done. 2nd copy at: %DEST%
 echo(
 echo  steam_settings (incl. pre-generated steam_interfaces.txt) is ready.
-echo  Workshop mods mirrored into Mods\ ; forced steamID matches the original so
-echo  the copy reads the SAME enabled-mods list. The copy should show ALL your mods.
+echo  Mods are SHARED via junctions in Mods\ ; forced steamID matches the original
+echo  so the copy reads the SAME enabled-mods list. The copy should show ALL your
+echo  mods, and updating a mod once is seen by BOTH instances.
 echo(
 echo  NEXT (see SECOND-INSTANCE-SETUP.md):
 echo    1. Download Goldberg's 64-bit steam_api64.dll and UNBLOCK it.

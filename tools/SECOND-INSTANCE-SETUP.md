@@ -76,15 +76,34 @@ Decompile-confirmed mod model (`PhoenixPoint.Modding.ModManager` / loaders):
    via Steam UGC. Goldberg (offline, fake Steam) returns **no** subscribed items, so
    `SteamWorkshopModLoader` finds nothing → TFTV is never discovered → and because
    `EnableModsFromStore` aborts on the first missing id, the rest may fail to enable too.
-   **Fix:** the bat copies every workshop folder containing a `meta.json` into the copy's
+   **Fix:** the bat junctions every workshop folder containing a `meta.json` into the copy's
    **local `Mods\`**, where the folder-scanning `PPModLoader` discovers them with no Steam at all.
 
-Your 5 other enabled mods (AutoAI, Multipleer, OfficerClass, PerkOracle, TheTurned) already
-live in `<install>\Mods\`, so `/MIR` carries them into the copy automatically — they are **not**
-excluded. With both fixes above, the copy discovers ALL six mods and enables exactly the same set.
+**Mods are SHARED via directory junctions — ONE source, both instances.** The `/MIR` now
+**excludes** `<install>\Mods\` (`/XD`), so real mod files are **not** duplicated into the copy.
+Instead the copy's `Mods\*` are **directory junctions** (`mklink /J`) pointing at the live
+sources: one per subfolder of the original install `Mods\` (AutoAI, Multipleer, OfficerClass,
+PerkOracle, TheTurned) and one per subscribed Workshop folder that contains a `meta.json`
+(e.g. TFTV `2872311902`; folders without `meta.json`, like `3250097289`, are skipped). A
+junction is reported by `Directory.GetDirectories` as a normal directory, so `PPModLoader`'s
+folder scan loads a junctioned mod exactly like a real one. **Consequence: update/deploy a mod
+once — to the original install `Mods\` for a local mod, or via Steam for a workshop mod — and
+BOTH instances see it immediately. No double-deploy, no stale copies.**
 
-> If you change your subscribed workshop mods or your enabled set later, re-run
-> `make-second-copy.bat` (it re-mirrors) so the copy's `Mods\` and config stay in sync.
+Junction creation needs **no admin** (it is a junction, same/any local NTFS volume). Here the
+install and workshop both live on `D:`, so a destination on `D:` is fully local-to-local; a
+destination on a *different* local NTFS drive also works with `/J`. The bat is **idempotent**:
+before each junction it removes any pre-existing entry with a **plain `rmdir`** (no `/s`), which
+deletes only the link, never the target's contents. It only ever writes under the destination
+and never touches the original install or the workshop folders.
+
+> **Deploying a NEW local mod later** (a new folder under the original install `Mods\`): re-run
+> `make-second-copy.bat` to add its junction (the mirror is incremental; the junction loops are
+> idempotent), or just add it by hand:
+> `mklink /J "D:\PP-Instance2\Mods\<NewMod>" "D:\Steam\steamapps\common\Phoenix Point\Mods\<NewMod>"`.
+> **TFTV / workshop updates flow automatically** — the junction points at the live workshop
+> folder, so a Steam update is seen by both instances with no action. Changing your *enabled
+> set* still updates the shared `Options.jopt` (same steamID), so both stay in sync.
 
 > **Shared-config caveat.** Matching the steamID means both instances read/write the
 > **same** `…\Steam\76561197996210591\` folder (saves, `Options.jopt`, `ModConfig.json`).
@@ -97,13 +116,14 @@ excluded. With both fixes above, the copy discovers ALL six mods and enables exa
 
 ### TL;DR — minimal user steps
 
-1. **Run `make-second-copy.bat`** — one-time ~35 GB mirror. It auto-creates
-   `steam_settings\` AND drops in a **pre-generated `steam_interfaces.txt`**
-   (extracted from the game's real `steam_api64.dll`), so you do **NOT** need
-   Goldberg's interface-generator tool. It also **copies your Steam Workshop mods
-   (e.g. TFTV) into the copy's local `Mods\`** and **forces the copy's steamID to
-   match the original**, so the copy shows **all the same mods, enabled identically**
-   (see "How mods load in the 2nd copy" below for why both steps are required).
+1. **Run `make-second-copy.bat`** — one-time mirror (~35 GB **minus** `Mods\`, which
+   is excluded from the copy). It auto-creates `steam_settings\` AND drops in a
+   **pre-generated `steam_interfaces.txt`** (extracted from the game's real
+   `steam_api64.dll`), so you do **NOT** need Goldberg's interface-generator tool. It
+   **junctions your local mods AND your Steam Workshop mods (e.g. TFTV) into the
+   copy's local `Mods\`** (one source, both instances — see below) and **forces the
+   copy's steamID to match the original**, so the copy shows **all the same mods,
+   enabled identically**.
 2. **Download Goldberg's 64-bit `steam_api64.dll`** from the official source (URL
    below), then **unblock it** (right-click → Properties → Unblock, or
    `Unblock-File -Path .\steam_api64.dll` in PowerShell).
@@ -124,13 +144,19 @@ The detailed walkthrough follows.
 ### Step 1 — make the 2nd copy (~35 GB, manual)
 
 Run `make-second-copy.bat` in this folder (it asks for the destination path and warns
-about the ~35 GB size before copying). Pick a path with free space, e.g.
-`D:\PP-Instance2`. The bat uses `robocopy /MIR` and does NOT touch the original.
+about the size before copying). Pick a path with free space, e.g. `D:\PP-Instance2`.
+The bat uses `robocopy /MIR` with the install `Mods\` **excluded** (mods are shared via
+junctions afterwards) and does NOT touch the original.
 
-Or run robocopy yourself:
+Or do it yourself — mirror with `Mods\` excluded, then junction the mods in:
 
 ```
-robocopy "D:\Steam\steamapps\common\Phoenix Point" "D:\PP-Instance2" /MIR /MT:16 /R:1 /W:1
+robocopy "D:\Steam\steamapps\common\Phoenix Point" "D:\PP-Instance2" /MIR /XD "D:\Steam\steamapps\common\Phoenix Point\Mods" /MT:16 /R:1 /W:1
+mkdir "D:\PP-Instance2\Mods"
+REM local mods:
+for /d %M in ("D:\Steam\steamapps\common\Phoenix Point\Mods\*") do mklink /J "D:\PP-Instance2\Mods\%~nxM" "%M"
+REM workshop mods that have a meta.json (e.g. TFTV 2872311902):
+mklink /J "D:\PP-Instance2\Mods\2872311902" "D:\Steam\steamapps\workshop\content\839770\2872311902"
 ```
 
 ### Step 2 — download Goldberg (official source)
