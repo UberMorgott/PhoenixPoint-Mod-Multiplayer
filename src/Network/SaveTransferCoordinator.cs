@@ -1,0 +1,583 @@
+using System;
+using System.Collections.Generic;
+using Base.Core;
+using Base.Serialization;
+using Base.Utils;
+using Multipleer.Network.MessageLayer;
+using Multipleer.Transport;
+using PhoenixPoint.Common.Game;
+using PhoenixPoint.Common.Levels.Params;
+using PhoenixPoint.Common.Saves;
+using UnityEngine;
+
+namespace Multipleer.Network
+{
+    /// <summary>
+    /// Owns the session-start save transfer + LOADED/BEGIN barrier (foundation #1, Phase B).
+    ///
+    /// Flow (host = coordinator):
+    ///   HOST  : serialize current savegame → byte[] (SerializationComponent.ReadSavegameBinary),
+    ///           chunk it into SaveChunk msgs, then SaveDone (size + crc32). Host prepares its own
+    ///           LoadLevelGameResult locally and waits at the barrier.
+    ///   CLIENT: reassemble chunks by offset, verify total + crc32 on SaveDone, build the loaded
+    ///           scene binding IN MEMORY (mirrors PhoenixSaveManager.LoadCurrentGeoscape), then send
+    ///           ClientLoaded. It does NOT enter the level — FinishLevel is deferred until BEGIN.
+    ///   BARRIER: host collects ClientLoaded from every connected peer (or kicks on timeout), then
+    ///            broadcasts SessionBegin. On BEGIN every peer (host + clients) calls FinishLevel with
+    ///            its prepared LoadLevelGameResult at the same instant → simultaneous entry.
+    ///
+    /// All game-save types are referenced directly (Assembly-CSharp is a compile-time reference) and
+    /// were verified against the decompile: SerializationComponent.ReadSavegameBinary (cs:280),
+    /// PhoenixSaveManager.LoadCurrentGeoscape in-memory pattern (cs:380-398), PhoenixGame.FinishLevel
+    /// (cs:263). Coroutines are driven through Timing.Start exactly like the vanilla load path
+    /// (UIModuleSaveGame.cs:170 / UIModuleMainMenuButtons.cs:241).
+    /// </summary>
+    public class SaveTransferCoordinator
+    {
+        // Chunk size. 32 KB is safe on the two RELIABLE transports: SteamTransport reliable P2P allows
+        // ~1 MB and DirectTransport is length-prefixed TCP (unbounded). It is NOT a single datagram on
+        // StunTransport: that path sends one raw UDP packet per message (UdpClient.Send,
+        // StunTransport.cs:322), so a 32 KB payload is split by IP into ~22 fragments, and Stun has no
+        // sequencing/ACK/retransmit — a single lost fragment drops the whole chunk unrecoverably. The
+        // Stun/WAN path is therefore best-effort only (see HostStartSession warning); reliable
+        // save-transfer is supported on Steam and DirectIP. Reducing ChunkSize below the path MTU would
+        // not make Stun reliable without an ACK/retransmit layer (out of foundation scope), so we keep
+        // 32 KB and document the limitation rather than branch the chunk size per transport.
+        public const int ChunkSize = 32 * 1024;
+
+        // Barrier timeout after SaveDone is sent / the barrier opens. On expiry the host kicks peers
+        // that have not reported LOADED and begins with whoever is ready (required, not optional).
+        private const long BarrierTimeoutMs = 60_000;
+
+        private readonly NetworkEngine _engine;
+
+        // ─── Host transfer/barrier state ──────────────────────────────────
+        private Guid _transferId;
+        private bool _barrierOpen;
+        private long _barrierOpenedAtMs;
+        private readonly HashSet<ulong> _loadedPeers = new HashSet<ulong>();
+
+        // ─── Client reassembly state ──────────────────────────────────────
+        private Guid _rxTransferId;
+        private long _rxTotalBytes;
+        private byte[] _rxBuffer;
+        private long _rxReceived;
+        private int _lastReportedDownloadPct = -1;
+        // Coverage tracking so reassembly is idempotent to duplicate / out-of-order chunks.
+        // StunTransport duplicates every reliable packet (StunTransport.cs:130), so a chunk can
+        // arrive more than once; copying into _rxBuffer is already idempotent, but a running byte
+        // counter would over-count. We instead track which chunk indices have been covered and
+        // declare the blob complete only when every index is present (+ CRC matches).
+        private bool[] _rxChunkSeen;
+        private int _rxChunksRemaining;
+
+        // ─── Per-peer prepared entry point (host + client) ────────────────
+        // The loaded scene to enter; built before the barrier, consumed on BEGIN.
+        private LoadLevelGameResult _pendingResult;
+        private bool _begun;
+
+        // ─── Per-peer download progress (host view) ───────────────────────
+        // Keyed by the authoritative transport sender id (msg.SenderSteamId), so it lines up with the
+        // roster's client SteamIds and is reliable even when LocalSteamId collides on DirectIP.
+        private readonly Dictionary<ulong, int> _peerDownloadPct = new Dictionary<ulong, int>();
+
+        public SaveTransferCoordinator(NetworkEngine engine)
+        {
+            _engine = engine;
+        }
+
+        /// <summary>True while a peer has a save prepared but must wait for BEGIN before entering.</summary>
+        public bool IsBarrierPending => _pendingResult != null && !_begun;
+
+        /// <summary>True once BEGIN has released this peer into the level (session has started).</summary>
+        public bool SessionStarted => _begun;
+
+        /// <summary>
+        /// True while a save transfer/load is in flight: the host has opened the barrier, or this
+        /// client is mid-download / has a prepared save awaiting BEGIN. Used to gate progress display.
+        /// </summary>
+        public bool TransferActive =>
+            (_engine.IsHost && _barrierOpen) || _rxTotalBytes > 0 || IsBarrierPending;
+
+        /// <summary>This peer's own download percent (0..100), or -1 when not downloading.</summary>
+        public int LocalDownloadPercent
+        {
+            get
+            {
+                if (_engine.IsHost) return 100;            // host has the blob locally; no download
+                if (_rxTotalBytes <= 0) return -1;
+                return (int)(100L * _rxReceived / _rxTotalBytes);
+            }
+        }
+
+        /// <summary>Host view of a connected client's last-reported download percent (0..100).</summary>
+        public bool TryGetPeerDownloadPercent(ulong peerKey, out int pct)
+            => _peerDownloadPct.TryGetValue(peerKey, out pct);
+
+        // ══════════════════════════════════════════════════════════════════
+        //  HOST: start the session — serialize + send the save, open the barrier
+        // ══════════════════════════════════════════════════════════════════
+
+        public void HostStartSession(SavegameMetaData chosen)
+        {
+            if (!_engine.IsHost)
+            {
+                Debug.LogWarning("[Multipleer] HostStartSession called on a non-host peer; ignored.");
+                return;
+            }
+
+            if (chosen == null)
+            {
+                Debug.LogError("[Multipleer] HostStartSession called with no chosen save; aborting.");
+                return;
+            }
+
+            // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
+            // DirectIP (length-prefixed TCP). The Stun/WAN path sends raw UDP with no sequencing/ACK/
+            // retransmit, so 32 KB chunks fragment at the IP layer and any lost fragment fails the
+            // transfer. Warn once at start; do not change Steam/Direct behaviour.
+            if (_engine.Transport != null && _engine.Transport.TransportType == TransportType.StunUDP)
+            {
+                Debug.LogWarning("[Multipleer] Save transfer over the Stun/WAN (UDP) transport is " +
+                                 "BEST-EFFORT only: chunks fragment over UDP with no retransmit, so the " +
+                                 "transfer may fail on packet loss. Reliable transfer is supported on " +
+                                 "Steam and DirectIP.");
+            }
+
+            PhoenixGame game;
+            PhoenixSaveManager saveManager;
+            if (!TryGetGame(out game, out saveManager)) return;
+
+            // The chosen save is supplied by the lobby save-picker (PhoenixSaveManager.GetSaves()),
+            // selected AFTER the lobby Play press — never auto-selected here (lobby-first invariant).
+            var timing = GetTiming();
+            if (timing == null) return;
+
+            _transferId = Guid.NewGuid();
+            timing.Start(HostSerializeAndSendCrt(game, chosen));
+        }
+
+        // Coroutine: read the save to bytes, then chunk+send, then prepare host entry + open barrier.
+        private IEnumerator<NextUpdate> HostSerializeAndSendCrt(PhoenixGame game, SavegameMetaData metaData)
+        {
+            var result = new ByRef<byte[]>();
+            yield return Timing.Current.Call(game.SaveManager.Serializer.ReadSavegameBinary(metaData, result));
+
+            var blob = result.Value;
+            if (blob == null || blob.Length == 0)
+            {
+                Debug.LogError("[Multipleer] Save serialization produced no bytes; aborting transfer.");
+                yield break;
+            }
+
+            var ext = System.IO.Path.GetExtension(metaData.Path);
+            if (string.IsNullOrEmpty(ext)) ext = SerializationComponent.DefaultExtension;
+
+            SendBlob(blob, ext);
+
+            // Host prepares its own entry from the SAME bytes (in memory), then waits at the barrier.
+            yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
+
+            OpenBarrier();
+            // Host counts as loaded immediately.
+            _loadedPeers.Add(_engine.LocalSteamId);
+            TryReleaseBarrier();
+        }
+
+        // Split the blob into SaveChunk messages (sequence by offset), then a SaveDone with crc32.
+        private void SendBlob(byte[] blob, string ext)
+        {
+            var crc = Crc32(blob);
+
+            long offset = 0;
+            while (offset < blob.Length)
+            {
+                var len = (int)Math.Min(ChunkSize, blob.Length - offset);
+                var chunk = new byte[len];
+                Array.Copy(blob, offset, chunk, 0, len);
+
+                var msg = new SaveChunkMessage
+                {
+                    TransferId = _transferId,
+                    TotalBytes = blob.Length,
+                    Offset = offset,
+                    Chunk = chunk
+                };
+                var payload = MessageSerializer.SerializeSaveChunk(msg);
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveChunk, payload));
+                offset += len;
+            }
+
+            var donePayload = MessageSerializer.SerializeSaveDone(_transferId, blob.Length, ext, crc);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveDone, donePayload));
+        }
+
+        private void OpenBarrier()
+        {
+            _barrierOpen = true;
+            _barrierOpenedAtMs = NowMs();
+            _loadedPeers.Clear();
+            _peerDownloadPct.Clear();
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  CLIENT: receive chunks, reassemble, verify, load in-memory
+        // ══════════════════════════════════════════════════════════════════
+
+        public void OnSaveChunk(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            var chunk = MessageSerializer.DeserializeSaveChunk(msg.Payload);
+
+            // First chunk of a transfer (re)initialises the reassembly buffer.
+            if (_rxBuffer == null || _rxTransferId != chunk.TransferId)
+            {
+                _rxTransferId = chunk.TransferId;
+                _rxTotalBytes = chunk.TotalBytes;
+                _rxBuffer = new byte[chunk.TotalBytes];
+                _rxReceived = 0;
+                _lastReportedDownloadPct = -1;
+                // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
+                var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
+                _rxChunkSeen = new bool[chunkCount];
+                _rxChunksRemaining = chunkCount;
+            }
+
+            if (chunk.Chunk != null && chunk.Offset >= 0 &&
+                chunk.Offset + chunk.Chunk.Length <= _rxBuffer.Length)
+            {
+                // Copy is idempotent; only count a chunk once toward coverage/progress even if the
+                // transport redelivers it (Stun duplicates reliable packets).
+                Array.Copy(chunk.Chunk, 0, _rxBuffer, chunk.Offset, chunk.Chunk.Length);
+
+                var index = (int)(chunk.Offset / ChunkSize);
+                if (_rxChunkSeen != null && index >= 0 && index < _rxChunkSeen.Length && !_rxChunkSeen[index])
+                {
+                    _rxChunkSeen[index] = true;
+                    _rxChunksRemaining--;
+                    _rxReceived += chunk.Chunk.Length;
+                    ReportDownloadProgress();
+                }
+            }
+        }
+
+        public void OnSaveDone(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            var (transferId, totalBytes, ext, crc32) = MessageSerializer.DeserializeSaveDone(msg.Payload);
+
+            if (_rxBuffer == null || transferId != _rxTransferId)
+            {
+                Debug.LogError("[Multipleer] SaveDone for an unknown transfer; ignoring.");
+                SendLoaded(transferId, false);
+                return;
+            }
+
+            // Completion is decided by chunk coverage, NOT a running byte counter: every chunk index
+            // must be present. A redelivered chunk does not inflate this (see OnSaveChunk).
+            if (totalBytes != _rxBuffer.Length || _rxChunksRemaining != 0)
+            {
+                Debug.LogError($"[Multipleer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
+                               $"{_rxChunksRemaining} chunk(s) still missing.");
+                SendLoaded(transferId, false);
+                ResetRx();
+                return;
+            }
+
+            var actualCrc = Crc32(_rxBuffer);
+            if (actualCrc != crc32)
+            {
+                Debug.LogError($"[Multipleer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
+                SendLoaded(transferId, false);
+                ResetRx();
+                return;
+            }
+
+            // Verified blob — load it in memory, but DEFER entering the level until BEGIN.
+            PhoenixGame game;
+            PhoenixSaveManager saveManager;
+            if (!TryGetGame(out game, out saveManager)) { SendLoaded(transferId, false); return; }
+
+            var blob = _rxBuffer;
+            var loadExt = string.IsNullOrEmpty(ext) ? SerializationComponent.DefaultExtension : ext;
+            ResetRx();
+
+            var timing = GetTiming();
+            if (timing == null) { SendLoaded(transferId, false); return; }
+            timing.Start(ClientLoadCrt(game, blob, loadExt, transferId));
+        }
+
+        private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId)
+        {
+            yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
+
+            var ok = _pendingResult != null;
+            // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
+            SendLoaded(transferId, ok);
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Shared: build the loaded scene binding in memory (no temp file)
+        //  Mirrors PhoenixSaveManager.LoadCurrentGeoscape (PhoenixSaveManager.cs:380-398).
+        // ══════════════════════════════════════════════════════════════════
+
+        private IEnumerator<NextUpdate> PrepareEntryFromBlobCrt(PhoenixGame game, byte[] blob, string ext)
+        {
+            var serializer = game.SaveManager.Serializer;
+            var slice = new TimeSlice(serializer.SerializeTimeSlice);
+
+            // 1. Read metadata (gives the LevelScene binding template).
+            var metaRef = new ByRef<SavegameMetaData>();
+            using (var ms = new System.IO.MemoryStream(blob))
+            {
+                yield return Timing.Current.Call(serializer.ReadMetaData(ms, ext, metaRef, slice));
+            }
+
+            var meta = metaRef.Value;
+            if (meta == null || meta.LevelScene == null)
+            {
+                Debug.LogError("[Multipleer] Transferred save metadata could not be read.");
+                yield break;
+            }
+
+            // 2. Read level params from the same bytes.
+            var paramsSource = new Base.Levels.BinaryDataLevelParamsSource(blob, ext);
+            var levelParams = new ByRef<Base.Levels.ILevelParams>();
+            yield return Timing.Current.Call(paramsSource.ReadLevelParamsAsync(serializer, levelParams));
+
+            // 3. Build the scene binding from the in-memory data source.
+            var serializedParam = new Base.Levels.LevelSerializedParam(
+                levelParams.Value,
+                new Base.Levels.BinaryDataLevelSerializedDataSource(blob, ext));
+            var binding = meta.LevelScene.CreateSceneBinding(serializedParam);
+
+            _pendingResult = new LoadLevelGameResult(binding);
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Barrier: LOADED collection (host) + BEGIN
+        // ══════════════════════════════════════════════════════════════════
+
+        private void SendLoaded(Guid transferId, bool ok)
+        {
+            var payload = MessageSerializer.SerializeClientLoaded(_engine.LocalSteamId, transferId, ok);
+            _engine.SendToHost(new NetworkMessage(PacketType.ClientLoaded, payload));
+        }
+
+        public void OnClientLoaded(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+            var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
+
+            // Ignore a stale ack from a prior transfer: it must match the current transfer id.
+            if (transferId != _transferId)
+            {
+                Debug.LogWarning($"[Multipleer] LOADED from peer {steamId} for stale transfer " +
+                                 $"{transferId} (current {_transferId}); ignoring.");
+                return;
+            }
+
+            if (ok)
+            {
+                _loadedPeers.Add(steamId);
+                TryReleaseBarrier();
+            }
+            else
+            {
+                Debug.LogWarning($"[Multipleer] Peer {steamId} failed to load the transferred save.");
+            }
+        }
+
+        // Host: release the barrier once every connected peer (+ host) has reported LOADED.
+        private void TryReleaseBarrier()
+        {
+            if (!_engine.IsHost || !_barrierOpen) return;
+
+            // Expected = host + all currently connected clients.
+            var expected = 1; // host
+            foreach (var _ in _engine.Session.GetConnectedClients()) expected++;
+
+            if (_loadedPeers.Count >= expected)
+                Begin();
+        }
+
+        // Host broadcasts BEGIN; every peer (incl. host) then enters its prepared level.
+        private void Begin()
+        {
+            if (!_engine.IsHost || _begun) return;
+            _barrierOpen = false;
+
+            var startTicks = DateTime.UtcNow.Ticks;
+            var payload = MessageSerializer.SerializeSessionBegin(startTicks);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SessionBegin, payload));
+
+            EnterLevel();
+        }
+
+        // All peers: BEGIN received → enter the prepared level simultaneously.
+        public void OnBegin(NetworkMessage msg)
+        {
+            EnterLevel();
+        }
+
+        private void EnterLevel()
+        {
+            if (_begun) return;
+            if (_pendingResult == null)
+            {
+                Debug.LogWarning("[Multipleer] BEGIN received but no save was prepared; cannot enter level.");
+                return;
+            }
+
+            _begun = true;
+            PhoenixGame game;
+            PhoenixSaveManager sm;
+            if (!TryGetGame(out game, out sm)) return;
+
+            // Single convergence point for both load paths (PhoenixGame.cs:263). The FinishLevel
+            // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
+            game.FinishLevel(_pendingResult);
+            _pendingResult = null;
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Progress reporting (download exact; load is a coarse phase flag)
+        //  Real in-game load % is an OPEN SDK item — no 0..1 float is exposed
+        //  (docs/specs/03-open-questions-sdk.md "Loading Progress Hook").
+        // ══════════════════════════════════════════════════════════════════
+
+        private void ReportDownloadProgress()
+        {
+            if (_rxTotalBytes <= 0) return;
+            var pct = (int)(100L * _rxReceived / _rxTotalBytes);
+            if (pct == _lastReportedDownloadPct) return;
+            // Throttle to whole-percent steps to avoid flooding the link.
+            _lastReportedDownloadPct = pct;
+            var payload = MessageSerializer.SerializeLoadProgress(_engine.LocalSteamId, 0, (byte)pct);
+            _engine.SendToHost(new NetworkMessage(PacketType.LoadProgress, payload));
+        }
+
+        public void OnLoadProgress(NetworkMessage msg)
+        {
+            // Host aggregates per-peer progress (keyed by the authoritative transport sender id so it
+            // matches the lobby roster's client SteamIds) and rebroadcasts so other lobbies can show it.
+            if (_engine.IsHost)
+            {
+                var (_, phase, percent) = MessageSerializer.DeserializeLoadProgress(msg.Payload);
+                // Phase 0 = download (exact). Phase 1 (game-load %) is an OPEN SDK item and not emitted
+                // yet; we only record/display the exact download phase here.
+                if (phase == 0)
+                    _peerDownloadPct[msg.SenderSteamId] = percent;
+
+                _engine.BroadcastExcept(msg.SenderSteamId, msg);
+            }
+            // Client-side cross-peer progress display is best-effort and deferred (the rebroadcast
+            // payload id is not reliably mappable to roster rows on DirectIP); each client shows its
+            // own exact download % locally via LocalDownloadPercent.
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Per-frame: host barrier timeout / kick
+        // ══════════════════════════════════════════════════════════════════
+
+        public void Update()
+        {
+            if (!_engine.IsHost || !_barrierOpen) return;
+
+            if (NowMs() - _barrierOpenedAtMs <= BarrierTimeoutMs) return;
+
+            // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
+            var stragglers = new List<ulong>();
+            foreach (var clientId in _engine.Session.GetConnectedClients())
+                if (!_loadedPeers.Contains(clientId))
+                    stragglers.Add(clientId);
+
+            foreach (var clientId in stragglers)
+            {
+                Debug.LogWarning($"[Multipleer] Peer {clientId} did not load in time — kicking.");
+                _engine.Session.RemoveClient(clientId);
+            }
+
+            // Host is always in _loadedPeers; begin with whoever remains (at least the host).
+            Begin();
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Helpers
+        // ══════════════════════════════════════════════════════════════════
+
+        private void ResetRx()
+        {
+            _rxBuffer = null;
+            _rxReceived = 0;
+            _rxTotalBytes = 0;
+            _rxTransferId = Guid.Empty;
+            _lastReportedDownloadPct = -1;
+            _rxChunkSeen = null;
+            _rxChunksRemaining = 0;
+        }
+
+        private static bool TryGetGame(out PhoenixGame game, out PhoenixSaveManager saveManager)
+        {
+            game = null;
+            saveManager = null;
+            try
+            {
+                game = GameUtl.GameComponent<PhoenixGame>();
+                saveManager = game?.SaveManager;
+                if (game == null || saveManager == null || saveManager.Serializer == null)
+                {
+                    Debug.LogError("[Multipleer] PhoenixGame/SaveManager not available.");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] Failed to resolve PhoenixGame: " + e.Message);
+                return false;
+            }
+        }
+
+        private static Timing GetTiming()
+        {
+            try
+            {
+                var ts = GameUtl.GameComponent<TimeSource>();
+                return ts?.Timing;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] Failed to resolve Timing: " + e.Message);
+                return null;
+            }
+        }
+
+        private static long NowMs() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+
+        // CRC-32 (IEEE 802.3, reflected) — small local impl, no external dependency.
+        private static readonly uint[] _crcTable = BuildCrcTable();
+
+        private static uint[] BuildCrcTable()
+        {
+            var table = new uint[256];
+            const uint poly = 0xEDB88320u;
+            for (uint i = 0; i < 256; i++)
+            {
+                var c = i;
+                for (var k = 0; k < 8; k++)
+                    c = (c & 1) != 0 ? poly ^ (c >> 1) : c >> 1;
+                table[i] = c;
+            }
+            return table;
+        }
+
+        private static uint Crc32(byte[] data)
+        {
+            var crc = 0xFFFFFFFFu;
+            for (var i = 0; i < data.Length; i++)
+                crc = _crcTable[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+            return crc ^ 0xFFFFFFFFu;
+        }
+    }
+}
