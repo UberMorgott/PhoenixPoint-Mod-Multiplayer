@@ -1,4 +1,4 @@
-# Phoenix Point Cooperative Multiplayer Mod — "Multipleer"
+# Phoenix Point Cooperative Multiplayer Mod
 
 ## Overview
 
