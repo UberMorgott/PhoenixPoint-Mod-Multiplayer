@@ -43,6 +43,15 @@ namespace Multipleer.UI
         private static GameObject _menuButtonTemplate;
         private static Canvas _menuCanvas;
 
+        // The native menu's uGUI Font, captured from the TemplateMenuButton's child Text (the same
+        // Text[] UIModuleMainMenuButtons.Init relabels). The native menu UI is uGUI UnityEngine.UI.Text
+        // (not TMP) — the template button carries a Text whose .font is the menu typeface — so we reuse
+        // that exact Font on every from-code label. Null until captured (UiToolkit falls back to Arial).
+        private static Font _menuFont;
+
+        /// <summary>The native main-menu uGUI Font (null until captured), applied to from-code labels.</summary>
+        public static Font MenuFont => _menuFont;
+
         // The main-menu buttons module (UIModuleMainMenuButtons) instance, captured from the same
         // Init Postfix. Source of the menu "chrome" the lobby hides while open: the buttons module
         // root GameObject + its per-edition visual lists (which carry the PhoenixLogo_* /TFTV logo).
@@ -73,6 +82,22 @@ namespace Multipleer.UI
             if (templateMenuButton != null) _menuButtonTemplate = templateMenuButton;
             if (menuCanvas != null) _menuCanvas = menuCanvas;
             if (menuButtonsModule != null) _menuButtonsModule = menuButtonsModule;
+
+            // Capture the menu typeface from the template button's child Text (includeInactive: the
+            // template is kept inactive as a prefab). Guarded — a missing Text/font leaves _menuFont
+            // null and UiToolkit keeps its Arial fallback.
+            if (_menuFont == null && _menuButtonTemplate != null)
+            {
+                try
+                {
+                    var t = _menuButtonTemplate.GetComponentsInChildren<Text>(true).FirstOrDefault(x => x != null && x.font != null);
+                    if (t != null) _menuFont = t.font;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError("[Multipleer] CaptureFromMainMenu (menu font) failed: " + e.Message);
+                }
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -81,37 +106,57 @@ namespace Multipleer.UI
 
         /// <summary>
         /// Hide the main-menu's own UI chrome so the lobby reads as a separate page laid over the
-        /// rendered background art: the menu BUTTONS module root, the LOGO / per-edition title art
-        /// (MainMenuButtonsModule.VanillaVisuals/YoeVisuals/CEVisuals/DemoVisuals — these carry the
-        /// PhoenixLogo_* images and TFTV's cloned logo, ref TFTVNewGameMenu.SetTFTVLogo), and the
-        /// bottom version/build label (UIModuleBuildRevision root). The 3D scene backdrop is NOT a
-        /// UI module and is left untouched, so the background art still shows through.
+        /// rendered background art. STRUCTURAL, not name-based, so it catches whatever chrome exists
+        /// regardless of TFTV (or any mod) customization:
         ///
-        /// Records ONLY objects that were active when hidden; idempotent (a second call without an
-        /// intervening Restore is a no-op) so repeated Show() never double-stores.
+        ///   (1) SIBLING SWEEP — primary, robust mechanism. <paramref name="lobbyRoot"/> is parented
+        ///       directly under the menu Canvas, so every OTHER direct child of that canvas is a
+        ///       top-level menu container (buttons + logo group, version label, social row, …).
+        ///       Deactivate every active sibling that is NOT the lobby root; nested logo/version/social
+        ///       go down with their container. This needs no knowledge of TFTV's cloned objects.
+        ///
+        ///   (2) EXTRA-CANVAS SUPPLEMENT — the version label (UIModuleBuildRevision) and the social-icon
+        ///       row (UIModuleMainMenuButtons.Social) can live on a DIFFERENT canvas than the lobby root.
+        ///       Both are grounded by type/field, so we also deactivate their roots explicitly. If they
+        ///       happen to share the lobby's canvas the sibling sweep already got them and HideOne's
+        ///       activeSelf check makes this a safe no-op.
+        ///
+        /// The 3D scene backdrop is NOT a UI module and is left untouched, so the background art still
+        /// shows through. Records ONLY objects that were active when hidden; idempotent (a second call
+        /// without an intervening Restore is a no-op) so repeated Show() never double-stores.
         /// </summary>
-        public static void HideMenuChrome()
+        /// <param name="lobbyRoot">The lobby panel root (a direct child of the menu Canvas); never hidden.</param>
+        public static void HideMenuChrome(GameObject lobbyRoot)
         {
             if (_chromeHidden) return;
             _hiddenChrome.Clear();
 
-            // Buttons module root (Continue/New Game/Load/etc.).
-            if (_menuButtonsModule != null)
-                HideOne(_menuButtonsModule.gameObject);
-
-            // Logo + per-edition title art (lists serialized on the buttons module). Only one list is
-            // active at a time (the player's edition), but we sweep all — HideOne skips inactive.
-            var buttons = _menuButtonsModule as UIModuleMainMenuButtons;
-            if (buttons != null)
+            // (1) Sibling sweep: deactivate every active sibling of the lobby root under the menu Canvas.
+            try
             {
-                HideVisualList(buttons.VanillaVisuals);
-                HideVisualList(buttons.YoeVisuals);
-                HideVisualList(buttons.CEVisuals);
-                HideVisualList(buttons.DemoVisuals);
+                var parent = lobbyRoot != null ? lobbyRoot.transform.parent : null;
+                if (parent != null)
+                {
+                    for (int i = 0; i < parent.childCount; i++)
+                    {
+                        var child = parent.GetChild(i).gameObject;
+                        if (child == lobbyRoot) continue;     // never hide the lobby itself
+                        HideOne(child);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] HideMenuChrome (sibling sweep) failed: " + e.Message);
             }
 
-            // Bottom version/build/copyright label module. Found by type (inactive-safe); its root is
-            // the whole revision group. If absent (none in scene), simply nothing to hide.
+            // (2a) Social-icon row (UIModuleMainMenuButtons.Social) — may sit on a different canvas.
+            var buttons = _menuButtonsModule as UIModuleMainMenuButtons;
+            if (buttons != null && buttons.Social != null)
+                HideOne(buttons.Social);
+
+            // (2b) Bottom version/build label module (UIModuleBuildRevision) — typically a separate
+            // canvas at the screen bottom. Found by type (inactive-safe). If absent, nothing to hide.
             try
             {
                 var rev = Resources.FindObjectsOfTypeAll<UIModuleBuildRevision>()
@@ -147,13 +192,6 @@ namespace Multipleer.UI
             if (go == null || !go.activeSelf) return;
             go.SetActive(false);
             _hiddenChrome.Add(go);
-        }
-
-        private static void HideVisualList(List<GameObject> visuals)
-        {
-            if (visuals == null) return;
-            foreach (var go in visuals)
-                HideOne(go);
         }
 
         // ═══════════════════════════════════════════════════════════════════

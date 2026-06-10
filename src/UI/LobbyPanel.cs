@@ -175,14 +175,14 @@ namespace Multipleer.UI
 
             _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "ChooseSaveBtn",
                 "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
-            if (_chooseSaveBtn != null) AnchorButton(_chooseSaveBtn, new Vector2(0f, 1f), new Vector2(12, -264));
+            if (_chooseSaveBtn != null) AnchorButton(_chooseSaveBtn, rail.transform, new Vector2(0f, 1f), new Vector2(12, -264), RailButtonSize);
             else _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
                 new Vector2(12, -264), new Vector2(220, 36), new Vector2(0f, 1f),
                 () => _owner.OnLobbyChooseSave());
 
             _inviteBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "InviteBtn",
                 "INVITE VIA STEAM", () => _owner.InvitePlayers());
-            if (_inviteBtn != null) AnchorButton(_inviteBtn, new Vector2(0f, 1f), new Vector2(12, -308));
+            if (_inviteBtn != null) AnchorButton(_inviteBtn, rail.transform, new Vector2(0f, 1f), new Vector2(12, -308), RailButtonSize);
             else _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
                 new Vector2(12, -308), new Vector2(220, 36), new Vector2(0f, 1f),
                 () => _owner.InvitePlayers());
@@ -277,14 +277,14 @@ namespace Multipleer.UI
         {
             _leaveButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "LeaveBtn", "LEAVE",
                 () => _owner.OnLobbyLeave());
-            if (_leaveButton != null) AnchorButton(_leaveButton, new Vector2(0f, 0f), new Vector2(24, 20));
+            if (_leaveButton != null) AnchorButton(_leaveButton, _root.transform, new Vector2(0f, 0f), new Vector2(24, 20), FooterButtonSize);
             else _leaveButton = UiToolkit.CreateButton(_root, "LeaveBtn", "LEAVE",
                 new Vector2(24, 20), new Vector2(140, 40), new Vector2(0f, 0f),
                 () => _owner.OnLobbyLeave());
 
             _joinButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "JoinBtn", "JOIN…",
                 () => _owner.OnLobbyJoinPrompt());
-            if (_joinButton != null) AnchorButton(_joinButton, new Vector2(0.35f, 0f), new Vector2(0, 20));
+            if (_joinButton != null) AnchorButton(_joinButton, _root.transform, new Vector2(0.35f, 0f), new Vector2(0, 20), FooterButtonSize);
             else _joinButton = UiToolkit.CreateButton(_root, "JoinBtn", "JOIN…",
                 new Vector2(0, 20), new Vector2(140, 40), new Vector2(0.35f, 0f),
                 () => _owner.OnLobbyJoinPrompt());
@@ -302,7 +302,7 @@ namespace Multipleer.UI
             {
                 _readyButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "ReadyBtn", "READY",
                     () => _owner.OnLobbyToggleReady());
-                if (_readyButton != null) AnchorButton(_readyButton, new Vector2(0.6f, 0f), new Vector2(0, 20));
+                if (_readyButton != null) AnchorButton(_readyButton, _root.transform, new Vector2(0.6f, 0f), new Vector2(0, 20), FooterButtonSize);
                 else _readyButton = UiToolkit.CreateButton(_root, "ReadyBtn", "READY",
                     new Vector2(0, 20), new Vector2(160, 40), new Vector2(0.6f, 0f),
                     () => _owner.OnLobbyToggleReady());
@@ -311,7 +311,7 @@ namespace Multipleer.UI
 
             _playButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "PlayBtn", "PLAY ▸",
                 () => _owner.OnLobbyPlay());
-            if (_playButton != null) AnchorButton(_playButton, new Vector2(1f, 0f), new Vector2(-24, 20));
+            if (_playButton != null) AnchorButton(_playButton, _root.transform, new Vector2(1f, 0f), new Vector2(-24, 20), FooterButtonSize);
             else _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY ▸",
                 new Vector2(-24, 20), new Vector2(140, 40), new Vector2(1f, 0f),
                 () => _owner.OnLobbyPlay());
@@ -344,16 +344,45 @@ namespace Multipleer.UI
             AddFramedPanel(zone, PanelFill, PanelBorder);
         }
 
-        // Position a cloned native button: anchor its root RectTransform to a corner of the
-        // panel without resizing it (the native prefab carries its own size/visuals).
-        private static void AnchorButton(Button btn, Vector2 anchor, Vector2 offset)
+        // Cloned-button sizing. The native TemplateMenuButton clone is sized/scaled for the full-width
+        // main-menu column, so dropped unmodified into a lobby zone it overflows badly. We constrain
+        // every cloned button to a fixed rect that fits its zone and cap its label font so the text
+        // stays inside that rect.
+        private static readonly Vector2 RailButtonSize = new Vector2(216, 38);   // left rail inner width
+        private static readonly Vector2 FooterButtonSize = new Vector2(150, 40); // footer corner button
+        private const int ClonedButtonFontCap = 18;
+
+        // Position AND size a cloned native button so it fits its zone. Resolves the OUTERMOST clone
+        // root (the GameObject CloneMenuButton parented directly under <paramref name="panel"/> — the
+        // returned Button may be that root or a nested child), resets its localScale to 1 (the prefab
+        // can carry a >1 scale), constrains its RectTransform to a fixed size, and caps the label font
+        // so the text does not overflow the rect.
+        private static void AnchorButton(Button btn, Transform panel, Vector2 anchor, Vector2 offset, Vector2 size)
         {
-            var rt = btn.transform as RectTransform;
+            if (btn == null) return;
+
+            // Walk up from the Button to the topmost transform whose parent is the panel: that is the
+            // clone root CloneMenuButton instantiated (the RectTransform carrying the visual size).
+            var t = btn.transform;
+            while (t.parent != null && t.parent != panel)
+                t = t.parent;
+            var rt = t as RectTransform;
+            if (rt == null) rt = btn.transform as RectTransform;
             if (rt == null) return;
+
+            // Reset any prefab scale so our fixed size is honoured 1:1.
+            rt.localScale = Vector3.one;
+
             rt.anchorMin = anchor;
             rt.anchorMax = anchor;
             rt.pivot = anchor;
             rt.anchoredPosition = offset;
+            rt.sizeDelta = size;
+
+            // Cap the label font so a large menu-sized glyph run fits the constrained rect.
+            var label = btn.GetComponentInChildren<Text>(true);
+            if (label != null && label.fontSize > ClonedButtonFontCap)
+                label.fontSize = ClonedButtonFontCap;
         }
 
         // ─── Show / Hide ───────────────────────────────────────────────────
@@ -364,7 +393,7 @@ namespace Multipleer.UI
             // Hide the main-menu chrome (buttons / logo / version) so the lobby reads as a separate
             // page over the background art. Idempotent: a second Show without an intervening Hide
             // won't double-store (HideMenuChrome guards _chromeHidden).
-            NativeWidgetFactory.HideMenuChrome();
+            NativeWidgetFactory.HideMenuChrome(_root);
             _root.SetActive(true);
             Refresh();
         }

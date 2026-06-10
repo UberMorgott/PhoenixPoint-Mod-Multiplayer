@@ -13,7 +13,8 @@ namespace Multipleer.UI
     {
         private static Font _font;
 
-        public static Font DefaultFont
+        // Built-in Arial fallback (only used before the native menu font is captured / if capture fails).
+        private static Font FallbackFont
         {
             get
             {
@@ -22,6 +23,14 @@ namespace Multipleer.UI
                 return _font;
             }
         }
+
+        /// <summary>
+        /// Font for all from-code labels: the captured native main-menu uGUI Font when available
+        /// (so lobby text matches the game's menu typeface — user request), else built-in Arial.
+        /// Resolved per call so labels created before menu capture still pick up the menu font on
+        /// the next text they create.
+        /// </summary>
+        public static Font DefaultFont => NativeWidgetFactory.MenuFont ?? FallbackFont;
 
         // Anchored text. anchor = anchorMin/Max pivot point inside the parent (e.g. (0.5,1) = top-center).
         public static Text CreateText(GameObject parent, string name, Vector2 pos, Vector2 size,
