@@ -98,15 +98,12 @@ namespace Multipleer.UI
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
 
-            // Background: a solid OPAQUE dark fill. We deliberately do NOT reuse the captured
-            // native panel sprite here — TryGetPanelBackgroundSprite() returns the first sliced
-            // sprite found on the menu canvas, which in practice is a near-WHITE 9-slice frame;
-            // tinting it Color.white painted the entire screen white (and the white from-code text
-            // vanished against it). A from-code dark Image is robust and never white. This Image is
-            // added first, so the bg GameObject is the back-most sibling and is drawn behind every
-            // zone/widget built below — it never covers content.
-            var bg = _root.AddComponent<Image>();
-            bg.color = new Color(0.08f, 0.09f, 0.11f, 0.98f);
+            // NO full-screen fill. The lobby is laid OVER the game's main-menu background art (the
+            // rendered 3D backdrop) as a clean separate "page": the menu's own chrome (buttons,
+            // logo, version label) is hidden on Show() so the art reads as the page background, and
+            // each zone gets its OWN framed panel for text contrast. A blanket dark Image here would
+            // blackout the art — exactly what the redesign removes. The root keeps its full-screen
+            // RectTransform purely for child layout/anchoring.
 
             BuildTopBar();
             BuildConnectRail();
@@ -120,11 +117,23 @@ namespace Multipleer.UI
         // TOP BAR: title + subtitle (no X/4 counter — small count lives in the roster header).
         private void BuildTopBar()
         {
-            UiToolkit.CreateText(_root, "Title", new Vector2(0, -24),
-                new Vector2(600, 36), "CO-OP LOBBY", 24, TextAnchor.MiddleCenter,
+            // A centred framed header card so the large title/subtitle keep contrast over arbitrary
+            // background art (the root itself has no fill).
+            var bar = new GameObject("TopBar");
+            bar.transform.SetParent(_root.transform, false);
+            var brt = bar.AddComponent<RectTransform>();
+            brt.anchorMin = new Vector2(0.5f, 1f);
+            brt.anchorMax = new Vector2(0.5f, 1f);
+            brt.pivot = new Vector2(0.5f, 1f);
+            brt.sizeDelta = new Vector2(560, 78);
+            brt.anchoredPosition = new Vector2(0, -8);
+            AddFramedPanel(bar);
+
+            UiToolkit.CreateText(bar, "Title", new Vector2(0, -8),
+                new Vector2(540, 44), "CO-OP LOBBY", 32, TextAnchor.MiddleCenter,
                 new Vector2(0.5f, 1f));
-            _roleText = UiToolkit.CreateText(_root, "Subtitle", new Vector2(0, -60),
-                new Vector2(700, 24), "your lobby", 14, TextAnchor.MiddleCenter,
+            _roleText = UiToolkit.CreateText(bar, "Subtitle", new Vector2(0, -50),
+                new Vector2(540, 24), "your lobby", 16, TextAnchor.MiddleCenter,
                 new Vector2(0.5f, 1f));
         }
 
@@ -138,44 +147,44 @@ namespace Multipleer.UI
             rrt.anchorMax = new Vector2(0.25f, 1f);
             rrt.offsetMin = new Vector2(24, 80);
             rrt.offsetMax = new Vector2(-12, -90);
-            AddZoneBackground(rail, new Color(0.11f, 0.12f, 0.15f, 0.98f));
+            AddFramedPanel(rail);
 
-            UiToolkit.CreateText(rail, "ConnectHdr", new Vector2(0, 0),
-                new Vector2(260, 24), "CONNECT", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            UiToolkit.CreateText(rail, "ConnectHdr", new Vector2(12, -10),
+                new Vector2(260, 28), "CONNECT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
 
-            UiToolkit.CreateText(rail, "IpLabel", new Vector2(0, -34),
-                new Vector2(260, 20), "Your IP (LAN):", 12, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railIpValue = MakeCopyableValue(rail, "IpValue", new Vector2(0, -54),
+            UiToolkit.CreateText(rail, "IpLabel", new Vector2(12, -44),
+                new Vector2(260, 20), "Your IP (LAN):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _railIpValue = MakeCopyableValue(rail, "IpValue", new Vector2(12, -64),
                 () => _owner.GetRailIp());
 
             // Same-PC value: 127.0.0.1:<port> so a second instance on THIS machine can connect.
-            UiToolkit.CreateText(rail, "LocalLabel", new Vector2(0, -82),
-                new Vector2(260, 20), "Same PC (2nd instance):", 12, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railLocalValue = MakeCopyableValue(rail, "LocalValue", new Vector2(0, -102),
+            UiToolkit.CreateText(rail, "LocalLabel", new Vector2(12, -92),
+                new Vector2(260, 20), "Same PC (2nd instance):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _railLocalValue = MakeCopyableValue(rail, "LocalValue", new Vector2(12, -112),
                 () => _owner.GetRailLocalIp());
 
-            UiToolkit.CreateText(rail, "StunLabel", new Vector2(0, -130),
-                new Vector2(260, 20), "STUN code:", 12, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railStunValue = MakeCopyableValue(rail, "StunValue", new Vector2(0, -150),
+            UiToolkit.CreateText(rail, "StunLabel", new Vector2(12, -140),
+                new Vector2(260, 20), "STUN code:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _railStunValue = MakeCopyableValue(rail, "StunValue", new Vector2(12, -160),
                 () => _owner.GetRailStunCode());
 
-            UiToolkit.CreateText(rail, "SaveLabel", new Vector2(0, -190),
-                new Vector2(260, 20), "Save to load:", 12, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", new Vector2(0, -210),
-                new Vector2(260, 40), "(none)", 13, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            UiToolkit.CreateText(rail, "SaveLabel", new Vector2(12, -200),
+                new Vector2(260, 20), "Save to load:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", new Vector2(12, -220),
+                new Vector2(248, 40), "(none)", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
 
             _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "ChooseSaveBtn",
                 "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
-            if (_chooseSaveBtn != null) AnchorButton(_chooseSaveBtn, new Vector2(0f, 1f), new Vector2(0, -254));
+            if (_chooseSaveBtn != null) AnchorButton(_chooseSaveBtn, new Vector2(0f, 1f), new Vector2(12, -264));
             else _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
-                new Vector2(0, -254), new Vector2(220, 36), new Vector2(0f, 1f),
+                new Vector2(12, -264), new Vector2(220, 36), new Vector2(0f, 1f),
                 () => _owner.OnLobbyChooseSave());
 
             _inviteBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "InviteBtn",
                 "INVITE VIA STEAM", () => _owner.InvitePlayers());
-            if (_inviteBtn != null) AnchorButton(_inviteBtn, new Vector2(0f, 1f), new Vector2(0, -298));
+            if (_inviteBtn != null) AnchorButton(_inviteBtn, new Vector2(0f, 1f), new Vector2(12, -308));
             else _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
-                new Vector2(0, -298), new Vector2(220, 36), new Vector2(0f, 1f),
+                new Vector2(12, -308), new Vector2(220, 36), new Vector2(0f, 1f),
                 () => _owner.InvitePlayers());
         }
 
@@ -185,7 +194,7 @@ namespace Multipleer.UI
             var btn = UiToolkit.CreateButton(parent, name, "", pos, new Vector2(240, 22),
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
             var label = btn.GetComponentInChildren<Text>();
-            if (label != null) { label.alignment = TextAnchor.MiddleLeft; label.fontSize = 13; }
+            if (label != null) { label.alignment = TextAnchor.MiddleLeft; label.fontSize = 15; }
             return label;
         }
 
@@ -199,10 +208,10 @@ namespace Multipleer.UI
             crt.anchorMax = new Vector2(0.66f, 1f);
             crt.offsetMin = new Vector2(0, 80);
             crt.offsetMax = new Vector2(0, -90);
-            AddZoneBackground(chat, new Color(0.08f, 0.09f, 0.11f, 0.98f));
+            AddFramedPanel(chat);
 
-            UiToolkit.CreateText(chat, "ChatHdr", new Vector2(0, 0),
-                new Vector2(300, 24), "CHAT", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            UiToolkit.CreateText(chat, "ChatHdr", new Vector2(12, -10),
+                new Vector2(300, 28), "CHAT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
 
             // Scroll area (native scroller content if capturable, else a plain stacked rect).
             var scrollHost = new GameObject("ChatScrollHost");
@@ -210,8 +219,8 @@ namespace Multipleer.UI
             var shrt = scrollHost.AddComponent<RectTransform>();
             shrt.anchorMin = new Vector2(0f, 0f);
             shrt.anchorMax = new Vector2(1f, 1f);
-            shrt.offsetMin = new Vector2(0, 40);
-            shrt.offsetMax = new Vector2(0, -28);
+            shrt.offsetMin = new Vector2(8, 40);
+            shrt.offsetMax = new Vector2(-8, -40);
 
             _chatContent = NativeWidgetFactory.CloneScroller(scrollHost.transform);
             if (_chatContent == null)
@@ -248,10 +257,10 @@ namespace Multipleer.UI
             prt.anchorMax = new Vector2(1f, 1f);
             prt.offsetMin = new Vector2(0, 80);
             prt.offsetMax = new Vector2(-24, -90);
-            AddZoneBackground(players, new Color(0.11f, 0.12f, 0.15f, 0.98f));
+            AddFramedPanel(players);
 
-            _connectText = UiToolkit.CreateText(players, "PlayersHdr", new Vector2(0, 0),
-                new Vector2(300, 24), "PLAYERS (0)", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _connectText = UiToolkit.CreateText(players, "PlayersHdr", new Vector2(12, -10),
+                new Vector2(300, 28), "PLAYERS (0)", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
 
             _rosterArea = new GameObject("RosterArea");
             _rosterArea.transform.SetParent(players.transform, false);
@@ -260,7 +269,7 @@ namespace Multipleer.UI
             rosterRect.anchorMax = new Vector2(1f, 1f);
             rosterRect.pivot = new Vector2(0.5f, 1f);
             rosterRect.sizeDelta = new Vector2(0, 400);
-            rosterRect.anchoredPosition = new Vector2(0, -34);
+            rosterRect.anchoredPosition = new Vector2(0, -46);
         }
 
         // FOOTER: Leave / Join… / Ready / Play (host).
@@ -308,15 +317,31 @@ namespace Multipleer.UI
                 () => _owner.OnLobbyPlay());
         }
 
-        // Give a zone GameObject an OPAQUE DARK panel background so the 5-zone structure is
-        // visible and the (white) text/labels inside have contrast. Same from-code dark-Image
-        // pattern used by UiToolkit.CreateButton / the value boxes. The Image is added directly on
-        // the zone root which is created (and parented) before its child widgets, so it sits behind
-        // them. Returns nothing — fire-and-forget surface.
-        private static void AddZoneBackground(GameObject zone, Color color)
+        // Default framed-panel colours: a light SEMI-opaque dark backing (so arbitrary background
+        // art behind the panel stays faintly visible while text keeps contrast) + a lighter 1-2px
+        // border outline. Tuned per the redesign brief.
+        private static readonly Color PanelFill = new Color(0.06f, 0.07f, 0.10f, 0.82f);
+        private static readonly Color PanelBorder = new Color(0.5f, 0.55f, 0.65f, 0.9f);
+
+        // FRAMED PANEL: a semi-opaque dark backing Image on the zone root + a border Outline, so the
+        // zone reads as a discrete bordered card over the menu background art (NOT a full-screen
+        // blackout). The Image is added on the zone root, which is created/parented before its child
+        // widgets, so it sits behind them. The Outline (uGUI effect) draws a duplicated border around
+        // the Image graphic — a cheap 1-2px frame with no extra GameObject.
+        private static void AddFramedPanel(GameObject zone, Color fill, Color border)
         {
             var img = zone.AddComponent<Image>();
-            img.color = color;
+            img.color = fill;
+
+            var outline = zone.AddComponent<Outline>();
+            outline.effectColor = border;
+            outline.effectDistance = new Vector2(2f, 2f);
+        }
+
+        // Default-coloured overload used by every zone.
+        private static void AddFramedPanel(GameObject zone)
+        {
+            AddFramedPanel(zone, PanelFill, PanelBorder);
         }
 
         // Position a cloned native button: anchor its root RectTransform to a corner of the
@@ -336,6 +361,10 @@ namespace Multipleer.UI
         public void Show()
         {
             if (_root == null) return;
+            // Hide the main-menu chrome (buttons / logo / version) so the lobby reads as a separate
+            // page over the background art. Idempotent: a second Show without an intervening Hide
+            // won't double-store (HideMenuChrome guards _chromeHidden).
+            NativeWidgetFactory.HideMenuChrome();
             _root.SetActive(true);
             Refresh();
         }
@@ -343,6 +372,10 @@ namespace Multipleer.UI
         public void Hide()
         {
             if (_root != null) _root.SetActive(false);
+            // CRITICAL: restore the menu chrome we hid on Show, or the main menu stays broken after
+            // leaving the lobby. Bulletproof: restores exactly the stored objects, guards nulls, and
+            // is a safe no-op if nothing was hidden.
+            NativeWidgetFactory.RestoreMenuChrome();
         }
 
         // ─── Per-frame refresh (driven from MultiplayerUI.Update) ──────────
@@ -601,7 +634,7 @@ namespace Multipleer.UI
             rect.anchoredPosition = new Vector2(0, -index * RowHeight);
 
             var label = UiToolkit.CreateText(go, "Label", new Vector2(10, 0),
-                new Vector2(RowWidth - 20, RowHeight), "", 14, TextAnchor.MiddleLeft,
+                new Vector2(RowWidth - 20, RowHeight), "", 15, TextAnchor.MiddleLeft,
                 new Vector2(0f, 0.5f));
 
             // Add the Image BEFORE the Button so the Button has a Graphic to raycast against

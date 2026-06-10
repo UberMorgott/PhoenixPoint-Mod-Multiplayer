@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
 using Base.Input;
@@ -7,6 +8,7 @@ using I2.Loc;
 using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Home.View.ViewControllers;
+using PhoenixPoint.Home.View.ViewModules;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -41,6 +43,17 @@ namespace Multipleer.UI
         private static GameObject _menuButtonTemplate;
         private static Canvas _menuCanvas;
 
+        // The main-menu buttons module (UIModuleMainMenuButtons) instance, captured from the same
+        // Init Postfix. Source of the menu "chrome" the lobby hides while open: the buttons module
+        // root GameObject + its per-edition visual lists (which carry the PhoenixLogo_* /TFTV logo).
+        private static Component _menuButtonsModule;
+
+        // Objects the lobby deactivated on its last Show() (so Hide() restores EXACTLY them). Holds
+        // only objects that were active when hidden; cleared on restore. Static + idempotent so a
+        // double Show never double-stores and a Hide after no Show is a safe no-op.
+        private static readonly List<GameObject> _hiddenChrome = new List<GameObject>();
+        private static bool _chromeHidden;
+
         // Captured lazily on first Play (save row prefab lives on an inactive module).
         private static UIModuleSaveGameSlot _saveRowPrefab;
         private static bool _saveRowProbed;
@@ -52,11 +65,95 @@ namespace Multipleer.UI
         public static bool HasMenuButton => _menuButtonTemplate != null;
 
         // Called from InjectNetworkButtonPatch.Postfix with the already-grabbed template +
-        // the Canvas reached via GameModueButtonsGroup.GetComponentInParent&lt;Canvas&gt;().
-        public static void CaptureFromMainMenu(GameObject templateMenuButton, Canvas menuCanvas)
+        // the Canvas reached via GameModueButtonsGroup.GetComponentInParent&lt;Canvas&gt;() +
+        // the UIModuleMainMenuButtons instance (__instance of the patched Init).
+        public static void CaptureFromMainMenu(GameObject templateMenuButton, Canvas menuCanvas,
+            Component menuButtonsModule = null)
         {
             if (templateMenuButton != null) _menuButtonTemplate = templateMenuButton;
             if (menuCanvas != null) _menuCanvas = menuCanvas;
+            if (menuButtonsModule != null) _menuButtonsModule = menuButtonsModule;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Main-menu chrome hide / restore (lobby reads as a separate page)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Hide the main-menu's own UI chrome so the lobby reads as a separate page laid over the
+        /// rendered background art: the menu BUTTONS module root, the LOGO / per-edition title art
+        /// (MainMenuButtonsModule.VanillaVisuals/YoeVisuals/CEVisuals/DemoVisuals — these carry the
+        /// PhoenixLogo_* images and TFTV's cloned logo, ref TFTVNewGameMenu.SetTFTVLogo), and the
+        /// bottom version/build label (UIModuleBuildRevision root). The 3D scene backdrop is NOT a
+        /// UI module and is left untouched, so the background art still shows through.
+        ///
+        /// Records ONLY objects that were active when hidden; idempotent (a second call without an
+        /// intervening Restore is a no-op) so repeated Show() never double-stores.
+        /// </summary>
+        public static void HideMenuChrome()
+        {
+            if (_chromeHidden) return;
+            _hiddenChrome.Clear();
+
+            // Buttons module root (Continue/New Game/Load/etc.).
+            if (_menuButtonsModule != null)
+                HideOne(_menuButtonsModule.gameObject);
+
+            // Logo + per-edition title art (lists serialized on the buttons module). Only one list is
+            // active at a time (the player's edition), but we sweep all — HideOne skips inactive.
+            var buttons = _menuButtonsModule as UIModuleMainMenuButtons;
+            if (buttons != null)
+            {
+                HideVisualList(buttons.VanillaVisuals);
+                HideVisualList(buttons.YoeVisuals);
+                HideVisualList(buttons.CEVisuals);
+                HideVisualList(buttons.DemoVisuals);
+            }
+
+            // Bottom version/build/copyright label module. Found by type (inactive-safe); its root is
+            // the whole revision group. If absent (none in scene), simply nothing to hide.
+            try
+            {
+                var rev = Resources.FindObjectsOfTypeAll<UIModuleBuildRevision>()
+                    .FirstOrDefault(m => m != null && m.gameObject.scene.IsValid());
+                if (rev != null) HideOne(rev.gameObject);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] HideMenuChrome (build revision) failed: " + e.Message);
+            }
+
+            _chromeHidden = true;
+        }
+
+        /// <summary>
+        /// Restore EXACTLY the chrome objects hidden by the last HideMenuChrome(). Guards nulls
+        /// (objects can be destroyed across a scene change). Safe to call when nothing was hidden.
+        /// This is the bulletproof restore the menu depends on after the lobby closes.
+        /// </summary>
+        public static void RestoreMenuChrome()
+        {
+            if (!_chromeHidden) return;
+            foreach (var go in _hiddenChrome)
+                if (go != null) go.SetActive(true);
+            _hiddenChrome.Clear();
+            _chromeHidden = false;
+        }
+
+        // Deactivate one object and remember it — only if it is currently active (so restore never
+        // re-activates something the game had intentionally hidden).
+        private static void HideOne(GameObject go)
+        {
+            if (go == null || !go.activeSelf) return;
+            go.SetActive(false);
+            _hiddenChrome.Add(go);
+        }
+
+        private static void HideVisualList(List<GameObject> visuals)
+        {
+            if (visuals == null) return;
+            foreach (var go in visuals)
+                HideOne(go);
         }
 
         // ═══════════════════════════════════════════════════════════════════

@@ -39,7 +39,11 @@ namespace Multipleer.Harmony
                 // lobby/save-picker can clone native widgets onto the menu's own canvas (same
                 // proven path used for the network button below). Then (re)build the panels.
                 var menuCanvas = group.GetComponentInParent<Canvas>();
-                NativeWidgetFactory.CaptureFromMainMenu(template, menuCanvas);
+                // __instance IS the UIModuleMainMenuButtons (this Postfix patches its Init), so it
+                // carries the per-edition logo/visual lists (VanillaVisuals/YoeVisuals/CEVisuals/
+                // DemoVisuals) the lobby hides while open. Hand it to the factory as a plain object
+                // (the patch has no compile-time ref to the game type beyond reflection).
+                NativeWidgetFactory.CaptureFromMainMenu(template, menuCanvas, __instance as Component);
                 if (menuCanvas != null)
                     MultiplayerUI.Instance?.OnMenuReady(menuCanvas);
 
