@@ -11,6 +11,7 @@ namespace Multipleer.Transport
         public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
         public bool IsHost { get; private set; }
         public string LocalEndpoint { get; private set; } = "";
+        public System.Net.IPEndPoint PublicEndPoint => null;
 
         public event Action<ConnectionState> OnStateChanged;
         public event Action<ulong, byte[]> OnPacketReceived;

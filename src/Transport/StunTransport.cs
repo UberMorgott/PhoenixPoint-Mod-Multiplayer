@@ -13,6 +13,7 @@ namespace Multipleer.Transport
         public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
         public bool IsHost { get; private set; }
         public string LocalEndpoint { get; private set; } = "";
+        public IPEndPoint PublicEndPoint => _publicEndPoint;
 
         public event Action<ConnectionState> OnStateChanged;
         public event Action<ulong, byte[]> OnPacketReceived;
@@ -65,6 +66,28 @@ namespace Multipleer.Transport
             StartUdp(port);
             State = ConnectionState.Connected;
             OnStateChanged?.Invoke(State);
+
+            // Host-side STUN discovery so the host can advertise a public endpoint (R3: may fail
+            // → placeholder). Runs on a background thread because DiscoverPublicEndpoint sleeps /
+            // retries; the rail polls PublicEndPoint and shows "discovering…" until it fills in.
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var pub = DiscoverPublicEndpoint();
+                    if (pub != null)
+                    {
+                        _publicEndPoint = pub;
+                        LocalEndpoint = $"STUN({pub})";
+                    }
+                    else
+                    {
+                        LocalEndpoint = "STUN(discovery failed)";
+                    }
+                }
+                catch { LocalEndpoint = "STUN(discovery failed)"; }
+            }) { IsBackground = true };
+            t.Start();
         }
 
         public void Connect(string address, int port)
