@@ -273,8 +273,7 @@ namespace Multipleer.UI
             });
         }
 
-        // Host PLAY now transfers the already-chosen save (rail-selected); if none chosen, open
-        // the picker as a last-chance fallback.
+        // The save the host chose in the rail (consumed by PLAY); null until a pick is made.
         public SavegameMetaData PendingChosenSave => _pendingChosenSave;
         private SavegameMetaData _pendingChosenSave;
 
@@ -304,6 +303,18 @@ namespace Multipleer.UI
             if (LanIpResolver.TryResolveLocalIPv4(out var ip) && ip != null)
                 return $"{ip}:{DefaultDirectPort}";
             return $"(LAN ip unknown):{DefaultDirectPort}";
+        }
+
+        // Loopback ip:port for a SECOND game instance on THIS SAME PC (two-window local test).
+        // The host DirectIP listener binds DefaultDirectPort, so 127.0.0.1:<port> is connectable
+        // same-machine and SmartJoinParser routes it as DirectIp. Empty when not hosting DirectIP.
+        public string GetRailLocalIp()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "—";
+            if (engine.Transport != null && engine.Transport.TransportType != TransportType.DirectIP)
+                return "(host on DirectIP)";
+            return $"127.0.0.1:{DefaultDirectPort}";
         }
 
         // Host STUN short code (or a status placeholder while discovering / on failure).
