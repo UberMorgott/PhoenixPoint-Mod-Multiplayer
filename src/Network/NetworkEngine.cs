@@ -359,7 +359,11 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.ChatMessage:
-                    // Will be exposed as an event when chat UI is built
+                    Session.HandleChat(msg);
+                    break;
+
+                case PacketType.SetSave:
+                    Session.HandleSetSave(msg);
                     break;
 
                 case PacketType.ClientReady:
