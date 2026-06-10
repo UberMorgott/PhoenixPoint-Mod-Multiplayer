@@ -1,6 +1,10 @@
 using System;
+using System.Linq;
 using Base.Serialization;
+using I2.Loc;
+using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Common.View.ViewModules;
+using PhoenixPoint.Home.View.ViewControllers;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -148,6 +152,63 @@ namespace Multipleer.UI
             var row = UnityEngine.Object.Instantiate(prefab, parent);
             row.gameObject.SetActive(true);
             return row;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native Ready toggle — GameOptionViewController clone
+        // ═══════════════════════════════════════════════════════════════════
+
+        private static GameOptionViewController _toggleTemplate;
+        private static bool _toggleProbed;
+
+        // Lazily locate a native toggle controller template (GameSettings option). Inactive at
+        // the menu → search includeInactive. Returns null if none in the scene (caller falls
+        // back to the label-flip menu button).
+        private static GameOptionViewController TryGetToggleTemplate()
+        {
+            if (_toggleTemplate != null) return _toggleTemplate;
+            if (_toggleProbed && _toggleTemplate == null) { /* re-probe each call until found */ }
+            try
+            {
+                _toggleTemplate = Resources.FindObjectsOfTypeAll<GameOptionViewController>()
+                    .FirstOrDefault(g => g != null && g.CheckedToggle != null);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] TryGetToggleTemplate failed: " + e.Message);
+            }
+            _toggleProbed = true;
+            return _toggleTemplate;
+        }
+
+        /// <summary>
+        /// Clone the native Ready toggle. Resets the cloned toggle's onValueChanged via the
+        /// controller's own RemoveAllClickListeners(), sets a raw runtime label on OptionText
+        /// (stripping its Localize so it is not overwritten), and wires our callback. Returns the
+        /// Unity Toggle (read .isOn for state), or null if no template was capturable.
+        /// </summary>
+        public static Toggle CloneReadyToggle(Transform parent, string label, Action<bool> onValueChanged)
+        {
+            var template = TryGetToggleTemplate();
+            if (template == null || parent == null) return null;
+
+            var ctrl = UnityEngine.Object.Instantiate(template, parent);
+            ctrl.gameObject.SetActive(true);
+            ctrl.RemoveAllClickListeners();
+
+            // Raw label: strip the Localize so OptionText.text is not reset on next loc refresh.
+            if (ctrl.OptionText != null)
+            {
+                var loc = ctrl.OptionText.GetComponent<Localize>();
+                if (loc != null) UnityEngine.Object.Destroy(loc);
+                ctrl.OptionText.text = label;
+            }
+
+            var toggle = ctrl.CheckedToggle;
+            if (toggle != null && onValueChanged != null)
+                toggle.onValueChanged.AddListener((UnityEngine.Events.UnityAction<bool>)(v => onValueChanged(v)));
+
+            return toggle;
         }
     }
 }
