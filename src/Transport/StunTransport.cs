@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using UnityEngine;
 
 namespace Multipleer.Transport
 {
@@ -39,6 +40,10 @@ namespace Multipleer.Transport
         private long _nextPeerId = 1;
         private int _listenPort;
 
+        // Default UDP port the host binds in Host(); also the loopback port a same-machine
+        // client redirects to (see Connect).
+        private const int DefaultStunPort = 14242;
+
         private const uint StunMagicCookie = 0x2112A442;
         private const ushort BindingRequest = 0x0001;
         private const ushort BindingResponse = 0x0101;
@@ -59,7 +64,7 @@ namespace Multipleer.Transport
             OnStateChanged?.Invoke(State);
         }
 
-        public void Host(int port = 14242)
+        public void Host(int port = DefaultStunPort)
         {
             IsHost = true;
             _listenPort = port;
@@ -111,6 +116,18 @@ namespace Multipleer.Transport
                 if (parts.Length == 2 && int.TryParse(parts[1], out var remotePort)
                     && IPAddress.TryParse(parts[0], out var ip))
                 {
+                    // Same-machine fallback: two instances behind one NAT share a single public
+                    // endpoint, so hole-punching the public IP can't reach a host on this PC (no
+                    // NAT hairpin). If the target IP is our own discovered public address, the
+                    // host is local — redirect to loopback on the host's default STUN port.
+                    if (_publicEndPoint != null && ip.Equals(_publicEndPoint.Address))
+                    {
+                        Debug.Log($"[Multipleer] STUN same-machine: target {ip}:{remotePort} == own public " +
+                                  $"address; redirecting to loopback 127.0.0.1:{DefaultStunPort}.");
+                        ip = IPAddress.Loopback;
+                        remotePort = DefaultStunPort;
+                    }
+
                     var remoteEp = new IPEndPoint(ip, remotePort);
                     var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
                     lock (_lock) { _peers[peerId] = remoteEp; }

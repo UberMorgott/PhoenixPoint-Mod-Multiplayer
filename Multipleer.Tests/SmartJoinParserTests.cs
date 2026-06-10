@@ -25,6 +25,33 @@ namespace Multipleer.Tests
         }
 
         [Fact]
+        public void Localhost_NoPort_MapsToLoopbackDefaultPort()
+        {
+            var r = SmartJoinParser.Parse("localhost");
+            Assert.Equal(JoinKind.DirectIp, r.Kind);
+            Assert.Equal("127.0.0.1", r.Ip);
+            Assert.Equal(14242, r.Port);
+        }
+
+        [Fact]
+        public void Localhost_WithPort_PreservesPort()
+        {
+            var r = SmartJoinParser.Parse("localhost:7000");
+            Assert.Equal(JoinKind.DirectIp, r.Kind);
+            Assert.Equal("127.0.0.1", r.Ip);
+            Assert.Equal(7000, r.Port);
+        }
+
+        [Fact]
+        public void Localhost_CaseInsensitive()
+        {
+            var r = SmartJoinParser.Parse("LOCALHOST");
+            Assert.Equal(JoinKind.DirectIp, r.Kind);
+            Assert.Equal("127.0.0.1", r.Ip);
+            Assert.Equal(14242, r.Port);
+        }
+
+        [Fact]
         public void StunCode_RoundTripsThroughConnectCode()
         {
             var code = ConnectCode.Encode(new IPEndPoint(IPAddress.Parse("203.0.113.7"), 50000));

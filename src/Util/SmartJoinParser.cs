@@ -45,6 +45,12 @@ namespace Multipleer.Util
                 hostPart = s.Substring(0, colon);
                 port = p;
             }
+            // "localhost" (case-insensitive) is a DirectIP alias for 127.0.0.1 — lets two
+            // instances on one PC connect by typing "localhost[:port]" (IPAddress.TryParse
+            // does not resolve hostnames). Keep port handling identical to a literal IP.
+            if (string.Equals(hostPart, "localhost", System.StringComparison.OrdinalIgnoreCase))
+                return JoinTarget.Direct("127.0.0.1", port);
+
             if (IPAddress.TryParse(hostPart, out var ip) &&
                 ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
                 return JoinTarget.Direct(ip.ToString(), port);
