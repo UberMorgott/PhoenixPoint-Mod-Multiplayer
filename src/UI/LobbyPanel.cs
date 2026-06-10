@@ -40,10 +40,12 @@ namespace Multipleer.UI
         private Button _chooseSaveBtn;
         private Button _inviteBtn;
 
-        // Chat zone. Version diff drives a cheap re-render; subscribe-once guards a duplicate listener.
+        // Chat zone. Version diff drives a cheap re-render; we track the subscribed session so we
+        // re-bind (and drop the old handler) when the session instance is re-created on Join.
         private readonly ChatLog _chat = new ChatLog(100);
         private int _chatRenderedVersion = -1;
-        private bool _chatSubscribed;
+        private SessionManager _chatSession;
+        private System.Action<string, string, bool> _chatHandler;
         private RectTransform _chatContent;        // native scroller content (or fallback rect)
         private readonly List<Text> _chatRows = new List<Text>();
         private InputField _chatInput;
@@ -388,13 +390,22 @@ namespace Multipleer.UI
 
         private void EnsureChatSubscription(NetworkEngine engine)
         {
-            if (_chatSubscribed || engine.Session == null) return;
-            engine.Session.OnChatReceived += (nick, text, isSystem) =>
+            // Re-bind when the session instance changes (smart-Join tears down the auto-hosted
+            // session and creates a new SessionManager — see MultiplayerUI.OnLobbyJoin).
+            if (ReferenceEquals(_chatSession, engine.Session)) return;
+
+            if (_chatSession != null && _chatHandler != null)
+                _chatSession.OnChatReceived -= _chatHandler;
+
+            _chatSession = engine.Session;
+            if (_chatSession == null) { _chatHandler = null; return; }
+
+            _chatHandler = (nick, text, isSystem) =>
             {
                 if (isSystem) _chat.AppendSystem(text);
                 else _chat.Append(nick, text, false);
             };
-            _chatSubscribed = true;
+            _chatSession.OnChatReceived += _chatHandler;
         }
 
         private void RenderChat()
