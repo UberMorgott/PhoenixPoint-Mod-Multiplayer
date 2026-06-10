@@ -24,18 +24,13 @@ namespace Multipleer.UI
         private Text _roleText;
         private Text _connectText;
 
-        // Interactive controls (T3). _nameField is no longer built into the full-screen tree
-        // (rename moved to the native prompt in Task 14); RefreshControls still reads it until
-        // Task 14 rewires it, so the now-unassigned field is intentionally tolerated here.
-#pragma warning disable CS0649 // _nameField assigned nowhere after the layout rewrite (Task 14 drops it)
-        private InputField _nameField;
-#pragma warning restore CS0649
+        // Interactive controls. Rename moved to the native prompt (own-row click → OnLobbyRenamePrompt),
+        // so there is no from-code nickname field in the full-screen tree.
         private Button _leaveButton;
         private Button _readyButton;
         private Text _readyButtonLabel;
         private Toggle _readyToggle;
         private Button _playButton;
-        private bool _nameInitialized;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
         private Text _railIpValue;
@@ -45,13 +40,10 @@ namespace Multipleer.UI
         private Button _chooseSaveBtn;
         private Button _inviteBtn;
 
-        // Chat zone. The render/subscribe bookkeeping fields are consumed by Refresh in Task 14;
-        // they are declared here (alongside the zone they belong to) but not yet read.
+        // Chat zone. Version diff drives a cheap re-render; subscribe-once guards a duplicate listener.
         private readonly ChatLog _chat = new ChatLog(100);
-#pragma warning disable CS0414, CS0169 // consumed by chat Refresh wiring in Task 14
         private int _chatRenderedVersion = -1;
         private bool _chatSubscribed;
-#pragma warning restore CS0414, CS0169
         private RectTransform _chatContent;        // native scroller content (or fallback rect)
         private readonly List<Text> _chatRows = new List<Text>();
         private InputField _chatInput;
@@ -72,6 +64,8 @@ namespace Multipleer.UI
         {
             public GameObject Go;
             public Text Label;
+            public Button Button;        // own-row click → rename
+            public bool RenameWired;
         }
 
         public bool IsVisible => _root != null && _root.activeSelf;
@@ -352,20 +346,86 @@ namespace Multipleer.UI
                 return;
             }
 
-            var role = engine.IsHost ? "HOST" : "CLIENT";
-            var count = (engine.Session?.ClientCount ?? 0) + (engine.IsHost ? 1 : 0);
-            if (_roleText != null)
-                _roleText.text = $"You are: {role}    Players connected: {count}";
+            // Subscribe once to chat events (session may be re-created on Join).
+            EnsureChatSubscription(engine);
 
-            if (_connectText != null)
+            // TOP BAR subtitle: host hint or chosen save.
+            if (_roleText != null)
             {
-                var ep = engine.Transport?.LocalEndpoint ?? "";
-                var tt = engine.Transport?.TransportType.ToString() ?? "None";
-                _connectText.text = $"{tt}   {ep}";
+                var chosen = engine.Session?.ChosenSaveName;
+                _roleText.text = string.IsNullOrEmpty(chosen)
+                    ? (engine.IsHost ? "your lobby" : "joined lobby")
+                    : $"save: {chosen}";
             }
 
+            // CONNECT RAIL values.
+            if (_railIpValue != null) _railIpValue.text = _owner.GetRailIp();
+            if (_railLocalValue != null) _railLocalValue.text = _owner.GetRailLocalIp();
+            if (_railStunValue != null) _railStunValue.text = _owner.GetRailStunCode();
+            if (_railSaveValue != null)
+            {
+                var n = engine.Session?.ChosenSaveName;
+                var m = engine.Session?.ChosenSaveMeta;
+                _railSaveValue.text = string.IsNullOrEmpty(n) ? "(none)"
+                    : (string.IsNullOrEmpty(m) ? n : $"{n}\n{m}");
+            }
+            // Host-only rail controls.
+            if (_chooseSaveBtn != null && _chooseSaveBtn.gameObject.activeSelf != engine.IsHost)
+                _chooseSaveBtn.gameObject.SetActive(engine.IsHost);
+
+            // CHAT: re-render only when the log changed.
+            if (_chat.Version != _chatRenderedVersion)
+            {
+                RenderChat();
+                _chatRenderedVersion = _chat.Version;
+            }
+
+            // ROSTER + controls.
             var roster = RefreshRoster(engine);
+            if (_connectText != null) _connectText.text = $"PLAYERS ({roster.Count})";
             RefreshControls(engine, roster);
+        }
+
+        private void EnsureChatSubscription(NetworkEngine engine)
+        {
+            if (_chatSubscribed || engine.Session == null) return;
+            engine.Session.OnChatReceived += (nick, text, isSystem) =>
+            {
+                if (isSystem) _chat.AppendSystem(text);
+                else _chat.Append(nick, text, false);
+            };
+            _chatSubscribed = true;
+        }
+
+        private void RenderChat()
+        {
+            if (_chatContent == null) return;
+            var lines = _chat.Lines;
+
+            // Grow the chat row pool.
+            while (_chatRows.Count < lines.Count)
+            {
+                var t = UiToolkit.CreateText(_chatContent.gameObject, $"ChatRow{_chatRows.Count}",
+                    new Vector2(6, -_chatRows.Count * 20), new Vector2(0, 20), "", 12,
+                    TextAnchor.UpperLeft, new Vector2(0f, 1f));
+                var rt = t.rectTransform;
+                rt.anchorMin = new Vector2(0f, 1f);
+                rt.anchorMax = new Vector2(1f, 1f);
+                rt.offsetMin = new Vector2(6, rt.offsetMin.y);
+                rt.offsetMax = new Vector2(-6, rt.offsetMax.y);
+                _chatRows.Add(t);
+            }
+
+            for (int i = 0; i < _chatRows.Count; i++)
+            {
+                var row = _chatRows[i];
+                if (i >= lines.Count) { if (row.gameObject.activeSelf) row.gameObject.SetActive(false); continue; }
+                if (!row.gameObject.activeSelf) row.gameObject.SetActive(true);
+                var line = lines[i];
+                row.rectTransform.anchoredPosition = new Vector2(0, -i * 20);
+                if (line.IsSystem) { row.text = line.Text; row.color = new Color(0.7f, 0.7f, 0.5f); }
+                else { row.text = $"{line.Sender}: {line.Text}"; row.color = Color.white; }
+            }
         }
 
         // Update ready-button label, play-button gating, and one-time nickname field init.
@@ -381,18 +441,22 @@ namespace Multipleer.UI
                 if (isMe) { me = p; break; }
             }
 
-            // One-time: seed the nickname field from my current roster nickname so edits start
-            // from the real value (avoid clobbering whatever the player is mid-typing afterwards).
-            if (!_nameInitialized && me != null && _nameField != null)
+            // Ready state: prefer the native toggle (set isOn without firing our listener), else
+            // the label-flip button.
+            if (_readyToggle != null)
             {
-                if (!string.IsNullOrEmpty(me.Nickname))
-                    _nameField.text = me.Nickname;
-                _nameInitialized = true;
+                var want = me != null && me.Ready;
+                if (_readyToggle.isOn != want)
+                {
+                    // SetIsOnWithoutNotify keeps the toggle visual in sync with authoritative state
+                    // without re-invoking OnLobbyToggleReady.
+                    _readyToggle.SetIsOnWithoutNotify(want);
+                }
             }
-
-            // Ready button label reflects my own readiness.
-            if (_readyButtonLabel != null)
+            else if (_readyButtonLabel != null)
+            {
                 _readyButtonLabel.text = (me != null && me.Ready) ? "READY ✓" : "NOT READY";
+            }
 
             // Play button: host only, enabled when host is ready AND every remote client is ready.
             // Cloned native buttons self-manage their disabled visuals from Button.interactable
@@ -463,8 +527,10 @@ namespace Multipleer.UI
                     }
                 }
 
-                row.Label.text = $"{name}{tags}    -    {status}";
+                var renameHint = isMe ? "   ✎ (click row to rename)" : "";
+                row.Label.text = $"{name}{tags}    -    {status}{renameHint}";
                 row.Label.color = color;
+                WireRenameClick(row, isMe);
             }
 
             return roster;
@@ -509,7 +575,47 @@ namespace Multipleer.UI
                 new Vector2(RowWidth - 20, RowHeight), "", 14, TextAnchor.MiddleLeft,
                 new Vector2(0f, 0.5f));
 
-            return new RosterRow { Go = go, Label = label };
+            // Add the Image BEFORE the Button so the Button has a Graphic to raycast against
+            // (Unity requires a Graphic on the same/child object). The transparent Image is the
+            // hit target for the own-row rename click.
+            var img = go.AddComponent<Image>();
+            img.color = new Color(0, 0, 0, 0); // transparent hit area
+            var btn = go.AddComponent<Button>();
+            var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
+
+            return new RosterRow { Go = go, Label = label, Button = btn };
+        }
+
+        // Wire the own-row click to the native rename prompt exactly once per row; the listener
+        // checks live ownership so a pooled row reused for another peer never renames the wrong one.
+        private void WireRenameClick(RosterRow row, bool isMe)
+        {
+            if (row.Button == null) return;
+            if (!row.RenameWired)
+            {
+                row.Button.onClick.AddListener((UnityEngine.Events.UnityAction)(() =>
+                {
+                    if (row == FindMyRow()) _owner.OnLobbyRenamePrompt();
+                }));
+                row.RenameWired = true;
+            }
+            row.Button.interactable = isMe;
+        }
+
+        // Returns the pooled row currently rendering the local player's roster entry, or null.
+        private RosterRow FindMyRow()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine?.Session == null) return null;
+            var roster = engine.Session.GetLobbyRoster();
+            var localGuid = ClientIdentity.PlayerGuid;
+            for (int i = 0; i < roster.Count && i < _rows.Count; i++)
+            {
+                var p = roster[i];
+                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
+                if (isMe) return _rows[i];
+            }
+            return null;
         }
     }
 }
