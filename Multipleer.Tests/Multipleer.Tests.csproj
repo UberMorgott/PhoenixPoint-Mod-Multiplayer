@@ -14,7 +14,7 @@
     <Compile Include="..\src\Util\ConnectCode.cs"><Link>ConnectCode.cs</Link></Compile>
     <Compile Include="..\src\Util\SmartJoinParser.cs"><Link>SmartJoinParser.cs</Link></Compile>
     <Compile Include="..\src\Util\LanIpResolver.cs"><Link>LanIpResolver.cs</Link></Compile>
-    <!-- <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile> -->
+    <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
