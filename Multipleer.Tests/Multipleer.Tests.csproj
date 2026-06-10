@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <!-- Do NOT auto-glob the mod source tree; link only the pure, Unity-free files. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Test files in THIS project. -->
+    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
+    <!-- Pure, Unity-free mod cores compiled directly (no Multipleer.dll / no game DLLs). -->
+    <!-- enabled per task -->
+    <!-- <Compile Include="..\src\Util\ConnectCode.cs"><Link>ConnectCode.cs</Link></Compile> -->
+    <!-- <Compile Include="..\src\Util\SmartJoinParser.cs"><Link>SmartJoinParser.cs</Link></Compile> -->
+    <!-- <Compile Include="..\src\Util\LanIpResolver.cs"><Link>LanIpResolver.cs</Link></Compile> -->
+    <!-- <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile> -->
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>
