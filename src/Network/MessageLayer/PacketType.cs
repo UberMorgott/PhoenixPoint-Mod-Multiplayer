@@ -49,6 +49,7 @@ namespace Multipleer.Network.MessageLayer
         PermissionUpdate = 0x40,
         SoldierAssignment = 0x41,
         PlayerListUpdate = 0x42,
+        SetSave = 0x43,
 
         // Chat
         ChatMessage = 0x50,
