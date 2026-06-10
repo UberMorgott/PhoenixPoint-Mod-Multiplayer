@@ -1,5 +1,7 @@
 using System;
 using System.Linq;
+using Base.Core;
+using Base.Input;
 using Base.Serialization;
 using I2.Loc;
 using PhoenixPoint.Common.View.ViewControllers;
@@ -209,6 +211,78 @@ namespace Multipleer.UI
                 toggle.onValueChanged.AddListener((UnityEngine.Events.UnityAction<bool>)(v => onValueChanged(v)));
 
             return toggle;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native scroller — UIModuleSaveGame.Scroller clone (roster + chat)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Clone the native save-list scroller subtree, strip its rows, and return its content
+        /// RectTransform (rows are parented here by the caller). Initializes the cloned
+        /// VerticalScrollRectScroller with the live InputController so wheel/drag work.
+        /// Returns null if no UIModuleSaveGame is in the scene (caller falls back to a plain
+        /// RectTransform list).
+        /// </summary>
+        public static RectTransform CloneScroller(Transform parent)
+        {
+            if (parent == null) return null;
+            try
+            {
+                var module = Resources.FindObjectsOfTypeAll<UIModuleSaveGame>()
+                    .FirstOrDefault(m => m != null && m.Scroller != null
+                        && m.Scroller.GetComponent<ScrollRect>() != null);
+                if (module == null) return null;
+
+                var scrollerGo = UnityEngine.Object.Instantiate(module.Scroller.gameObject, parent);
+                scrollerGo.SetActive(true);
+
+                var scroller = scrollerGo.GetComponent<VerticalScrollRectScroller>();
+                var scrollRect = scrollerGo.GetComponent<ScrollRect>();
+                var content = scrollRect != null ? scrollRect.content : null;
+                if (content == null) return null;
+
+                // Strip any cloned rows from the content.
+                for (int i = content.childCount - 1; i >= 0; i--)
+                    UnityEngine.Object.Destroy(content.GetChild(i).gameObject);
+
+                if (scroller != null)
+                    scroller.Init(GameUtl.GameComponent<InputController>());
+
+                return content;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] CloneScroller failed: " + e.Message);
+                return null;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native panel background sprite
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Find a styled native panel Image sprite to skin the lobby background. Searches the
+        /// captured menu Canvas's hierarchy for an Image carrying a sprite; prefers a sliced
+        /// sprite (panel-style) and otherwise returns the first sprite found, or null (caller
+        /// keeps a solid color).
+        /// </summary>
+        public static Sprite TryGetPanelBackgroundSprite()
+        {
+            try
+            {
+                if (_menuCanvas == null) return null;
+                var images = _menuCanvas.GetComponentsInChildren<Image>(true);
+                var img = images.FirstOrDefault(i => i != null && i.sprite != null
+                    && i.type == Image.Type.Sliced);
+                return img != null ? img.sprite : images.FirstOrDefault(i => i != null && i.sprite != null)?.sprite;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] TryGetPanelBackgroundSprite failed: " + e.Message);
+                return null;
+            }
         }
     }
 }
