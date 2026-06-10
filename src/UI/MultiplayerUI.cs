@@ -34,6 +34,10 @@ namespace Multipleer.UI
         private SavePickerPanel _savePicker;
         private bool _panelsBuilt;
 
+        // True while the lobby overlay is on-screen. Consumed by the main-menu Escape patch
+        // (MainMenuPatches) so Escape leaves the lobby instead of opening the Options menu.
+        public bool IsLobbyOpen => _lobby?.IsVisible == true;
+
         private void Awake()
         {
             Instance = this;
@@ -107,12 +111,22 @@ namespace Multipleer.UI
         // Default DirectIP listen port for the host (matches the client connect default).
         private const int DefaultDirectPort = 14242;
 
-        // CREATE (lobby-first): start hosting on DirectIP and open the lobby panel immediately.
-        // No campaign is loaded here — the host picks a save only after everyone is ready (Play).
+        // CREATE (lobby-first): start hosting on Direct + STUN + Steam SIMULTANEOUSLY in one
+        // session and open the lobby panel immediately. A joiner arriving by DirectIP, by STUN
+        // invite-code, or by Steam all land in the same peer list (CompositeTransport namespaces
+        // their ids). No campaign is loaded here — the host picks a save only after everyone is
+        // ready (Play). CompositeTransport.Host wraps each child so one failing transport (e.g.
+        // Steam unavailable) does not abort the others.
         private void StartHostAndOpenLobby()
         {
             NetworkEngine.Create();
-            NetworkEngine.Instance.Initialize(TransportType.DirectIP);
+            var composite = new CompositeTransport(new ITransport[]
+            {
+                new DirectTransport(),
+                new StunTransport(),
+                new SteamTransport()
+            });
+            NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
             ShowInGameBar();
@@ -307,26 +321,54 @@ namespace Multipleer.UI
 
         // Loopback ip:port for a SECOND game instance on THIS SAME PC (two-window local test).
         // The host DirectIP listener binds DefaultDirectPort, so 127.0.0.1:<port> is connectable
-        // same-machine and SmartJoinParser routes it as DirectIp. Empty when not hosting DirectIP.
+        // same-machine and SmartJoinParser routes it as DirectIp. The host now listens on a
+        // CompositeTransport that ALWAYS includes a DirectTransport, so this is valid whenever
+        // hosting.
         public string GetRailLocalIp()
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsHost) return "—";
-            if (engine.Transport != null && engine.Transport.TransportType != TransportType.DirectIP)
+            if (FindHostingChild(TransportType.DirectIP) == null)
                 return "(host on DirectIP)";
             return $"127.0.0.1:{DefaultDirectPort}";
         }
 
         // Host STUN short code (or a status placeholder while discovering / on failure).
+        // The host's CompositeTransport always includes a hosting StunTransport, so the code
+        // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.
         public string GetRailStunCode()
         {
             var engine = NetworkEngine.Instance;
-            var t = engine?.Transport;
-            if (t == null || t.TransportType != TransportType.StunUDP) return "(host on STUN to share)";
-            if (t.PublicEndPoint == null)
-                return t.LocalEndpoint.Contains("failed") ? "discovery failed" : "discovering…";
-            var code = ConnectCode.Encode(t.PublicEndPoint);
-            return code ?? "discovery failed";
+            if (engine == null || !engine.IsHost) return "(host on STUN to share)";
+            var stun = FindHostingChild(TransportType.StunUDP);
+            if (stun == null) return "(host on STUN to share)";
+            if (stun.PublicEndPoint == null)
+            {
+                // Mirror the StunTransport discovery thread's state messages (it retries across a
+                // pool of Google STUN servers and only marks itself unavailable after exhausting all
+                // rounds). "unavailable" = environmentally blocked (symmetric NAT / firewall); the
+                // rail re-reads every frame, so a late success still appears live without reopening.
+                if (stun.LocalEndpoint.Contains("unavailable"))
+                    return "unavailable (NAT/firewall)";
+                return "discovering…";
+            }
+            var code = ConnectCode.Encode(stun.PublicEndPoint);
+            return code ?? "unavailable (NAT/firewall)";
+        }
+
+        // Resolve the live hosting child transport of a given type from the host's transport,
+        // whether that transport is a CompositeTransport (multi-listen) or a single transport.
+        private static ITransport FindHostingChild(TransportType type)
+        {
+            var t = NetworkEngine.Instance?.Transport;
+            if (t == null) return null;
+            if (t is CompositeTransport composite)
+            {
+                foreach (var child in composite.Children)
+                    if (child.TransportType == type && child.IsHost) return child;
+                return null;
+            }
+            return t.TransportType == type && t.IsHost ? t : null;
         }
 
         public void CopyToClipboard(string text)
@@ -408,14 +450,23 @@ namespace Multipleer.UI
                         $" | {(engine.IsHost ? "Host" : "Client")}" +
                         $" | {engine.Session?.ClientCount ?? 0} player(s)";
                 }
-
-                _lobby?.Refresh();
             }
             else
             {
                 if (_barStatusText != null)
                     _barStatusText.text = "Not connected";
             }
+
+            // Refresh the lobby panel EVERY frame while it is visible — UNCONDITIONALLY, i.e. not
+            // gated on engine.IsActive. This is the fix for the "CONNECT rail empty on first open"
+            // bug: the rail values (IP / Same-PC / STUN code) are re-pushed by LobbyPanel.Refresh,
+            // so they fill within one frame of the host becoming ready on the FIRST open (no need to
+            // reopen the lobby). It also makes a late-arriving STUN code appear LIVE once background
+            // discovery resolves. Refresh() self-guards (hides itself if the engine is null/inactive
+            // or the session has started), so calling it outside the IsActive branch is safe; it only
+            // does real work while the panel is actually on screen.
+            if (_lobby != null && _lobby.IsVisible)
+                _lobby.Refresh();
         }
 
         // ═══════════════════════════════════════════════════════════════════

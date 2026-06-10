@@ -40,6 +40,20 @@ namespace Multipleer.Transport
         private long _nextPeerId = 1;
         private int _listenPort;
 
+        // ─── STUN discovery coordination ──────────────────────────────────
+        // The transport binds a SINGLE UdpClient (_udp) and ReceiveLoop is the ONLY thread that
+        // calls _udp.Receive on it. Earlier, DiscoverPublicEndpoint ALSO read _udp directly, so the
+        // STUN binding RESPONSE was usually swallowed by ReceiveLoop (it is neither HOLE_PUNCH nor a
+        // known peer) → discovery returned null → "discovery failed". Now ReceiveLoop recognises a
+        // STUN binding response (magic cookie + message type) WHILE discovery is pending and hands
+        // the parsed public endpoint to the waiting discovery thread via this signal. Using the same
+        // socket is REQUIRED: the NAT mapping the STUN server reports must be the mapping of this
+        // transport's own socket, or the ConnectCode would point at the wrong public port and the
+        // hole-punch would fail.
+        private volatile bool _stunDiscoveryPending;
+        private volatile IPEndPoint _stunResult;
+        private readonly ManualResetEventSlim _stunSignal = new ManualResetEventSlim(false);
+
         // Default UDP port the host binds in Host(); also the loopback port a same-machine
         // client redirects to (see Connect).
         private const int DefaultStunPort = 14242;
@@ -57,6 +71,10 @@ namespace Multipleer.Transport
         public void Shutdown()
         {
             _running = false;
+            // Release any discovery thread still blocked on the per-server wait so it can observe
+            // _running == false and exit promptly instead of hanging on the timeout.
+            _stunDiscoveryPending = false;
+            _stunSignal.Set();
             _udp?.Close();
             _receiveThread?.Join(1000);
             lock (_lock) { _peers.Clear(); }
@@ -73,24 +91,44 @@ namespace Multipleer.Transport
             OnStateChanged?.Invoke(State);
 
             // Host-side STUN discovery so the host can advertise a public endpoint (R3: may fail
-            // → placeholder). Runs on a background thread because DiscoverPublicEndpoint sleeps /
-            // retries; the rail polls PublicEndPoint and shows "discovering…" until it fills in.
+            // → placeholder). Runs on a background thread because DiscoverPublicEndpoint blocks on
+            // per-server waits; the rail polls PublicEndPoint and shows "discovering…" until it fills
+            // in. RETRY periodically: a transient first-pass failure (DNS hiccup, dropped UDP, NIC
+            // not ready) recovers on a later round and the ConnectCode then appears LIVE — the lobby
+            // rail re-reads every frame (MultiplayerUI.Update), so no reopen is needed. We stop once
+            // resolved or the host shuts down. The state message distinguishes a transient retry
+            // ("discovering…") from a definitive give-up ("NAT/firewall") so the UX is accurate.
+            const int maxRounds = 6;       // ~ up to a minute of retries before giving up
+            const int retryDelayMs = 8000;
             var t = new Thread(() =>
             {
-                try
+                for (int round = 0; round < maxRounds && _running && _publicEndPoint == null; round++)
                 {
-                    var pub = DiscoverPublicEndpoint();
-                    if (pub != null)
+                    try
                     {
-                        _publicEndPoint = pub;
-                        LocalEndpoint = $"STUN({pub})";
+                        var pub = DiscoverPublicEndpoint();
+                        if (pub != null)
+                        {
+                            _publicEndPoint = pub;
+                            LocalEndpoint = $"STUN({pub})";
+                            return;
+                        }
+                    }
+                    catch { /* fall through to retry */ }
+
+                    // Not resolved this round. Keep the "still trying" state visible unless this was
+                    // the final attempt, in which case mark it unavailable (env-blocked: symmetric
+                    // NAT / firewall blocking outbound UDP to the STUN servers).
+                    if (round < maxRounds - 1 && _running)
+                    {
+                        LocalEndpoint = "STUN(discovering…)";
+                        Thread.Sleep(retryDelayMs);
                     }
                     else
                     {
-                        LocalEndpoint = "STUN(discovery failed)";
+                        LocalEndpoint = "STUN(unavailable: NAT/firewall)";
                     }
                 }
-                catch { LocalEndpoint = "STUN(discovery failed)"; }
             }) { IsBackground = true };
             t.Start();
         }
@@ -202,37 +240,48 @@ namespace Multipleer.Transport
 
         // ─── STUN Protocol (RFC 5389) ─────────────────────────────────────
 
+        // Per-server wait for a STUN binding response (delivered by ReceiveLoop, the single socket
+        // reader). 800ms comfortably covers an internet RTT to Google's STUN anycast plus parsing,
+        // while keeping a full 5-server sweep under ~4s worst case.
+        private const int StunPerServerTimeoutMs = 800;
+
         private IPEndPoint DiscoverPublicEndpoint()
         {
-            foreach (var stunServer in StunServers)
+            // Arm the cooperative path: ReceiveLoop only diverts STUN binding responses to us while
+            // this flag is set, so normal game traffic is never misrouted once discovery is done.
+            _stunResult = null;
+            _stunSignal.Reset();
+            _stunDiscoveryPending = true;
+            try
             {
-                try
+                foreach (var stunServer in StunServers)
                 {
-                    var parts = stunServer.Split(':');
-                    var stunHost = parts[0];
-                    var stunPort = int.Parse(parts[1]);
-                    var stunEp = new IPEndPoint(
-                        Dns.GetHostAddresses(stunHost)[0], stunPort);
-
-                    var request = CreateStunBindingRequest();
-                    _udp.Send(request, request.Length, stunEp);
-
-                    var from = new IPEndPoint(IPAddress.Any, 0);
-                    for (int retry = 0; retry < 3; retry++)
+                    try
                     {
-                        if (_udp.Client != null && _udp.Available > 0)
-                        {
-                            var response = _udp.Receive(ref from);
-                            var mapped = ParseStunResponse(response);
-                            if (mapped != null)
-                                return mapped;
-                        }
-                        Thread.Sleep(100);
+                        var parts = stunServer.Split(':');
+                        var stunHost = parts[0];
+                        var stunPort = int.Parse(parts[1]);
+                        var addrs = Dns.GetHostAddresses(stunHost);
+                        if (addrs == null || addrs.Length == 0) continue;
+                        var stunEp = new IPEndPoint(addrs[0], stunPort);
+
+                        _stunSignal.Reset();
+                        var request = CreateStunBindingRequest();
+                        _udp.Send(request, request.Length, stunEp);
+
+                        // Block until ReceiveLoop signals a parsed response or we time out. We do NOT
+                        // touch _udp here — ReceiveLoop owns the socket and feeds us _stunResult.
+                        if (_stunSignal.Wait(StunPerServerTimeoutMs) && _stunResult != null)
+                            return _stunResult;
                     }
+                    catch { continue; }
                 }
-                catch { continue; }
+                return null;
             }
-            return null;
+            finally
+            {
+                _stunDiscoveryPending = false;
+            }
         }
 
         private static byte[] CreateStunBindingRequest()
@@ -316,6 +365,22 @@ namespace Multipleer.Transport
                 {
                     var from = new IPEndPoint(IPAddress.Any, 0);
                     var data = _udp.Receive(ref from);
+
+                    // STUN binding response (host- or client-side discovery in flight): hand the
+                    // parsed public endpoint to the waiting DiscoverPublicEndpoint thread. ParseStunResponse
+                    // self-validates (BindingResponse type + magic cookie), so this can never swallow a
+                    // game packet; we only divert while a discovery is actually pending.
+                    if (_stunDiscoveryPending)
+                    {
+                        var mapped = ParseStunResponse(data);
+                        if (mapped != null)
+                        {
+                            _stunResult = mapped;
+                            _stunSignal.Set();
+                            continue;
+                        }
+                    }
+
                     var dataStr = Encoding.UTF8.GetString(data);
 
                     if (dataStr == "HOLE_PUNCH")

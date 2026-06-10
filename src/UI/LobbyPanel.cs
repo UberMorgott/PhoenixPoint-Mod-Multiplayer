@@ -20,6 +20,12 @@ namespace Multipleer.UI
     {
         private readonly MultiplayerUI _owner;
 
+        // The lobby's OWN overlay Canvas (created in Build). The lobby no longer parents directly
+        // under the captured menu Canvas (whose CanvasScaler is unknown → everything rendered tiny
+        // and the Leave button fell offscreen); it gets a dedicated ScreenSpaceOverlay canvas with a
+        // 1920×1080 ScaleWithScreenSize scaler so the absolute-px layout below is deterministic.
+        private Canvas _lobbyCanvas;
+
         private GameObject _root;
         private Text _roleText;
         private Text _connectText;
@@ -70,7 +76,12 @@ namespace Multipleer.UI
             public bool RenameWired;
         }
 
-        public bool IsVisible => _root != null && _root.activeSelf;
+        // SINGLE visibility lever = the lobby's own overlay Canvas GameObject. While that GO is
+        // inactive, the WHOLE lobby subtree (_root + every zone + every cloned native widget) is
+        // hidden no matter what — so IsVisible, Show, Hide and Build all key on this ONE object and
+        // can never disagree (no "panel shows but IsVisible says hidden", or vice-versa). _root stays
+        // permanently active *inside* the canvas after Build; only the canvas GO is ever toggled.
+        public bool IsVisible => _lobbyCanvas != null && _lobbyCanvas.gameObject.activeSelf;
 
         public LobbyPanel(MultiplayerUI owner)
         {
@@ -79,24 +90,78 @@ namespace Multipleer.UI
 
         // ─── Build (once) ──────────────────────────────────────────────────
 
-        // Build under the native main-menu Canvas. Buttons are cloned native widgets
-        // (TemplateMenuButton via NativeWidgetFactory) so they match the game's look; the
-        // panel background, roster rows and nickname field stay from-code (documented
-        // per-widget fallbacks — no cheap native template at the menu for these).
+        // Build on the lobby's OWN ROOT overlay Canvas (created here, parented under ModGO so it is a
+        // root canvas — see the critical note in the body). The menuCanvas param is still required as
+        // a readiness gate (we only build once the native menu is captured) and as the source for
+        // cloned native widgets. Buttons are cloned native widgets (TemplateMenuButton via
+        // NativeWidgetFactory) so they match the game's look; the panel background, roster rows and
+        // nickname field stay from-code (documented per-widget fallbacks — no cheap native template
+        // at the menu for these).
         public void Build(Canvas menuCanvas)
         {
             if (_root != null || menuCanvas == null) return;
 
+            // Dedicated overlay Canvas (mirrors MultiplayerUI.MultipleerBarCanvas EXACTLY):
+            // ScreenSpaceOverlay + 1920×1080 ScaleWithScreenSize scaler + GraphicRaycaster. Sort order
+            // 4000 sits above the menu chrome but BELOW the 5000 in-game status bar.
+            //
+            // CRITICAL — parent under the mod's ModGO transform (_owner.transform), NOT under the
+            // menu Canvas. A Canvas parented under ANOTHER Canvas is a NESTED (non-root) canvas:
+            // Unity then IGNORES its CanvasScaler and does NOT drive its RectTransform to the screen
+            // rect — the auto-added RectTransform keeps its default (0.5,0.5) anchors / 100×100
+            // sizeDelta, so the whole lobby collapsed into a tiny ~100px centred box (the cramping
+            // bug). The proven status-bar canvas avoids this by living under ModGO (a plain
+            // GameObject, no Canvas ancestor) → it is a ROOT canvas → scaler honoured, overlay fills
+            // the screen. We mirror that here. ModGO is persistent, so the lobby canvas now shares the
+            // mod's lifetime (the lobby is only Show()n while a session is active, like the bar).
+            var canvasGo = new GameObject("MultipleerLobbyCanvas");
+            canvasGo.transform.SetParent(_owner.transform, false);
+            // Hide the lobby canvas GO from the very first frame. The canvas is the SINGLE visibility
+            // lever: while inactive, its whole subtree (_root + every zone) is hidden no matter what.
+            // This makes startup-hidden robust even if a Build sub-step throws (the throw is swallowed
+            // by the OnMenuReady try/catch in MainMenuPatches) — the half-built panel can never leak
+            // onto the menu. Show() re-activates this GO (and _root) when the user opens the lobby.
+            canvasGo.SetActive(false);
+            _lobbyCanvas = canvasGo.AddComponent<Canvas>();
+            _lobbyCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _lobbyCanvas.sortingOrder = 4000;
+
+            var scaler = canvasGo.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920, 1080);
+            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+            scaler.matchWidthOrHeight = 0.5f;
+
+            canvasGo.AddComponent<GraphicRaycaster>();
+
+            // Belt-and-suspenders: explicitly full-stretch the canvas RectTransform. On a root overlay
+            // canvas Unity drives this anyway, but it makes the full-screen intent explicit and is
+            // harmless if the canvas ever ends up nested again.
+            var canvasRect = canvasGo.GetComponent<RectTransform>();
+            if (canvasRect != null)
+            {
+                canvasRect.anchorMin = Vector2.zero;
+                canvasRect.anchorMax = Vector2.one;
+                canvasRect.pivot = new Vector2(0.5f, 0.5f);
+                canvasRect.offsetMin = Vector2.zero;
+                canvasRect.offsetMax = Vector2.zero;
+                canvasRect.localScale = Vector3.one;
+            }
+
             _root = new GameObject("MultipleerLobbyPanel");
-            _root.transform.SetParent(menuCanvas.transform, false);
+            _root.transform.SetParent(_lobbyCanvas.transform, false);
 
             var rect = _root.AddComponent<RectTransform>();
-            // Full-screen: stretch anchors 0..1, zero offsets (was ~85% inset).
+            // Full-screen: stretch anchors 0..1, zero offsets (was ~85% inset). With the canvas now a
+            // proper root overlay (above), this rect fills the 1920×1080 reference rect and every zone
+            // anchored as a fraction of it spreads across the full screen.
             rect.anchorMin = Vector2.zero;
             rect.anchorMax = Vector2.one;
             rect.pivot = new Vector2(0.5f, 0.5f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
+            rect.anchoredPosition = Vector2.zero;
+            rect.localScale = Vector3.one;
 
             // NO full-screen fill. The lobby is laid OVER the game's main-menu background art (the
             // rendered 3D backdrop) as a clean separate "page": the menu's own chrome (buttons,
@@ -105,13 +170,29 @@ namespace Multipleer.UI
             // blackout the art — exactly what the redesign removes. The root keeps its full-screen
             // RectTransform purely for child layout/anchoring.
 
-            BuildTopBar();
-            BuildConnectRail();
-            BuildChatZone();
-            BuildRosterZone();
-            BuildFooter();
-
-            _root.SetActive(false);
+            // try/finally guarantees the lobby is left fully hidden even if a zone-build sub-step
+            // throws. A throw here is swallowed upstream (OnMenuReady try/catch), so without this the
+            // already-active canvas/root + partially built zones would leak onto the main menu at
+            // startup (the "lobby open + chrome visible + empty fields" bug). The finally pins both
+            // visibility levers OFF; Show() is the only thing that turns them back on.
+            try
+            {
+                BuildTopBar();
+                BuildConnectRail();
+                BuildChatZone();
+                BuildRosterZone();
+                BuildFooter();
+            }
+            finally
+            {
+                // Pin the SINGLE visibility lever OFF on EVERY path (normal completion, early-return
+                // sub-step, or a thrown+swallowed exception): the lobby canvas GO is forced inactive,
+                // which hides the entire subtree. _root is left ACTIVE *inside* the inactive canvas so
+                // its active-state can never disagree with the lever (the canvas alone gates
+                // visibility). Show() turns the canvas back on; nothing else does.
+                _root.SetActive(true);
+                if (_lobbyCanvas != null) _lobbyCanvas.gameObject.SetActive(false);
+            }
         }
 
         // TOP BAR: title + subtitle (no X/4 counter — small count lives in the roster header).
@@ -275,18 +356,21 @@ namespace Multipleer.UI
         // FOOTER: Leave / Join… / Ready / Play (host).
         private void BuildFooter()
         {
+            // Footer buttons sit in the 0..80px band below the framed zones. Anchor them a clear
+            // ~44px above the screen bottom (chrome is hidden once the lobby is open, so nothing else
+            // occupies the edge) — keeps LEAVE/JOIN/READY/PLAY fully on-screen and off the very edge.
             _leaveButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "LeaveBtn", "LEAVE",
                 () => _owner.OnLobbyLeave());
-            if (_leaveButton != null) AnchorButton(_leaveButton, _root.transform, new Vector2(0f, 0f), new Vector2(24, 20), FooterButtonSize);
+            if (_leaveButton != null) AnchorButton(_leaveButton, _root.transform, new Vector2(0f, 0f), new Vector2(24, 44), FooterButtonSize);
             else _leaveButton = UiToolkit.CreateButton(_root, "LeaveBtn", "LEAVE",
-                new Vector2(24, 20), new Vector2(140, 40), new Vector2(0f, 0f),
+                new Vector2(24, 44), new Vector2(140, 40), new Vector2(0f, 0f),
                 () => _owner.OnLobbyLeave());
 
             _joinButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "JoinBtn", "JOIN…",
                 () => _owner.OnLobbyJoinPrompt());
-            if (_joinButton != null) AnchorButton(_joinButton, _root.transform, new Vector2(0.35f, 0f), new Vector2(0, 20), FooterButtonSize);
+            if (_joinButton != null) AnchorButton(_joinButton, _root.transform, new Vector2(0.35f, 0f), new Vector2(0, 44), FooterButtonSize);
             else _joinButton = UiToolkit.CreateButton(_root, "JoinBtn", "JOIN…",
-                new Vector2(0, 20), new Vector2(140, 40), new Vector2(0.35f, 0f),
+                new Vector2(0, 44), new Vector2(140, 40), new Vector2(0.35f, 0f),
                 () => _owner.OnLobbyJoinPrompt());
 
             // Ready: native toggle if capturable, else label-flip menu button (fallback).
@@ -296,31 +380,31 @@ namespace Multipleer.UI
             {
                 var trt = _readyToggle.transform as RectTransform;
                 if (trt != null) { trt.anchorMin = new Vector2(0.6f, 0f); trt.anchorMax = new Vector2(0.6f, 0f);
-                    trt.pivot = new Vector2(0.5f, 0f); trt.anchoredPosition = new Vector2(0, 24); }
+                    trt.pivot = new Vector2(0.5f, 0f); trt.anchoredPosition = new Vector2(0, 44); }
             }
             else
             {
                 _readyButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "ReadyBtn", "READY",
                     () => _owner.OnLobbyToggleReady());
-                if (_readyButton != null) AnchorButton(_readyButton, _root.transform, new Vector2(0.6f, 0f), new Vector2(0, 20), FooterButtonSize);
+                if (_readyButton != null) AnchorButton(_readyButton, _root.transform, new Vector2(0.6f, 0f), new Vector2(0, 44), FooterButtonSize);
                 else _readyButton = UiToolkit.CreateButton(_root, "ReadyBtn", "READY",
-                    new Vector2(0, 20), new Vector2(160, 40), new Vector2(0.6f, 0f),
+                    new Vector2(0, 44), new Vector2(160, 40), new Vector2(0.6f, 0f),
                     () => _owner.OnLobbyToggleReady());
                 _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
             }
 
             _playButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "PlayBtn", "PLAY ▸",
                 () => _owner.OnLobbyPlay());
-            if (_playButton != null) AnchorButton(_playButton, _root.transform, new Vector2(1f, 0f), new Vector2(-24, 20), FooterButtonSize);
+            if (_playButton != null) AnchorButton(_playButton, _root.transform, new Vector2(1f, 0f), new Vector2(-24, 44), FooterButtonSize);
             else _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY ▸",
-                new Vector2(-24, 20), new Vector2(140, 40), new Vector2(1f, 0f),
+                new Vector2(-24, 44), new Vector2(140, 40), new Vector2(1f, 0f),
                 () => _owner.OnLobbyPlay());
         }
 
         // Default framed-panel colours: a light SEMI-opaque dark backing (so arbitrary background
         // art behind the panel stays faintly visible while text keeps contrast) + a lighter 1-2px
         // border outline. Tuned per the redesign brief.
-        private static readonly Color PanelFill = new Color(0.06f, 0.07f, 0.10f, 0.82f);
+        private static readonly Color PanelFill = new Color(0.06f, 0.07f, 0.10f, 0.62f);
         private static readonly Color PanelBorder = new Color(0.5f, 0.55f, 0.65f, 0.9f);
 
         // FRAMED PANEL: a semi-opaque dark backing Image on the zone root + a border Outline, so the
@@ -387,20 +471,33 @@ namespace Multipleer.UI
 
         // ─── Show / Hide ───────────────────────────────────────────────────
 
+        // The ONLY method that makes the lobby visible. Reachable solely from the user-driven button
+        // path: MultiplayerUI.ShowNetworkMenu (the injected NETWORK GAME button onClick) →
+        // StartHostAndOpenLobby → Show, plus the footer Join… re-show. Nothing in Build / Awake /
+        // Update / OnMenuReady / the Harmony postfix calls it, so the lobby can never auto-open.
         public void Show()
         {
-            if (_root == null) return;
+            if (_lobbyCanvas == null || _root == null) return;
+
+            // Turn the SINGLE visibility lever ON: activate the lobby canvas GO (its whole subtree,
+            // incl. the always-active _root, becomes visible) and re-assert Canvas.enabled. Done
+            // BEFORE hiding the menu chrome so no edge path can leave the lobby blank while the menu
+            // canvases are down. Mirrors the proven always-under-ModGO status-bar canvas.
+            if (!_lobbyCanvas.gameObject.activeSelf) _lobbyCanvas.gameObject.SetActive(true);
+            _lobbyCanvas.enabled = true;
+
             // Hide the main-menu chrome (buttons / logo / version) so the lobby reads as a separate
             // page over the background art. Idempotent: a second Show without an intervening Hide
             // won't double-store (HideMenuChrome guards _chromeHidden).
-            NativeWidgetFactory.HideMenuChrome(_root);
-            _root.SetActive(true);
+            NativeWidgetFactory.HideMenuChrome(_lobbyCanvas);
             Refresh();
         }
 
         public void Hide()
         {
-            if (_root != null) _root.SetActive(false);
+            // Turn the SINGLE visibility lever OFF: deactivate the lobby canvas GO (hides the whole
+            // subtree). _root stays active inside it, ready for the next Show().
+            if (_lobbyCanvas != null) _lobbyCanvas.gameObject.SetActive(false);
             // CRITICAL: restore the menu chrome we hid on Show, or the main menu stays broken after
             // leaving the lobby. Bulletproof: restores exactly the stored objects, guards nulls, and
             // is a safe no-op if nothing was hidden.
@@ -411,7 +508,9 @@ namespace Multipleer.UI
 
         public void Refresh()
         {
-            if (_root == null || !_root.activeSelf) return;
+            // Key the work-guard on the SAME single lever as IsVisible: do nothing unless the lobby
+            // canvas GO is actually on screen.
+            if (!IsVisible) return;
 
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive)

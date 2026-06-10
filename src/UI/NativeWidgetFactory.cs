@@ -4,6 +4,7 @@ using System.Linq;
 using Base.Core;
 using Base.Input;
 using Base.Serialization;
+using Base.UI;
 using I2.Loc;
 using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Common.View.ViewModules;
@@ -52,16 +53,21 @@ namespace Multipleer.UI
         /// <summary>The native main-menu uGUI Font (null until captured), applied to from-code labels.</summary>
         public static Font MenuFont => _menuFont;
 
-        // The main-menu buttons module (UIModuleMainMenuButtons) instance, captured from the same
-        // Init Postfix. Source of the menu "chrome" the lobby hides while open: the buttons module
-        // root GameObject + its per-edition visual lists (which carry the PhoenixLogo_* /TFTV logo).
-        private static Component _menuButtonsModule;
-
-        // Objects the lobby deactivated on its last Show() (so Hide() restores EXACTLY them). Holds
-        // only objects that were active when hidden; cleared on restore. Static + idempotent so a
-        // double Show never double-stores and a Hide after no Show is a safe no-op.
-        private static readonly List<GameObject> _hiddenChrome = new List<GameObject>();
+        // Root canvases the lobby disabled on its last Show() (so Hide() restores EXACTLY their
+        // prior enabled state). The PP home screen is MULTIPLE root canvases (one per module
+        // scene), so we disable every root canvas that hosts a UIModuleBehavior wholesale rather
+        // than chasing individual chrome objects. Static + idempotent so a double Show never
+        // double-stores and a Hide after no Show is a safe no-op.
+        private static readonly List<HiddenCanvas> _hiddenCanvases = new List<HiddenCanvas>();
         private static bool _chromeHidden;
+
+        // A disabled root canvas + the enabled value it had BEFORE we disabled it (so restore is
+        // exact and never blindly forces enabled=true, which could fight the game's own refresh).
+        private struct HiddenCanvas
+        {
+            public Canvas Canvas;
+            public bool WasEnabled;
+        }
 
         // Captured lazily on first Play (save row prefab lives on an inactive module).
         private static UIModuleSaveGameSlot _saveRowPrefab;
@@ -81,7 +87,8 @@ namespace Multipleer.UI
         {
             if (templateMenuButton != null) _menuButtonTemplate = templateMenuButton;
             if (menuCanvas != null) _menuCanvas = menuCanvas;
-            if (menuButtonsModule != null) _menuButtonsModule = menuButtonsModule;
+            // menuButtonsModule was used by the old chrome-hide path (now superseded by the
+            // root-canvas sweep in HideMenuChrome); the param is kept for call-site compatibility.
 
             // Capture the menu typeface from the template button's child Text (includeInactive: the
             // template is kept inactive as a prefab). Guarded — a missing Text/font leaves _menuFont
@@ -105,93 +112,74 @@ namespace Multipleer.UI
         // ═══════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Hide the main-menu's own UI chrome so the lobby reads as a separate page laid over the
-        /// rendered background art. STRUCTURAL, not name-based, so it catches whatever chrome exists
-        /// regardless of TFTV (or any mod) customization:
+        /// Hide ALL main-menu chrome wholesale so the lobby reads as a separate page laid over the
+        /// rendered background art. The PP home screen is built from MULTIPLE root canvases (one per
+        /// module scene), and decorative art such as the TFTV "TERROR FROM THE VOID" logo does NOT
+        /// always live on a canvas that carries a UIModuleBehavior:
+        ///   * The TFTV logo is built on HomeScreenModules.MainMenuButtonsModule.VanillaVisuals[0]
+        ///     (PhoenixLogo_text / PhoenixLogo_symbol — see refs\TFTV-src\TFTV\TFTVNewGameMenu.cs
+        ///     SetTFTVLogo). PP ALSO has HomeSceneReferences.VanillaVisuals (EditionVisualsController),
+        ///     a separate scene-visuals root that has NO UIModuleBehavior. The earlier sweep, which
+        ///     only disabled root canvases CONTAINING a UIModuleBehavior, left the logo's canvas
+        ///     visible behind the lobby.
+        /// So we now BROADEN the sweep: disable EVERY active root Canvas EXCEPT our own (the lobby
+        /// canvas and the Multipleer status-bar canvas — both children of ModGO). This is safe because
+        /// we record each canvas's prior enabled value and RestoreMenuChrome() puts every one back
+        /// exactly, and because our own buttons render on the (excluded) lobby canvas and route input
+        /// through the EventSystem (not a separate canvas), so disabling the rest cannot break them.
         ///
-        ///   (1) SIBLING SWEEP — primary, robust mechanism. <paramref name="lobbyRoot"/> is parented
-        ///       directly under the menu Canvas, so every OTHER direct child of that canvas is a
-        ///       top-level menu container (buttons + logo group, version label, social row, …).
-        ///       Deactivate every active sibling that is NOT the lobby root; nested logo/version/social
-        ///       go down with their container. This needs no knowledge of TFTV's cloned objects.
-        ///
-        ///   (2) EXTRA-CANVAS SUPPLEMENT — the version label (UIModuleBuildRevision) and the social-icon
-        ///       row (UIModuleMainMenuButtons.Social) can live on a DIFFERENT canvas than the lobby root.
-        ///       Both are grounded by type/field, so we also deactivate their roots explicitly. If they
-        ///       happen to share the lobby's canvas the sibling sweep already got them and HideOne's
-        ///       activeSelf check makes this a safe no-op.
-        ///
-        /// The 3D scene backdrop is NOT a UI module and is left untouched, so the background art still
-        /// shows through. Records ONLY objects that were active when hidden; idempotent (a second call
-        /// without an intervening Restore is a no-op) so repeated Show() never double-stores.
+        /// We toggle Canvas.enabled (NOT GameObject.SetActive, NOT CanvasGroup): that stops rendering
+        /// and raycasting while leaving each module's state machine untouched, so the game's own
+        /// refresh can't fight us and restore is exact. FindObjectsOfType returns only ACTIVE
+        /// canvases, so we never touch (or wrongly re-enable) an intentionally-inactive one. Records
+        /// the prior enabled value per canvas; idempotent (a second call without an intervening
+        /// Restore is a no-op) so repeated Show() never double-stores.
         /// </summary>
-        /// <param name="lobbyRoot">The lobby panel root (a direct child of the menu Canvas); never hidden.</param>
-        public static void HideMenuChrome(GameObject lobbyRoot)
+        /// <param name="lobbyCanvas">The lobby's own overlay Canvas; never disabled.</param>
+        public static void HideMenuChrome(Canvas lobbyCanvas)
         {
             if (_chromeHidden) return;
-            _hiddenChrome.Clear();
+            _hiddenCanvases.Clear();
 
-            // (1) Sibling sweep: deactivate every active sibling of the lobby root under the menu Canvas.
+            // The mod's own ModGO root: both our canvases (lobby + status bar) are children of it.
+            // Anything under this transform is OURS and must never be disabled. The lobby canvas is a
+            // direct child of ModGO, so its parent IS the ModGO transform.
+            Transform modRoot = lobbyCanvas != null ? lobbyCanvas.transform.parent : null;
+
             try
             {
-                var parent = lobbyRoot != null ? lobbyRoot.transform.parent : null;
-                if (parent != null)
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<Canvas>())
                 {
-                    for (int i = 0; i < parent.childCount; i++)
-                    {
-                        var child = parent.GetChild(i).gameObject;
-                        if (child == lobbyRoot) continue;     // never hide the lobby itself
-                        HideOne(child);
-                    }
+                    if (c == null || !c.isRootCanvas) continue;
+                    if (c == lobbyCanvas) continue;                         // never disable the lobby's own canvas
+                    if (modRoot != null && c.transform.IsChildOf(modRoot))  // never disable any Multipleer canvas
+                        continue;                                           // (status bar lives under the same ModGO)
+
+                    _hiddenCanvases.Add(new HiddenCanvas { Canvas = c, WasEnabled = c.enabled });
+                    c.enabled = false;
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] HideMenuChrome (sibling sweep) failed: " + e.Message);
-            }
-
-            // (2a) Social-icon row (UIModuleMainMenuButtons.Social) — may sit on a different canvas.
-            var buttons = _menuButtonsModule as UIModuleMainMenuButtons;
-            if (buttons != null && buttons.Social != null)
-                HideOne(buttons.Social);
-
-            // (2b) Bottom version/build label module (UIModuleBuildRevision) — typically a separate
-            // canvas at the screen bottom. Found by type (inactive-safe). If absent, nothing to hide.
-            try
-            {
-                var rev = Resources.FindObjectsOfTypeAll<UIModuleBuildRevision>()
-                    .FirstOrDefault(m => m != null && m.gameObject.scene.IsValid());
-                if (rev != null) HideOne(rev.gameObject);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError("[Multipleer] HideMenuChrome (build revision) failed: " + e.Message);
+                Debug.LogError("[Multipleer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
             }
 
             _chromeHidden = true;
         }
 
         /// <summary>
-        /// Restore EXACTLY the chrome objects hidden by the last HideMenuChrome(). Guards nulls
-        /// (objects can be destroyed across a scene change). Safe to call when nothing was hidden.
-        /// This is the bulletproof restore the menu depends on after the lobby closes.
+        /// Restore EXACTLY the root canvases disabled by the last HideMenuChrome(), each back to its
+        /// SAVED enabled value (never blindly forced true). Guards nulls (canvases can be destroyed
+        /// across a scene change). Safe to call when nothing was hidden. This is the bulletproof
+        /// restore the menu depends on after the lobby closes.
         /// </summary>
         public static void RestoreMenuChrome()
         {
             if (!_chromeHidden) return;
-            foreach (var go in _hiddenChrome)
-                if (go != null) go.SetActive(true);
-            _hiddenChrome.Clear();
+            foreach (var h in _hiddenCanvases)
+                if (h.Canvas != null) h.Canvas.enabled = h.WasEnabled;
+            _hiddenCanvases.Clear();
             _chromeHidden = false;
-        }
-
-        // Deactivate one object and remember it — only if it is currently active (so restore never
-        // re-activates something the game had intentionally hidden).
-        private static void HideOne(GameObject go)
-        {
-            if (go == null || !go.activeSelf) return;
-            go.SetActive(false);
-            _hiddenChrome.Add(go);
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -213,9 +201,13 @@ namespace Multipleer.UI
             obj.name = name;
             obj.SetActive(true);
 
+            // Overwrite EVERY Text child, not just the first. The native TemplateMenuButton subtree
+            // can carry more than one Text (e.g. a shadow/echo label), and any child we leave alone
+            // keeps the prefab's serialized placeholder string ("NEEDS TEXT"), which then renders as a
+            // stray ghost label in the lobby. Setting them all to our label removes that placeholder.
             var texts = obj.GetComponentsInChildren<Text>(true);
-            if (texts.Length > 0)
-                texts[0].text = label;
+            for (int i = 0; i < texts.Length; i++)
+                if (texts[i] != null) texts[i].text = label;
 
             var btn = obj.GetComponentInChildren<Button>();
             if (btn != null)
@@ -339,6 +331,18 @@ namespace Multipleer.UI
                 var loc = ctrl.OptionText.GetComponent<Localize>();
                 if (loc != null) UnityEngine.Object.Destroy(loc);
                 ctrl.OptionText.text = label;
+            }
+
+            // Scrub any OTHER Text child still holding the prefab's "NEEDS TEXT" placeholder (the
+            // toggle template can carry a secondary/echo Text besides OptionText). We do NOT relabel
+            // them with our text (that would duplicate "READY"); we just clear the stray placeholder
+            // so it stops rendering as a ghost label.
+            foreach (var t in ctrl.GetComponentsInChildren<Text>(true))
+            {
+                if (t == null || t == ctrl.OptionText) continue;
+                if (!string.IsNullOrEmpty(t.text) &&
+                    t.text.Trim().Equals("NEEDS TEXT", StringComparison.OrdinalIgnoreCase))
+                    t.text = "";
             }
 
             var toggle = ctrl.CheckedToggle;

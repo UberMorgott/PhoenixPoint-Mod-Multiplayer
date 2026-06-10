@@ -40,51 +40,61 @@ namespace Multipleer.UI
 
             _root = new GameObject("MultipleerSavePicker");
             _root.transform.SetParent(menuCanvas.transform, false);
+            // The picker parents directly under the LIVE menu canvas, so it MUST be hidden from the
+            // very first frame and guaranteed hidden even if a build sub-step throws (the throw is
+            // swallowed by the OnMenuReady try/catch in MainMenuPatches). Set inactive immediately,
+            // then re-assert it in a finally — a half-built picker can never leak onto the menu.
+            _root.SetActive(false);
 
-            var rect = _root.AddComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.5f, 0.5f);
-            rect.anchorMax = new Vector2(0.5f, 0.5f);
-            rect.pivot = new Vector2(0.5f, 0.5f);
-            rect.sizeDelta = new Vector2(580, 480);
-            rect.anchoredPosition = Vector2.zero;
-
-            var bg = _root.AddComponent<Image>();
-            bg.color = new Color(0.04f, 0.05f, 0.07f, 0.97f);
-
-            UiToolkit.CreateText(_root, "Title", new Vector2(0, -24),
-                new Vector2(560, 30), "CHOOSE A SAVE TO HOST", 17,
-                TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
-
-            _listArea = new GameObject("ListArea");
-            _listArea.transform.SetParent(_root.transform, false);
-            var listRect = _listArea.AddComponent<RectTransform>();
-            listRect.anchorMin = new Vector2(0.5f, 1f);
-            listRect.anchorMax = new Vector2(0.5f, 1f);
-            listRect.pivot = new Vector2(0.5f, 1f);
-            listRect.sizeDelta = new Vector2(RowWidth, MaxRows * RowHeight);
-            listRect.anchoredPosition = new Vector2(0, -64);
-
-            // Cancel button (bottom-center) — native clone, fallback to from-code button.
-            var cancel = NativeWidgetFactory.CloneMenuButton(_root.transform, "CancelBtn", "CANCEL", Hide);
-            if (cancel != null)
+            try
             {
-                var crt = cancel.transform as RectTransform;
-                if (crt != null)
+                var rect = _root.AddComponent<RectTransform>();
+                rect.anchorMin = new Vector2(0.5f, 0.5f);
+                rect.anchorMax = new Vector2(0.5f, 0.5f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.sizeDelta = new Vector2(580, 480);
+                rect.anchoredPosition = Vector2.zero;
+
+                var bg = _root.AddComponent<Image>();
+                bg.color = new Color(0.04f, 0.05f, 0.07f, 0.97f);
+
+                UiToolkit.CreateText(_root, "Title", new Vector2(0, -24),
+                    new Vector2(560, 30), "CHOOSE A SAVE TO HOST", 17,
+                    TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
+
+                _listArea = new GameObject("ListArea");
+                _listArea.transform.SetParent(_root.transform, false);
+                var listRect = _listArea.AddComponent<RectTransform>();
+                listRect.anchorMin = new Vector2(0.5f, 1f);
+                listRect.anchorMax = new Vector2(0.5f, 1f);
+                listRect.pivot = new Vector2(0.5f, 1f);
+                listRect.sizeDelta = new Vector2(RowWidth, MaxRows * RowHeight);
+                listRect.anchoredPosition = new Vector2(0, -64);
+
+                // Cancel button (bottom-center) — native clone, fallback to from-code button.
+                var cancel = NativeWidgetFactory.CloneMenuButton(_root.transform, "CancelBtn", "CANCEL", Hide);
+                if (cancel != null)
                 {
-                    crt.anchorMin = new Vector2(0.5f, 0f);
-                    crt.anchorMax = new Vector2(0.5f, 0f);
-                    crt.pivot = new Vector2(0.5f, 0f);
-                    crt.anchoredPosition = new Vector2(0, 18);
+                    var crt = cancel.transform as RectTransform;
+                    if (crt != null)
+                    {
+                        crt.anchorMin = new Vector2(0.5f, 0f);
+                        crt.anchorMax = new Vector2(0.5f, 0f);
+                        crt.pivot = new Vector2(0.5f, 0f);
+                        crt.anchoredPosition = new Vector2(0, 18);
+                    }
+                }
+                else
+                {
+                    UiToolkit.CreateButton(_root, "CancelBtn", "CANCEL",
+                        new Vector2(0, 18), new Vector2(160, 40), new Vector2(0.5f, 0f),
+                        Hide);
                 }
             }
-            else
+            finally
             {
-                UiToolkit.CreateButton(_root, "CancelBtn", "CANCEL",
-                    new Vector2(0, 18), new Vector2(160, 40), new Vector2(0.5f, 0f),
-                    Hide);
+                _root.SetActive(false);
             }
-
-            _root.SetActive(false);
         }
 
         public void Show(Action<SavegameMetaData> onPick)
