@@ -98,11 +98,15 @@ namespace Multipleer.UI
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
 
-            // Background: native panel sprite if capturable, else a solid dark fill.
+            // Background: a solid OPAQUE dark fill. We deliberately do NOT reuse the captured
+            // native panel sprite here — TryGetPanelBackgroundSprite() returns the first sliced
+            // sprite found on the menu canvas, which in practice is a near-WHITE 9-slice frame;
+            // tinting it Color.white painted the entire screen white (and the white from-code text
+            // vanished against it). A from-code dark Image is robust and never white. This Image is
+            // added first, so the bg GameObject is the back-most sibling and is drawn behind every
+            // zone/widget built below — it never covers content.
             var bg = _root.AddComponent<Image>();
-            var nativeSprite = NativeWidgetFactory.TryGetPanelBackgroundSprite();
-            if (nativeSprite != null) { bg.sprite = nativeSprite; bg.type = Image.Type.Sliced; bg.color = Color.white; }
-            else bg.color = new Color(0.05f, 0.06f, 0.08f, 0.96f);
+            bg.color = new Color(0.08f, 0.09f, 0.11f, 0.98f);
 
             BuildTopBar();
             BuildConnectRail();
@@ -134,6 +138,7 @@ namespace Multipleer.UI
             rrt.anchorMax = new Vector2(0.25f, 1f);
             rrt.offsetMin = new Vector2(24, 80);
             rrt.offsetMax = new Vector2(-12, -90);
+            AddZoneBackground(rail, new Color(0.11f, 0.12f, 0.15f, 0.98f));
 
             UiToolkit.CreateText(rail, "ConnectHdr", new Vector2(0, 0),
                 new Vector2(260, 24), "CONNECT", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
@@ -194,6 +199,7 @@ namespace Multipleer.UI
             crt.anchorMax = new Vector2(0.66f, 1f);
             crt.offsetMin = new Vector2(0, 80);
             crt.offsetMax = new Vector2(0, -90);
+            AddZoneBackground(chat, new Color(0.08f, 0.09f, 0.11f, 0.98f));
 
             UiToolkit.CreateText(chat, "ChatHdr", new Vector2(0, 0),
                 new Vector2(300, 24), "CHAT", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
@@ -242,6 +248,7 @@ namespace Multipleer.UI
             prt.anchorMax = new Vector2(1f, 1f);
             prt.offsetMin = new Vector2(0, 80);
             prt.offsetMax = new Vector2(-24, -90);
+            AddZoneBackground(players, new Color(0.11f, 0.12f, 0.15f, 0.98f));
 
             _connectText = UiToolkit.CreateText(players, "PlayersHdr", new Vector2(0, 0),
                 new Vector2(300, 24), "PLAYERS (0)", 16, TextAnchor.UpperLeft, new Vector2(0f, 1f));
@@ -299,6 +306,17 @@ namespace Multipleer.UI
             else _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY ▸",
                 new Vector2(-24, 20), new Vector2(140, 40), new Vector2(1f, 0f),
                 () => _owner.OnLobbyPlay());
+        }
+
+        // Give a zone GameObject an OPAQUE DARK panel background so the 5-zone structure is
+        // visible and the (white) text/labels inside have contrast. Same from-code dark-Image
+        // pattern used by UiToolkit.CreateButton / the value boxes. The Image is added directly on
+        // the zone root which is created (and parented) before its child widgets, so it sits behind
+        // them. Returns nothing — fire-and-forget surface.
+        private static void AddZoneBackground(GameObject zone, Color color)
+        {
+            var img = zone.AddComponent<Image>();
+            img.color = color;
         }
 
         // Position a cloned native button: anchor its root RectTransform to a corner of the
