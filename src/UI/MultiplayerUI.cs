@@ -440,21 +440,6 @@ namespace Multipleer.UI
             return text;
         }
 
-        private static ulong ResolveSteamId()
-        {
-            try
-            {
-                var asm = FindSteamworksAssembly();
-                if (asm == null) return 0;
-                var type = asm.GetType("Steamworks.SteamClient");
-                if (type == null) return 0;
-                var prop = type.GetProperty("SteamId",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return prop != null ? (ulong)prop.GetValue(null, null) : 0UL;
-            }
-            catch { return 0; }
-        }
-
         public void InvitePlayers()
         {
             try

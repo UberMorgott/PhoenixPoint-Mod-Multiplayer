@@ -64,6 +64,10 @@ namespace Multipleer.Network
             SaveTransfer = null;
             IsActive = false;
             IsHost = false;
+
+            // Singleton persists across host/join/leave cycles (Instance is never nulled),
+            // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
+            OnConnectionFailed = null;
         }
 
         // ─── Transport Selection ──────────────────────────────────────────

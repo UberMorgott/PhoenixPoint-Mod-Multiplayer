@@ -109,16 +109,5 @@ namespace Multipleer.UI
 
             return input;
         }
-
-        public static void SetButtonInteractable(Button btn, bool interactable)
-        {
-            if (btn == null) return;
-            btn.interactable = interactable;
-            var img = btn.GetComponent<Image>();
-            if (img != null)
-                img.color = interactable
-                    ? new Color(0.18f, 0.22f, 0.30f, 1f)
-                    : new Color(0.12f, 0.13f, 0.15f, 1f);
-        }
     }
 }
