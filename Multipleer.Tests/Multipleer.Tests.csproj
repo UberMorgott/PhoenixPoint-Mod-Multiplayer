@@ -12,7 +12,7 @@
     <!-- Pure, Unity-free mod cores compiled directly (no Multipleer.dll / no game DLLs). -->
     <!-- enabled per task -->
     <Compile Include="..\src\Util\ConnectCode.cs"><Link>ConnectCode.cs</Link></Compile>
-    <!-- <Compile Include="..\src\Util\SmartJoinParser.cs"><Link>SmartJoinParser.cs</Link></Compile> -->
+    <Compile Include="..\src\Util\SmartJoinParser.cs"><Link>SmartJoinParser.cs</Link></Compile>
     <!-- <Compile Include="..\src\Util\LanIpResolver.cs"><Link>LanIpResolver.cs</Link></Compile> -->
     <!-- <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile> -->
   </ItemGroup>
