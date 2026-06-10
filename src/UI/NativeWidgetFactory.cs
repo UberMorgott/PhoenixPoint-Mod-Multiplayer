@@ -1,6 +1,15 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using Base.Core;
+using Base.Input;
 using Base.Serialization;
+using Base.UI;
+using I2.Loc;
+using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Common.View.ViewModules;
+using PhoenixPoint.Home.View.ViewControllers;
+using PhoenixPoint.Home.View.ViewModules;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -35,6 +44,31 @@ namespace Multipleer.UI
         private static GameObject _menuButtonTemplate;
         private static Canvas _menuCanvas;
 
+        // The native menu's uGUI Font, captured from the TemplateMenuButton's child Text (the same
+        // Text[] UIModuleMainMenuButtons.Init relabels). The native menu UI is uGUI UnityEngine.UI.Text
+        // (not TMP) — the template button carries a Text whose .font is the menu typeface — so we reuse
+        // that exact Font on every from-code label. Null until captured (UiToolkit falls back to Arial).
+        private static Font _menuFont;
+
+        /// <summary>The native main-menu uGUI Font (null until captured), applied to from-code labels.</summary>
+        public static Font MenuFont => _menuFont;
+
+        // Root canvases the lobby disabled on its last Show() (so Hide() restores EXACTLY their
+        // prior enabled state). The PP home screen is MULTIPLE root canvases (one per module
+        // scene), so we disable every root canvas that hosts a UIModuleBehavior wholesale rather
+        // than chasing individual chrome objects. Static + idempotent so a double Show never
+        // double-stores and a Hide after no Show is a safe no-op.
+        private static readonly List<HiddenCanvas> _hiddenCanvases = new List<HiddenCanvas>();
+        private static bool _chromeHidden;
+
+        // A disabled root canvas + the enabled value it had BEFORE we disabled it (so restore is
+        // exact and never blindly forces enabled=true, which could fight the game's own refresh).
+        private struct HiddenCanvas
+        {
+            public Canvas Canvas;
+            public bool WasEnabled;
+        }
+
         // Captured lazily on first Play (save row prefab lives on an inactive module).
         private static UIModuleSaveGameSlot _saveRowPrefab;
         private static bool _saveRowProbed;
@@ -46,11 +80,106 @@ namespace Multipleer.UI
         public static bool HasMenuButton => _menuButtonTemplate != null;
 
         // Called from InjectNetworkButtonPatch.Postfix with the already-grabbed template +
-        // the Canvas reached via GameModueButtonsGroup.GetComponentInParent&lt;Canvas&gt;().
-        public static void CaptureFromMainMenu(GameObject templateMenuButton, Canvas menuCanvas)
+        // the Canvas reached via GameModueButtonsGroup.GetComponentInParent&lt;Canvas&gt;() +
+        // the UIModuleMainMenuButtons instance (__instance of the patched Init).
+        public static void CaptureFromMainMenu(GameObject templateMenuButton, Canvas menuCanvas,
+            Component menuButtonsModule = null)
         {
             if (templateMenuButton != null) _menuButtonTemplate = templateMenuButton;
             if (menuCanvas != null) _menuCanvas = menuCanvas;
+            // menuButtonsModule was used by the old chrome-hide path (now superseded by the
+            // root-canvas sweep in HideMenuChrome); the param is kept for call-site compatibility.
+
+            // Capture the menu typeface from the template button's child Text (includeInactive: the
+            // template is kept inactive as a prefab). Guarded — a missing Text/font leaves _menuFont
+            // null and UiToolkit keeps its Arial fallback.
+            if (_menuFont == null && _menuButtonTemplate != null)
+            {
+                try
+                {
+                    var t = _menuButtonTemplate.GetComponentsInChildren<Text>(true).FirstOrDefault(x => x != null && x.font != null);
+                    if (t != null) _menuFont = t.font;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError("[Multipleer] CaptureFromMainMenu (menu font) failed: " + e.Message);
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Main-menu chrome hide / restore (lobby reads as a separate page)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Hide ALL main-menu chrome wholesale so the lobby reads as a separate page laid over the
+        /// rendered background art. The PP home screen is built from MULTIPLE root canvases (one per
+        /// module scene), and decorative art such as the TFTV "TERROR FROM THE VOID" logo does NOT
+        /// always live on a canvas that carries a UIModuleBehavior:
+        ///   * The TFTV logo is built on HomeScreenModules.MainMenuButtonsModule.VanillaVisuals[0]
+        ///     (PhoenixLogo_text / PhoenixLogo_symbol — see refs\TFTV-src\TFTV\TFTVNewGameMenu.cs
+        ///     SetTFTVLogo). PP ALSO has HomeSceneReferences.VanillaVisuals (EditionVisualsController),
+        ///     a separate scene-visuals root that has NO UIModuleBehavior. The earlier sweep, which
+        ///     only disabled root canvases CONTAINING a UIModuleBehavior, left the logo's canvas
+        ///     visible behind the lobby.
+        /// So we now BROADEN the sweep: disable EVERY active root Canvas EXCEPT our own (the lobby
+        /// canvas and the Multipleer status-bar canvas — both children of ModGO). This is safe because
+        /// we record each canvas's prior enabled value and RestoreMenuChrome() puts every one back
+        /// exactly, and because our own buttons render on the (excluded) lobby canvas and route input
+        /// through the EventSystem (not a separate canvas), so disabling the rest cannot break them.
+        ///
+        /// We toggle Canvas.enabled (NOT GameObject.SetActive, NOT CanvasGroup): that stops rendering
+        /// and raycasting while leaving each module's state machine untouched, so the game's own
+        /// refresh can't fight us and restore is exact. FindObjectsOfType returns only ACTIVE
+        /// canvases, so we never touch (or wrongly re-enable) an intentionally-inactive one. Records
+        /// the prior enabled value per canvas; idempotent (a second call without an intervening
+        /// Restore is a no-op) so repeated Show() never double-stores.
+        /// </summary>
+        /// <param name="lobbyCanvas">The lobby's own overlay Canvas; never disabled.</param>
+        public static void HideMenuChrome(Canvas lobbyCanvas)
+        {
+            if (_chromeHidden) return;
+            _hiddenCanvases.Clear();
+
+            // The mod's own ModGO root: both our canvases (lobby + status bar) are children of it.
+            // Anything under this transform is OURS and must never be disabled. The lobby canvas is a
+            // direct child of ModGO, so its parent IS the ModGO transform.
+            Transform modRoot = lobbyCanvas != null ? lobbyCanvas.transform.parent : null;
+
+            try
+            {
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<Canvas>())
+                {
+                    if (c == null || !c.isRootCanvas) continue;
+                    if (c == lobbyCanvas) continue;                         // never disable the lobby's own canvas
+                    if (modRoot != null && c.transform.IsChildOf(modRoot))  // never disable any Multipleer canvas
+                        continue;                                           // (status bar lives under the same ModGO)
+
+                    _hiddenCanvases.Add(new HiddenCanvas { Canvas = c, WasEnabled = c.enabled });
+                    c.enabled = false;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
+            }
+
+            _chromeHidden = true;
+        }
+
+        /// <summary>
+        /// Restore EXACTLY the root canvases disabled by the last HideMenuChrome(), each back to its
+        /// SAVED enabled value (never blindly forced true). Guards nulls (canvases can be destroyed
+        /// across a scene change). Safe to call when nothing was hidden. This is the bulletproof
+        /// restore the menu depends on after the lobby closes.
+        /// </summary>
+        public static void RestoreMenuChrome()
+        {
+            if (!_chromeHidden) return;
+            foreach (var h in _hiddenCanvases)
+                if (h.Canvas != null) h.Canvas.enabled = h.WasEnabled;
+            _hiddenCanvases.Clear();
+            _chromeHidden = false;
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -72,9 +201,13 @@ namespace Multipleer.UI
             obj.name = name;
             obj.SetActive(true);
 
+            // Overwrite EVERY Text child, not just the first. The native TemplateMenuButton subtree
+            // can carry more than one Text (e.g. a shadow/echo label), and any child we leave alone
+            // keeps the prefab's serialized placeholder string ("NEEDS TEXT"), which then renders as a
+            // stray ghost label in the lobby. Setting them all to our label removes that placeholder.
             var texts = obj.GetComponentsInChildren<Text>(true);
-            if (texts.Length > 0)
-                texts[0].text = label;
+            for (int i = 0; i < texts.Length; i++)
+                if (texts[i] != null) texts[i].text = label;
 
             var btn = obj.GetComponentInChildren<Button>();
             if (btn != null)
@@ -148,6 +281,147 @@ namespace Multipleer.UI
             var row = UnityEngine.Object.Instantiate(prefab, parent);
             row.gameObject.SetActive(true);
             return row;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native Ready toggle — GameOptionViewController clone
+        // ═══════════════════════════════════════════════════════════════════
+
+        private static GameOptionViewController _toggleTemplate;
+        private static bool _toggleProbed;
+
+        // Lazily locate a native toggle controller template (GameSettings option). Inactive at
+        // the menu → search includeInactive. Returns null if none in the scene (caller falls
+        // back to the label-flip menu button).
+        private static GameOptionViewController TryGetToggleTemplate()
+        {
+            if (_toggleTemplate != null) return _toggleTemplate;
+            if (_toggleProbed && _toggleTemplate == null) { /* re-probe each call until found */ }
+            try
+            {
+                _toggleTemplate = Resources.FindObjectsOfTypeAll<GameOptionViewController>()
+                    .FirstOrDefault(g => g != null && g.CheckedToggle != null);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] TryGetToggleTemplate failed: " + e.Message);
+            }
+            _toggleProbed = true;
+            return _toggleTemplate;
+        }
+
+        /// <summary>
+        /// Clone the native Ready toggle. Resets the cloned toggle's onValueChanged via the
+        /// controller's own RemoveAllClickListeners(), sets a raw runtime label on OptionText
+        /// (stripping its Localize so it is not overwritten), and wires our callback. Returns the
+        /// Unity Toggle (read .isOn for state), or null if no template was capturable.
+        /// </summary>
+        public static Toggle CloneReadyToggle(Transform parent, string label, Action<bool> onValueChanged)
+        {
+            var template = TryGetToggleTemplate();
+            if (template == null || parent == null) return null;
+
+            var ctrl = UnityEngine.Object.Instantiate(template, parent);
+            ctrl.gameObject.SetActive(true);
+            ctrl.RemoveAllClickListeners();
+
+            // Raw label: strip the Localize so OptionText.text is not reset on next loc refresh.
+            if (ctrl.OptionText != null)
+            {
+                var loc = ctrl.OptionText.GetComponent<Localize>();
+                if (loc != null) UnityEngine.Object.Destroy(loc);
+                ctrl.OptionText.text = label;
+            }
+
+            // Scrub any OTHER Text child still holding the prefab's "NEEDS TEXT" placeholder (the
+            // toggle template can carry a secondary/echo Text besides OptionText). We do NOT relabel
+            // them with our text (that would duplicate "READY"); we just clear the stray placeholder
+            // so it stops rendering as a ghost label.
+            foreach (var t in ctrl.GetComponentsInChildren<Text>(true))
+            {
+                if (t == null || t == ctrl.OptionText) continue;
+                if (!string.IsNullOrEmpty(t.text) &&
+                    t.text.Trim().Equals("NEEDS TEXT", StringComparison.OrdinalIgnoreCase))
+                    t.text = "";
+            }
+
+            var toggle = ctrl.CheckedToggle;
+            if (toggle != null && onValueChanged != null)
+                toggle.onValueChanged.AddListener((UnityEngine.Events.UnityAction<bool>)(v => onValueChanged(v)));
+
+            return toggle;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native scroller — UIModuleSaveGame.Scroller clone (roster + chat)
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Clone the native save-list scroller subtree, strip its rows, and return its content
+        /// RectTransform (rows are parented here by the caller). Initializes the cloned
+        /// VerticalScrollRectScroller with the live InputController so wheel/drag work.
+        /// Returns null if no UIModuleSaveGame is in the scene (caller falls back to a plain
+        /// RectTransform list).
+        /// </summary>
+        public static RectTransform CloneScroller(Transform parent)
+        {
+            if (parent == null) return null;
+            try
+            {
+                var module = Resources.FindObjectsOfTypeAll<UIModuleSaveGame>()
+                    .FirstOrDefault(m => m != null && m.Scroller != null
+                        && m.Scroller.GetComponent<ScrollRect>() != null);
+                if (module == null) return null;
+
+                var scrollerGo = UnityEngine.Object.Instantiate(module.Scroller.gameObject, parent);
+                scrollerGo.SetActive(true);
+
+                var scroller = scrollerGo.GetComponent<VerticalScrollRectScroller>();
+                var scrollRect = scrollerGo.GetComponent<ScrollRect>();
+                var content = scrollRect != null ? scrollRect.content : null;
+                if (content == null) return null;
+
+                // Strip any cloned rows from the content.
+                for (int i = content.childCount - 1; i >= 0; i--)
+                    UnityEngine.Object.Destroy(content.GetChild(i).gameObject);
+
+                if (scroller != null)
+                    scroller.Init(GameUtl.GameComponent<InputController>());
+
+                return content;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] CloneScroller failed: " + e.Message);
+                return null;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native panel background sprite
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Find a styled native panel Image sprite to skin the lobby background. Searches the
+        /// captured menu Canvas's hierarchy for an Image carrying a sprite; prefers a sliced
+        /// sprite (panel-style) and otherwise returns the first sprite found, or null (caller
+        /// keeps a solid color).
+        /// </summary>
+        public static Sprite TryGetPanelBackgroundSprite()
+        {
+            try
+            {
+                if (_menuCanvas == null) return null;
+                var images = _menuCanvas.GetComponentsInChildren<Image>(true);
+                var img = images.FirstOrDefault(i => i != null && i.sprite != null
+                    && i.type == Image.Type.Sliced);
+                return img != null ? img.sprite : images.FirstOrDefault(i => i != null && i.sprite != null)?.sprite;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] TryGetPanelBackgroundSprite failed: " + e.Message);
+                return null;
+            }
         }
     }
 }

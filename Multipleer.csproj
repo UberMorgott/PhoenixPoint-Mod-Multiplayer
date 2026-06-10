@@ -15,6 +15,11 @@
     <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The test project lives in a subfolder; do not compile its sources into the mod
+         (they reference xUnit, which the mod does not — and must not — reference). -->
+    <Compile Remove="Multipleer.Tests\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(ModSDK)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>

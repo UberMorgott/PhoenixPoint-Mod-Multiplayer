@@ -244,6 +244,60 @@ namespace Multipleer.Network.MessageLayer
             }
         }
 
+        // ─── Chat / Set-Save Messages ──────────────────────────────────────
+
+        // CHAT (ChatMessage): user/system lobby chat line. Host stamps the authoritative sender.
+        public static byte[] SerializeChat(ChatMessageData chat)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(chat.SenderSteamId);
+                bw.Write(chat.SenderNick ?? "");
+                bw.Write(chat.Text ?? "");
+                bw.Write((byte)(chat.IsSystem ? 1 : 0));
+                return ms.ToArray();
+            }
+        }
+
+        public static ChatMessageData DeserializeChat(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                return new ChatMessageData
+                {
+                    SenderSteamId = br.ReadUInt64(),
+                    SenderNick = br.ReadString(),
+                    Text = br.ReadString(),
+                    IsSystem = br.ReadByte() != 0
+                };
+            }
+        }
+
+        // SET_SAVE (SetSave, H→all): the chosen save's display name+meta, read-only on clients.
+        public static byte[] SerializeSetSave(string saveName, string saveMeta)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(saveName ?? "");
+                bw.Write(saveMeta ?? "");
+                return ms.ToArray();
+            }
+        }
+
+        public static (string saveName, string saveMeta) DeserializeSetSave(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                var name = br.ReadString();
+                var meta = br.ReadString();
+                return (name, meta);
+            }
+        }
+
         // ─── Save-Transfer Messages ────────────────────────────────────────
 
         // SAVE_CHUNK (SaveChunk): one slice of the save blob.
@@ -475,5 +529,13 @@ namespace Multipleer.Network.MessageLayer
         public long TotalBytes { get; set; }
         public long Offset { get; set; }
         public byte[] Chunk { get; set; }
+    }
+
+    public class ChatMessageData
+    {
+        public ulong SenderSteamId { get; set; }
+        public string SenderNick { get; set; }
+        public string Text { get; set; }
+        public bool IsSystem { get; set; }
     }
 }

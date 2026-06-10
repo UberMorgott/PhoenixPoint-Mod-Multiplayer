@@ -1,9 +1,11 @@
 using System.Collections.Generic;
 using Base.Core;
+using Base.Serialization;
 using Base.UI.MessageBox;
 using Multipleer.Harmony;
 using Multipleer.Network;
 using Multipleer.Transport;
+using Multipleer.Util;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -31,6 +33,10 @@ namespace Multipleer.UI
         private LobbyPanel _lobby;
         private SavePickerPanel _savePicker;
         private bool _panelsBuilt;
+
+        // True while the lobby overlay is on-screen. Consumed by the main-menu Escape patch
+        // (MainMenuPatches) so Escape leaves the lobby instead of opening the Options menu.
+        public bool IsLobbyOpen => _lobby?.IsVisible == true;
 
         private void Awake()
         {
@@ -99,162 +105,32 @@ namespace Multipleer.UI
                 _lobby?.Show();
                 return;
             }
-            ShowMainDialog();
+            StartHostAndOpenLobby();
         }
 
         // Default DirectIP listen port for the host (matches the client connect default).
         private const int DefaultDirectPort = 14242;
 
-        // ═══════════════════════════════════════════════════════════════════
-        //  Dialog flow — native game MessageBox
-        // ═══════════════════════════════════════════════════════════════════
-
-        private void ShowMainDialog()
-        {
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            mb.ShowSimplePrompt("", MessageBoxIcon.None, MessageBoxButtons.YesNoCancel,
-                new Dictionary<MessageBoxButtons, string>
-                {
-                    { MessageBoxButtons.Yes, "CREATE GAME" },
-                    { MessageBoxButtons.No, "JOIN GAME" },
-                    { MessageBoxButtons.Cancel, "CANCEL" }
-                },
-                OnMainResult, this);
-        }
-
-        private void OnMainResult(MessageBoxCallbackResult res)
-        {
-            if (res.DialogResult == MessageBoxResult.Yes)
-                StartHostAndOpenLobby();
-            else if (res.DialogResult == MessageBoxResult.No)
-                ShowJoinDialog();
-        }
-
-        // CREATE (lobby-first): start hosting on DirectIP and open the lobby panel immediately.
-        // No campaign is loaded here — the host picks a save only after everyone is ready (Play).
+        // CREATE (lobby-first): start hosting on Direct + STUN + Steam SIMULTANEOUSLY in one
+        // session and open the lobby panel immediately. A joiner arriving by DirectIP, by STUN
+        // invite-code, or by Steam all land in the same peer list (CompositeTransport namespaces
+        // their ids). No campaign is loaded here — the host picks a save only after everyone is
+        // ready (Play). CompositeTransport.Host wraps each child so one failing transport (e.g.
+        // Steam unavailable) does not abort the others.
         private void StartHostAndOpenLobby()
         {
             NetworkEngine.Create();
-            NetworkEngine.Instance.Initialize(TransportType.DirectIP);
+            var composite = new CompositeTransport(new ITransport[]
+            {
+                new DirectTransport(),
+                new StunTransport(),
+                new SteamTransport()
+            });
+            NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
             ShowInGameBar();
             _lobby?.Show();
-        }
-
-        private void ShowJoinDialog()
-        {
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            mb.ShowSimplePrompt("", MessageBoxIcon.None,
-                MessageBoxButtons.Yes | MessageBoxButtons.No | MessageBoxButtons.Abort | MessageBoxButtons.Cancel,
-                new Dictionary<MessageBoxButtons, string>
-                {
-                    { MessageBoxButtons.Yes, "DIRECT IP" },
-                    { MessageBoxButtons.No, "STUN CODE" },
-                    { MessageBoxButtons.Abort, "STEAM" },
-                    { MessageBoxButtons.Cancel, "BACK" }
-                },
-                OnJoinResult, this);
-        }
-
-        private void OnJoinResult(MessageBoxCallbackResult res)
-        {
-            if (res.DialogResult == MessageBoxResult.Yes)
-                ShowDirectConnect();
-            else if (res.DialogResult == MessageBoxResult.No)
-                ShowStunConnect();
-            else if (res.DialogResult == MessageBoxResult.Abort)
-                ShowSteamConnect();
-            else if (res.DialogResult == MessageBoxResult.Cancel)
-                ShowMainDialog();
-        }
-
-        private void ShowDirectConnect()
-        {
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            mb.ShowInputPrompt("Enter IP:Port", "192.168.1.100:14242", null,
-                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
-                delegate (MessageBoxCallbackResult res)
-                {
-                    if (res.DialogResult != MessageBoxResult.OK) { ShowJoinDialog(); return; }
-                    var input = res.InputTextResult ?? "";
-                    var parts = input.Split(':');
-                    var ip = parts[0].Trim();
-                    var port = parts.Length > 1 && int.TryParse(parts[1], out var p) ? p : 14242;
-
-                    NetworkEngine.Create();
-                    NetworkEngine.Instance.Initialize(TransportType.DirectIP);
-                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                    NetworkEngine.Instance.JoinGame(ip, port);
-                    ShowInGameBar();
-                    _lobby?.Show();
-                }, this);
-        }
-
-        private void ShowStunConnect()
-        {
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            mb.ShowInputPrompt("Enter STUN connection code", "", null,
-                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
-                delegate (MessageBoxCallbackResult res)
-                {
-                    if (res.DialogResult != MessageBoxResult.OK) { ShowJoinDialog(); return; }
-                    var code = res.InputTextResult?.Trim() ?? "";
-                    if (string.IsNullOrEmpty(code)) { ShowStunConnect(); return; }
-
-                    NetworkEngine.Create();
-                    NetworkEngine.Instance.Initialize(TransportType.StunUDP);
-                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                    NetworkEngine.Instance.JoinGame(code, 0);
-                    ShowInGameBar();
-                    _lobby?.Show();
-                }, this);
-        }
-
-        private void ShowSteamConnect()
-        {
-            var steamId = ResolveSteamId();
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            mb.ShowSimplePrompt(
-                $"Your Steam ID: {steamId}\n\nChoose action:",
-                MessageBoxIcon.Information,
-                MessageBoxButtons.YesNoCancel,
-                new Dictionary<MessageBoxButtons, string>
-                {
-                    { MessageBoxButtons.Yes, "HOST GAME" },
-                    { MessageBoxButtons.No, "INVITE FRIEND" },
-                    { MessageBoxButtons.Cancel, "BACK" }
-                },
-                delegate (MessageBoxCallbackResult res)
-                {
-                    if (res.DialogResult == MessageBoxResult.Yes)
-                    {
-                        NetworkEngine.Create();
-                        NetworkEngine.Instance.Initialize(TransportType.SteamP2P);
-                        NetworkEngine.Instance.StartHost(0);
-                        ShowInGameBar();
-                        _lobby?.Show();
-                    }
-                    else if (res.DialogResult == MessageBoxResult.No)
-                    {
-                        InvitePlayers();
-                        ShowInGameBar();
-                    }
-                    else
-                    {
-                        ShowJoinDialog();
-                    }
-                }, this);
         }
 
         // ═══ Lobby panel callbacks ═════════════════════════════════════════
@@ -292,20 +168,214 @@ namespace Multipleer.UI
             NetworkEngine.Instance?.Session?.SendRename(newName.Trim());
         }
 
-        // Host PLAY (gated all-ready by the lobby) → open the save-picker; the chosen save is then
-        // serialized + transferred via the coordinator and the LOADED/BEGIN barrier runs.
+        // Host PLAY now transfers the already-chosen save (rail-selected); if none chosen, open
+        // the picker as a last-chance fallback.
         public void OnLobbyPlay()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return;
+
+            if (_pendingChosenSave != null)
+            {
+                engine.SaveTransfer?.HostStartSession(_pendingChosenSave);
+                return;
+            }
+            // No save chosen in the rail yet → open the picker as a fallback.
+            _savePicker?.Show(chosen =>
+            {
+                _pendingChosenSave = chosen;
+                engine.Session?.SetChosenSave(SaveDisplayName(chosen), SaveDisplayMeta(chosen));
+                NetworkEngine.Instance?.SaveTransfer?.HostStartSession(chosen);
+            });
+        }
+
+        // ─── Smart-Join (footer Join…) ─────────────────────────────────────
+
+        // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
+        public void OnLobbyJoin(string input)
+        {
+            var target = SmartJoinParser.Parse(input ?? "");
+            if (target.Kind == JoinKind.Invalid)
+            {
+                var mbErr = GameUtl.GetMessageBox();
+                mbErr?.ShowSimplePrompt("Could not read that address or code.",
+                    MessageBoxIcon.Error, MessageBoxButtons.OK, null, this);
+                return;
+            }
+
+            // Tear down the auto-hosted session, then connect as a client (overlay stays open;
+            // Update's _lobby.Refresh() re-binds it to the new client session).
+            NetworkEngine.Instance?.Disconnect();
+            NetworkEngine.Instance?.Shutdown();
+
+            NetworkEngine.Create();
+            switch (target.Kind)
+            {
+                case JoinKind.DirectIp:
+                    NetworkEngine.Instance.Initialize(TransportType.DirectIP);
+                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                    NetworkEngine.Instance.JoinGame(target.Ip, target.Port);
+                    break;
+                case JoinKind.StunCode:
+                    NetworkEngine.Instance.Initialize(TransportType.StunUDP);
+                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                    NetworkEngine.Instance.JoinGame($"{target.Ip}:{target.Port}", 0);
+                    break;
+                case JoinKind.SteamId:
+                    NetworkEngine.Instance.Initialize(TransportType.SteamP2P);
+                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                    NetworkEngine.Instance.JoinGame(target.SteamId.ToString(), 0);
+                    break;
+            }
+            ShowInGameBar();
+            _lobby?.Show();
+        }
+
+        // Footer Join… button → native modal input → OnLobbyJoin.
+        public void OnLobbyJoinPrompt()
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+            mb.ShowInputPrompt("Paste IP or code… (auto-detect)", "", null,
+                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
+                delegate (MessageBoxCallbackResult res)
+                {
+                    if (res.DialogResult != MessageBoxResult.OK) return;
+                    OnLobbyJoin(res.InputTextResult ?? "");
+                }, this);
+        }
+
+        // ─── Nickname rename (own roster row pencil) ───────────────────────
+
+        public void OnLobbyRenamePrompt()
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+            var current = NetworkEngine.Instance?.IsHost == true
+                ? NetworkEngine.Instance.Session?.HostNickname ?? ""
+                : SystemInfo.deviceName;
+            mb.ShowInputPrompt("New nickname", current, null,
+                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
+                delegate (MessageBoxCallbackResult res)
+                {
+                    if (res.DialogResult != MessageBoxResult.OK) return;
+                    OnLobbyRename(res.InputTextResult ?? "");
+                }, this);
+        }
+
+        // ─── Chat send ─────────────────────────────────────────────────────
+
+        public void OnLobbyChatSend(string text)
+        {
+            NetworkEngine.Instance?.Session?.SendChat(text);
+        }
+
+        // ─── Choose save (host only) ───────────────────────────────────────
+
+        // Host rail "Choose save…": pick a save NOW (before Play). Record + broadcast it.
+        public void OnLobbyChooseSave()
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsHost) return;
 
             _savePicker?.Show(chosen =>
             {
-                NetworkEngine.Instance?.SaveTransfer?.HostStartSession(chosen);
+                _pendingChosenSave = chosen;
+                var name = SaveDisplayName(chosen);
+                var meta = SaveDisplayMeta(chosen);
+                engine.Session?.SetChosenSave(name, meta);
             });
         }
 
-        
+        // The save the host chose in the rail (consumed by PLAY); null until a pick is made.
+        public SavegameMetaData PendingChosenSave => _pendingChosenSave;
+        private SavegameMetaData _pendingChosenSave;
+
+        private static string SaveDisplayName(SavegameMetaData meta)
+        {
+            if (meta == null) return "(none)";
+            var name = meta.Name;
+            if (meta is PPSavegameMetaData pp
+                && !string.IsNullOrEmpty(pp.UserSetName))
+                name = pp.UserSetName;
+            return string.IsNullOrEmpty(name) ? "(unnamed)" : name;
+        }
+
+        private static string SaveDisplayMeta(SavegameMetaData meta)
+        {
+            try { return meta?.SaveCreated?.DisplayDateTime ?? ""; }
+            catch { return ""; }
+        }
+
+        // ─── Connect rail values + clipboard ───────────────────────────────
+
+        // Host LAN ip:port for the rail. Resolved via the connected-UDP-socket method (R: not Dns).
+        public string GetRailIp()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "—";
+            if (LanIpResolver.TryResolveLocalIPv4(out var ip) && ip != null)
+                return $"{ip}:{DefaultDirectPort}";
+            return $"(LAN ip unknown):{DefaultDirectPort}";
+        }
+
+        // Loopback ip:port for a SECOND game instance on THIS SAME PC (two-window local test).
+        // The host DirectIP listener binds DefaultDirectPort, so 127.0.0.1:<port> is connectable
+        // same-machine and SmartJoinParser routes it as DirectIp. The host now listens on a
+        // CompositeTransport that ALWAYS includes a DirectTransport, so this is valid whenever
+        // hosting.
+        public string GetRailLocalIp()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "—";
+            if (FindHostingChild(TransportType.DirectIP) == null)
+                return "(host on DirectIP)";
+            return $"127.0.0.1:{DefaultDirectPort}";
+        }
+
+        // Host STUN short code (or a status placeholder while discovering / on failure).
+        // The host's CompositeTransport always includes a hosting StunTransport, so the code
+        // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.
+        public string GetRailStunCode()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "(host on STUN to share)";
+            var stun = FindHostingChild(TransportType.StunUDP);
+            if (stun == null) return "(host on STUN to share)";
+            if (stun.PublicEndPoint == null)
+            {
+                // Mirror the StunTransport discovery thread's state messages (it retries across a
+                // pool of Google STUN servers and only marks itself unavailable after exhausting all
+                // rounds). "unavailable" = environmentally blocked (symmetric NAT / firewall); the
+                // rail re-reads every frame, so a late success still appears live without reopening.
+                if (stun.LocalEndpoint.Contains("unavailable"))
+                    return "unavailable (NAT/firewall)";
+                return "discovering…";
+            }
+            var code = ConnectCode.Encode(stun.PublicEndPoint);
+            return code ?? "unavailable (NAT/firewall)";
+        }
+
+        // Resolve the live hosting child transport of a given type from the host's transport,
+        // whether that transport is a CompositeTransport (multi-listen) or a single transport.
+        private static ITransport FindHostingChild(TransportType type)
+        {
+            var t = NetworkEngine.Instance?.Transport;
+            if (t == null) return null;
+            if (t is CompositeTransport composite)
+            {
+                foreach (var child in composite.Children)
+                    if (child.TransportType == type && child.IsHost) return child;
+                return null;
+            }
+            return t.TransportType == type && t.IsHost ? t : null;
+        }
+
+        public void CopyToClipboard(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            GUIUtility.systemCopyBuffer = text;
+        }
 
         // ═══════════════════════════════════════════════════════════════════
         //  Connection events
@@ -380,14 +450,23 @@ namespace Multipleer.UI
                         $" | {(engine.IsHost ? "Host" : "Client")}" +
                         $" | {engine.Session?.ClientCount ?? 0} player(s)";
                 }
-
-                _lobby?.Refresh();
             }
             else
             {
                 if (_barStatusText != null)
                     _barStatusText.text = "Not connected";
             }
+
+            // Refresh the lobby panel EVERY frame while it is visible — UNCONDITIONALLY, i.e. not
+            // gated on engine.IsActive. This is the fix for the "CONNECT rail empty on first open"
+            // bug: the rail values (IP / Same-PC / STUN code) are re-pushed by LobbyPanel.Refresh,
+            // so they fill within one frame of the host becoming ready on the FIRST open (no need to
+            // reopen the lobby). It also makes a late-arriving STUN code appear LIVE once background
+            // discovery resolves. Refresh() self-guards (hides itself if the engine is null/inactive
+            // or the session has started), so calling it outside the IsActive branch is safe; it only
+            // does real work while the panel is actually on screen.
+            if (_lobby != null && _lobby.IsVisible)
+                _lobby.Refresh();
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -410,21 +489,6 @@ namespace Multipleer.UI
             text.alignment = TextAnchor.MiddleLeft;
             text.text = content;
             return text;
-        }
-
-        private static ulong ResolveSteamId()
-        {
-            try
-            {
-                var asm = FindSteamworksAssembly();
-                if (asm == null) return 0;
-                var type = asm.GetType("Steamworks.SteamClient");
-                if (type == null) return 0;
-                var prop = type.GetProperty("SteamId",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return prop != null ? (ulong)prop.GetValue(null, null) : 0UL;
-            }
-            catch { return 0; }
         }
 
         public void InvitePlayers()
@@ -513,7 +577,7 @@ namespace Multipleer.UI
 
             if (engine == null || !engine.IsActive)
             {
-                ShowMainDialog();
+                StartHostAndOpenLobby();
                 return;
             }
 

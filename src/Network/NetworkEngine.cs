@@ -54,6 +54,31 @@ namespace Multipleer.Network
             IsActive = true;
         }
 
+        /// <summary>
+        /// Host-side overload: bind the engine to a pre-constructed transport (e.g. a
+        /// <see cref="Multipleer.Transport.CompositeTransport"/> that listens on Direct +
+        /// STUN + Steam at once). Mirrors <see cref="Initialize(TransportType)"/> exactly,
+        /// only the transport source differs — clients keep using Initialize(TransportType).
+        /// </summary>
+        public void Initialize(ITransport transport)
+        {
+            if (IsActive) return;
+            if (transport == null) throw new ArgumentNullException(nameof(transport));
+
+            Transport = transport;
+            Session = new SessionManager(this);
+            SaveTransfer = new SaveTransferCoordinator(this);
+            LocalSteamId = ResolveLocalSteamId();
+
+            Transport.OnPacketReceived += OnPacketReceived;
+            Transport.OnPeerConnected += OnPeerConnected;
+            Transport.OnPeerDisconnected += OnPeerDisconnected;
+            Transport.OnStateChanged += OnTransportStateChanged;
+
+            Transport.Initialize();
+            IsActive = true;
+        }
+
         public void Shutdown()
         {
             if (!IsActive) return;
@@ -64,6 +89,10 @@ namespace Multipleer.Network
             SaveTransfer = null;
             IsActive = false;
             IsHost = false;
+
+            // Singleton persists across host/join/leave cycles (Instance is never nulled),
+            // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
+            OnConnectionFailed = null;
         }
 
         // ─── Transport Selection ──────────────────────────────────────────
@@ -359,7 +388,11 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.ChatMessage:
-                    // Will be exposed as an event when chat UI is built
+                    Session.HandleChat(msg);
+                    break;
+
+                case PacketType.SetSave:
+                    Session.HandleSetSave(msg);
                     break;
 
                 case PacketType.ClientReady:

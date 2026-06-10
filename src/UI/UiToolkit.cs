@@ -13,7 +13,8 @@ namespace Multipleer.UI
     {
         private static Font _font;
 
-        public static Font DefaultFont
+        // Built-in Arial fallback (only used before the native menu font is captured / if capture fails).
+        private static Font FallbackFont
         {
             get
             {
@@ -22,6 +23,14 @@ namespace Multipleer.UI
                 return _font;
             }
         }
+
+        /// <summary>
+        /// Font for all from-code labels: the captured native main-menu uGUI Font when available
+        /// (so lobby text matches the game's menu typeface — user request), else built-in Arial.
+        /// Resolved per call so labels created before menu capture still pick up the menu font on
+        /// the next text they create.
+        /// </summary>
+        public static Font DefaultFont => NativeWidgetFactory.MenuFont ?? FallbackFont;
 
         // Anchored text. anchor = anchorMin/Max pivot point inside the parent (e.g. (0.5,1) = top-center).
         public static Text CreateText(GameObject parent, string name, Vector2 pos, Vector2 size,
@@ -108,17 +117,6 @@ namespace Multipleer.UI
                 input.onEndEdit.AddListener((UnityAction<string>)(v => onEndEdit(v)));
 
             return input;
-        }
-
-        public static void SetButtonInteractable(Button btn, bool interactable)
-        {
-            if (btn == null) return;
-            btn.interactable = interactable;
-            var img = btn.GetComponent<Image>();
-            if (img != null)
-                img.color = interactable
-                    ? new Color(0.18f, 0.22f, 0.30f, 1f)
-                    : new Color(0.12f, 0.13f, 0.15f, 1f);
         }
     }
 }

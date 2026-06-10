@@ -22,6 +22,10 @@ namespace Multipleer.Network
         public string HostNickname { get; set; } = "Host";
         public bool HostReady { get; set; }
 
+        // Host's chosen save (rail display + read-only client mirror). Set on the rail save-pick.
+        public string ChosenSaveName { get; private set; }
+        public string ChosenSaveMeta { get; private set; }
+
         // Last roster the CLIENT received from the host (preserves IsHost + every peer's nickname/
         // ready exactly as the host broadcast it). On the host the live BuildPeerList() is authoritative.
         private List<PeerListEntry> _clientRoster = new List<PeerListEntry>();
@@ -40,6 +44,8 @@ namespace Multipleer.Network
         public event Action<Guid, CampaignPermission, bool> OnPermissionUpdated;
         public event Action<byte[]> OnInitialGameStateReceived;
         public event Action OnHostDisconnected;
+        public event Action<string, string, bool> OnChatReceived;   // (senderNick, text, isSystem)
+        public event Action<string, string> OnChosenSaveChanged;    // (saveName, saveMeta)
 
         private const int HeartbeatIntervalMs = 5000;
         private const int HeartbeatTimeoutMs = 20000;
@@ -177,6 +183,8 @@ namespace Multipleer.Network
 
             // Roster changed → broadcast authoritative peer list.
             BroadcastPeerList();
+
+            SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} joined —");
         }
 
         public void HandleConnectionAccepted(NetworkMessage msg)
@@ -377,6 +385,9 @@ namespace Multipleer.Network
                 // Re-broadcast leave so all peers drop the client (RemoveClient refreshes the roster).
                 _engine.BroadcastToAll(new NetworkMessage(PacketType.ClientLeave,
                     MessageSerializer.SerializeLeave(peerSteamId)));
+
+                var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : "a player";
+                SystemChat($"— {leaverNick} left —");
             }
             RemoveClient(peerSteamId);
         }
@@ -417,6 +428,97 @@ namespace Multipleer.Network
         }
 
         // HOST_LEFT (H→all): session-end notice.
+        // ─── Chat ─────────────────────────────────────────────────────────
+
+        // Local→network user chat. Host stamps + broadcasts directly; client relays to host.
+        public void SendChat(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            var trimmed = text.Trim();
+
+            if (_engine.IsHost)
+            {
+                BroadcastChat(_engine.LocalSteamId, HostNickname, trimmed, false);
+            }
+            else
+            {
+                var chat = new ChatMessageData
+                {
+                    SenderSteamId = _engine.LocalSteamId,
+                    SenderNick = "",          // host substitutes the authoritative nick
+                    Text = trimmed,
+                    IsSystem = false
+                };
+                _engine.SendToHost(new NetworkMessage(PacketType.ChatMessage,
+                    MessageSerializer.SerializeChat(chat)));
+            }
+        }
+
+        // Host-only: emit a SYSTEM line to everyone (join/leave/host-set-save notices).
+        public void SystemChat(string text)
+        {
+            if (!_engine.IsHost || string.IsNullOrEmpty(text)) return;
+            BroadcastChat(0, null, text, true);
+        }
+
+        // Host-authoritative fan-out: raise locally + push to clients (mirrors BroadcastPeerList).
+        private void BroadcastChat(ulong senderId, string senderNick, string text, bool isSystem)
+        {
+            var chat = new ChatMessageData
+            {
+                SenderSteamId = senderId,
+                SenderNick = senderNick ?? "",
+                Text = text,
+                IsSystem = isSystem
+            };
+            OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem); // local echo on host
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.ChatMessage,
+                MessageSerializer.SerializeChat(chat)));
+        }
+
+        public void HandleChat(NetworkMessage msg)
+        {
+            var chat = MessageSerializer.DeserializeChat(msg.Payload);
+
+            if (_engine.IsHost)
+            {
+                // Validate + stamp the authoritative sender (mirror HandleRename keying).
+                if (chat.IsSystem) return; // clients may not inject system lines
+                var nick = "Player";
+                if (_clients.TryGetValue(msg.SenderSteamId, out var c))
+                    nick = c.PlayerName;
+                BroadcastChat(msg.SenderSteamId, nick, chat.Text, false);
+            }
+            else
+            {
+                // Client: render exactly what the host broadcast.
+                OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem);
+            }
+        }
+
+        // ─── Chosen save (host picks; clients mirror read-only) ───────────
+
+        // Host-only: record the chosen save, broadcast it (SetSave) + a SYSTEM chat line.
+        public void SetChosenSave(string saveName, string saveMeta)
+        {
+            if (!_engine.IsHost) return;
+            ChosenSaveName = saveName;
+            ChosenSaveMeta = saveMeta;
+            OnChosenSaveChanged?.Invoke(saveName, saveMeta);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SetSave,
+                MessageSerializer.SerializeSetSave(saveName, saveMeta)));
+            SystemChat($"— host set save: {saveName} —");
+        }
+
+        public void HandleSetSave(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            var (name, meta) = MessageSerializer.DeserializeSetSave(msg.Payload);
+            ChosenSaveName = name;
+            ChosenSaveMeta = meta;
+            OnChosenSaveChanged?.Invoke(name, meta);
+        }
+
         public void HandleHostDisconnected(NetworkMessage msg)
         {
             Debug.LogWarning("[Multipleer] Host disconnected — session ended");
