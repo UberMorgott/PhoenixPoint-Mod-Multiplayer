@@ -78,10 +78,29 @@ if not exist "%SS%" mkdir "%SS%"
 >"%SS%\steam_appid.txt"        echo 839770
 >"%SS%\offline.txt"            rem.
 >"%SS%\disable_overlay.txt"    rem.
+
+REM  --- identity: gbe_fork (GSE) config, NOT classic Goldberg ------------------
+REM  The dll shipped here is gbe_fork (Detanup01), ~11 MB, save dir "GSE Saves".
+REM  gbe_fork IGNORES classic Goldberg's force_steamid.txt / force_account_name.txt.
+REM  It reads identity from configs.user.ini under [user::general]. WITHOUT a LOCAL
+REM  configs.user.ini it falls back to the GLOBAL %APPDATA%\GSE Saves\settings\
+REM  configs.user.ini, whose account_steamid is some throwaway id -> the game reads
+REM  an EMPTY ...\Steam\<thatID>\ profile -> MOD_ACTIVATED empty -> NO mods enabled.
+REM  (This was the real bug: force_steamid.txt was the wrong format for this dll.)
+REM  We therefore write a LOCAL configs.user.ini that OVERRIDES the global and
+REM  forces account_steamid to the original install's id, so the copy reads the
+REM  SAME Options.jopt (MOD_ACTIVATED) + ModConfig.json -> identical enabled set.
+REM  NOTE: shared steamID => both instances share ...\Steam\<id>\ (saves/options);
+REM  that is intended for co-op testing (see SECOND-INSTANCE-SETUP.md caveat).
+(
+  echo [user::general]
+  echo account_name=Client2
+  echo account_steamid=%ORIG_STEAMID%
+  echo language=english
+  echo ip_country=US
+)>"%SS%\configs.user.ini"
+REM  Harmless leftovers for classic-Goldberg compatibility (ignored by gbe_fork):
 >"%SS%\force_account_name.txt" echo Client2
-REM  MUST match the original steamID so the copy reads the SAME per-user config
-REM  folder (Options.jopt MOD_ACTIVATED + ModConfig.json). A different id would
-REM  point at an empty folder and the game would show NO mods enabled.
 >"%SS%\force_steamid.txt"      echo %ORIG_STEAMID%
 
 REM --- pre-generated steam_interfaces.txt (the #1 Goldberg failure point) -------

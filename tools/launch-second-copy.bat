@@ -38,8 +38,16 @@ set "MULTIPLEER_IDENTITY="
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "[guid]::NewGuid().ToString()"`) do set "MULTIPLEER_IDENTITY=%%i"
 echo MULTIPLEER_IDENTITY=!MULTIPLEER_IDENTITY!
 
+REM --- -mods is MANDATORY: PP gates ALL mod support on this launch arg ---------
+REM  PhoenixGame.HandleCommandLineArg("mods") sets ModManager.CanUseMods=true
+REM  (the ONLY place it is enabled). Without it, InitMods() bails immediately
+REM  (yield break), DiscoverMods() never runs (0 mods), AND the main-menu MODS
+REM  button is hidden (UIModuleMainMenuButtons sets it active = CanUseMods).
+REM  Steam normally injects this via the game's Steam launch options; a
+REM  standalone gbe_fork copy bypasses Steam, so we MUST pass it ourselves.
+REM  (Arg parser strips all '-' then matches "mods", so "-mods" is correct.)
 echo Launching INSTANCE #2 (CLIENT, Goldberg copy)...
-start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -screen-fullscreen 0 -popupwindow -screen-width 960 -screen-height 1080
+start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -mods -screen-fullscreen 0 -popupwindow -screen-width 960 -screen-height 1080
 
 echo(
 echo Done. Tile this window to the RIGHT half (Win+Right).

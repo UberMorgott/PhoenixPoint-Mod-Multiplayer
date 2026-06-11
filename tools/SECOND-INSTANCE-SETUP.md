@@ -198,14 +198,34 @@ copy, containing:
 - empty file `disable_overlay.txt`    (avoid overlay weirdness)
 - **networking left ENABLED** — no `disable_networking.txt`; the mod's DirectIP uses
   normal TCP and does not rely on Goldberg at all, so leaving it on is harmless.
-- `force_account_name.txt` with a unique name (`Client2`)
-- `force_steamid.txt` set to the **SAME** steamID as the original install
-  (`76561197996210591`). This is deliberate (see "How mods load in the 2nd copy"):
-  PP keys its per-user config folder by steamID, so matching it lets the copy read
-  the **same enabled-mods list + mod settings**. A *different* id would point the
-  copy at an empty config folder and the game would show **NO mods enabled** — that
-  was the original symptom. The two instances are still distinguished by
-  `force_account_name` and a throwaway `MULTIPLEER_IDENTITY` at launch.
+- **`configs.user.ini`** — the gbe_fork identity file (this is the one that
+  actually matters). The Goldberg build shipped here is **gbe_fork** (Detanup01),
+  not classic Mr_Goldberg (the dll is ~11 MB and its save dir is `…\AppData\Roaming\GSE Saves\`).
+  **gbe_fork IGNORES classic Goldberg's `force_steamid.txt` / `force_account_name.txt`.**
+  It reads identity from `configs.user.ini` under `[user::general]`:
+  ```ini
+  [user::general]
+  account_name=Client2
+  account_steamid=76561197996210591
+  language=english
+  ip_country=US
+  ```
+  `account_steamid` is set to the **SAME** steamID as the original install
+  (`76561197996210591`). PP keys its per-user config folder by steamID
+  (`…\Phoenix Point\Steam\<steamID64>\`), so matching it lets the copy read the
+  **same `Options.jopt` (`MOD_ACTIVATED`) + `ModConfig.json`** → identical enabled set.
+  A **LOCAL** `steam_settings\configs.user.ini` **overrides** the GLOBAL
+  `%APPDATA%\GSE Saves\settings\configs.user.ini`. Without a local one, gbe_fork
+  falls back to that global file, whose `account_steamid` is a throwaway id
+  (e.g. `76561198484409974`) → the game reads an **empty** `…\Steam\<thatID>\`
+  profile → `MOD_ACTIVATED` is empty → `ModManager.EnableModsFromStore` enables
+  **nothing** → **NO mods load**. *That was the real root cause the first time:* the
+  bat wrote classic `force_steamid.txt`, which this dll ignored, so the global
+  throwaway id won.
+- `force_account_name.txt` / `force_steamid.txt` are still written for classic-Goldberg
+  compatibility but are **ignored by gbe_fork** — harmless leftovers. The two instances
+  are distinguished by `account_name` (`Client2`) and a throwaway `MULTIPLEER_IDENTITY`
+  at launch.
 
 So you only need to drop in the Goldberg `steam_api64.dll` + back up the original
 (Step 3 above) — everything else in `steam_settings` is done for you.
@@ -219,6 +239,25 @@ So you only need to drop in the Goldberg `steam_api64.dll` + back up the origina
    as a second safeguard so the two share no Multipleer identity.
 3. In instance #2: Multiplayer → Direct Connect → `127.0.0.1:14242`.
 4. Tile the windows (Win+Left / Win+Right).
+
+> **`-mods` is mandatory — this is what makes mods load AND shows the MODS menu.**
+> PP gates *all* mod support on the `-mods` launch arg:
+> `Game.ReadCommandsLineArgs` strips the dashes → `PhoenixGame.HandleCommandLineArg("mods")`
+> sets `ModManager.CanUseMods = true` — the **only** place it is enabled
+> (`PhoenixGame.cs:174-176`). Without it:
+> - `PhoenixGame.InitMods()` hits `if (!CanUseMods) yield break;` (`PhoenixGame.cs:833`)
+>   → `DiscoverMods()` / `EnableModsFromStore()` **never run** → 0 mods discovered;
+> - `UIModuleMainMenuButtons` does `ModsButton.SetActive(ModManager.CanUseMods)`
+>   (`UIModuleMainMenuButtons.cs:124`) → the **MODS main-menu button is hidden**.
+>
+> On a normal Steam launch, Steam injects `-mods` from the game's Steam *launch options*.
+> A standalone gbe_fork copy bypasses Steam, so `launch-second-copy.bat` passes `-mods`
+> on the command line itself. The Mods *path* and steamID config were never the problem
+> for discovery: `PPModLoader` scans `<installRoot>\Mods` via a Unity-relative path
+> (`ModManager.GetRootDir()` = two `GetDirectoryName` up from `streamingAssetsPath`),
+> independent of any Steam API, so the junctions in `D:\PP-Instance2\Mods` resolve fine.
+> The steamID in `configs.user.ini` only governs *which* mods are pre-enabled
+> (`MOD_ACTIVATED` in `…\Steam\<id>\Options.jopt`), not whether modding is on at all.
 
 ## Fallback (no dll swap): Sandboxie-Plus
 
