@@ -17,6 +17,14 @@ namespace Multipleer.Network
         public SessionManager Session { get; private set; }
         public SaveTransferCoordinator SaveTransfer { get; private set; }
 
+        // Set true at the START of every intentional teardown (Disconnect/Shutdown). Tearing a
+        // CompositeTransport down disconnects its children one-by-one; once the hosting child goes
+        // Disconnected the aggregate State can read Failed (e.g. a Steam child that never came up),
+        // which would otherwise surface as a bogus "Transport connection failed" MessageBox on a
+        // user-initiated leave. Checked in OnTransportStateChanged to suppress that box. Reset in
+        // Initialize() so the next genuine connect attempt still reports real failures.
+        private bool _intentionalDisconnect;
+
         // ─── Events ───────────────────────────────────────────────────────
 
         public event Action OnHostStarted;
@@ -52,6 +60,8 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            // Fresh session: a genuine connect failure from here on must surface to the user.
+            _intentionalDisconnect = false;
         }
 
         /// <summary>
@@ -77,12 +87,16 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            // Fresh session: a genuine connect failure from here on must surface to the user.
+            _intentionalDisconnect = false;
         }
 
         public void Shutdown()
         {
             if (!IsActive) return;
 
+            // Suppress the transport-failed MessageBox: this teardown is user-initiated.
+            _intentionalDisconnect = true;
             Transport?.Shutdown();
             Transport = null;
             Session = null;
@@ -130,6 +144,9 @@ namespace Multipleer.Network
 
         public void Disconnect()
         {
+            // Suppress the transport-failed MessageBox: this teardown is user-initiated. Disconnecting
+            // a CompositeTransport child-by-child can flip the aggregate State to Failed mid-teardown.
+            _intentionalDisconnect = true;
             Transport?.Disconnect();
             IsHost = false;
         }
@@ -264,6 +281,11 @@ namespace Multipleer.Network
         {
             if (state == ConnectionState.Failed)
             {
+                // A Failed state raised while we are intentionally tearing the session down (leave /
+                // host-stop / smart-join handoff) is not a real connection error — swallow it so no
+                // bogus error box pops on leave. Genuine join/connect failures arrive with the flag
+                // cleared (reset in Initialize) and still surface.
+                if (_intentionalDisconnect) return;
                 OnConnectionFailed?.Invoke("Transport connection failed");
             }
         }

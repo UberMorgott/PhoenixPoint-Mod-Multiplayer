@@ -144,3 +144,60 @@ The `CampaignPermission` parameter does not yet affect the logic — it is reser
 ### SDK Unknowns
 
 - The main-menu UI state class to patch (e.g. `UIStateMainMenu`?), the button prefab to clone, and the UI state-stack push/pop API are all unverified without the SDK → [specs/03-open-questions-sdk](../specs/03-open-questions-sdk.md).
+
+---
+
+## Native Load-Screen Intercept — co-op "Choose save" (as-built)
+
+> The host's "CHOOSE SAVE…" no longer hand-builds a save-row list (custom rows kept rendering
+> empty). It opens the game's **own native Load screen** and **intercepts the load-on-click** so a
+> chosen `SavegameMetaData` is returned to the lobby WITHOUT loading the campaign.
+> Code: `src/Harmony/SaveLoadInterceptPatch.cs`, wired from `MultiplayerUI.OnLobbyChooseSave`.
+
+### Native load flow (decompiled `Assembly-CSharp/src`, file:line)
+
+- **Open:** `PhoenixPoint.Home.View.ViewStates/UIStateMainMenu.cs:134-137` —
+  `OnLoadGameButtonClicked()` → `SwitchToState(new UIStateHomeLoadGame(), StateStackAction.PushOnTop)`.
+  That handler is subscribed to `UIModuleMainMenuButtons.LoadGameButton.PointerClicked`
+  (`UIStateMainMenu.cs:46-47`); firing that event opens the screen exactly like a real click.
+- **Build:** `PhoenixPoint.Home.View.ViewStates/UIStateHomeLoadGame.cs:12-28` — `EnterState` activates
+  `LoadGameModule` (a `UIModuleSaveGame`), hides `PausePanel`, `SetActiveState("LoadGame")`; `PushState`
+  → `LoadGameModule.InitLoadMode(SwitchToPreviousState, showConfirmationForLoad:false)`.
+  `UIModuleSaveGame.InitializeSaveGames` (`UIModuleSaveGame.cs:239-310`) enumerates
+  `SaveManager.GetSaves()` and builds rows via
+  `UIModuleSaveGameSlot.InitUsedSaveSlot(meta, false, OnOverwrite, OnLoadGamePressed, OnDelete, false)`
+  (`:276,283,294`).
+- **LOAD-ON-CLICK (what we avoid):** slot click → `UIModuleSaveGameSlot.OnLoadGamePressedCrt`
+  (`UIModuleSaveGameSlot.cs:239-275`) → `OnLoadPressed.Invoke(_data)` (`:273`) → wired to
+  `UIModuleSaveGame.OnLoadGamePressed(PPSavegameMetaData)` (`UIModuleSaveGame.cs:166-171`) →
+  `SaveManager.LoadGame(meta)` = the actual single-player load.
+
+### Intercept (mod)
+
+- **Prefix** `UIModuleSaveGame.OnLoadGamePressed(PPSavegameMetaData)`: while *armed*, store the meta,
+  close the screen by reflecting the private `UIModuleSaveGame.CloseModule` (`:145`, fires
+  `SwitchToPreviousState`), and `return false` to skip `SaveManager.LoadGame`.
+- **Postfix** `UIStateHomeLoadGame.ExitState` (`:30-34`, runs on BOTH pick and cancel): disarm; re-show
+  the lobby; if a meta was captured deliver it to the lobby's chosen-save handler (`SetChosenSave` +
+  `_pendingChosenSave`). Cancel → meta null → lobby just re-opens, no selection change.
+
+### Feasibility / conflict (honest)
+
+- Pushing `UIStateHomeLoadGame` is a normal home-screen state push; it does **not** touch the network
+  session (engine is UI-independent) and does **not** destroy the mod's ModGO canvases.
+- **The one real conflict is visual:** the lobby's `Show()` disables every native root canvas
+  (`NativeWidgetFactory.HideMenuChrome`) — and the native Load screen renders on those. So before
+  opening we call `LobbyPanel.HideForNativeScreen()` (deactivate lobby canvas + `RestoreMenuChrome` +
+  hide the status bar); the post-close `LobbyPanel.Show()` re-hides the chrome again.
+- Underlying state when "CHOOSE SAVE…" is pressed is still `UIStateMainMenu` (the lobby is
+  overlay-only, never pushed a state), so the `PushOnTop` lands correctly and `SwitchToPreviousState`
+  returns there.
+- **Unverified without an in-game run:** that the native screen renders correctly through the restored
+  chrome and that the lobby re-appears cleanly after `ExitState` (pick and cancel) — see the mod's
+  visual-unverifiable checklist.
+
+### Fallback
+
+- If `OpenNativeLoadScreen` can't reach the live `LoadGameButton`, the host disarms, re-shows the
+  lobby, and falls back to the legacy from-code `SavePickerPanel.Show(onPicked)` — same callback
+  contract, so the host is never stuck.

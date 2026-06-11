@@ -22,17 +22,16 @@ namespace Multipleer.UI
     ///
     /// Capture path is the one already proven by the mod's network-button injection
     /// (Harmony/MainMenuPatches.cs): the same Postfix on UIModuleMainMenuButtons.Init hands
-    /// us the TemplateMenuButton GameObject and the menu Canvas. The native save row
-    /// (UIModuleSaveGame.SaveSlotPrefab) is captured LAZILY because its host module
+    /// us the TemplateMenuButton GameObject and the menu Canvas. The native save-list scroller
+    /// (UIModuleSaveGame.Scroller) is cloned LAZILY because its host module
     /// (UIModulePauseScreen.LoadGameModule) is inactive until the Load screen first opens.
     ///
     /// Decompile anchors:
     ///   - TemplateMenuButton clone pattern: UIModuleMainMenuButtons.Init (Instantiate →
     ///     SetActive(true) → relabel child Text[0] → wire child Button.onClick).
-    ///   - SaveSlotPrefab (UIModuleSaveGameSlot) field on UIModuleSaveGame.cs:22;
-    ///     InitUsedSaveSlot(PPSavegameMetaData, bool, Action&lt;PPSavegameMetaData&gt;×3, bool)
-    ///     at UIModuleSaveGameSlot.cs:112 self-resets its load/delete delegates (-= then +=),
-    ///     so cloned rows do NOT carry the native single-player load wiring.
+    ///   - Scroller (VerticalScrollRectScroller) field on UIModuleSaveGame.cs; the save picker
+    ///     parents its own lightweight, mod-drawn rows under the cloned scroller's content
+    ///     (it does NOT clone the heavyweight native save-slot row prefab).
     ///
     /// Per-widget fallback: any template that cannot be captured returns null/false here and
     /// the caller keeps that one element as the existing from-code widget (UiToolkit), rather
@@ -68,10 +67,6 @@ namespace Multipleer.UI
             public Canvas Canvas;
             public bool WasEnabled;
         }
-
-        // Captured lazily on first Play (save row prefab lives on an inactive module).
-        private static UIModuleSaveGameSlot _saveRowPrefab;
-        private static bool _saveRowProbed;
 
         /// <summary>The native main-menu Canvas all mod panels parent under (null until captured).</summary>
         public static Canvas MenuCanvas => _menuCanvas;
@@ -229,58 +224,6 @@ namespace Multipleer.UI
             if (btn == null) return;
             var t = btn.GetComponentInChildren<Text>(true);
             if (t != null) t.text = label;
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        //  Native save row — UIModuleSaveGameSlot clone
-        // ═══════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Lazily locate the native save-row prefab. UIModuleSaveGame lives under
-        /// UIModulePauseScreen and is INACTIVE at the menu, so search includeInactive and read
-        /// the public serialized SaveSlotPrefab field. Returns null if the module is not yet in
-        /// the scene (caller falls back to a from-code row).
-        /// </summary>
-        public static UIModuleSaveGameSlot TryGetSaveRowPrefab()
-        {
-            if (_saveRowPrefab != null) return _saveRowPrefab;
-            if (_saveRowProbed && _saveRowPrefab == null) { /* re-probe each call until found */ }
-
-            try
-            {
-                // FindObjectsOfTypeAll includes INACTIVE objects (the pause-screen save module
-                // is inactive at the menu until the Load screen first opens).
-                var modules = Resources.FindObjectsOfTypeAll<UIModuleSaveGame>();
-                foreach (var m in modules)
-                {
-                    if (m != null && m.SaveSlotPrefab != null)
-                    {
-                        _saveRowPrefab = m.SaveSlotPrefab;
-                        break;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError("[Multipleer] TryGetSaveRowPrefab failed: " + e.Message);
-            }
-            _saveRowProbed = true;
-            return _saveRowPrefab;
-        }
-
-        /// <summary>
-        /// Clone the native save row under <paramref name="parent"/> (active). The caller then
-        /// calls InitUsedSaveSlot(...), which itself resets the load/overwrite/delete delegates,
-        /// so no manual listener-reset is needed here. Returns null if no prefab was captured.
-        /// </summary>
-        public static UIModuleSaveGameSlot CloneSaveRow(Transform parent)
-        {
-            var prefab = TryGetSaveRowPrefab();
-            if (prefab == null || parent == null) return null;
-
-            var row = UnityEngine.Object.Instantiate(prefab, parent);
-            row.gameObject.SetActive(true);
-            return row;
         }
 
         // ═══════════════════════════════════════════════════════════════════

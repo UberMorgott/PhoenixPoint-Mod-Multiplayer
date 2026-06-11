@@ -289,11 +289,11 @@ namespace Multipleer.UI
             LE(hdr.gameObject).minHeight = 28;
 
             var stunLabel = UiToolkit.CreateText(rail, "StunLabel", Vector2.zero,
-                new Vector2(260, 20), "STUN code:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+                new Vector2(260, 20), "STUN code (click to copy):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
             LE(stunLabel.gameObject).minHeight = 20;
 
             _railStunValue = MakeCopyableValue(rail, "StunValue", () => _owner.GetRailStunCode());
-            LE(_railStunValue.transform.parent.gameObject).minHeight = 22;
+            LE(_railStunValue.transform.parent.gameObject).minHeight = 32;
 
             var saveLabel = UiToolkit.CreateText(rail, "SaveLabel", Vector2.zero,
                 new Vector2(260, 20), "Save to load:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
@@ -333,10 +333,15 @@ namespace Multipleer.UI
         // button rect is owned by the parent layout group (caller sets the LayoutElement.minHeight).
         private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
-            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, new Vector2(240, 22),
+            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, new Vector2(240, 32),
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
             var label = btn.GetComponentInChildren<Text>();
-            if (label != null) { label.alignment = TextAnchor.MiddleLeft; label.fontSize = 15; }
+            if (label != null)
+            {
+                label.alignment = TextAnchor.MiddleLeft;
+                label.fontSize = 24;
+                label.fontStyle = FontStyle.Bold;
+            }
             return label;
         }
 
@@ -736,6 +741,19 @@ namespace Multipleer.UI
             var engine = NetworkEngine.Instance;
             if (engine != null && engine.IsActive)
                 MultiplayerUI.Instance?.ShowInGameBar();
+        }
+
+        // Hide the lobby overlay so the game's NATIVE Load screen (UIStateHomeLoadGame) is visible
+        // underneath: deactivate the lobby canvas AND restore the native menu chrome we disabled on
+        // Show() (HideMenuChrome turned every native root canvas off — the native Load screen renders
+        // on those, so without this restore it would be invisible). The session is left intact; a
+        // later Show() re-hides the chrome again. The in-game status bar (sort 5000) is also hidden so
+        // it can't overlap the native screen.
+        public void HideForNativeScreen()
+        {
+            if (_lobbyCanvas != null) _lobbyCanvas.gameObject.SetActive(false);
+            NativeWidgetFactory.RestoreMenuChrome();
+            MultiplayerUI.Instance?.HideInGameBar();
         }
 
         // ─── Per-frame refresh (driven from MultiplayerUI.Update) ──────────

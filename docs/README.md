@@ -37,7 +37,7 @@ Local docs are the **single source of truth** for the Multipleer cooperative-mul
 |-----|-------|
 | [engine/01-networking-core.md](engine/01-networking-core.md) | `NetworkEngine` singleton + lifecycle, message routing, `PacketType`, binary message formats, `SessionManager` (heartbeat, ready-state), reliable message flow |
 | [engine/02-transport-layer.md](engine/02-transport-layer.md) | `ITransport` + three transports (Steam P2P / Direct TCP / STUN UDP), comparison table, message envelope + message-type catalog by phase, reliability |
-| [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection design |
+| [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection design; **native Load-screen intercept** for the co-op "Choose save" (open native `UIStateHomeLoadGame` + Prefix `UIModuleSaveGame.OnLoadGamePressed` to capture-and-return without loading) |
 
 ### `diagrams/`
 

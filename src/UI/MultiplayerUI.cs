@@ -63,7 +63,12 @@ namespace Multipleer.UI
         {
             if (_panelsBuilt || menuCanvas == null) return;
             _lobby.Build(menuCanvas);
-            _savePicker.Build(menuCanvas);
+            // Picker builds its OWN ROOT canvas under the mod's ModGO transform (this MonoBehaviour),
+            // mirroring the bar/lobby canvases — a root canvas honours its CanvasScaler and its
+            // overrideSorting wins, so the picker is a correctly-sized modal on top, not a nested
+            // canvas crammed behind the lobby. It clones its native widgets via Resources, so it no
+            // longer needs the menu canvas.
+            _savePicker.Build(transform);
             _panelsBuilt = true;
         }
 
@@ -272,19 +277,47 @@ namespace Multipleer.UI
 
         // ─── Choose save (host only) ───────────────────────────────────────
 
-        // Host rail "Choose save…": pick a save NOW (before Play). Record + broadcast it.
+        // Host rail "Choose save…": open the game's OWN native Load screen and INTERCEPT the pick so
+        // it hands back the chosen SavegameMetaData WITHOUT loading the campaign (see
+        // Harmony/SaveLoadInterceptPatch). We stopped hand-building the row list (it kept rendering
+        // empty); the native screen is the game's verified save UI. Falls back to the from-code picker
+        // only if the native Load button can't be reached.
         public void OnLobbyChooseSave()
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsHost) return;
 
-            _savePicker?.Show(chosen =>
+            // The handler that records + broadcasts the chosen save (identical to the old picker path).
+            System.Action<SavegameMetaData> onPicked = chosen =>
             {
+                if (chosen == null) return;
                 _pendingChosenSave = chosen;
                 var name = SaveDisplayName(chosen);
                 var meta = SaveDisplayMeta(chosen);
-                engine.Session?.SetChosenSave(name, meta);
-            });
+                NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
+            };
+
+            // Arm the intercept, hide our overlay so the native screen shows through, then open it by
+            // firing the live LoadGameButton. If the native open fails, disarm + fall back to the
+            // legacy from-code picker so the host is never stuck.
+            SaveLoadInterceptPatch.Arm(onPicked);
+            _lobby?.HideForNativeScreen();
+            if (!SaveLoadInterceptPatch.OpenNativeLoadScreen())
+            {
+                SaveLoadInterceptPatch.Disarm();
+                _lobby?.Show();
+                _savePicker?.Show(onPicked);
+            }
+        }
+
+        // Called from SaveLoadInterceptPatch when the native Load screen closes (after a pick OR a
+        // cancel). Re-show the lobby (which re-hides the native chrome) and, if a save was chosen,
+        // deliver it to the chosen-save handler. Runs on the main thread (Harmony Postfix on
+        // UIStateHomeLoadGame.ExitState).
+        public void OnNativeSaveScreenClosed(SavegameMetaData chosen, System.Action<SavegameMetaData> onPicked)
+        {
+            _lobby?.Show();
+            if (chosen != null) onPicked?.Invoke(chosen);
         }
 
         // The save the host chose in the rail (consumed by PLAY); null until a pick is made.
