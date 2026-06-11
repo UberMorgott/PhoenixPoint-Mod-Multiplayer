@@ -35,12 +35,12 @@ namespace Multipleer.UI
         private Button _leaveButton;
         private Button _readyButton;
         private Text _readyButtonLabel;
-        private Toggle _readyToggle;
+        // Local optimistic ready flag — flipped on click for instant label feedback, then re-synced
+        // from authoritative roster state (me.Ready) in RefreshControls.
+        private bool _localReady;
         private Button _playButton;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
-        private Text _railIpValue;
-        private Text _railLocalValue;       // 127.0.0.1:<port> for same-PC two-instance play
         private Text _railStunValue;
         private Text _railSaveValue;
         private Button _chooseSaveBtn;
@@ -63,10 +63,9 @@ namespace Multipleer.UI
         private GameObject _rosterArea;
         private readonly List<RosterRow> _rows = new List<RosterRow>();
 
-        // Layout constants for the roster area.
-        private const float RosterTop = 130f;     // px from panel top to first row
+        // Layout constants for the roster area. RowHeight now feeds LayoutElement.minHeight; the old
+        // RosterTop / RowWidth pixel constants are gone (layout groups own position/width).
         private const float RowHeight = 30f;
-        private const float RowWidth = 520f;
 
         private class RosterRow
         {
@@ -163,6 +162,20 @@ namespace Multipleer.UI
             rect.anchoredPosition = Vector2.zero;
             rect.localScale = Vector3.one;
 
+            // ROOT layout: a VerticalLayoutGroup stacks TopBar / MainRow / Footer top-to-bottom and
+            // owns all vertical placement (replaces the old per-zone anchoredPosition Y math). Padding
+            // keeps zones off the screen edges on ultrawide; childForceExpandWidth lets each row span
+            // the full width while childForceExpandHeight=false lets MainRow's flexibleHeight absorb
+            // all the leftover vertical space.
+            var rootVlg = _root.AddComponent<VerticalLayoutGroup>();
+            rootVlg.padding = new RectOffset(48, 48, 24, 24);
+            rootVlg.spacing = 16;
+            rootVlg.childControlWidth = true;
+            rootVlg.childControlHeight = true;
+            rootVlg.childForceExpandWidth = true;
+            rootVlg.childForceExpandHeight = false;
+            rootVlg.childAlignment = TextAnchor.UpperCenter;
+
             // NO full-screen fill. The lobby is laid OVER the game's main-menu background art (the
             // rendered 3D backdrop) as a clean separate "page": the menu's own chrome (buttons,
             // logo, version label) is hidden on Show() so the art reads as the page background, and
@@ -178,9 +191,7 @@ namespace Multipleer.UI
             try
             {
                 BuildTopBar();
-                BuildConnectRail();
-                BuildChatZone();
-                BuildRosterZone();
+                BuildMainRow();
                 BuildFooter();
             }
             finally
@@ -198,81 +209,131 @@ namespace Multipleer.UI
         // TOP BAR: title + subtitle (no X/4 counter — small count lives in the roster header).
         private void BuildTopBar()
         {
-            // A centred framed header card so the large title/subtitle keep contrast over arbitrary
-            // background art (the root itself has no fill).
+            // A framed header card whose height is fixed (LE.minHeight 78, flexibleHeight 0) so the
+            // root VLG never stretches it — MainRow takes the slack. Title/subtitle are stacked by an
+            // inner VLG (no manual anchoredPosition).
             var bar = new GameObject("TopBar");
             bar.transform.SetParent(_root.transform, false);
-            var brt = bar.AddComponent<RectTransform>();
-            brt.anchorMin = new Vector2(0.5f, 1f);
-            brt.anchorMax = new Vector2(0.5f, 1f);
-            brt.pivot = new Vector2(0.5f, 1f);
-            brt.sizeDelta = new Vector2(560, 78);
-            brt.anchoredPosition = new Vector2(0, -8);
+            bar.AddComponent<RectTransform>();
             AddFramedPanel(bar);
 
-            UiToolkit.CreateText(bar, "Title", new Vector2(0, -8),
+            var le = LE(bar);
+            le.minHeight = 78;
+            le.flexibleHeight = 0;
+
+            var vlg = bar.AddComponent<VerticalLayoutGroup>();
+            vlg.childAlignment = TextAnchor.MiddleCenter;
+            vlg.spacing = 2;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            var title = UiToolkit.CreateText(bar, "Title", Vector2.zero,
                 new Vector2(540, 44), "CO-OP LOBBY", 32, TextAnchor.MiddleCenter,
                 new Vector2(0.5f, 1f));
-            _roleText = UiToolkit.CreateText(bar, "Subtitle", new Vector2(0, -50),
+            LE(title.gameObject).minHeight = 44;
+
+            _roleText = UiToolkit.CreateText(bar, "Subtitle", Vector2.zero,
                 new Vector2(540, 24), "your lobby", 16, TextAnchor.MiddleCenter,
                 new Vector2(0.5f, 1f));
+            LE(_roleText.gameObject).minHeight = 24;
         }
 
-        // LEFT RAIL "Connect": IP (click-to-copy), STUN code (click-to-copy), Save block, Invite.
-        private void BuildConnectRail()
+        // MAIN ROW: three equal-height cards (ConnectColumn / ChatColumn / PlayersColumn) sharing the
+        // row width 1:2:1 via per-column LayoutElement.flexibleWidth under childForceExpandWidth. Takes
+        // ALL leftover vertical space (LE.flexibleHeight 1) so the row stretches to fill between the
+        // fixed-height TopBar and Footer.
+        private void BuildMainRow()
         {
-            var rail = new GameObject("ConnectRail");
-            rail.transform.SetParent(_root.transform, false);
-            var rrt = rail.AddComponent<RectTransform>();
-            rrt.anchorMin = new Vector2(0f, 0f);
-            rrt.anchorMax = new Vector2(0.25f, 1f);
-            rrt.offsetMin = new Vector2(24, 80);
-            rrt.offsetMax = new Vector2(-12, -90);
+            var mainRow = new GameObject("MainRow");
+            mainRow.transform.SetParent(_root.transform, false);
+            mainRow.AddComponent<RectTransform>();
+
+            LE(mainRow).flexibleHeight = 1;
+
+            var hlg = mainRow.AddComponent<HorizontalLayoutGroup>();
+            hlg.spacing = 24;
+            hlg.padding = new RectOffset(0, 0, 0, 0);
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+            hlg.childForceExpandWidth = true;
+            hlg.childForceExpandHeight = true;
+
+            BuildConnectRail(mainRow);
+            BuildChatZone(mainRow);
+            BuildRosterZone(mainRow);
+        }
+
+        // LEFT COLUMN "Connect": STUN code (click-to-copy), Save block, Choose Save / Invite buttons.
+        private void BuildConnectRail(GameObject parent)
+        {
+            var rail = new GameObject("ConnectColumn");
+            rail.transform.SetParent(parent.transform, false);
+            rail.AddComponent<RectTransform>();
             AddFramedPanel(rail);
 
-            UiToolkit.CreateText(rail, "ConnectHdr", new Vector2(12, -10),
+            LE(rail).flexibleWidth = 1;
+
+            var vlg = rail.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(12, 12, 12, 12);
+            vlg.spacing = 8;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+            vlg.childAlignment = TextAnchor.UpperLeft;
+
+            var hdr = UiToolkit.CreateText(rail, "ConnectHdr", Vector2.zero,
                 new Vector2(260, 28), "CONNECT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            LE(hdr.gameObject).minHeight = 28;
 
-            UiToolkit.CreateText(rail, "IpLabel", new Vector2(12, -44),
-                new Vector2(260, 20), "Your IP (LAN):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railIpValue = MakeCopyableValue(rail, "IpValue", new Vector2(12, -64),
-                () => _owner.GetRailIp());
-
-            // Same-PC value: 127.0.0.1:<port> so a second instance on THIS machine can connect.
-            UiToolkit.CreateText(rail, "LocalLabel", new Vector2(12, -92),
-                new Vector2(260, 20), "Same PC (2nd instance):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railLocalValue = MakeCopyableValue(rail, "LocalValue", new Vector2(12, -112),
-                () => _owner.GetRailLocalIp());
-
-            UiToolkit.CreateText(rail, "StunLabel", new Vector2(12, -140),
+            var stunLabel = UiToolkit.CreateText(rail, "StunLabel", Vector2.zero,
                 new Vector2(260, 20), "STUN code:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railStunValue = MakeCopyableValue(rail, "StunValue", new Vector2(12, -160),
-                () => _owner.GetRailStunCode());
+            LE(stunLabel.gameObject).minHeight = 20;
 
-            UiToolkit.CreateText(rail, "SaveLabel", new Vector2(12, -200),
+            _railStunValue = MakeCopyableValue(rail, "StunValue", () => _owner.GetRailStunCode());
+            LE(_railStunValue.transform.parent.gameObject).minHeight = 22;
+
+            var saveLabel = UiToolkit.CreateText(rail, "SaveLabel", Vector2.zero,
                 new Vector2(260, 20), "Save to load:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", new Vector2(12, -220),
+            LE(saveLabel.gameObject).minHeight = 20;
+
+            _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", Vector2.zero,
                 new Vector2(248, 40), "(none)", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            LE(_railSaveValue.gameObject).minHeight = 40;
 
             _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "ChooseSaveBtn",
                 "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
-            if (_chooseSaveBtn != null) AnchorButton(_chooseSaveBtn, rail.transform, new Vector2(0f, 1f), new Vector2(12, -264), RailButtonSize);
-            else _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
-                new Vector2(12, -264), new Vector2(220, 36), new Vector2(0f, 1f),
-                () => _owner.OnLobbyChooseSave());
+            if (_chooseSaveBtn != null)
+                AddCloneLayoutElement(_chooseSaveBtn, rail.transform, RailButtonSize.x, RailButtonSize.y);
+            else
+            {
+                _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
+                    Vector2.zero, new Vector2(220, 36), new Vector2(0f, 1f),
+                    () => _owner.OnLobbyChooseSave());
+                LE(_chooseSaveBtn.gameObject).preferredHeight = 38;
+            }
 
             _inviteBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "InviteBtn",
                 "INVITE VIA STEAM", () => _owner.InvitePlayers());
-            if (_inviteBtn != null) AnchorButton(_inviteBtn, rail.transform, new Vector2(0f, 1f), new Vector2(12, -308), RailButtonSize);
-            else _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
-                new Vector2(12, -308), new Vector2(220, 36), new Vector2(0f, 1f),
-                () => _owner.InvitePlayers());
+            if (_inviteBtn != null)
+                AddCloneLayoutElement(_inviteBtn, rail.transform, RailButtonSize.x, RailButtonSize.y);
+            else
+            {
+                _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
+                    Vector2.zero, new Vector2(220, 36), new Vector2(0f, 1f),
+                    () => _owner.InvitePlayers());
+                LE(_inviteBtn.gameObject).preferredHeight = 38;
+            }
         }
 
         // Click-to-copy value text: a button whose label is the live value; click copies it.
-        private Text MakeCopyableValue(GameObject parent, string name, Vector2 pos, System.Func<string> getValue)
+        // Click-to-copy value text: a button whose label is the live value; click copies it. The
+        // button rect is owned by the parent layout group (caller sets the LayoutElement.minHeight).
+        private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
-            var btn = UiToolkit.CreateButton(parent, name, "", pos, new Vector2(240, 22),
+            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, new Vector2(240, 22),
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
             var label = btn.GetComponentInChildren<Text>();
             if (label != null) { label.alignment = TextAnchor.MiddleLeft; label.fontSize = 15; }
@@ -280,125 +341,217 @@ namespace Multipleer.UI
         }
 
         // CENTER CHAT: native scroller (fallback plain rect) + inline input + Send.
-        private void BuildChatZone()
+        private void BuildChatZone(GameObject parent)
         {
-            var chat = new GameObject("ChatZone");
-            chat.transform.SetParent(_root.transform, false);
-            var crt = chat.AddComponent<RectTransform>();
-            crt.anchorMin = new Vector2(0.27f, 0f);
-            crt.anchorMax = new Vector2(0.66f, 1f);
-            crt.offsetMin = new Vector2(0, 80);
-            crt.offsetMax = new Vector2(0, -90);
+            var chat = new GameObject("ChatColumn");
+            chat.transform.SetParent(parent.transform, false);
+            chat.AddComponent<RectTransform>();
             AddFramedPanel(chat);
 
-            UiToolkit.CreateText(chat, "ChatHdr", new Vector2(12, -10),
-                new Vector2(300, 28), "CHAT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            LE(chat).flexibleWidth = 2;   // center widest (1:2:1)
 
-            // Scroll area (native scroller content if capturable, else a plain stacked rect).
+            var vlg = chat.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(12, 12, 12, 12);
+            vlg.spacing = 8;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            var hdr = UiToolkit.CreateText(chat, "ChatHdr", Vector2.zero,
+                new Vector2(300, 28), "CHAT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            var hle = LE(hdr.gameObject); hle.minHeight = 28; hle.flexibleHeight = 0;
+
+            // Scroll host: fills the middle of the column (flexibleHeight 1). Plain RectTransform — NOT
+            // a layout group — so the scroller content's ContentSizeFitter is conflict-free (§E-1).
             var scrollHost = new GameObject("ChatScrollHost");
             scrollHost.transform.SetParent(chat.transform, false);
-            var shrt = scrollHost.AddComponent<RectTransform>();
-            shrt.anchorMin = new Vector2(0f, 0f);
-            shrt.anchorMax = new Vector2(1f, 1f);
-            shrt.offsetMin = new Vector2(8, 40);
-            shrt.offsetMax = new Vector2(-8, -40);
+            scrollHost.AddComponent<RectTransform>();
+            var sle = LE(scrollHost); sle.flexibleHeight = 1; sle.minHeight = 80;
 
             _chatContent = NativeWidgetFactory.CloneScroller(scrollHost.transform);
-            if (_chatContent == null)
+            if (_chatContent != null)
             {
-                // Fallback: a plain content rect, top-anchored, rows stacked downward.
+                // Stretch the native scroller GO (child of scrollHost) to fill the group-sized host.
+                StretchScrollerToHost(_chatContent, scrollHost.transform);
+                ConfigureScrollContent(_chatContent, padding: 4);
+            }
+            else
+            {
+                // Fallback: a plain content rect, top-anchored, rows stacked downward by a VLG and
+                // sized by a ContentSizeFitter (parent is scrollHost, not a layout group → safe).
                 var fb = new GameObject("ChatContentFallback");
                 fb.transform.SetParent(scrollHost.transform, false);
                 var fbrt = fb.AddComponent<RectTransform>();
                 fbrt.anchorMin = new Vector2(0f, 1f);
                 fbrt.anchorMax = new Vector2(1f, 1f);
                 fbrt.pivot = new Vector2(0.5f, 1f);
-                fbrt.sizeDelta = new Vector2(0, 600);
+                fbrt.offsetMin = Vector2.zero;
+                fbrt.offsetMax = Vector2.zero;
                 fbrt.anchoredPosition = Vector2.zero;
                 _chatContent = fbrt;
+                ConfigureScrollContent(_chatContent, padding: 4);
             }
 
-            // Inline input (from-code: no native inline-input template — justified §4a) + Send.
-            _chatInput = UiToolkit.CreateInputField(chat, "ChatInput", "",
-                new Vector2(0, 4), new Vector2(220, 26), new Vector2(0f, 0f),
-                v => { _owner.OnLobbyChatSend(v); if (_chatInput != null) _chatInput.text = ""; });
+            // Input row: input (flexibleWidth 1) + Send (preferredWidth 70), laid out by an HLG.
+            var inputRow = new GameObject("ChatInputRow");
+            inputRow.transform.SetParent(chat.transform, false);
+            inputRow.AddComponent<RectTransform>();
+            var irle = LE(inputRow); irle.minHeight = 30; irle.flexibleHeight = 0;
+            var irhlg = inputRow.AddComponent<HorizontalLayoutGroup>();
+            irhlg.spacing = 8;
+            irhlg.childControlWidth = true;
+            irhlg.childControlHeight = true;
+            irhlg.childForceExpandWidth = false;
+            irhlg.childForceExpandHeight = true;
 
-            var send = UiToolkit.CreateButton(chat, "ChatSend", "SEND",
-                new Vector2(230, 4), new Vector2(70, 26), new Vector2(0f, 0f),
+            _chatInput = UiToolkit.CreateInputField(inputRow, "ChatInput", "",
+                Vector2.zero, new Vector2(220, 26), new Vector2(0f, 0f),
+                v => { _owner.OnLobbyChatSend(v); if (_chatInput != null) _chatInput.text = ""; });
+            LE(_chatInput.gameObject).flexibleWidth = 1;
+
+            var send = UiToolkit.CreateButton(inputRow, "ChatSend", "SEND",
+                Vector2.zero, new Vector2(70, 26), new Vector2(0f, 0f),
                 () => { if (_chatInput != null) { _owner.OnLobbyChatSend(_chatInput.text); _chatInput.text = ""; } });
+            var sndle = LE(send.gameObject); sndle.preferredWidth = 70; sndle.flexibleWidth = 0;
         }
 
         // RIGHT ROSTER: header with small count + scrollable rows (re-uses the existing pool).
-        private void BuildRosterZone()
+        private void BuildRosterZone(GameObject parent)
         {
-            var players = new GameObject("PlayersZone");
-            players.transform.SetParent(_root.transform, false);
-            var prt = players.AddComponent<RectTransform>();
-            prt.anchorMin = new Vector2(0.68f, 0f);
-            prt.anchorMax = new Vector2(1f, 1f);
-            prt.offsetMin = new Vector2(0, 80);
-            prt.offsetMax = new Vector2(-24, -90);
+            var players = new GameObject("PlayersColumn");
+            players.transform.SetParent(parent.transform, false);
+            players.AddComponent<RectTransform>();
             AddFramedPanel(players);
 
-            _connectText = UiToolkit.CreateText(players, "PlayersHdr", new Vector2(12, -10),
-                new Vector2(300, 28), "PLAYERS (0)", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            LE(players).flexibleWidth = 1;
 
-            _rosterArea = new GameObject("RosterArea");
-            _rosterArea.transform.SetParent(players.transform, false);
+            var vlg = players.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(12, 12, 12, 12);
+            vlg.spacing = 8;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            _connectText = UiToolkit.CreateText(players, "PlayersHdr", Vector2.zero,
+                new Vector2(300, 28), "PLAYERS (0)", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            var hle = LE(_connectText.gameObject); hle.minHeight = 28; hle.flexibleHeight = 0;
+
+            // Scroll host fills the column (flexibleHeight 1); plain rect, NOT a layout group.
+            var scrollHost = new GameObject("RosterScrollHost");
+            scrollHost.transform.SetParent(players.transform, false);
+            scrollHost.AddComponent<RectTransform>();
+            LE(scrollHost).flexibleHeight = 1;
+
+            // RosterContent (= _rosterArea): top-stretched in the host, rows stacked by a VLG and
+            // sized by a ContentSizeFitter (host is not a layout group → conflict-free, §E-1).
+            _rosterArea = new GameObject("RosterContent");
+            _rosterArea.transform.SetParent(scrollHost.transform, false);
             var rosterRect = _rosterArea.AddComponent<RectTransform>();
             rosterRect.anchorMin = new Vector2(0f, 1f);
             rosterRect.anchorMax = new Vector2(1f, 1f);
             rosterRect.pivot = new Vector2(0.5f, 1f);
-            rosterRect.sizeDelta = new Vector2(0, 400);
-            rosterRect.anchoredPosition = new Vector2(0, -46);
+            rosterRect.offsetMin = Vector2.zero;
+            rosterRect.offsetMax = Vector2.zero;
+            rosterRect.anchoredPosition = Vector2.zero;
+            ConfigureScrollContent(rosterRect, padding: 0);
         }
 
         // FOOTER: Leave / Join… / Ready / Play (host).
+        // FOOTER: Leave (left) … Join / Ready / Play (right), pushed apart by a flexible Spacer. Fixed
+        // height (LE.minHeight 48, flexibleHeight 0); buttons laid out by a HorizontalLayoutGroup so
+        // there is zero fractional-X math.
         private void BuildFooter()
         {
-            // Footer buttons sit in the 0..80px band below the framed zones. Anchor them a clear
-            // ~44px above the screen bottom (chrome is hidden once the lobby is open, so nothing else
-            // occupies the edge) — keeps LEAVE/JOIN/READY/PLAY fully on-screen and off the very edge.
-            _leaveButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "LeaveBtn", "LEAVE",
-                () => _owner.OnLobbyLeave());
-            if (_leaveButton != null) AnchorButton(_leaveButton, _root.transform, new Vector2(0f, 0f), new Vector2(24, 44), FooterButtonSize);
-            else _leaveButton = UiToolkit.CreateButton(_root, "LeaveBtn", "LEAVE",
-                new Vector2(24, 44), new Vector2(140, 40), new Vector2(0f, 0f),
-                () => _owner.OnLobbyLeave());
+            var footer = new GameObject("Footer");
+            footer.transform.SetParent(_root.transform, false);
+            footer.AddComponent<RectTransform>();
+            var fle = LE(footer); fle.minHeight = 48; fle.flexibleHeight = 0;
 
-            _joinButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "JoinBtn", "JOIN…",
-                () => _owner.OnLobbyJoinPrompt());
-            if (_joinButton != null) AnchorButton(_joinButton, _root.transform, new Vector2(0.35f, 0f), new Vector2(0, 44), FooterButtonSize);
-            else _joinButton = UiToolkit.CreateButton(_root, "JoinBtn", "JOIN…",
-                new Vector2(0, 44), new Vector2(140, 40), new Vector2(0.35f, 0f),
-                () => _owner.OnLobbyJoinPrompt());
+            var hlg = footer.AddComponent<HorizontalLayoutGroup>();
+            hlg.spacing = 12;
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+            hlg.childForceExpandWidth = false;
+            hlg.childForceExpandHeight = true;
+            hlg.childAlignment = TextAnchor.MiddleLeft;
 
-            // Ready: native toggle if capturable, else label-flip menu button (fallback).
-            _readyToggle = NativeWidgetFactory.CloneReadyToggle(_root.transform, "READY",
-                _ => _owner.OnLobbyToggleReady());
-            if (_readyToggle != null)
-            {
-                var trt = _readyToggle.transform as RectTransform;
-                if (trt != null) { trt.anchorMin = new Vector2(0.6f, 0f); trt.anchorMax = new Vector2(0.6f, 0f);
-                    trt.pivot = new Vector2(0.5f, 0f); trt.anchoredPosition = new Vector2(0, 44); }
-            }
+            // Leave (left).
+            _leaveButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "LeaveBtn", "LEAVE",
+                () => _owner.OnLobbyLeave());
+            if (_leaveButton != null)
+                AddCloneLayoutElement(_leaveButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
             else
             {
-                _readyButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "ReadyBtn", "READY",
-                    () => _owner.OnLobbyToggleReady());
-                if (_readyButton != null) AnchorButton(_readyButton, _root.transform, new Vector2(0.6f, 0f), new Vector2(0, 44), FooterButtonSize);
-                else _readyButton = UiToolkit.CreateButton(_root, "ReadyBtn", "READY",
-                    new Vector2(0, 44), new Vector2(160, 40), new Vector2(0.6f, 0f),
-                    () => _owner.OnLobbyToggleReady());
-                _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
+                _leaveButton = UiToolkit.CreateButton(footer, "LeaveBtn", "LEAVE",
+                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    () => _owner.OnLobbyLeave());
+                LE(_leaveButton.gameObject).preferredWidth = 150;
             }
 
-            _playButton = NativeWidgetFactory.CloneMenuButton(_root.transform, "PlayBtn", "PLAY ▸",
+            // Flexible spacer pushes the remaining buttons to the right edge.
+            var spacer = new GameObject("Spacer");
+            spacer.transform.SetParent(footer.transform, false);
+            spacer.AddComponent<RectTransform>();
+            LE(spacer).flexibleWidth = 1;
+
+            // Join.
+            _joinButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "JoinBtn", "JOIN…",
+                () => _owner.OnLobbyJoinPrompt());
+            if (_joinButton != null)
+                AddCloneLayoutElement(_joinButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
+            else
+            {
+                _joinButton = UiToolkit.CreateButton(footer, "JoinBtn", "JOIN…",
+                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    () => _owner.OnLobbyJoinPrompt());
+                LE(_joinButton.gameObject).preferredWidth = 150;
+            }
+
+            // Ready: a plain cloned MENU BUTTON acting as a toggle — same widget family as
+            // Leave/Join/Play, which render cleanly in a LayoutElement slot. (The old approach cloned a
+            // GameOptionViewController option-row whose internal layout + "NEEDS TEXT" placeholder leaked
+            // OUTSIDE its wrapper; the menu button has no such stray children.) The button is interactable
+            // for everyone — OnLobbyToggleReady drives both the host (HostReady) and client (ClientReady)
+            // paths — so it is NOT host-gated. Authoritative ready state arrives via the roster and is
+            // re-synced into _localReady + the label in RefreshControls.
+            _readyButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "ReadyBtn", "READY",
+                () =>
+                {
+                    _localReady = !_localReady;        // optimistic flip for instant feedback
+                    _owner.OnLobbyToggleReady();        // reuse the EXACT existing propagation path
+                    UpdateReadyButtonLabel();
+                });
+            if (_readyButton != null)
+                AddCloneLayoutElement(_readyButton, footer.transform, 150, FooterButtonSize.y);
+            else
+            {
+                _readyButton = UiToolkit.CreateButton(footer, "ReadyBtn", "READY",
+                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    () =>
+                    {
+                        _localReady = !_localReady;
+                        _owner.OnLobbyToggleReady();
+                        UpdateReadyButtonLabel();
+                    });
+                LE(_readyButton.gameObject).preferredWidth = 150;
+            }
+            _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
+            UpdateReadyButtonLabel();
+
+            // Play (host).
+            _playButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "PlayBtn", "PLAY ▸",
                 () => _owner.OnLobbyPlay());
-            if (_playButton != null) AnchorButton(_playButton, _root.transform, new Vector2(1f, 0f), new Vector2(-24, 44), FooterButtonSize);
-            else _playButton = UiToolkit.CreateButton(_root, "PlayBtn", "PLAY ▸",
-                new Vector2(-24, 44), new Vector2(140, 40), new Vector2(1f, 0f),
-                () => _owner.OnLobbyPlay());
+            if (_playButton != null)
+                AddCloneLayoutElement(_playButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
+            else
+            {
+                _playButton = UiToolkit.CreateButton(footer, "PlayBtn", "PLAY ▸",
+                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    () => _owner.OnLobbyPlay());
+                LE(_playButton.gameObject).preferredWidth = 150;
+            }
         }
 
         // Default framed-panel colours: a light SEMI-opaque dark backing (so arbitrary background
@@ -436,37 +589,103 @@ namespace Multipleer.UI
         private static readonly Vector2 FooterButtonSize = new Vector2(150, 40); // footer corner button
         private const int ClonedButtonFontCap = 18;
 
-        // Position AND size a cloned native button so it fits its zone. Resolves the OUTERMOST clone
-        // root (the GameObject CloneMenuButton parented directly under <paramref name="panel"/> — the
-        // returned Button may be that root or a nested child), resets its localScale to 1 (the prefab
-        // can carry a >1 scale), constrains its RectTransform to a fixed size, and caps the label font
-        // so the text does not overflow the rect.
-        private static void AnchorButton(Button btn, Transform panel, Vector2 anchor, Vector2 offset, Vector2 size)
+        // Get-or-add a LayoutElement on a GameObject (caller sets the size fields). Centralises the
+        // null-coalescing pattern used throughout the layout-driven build.
+        private static LayoutElement LE(GameObject go)
         {
-            if (btn == null) return;
+            return go.GetComponent<LayoutElement>() ?? go.AddComponent<LayoutElement>();
+        }
 
-            // Walk up from the Button to the topmost transform whose parent is the panel: that is the
-            // clone root CloneMenuButton instantiated (the RectTransform carrying the visual size).
-            var t = btn.transform;
-            while (t.parent != null && t.parent != panel)
+        // Walk UP from a Clone*-returned widget (often a NESTED inner Button/Toggle) to the clone ROOT
+        // — the topmost transform whose parent is <paramref name="container"/>. Clone* parents that
+        // root directly under the container; the inner widget we get back is below it. Returns the
+        // clone root transform (or the start transform if no walk applies), or null.
+        private static Transform ResolveCloneRoot(Transform start, Transform container)
+        {
+            if (start == null) return null;
+            var t = start;
+            while (t.parent != null && t.parent != container)
                 t = t.parent;
-            var rt = t as RectTransform;
-            if (rt == null) rt = btn.transform as RectTransform;
-            if (rt == null) return;
+            return t;
+        }
 
-            // Reset any prefab scale so our fixed size is honoured 1:1.
-            rt.localScale = Vector3.one;
-
-            rt.anchorMin = anchor;
-            rt.anchorMax = anchor;
-            rt.pivot = anchor;
-            rt.anchoredPosition = offset;
-            rt.sizeDelta = size;
-
-            // Cap the label font so a large menu-sized glyph run fits the constrained rect.
-            var label = btn.GetComponentInChildren<Text>(true);
+        // Cap the label font on a cloned widget so a large menu-sized glyph run fits its constrained
+        // rect (the prefab text is sized for the full-width menu column).
+        private static void CapCloneFont(Transform start)
+        {
+            if (start == null) return;
+            var label = start.GetComponentInChildren<Text>(true);
             if (label != null && label.fontSize > ClonedButtonFontCap)
                 label.fontSize = ClonedButtonFontCap;
+        }
+
+        // Size a cloned native button via a LayoutElement on its clone ROOT (the parent LayoutGroup
+        // then drives position/size — no anchoredPosition/sizeDelta math). Resolves the OUTERMOST clone
+        // root (the GameObject Clone* parented directly under <paramref name="container"/> — the
+        // returned Button may be that root or a nested child), resets its localScale to 1 (the prefab
+        // can carry a >1 scale), sets preferred W/H + flexibleWidth 0, and caps the label font.
+        private static void AddCloneLayoutElement(Button btn, Transform container, float w, float h)
+        {
+            if (btn == null) return;
+            AddCloneLayoutElement(btn.transform, container, w, h);
+        }
+
+        private static void AddCloneLayoutElement(Transform start, Transform container, float w, float h)
+        {
+            var root = ResolveCloneRoot(start, container);
+            if (root == null) return;
+
+            // Reset any prefab scale so our preferred size is honoured 1:1.
+            root.localScale = Vector3.one;
+
+            var le = LE(root.gameObject);
+            le.preferredWidth = w;
+            le.preferredHeight = h;
+            le.flexibleWidth = 0;
+
+            CapCloneFont(start);
+        }
+
+        // Stretch a cloned native scroller GO (an ancestor of its returned content RectTransform, child
+        // of <paramref name="host"/>) to fill the group-sized host: relative 0..1 anchors, zero
+        // offsets → rubber, no pixel math. No LayoutElement on it (the host is not a layout group).
+        private static void StretchScrollerToHost(RectTransform content, Transform host)
+        {
+            if (content == null || host == null) return;
+            Transform t = content.transform;
+            while (t.parent != null && t.parent != host)
+                t = t.parent;
+            var rt = t as RectTransform;
+            if (rt == null) return;
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            rt.localScale = Vector3.one;
+        }
+
+        // Configure a ScrollRect content (or fallback list) RectTransform to stack rows top-down and
+        // self-size by content: pivot top, VerticalLayoutGroup + ContentSizeFitter(PreferredSize). Its
+        // parent is the viewport / scroll host (NOT a layout group) so the fitter is conflict-free (§E-1).
+        private static void ConfigureScrollContent(RectTransform content, int padding)
+        {
+            if (content == null) return;
+            content.pivot = new Vector2(0.5f, 1f);   // growth/scroll downward
+
+            var vlg = content.gameObject.GetComponent<VerticalLayoutGroup>()
+                      ?? content.gameObject.AddComponent<VerticalLayoutGroup>();
+            vlg.spacing = 2;
+            vlg.padding = new RectOffset(padding, padding, padding, padding);
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            var fitter = content.gameObject.GetComponent<ContentSizeFitter>()
+                         ?? content.gameObject.AddComponent<ContentSizeFitter>();
+            fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
         }
 
         // ─── Show / Hide ───────────────────────────────────────────────────
@@ -490,6 +709,13 @@ namespace Multipleer.UI
             // page over the background art. Idempotent: a second Show without an intervening Hide
             // won't double-store (HideMenuChrome guards _chromeHidden).
             NativeWidgetFactory.HideMenuChrome(_lobbyCanvas);
+
+            // Hide the in-game status bar (its own canvas, sort 5000) while the lobby is open: it is
+            // shown right before Show() on the host/join paths and, on a root canvas above the lobby's
+            // 4000, otherwise overlaps the lobby's footer. Restored in Hide() so the in-geoscape bar
+            // returns once the lobby closes (session play).
+            MultiplayerUI.Instance?.HideInGameBar();
+
             Refresh();
         }
 
@@ -502,6 +728,14 @@ namespace Multipleer.UI
             // leaving the lobby. Bulletproof: restores exactly the stored objects, guards nulls, and
             // is a safe no-op if nothing was hidden.
             NativeWidgetFactory.RestoreMenuChrome();
+
+            // Restore the in-game status bar we hid on Show — but ONLY while a session is still live
+            // (lobby closed because the geoscape was entered → the bar belongs back in-game). When the
+            // lobby closes because the session was torn down (LEAVE / disconnect), the engine is no
+            // longer active and the bar must stay hidden; the disconnect paths also explicitly hide it.
+            var engine = NetworkEngine.Instance;
+            if (engine != null && engine.IsActive)
+                MultiplayerUI.Instance?.ShowInGameBar();
         }
 
         // ─── Per-frame refresh (driven from MultiplayerUI.Update) ──────────
@@ -540,8 +774,6 @@ namespace Multipleer.UI
             }
 
             // CONNECT RAIL values.
-            if (_railIpValue != null) _railIpValue.text = _owner.GetRailIp();
-            if (_railLocalValue != null) _railLocalValue.text = _owner.GetRailLocalIp();
             if (_railStunValue != null) _railStunValue.text = _owner.GetRailStunCode();
             if (_railSaveValue != null)
             {
@@ -592,17 +824,16 @@ namespace Multipleer.UI
             if (_chatContent == null) return;
             var lines = _chat.Lines;
 
-            // Grow the chat row pool.
+            // Grow the chat row pool. The content's VerticalLayoutGroup positions each row top-down and
+            // the ContentSizeFitter sizes the content — no manual anchoredPosition Y math.
             while (_chatRows.Count < lines.Count)
             {
                 var t = UiToolkit.CreateText(_chatContent.gameObject, $"ChatRow{_chatRows.Count}",
-                    new Vector2(6, -_chatRows.Count * 20), new Vector2(0, 20), "", 12,
+                    Vector2.zero, new Vector2(0, 18), "", 12,
                     TextAnchor.UpperLeft, new Vector2(0f, 1f));
-                var rt = t.rectTransform;
-                rt.anchorMin = new Vector2(0f, 1f);
-                rt.anchorMax = new Vector2(1f, 1f);
-                rt.offsetMin = new Vector2(6, rt.offsetMin.y);
-                rt.offsetMax = new Vector2(-6, rt.offsetMax.y);
+                var le = LE(t.gameObject);
+                le.minHeight = 18;
+                le.flexibleWidth = 1;
                 _chatRows.Add(t);
             }
 
@@ -612,7 +843,6 @@ namespace Multipleer.UI
                 if (i >= lines.Count) { if (row.gameObject.activeSelf) row.gameObject.SetActive(false); continue; }
                 if (!row.gameObject.activeSelf) row.gameObject.SetActive(true);
                 var line = lines[i];
-                row.rectTransform.anchoredPosition = new Vector2(0, -i * 20);
                 if (line.IsSystem) { row.text = line.Text; row.color = new Color(0.7f, 0.7f, 0.5f); }
                 else { row.text = $"{line.Sender}: {line.Text}"; row.color = Color.white; }
             }
@@ -631,22 +861,11 @@ namespace Multipleer.UI
                 if (isMe) { me = p; break; }
             }
 
-            // Ready state: prefer the native toggle (set isOn without firing our listener), else
-            // the label-flip button.
-            if (_readyToggle != null)
-            {
-                var want = me != null && me.Ready;
-                if (_readyToggle.isOn != want)
-                {
-                    // SetIsOnWithoutNotify keeps the toggle visual in sync with authoritative state
-                    // without re-invoking OnLobbyToggleReady.
-                    _readyToggle.SetIsOnWithoutNotify(want);
-                }
-            }
-            else if (_readyButtonLabel != null)
-            {
-                _readyButtonLabel.text = (me != null && me.Ready) ? "READY ✓" : "NOT READY";
-            }
+            // Ready state: re-sync the local flag from authoritative roster state (me.Ready) and relabel
+            // the button. This overrides any optimistic click flip with the truth (e.g. after a
+            // reconnect or if the host's view differs), without re-invoking OnLobbyToggleReady.
+            _localReady = me != null && me.Ready;
+            UpdateReadyButtonLabel();
 
             // Play button: host only, enabled when host is ready AND every remote client is ready.
             // Cloned native buttons self-manage their disabled visuals from Button.interactable
@@ -658,6 +877,15 @@ namespace Multipleer.UI
                     _playButton.gameObject.SetActive(engine.IsHost);
                 _playButton.interactable = playable;
             }
+        }
+
+        // Reflect the current local ready state on the ready button's label. Call after a click flip and
+        // whenever RefreshControls re-syncs _localReady from authoritative roster state. "✓ READY" =
+        // readied up; "READY" = press to ready up.
+        private void UpdateReadyButtonLabel()
+        {
+            if (_readyButtonLabel == null) return;
+            _readyButtonLabel.text = _localReady ? "✓ READY" : "READY";
         }
 
         // All-ready gate (lobby-computed): every roster entry (host self-entry + all clients) ready.
@@ -754,15 +982,15 @@ namespace Multipleer.UI
         {
             var go = new GameObject($"Row{index}");
             go.transform.SetParent(_rosterArea.transform, false);
-            var rect = go.AddComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.5f, 1f);
-            rect.anchorMax = new Vector2(0.5f, 1f);
-            rect.pivot = new Vector2(0.5f, 1f);
-            rect.sizeDelta = new Vector2(RowWidth, RowHeight);
-            rect.anchoredPosition = new Vector2(0, -index * RowHeight);
+            go.AddComponent<RectTransform>();
+            // The RosterContent VerticalLayoutGroup positions/sizes the row; LE feeds its min height and
+            // lets it span the column width.
+            var le = LE(go);
+            le.minHeight = RowHeight;
+            le.flexibleWidth = 1;
 
             var label = UiToolkit.CreateText(go, "Label", new Vector2(10, 0),
-                new Vector2(RowWidth - 20, RowHeight), "", 15, TextAnchor.MiddleLeft,
+                new Vector2(0, RowHeight), "", 15, TextAnchor.MiddleLeft,
                 new Vector2(0f, 0.5f));
 
             // Add the Image BEFORE the Button so the Button has a Graphic to raycast against

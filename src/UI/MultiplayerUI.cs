@@ -309,30 +309,6 @@ namespace Multipleer.UI
 
         // ─── Connect rail values + clipboard ───────────────────────────────
 
-        // Host LAN ip:port for the rail. Resolved via the connected-UDP-socket method (R: not Dns).
-        public string GetRailIp()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsHost) return "—";
-            if (LanIpResolver.TryResolveLocalIPv4(out var ip) && ip != null)
-                return $"{ip}:{DefaultDirectPort}";
-            return $"(LAN ip unknown):{DefaultDirectPort}";
-        }
-
-        // Loopback ip:port for a SECOND game instance on THIS SAME PC (two-window local test).
-        // The host DirectIP listener binds DefaultDirectPort, so 127.0.0.1:<port> is connectable
-        // same-machine and SmartJoinParser routes it as DirectIp. The host now listens on a
-        // CompositeTransport that ALWAYS includes a DirectTransport, so this is valid whenever
-        // hosting.
-        public string GetRailLocalIp()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsHost) return "—";
-            if (FindHostingChild(TransportType.DirectIP) == null)
-                return "(host on DirectIP)";
-            return $"127.0.0.1:{DefaultDirectPort}";
-        }
-
         // Host STUN short code (or a status placeholder while discovering / on failure).
         // The host's CompositeTransport always includes a hosting StunTransport, so the code
         // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.

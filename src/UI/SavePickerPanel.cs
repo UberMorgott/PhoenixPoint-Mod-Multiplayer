@@ -39,12 +39,13 @@ namespace Multipleer.UI
             if (_root != null || menuCanvas == null) return;
 
             _root = new GameObject("MultipleerSavePicker");
-            _root.transform.SetParent(menuCanvas.transform, false);
             // The picker parents directly under the LIVE menu canvas, so it MUST be hidden from the
             // very first frame and guaranteed hidden even if a build sub-step throws (the throw is
-            // swallowed by the OnMenuReady try/catch in MainMenuPatches). Set inactive immediately,
-            // then re-assert it in a finally — a half-built picker can never leak onto the menu.
+            // swallowed by the OnMenuReady try/catch in MainMenuPatches). Set inactive BEFORE parenting
+            // under the live canvas, then re-assert it in a finally — the empty GO must never be active
+            // under the live menu canvas even for an instant, and a half-built picker can never leak onto the menu.
             _root.SetActive(false);
+            _root.transform.SetParent(menuCanvas.transform, false);
 
             try
             {
