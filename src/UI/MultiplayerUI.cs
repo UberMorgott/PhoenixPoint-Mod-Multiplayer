@@ -34,6 +34,19 @@ namespace Multipleer.UI
         private SavePickerPanel _savePicker;
         private bool _panelsBuilt;
 
+        // ─── Client-join connecting state ───────────────────────────────────
+        // True from the moment a CLIENT smart-join is kicked off (OnLobbyJoin) until that attempt
+        // resolves — confirmed (first host PEER_LIST arrives, Update opens the lobby), failed/timed
+        // out (OnConnectionFailed), or cancelled (the connecting box's CANCEL button). It gates the
+        // optimistic lobby Show: while it is true the lobby stays HIDDEN behind a native
+        // "Connecting…" box, so a client never sees a fake empty lobby for a join that hasn't been
+        // accepted yet. The HOST path never sets this (hosting is instant/local).
+        private bool _clientConnecting;
+        // The native "Connecting to host…" MessageBox shown during _clientConnecting, kept so we can
+        // dismiss it programmatically (ForceCloseAllPrompts) on confirm/fail/timeout. On user CANCEL
+        // the box closes itself and fires its callback.
+        private MessageBox _connectingBox;
+
         // True while the lobby overlay is on-screen. Consumed by the main-menu Escape patch
         // (MainMenuPatches) so Escape leaves the lobby instead of opening the Options menu.
         public bool IsLobbyOpen => _lobby?.IsVisible == true;
@@ -202,38 +215,66 @@ namespace Multipleer.UI
             var target = SmartJoinParser.Parse(input ?? "");
             if (target.Kind == JoinKind.Invalid)
             {
+                // Reached via OnLobbyJoinPrompt's OK path, which left the lobby HIDDEN. Keep it hidden
+                // behind this error box (HideForNativeScreen is idempotent) so the native error shows
+                // through cleanly, then re-show the lobby when the box is dismissed.
                 var mbErr = GameUtl.GetMessageBox();
+                _lobby?.HideForNativeScreen();
                 mbErr?.ShowSimplePrompt("Could not read that address or code.",
-                    MessageBoxIcon.Error, MessageBoxButtons.OK, null, this);
+                    MessageBoxIcon.Error, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
                 return;
             }
 
             // Tear down the auto-hosted session, then connect as a client (overlay stays open;
-            // Update's _lobby.Refresh() re-binds it to the new client session).
-            NetworkEngine.Instance?.Disconnect();
-            NetworkEngine.Instance?.Shutdown();
-
-            NetworkEngine.Create();
-            switch (target.Kind)
+            // Update's _lobby.Refresh() re-binds it to the new client session). The whole setup +
+            // connect is wrapped so that NO exception (transport construction, Initialize, a
+            // malformed target, etc.) can ever escape to freeze/crash the game — on any failure we
+            // route to the same error dialog (OnConnectionFailed) and the lobby stays usable for a
+            // retry. The actual socket connect inside JoinGame is already non-blocking + time-bounded
+            // (DirectTransport/StunTransport surface their outcome from Update on the main thread),
+            // so an unreachable host produces an error dialog within the connect timeout, never a
+            // frozen UI.
+            try
             {
-                case JoinKind.DirectIp:
-                    NetworkEngine.Instance.Initialize(TransportType.DirectIP);
-                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                    NetworkEngine.Instance.JoinGame(target.Ip, target.Port);
-                    break;
-                case JoinKind.StunCode:
-                    NetworkEngine.Instance.Initialize(TransportType.StunUDP);
-                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                    NetworkEngine.Instance.JoinGame($"{target.Ip}:{target.Port}", 0);
-                    break;
-                case JoinKind.SteamId:
-                    NetworkEngine.Instance.Initialize(TransportType.SteamP2P);
-                    NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                    NetworkEngine.Instance.JoinGame(target.SteamId.ToString(), 0);
-                    break;
+                NetworkEngine.Instance?.Disconnect();
+                NetworkEngine.Instance?.Shutdown();
+
+                NetworkEngine.Create();
+                switch (target.Kind)
+                {
+                    case JoinKind.DirectIp:
+                        NetworkEngine.Instance.Initialize(TransportType.DirectIP);
+                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                        NetworkEngine.Instance.JoinGame(target.Ip, target.Port);
+                        break;
+                    case JoinKind.StunCode:
+                        NetworkEngine.Instance.Initialize(TransportType.StunUDP);
+                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                        NetworkEngine.Instance.JoinGame($"{target.Ip}:{target.Port}", 0);
+                        break;
+                    case JoinKind.SteamId:
+                        NetworkEngine.Instance.Initialize(TransportType.SteamP2P);
+                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+                        NetworkEngine.Instance.JoinGame(target.SteamId.ToString(), 0);
+                        break;
+                }
+                // DO NOT open the lobby yet. The connect is async + time-bounded (up to 10s) and the
+                // host has not accepted us until its first PEER_LIST arrives — opening the lobby here
+                // would show a FAKE empty lobby that an async failure then kicks us out of. Instead
+                // enter the "connecting" state: keep the lobby HIDDEN (OnLobbyJoinPrompt already hid
+                // it via HideForNativeScreen) behind a native "Connecting…" box with a CANCEL button.
+                // Update() opens the real lobby once the join is confirmed; OnConnectionFailed tears
+                // down + shows the error on failure/timeout; CANCEL aborts. See ShowConnectingBox.
+                ShowConnectingBox();
             }
-            ShowInGameBar();
-            _lobby?.Show();
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[Multipleer] Join attempt failed: {ex}");
+                // Reset any half-open session so a subsequent retry / host still works cleanly.
+                NetworkEngine.Instance?.Shutdown();
+                OnConnectionFailed($"Join failed: {ex.Message}");
+            }
         }
 
         // Footer Join… button → native modal input → OnLobbyJoin.
@@ -241,13 +282,30 @@ namespace Multipleer.UI
         {
             var mb = GameUtl.GetMessageBox();
             if (mb == null) return;
+
+            // Hide the lobby overlay (proven Load-screen approach) so the native input prompt shows
+            // through cleanly, then bring it back on dismiss. CANCEL re-shows the lobby here. On OK we
+            // hand off to OnLobbyJoin while the lobby is STILL hidden — OnLobbyJoin owns the visibility
+            // from there: its valid path re-shows the lobby after connecting (ShowInGameBar + Show),
+            // and its invalid-input branch shows its OWN error box (lobby hidden behind it) and
+            // re-shows the lobby on that box's dismiss. This sequences the chained prompts so the
+            // visible element is always on top and the lobby always returns once everything is gone.
+            _lobby?.HideForNativeScreen();
             mb.ShowInputPrompt("Paste IP or code… (auto-detect)", "", null,
                 MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
                 delegate (MessageBoxCallbackResult res)
                 {
-                    if (res.DialogResult != MessageBoxResult.OK) return;
-                    OnLobbyJoin(res.InputTextResult ?? "");
+                    // Empty submit is impossible through OK (the native ValidateResult blocks
+                    // whitespace-only OK), and an empty string reaching OnLobbyJoin classifies as
+                    // Invalid → error box, never a connect-to-nothing. So empty == cancel/no-op.
+                    if (res.DialogResult == MessageBoxResult.OK)
+                        OnLobbyJoin(res.InputTextResult ?? "");
+                    else
+                        _lobby?.Show();
                 }, this);
+
+            // Web-style: clear the field and show a grey hint behind a blinking caret.
+            TryUpgradePromptInput("IP:port or STUN code");
         }
 
         // ─── Nickname rename (own roster row pencil) ───────────────────────
@@ -259,13 +317,103 @@ namespace Multipleer.UI
             var current = NetworkEngine.Instance?.IsHost == true
                 ? NetworkEngine.Instance.Session?.HostNickname ?? ""
                 : SystemInfo.deviceName;
+
+            // The native MessageBox renders BELOW the lobby overlay, so a prompt opened over the open
+            // lobby is occluded. Use the proven Load-screen approach: hide the lobby overlay (restore
+            // menu chrome + hide the status bar) so the native prompt shows through cleanly, then
+            // re-show the lobby in EVERY dialog-result path (OK and Cancel) so it never gets stuck
+            // hidden. On OK the rename commits/propagates (the host BroadcastPeerList in
+            // SendRename/HandleRename pushes it to every other peer); the lobby's per-frame Refresh
+            // reflects the new nickname once it is shown again.
+            _lobby?.HideForNativeScreen();
+            // Pass `current` as suggestedText so that IF the InputField can't be located
+            // (TryUpgradePromptInput == false) the prompt gracefully falls back to the OLD
+            // prefilled-value behavior instead of an empty, hint-less field.
             mb.ShowInputPrompt("New nickname", current, null,
                 MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
                 delegate (MessageBoxCallbackResult res)
                 {
-                    if (res.DialogResult != MessageBoxResult.OK) return;
-                    OnLobbyRename(res.InputTextResult ?? "");
+                    // OnLobbyRename no-ops on empty/whitespace, and the native ValidateResult
+                    // already blocks an empty OK — so an empty submit keeps the current nickname.
+                    if (res.DialogResult == MessageBoxResult.OK)
+                        OnLobbyRename(res.InputTextResult ?? "");
+                    _lobby?.Show();
                 }, this);
+
+            // Web-style: clear the prefilled value and show it as a grey placeholder hint behind a
+            // blinking caret instead, so the user can type immediately without selecting/deleting.
+            TryUpgradePromptInput(string.IsNullOrEmpty(current) ? "Nickname" : current);
+        }
+
+        // Reconfigure the just-opened native input prompt into a web-style field: empty text with a
+        // grey placeholder hint and an already-blinking caret (no extra click). The native
+        // MessageBoxInputPromptController.Show() runs synchronously inside ShowInputPrompt and
+        // activates + focuses the field in the same call, so this can run immediately afterward.
+        //
+        // Returns true if the InputField was found and reconfigured. On false the caller's prefilled
+        // suggestedText (if any) remains untouched as a graceful fallback — nothing breaks.
+        //
+        // Native grounding (decompiled, source-provenance authoritative):
+        //   MessageBoxInputPromptController.cs:11   private InputField _inputField   (UnityEngine.UI, legacy)
+        //   MessageBoxInputPromptController.cs:13-22 Show() sets _inputField.text = SuggestedText, SetActive(true)
+        //   MessageBoxInputPromptController.cs:32-33 OnShowReady() Select()+ActivateInputField()
+        //   MessageBoxInputPromptController.cs:50-57 ValidateResult blocks OK on whitespace-only text
+        // Also normalizes the field so ALL characters type (BUG A: prefab characterValidation rejected
+        // ".") and forces a readable dark text/caret on the light field (BUG B: white-on-white text).
+        private static bool TryUpgradePromptInput(string placeholderHint)
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return false;
+
+            // The InputField lives on the (active) input-prompt controller under the MessageBox.
+            var field = mb.GetComponentInChildren<InputField>(true);
+            if (field == null) return false;
+
+            // BUG A fix — accept ALL characters (periods/colons for IP:port, base32 for STUN codes).
+            // The native prompt prefab serializes this InputField with a restrictive characterValidation,
+            // so "." (and other punctuation) is silently rejected by the engine's per-keystroke validation
+            // — an IPv4 address can't be typed. The console-hotkey patch (doc 11) already stopped the dev
+            // console from eating the dot; this normalizes the FIELD-side filter that was the remaining
+            // cause. Forcing ContentType.Standard runs Unity's EnforceContentType (resets validation to
+            // None, single-line, etc.); we then set CharacterValidation.None explicitly and clear any
+            // leftover onValidateInput (the shared native field is reused across dialogs). Re-applied on
+            // every prompt so prior-use state never leaks in.
+            //   Native grounding: MessageBoxInputPromptController.cs:11 (the InputField),
+            //   :19 (combines data.InputValidator into onValidateInput — ours is null).
+            field.contentType = InputField.ContentType.Standard;
+            field.characterValidation = InputField.CharacterValidation.None;
+            field.onValidateInput = null;
+
+            // Clear any prefilled value so the placeholder hint shows. An empty submit can never
+            // rename/connect to nothing because the native ValidateResult rejects an empty OK.
+            field.text = string.Empty;
+
+            // BUG B fix — the typed text was white-on-white (invisible). PP's prompt prefab serializes
+            // the input Text white and renders over a light field background in our usage; the dev
+            // console itself overrides this same color at runtime (GameConsoleWindow.cs:611:
+            // ((Graphic)_inputField.textComponent).color = style.InputFieldTextColor), confirming the
+            // native default isn't readable on its own. Force a near-black text + caret that contrasts
+            // the light field, and darken the placeholder hint so it's visible yet distinct (alpha 0.45
+            // vs solid text). textComponent is null-guarded.
+            var inkColor = new Color(0.10f, 0.10f, 0.10f, 1f); // near-black, readable on light field
+            if (field.textComponent != null)
+                field.textComponent.color = inkColor;
+            field.customCaretColor = true;
+            field.caretColor = inkColor;
+
+            // InputField.placeholder is a Graphic, normally a Text in PP's prefab.
+            if (field.placeholder is Text ph)
+            {
+                ph.text = placeholderHint ?? string.Empty;
+                ph.color = new Color(0.10f, 0.10f, 0.10f, 0.45f); // dark translucent hint on light field
+            }
+
+            // Focus immediately so the caret blinks without an extra click. Reinforces the engine's
+            // own Select()+ActivateInputField from OnShowReady (harmless to repeat).
+            EventSystem.current?.SetSelectedGameObject(field.gameObject);
+            field.ActivateInputField();
+            field.caretPosition = 0;
+            return true;
         }
 
         // ─── Chat send ─────────────────────────────────────────────────────
@@ -392,12 +540,86 @@ namespace Multipleer.UI
 
         private void OnConnectionFailed(string reason)
         {
+            // A client join in flight just failed/timed out. End the connecting state and close the
+            // "Connecting…" box FIRST, so the error box below isn't pushed onto the modal stack behind
+            // it (and so the CANCEL callback can't also fire — it self-guards on _clientConnecting).
+            // No-op for a host or an already-resolved attempt.
+            _clientConnecting = false;
+            DismissConnectingBox();
+
+            // Tear down the failed/half-open session NOW so no leaked socket, worker thread, or stuck
+            // "Connecting/Failed" engine lingers — a subsequent Join or Host then starts from a clean
+            // slate. Shutdown also disposes any in-flight connect worker (DirectTransport/StunTransport
+            // abort + join their connect thread) and clears the engine's OnConnectionFailed handler so
+            // it can't double-fire. The in-game bar is hidden because this session is over.
+            NetworkEngine.Instance?.Disconnect();
+            NetworkEngine.Instance?.Shutdown();
+            _inGameBar?.SetActive(false);
+
             var mb = GameUtl.GetMessageBox();
             if (mb != null)
             {
+                // Fires asynchronously after a smart-join attempt while the lobby is still HIDDEN (we
+                // never opened it for an unconfirmed join). Keep it hidden behind this error box, then
+                // HIDE it on dismiss: the session is gone, so we return to the plain main menu where
+                // the user can re-open the network menu to host or retry the join. NO empty lobby is
+                // ever shown on the client failure path.
+                _lobby?.HideForNativeScreen();
                 mb.ShowSimplePrompt($"Connection failed: {reason}",
-                    MessageBoxIcon.Error, MessageBoxButtons.OK, null, this);
+                    MessageBoxIcon.Error, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Hide(); }, this);
             }
+            else
+            {
+                _lobby?.Hide();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Client-join connecting state machine
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Enter the connecting state for a client smart-join: keep the lobby HIDDEN and put up a
+        // native "Connecting to host…" box with a CANCEL button. The box renders ON TOP of the
+        // (hidden) lobby via the same approach the other prompts use; CANCEL aborts the connect. The
+        // box is dismissed programmatically by DismissConnectingBox() on confirm (Update) or
+        // failure/timeout (OnConnectionFailed). Null-safe: if the MessageBox is unavailable we still
+        // set _clientConnecting so Update can open the lobby on confirmation (degraded: no visible
+        // indicator, but never a fake lobby and never stuck).
+        private void ShowConnectingBox()
+        {
+            _clientConnecting = true;
+            _connectingBox = GameUtl.GetMessageBox();
+            _connectingBox?.ShowSimplePrompt("Connecting to host…",
+                MessageBoxIcon.Information, MessageBoxButtons.Cancel,
+                delegate (MessageBoxCallbackResult _)
+                {
+                    // User pressed CANCEL. Guard on _clientConnecting: a programmatic dismiss
+                    // (confirm/fail) uses ForceCloseAllPrompts which does NOT fire this callback, and
+                    // it also clears the flag first, so a late/stale invocation here no-ops.
+                    if (_clientConnecting)
+                        CancelClientConnect();
+                }, this);
+        }
+
+        // Close the "Connecting…" box without firing its CANCEL callback. Idempotent + null-safe.
+        private void DismissConnectingBox()
+        {
+            _connectingBox?.ForceCloseAllPrompts();
+            _connectingBox = null;
+        }
+
+        // CANCEL during connect: leave the connecting state, abort the in-flight connect (Shutdown
+        // disposes the connect worker + aborts the socket), and return to the plain network menu —
+        // no error dialog, no lobby. The box already closed itself on the CANCEL press.
+        private void CancelClientConnect()
+        {
+            _clientConnecting = false;
+            _connectingBox = null;
+            NetworkEngine.Instance?.Disconnect();
+            NetworkEngine.Instance?.Shutdown();
+            _inGameBar?.SetActive(false);
+            _lobby?.Hide();
         }
 
         private void OnDisconnectClicked()
@@ -452,6 +674,22 @@ namespace Multipleer.UI
             if (engine?.IsActive == true)
             {
                 engine.Update();
+
+                // CLIENT-JOIN CONFIRMATION GATE. While a client join is in flight, open the real
+                // lobby ONLY once the host has genuinely accepted us. The strongest available signal
+                // is the host's first PEER_LIST: HandleConnectionRequest accepts the JOIN and then
+                // BroadcastPeerList()s, and the client's HandlePeerList populates the roster. A bare
+                // TCP connect (OnPeerConnected) is premature — the host may still reject the JOIN
+                // (e.g. empty GUID) — so we wait for the roster, which is the host's explicit accept.
+                // engine.Update() above drains this frame's packets first, so the roster is current.
+                if (_clientConnecting && !engine.IsHost &&
+                    (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
+                {
+                    _clientConnecting = false;
+                    DismissConnectingBox();   // close "Connecting…" before showing the lobby
+                    ShowInGameBar();
+                    _lobby?.Show();           // real, populated roster — never a fake empty lobby
+                }
 
                 if (_barStatusText != null)
                 {

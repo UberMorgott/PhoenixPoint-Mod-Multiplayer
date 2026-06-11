@@ -139,7 +139,18 @@ namespace Multipleer.Network
             if (!IsActive || Transport == null) return;
 
             IsHost = false;
-            Transport.Connect(address, port);
+            // Defense-in-depth: the transport connect is non-blocking and catches its own socket
+            // errors, but ANY exception escaping here (e.g. a malformed address before the socket
+            // layer) must surface as a clean connection failure, never an unhandled crash.
+            try
+            {
+                Transport.Connect(address, port);
+            }
+            catch (Exception ex)
+            {
+                if (!_intentionalDisconnect)
+                    OnConnectionFailed?.Invoke(ex.Message);
+            }
         }
 
         public void Disconnect()

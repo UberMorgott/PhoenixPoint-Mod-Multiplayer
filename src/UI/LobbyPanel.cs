@@ -48,7 +48,10 @@ namespace Multipleer.UI
 
         // Chat zone. Version diff drives a cheap re-render; we track the subscribed session so we
         // re-bind (and drop the old handler) when the session instance is re-created on Join.
-        private readonly ChatLog _chat = new ChatLog(100);
+        // Capacity 500 = effectively whole-session history for a lobby chat (matches the host's
+        // ChatHistoryCap). The instance is readonly + never recreated, so history persists for the
+        // entire lobby lifetime (Show/Hide/Refresh never clear it).
+        private readonly ChatLog _chat = new ChatLog(500);
         private int _chatRenderedVersion = -1;
         private SessionManager _chatSession;
         private System.Action<string, string, bool> _chatHandler;
@@ -374,29 +377,24 @@ namespace Multipleer.UI
             scrollHost.AddComponent<RectTransform>();
             var sle = LE(scrollHost); sle.flexibleHeight = 1; sle.minHeight = 80;
 
-            _chatContent = NativeWidgetFactory.CloneScroller(scrollHost.transform);
-            if (_chatContent != null)
-            {
-                // Stretch the native scroller GO (child of scrollHost) to fill the group-sized host.
-                StretchScrollerToHost(_chatContent, scrollHost.transform);
-                ConfigureScrollContent(_chatContent, padding: 4);
-            }
-            else
-            {
-                // Fallback: a plain content rect, top-anchored, rows stacked downward by a VLG and
-                // sized by a ContentSizeFitter (parent is scrollHost, not a layout group → safe).
-                var fb = new GameObject("ChatContentFallback");
-                fb.transform.SetParent(scrollHost.transform, false);
-                var fbrt = fb.AddComponent<RectTransform>();
-                fbrt.anchorMin = new Vector2(0f, 1f);
-                fbrt.anchorMax = new Vector2(1f, 1f);
-                fbrt.pivot = new Vector2(0.5f, 1f);
-                fbrt.offsetMin = Vector2.zero;
-                fbrt.offsetMax = Vector2.zero;
-                fbrt.anchoredPosition = Vector2.zero;
-                _chatContent = fbrt;
-                ConfigureScrollContent(_chatContent, padding: 4);
-            }
+            // Chat content = a plain from-code top-anchored rect, identical to the proven RosterContent
+            // construction (BuildRosterZone). The native CloneScroller was the ONLY structural
+            // difference between the working roster list and the chat list; under the cloned native
+            // ScrollRect's viewport mask the from-code chat rows did not render ("nothing shows" even
+            // though the data pipeline appended them). Mirroring the known-good roster rect — top
+            // anchors, VLG + ContentSizeFitter via ConfigureScrollContent, parent is scrollHost (not a
+            // layout group → fitter conflict-free, §E-1) — makes the rows visible deterministically.
+            var contentGo = new GameObject("ChatContent");
+            contentGo.transform.SetParent(scrollHost.transform, false);
+            var contentRect = contentGo.AddComponent<RectTransform>();
+            contentRect.anchorMin = new Vector2(0f, 1f);
+            contentRect.anchorMax = new Vector2(1f, 1f);
+            contentRect.pivot = new Vector2(0.5f, 1f);
+            contentRect.offsetMin = Vector2.zero;
+            contentRect.offsetMax = Vector2.zero;
+            contentRect.anchoredPosition = Vector2.zero;
+            _chatContent = contentRect;
+            ConfigureScrollContent(_chatContent, padding: 4);
 
             // Input row: input (flexibleWidth 1) + Send (preferredWidth 70), laid out by an HLG.
             var inputRow = new GameObject("ChatInputRow");
@@ -410,15 +408,33 @@ namespace Multipleer.UI
             irhlg.childForceExpandWidth = false;
             irhlg.childForceExpandHeight = true;
 
+            // Both the Enter key (InputField.onEndEdit) and the SEND button route through ONE helper
+            // (SendCurrentChatInput) so the input text is read, empty-checked, sent, and cleared
+            // identically on every path. The send goes via OnLobbyChatSend → SessionManager.SendChat,
+            // which on the host echoes locally (sender sees their own line) and on a client relays to
+            // the host who broadcasts it back — so the sender always sees their message.
             _chatInput = UiToolkit.CreateInputField(inputRow, "ChatInput", "",
                 Vector2.zero, new Vector2(220, 26), new Vector2(0f, 0f),
-                v => { _owner.OnLobbyChatSend(v); if (_chatInput != null) _chatInput.text = ""; });
+                _ => SendCurrentChatInput());
             LE(_chatInput.gameObject).flexibleWidth = 1;
 
             var send = UiToolkit.CreateButton(inputRow, "ChatSend", "SEND",
                 Vector2.zero, new Vector2(70, 26), new Vector2(0f, 0f),
-                () => { if (_chatInput != null) { _owner.OnLobbyChatSend(_chatInput.text); _chatInput.text = ""; } });
+                SendCurrentChatInput);
             var sndle = LE(send.gameObject); sndle.preferredWidth = 70; sndle.flexibleWidth = 0;
+        }
+
+        // Single chat-send entry point shared by the SEND button and the Enter key. Reads the current
+        // input text, ignores empty/whitespace, sends it down the existing chat path, then clears the
+        // field. The sent line comes back via OnChatReceived (host echo / host broadcast) → _chat →
+        // RenderChat, so the sender sees their own message.
+        private void SendCurrentChatInput()
+        {
+            if (_chatInput == null) return;
+            var text = _chatInput.text;
+            if (!string.IsNullOrWhiteSpace(text))
+                _owner.OnLobbyChatSend(text);
+            _chatInput.text = "";
         }
 
         // RIGHT ROSTER: header with small count + scrollable rows (re-uses the existing pool).

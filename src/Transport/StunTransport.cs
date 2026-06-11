@@ -40,6 +40,17 @@ namespace Multipleer.Transport
         private long _nextPeerId = 1;
         private int _listenPort;
 
+        // ─── Non-blocking client connect (anti-freeze) ─────────────────────
+        // STUN discovery + hole-punch block for up to a few seconds; running them on the Unity main
+        // thread (Connect is called from the lobby's OnLobbyJoin) freezes the game. The connect runs
+        // on this worker and the outcome is surfaced from Update() on the main thread.
+        private Thread _connectThread;
+        private volatile bool _connectAborted;
+        private bool _pendingConnectResult;       // a result is waiting to be surfaced (guarded by _lock)
+        private bool _pendingConnectSucceeded;    // true = connected, false = failed
+        private ulong _pendingPeerId;             // minted peer id (success only)
+        private IPEndPoint _pendingRemoteEp;      // remote endpoint (success only)
+
         // ─── STUN discovery coordination ──────────────────────────────────
         // The transport binds a SINGLE UdpClient (_udp) and ReceiveLoop is the ONLY thread that
         // calls _udp.Receive on it. Earlier, DiscoverPublicEndpoint ALSO read _udp directly, so the
@@ -71,13 +82,22 @@ namespace Multipleer.Transport
         public void Shutdown()
         {
             _running = false;
+            // Abort any in-flight client connect worker so a late discovery result is not surfaced
+            // into a torn-down session.
+            _connectAborted = true;
             // Release any discovery thread still blocked on the per-server wait so it can observe
             // _running == false and exit promptly instead of hanging on the timeout.
             _stunDiscoveryPending = false;
             _stunSignal.Set();
             _udp?.Close();
             _receiveThread?.Join(1000);
-            lock (_lock) { _peers.Clear(); }
+            _connectThread?.Join(1000);
+            lock (_lock)
+            {
+                _peers.Clear();
+                _pendingConnectResult = false;
+                _pendingRemoteEp = null;
+            }
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);
         }
@@ -137,46 +157,113 @@ namespace Multipleer.Transport
         {
             IsHost = false;
             State = ConnectionState.Connecting;
-            OnStateChanged?.Invoke(State);
+            OnStateChanged?.Invoke(State);   // main thread (called from OnLobbyJoin) — safe
 
             StartUdp(0);
 
-            // Discover public endpoint via STUN
-            _publicEndPoint = DiscoverPublicEndpoint();
-            LocalEndpoint = _publicEndPoint != null
-                ? $"STUN({_publicEndPoint})"
-                : "STUN(discovery failed)";
+            // DiscoverPublicEndpoint blocks on per-server STUN waits (~up to 4s) and an invalid/
+            // unresolvable target would otherwise stall the Unity main thread → freeze. Run the whole
+            // discovery + hole-punch off the main thread and surface the outcome from Update() (main
+            // thread) via the pending-connect fields, so OnStateChanged/OnPeerConnected — and the
+            // MessageBox they can drive — never fire off-thread.
+            _connectAborted = false;
+            _connectThread = new Thread(() => ConnectWorker(address)) { IsBackground = true };
+            _connectThread.Start();
+        }
 
-            // Address format: "ip:port"
-            if (address.Contains(":"))
+        // Background worker: STUN discovery + hole-punch. Records the outcome for Update() to surface
+        // on the main thread; never raises Unity-facing events itself.
+        private void ConnectWorker(string address)
+        {
+            try
             {
-                var parts = address.Split(':');
-                if (parts.Length == 2 && int.TryParse(parts[1], out var remotePort)
-                    && IPAddress.TryParse(parts[0], out var ip))
+                // Discover public endpoint via STUN (bounded internally by the per-server timeouts).
+                _publicEndPoint = DiscoverPublicEndpoint();
+                LocalEndpoint = _publicEndPoint != null
+                    ? $"STUN({_publicEndPoint})"
+                    : "STUN(discovery failed)";
+
+                if (_connectAborted) return;
+
+                // Address format: "ip:port"
+                if (address.Contains(":"))
                 {
-                    // Same-machine fallback: two instances behind one NAT share a single public
-                    // endpoint, so hole-punching the public IP can't reach a host on this PC (no
-                    // NAT hairpin). If the target IP is our own discovered public address, the
-                    // host is local — redirect to loopback on the host's default STUN port.
-                    if (_publicEndPoint != null && ip.Equals(_publicEndPoint.Address))
+                    var parts = address.Split(':');
+                    if (parts.Length == 2 && int.TryParse(parts[1], out var remotePort)
+                        && IPAddress.TryParse(parts[0], out var ip))
                     {
-                        Debug.Log($"[Multipleer] STUN same-machine: target {ip}:{remotePort} == own public " +
-                                  $"address; redirecting to loopback 127.0.0.1:{DefaultStunPort}.");
-                        ip = IPAddress.Loopback;
-                        remotePort = DefaultStunPort;
+                        // Same-machine fallback: two instances behind one NAT share a single public
+                        // endpoint, so hole-punching the public IP can't reach a host on this PC (no
+                        // NAT hairpin). If the target IP is our own discovered public address, the
+                        // host is local — redirect to loopback on the host's default STUN port.
+                        if (_publicEndPoint != null && ip.Equals(_publicEndPoint.Address))
+                        {
+                            Debug.Log($"[Multipleer] STUN same-machine: target {ip}:{remotePort} == own public " +
+                                      $"address; redirecting to loopback 127.0.0.1:{DefaultStunPort}.");
+                            ip = IPAddress.Loopback;
+                            remotePort = DefaultStunPort;
+                        }
+
+                        var remoteEp = new IPEndPoint(ip, remotePort);
+                        var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
+                        lock (_lock) { _peers[peerId] = remoteEp; }
+
+                        // Hole punching: send dummy packets from different ports
+                        SendRaw(remoteEp, Encoding.UTF8.GetBytes("HOLE_PUNCH"));
+
+                        if (!_connectAborted)
+                            QueueConnectResult(true, peerId, remoteEp);
+                        return;
                     }
-
-                    var remoteEp = new IPEndPoint(ip, remotePort);
-                    var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
-                    lock (_lock) { _peers[peerId] = remoteEp; }
-
-                    // Hole punching: send dummy packets from different ports
-                    SendRaw(remoteEp, Encoding.UTF8.GetBytes("HOLE_PUNCH"));
-
-                    State = ConnectionState.Connected;
-                    OnStateChanged?.Invoke(State);
-                    OnPeerConnected?.Invoke(peerId, $"STUN({remoteEp})");
                 }
+
+                // Malformed address → connect failed (surfaced as Failed so the UI returns to lobby).
+                if (!_connectAborted) QueueConnectResult(false, 0, null);
+            }
+            catch
+            {
+                if (!_connectAborted) QueueConnectResult(false, 0, null);
+            }
+        }
+
+        private void QueueConnectResult(bool succeeded, ulong peerId, IPEndPoint remoteEp)
+        {
+            lock (_lock)
+            {
+                _pendingConnectResult = true;
+                _pendingConnectSucceeded = succeeded;
+                _pendingPeerId = peerId;
+                _pendingRemoteEp = remoteEp;
+            }
+        }
+
+        // Surface a completed connect attempt on the MAIN thread (called from Update). Keeps
+        // OnStateChanged/OnPeerConnected — and any MessageBox they drive — on Unity's main thread.
+        private void SurfacePendingConnect()
+        {
+            bool succeeded;
+            ulong peerId;
+            IPEndPoint remoteEp;
+            lock (_lock)
+            {
+                if (!_pendingConnectResult) return;
+                _pendingConnectResult = false;
+                succeeded = _pendingConnectSucceeded;
+                peerId = _pendingPeerId;
+                remoteEp = _pendingRemoteEp;
+                _pendingRemoteEp = null;
+            }
+
+            if (succeeded && remoteEp != null)
+            {
+                State = ConnectionState.Connected;
+                OnStateChanged?.Invoke(State);
+                OnPeerConnected?.Invoke(peerId, $"STUN({remoteEp})");
+            }
+            else
+            {
+                State = ConnectionState.Failed;
+                OnStateChanged?.Invoke(State);
             }
         }
 
@@ -228,6 +315,9 @@ namespace Multipleer.Transport
 
         public void Update()
         {
+            // Surface a completed client-connect on the main thread first, then drain packets.
+            SurfacePendingConnect();
+
             lock (_lock)
             {
                 while (_incomingQueue.Count > 0)

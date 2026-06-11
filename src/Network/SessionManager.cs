@@ -13,6 +13,15 @@ namespace Multipleer.Network
         private readonly Dictionary<ulong, long> _lastHeartbeat = new Dictionary<ulong, long>();
         private readonly HashSet<ulong> _readyClients = new HashSet<ulong>();
 
+        // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
+        // BroadcastChat is appended here in arrival order; on a new client fully joining the host
+        // replays this backlog to ONLY that client (ReplayChatHistoryTo) so late joiners see the
+        // full prior conversation. Host-only — clients render straight from OnChatReceived and never
+        // populate this. Capped to bound memory across a long session; the cap is generous so a
+        // normal lobby never drops a line.
+        private readonly List<ChatMessageData> _chatHistory = new List<ChatMessageData>();
+        private const int ChatHistoryCap = 500;
+
         public ulong? HostPeerId { get; private set; }
         public IReadOnlyDictionary<ulong, ClientInfo> Clients => _clients;
 
@@ -183,6 +192,12 @@ namespace Multipleer.Network
 
             // Roster changed → broadcast authoritative peer list.
             BroadcastPeerList();
+
+            // Backlog replay: send the full prior chat history to ONLY this new client (in arrival
+            // order) so a late joiner sees the conversation from the beginning. Done BEFORE the live
+            // "joined" SystemChat below — that notice is then fanned out to everyone (incl. the new
+            // client) exactly once via BroadcastToAll, so it is never duplicated for the joiner.
+            ReplayChatHistoryTo(clientId);
 
             SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} joined —");
         }
@@ -471,9 +486,30 @@ namespace Multipleer.Network
                 Text = text,
                 IsSystem = isSystem
             };
+            // Record into the host-authoritative backlog (arrival order) BEFORE fan-out so late
+            // joiners can be replayed the full session history. Bounded ring: drop the oldest line
+            // once the cap is hit (matches the panel ChatLog's bounded behaviour).
+            _chatHistory.Add(chat);
+            if (_chatHistory.Count > ChatHistoryCap)
+                _chatHistory.RemoveAt(0);
+
             OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem); // local echo on host
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ChatMessage,
                 MessageSerializer.SerializeChat(chat)));
+        }
+
+        // Host-only: replay the entire chat backlog to a SINGLE newly-joined client, in arrival
+        // order, as ordinary ChatMessage packets (the client's existing HandleChat receive path
+        // appends each one). Sent only to that client (SendToClient), so peers already in sync are
+        // never re-sent the backlog. No new packet type — reuses the proven chat serialization.
+        public void ReplayChatHistoryTo(ulong clientId)
+        {
+            if (!_engine.IsHost || _chatHistory.Count == 0) return;
+            foreach (var chat in _chatHistory)
+            {
+                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ChatMessage,
+                    MessageSerializer.SerializeChat(chat)));
+            }
         }
 
         public void HandleChat(NetworkMessage msg)

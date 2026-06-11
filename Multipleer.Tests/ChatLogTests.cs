@@ -45,5 +45,18 @@ namespace Multipleer.Tests
             log.Append("u", "a", false);
             Assert.NotEqual(v0, log.Version);
         }
+
+        // Session-history requirement: at the lobby's 500-line capacity the log retains the entire
+        // session backlog (here 250 lines) in arrival order — none dropped, first/last preserved —
+        // so a whole lobby conversation persists and can be replayed/rendered in full.
+        [Fact]
+        public void SessionCapacity_RetainsFullBacklogInOrder()
+        {
+            var log = new ChatLog(500);
+            for (int i = 0; i < 250; i++) log.Append("u", "m" + i, false);
+            Assert.Equal(250, log.Lines.Count);
+            Assert.Equal("m0", log.Lines.First().Text);
+            Assert.Equal("m249", log.Lines.Last().Text);
+        }
     }
 }
