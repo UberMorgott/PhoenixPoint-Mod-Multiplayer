@@ -4,6 +4,7 @@ using Base.Serialization;
 using Base.UI.MessageBox;
 using Multipleer.Harmony;
 using Multipleer.Network;
+using Multipleer.Network.CommandSync;
 using Multipleer.Transport;
 using Multipleer.Util;
 using UnityEngine;
@@ -183,6 +184,9 @@ namespace Multipleer.UI
             });
             NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+            // Wire the host-authoritative geoscape command relay (validate/execute/broadcast +
+            // result/rejected apply). Idempotent across host/join/leave cycles.
+            CommandRelay.Wire(NetworkEngine.Instance);
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
             ShowInGameBar();
             _lobby?.Show();
@@ -300,6 +304,10 @@ namespace Multipleer.UI
                         NetworkEngine.Instance.JoinGame(target.SteamId.ToString(), 0);
                         break;
                 }
+                // Wire the client-side geoscape command relay (apply approved results / log rejected).
+                // Engine + events exist after Initialize; the connect above is async so no campaign
+                // packet can arrive before this. Idempotent (detaches any prior wiring first).
+                CommandRelay.Wire(NetworkEngine.Instance);
                 // DO NOT open the lobby yet. The connect is async + time-bounded (up to 10s) and the
                 // host has not accepted us until its first PEER_LIST arrives — opening the lobby here
                 // would show a FAKE empty lobby that an async failure then kicks us out of. Instead

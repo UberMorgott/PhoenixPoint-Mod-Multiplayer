@@ -281,6 +281,17 @@ namespace Multipleer.Network
             SendToClient(clientId, msg);
         }
 
+        // Fan-out variant of ApproveCampaignAction: replays an approved action to ALL peers (incl. the
+        // originator, whose local execution was blocked by the client prefix). Result-replay model — the
+        // payload IS the authorized action; each peer reproduces it, no recompute. Routed to 0x31
+        // (CampaignActionApproved) so the existing RouteMessage path fires OnHostCampaignActionResult.
+        public void BroadcastCampaignActionResult(CampaignActionMessage action)
+        {
+            var payload = MessageSerializer.SerializeCampaignAction(action);
+            var msg = new NetworkMessage(PacketType.CampaignActionApproved, payload);
+            BroadcastToAll(msg);
+        }
+
         public void BroadcastCampaignState(byte[] stateData)
         {
             var payload = MessageSerializer.SerializeGameState("campaign", stateData);
