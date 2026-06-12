@@ -24,6 +24,9 @@ namespace Multipleer.Util
         private const string DirName = "Multipleer";
         private const string LogName = "multipleer.log";
         private const string PrevName = "multipleer-prev.log";
+        // Same-machine instance cap for the suffixed-file fallback (multipleer-2.log … -N.log) when
+        // the primary log is locked by an earlier instance (co-op client on the local 2-instance rig).
+        private const int MaxInstances = 5;
 
         private static readonly object Gate = new object();
         private static StreamWriter _writer;
@@ -69,10 +72,38 @@ namespace Multipleer.Util
                     }
 
                     // append:false -> truncate/create fresh; AutoFlush so a crash still leaves data on disk.
-                    _writer = new StreamWriter(logPath, append: false) { AutoFlush = true };
+                    // A 2nd same-machine instance (the co-op client test rig) finds multipleer.log
+                    // locked by instance 1 → IOException (sharing violation). Fall back to an
+                    // instance-suffixed file (multipleer-2.log, -3.log, … up to MaxInstances) so the
+                    // client gets its OWN dedicated log instead of silently writing nothing.
+                    var fellBack = false;
+                    for (var instance = 1; instance <= MaxInstances && _writer == null; instance++)
+                    {
+                        var attemptName = instance == 1
+                            ? LogName
+                            : "multipleer-" + instance + ".log";
+                        var attemptPath = Path.Combine(dir, attemptName);
+                        try
+                        {
+                            _writer = new StreamWriter(attemptPath, append: false) { AutoFlush = true };
+                            LogPath = attemptPath;
+                            fellBack = instance > 1;
+                        }
+                        catch (IOException)
+                        {
+                            // Locked by another instance — try the next suffix. If we exhaust the cap
+                            // the outer catch reports it and logging degrades to the engine log.
+                            if (instance == MaxInstances) throw;
+                        }
+                    }
+
                     _writer.WriteLine(
                         "=== Multipleer log — launch " +
                         DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ===");
+                    if (fellBack)
+                        _writer.WriteLine(
+                            "[Multipleer] primary log was locked (another instance) — using fallback file: " +
+                            Path.GetFileName(LogPath));
                 }
                 catch (Exception e)
                 {

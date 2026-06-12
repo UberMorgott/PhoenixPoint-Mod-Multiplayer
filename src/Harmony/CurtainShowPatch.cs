@@ -32,35 +32,58 @@ namespace Multipleer.Harmony
         public static MethodBase TargetMethod() => _targetMethod;
 
         // Signature: OnLevelStateChanged(Level level, Level.State prevState, Level.State newState).
-        // newState is an enum; compare by its integer/string name to avoid a hard type ref.
-        public static void Postfix(object newState)
+        // Harmony binds injected params BY NAME to the original (verified names: level/prevState/
+        // newState, decompile LevelSwitchCurtainController.cs:46); typed as object to avoid hard
+        // refs to Level / Level.State. newState is an enum; compare by its string name.
+        public static void Postfix(object level, object prevState, object newState)
         {
             try
             {
                 if (newState == null) return;
                 var state = newState.ToString();
-                if (state != "Loading" && state != "Playing") return;
+                if (state != "Loading" && state != "Playing" && state != "Loaded") return;
 
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActive) return;
 
-                if (state == "Playing")
+                if (state == "Playing" || state == "Loaded")
                 {
-                    // Native curtain auto-lifted (LiftCurtain on Loaded→Playing). In a co-op session
-                    // HOLD our own synced overlay until the RevealAll second barrier; outside co-op,
-                    // drop it immediately (unchanged behaviour).
-                    var playingCoord = engine.SaveTransfer;
-                    if (playingCoord != null && playingCoord.SessionStarted)
-                        playingCoord.OnReachedPlaying();           // co-op: hold until RevealAll
-                    else
-                        MultiplayerUI.Instance?.HideLoadOverlay();  // non-co-op: unchanged
+                    // Load finished / handed off → clear the captured loading Level so the phase-2
+                    // pump stops reading it (a null loading level == done, same as LoadingProgress→null).
+                    engine.SaveTransfer?.SetLoadingLevel(null);
+
+                    if (state == "Playing")
+                    {
+                        // Native curtain auto-lifted (LiftCurtain on Loaded→Playing). In a co-op
+                        // session HOLD our own synced overlay until the RevealAll second barrier;
+                        // outside co-op, drop it immediately (unchanged behaviour).
+                        var playingCoord = engine.SaveTransfer;
+                        if (playingCoord != null && playingCoord.SessionStarted)
+                            playingCoord.OnReachedPlaying();           // co-op: hold until RevealAll
+                        else
+                            MultiplayerUI.Instance?.HideLoadOverlay();  // non-co-op: unchanged
+                    }
                     return;
                 }
 
-                // state == "Loading": curtain dropped for the load → SHOW (only with a pending transfer).
+                // state == "Loading": curtain dropped for the load. Capture the loading Level for the
+                // phase-2 pump (GameUtl.CurrentLevel() is null mid-load), then SHOW the overlay.
                 var coord = engine.SaveTransfer;
-                if (coord == null || !coord.TransferActive) return;
+                if (coord == null) return;
+                coord.SetLoadingLevel(level);
 
+                // SHOW on a pending transfer (host/lobby) OR while this peer is in phase-2 world-load.
+                // The client predicate is FALSE at this instant (rxBytes reset, barrier not pending),
+                // so InPhase2 (begun && !loadComplete) is what makes the client show its overlay.
+                if (!(coord.TransferActive || coord.InPhase2))
+                {
+                    Debug.Log($"[Multipleer] curtain Loading: TransferActive={coord.TransferActive} " +
+                              $"InPhase2={coord.InPhase2} → skip ShowLoadOverlay");
+                    return;
+                }
+
+                Debug.Log($"[Multipleer] curtain Loading: TransferActive={coord.TransferActive} " +
+                          $"InPhase2={coord.InPhase2} → ShowLoadOverlay");
                 MultiplayerUI.Instance?.ShowLoadOverlay();
             }
             catch (Exception e)

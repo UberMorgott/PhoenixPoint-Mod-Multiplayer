@@ -98,6 +98,13 @@ namespace Multipleer.Network
         // peer reported, so the session-scoped pump throttles to whole-percent steps and detects the
         // load finishing (LoadingProgress→null) independently of overlay visibility. -1 = not reporting.
         private int _lastReportedLoadPct = -1;
+        // The Level instance currently loading. Captured from CurtainShowPatch's OnLevelStateChanged
+        // hook (newState==Loading), cleared on Playing/Loaded. The phase-2 pump reads .LoadingProgress
+        // off THIS, NOT GameUtl.CurrentLevel(): during a geoscape load CurrentLevel() is null (the old
+        // level is cleared at Game.cs:191, the new one assigned only at Game.cs:211 AFTER LoadCrt), so
+        // the pump would read null every frame and never report phase-1 progress. The loading Level's
+        // LoadingProgress is non-null from load-start (Level.cs:137) until done (Level.cs:149→null).
+        private Base.Levels.Level _loadingLevel;
         // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
         // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
         // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
@@ -133,6 +140,16 @@ namespace Multipleer.Network
 
         /// <summary>True while this peer is in phase-2 native world-load (begun, not yet done).</summary>
         public bool InPhase2 => RosterProgressTracker.InPhase2(_begun, _loadCompleteSent);
+
+        /// <summary>
+        /// CurtainShowPatch passes the loading Level on Loading (capture) and null on Playing/Loaded
+        /// (clear). The phase-2 pump reads progress off this — see <see cref="_loadingLevel"/>.
+        /// Typed object so the patch needs no hard Level ref; unboxed to Base.Levels.Level here.
+        /// </summary>
+        public void SetLoadingLevel(object level)
+        {
+            _loadingLevel = level as Base.Levels.Level;
+        }
 
         /// <summary>
         /// True while a save transfer/load is in flight: the host has opened the barrier, or this
@@ -265,6 +282,7 @@ namespace Multipleer.Network
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
             _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
+            _loadingLevel = null;      // fresh session: no level captured yet
             _loadPhaseActive = false; // fresh session: phase-2 not started yet
             // Second barrier (reveal) state — fresh session.
             _reachedPlaying = false;
@@ -507,6 +525,8 @@ namespace Multipleer.Network
             if (_reachedPlaying) return;
             _reachedPlaying = true;
             _revealHoldStartedMs = NowMs();
+            Debug.Log($"[Multipleer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
+                      $"→ hold + SendLoadComplete");
             // Idempotent: guarantees done is reported even if LoadingProgress never went null.
             SendLoadComplete();
         }
@@ -522,6 +542,7 @@ namespace Multipleer.Network
         {
             if (_revealed) return;
             _revealed = true;
+            Debug.Log("[Multipleer] PerformDeferredLift → reveal");
             try
             {
                 // The overlay IS the curtain; hiding it reveals the already-loaded world. Same
@@ -547,6 +568,7 @@ namespace Multipleer.Network
         public void OnRosterProgress(NetworkMessage msg)
         {
             var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
+            Debug.Log($"[Multipleer] RosterProgress RECV rows={rows.Count}");
             foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
@@ -672,14 +694,18 @@ namespace Multipleer.Network
             // Decoupled from the UI: the overlay being hidden must NOT stall progress/done reporting.
             if (InPhase2)
             {
-                var level = GameUtl.CurrentLevel();
-                var lp = level != null ? level.LoadingProgress : null;
+                // Read the captured loading Level (NOT GameUtl.CurrentLevel(), which is null mid-load
+                // — see _loadingLevel). _loadingLevel goes null either when its LoadingProgress ends
+                // OR when CurtainShowPatch clears it on Playing/Loaded; both routes mean "done".
+                var lp = _loadingLevel != null ? _loadingLevel.LoadingProgress : null;
                 if (lp != null)
                 {
                     var pct = RosterProgressTracker.ProgressByte(lp.Progress);
                     if (pct != _lastReportedLoadPct)
                     {
                         _lastReportedLoadPct = pct;
+                        Debug.Log($"[Multipleer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
+                                  $"pct={pct} (loadingLevel={(_loadingLevel != null)})");
                         ReportLoadProgress(pct);
                     }
                 }
@@ -687,6 +713,7 @@ namespace Multipleer.Network
                 {
                     // Native load finished (LoadingProgress went null) → event-driven done.
                     _lastReportedLoadPct = -1;
+                    Debug.Log("[Multipleer] phase-2 pump: LoadingProgress null → SendLoadComplete");
                     SendLoadComplete();
                 }
             }
@@ -737,6 +764,7 @@ namespace Multipleer.Network
                 if (_engine.IsHost && !_revealAllSent)
                 {
                     _revealAllSent = true;
+                    Debug.Log("[Multipleer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                     PerformDeferredLift(); // host reveals at the same instant
@@ -773,6 +801,7 @@ namespace Multipleer.Network
             var rows = new List<ProgressRow>(_slotProgress.Count);
             foreach (var kv in _slotProgress)
                 rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
+            Debug.Log($"[Multipleer] RosterProgress SEND rows={rows.Count}");
             var payload = MessageSerializer.SerializeRosterProgress(rows);
             _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
         }
