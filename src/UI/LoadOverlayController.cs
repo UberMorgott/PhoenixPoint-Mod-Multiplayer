@@ -173,8 +173,13 @@ namespace Multipleer.UI
         private void Refresh(NetworkEngine engine)
         {
             var tracker = engine.SaveTransfer.Tracker;
+            var localSlot = engine.Session.LocalSlotIndex;
             foreach (var p in engine.Session.GetLobbyRoster())
             {
+                // Show only OTHER players: hide this instance's own row (each instance hides only
+                // ITS OWN slot, so host and clients stay symmetric). No local row is ever built.
+                if (p.SlotIndex == localSlot) continue;
+
                 if (!_rows.TryGetValue(p.SlotIndex, out var row))
                 {
                     EnsureCanvas();
