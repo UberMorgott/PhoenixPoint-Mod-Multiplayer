@@ -208,6 +208,16 @@ namespace Multipleer.Network
                 client.PlayerGuid = join.PlayerGuid;
                 if (!string.IsNullOrEmpty(join.Nickname))
                     client.PlayerName = join.Nickname;
+
+                // Co-op "allow everything" policy (no per-player permission menu yet): grant the
+                // joining client FullCommander, keyed by its persistent playerGUID (the permission
+                // key). Without this the client has 0 permissions and HostArbiter rejects every
+                // command (e.g. "Missing permission: ManageAircraft"). Host-authoritative arbiter
+                // serializes commands, so "last command wins" naturally. Granted here (not in
+                // AddClient) because PlayerGuid is only bound after AddClient returns. Mirror the
+                // resulting mask onto ClientInfo so the PEER_LIST roster reflects real permissions.
+                PermissionManager.SetPermission(client.PlayerGuid, CampaignPermission.FullCommander, true);
+                client.Permissions = PermissionManager.GetPermissions(client.PlayerGuid);
             }
 
             // Send acceptance
@@ -342,6 +352,12 @@ namespace Multipleer.Network
             if (_slots == null) _slots = new SlotAllocator(ClientIdentity.PlayerGuid);
             LocalSlotIndex = 0; // host self
 
+            // Co-op "allow everything" policy: the host also gets FullCommander, keyed by its
+            // persistent playerGUID. Idempotent (SetPermission ORs the flag), so safe to call on
+            // every roster rebuild. Even though the host bypasses the HostArbiter gate today, this
+            // keeps the permission model consistent and lets the roster show the host's real mask.
+            PermissionManager.SetPermission(ClientIdentity.PlayerGuid, CampaignPermission.FullCommander, true);
+
             // Host self-entry first: the host is not in _clients, but the lobby roster (on both the
             // host and every client) must show it. Marked IsHost so each side can identify the host
             // row regardless of its display id (LocalSteamId may be 0 on DirectIP).
@@ -350,7 +366,7 @@ namespace Multipleer.Network
                 SteamId = _engine.LocalSteamId,
                 PlayerGuid = ClientIdentity.PlayerGuid,
                 Nickname = HostNickname,
-                Permissions = 0,
+                Permissions = PermissionManager.GetPermissions(ClientIdentity.PlayerGuid),
                 Ready = HostReady,
                 IsHost = true,
                 SlotIndex = 0
