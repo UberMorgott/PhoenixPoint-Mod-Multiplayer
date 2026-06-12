@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using Base.Core;
+using Base.Platforms;
 using Base.Serialization;
 using Base.Utils;
+using HarmonyLib;
 using Multipleer.Network.MessageLayer;
 using Multipleer.Transport;
 using PhoenixPoint.Common.Game;
@@ -359,6 +361,17 @@ namespace Multipleer.Network
                 yield break;
             }
 
+            // 1b. Replicate PhoenixSaveManager.PrepareLoadGame's state side-effects from the blob's
+            // metadata BEFORE FinishLevel runs (EnterLevel). The native LoadGame path calls
+            // PrepareLoadGame (PhoenixSaveManager.cs:623-647) which sets _enabledDlc/_currentGameId/
+            // _currentDifficulty/LatestLoad; we never go through that path here, so without this the
+            // SaveManager keeps _enabledDlc empty → PhoenixGame.IsDlcEnabled(FesteringSkies) false →
+            // GeoMap.GenerateSitePathData leaves _landConnectedSites null → GeoBehemothActor NRE →
+            // LevelCrt aborts → empty globe, no UI. We do NOT call PrepareLoadGame directly: it is a
+            // private IEnumerator coroutine that ALSO does IronmanSave() + tactical content reads
+            // (cs:625-637), i.e. far more than field-setting — so we replicate ONLY the field set.
+            ApplyPrepareLoadGameState(game.SaveManager, meta);
+
             // 2. Read level params from the same bytes.
             var paramsSource = new Base.Levels.BinaryDataLevelParamsSource(blob, ext);
             var levelParams = new ByRef<Base.Levels.ILevelParams>();
@@ -499,6 +512,9 @@ namespace Multipleer.Network
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
             Debug.Log("[Multipleer] EnterLevel → FinishLevel.");
             game.FinishLevel(_pendingResult);
+            // Confirm PrepareLoadGame state was applied (was 0 → empty geoscape; expect >0 now).
+            var dlcLen = sm.EnabledDlc != null ? sm.EnabledDlc.Length : 0;
+            Debug.Log($"[Multipleer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
             _pendingResult = null;
             // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
             // game coroutine loads the world on LATER frames). Do NOT hide the overlay here — the
@@ -614,6 +630,45 @@ namespace Multipleer.Network
             _lastReportedDownloadPct = -1;
             _rxChunkSeen = null;
             _rxChunksRemaining = 0;
+        }
+
+        // Replicate PhoenixSaveManager.PrepareLoadGame's field set (cs:639-642) on the live
+        // SaveManager from the transferred metadata, via reflection (the fields + the LatestLoad
+        // setter are private). Matches the native order/values exactly:
+        //   LatestLoad = metaData;                                  // setter also sets _currentGameId + IsIronmanMode
+        //   _currentGameId    = metaData.GameId;
+        //   _currentDifficulty= metaData.DifficultyDef;
+        //   _enabledDlc       = metaData.EnabledDlc ?? new EntitlementDef[0];
+        // The DLC array is the load-bearing one (empty → empty geoscape); the rest keep save/ironman
+        // bookkeeping consistent. EnabledDlc/GameId/DifficultyDef live on PPSavegameMetaData (the
+        // concrete runtime type the serializer produces), not the SavegameMetaData base.
+        private static void ApplyPrepareLoadGameState(PhoenixSaveManager saveManager, SavegameMetaData meta)
+        {
+            if (saveManager == null) return;
+            try
+            {
+                var pp = meta as PPSavegameMetaData;
+                if (pp == null)
+                {
+                    Debug.LogError("[Multipleer] co-op load: metadata is not PPSavegameMetaData; " +
+                                   "cannot apply PrepareLoadGame state (EnabledDlc/GameId/Difficulty).");
+                    return;
+                }
+
+                var t = typeof(PhoenixSaveManager);
+                // LatestLoad setter (private) also assigns _currentGameId + IsIronmanMode (cs:70-78).
+                var latestLoadProp = AccessTools.Property(t, "LatestLoad");
+                latestLoadProp?.SetValue(saveManager, pp, null);
+
+                AccessTools.Field(t, "_currentGameId").SetValue(saveManager, pp.GameId);
+                AccessTools.Field(t, "_currentDifficulty").SetValue(saveManager, pp.DifficultyDef);
+                AccessTools.Field(t, "_enabledDlc")
+                    .SetValue(saveManager, pp.EnabledDlc ?? new EntitlementDef[0]);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] co-op load: failed to apply PrepareLoadGame state: " + e);
+            }
         }
 
         private static bool TryGetGame(out PhoenixGame game, out PhoenixSaveManager saveManager)
