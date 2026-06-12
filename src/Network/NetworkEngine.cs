@@ -35,6 +35,7 @@ namespace Multipleer.Network
         public event Action<ulong, CampaignActionMessage> OnCampaignActionRequest;
         public event Action<TacticalActionMessage> OnHostTacticalActionResult;
         public event Action<CampaignActionMessage> OnHostCampaignActionResult;
+        public event Action<CampaignActionMessage> OnHostCampaignActionRejected;
 
         // ─── Initialization ───────────────────────────────────────────────
 
@@ -413,9 +414,16 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.CampaignActionApproved:
-                case PacketType.CampaignActionRejected:
                     var campResult = MessageSerializer.DeserializeCampaignAction(msg.Payload);
                     OnHostCampaignActionResult?.Invoke(campResult);
+                    break;
+
+                case PacketType.CampaignActionRejected:
+                    // Rejected actions go to a SEPARATE, non-applying channel. Firing the result/apply
+                    // event here would make the originating client perform the exact action the host
+                    // refused (its local exec was blocked by the Prefix). Feedback path only.
+                    var campRejected = MessageSerializer.DeserializeCampaignAction(msg.Payload);
+                    OnHostCampaignActionRejected?.Invoke(campRejected);
                     break;
 
                 case PacketType.PermissionUpdate:
