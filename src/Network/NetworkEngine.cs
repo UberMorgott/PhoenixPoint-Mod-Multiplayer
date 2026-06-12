@@ -478,6 +478,14 @@ namespace Multipleer.Network
                     SaveTransfer?.OnBegin(msg);
                     break;
 
+                case PacketType.RosterProgress:
+                    SaveTransfer?.OnRosterProgress(msg);
+                    break;
+
+                case PacketType.LoadComplete:
+                    SaveTransfer?.OnLoadComplete(msg);
+                    break;
+
                 // ─── STUB + TODO: members no longer silently fall through. ───────────
                 case PacketType.TacticalActionBroadcast:
                     // TODO(tactical-sync): apply broadcast on clients (latent: sent but never received-routed).
