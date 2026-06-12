@@ -61,6 +61,7 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
         }
@@ -88,6 +89,7 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
         }
@@ -482,6 +484,7 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.SaveDone:
+                    Debug.Log("[Multipleer] route: SaveDone");
                     SaveTransfer?.OnSaveDone(msg);
                     break;
 
@@ -490,6 +493,7 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.ClientLoaded:
+                    Debug.Log("[Multipleer] route: ClientLoaded");
                     SaveTransfer?.OnClientLoaded(msg);
                     break;
 

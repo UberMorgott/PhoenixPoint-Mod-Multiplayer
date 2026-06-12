@@ -191,6 +191,8 @@ namespace Multipleer.Network
                 return;
             }
 
+            Debug.Log($"[Multipleer] HostStartSession: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
+
             // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
             // DirectIP (length-prefixed TCP). The Stun/WAN path sends raw UDP with no sequencing/ACK/
             // retransmit, so 32 KB chunks fragment at the IP layer and any lost fragment fails the
@@ -248,6 +250,9 @@ namespace Multipleer.Network
         {
             var crc = Crc32(blob);
 
+            var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
+            Debug.Log($"[Multipleer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8}");
+
             long offset = 0;
             while (offset < blob.Length)
             {
@@ -269,6 +274,7 @@ namespace Multipleer.Network
 
             var donePayload = MessageSerializer.SerializeSaveDone(_transferId, blob.Length, ext, crc);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveDone, donePayload));
+            Debug.Log("[Multipleer] SendBlob: all chunks + SaveDone broadcast sent");
         }
 
         private void OpenBarrier()
@@ -314,6 +320,7 @@ namespace Multipleer.Network
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
                 _rxChunksRemaining = chunkCount;
+                Debug.Log($"[Multipleer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
             }
 
             if (chunk.Chunk != null && chunk.Offset >= 0 &&
@@ -330,6 +337,9 @@ namespace Multipleer.Network
                     _rxChunksRemaining--;
                     _rxReceived += chunk.Chunk.Length;
                     ReportDownloadProgress();
+                    // Throttled progress trace: every 64 chunks (and at completion). Not per-chunk.
+                    if (_rxChunksRemaining == 0 || (_rxChunksRemaining % 64) == 0)
+                        Debug.Log($"[Multipleer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
                 }
             }
         }
@@ -338,6 +348,8 @@ namespace Multipleer.Network
         {
             if (_engine.IsHost) return;
             var (transferId, totalBytes, ext, crc32) = MessageSerializer.DeserializeSaveDone(msg.Payload);
+
+            Debug.Log($"[Multipleer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
 
             if (_rxBuffer == null || transferId != _rxTransferId)
             {
@@ -377,14 +389,17 @@ namespace Multipleer.Network
 
             var timing = GetTiming();
             if (timing == null) { SendLoaded(transferId, false); return; }
+            Debug.Log("[Multipleer] OnSaveDone: verified OK → ClientLoadCrt");
             timing.Start(ClientLoadCrt(game, blob, loadExt, transferId));
         }
 
         private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId)
         {
+            Debug.Log("[Multipleer] ClientLoadCrt: preparing entry");
             yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
             var ok = _pendingResult != null;
+            Debug.Log($"[Multipleer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendLoaded(transferId, ok);
         }
@@ -396,6 +411,7 @@ namespace Multipleer.Network
 
         private IEnumerator<NextUpdate> PrepareEntryFromBlobCrt(PhoenixGame game, byte[] blob, string ext)
         {
+            Debug.Log("[Multipleer] PrepareEntryFromBlobCrt: start");
             var serializer = game.SaveManager.Serializer;
             var slice = new TimeSlice(serializer.SerializeTimeSlice);
 
@@ -436,6 +452,7 @@ namespace Multipleer.Network
             var binding = meta.LevelScene.CreateSceneBinding(serializedParam);
 
             _pendingResult = new LoadLevelGameResult(binding);
+            Debug.Log("[Multipleer] PrepareEntryFromBlobCrt: _pendingResult ready");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -444,6 +461,7 @@ namespace Multipleer.Network
 
         private void SendLoaded(Guid transferId, bool ok)
         {
+            Debug.Log($"[Multipleer] SendLoaded: transfer={transferId} ok={ok} → host");
             var payload = MessageSerializer.SerializeClientLoaded(_engine.LocalSteamId, transferId, ok);
             _engine.SendToHost(new NetworkMessage(PacketType.ClientLoaded, payload));
         }
