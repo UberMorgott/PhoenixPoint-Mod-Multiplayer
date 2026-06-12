@@ -39,6 +39,11 @@ namespace Multipleer.UI
         // from authoritative roster state (me.Ready) in RefreshControls.
         private bool _localReady;
         private Button _playButton;
+        // Cached last-applied Play-button visual state (active + interactable). Refresh() runs every
+        // frame, so we force an immediate visual refresh ONLY on a real transition (e.g. the moment
+        // the second player's Ready arrives), never every frame. -1 = not yet applied.
+        private int _playActiveCache = -1;
+        private int _playInteractableCache = -1;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
         private Text _railStunValue;
@@ -907,10 +912,45 @@ namespace Multipleer.UI
             if (_playButton != null)
             {
                 var playable = engine.IsHost && AllReady(roster);
+
+                var activeNow = engine.IsHost ? 1 : 0;
                 if (_playButton.gameObject.activeSelf != engine.IsHost)
                     _playButton.gameObject.SetActive(engine.IsHost);
+
+                var interactableNow = playable ? 1 : 0;
                 _playButton.interactable = playable;
+
+                // BUG: the cloned native button's enabled/greyed visual is driven by its Selectable
+                // colour/animator controller, which only re-runs DoStateTransition on a pointer event.
+                // Writing interactable every frame did NOT repaint it, so when the second player's
+                // Ready flipped AllReady false→true the PLAY button stayed visually disabled until the
+                // mouse hovered it. On a REAL transition (not every frame) force the button to
+                // re-evaluate its visual now and rebuild the footer layout so it appears immediately.
+                if (activeNow != _playActiveCache || interactableNow != _playInteractableCache)
+                {
+                    _playActiveCache = activeNow;
+                    _playInteractableCache = interactableNow;
+                    RefreshPlayButtonVisual();
+                }
             }
+        }
+
+        // Force the Play button's Selectable to re-apply its enabled/disabled visual immediately,
+        // without waiting for a pointer event. Toggling the Button component off→on triggers
+        // Selectable.OnEnable → DoStateTransition(currentSelectionState, instant) which re-paints the
+        // correct colour/animator state. A layout rebuild + canvas update repaints the footer the
+        // same frame (the button lives in nested HorizontalLayoutGroup/ContentSizeFitter chrome).
+        private void RefreshPlayButtonVisual()
+        {
+            if (_playButton == null) return;
+            if (_playButton.gameObject.activeInHierarchy && _playButton.enabled)
+            {
+                _playButton.enabled = false;
+                _playButton.enabled = true;
+            }
+            var rt = _playButton.transform.parent as RectTransform;
+            if (rt != null) LayoutRebuilder.ForceRebuildLayoutImmediate(rt);
+            Canvas.ForceUpdateCanvases();
         }
 
         // Reflect the current local ready state on the ready button's label. Call after a click flip and
