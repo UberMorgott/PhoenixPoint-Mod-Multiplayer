@@ -23,6 +23,7 @@
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
     <!-- DirectTransport is Unity-free (System.Net.Sockets only) → real-loopback connect tests. -->
     <Compile Include="..\src\Transport\DirectTransport.cs"><Link>DirectTransport.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\CommandCodec.cs"><Link>CommandCodec.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
