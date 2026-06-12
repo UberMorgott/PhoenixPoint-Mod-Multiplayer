@@ -227,8 +227,9 @@ namespace Multipleer.UI
             NetworkEngine.Instance?.Session?.SendRename(newName.Trim());
         }
 
-        // Host PLAY now transfers the already-chosen save (rail-selected); if none chosen, open
-        // the picker as a last-chance fallback.
+        // Host PLAY transfers the already-chosen save (rail-selected). If no save is chosen yet it
+        // does NOT start the session and does NOT open a fallback picker (that produced a broken
+        // undismissable window); it shows a native warning to choose a save first.
         public void OnLobbyPlay()
         {
             var engine = NetworkEngine.Instance;
@@ -241,15 +242,20 @@ namespace Multipleer.UI
                 engine.SaveTransfer?.HostStartSession(_pendingChosenSave);
                 return;
             }
-            // No save chosen in the rail yet → open the picker as a fallback.
-            _savePicker?.Show(chosen =>
+            // No save chosen yet. Do NOT start the session (HostStartSession with a null save) and do
+            // NOT open the SavePicker as a half-built fallback — that produced a broken, undismissable
+            // window over the lobby. Instead warn the host (vanilla native prompt) to pick a save via
+            // the rail's "Choose save" button first. Reuse the proven HideForNativeScreen → prompt →
+            // Show pattern (same as OnConnectionFailed / OnLobbyJoinPrompt) so the lobby is restored
+            // fully interactive on dismiss and never gets stuck hidden.
+            var mb = GameUtl.GetMessageBox();
+            if (mb != null)
             {
-                _pendingChosenSave = chosen;
-                engine.Session?.SetChosenSave(SaveDisplayName(chosen), SaveDisplayMeta(chosen));
-                DropCurtainEarly();
-                ShowLoadOverlay();
-                NetworkEngine.Instance?.SaveTransfer?.HostStartSession(chosen);
-            });
+                _lobby?.HideForNativeScreen();
+                mb.ShowSimplePrompt("Choose a save before starting.",
+                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
         }
 
         // ─── Smart-Join (footer Join…) ─────────────────────────────────────
