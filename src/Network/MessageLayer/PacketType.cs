@@ -27,6 +27,8 @@ namespace Multipleer.Network.MessageLayer
         LoadProgress = 0x1A,
         ClientLoaded = 0x1B,
         SessionBegin = 0x1C,
+        RosterProgress = 0x1D,
+        LoadComplete = 0x1E,
 
         // Tactical Actions
         TacticalActionRequest = 0x20,
