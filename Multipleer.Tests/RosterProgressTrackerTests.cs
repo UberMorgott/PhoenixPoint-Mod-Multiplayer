@@ -38,5 +38,36 @@ namespace Multipleer.Tests
             var t = new RosterProgressTracker();
             Assert.Equal((0, 0), t.Get(9));
         }
+
+        [Fact]
+        public void AllDone_False_Until_Every_Expected_Slot_Reports()
+        {
+            var t = new RosterProgressTracker();
+            var expected = new byte[] { 0, 1 };
+            Assert.False(t.AllDone(expected));
+            t.MarkDone(0);
+            Assert.False(t.AllDone(expected));
+            t.MarkDone(1);
+            Assert.True(t.AllDone(expected));
+        }
+
+        [Fact]
+        public void AllDone_Ignores_Extra_Done_Slots()
+        {
+            var t = new RosterProgressTracker();
+            t.MarkDone(0);
+            t.MarkDone(5);                         // slot that left / not expected
+            Assert.True(t.AllDone(new byte[] { 0 }));
+        }
+
+        [Fact]
+        public void MarkDone_Is_Idempotent()
+        {
+            var t = new RosterProgressTracker();
+            t.MarkDone(0);
+            t.MarkDone(0);
+            Assert.True(t.IsDone(0));
+            Assert.True(t.AllDone(new byte[] { 0 }));
+        }
     }
 }
