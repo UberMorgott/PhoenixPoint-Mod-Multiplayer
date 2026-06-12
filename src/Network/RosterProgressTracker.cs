@@ -59,5 +59,8 @@ namespace Multipleer.Network
             if (progress >= 1f) return 100;
             return (byte)System.Math.Floor(progress * 100f);
         }
+
+        /// <summary>Phase-2 (native world-load) is active from BEGIN (begun) until this peer's load is done.</summary>
+        public static bool InPhase2(bool begun, bool loadCompleteSent) => begun && !loadCompleteSent;
     }
 }

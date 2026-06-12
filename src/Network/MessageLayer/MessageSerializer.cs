@@ -488,6 +488,29 @@ namespace Multipleer.Network.MessageLayer
             }
         }
 
+
+        // ─── RevealAll (second barrier: synchronized geoscape reveal) ────────────────
+        // Mirrors SessionBegin exactly: a single long serverTicks (DateTime.UtcNow.Ticks at send),
+        // written via BinaryWriter.Write(long) and read back via BinaryReader.ReadInt64().
+        public static byte[] SerializeRevealAll(long serverTicks)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(serverTicks);
+                return ms.ToArray();
+            }
+        }
+
+        public static long DeserializeRevealAll(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                return br.ReadInt64();
+            }
+        }
+
         // ─── Ownership Messages ────────────────────────────────────────────
 
         // ASSIGN_OWNER (SoldierAssignment): soldierID→playerGUID ownership.

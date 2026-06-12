@@ -95,5 +95,23 @@ namespace Multipleer.Tests
         {
             Assert.Equal(expected, RosterProgressTracker.ProgressByte(progress));
         }
+
+        [Fact]
+        public void InPhase2_False_Before_Begin()
+        {
+            Assert.False(RosterProgressTracker.InPhase2(begun: false, loadCompleteSent: false));
+        }
+
+        [Fact]
+        public void InPhase2_True_After_Begin_Before_Done()
+        {
+            Assert.True(RosterProgressTracker.InPhase2(begun: true, loadCompleteSent: false));
+        }
+
+        [Fact]
+        public void InPhase2_False_After_Done()
+        {
+            Assert.False(RosterProgressTracker.InPhase2(begun: true, loadCompleteSent: true));
+        }
     }
 }

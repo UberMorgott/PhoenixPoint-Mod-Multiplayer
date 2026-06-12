@@ -28,8 +28,6 @@ namespace Multipleer.UI
         }
         private readonly Dictionary<byte, Row> _rows = new Dictionary<byte, Row>();
 
-        private int _lastReportedLoadPct = -1;
-
         private void EnsureCanvas()
         {
             if (_canvas != null) return;
@@ -47,6 +45,20 @@ namespace Multipleer.UI
             scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
             scaler.matchWidthOrHeight = 0.5f;
             // Display-only: no GraphicRaycaster.
+
+            // Fullscreen opaque cover: the native curtain auto-lifts on Loaded→Playing
+            // (LevelSwitchCurtainController.LiftCurtain), so THIS overlay is the synchronized
+            // cover that hides the already-revealed world until the RevealAll second barrier.
+            // Built BEFORE the roster Panel so the roster renders on top of it.
+            var cover = new GameObject("Cover");
+            cover.transform.SetParent(go.transform, false);
+            var coverImg = cover.AddComponent<Image>();
+            coverImg.color = new Color(0f, 0f, 0f, 1f); // fully opaque black
+            var crt = coverImg.rectTransform;
+            crt.anchorMin = new Vector2(0f, 0f);
+            crt.anchorMax = new Vector2(1f, 1f);
+            crt.offsetMin = Vector2.zero;
+            crt.offsetMax = Vector2.zero;
 
             var panel = new GameObject("Panel");
             panel.transform.SetParent(go.transform, false);
@@ -144,29 +156,12 @@ namespace Multipleer.UI
 
         private void Update()
         {
+            // UI refresh only. The phase-2 native-load driver (progress read + done detection) moved
+            // to SaveTransferCoordinator.Update() so it runs on every peer regardless of overlay
+            // visibility — see RosterProgressTracker.InPhase2 / SaveTransferCoordinator pump.
             if (!_visible) return;
             var engine = NetworkEngine.Instance;
             if (engine == null || engine.SaveTransfer == null || engine.Session == null) return;
-
-            // DRIVE phase-2: read native progress and report this peer's load percent (throttled).
-            var level = GameUtl.CurrentLevel();
-            var lp = level != null ? level.LoadingProgress : null;
-            if (lp != null)
-            {
-                var pct = RosterProgressTracker.ProgressByte(lp.Progress);
-                if (pct != _lastReportedLoadPct)
-                {
-                    _lastReportedLoadPct = pct;
-                    engine.SaveTransfer.ReportLoadProgress(pct);
-                }
-            }
-            else if (_lastReportedLoadPct >= 0)
-            {
-                // Native load finished (LoadingProgress went null) → event-driven done.
-                _lastReportedLoadPct = -1;
-                engine.SaveTransfer.SendLoadComplete();
-            }
-
             Refresh(engine);
         }
 

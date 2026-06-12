@@ -7,6 +7,7 @@ using Base.Utils;
 using HarmonyLib;
 using Multipleer.Network.MessageLayer;
 using Multipleer.Transport;
+using Multipleer.UI;
 using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Params;
 using PhoenixPoint.Common.Saves;
@@ -93,12 +94,28 @@ namespace Multipleer.Network
         private long _lastSnapshotMs = -1;
         private const long SnapshotIntervalMs = 200; // ≤5 Hz
         private bool _loadCompleteSent;
+        // Phase-2 native-load driver state (moved here from LoadOverlayController): last percent this
+        // peer reported, so the session-scoped pump throttles to whole-percent steps and detects the
+        // load finishing (LoadingProgress→null) independently of overlay visibility. -1 = not reporting.
+        private int _lastReportedLoadPct = -1;
         // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
         // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
         // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
         // would freeze at the phase-1 value. Does NOT re-block FinishLevel (the Harmony gate keys on
         // IsBarrierPending, not _barrierOpen). Cleared on all-done and reset in OpenBarrier.
         private bool _loadPhaseActive;
+
+        // ─── Second barrier: synchronized geoscape reveal (BUG D) ─────────
+        // The native curtain auto-lifts on Loaded→Playing; the mod overlay (opaque) is held as the
+        // real synchronized cover and dropped together via RevealAll. _reachedPlaying: this peer hit
+        // Playing (CurtainShowPatch); _revealHoldStartedMs: when the hold began (self-reveal fallback
+        // baseline); _phase2DeadlineMs: host forced-reveal deadline; _revealed: lift performed once;
+        // _revealAllSent: host broadcast-once guard.
+        private bool _reachedPlaying;
+        private long _revealHoldStartedMs;
+        private long _phase2DeadlineMs;
+        private bool _revealed;
+        private bool _revealAllSent;
 
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
@@ -113,6 +130,9 @@ namespace Multipleer.Network
 
         /// <summary>True once BEGIN has released this peer into the level (session has started).</summary>
         public bool SessionStarted => _begun;
+
+        /// <summary>True while this peer is in phase-2 native world-load (begun, not yet done).</summary>
+        public bool InPhase2 => RosterProgressTracker.InPhase2(_begun, _loadCompleteSent);
 
         /// <summary>
         /// True while a save transfer/load is in flight: the host has opened the barrier, or this
@@ -244,7 +264,14 @@ namespace Multipleer.Network
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
+            _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
             _loadPhaseActive = false; // fresh session: phase-2 not started yet
+            // Second barrier (reveal) state — fresh session.
+            _reachedPlaying = false;
+            _revealed = false;
+            _revealAllSent = false;
+            _revealHoldStartedMs = 0;
+            _phase2DeadlineMs = 0;
             Debug.Log($"[Multipleer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
@@ -465,6 +492,48 @@ namespace Multipleer.Network
             _engine.SendToHost(new NetworkMessage(PacketType.LoadComplete, payload));
         }
 
+
+        // ══════════════════════════════════════════════════════════════════
+        //  Second barrier: synchronized geoscape reveal (BUG D)
+        //  The native curtain auto-lifts on Loaded→Playing; the mod's opaque overlay is held as the
+        //  real cover and dropped together on RevealAll so every peer reveals the world at once.
+        // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>Called by CurtainShowPatch when this peer hits Playing during a co-op session.
+        /// Marks the hold start + reports this peer's load done (idempotent), but does NOT lift —
+        /// the overlay stays up until RevealAll (or a fallback).</summary>
+        public void OnReachedPlaying()
+        {
+            if (_reachedPlaying) return;
+            _reachedPlaying = true;
+            _revealHoldStartedMs = NowMs();
+            // Idempotent: guarantees done is reported even if LoadingProgress never went null.
+            SendLoadComplete();
+        }
+
+        /// <summary>All peers: host says everyone is loaded → lift the held overlay now.</summary>
+        public void OnRevealAll(NetworkMessage msg)
+        {
+            PerformDeferredLift();
+        }
+
+        // Lift the held synced overlay (reveals the already-loaded world). Once-guarded; never throws.
+        private void PerformDeferredLift()
+        {
+            if (_revealed) return;
+            _revealed = true;
+            try
+            {
+                // The overlay IS the curtain; hiding it reveals the already-loaded world. Same
+                // accessor CurtainShowPatch uses.
+                MultiplayerUI.Instance?.HideLoadOverlay();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] PerformDeferredLift failed: " + e);
+            }
+        }
+
         /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>
         public void OnLoadComplete(NetworkMessage msg)
         {
@@ -488,6 +557,8 @@ namespace Multipleer.Network
             _barrierOpen = false;
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;
+            // Host forced-reveal deadline: if a peer errors / never reports done, reveal anyway.
+            _phase2DeadlineMs = NowMs() + BarrierTimeoutMs;
 
             Debug.Log("[Multipleer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
@@ -597,6 +668,47 @@ namespace Multipleer.Network
 
         public void Update()
         {
+            // Phase-2 progress pump — runs on EVERY peer (host + clients) regardless of overlay visibility.
+            // Decoupled from the UI: the overlay being hidden must NOT stall progress/done reporting.
+            if (InPhase2)
+            {
+                var level = GameUtl.CurrentLevel();
+                var lp = level != null ? level.LoadingProgress : null;
+                if (lp != null)
+                {
+                    var pct = RosterProgressTracker.ProgressByte(lp.Progress);
+                    if (pct != _lastReportedLoadPct)
+                    {
+                        _lastReportedLoadPct = pct;
+                        ReportLoadProgress(pct);
+                    }
+                }
+                else if (_lastReportedLoadPct >= 0)
+                {
+                    // Native load finished (LoadingProgress went null) → event-driven done.
+                    _lastReportedLoadPct = -1;
+                    SendLoadComplete();
+                }
+            }
+
+            // Reveal deadlock fallbacks — run on EVERY peer every frame (above the host-only return).
+            // Host forced reveal: a peer errored / never reported done before the deadline. Broadcast
+            // RevealAll anyway so nobody is stuck behind the held overlay forever.
+            if (_engine.IsHost && _loadPhaseActive && !_revealAllSent && NowMs() > _phase2DeadlineMs)
+            {
+                _revealAllSent = true;
+                _engine.BroadcastToAll(new NetworkMessage(
+                    PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
+                _loadPhaseActive = false;
+                PerformDeferredLift();
+            }
+            // Per-peer self-reveal: this peer is holding (reached Playing) but the RevealAll never
+            // arrived (dead host). After the hold timeout, reveal locally so it isn't stuck forever.
+            if (_reachedPlaying && !_revealed && NowMs() - _revealHoldStartedMs > BarrierTimeoutMs)
+            {
+                PerformDeferredLift();
+            }
+
             // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
             // the phase-2 world-load (_loadPhaseActive, set in Begin() where _barrierOpen is cleared).
             // Without _loadPhaseActive every peer's tracker would freeze the instant phase-2 begins.
@@ -620,6 +732,15 @@ namespace Multipleer.Network
                 BroadcastSnapshot();
                 _loadPhaseActive = false;
                 Debug.Log("[Multipleer] co-op load: roster all-done — stopping phase-2 snapshots.");
+
+                // Second barrier satisfied: every peer is loaded → reveal the world simultaneously.
+                if (_engine.IsHost && !_revealAllSent)
+                {
+                    _revealAllSent = true;
+                    _engine.BroadcastToAll(new NetworkMessage( // reliable
+                        PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
+                    PerformDeferredLift(); // host reveals at the same instant
+                }
             }
 
             // Timeout/kick + Begin only apply while the LOADED barrier is still open (phase-1).

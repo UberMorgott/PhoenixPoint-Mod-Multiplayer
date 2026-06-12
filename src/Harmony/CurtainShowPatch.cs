@@ -46,8 +46,14 @@ namespace Multipleer.Harmony
 
                 if (state == "Playing")
                 {
-                    // Curtain LIFTED → this peer's gameplay starts; drop the overlay (no-op if hidden).
-                    MultiplayerUI.Instance?.HideLoadOverlay();
+                    // Native curtain auto-lifted (LiftCurtain on Loaded→Playing). In a co-op session
+                    // HOLD our own synced overlay until the RevealAll second barrier; outside co-op,
+                    // drop it immediately (unchanged behaviour).
+                    var playingCoord = engine.SaveTransfer;
+                    if (playingCoord != null && playingCoord.SessionStarted)
+                        playingCoord.OnReachedPlaying();           // co-op: hold until RevealAll
+                    else
+                        MultiplayerUI.Instance?.HideLoadOverlay();  // non-co-op: unchanged
                     return;
                 }
 

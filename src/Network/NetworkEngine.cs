@@ -497,6 +497,10 @@ namespace Multipleer.Network
                     SaveTransfer?.OnBegin(msg);
                     break;
 
+                case PacketType.RevealAll:
+                    SaveTransfer?.OnRevealAll(msg);
+                    break;
+
                 case PacketType.RosterProgress:
                     SaveTransfer?.OnRosterProgress(msg);
                     break;

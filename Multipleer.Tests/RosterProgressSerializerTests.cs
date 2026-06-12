@@ -50,5 +50,14 @@ namespace Multipleer.Tests
             Assert.Equal((byte)5, slot);
             Assert.Equal(id, transferId);
         }
+
+        [Fact]
+        public void RevealAll_RoundTrips()
+        {
+            var ticks = DateTime.UtcNow.Ticks;
+            var back = MessageSerializer.DeserializeRevealAll(
+                          MessageSerializer.SerializeRevealAll(ticks));
+            Assert.Equal(ticks, back);
+        }
     }
 }
