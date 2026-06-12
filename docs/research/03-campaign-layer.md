@@ -203,3 +203,24 @@ This is the **authoritative permission set** for the mod. Two flags extend beyon
 
 - **`ControlTime`** — gates who may pause / change the shared geoscape clock → [08-geoscape-concurrency](08-geoscape-concurrency.md).
 - **`ForceEndTurn`** — gates who may force-end the tactical player phase for the whole group → [07-tactical-concurrency](07-tactical-concurrency.md).
+
+## Vision / Roadmap — per-player permission MENU (2026-06-13)
+
+- **END GOAL:** a host-driven per-player access-control MENU (the "Player Management" screen, [specs/02](../specs/02-session-lifecycle-and-player-management.md) §4). Host assigns each connected player a granular, per-resource set of rights — not a single global on/off.
+- **Granular menu items the host toggles per player:**
+  - **Fly across the geoscape map** — gate `GeoVehicle.StartTravel` (→ `ManageAircraft`).
+  - **Assign a SPECIFIC aircraft to a specific player** — bind one `GeoVehicle` to one `playerGUID`; only its owner may fly/equip it (per-resource ownership, finer than the flag bits — future extension of the `playerGUID → flags` table to `playerGUID → {flags, ownedVehicleIds}`).
+  - **Base management** — `GeoPhoenixBase.ConstructFacility/RemoveFacility/RepairFacility` (→ `ManageBases`).
+  - **Squad / roster assignment** — soldier ownership `soldierID → playerGUID` via the Roster surface (§3 of specs/02); distinct panel from permissions.
+  - Plus existing flag bits: Research / Manufacturing / Recruitment / Equipment / Control Time / Force End Turn / Full Commander.
+- Toggle → `PERMISSION{ playerGUID, flag, value }` broadcast → applied live; persisted host-side in `coop-perms.json` ([specs/02](../specs/02-session-lifecycle-and-player-management.md) §4).
+- **Tighten incrementally** toward this menu; do NOT block the working co-op loop on it.
+
+### Interim decision (2026-06-13) — grant EVERYTHING (`FullCommander` default)
+
+- **Now:** both host self-entry AND every joining client default to `FullCommander` → allow-all. No per-resource gating yet; the controlled menu above is deferred.
+- **Why "last command wins" is safe under allow-all:** the host-authoritative arbiter ([geoscape-command-sync-design](../superpowers/specs/2026-06-12-geoscape-command-sync-design.md)) serializes all commands on its single-threaded receipt queue, so concurrent client commands never corrupt state — the latest valid command simply wins (consistent with [08-geoscape-concurrency](08-geoscape-concurrency.md) last-writer-wins).
+- **Bug it fixes:** joining clients previously got a `ClientInfo` with **no permission entry** (`SessionManager.AddClient` `:124-138` creates `ClientInfo` without flags). `PermissionManager.HasCampaignPermission` `:87-96` returns **`false` when the GUID is absent from `_assignments`** → host rejected ALL client `StartTravel`. Auto-granting `FullCommander` to host + each client populates `_assignments`, and the `FullCommander` override (`:92-93`) makes every `HasCampaignPermission` check pass.
+- **Enforcement seam (unchanged):** gating still flows through `PermissionManager.HasCampaignPermission` (FullCommander = allow-all override). When tightening, replace the blanket `FullCommander` grant in the host self-entry / `SessionManager.AddClient` path with menu-driven per-flag (and later per-resource) grants — the gate itself does not change.
+
+> **Doc-path drift note:** [geoscape-command-sync-design](../superpowers/specs/2026-06-12-geoscape-command-sync-design.md) references `docs/research/03-permission-system.md`; the actual file is THIS one (`03-campaign-layer.md`). No `03-permission-system.md` exists.

@@ -2,7 +2,7 @@
 
 **Status:** Approved (2026-06-12). **Mod:** Multipleer (Phoenix Point co-op). **Milestone:** runtime geoscape state synchronization.
 
-> **Thin spec by design.** The detailed engineering research already lives in `docs/research/03-permission-system.md`, `04-serialization.md`, `07-tactical-concurrency.md`, `08-geoscape-concurrency.md` and `docs/specs/01..03`. This document is the ARCHITECTURE INDEX + module map + staging — it references those rather than duplicating them. Each stage gets its OWN implementation plan; do not fold everything into one mega-doc or one mega-file.
+> **Thin spec by design.** The detailed engineering research already lives in `docs/research/03-campaign-layer.md`, `04-serialization.md`, `07-tactical-concurrency.md`, `08-geoscape-concurrency.md` and `docs/specs/01..03`. This document is the ARCHITECTURE INDEX + module map + staging — it references those rather than duplicating them. Each stage gets its OWN implementation plan; do not fold everything into one mega-doc or one mega-file.
 
 ## Problem
 Co-op currently loads the same save into both instances, then the two geoscape sessions run independently and DIVERGE (a vehicle move / time change on one peer never reaches the other). We need host-authoritative runtime synchronization of geoscape gameplay.
@@ -28,9 +28,9 @@ Conflict resolution = last-writer-wins by host receipt order (single-threaded ho
 
 ## Module decomposition (single-responsibility units)
 - **CommandRelay** — the generic pipeline orchestrator (intercept→encode→route→apply). Reusable across every intercepted action. Core seam.
-- **CommandCodec** — pure-logic (de)serialization of `CampaignActionMessage{ActionId,ActionType,ActorId,TargetId,Payload,Timestamp}`. Unit-testable, no UnityEngine. (Reuse/extend existing `MessageSerializer.Serialize/DeserializeCampaignAction`.)
-- **HostArbiter** — host-only: validate + execute real game method + broadcast result. Subscribes the existing `OnCampaignActionRequest` event (currently has zero subscribers).
-- **ClientApplier** — client-side: block local exec in Prefix; apply host result on `OnHostCampaignActionResult` (currently zero subscribers).
+- **CommandCodec** — pure-logic (de)serialization of `CampaignActionMessage{ActionId,ActionType,TargetId,Payload,Timestamp}`. Unit-testable, no UnityEngine. (Reuse/extend existing `MessageSerializer.Serialize/DeserializeCampaignAction`.) NOTE (as-built): the real envelope has **no `ActorId`** field — the actor rides in `TargetId`/`Payload`.
+- **HostArbiter** — host-only: validate + execute real game method + broadcast result. Subscribes the existing `OnCampaignActionRequest` event (wired in Stage 1 via `CommandRelay.Wire`).
+- **ClientApplier** — client-side: block local exec in Prefix; apply host result on `OnHostCampaignActionResult` (0x31) and log-only on `OnHostCampaignActionRejected` (0x32) — the rejected channel was split out so the originator never re-applies a refused action. (Wired in Stage 1.)
 - **InterceptRegistry** — declarative table of intercepts (BROAD, prune-later). Each entry = `{ target method (AccessTools-resolved), encode-args fn, apply-result fn, required permission }`. Adding/removing an intercept = one registry entry — no core change.
 - **PermissionGate** — turns the existing stub (`CampaignPermissionHelper.Check` = host=allow/client=block, flag arg ignored — ref `engine/03`) into REAL per-`playerGUID` flag enforcement using the already-defined `CampaignPermission` bits (`ControlSoldiers..FullCommander`, incl. `ControlTime 1<<7`). Keyed by GUID via `SessionManager`.
 - **TimeSync** — shared clock (pause/speed) — STAGE 2 (own unit, own plan).
@@ -41,7 +41,8 @@ Register ALL at once via CommandRelay, prune what misbehaves:
 `Research.SetQueued` (+`ResearchElement.AddResearch`), `ItemManufacturing.EnqueueItem` (+`RemoveFromQueue`), `GeoPhoenixBase.ConstructFacility`/`RemoveFacility`/`RepairFacility`, `GeoVehicle.StartTravel`/`AddEquipment`/`AddCharacter`, `GeoCharacter.SetItems`, `GeoPhoenixFaction.HireNakedRecruit`, `GeoFaction.KillCharacter`. Prune criteria: non-deterministic, double-applying, or purely-local (no sync needed).
 
 ## Reused existing infrastructure (ref audit)
-Packets `CampaignActionRequest 0x30`/`Approved 0x31`/`Rejected 0x32` + serializers + `NetworkEngine.SendCampaignAction`/`ApproveCampaignAction`/`RejectCampaignAction` + `RouteMessage` events `OnCampaignActionRequest`/`OnHostCampaignActionResult` (defined, no subscribers yet) + `ActionValidator` campaign permission map + `SessionManager` GUID/slot identity + `CampaignPatches` AccessTools intercept pattern. `CampaignActionResult 0x33` / `CampaignStateUpdate 0x34` are stubs — `CampaignStateUpdate` payload/flow is UNDEFINED in docs (open design item); Stage 1 uses result-replay (Approved/Rejected carry the result), not state push.
+Packets `CampaignActionRequest 0x30`/`Approved 0x31`/`Rejected 0x32` + serializers + `NetworkEngine.SendCampaignAction`/`ApproveCampaignAction`/`RejectCampaignAction` + `RouteMessage` events `OnCampaignActionRequest`/`OnHostCampaignActionResult`/`OnHostCampaignActionRejected` + `ActionValidator` campaign permission map + `SessionManager` GUID/slot identity + `CampaignPatches` AccessTools intercept pattern. `CampaignActionResult 0x33` / `CampaignStateUpdate 0x34` are stubs — `CampaignStateUpdate` payload/flow is UNDEFINED in docs (open design item); Stage 1 uses result-replay (Approved/Rejected carry the result), not state push.
+> **As-built (2026-06-13):** Stage 1 is IMPLEMENTED and wired — `CommandRelay.Wire` (called from `src/UI/MultiplayerUI.cs:189` host / `:310` client) subscribes `HostArbiter.HandleRequest`, `ClientApplier.HandleResult` (0x31), `ClientApplier.HandleRejected` (0x32, log-only). `NetworkEngine.BroadcastCampaignActionResult` (`:288`) fans an approved action out via 0x31. `0x33`/`0x34` receive-cases remain TODO stubs (`NetworkEngine.cs:530-536`). See `docs/research/00-current-state.md`.
 
 ## Staging by risk
 - **STAGE 1 — command actions + real permissions** (THIS milestone's first plan). Hook points are KNOWN (the curated list), skeleton exists. No SDK unknowns. Deliverable: client geoscape actions replicate host-authoritatively + per-GUID permission enforcement live. First vertical proof: `GeoVehicle.StartTravel` (the reported broken case).
