@@ -484,10 +484,10 @@ namespace Multipleer.Network
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
             game.FinishLevel(_pendingResult);
             _pendingResult = null;
-
-            // All peers enter together at BEGIN → the shared load is over; hide the overlay.
-            try { Multipleer.UI.MultiplayerUI.Instance?.HideLoadOverlay(); }
-            catch (System.Exception ex) { Debug.LogWarning("[Multipleer] HideLoadOverlay on BEGIN failed: " + ex.Message); }
+            // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
+            // game coroutine loads the world on LATER frames). Do NOT hide the overlay here — the
+            // phase-2 world-load happens after this returns. The overlay is hidden on the curtain
+            // LIFT (Loaded→Playing) by CurtainShowPatch instead.
         }
 
         // ══════════════════════════════════════════════════════════════════
