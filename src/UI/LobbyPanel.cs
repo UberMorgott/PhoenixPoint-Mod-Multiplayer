@@ -39,6 +39,15 @@ namespace Multipleer.UI
         // from authoritative roster state (me.Ready) in RefreshControls.
         private bool _localReady;
         private Button _playButton;
+        // The native PhoenixGeneralButton controller on the cloned Play button (resolved via
+        // reflection — the mod can't reference the type). Its Update() repaints ONLY when its own
+        // IsEnabled/VisualHovered/VisualPressed change, NOT when BaseButton.interactable changes, so
+        // writing interactable alone leaves the button stale (greyed) until a real pointer-enter.
+        // SetInteractable(bool) is the complete native "appear now" path: it sets BaseButton.interactable,
+        // flips IsEnabled, runs the animator and calls UpdateColorElements() — no pointer needed.
+        // object/MethodInfo because the type isn't referenceable at compile time.
+        private object _playButtonCtrl;
+        private System.Reflection.MethodInfo _playButtonSetInteractable;
         // Cached last-applied Play-button visual state (active + interactable). Refresh() runs every
         // frame, so we force an immediate visual refresh ONLY on a real transition (e.g. the moment
         // the second player's Ready arrives), never every frame. -1 = not yet applied.
@@ -570,7 +579,25 @@ namespace Multipleer.UI
             _playButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "PlayBtn", "PLAY ▸",
                 () => _owner.OnLobbyPlay());
             if (_playButton != null)
+            {
                 AddCloneLayoutElement(_playButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
+
+                // Resolve the native PhoenixGeneralButton controller on the clone ONCE. It lives on the
+                // prefab root that also carries BaseButton; the cloned child Button is at-or-below it, so
+                // GetComponentInParent(type) finds it. Fall back to GetComponentInChildren if the layout
+                // ever puts the controller below the Button. We then drive its SetInteractable(bool) to
+                // repaint the enabled/greyed visual immediately (see RefreshPlayButtonVisual).
+                var pgbType = HarmonyLib.AccessTools.TypeByName(
+                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
+                if (pgbType != null)
+                {
+                    _playButtonCtrl = _playButton.GetComponentInParent(pgbType)
+                        ?? _playButton.GetComponentInChildren(pgbType);
+                    if (_playButtonCtrl != null)
+                        _playButtonSetInteractable =
+                            HarmonyLib.AccessTools.Method(pgbType, "SetInteractable", new[] { typeof(bool) });
+                }
+            }
             else
             {
                 _playButton = UiToolkit.CreateButton(footer, "PlayBtn", "PLAY ▸",
@@ -920,37 +947,47 @@ namespace Multipleer.UI
                 var interactableNow = playable ? 1 : 0;
                 _playButton.interactable = playable;
 
-                // BUG: the cloned native button's enabled/greyed visual is driven by its Selectable
-                // colour/animator controller, which only re-runs DoStateTransition on a pointer event.
-                // Writing interactable every frame did NOT repaint it, so when the second player's
-                // Ready flipped AllReady false→true the PLAY button stayed visually disabled until the
-                // mouse hovered it. On a REAL transition (not every frame) force the button to
-                // re-evaluate its visual now and rebuild the footer layout so it appears immediately.
+                // The cloned native button's enabled/greyed visual is driven by its PhoenixGeneralButton
+                // controller, which repaints ONLY when its own IsEnabled changes (via SetInteractable) —
+                // NOT when BaseButton.interactable changes. So when the second player's Ready flips
+                // AllReady false→true (remote peer-ready path) OR the host toggles its own Ready (local
+                // path) — both flow through here — we must drive SetInteractable so the button appears
+                // immediately, without a pointer-enter. Fire ONLY on a real transition (the cache guard
+                // is per-instance and changes only when playable/active actually flips, so it covers BOTH
+                // the local and remote paths) to avoid repainting every frame.
                 if (activeNow != _playActiveCache || interactableNow != _playInteractableCache)
                 {
                     _playActiveCache = activeNow;
                     _playInteractableCache = interactableNow;
-                    RefreshPlayButtonVisual();
+                    RefreshPlayButtonVisual(playable);
                 }
             }
         }
 
-        // Force the Play button's Selectable to re-apply its enabled/disabled visual immediately,
-        // without waiting for a pointer event. Toggling the Button component off→on triggers
-        // Selectable.OnEnable → DoStateTransition(currentSelectionState, instant) which re-paints the
-        // correct colour/animator state. A layout rebuild + canvas update repaints the footer the
-        // same frame (the button lives in nested HorizontalLayoutGroup/ContentSizeFitter chrome).
-        private void RefreshPlayButtonVisual()
+        // Make the Play button's enabled/greyed visual appear immediately, without a pointer-enter.
+        // The clone is driven by the native PhoenixGeneralButton controller, whose Update() repaints
+        // only when ITS OWN IsEnabled/VisualHovered/VisualPressed change — not when BaseButton.interactable
+        // changes. SetInteractable(bool) is the complete native path: it sets BaseButton.interactable,
+        // flips IsEnabled, advances the animator (SetAnimationState → _animator.Update(0f)) and calls
+        // ResetButtonAnimations → UpdateColorElements(). The old approach (toggling Button.enabled +
+        // LayoutRebuilder + Canvas.ForceUpdateCanvases) did nothing because it never touched the
+        // controller, so it has been dropped.
+        private void RefreshPlayButtonVisual(bool playable)
         {
-            if (_playButton == null) return;
-            if (_playButton.gameObject.activeInHierarchy && _playButton.enabled)
+            if (_playButtonSetInteractable != null && _playButtonCtrl != null)
             {
-                _playButton.enabled = false;
-                _playButton.enabled = true;
+                try { _playButtonSetInteractable.Invoke(_playButtonCtrl, new object[] { playable }); }
+                catch (System.Exception e)
+                {
+                    UnityEngine.Debug.LogError("[Multipleer] Play button repaint failed: " + e.Message);
+                }
             }
-            var rt = _playButton.transform.parent as RectTransform;
-            if (rt != null) LayoutRebuilder.ForceRebuildLayoutImmediate(rt);
-            Canvas.ForceUpdateCanvases();
+            else if (_playButton != null)
+            {
+                // Fallback (controller unresolved, e.g. the UiToolkit-created non-native button): just
+                // set interactable, which IS sufficient for a plain Unity Selectable.
+                _playButton.interactable = playable;
+            }
         }
 
         // Reflect the current local ready state on the ready button's label. Call after a click flip and

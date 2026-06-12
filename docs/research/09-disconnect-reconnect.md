@@ -24,6 +24,31 @@
 - **Toast:** `NOTICE` → "Player X reconnecting — resyncing…" then "Player X is back." (The loading screen already covers the pause visually.)
 - **Reconnect storm:** one resync at a time; queue additional reconnects.
 
+## Co-op Loading Overlay — as-built two-phase barrier (`ab4b921`)
+
+> The session-start / resync barrier above describes the *design*. This is the *as-built* loading screen: the barrier is **two** barriers, because the native level-load and the native geoscape curtain each release per-instance and must be re-synchronized twice. Pump lives in `src/Network/SaveTransferCoordinator.cs`; UI in `src/UI/LoadOverlayController.cs`.
+
+- **Phase 1 — LOADED/BEGIN (save received → native load done).** Unchanged. Host gates on `_barrierOpen||_loadPhaseActive`, collects LOADED, broadcasts BEGIN; 60s timeout/kick. Set up in `Begin()`/`OpenBarrier`.
+- **Phase 2 — RevealAll (native curtain auto-lift → synchronized world reveal). NEW.**
+  - **Why a second barrier:** the native curtain auto-lifts on `Loaded→Playing` (`Base.Utils.LevelSwitchCurtainController.OnLevelStateChanged → LiftCurtain()`) **per instance, no cross-peer wait** — the faster machine would enter the geoscape first. The native curtain can't be held, so our overlay becomes a **synchronized opaque cover** that every peer drops at the same instant.
+  - **Reveal flow:** on `Loaded→Playing` during a co-op session (`coord.SessionStarted`), `CurtainShowPatch` calls `coord.OnReachedPlaying()` (HOLD; idempotent `SendLoadComplete`) instead of `HideLoadOverlay`. Host collects all `LoadComplete`; on `AllDone(roster)` it broadcasts `RevealAll` (once-guarded) and lifts locally. Every peer's `OnRevealAll` → `PerformDeferredLift()` = `MultiplayerUI.Instance?.HideLoadOverlay()` (guarded `_revealed`). A FULLSCREEN opaque black "Cover" Image (overlay canvas sortingOrder 7000, above native curtain) blacks out the already-revealed world while held.
+
+### InPhase2 pump decoupling (fixes the host-stall, bugs B+C)
+
+- The phase-2 native-load read + `ReportLoadProgress` + `SendLoadComplete` previously lived inside `LoadOverlayController.Update()` behind `if (!_visible) return;` → a peer whose overlay was hidden never reported phase-2 nor fired done → **host aggregate stalled forever.**
+- Now the pump runs in `SaveTransferCoordinator.Update()` **above the host-only early-return**, on every peer each frame (NetworkEngine.Update → SaveTransfer.Update, unconditional). Predicate `RosterProgressTracker.InPhase2(begun, loadCompleteSent) => begun && !loadCompleteSent` (Unity-free, test-linked) gates it. `LoadOverlayController.Update()` is now UI-refresh-only. Progress source = `GameUtl.CurrentLevel().LoadingProgress.Progress`; `LoadingProgress==null` ⇒ `SendLoadComplete`.
+
+### Wire format
+
+- New opcode **`PacketType.RevealAll = 0x1F`** (reliable; next free after `LoadComplete = 0x1E`, `0x20` begins the Tactical block). `MessageSerializer.SerializeRevealAll(long serverTicks)` / `DeserializeRevealAll(byte[])→long` mirror SessionBegin (BinaryWriter Int64). Routed `NetworkEngine.RouteMessage → SaveTransferCoordinator.OnRevealAll`.
+
+### Deadlock fallbacks (both placed ABOVE the host-only return so clients reach them)
+
+- **(a) Host forced reveal** after `_phase2DeadlineMs` (= `Begin()` time + `BarrierTimeoutMs` = 60s) if any peer never reports done.
+- **(b) Per-peer self-reveal** after `BarrierTimeoutMs` from `_revealHoldStartedMs` if the host dies / RevealAll never arrives.
+- All phase-2 fields (`_reachedPlaying`, `_revealHoldStartedMs`, `_phase2DeadlineMs`, `_revealed`, `_revealAllSent`, `_lastReportedLoadPct`) reset in `OpenBarrier`. Same-machine 2-instance test rig safe: done-set keyed by slotIndex, barrier by `msg.SenderSteamId`, nothing on LocalSteamId.
+- Status: `ab4b921` deployed + hash-verified, **in-game pending** (UI/Harmony/curtain seams integration-only). Exact file:line → [00-current-state](00-current-state.md) §Co-op loading screen.
+
 ## Mid-Battle Save Caveat
 
 - Reconnect mid-tactical-mission needs a **save while in battle**.

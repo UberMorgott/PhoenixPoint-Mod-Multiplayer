@@ -38,6 +38,23 @@
   - **NEW `LobbyCancelSuppressPatch`**: prefixes `HomeScreenViewState.OnInputEventInternal` to swallow the "Cancel" (RMB/back) gesture inside the lobby so back-navigation can't tear down the menu under the overlay. Gated by `IsLobbyOpen` → inert everywhere else. **Leaving the lobby is ONLY via the LEAVE button.**
 - **DirectTransport connect-fail diagnostic** `src/Transport/DirectTransport.cs`: the previously-silent `catch` on DirectIP connect now logs the real failure (`SocketException` → includes `SocketErrorCode`) via a reflection-based `LogError` (file stays Unity-free for the test link; no-op/Console fallback under tests).
 
+### Co-op loading screen — two-phase barrier + synchronized reveal (fix `ab4b921`, deployed + hash-verified, in-game pending)
+
+Commit `ab4b921` (on `main`, NOT pushed) fixed 3 coupled co-op loading-screen bugs.
+Phase-1 LOADED/BEGIN barrier + host broadcast gate (`_barrierOpen||_loadPhaseActive`) + 60s timeout/kick UNCHANGED. Design detail → [09-disconnect-reconnect](09-disconnect-reconnect.md) §Co-op Loading Overlay.
+
+- **B+C — phase-2 progress was gated on overlay visibility (host aggregate stalled).**
+  - Root: phase-2 native-load read + `ReportLoadProgress` + `SendLoadComplete` lived in `LoadOverlayController.Update()` behind `if (!_visible) return;`. A peer with a hidden overlay never reported phase-2 nor fired done.
+  - Fix: Unity-free `RosterProgressTracker.InPhase2(bool begun,bool loadCompleteSent) => begun && !loadCompleteSent` (`RosterProgressTracker.cs:64`) + coordinator prop `SaveTransferCoordinator.InPhase2` (`:135`). The progress pump (read `GameUtl.CurrentLevel().LoadingProgress.Progress` → `RosterProgressTracker.ProgressByte` → `ReportLoadProgress`; on `LoadingProgress==null` → `SendLoadComplete`) moved to the TOP of `SaveTransferCoordinator.Update()`, ABOVE the host-only early-return (`if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive)) return;`). Runs on every peer each frame (NetworkEngine.Update → SaveTransfer.Update, unconditional). `_lastReportedLoadPct` field moved controller → coordinator. `LoadOverlayController.Update()` is now UI-refresh-only.
+- **D — per-instance geoscape reveal (faster machine enters world first).**
+  - Root: native curtain auto-lifts on `Loaded→Playing` (`Base.Utils.LevelSwitchCurtainController.OnLevelStateChanged → LiftCurtain()`), per instance, no cross-peer wait; native curtain can't be held down.
+  - Fix = **second barrier, overlay as synchronized cover.** New opcode `PacketType.RevealAll = 0x1F` (`PacketType.cs:32`; reliable, next free after LoadComplete=0x1E, 0x20 begins Tactical). `MessageSerializer.SerializeRevealAll(long serverTicks)` / `DeserializeRevealAll(byte[])→long` (`MessageSerializer.cs:495,505`; mirror SessionBegin, BinaryWriter Int64). Routed `NetworkEngine.RouteMessage` → `SaveTransferCoordinator.OnRevealAll` (`NetworkEngine.cs:500`).
+  - On `Loaded→Playing` during a co-op session (`coord.SessionStarted`), `CurtainShowPatch` Postfix Playing branch calls `coord.OnReachedPlaying()` (`CurtainShowPatch.cs:54`) instead of `HideLoadOverlay` — HOLD: sets `_reachedPlaying`, records `_revealHoldStartedMs`, fires idempotent `SendLoadComplete` (`SaveTransferCoordinator.cs:505`). Host collects all `LoadComplete` (`MarkDone`); when `_tracker.AllDone(...)` it broadcasts RevealAll (once-guarded `_revealAllSent`) + lifts locally via `PerformDeferredLift` (`:741`). `OnRevealAll` → `PerformDeferredLift()` on every peer = `MultiplayerUI.Instance?.HideLoadOverlay()` (guarded `_revealed`, try/catch; `:515,521`).
+  - FULLSCREEN opaque black "Cover" Image (anchors 0→1, alpha 1, built before the roster Panel) added to `LoadOverlayController.EnsureCanvas` (`LoadOverlayController.cs:51`) so the held overlay blacks out the auto-revealed world. Overlay canvas sortingOrder 7000 (above native curtain).
+  - **Deadlock safety (two release paths, both ABOVE the host-only return so clients reach them):** (a) host forced reveal after `_phase2DeadlineMs` (= `Begin()` NowMs()+BarrierTimeoutMs, 60s) if a peer never reports done (`SaveTransferCoordinator.cs:697`); (b) per-peer self-reveal after BarrierTimeoutMs from `_revealHoldStartedMs` if host dies / RevealAll never arrives (`:707`). New fields (`_reachedPlaying`,`_revealHoldStartedMs`,`_phase2DeadlineMs`,`_revealed`,`_revealAllSent`,`_lastReportedLoadPct`) all reset in `OpenBarrier`.
+- **Same-machine 2-instance rig safe:** nothing keyed on LocalSteamId — done-set keyed by slotIndex, barrier set by `msg.SenderSteamId`.
+- **Tests: 85/85 green** (added `InPhase2_*` in `RosterProgressTrackerTests.cs`, `RevealAll_RoundTrips` in `RosterProgressSerializerTests.cs`). UI/Harmony/curtain seams are integration-only → **in-game verification pending.**
+
 ### Active next step
 
 - **Time Sync — Stage 2 Increment 1 (host-authoritative time)** — plan `docs/superpowers/plans/2026-06-13-time-sync-stage2-increment1.md`, grounded in `docs/research/12-time-flow-and-sync-seams.md`. Adds `SetTimeState = 14`, client pause/speed intercepts, client hourly-sim suppression, and a continuous `0x34` clock mirror (`RecordInstanceData`/`ProcessInstanceData`). Verified to NOT overlap any existing code.
@@ -55,3 +72,4 @@
   - host→client `StartTravel` mirror ✓ (first proof committed); client→host `StartTravel` after FullCommander grant — **re-test pending** (the grant is uncommitted).
   - Lobby `Escape` / RMB-`Cancel` guard — in-game pending.
   - DirectTransport connect-fail logging — surfaces the real socket error in `Player.log`, pending live confirm.
+  - Co-op loading screen B/C/D fix (`ab4b921`) — synchronized two-instance reveal, phase-2 progress on hidden peer, deadlock fallbacks — **in-game pending** (UI/Harmony/curtain seams are integration-only).
