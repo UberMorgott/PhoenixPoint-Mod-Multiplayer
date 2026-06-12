@@ -137,11 +137,44 @@ namespace Multipleer.Transport
                 var endpoint = $"Host({address}:{port})";
                 QueueConnectResult(true, peerId, client, endpoint);
             }
-            catch
+            catch (Exception ex)
             {
+                // Diagnostic: surface the real reason the DirectIP connect failed instead of
+                // swallowing it silently. For SocketException include the SocketErrorCode.
+                var sockEx = ex as SocketException;
+                var msg = sockEx != null
+                    ? $"[Multipleer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message} (SocketErrorCode={sockEx.SocketErrorCode})"
+                    : $"[Multipleer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message}";
+                LogError(msg);
                 try { client?.Close(); } catch { }
                 if (!_connectAborted) QueueConnectResult(false, 0, null, null);
             }
+        }
+
+        // This file is intentionally Unity-free at compile time (the test project links it directly
+        // without referencing UnityEngine), so we reach UnityEngine.Debug.LogError via reflection.
+        // In-game the call resolves and the line lands in the Unity Player.log; under tests it is a
+        // harmless no-op. Resolution is cached after first use.
+        private static System.Reflection.MethodInfo _unityLogError;
+        private static bool _unityLogErrorResolved;
+        private static void LogError(string message)
+        {
+            try
+            {
+                if (!_unityLogErrorResolved)
+                {
+                    _unityLogErrorResolved = true;
+                    var debugType = Type.GetType("UnityEngine.Debug, UnityEngine.CoreModule")
+                                    ?? Type.GetType("UnityEngine.Debug, UnityEngine");
+                    if (debugType != null)
+                        _unityLogError = debugType.GetMethod("LogError", new[] { typeof(object) });
+                }
+                if (_unityLogError != null)
+                    _unityLogError.Invoke(null, new object[] { message });
+                else
+                    Console.WriteLine(message); // fallback (e.g. test host with no UnityEngine loaded)
+            }
+            catch { /* logging must never break the connect path */ }
         }
 
         private void QueueConnectResult(bool succeeded, ulong peerId, TcpClient client, string endpoint)

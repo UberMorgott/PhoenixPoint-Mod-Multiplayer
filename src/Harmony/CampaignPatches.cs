@@ -12,8 +12,11 @@ namespace Multipleer.Harmony
         public static bool Check(CampaignPermission required)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActive) return true;
-            if (!engine.IsHost) return false;
+            if (engine == null || !engine.IsActive) return true; // single player
+            if (!engine.IsHost) return false;                    // client never executes locally
+            // Host: the authorized relayed action arrives via HostArbiter, which has already run
+            // PermissionGate.IsAllowed against the caller GUID. A direct host-local call is the host's
+            // own action and is allowed. (Per-GUID enforcement for the relayed path lives in HostArbiter.)
             return true;
         }
     }

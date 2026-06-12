@@ -2,6 +2,7 @@ using System.Reflection;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.UI;
+using Multipleer.Util;
 using PhoenixPoint.Modding;
 using UnityEngine;
 
@@ -17,6 +18,7 @@ namespace Multipleer
         public override void OnModEnabled()
         {
             Instance = this;
+            MultipleerLog.Init(); // earliest: capture startup lines into the dedicated mod log.
             Logger.LogInfo("[Multipleer] OnModEnabled");
 
             try
@@ -50,6 +52,7 @@ namespace Multipleer
             }
 
             Instance = null;
+            MultipleerLog.Shutdown();
         }
 
         private void Update()

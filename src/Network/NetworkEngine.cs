@@ -35,6 +35,7 @@ namespace Multipleer.Network
         public event Action<ulong, CampaignActionMessage> OnCampaignActionRequest;
         public event Action<TacticalActionMessage> OnHostTacticalActionResult;
         public event Action<CampaignActionMessage> OnHostCampaignActionResult;
+        public event Action<CampaignActionMessage> OnHostCampaignActionRejected;
 
         // ─── Initialization ───────────────────────────────────────────────
 
@@ -185,6 +186,16 @@ namespace Multipleer.Network
             Transport?.Broadcast(data);
         }
 
+        // UNRELIABLE fan-out for high-frequency, loss-tolerant state (co-op load RosterProgress
+        // snapshots). Mirrors BroadcastToAll but passes reliable: false so the transport may drop /
+        // reorder these — the receiver-side RosterProgressTracker merges monotonic-max, so a lost or
+        // late snapshot is harmless. LoadComplete / PEER_LIST stay on the reliable BroadcastToAll path.
+        public void BroadcastUnreliable(NetworkMessage msg)
+        {
+            var data = msg.Serialize();
+            Transport?.Broadcast(data, reliable: false);
+        }
+
         public void BroadcastExcept(ulong excludeSteamId, NetworkMessage msg)
         {
             var data = msg.Serialize();
@@ -268,6 +279,17 @@ namespace Multipleer.Network
 
             var msg = new NetworkMessage(PacketType.CampaignActionRejected, rejectPayload);
             SendToClient(clientId, msg);
+        }
+
+        // Fan-out variant of ApproveCampaignAction: replays an approved action to ALL peers (incl. the
+        // originator, whose local execution was blocked by the client prefix). Result-replay model — the
+        // payload IS the authorized action; each peer reproduces it, no recompute. Routed to 0x31
+        // (CampaignActionApproved) so the existing RouteMessage path fires OnHostCampaignActionResult.
+        public void BroadcastCampaignActionResult(CampaignActionMessage action)
+        {
+            var payload = MessageSerializer.SerializeCampaignAction(action);
+            var msg = new NetworkMessage(PacketType.CampaignActionApproved, payload);
+            BroadcastToAll(msg);
         }
 
         public void BroadcastCampaignState(byte[] stateData)
@@ -403,9 +425,16 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.CampaignActionApproved:
-                case PacketType.CampaignActionRejected:
                     var campResult = MessageSerializer.DeserializeCampaignAction(msg.Payload);
                     OnHostCampaignActionResult?.Invoke(campResult);
+                    break;
+
+                case PacketType.CampaignActionRejected:
+                    // Rejected actions go to a SEPARATE, non-applying channel. Firing the result/apply
+                    // event here would make the originating client perform the exact action the host
+                    // refused (its local exec was blocked by the Prefix). Feedback path only.
+                    var campRejected = MessageSerializer.DeserializeCampaignAction(msg.Payload);
+                    OnHostCampaignActionRejected?.Invoke(campRejected);
                     break;
 
                 case PacketType.PermissionUpdate:
@@ -466,6 +495,14 @@ namespace Multipleer.Network
 
                 case PacketType.SessionBegin:
                     SaveTransfer?.OnBegin(msg);
+                    break;
+
+                case PacketType.RosterProgress:
+                    SaveTransfer?.OnRosterProgress(msg);
+                    break;
+
+                case PacketType.LoadComplete:
+                    SaveTransfer?.OnLoadComplete(msg);
                     break;
 
                 // ─── STUB + TODO: members no longer silently fall through. ───────────

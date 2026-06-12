@@ -118,15 +118,17 @@ namespace Multipleer.Harmony
     }
 
     /// <summary>
-    /// While the co-op lobby overlay is open, Escape (the "OptionsMenu" input action) should LEAVE
-    /// the lobby instead of opening the main-menu Options screen. Escape is event-driven, dispatched
-    /// to UIStateMainMenu.OnInputEvent(InputEvent) — there is no per-frame poll to intercept — so we
-    /// prefix that handler: when the lobby is open and a "OptionsMenu" press arrives, we run the same
-    /// teardown the on-screen LEAVE button does (MultiplayerUI.OnLobbyLeave) and skip the original
-    /// (return false → Options not opened). Otherwise the original runs unchanged.
+    /// While the co-op lobby overlay is open, Escape (the "OptionsMenu" input action) must NOT leave
+    /// the lobby and must NOT open the main-menu Options screen over it — the ONLY way out of the
+    /// lobby is the explicit on-screen LEAVE button (MultiplayerUI.OnLobbyLeave). Escape is
+    /// event-driven, dispatched to UIStateMainMenu.OnInputEvent(InputEvent), so we prefix that
+    /// handler: when the lobby is open and an "OptionsMenu" press arrives, we simply SWALLOW it
+    /// (return false → original skipped, Options not opened, nothing torn down). Outside the lobby
+    /// the original runs unchanged. (Accidental Escape used to close the host listener / break the
+    /// session — that teardown is removed here.)
     /// </summary>
     [HarmonyPatch]
-    public static class LobbyEscapeLeavePatch
+    public static class LobbyEscapeSuppressPatch
     {
         private static MethodBase _targetMethod;
 
@@ -147,8 +149,51 @@ namespace Multipleer.Harmony
                 && ev.Type == InputEventType.Pressed
                 && ev.Name == "OptionsMenu")
             {
-                MultiplayerUI.Instance.OnLobbyLeave();
-                return false; // skip original → Options menu NOT opened
+                // Swallow Escape inside the lobby: do NOT open Options, do NOT leave. Leaving is
+                // ONLY via the LEAVE button.
+                return false; // skip original
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// While the co-op lobby overlay is open, the right-click / back gesture (the "Cancel" input
+    /// action) must NOT leave the lobby either. In the home-screen UI framework "Cancel" is captured
+    /// in HomeScreenViewState.OnInputEventInternal (sets _cancelEventPending), which the state's
+    /// update loop then turns into SwitchToPreviousState()/OnCancel() — i.e. a back-navigation that
+    /// can tear down the menu underneath the lobby. We prefix that base handler: when the lobby is
+    /// open and a "Cancel" press arrives, we SWALLOW it (return false → the whole base body is
+    /// skipped, _cancelEventPending is never set, so no back-navigation fires). The patch lives on
+    /// the BASE state so it covers whichever home state hosts the lobby overlay, but the
+    /// IsLobbyOpen gate makes it completely inert in every other menu/state — so normal right-click
+    /// back-navigation is untouched outside the co-op lobby. Leaving is ONLY via the LEAVE button.
+    /// </summary>
+    [HarmonyPatch]
+    public static class LobbyCancelSuppressPatch
+    {
+        private static MethodBase _targetMethod;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Home.View.HomeScreenViewState");
+            if (t == null) return false;
+            _targetMethod = AccessTools.Method(t, "OnInputEventInternal");
+            return _targetMethod != null;
+        }
+
+        public static MethodBase TargetMethod() => _targetMethod;
+
+        [HarmonyPrefix]
+        public static bool Prefix(InputEvent ev)
+        {
+            if (MultiplayerUI.Instance?.IsLobbyOpen == true
+                && ev.Type == InputEventType.Pressed
+                && ev.Name == "Cancel")
+            {
+                // Swallow right-click/back inside the lobby: skip the base body so the cancel is
+                // never queued and no back-navigation/teardown runs.
+                return false; // skip original
             }
             return true;
         }

@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using Base.Core;
+using Base.Platforms;
 using Base.Serialization;
 using Base.Utils;
+using HarmonyLib;
 using Multipleer.Network.MessageLayer;
 using Multipleer.Transport;
 using PhoenixPoint.Common.Game;
@@ -80,6 +82,26 @@ namespace Multipleer.Network
         // Keyed by the authoritative transport sender id (msg.SenderSteamId), so it lines up with the
         // roster's client SteamIds and is reliable even when LocalSteamId collides on DirectIP.
         private readonly Dictionary<ulong, int> _peerDownloadPct = new Dictionary<ulong, int>();
+
+        // ─── Co-op load overlay state ─────────────────────────────────────
+        // Host aggregate: per-slot (phase, percent), keyed by host-assigned slotIndex (never the
+        // transport peer id). The host serializes this into the RosterProgress snapshot each tick.
+        private readonly Dictionary<byte, (byte phase, byte percent)> _slotProgress
+            = new Dictionary<byte, (byte, byte)>();
+        // Shared receiver-side view (host + every client): monotonic-max merge + event-driven done-set.
+        private readonly RosterProgressTracker _tracker = new RosterProgressTracker();
+        private long _lastSnapshotMs = -1;
+        private const long SnapshotIntervalMs = 200; // ≤5 Hz
+        private bool _loadCompleteSent;
+        // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
+        // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
+        // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
+        // would freeze at the phase-1 value. Does NOT re-block FinishLevel (the Harmony gate keys on
+        // IsBarrierPending, not _barrierOpen). Cleared on all-done and reset in OpenBarrier.
+        private bool _loadPhaseActive;
+
+        /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
+        public RosterProgressTracker Tracker => _tracker;
 
         public SaveTransferCoordinator(NetworkEngine engine)
         {
@@ -218,6 +240,12 @@ namespace Multipleer.Network
             _barrierOpenedAtMs = NowMs();
             _loadedPeers.Clear();
             _peerDownloadPct.Clear();
+            _slotProgress.Clear();
+            _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
+            _lastSnapshotMs = -1;
+            _loadCompleteSent = false;
+            _loadPhaseActive = false; // fresh session: phase-2 not started yet
+            Debug.Log($"[Multipleer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -340,6 +368,17 @@ namespace Multipleer.Network
                 yield break;
             }
 
+            // 1b. Replicate PhoenixSaveManager.PrepareLoadGame's state side-effects from the blob's
+            // metadata BEFORE FinishLevel runs (EnterLevel). The native LoadGame path calls
+            // PrepareLoadGame (PhoenixSaveManager.cs:623-647) which sets _enabledDlc/_currentGameId/
+            // _currentDifficulty/LatestLoad; we never go through that path here, so without this the
+            // SaveManager keeps _enabledDlc empty → PhoenixGame.IsDlcEnabled(FesteringSkies) false →
+            // GeoMap.GenerateSitePathData leaves _landConnectedSites null → GeoBehemothActor NRE →
+            // LevelCrt aborts → empty globe, no UI. We do NOT call PrepareLoadGame directly: it is a
+            // private IEnumerator coroutine that ALSO does IronmanSave() + tactical content reads
+            // (cs:625-637), i.e. far more than field-setting — so we replicate ONLY the field set.
+            ApplyPrepareLoadGameState(game.SaveManager, meta);
+
             // 2. Read level params from the same bytes.
             var paramsSource = new Base.Levels.BinaryDataLevelParamsSource(blob, ext);
             var levelParams = new ByRef<Base.Levels.ILevelParams>();
@@ -369,22 +408,31 @@ namespace Multipleer.Network
             if (!_engine.IsHost) return;
             var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
 
+            Debug.Log($"[Multipleer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
+                      $"transferId={transferId} (current {_transferId}) ok={ok}.");
+
             // Ignore a stale ack from a prior transfer: it must match the current transfer id.
             if (transferId != _transferId)
             {
-                Debug.LogWarning($"[Multipleer] LOADED from peer {steamId} for stale transfer " +
-                                 $"{transferId} (current {_transferId}); ignoring.");
+                Debug.LogWarning($"[Multipleer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
+                                 $"transfer {transferId} (current {_transferId}); ignoring.");
                 return;
             }
 
             if (ok)
             {
-                _loadedPeers.Add(steamId);
+                // Key the barrier set by the AUTHORITATIVE transport id (msg.SenderSteamId), NOT the
+                // self-reported payload steamId — mirrors _peerDownloadPct (line ~80): robust to
+                // LocalSteamId collision on DirectIP / the local 2-instance test rig. The payload
+                // steamId can collide across peers and stall release at Count=1.
+                _loadedPeers.Add(msg.SenderSteamId);
+                Debug.Log($"[Multipleer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
                 TryReleaseBarrier();
             }
             else
             {
-                Debug.LogWarning($"[Multipleer] Peer {steamId} failed to load the transferred save.");
+                Debug.LogWarning($"[Multipleer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
+                                 $"failed to load the transferred save.");
             }
         }
 
@@ -397,8 +445,40 @@ namespace Multipleer.Network
             var expected = 1; // host
             foreach (var _ in _engine.Session.GetConnectedClients()) expected++;
 
-            if (_loadedPeers.Count >= expected)
+            var release = _loadedPeers.Count >= expected;
+            Debug.Log($"[Multipleer] TryReleaseBarrier: loadedPeers={_loadedPeers.Count} " +
+                      $"expected={expected} release={release}.");
+
+            if (release)
                 Begin();
+        }
+
+        /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
+        public void SendLoadComplete()
+        {
+            if (_loadCompleteSent) return;
+            _loadCompleteSent = true;
+            var slot = _engine.Session.LocalSlotIndex;
+            _tracker.MarkDone(slot); // local self-done
+            if (_engine.IsHost) { TryReleaseBarrier(); return; }
+            var payload = MessageSerializer.SerializeLoadComplete(slot, _rxTransferId);
+            _engine.SendToHost(new NetworkMessage(PacketType.LoadComplete, payload));
+        }
+
+        /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>
+        public void OnLoadComplete(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+            var (slot, _) = MessageSerializer.DeserializeLoadComplete(msg.Payload);
+            _tracker.MarkDone(slot);
+            TryReleaseBarrier();
+        }
+
+        /// <summary>All peers: merge a host RosterProgress snapshot into the shared tracker for the overlay.</summary>
+        public void OnRosterProgress(NetworkMessage msg)
+        {
+            var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
+            foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
         // Host broadcasts BEGIN; every peer (incl. host) then enters its prepared level.
@@ -406,7 +486,10 @@ namespace Multipleer.Network
         {
             if (!_engine.IsHost || _begun) return;
             _barrierOpen = false;
+            // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
+            _loadPhaseActive = true;
 
+            Debug.Log("[Multipleer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
             var payload = MessageSerializer.SerializeSessionBegin(startTicks);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SessionBegin, payload));
@@ -436,8 +519,16 @@ namespace Multipleer.Network
 
             // Single convergence point for both load paths (PhoenixGame.cs:263). The FinishLevel
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
+            Debug.Log("[Multipleer] EnterLevel → FinishLevel.");
             game.FinishLevel(_pendingResult);
+            // Confirm PrepareLoadGame state was applied (was 0 → empty geoscape; expect >0 now).
+            var dlcLen = sm.EnabledDlc != null ? sm.EnabledDlc.Length : 0;
+            Debug.Log($"[Multipleer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
             _pendingResult = null;
+            // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
+            // game coroutine loads the world on LATER frames). Do NOT hide the overlay here — the
+            // phase-2 world-load happens after this returns. The overlay is hidden on the curtain
+            // LIFT (Loaded→Playing) by CurtainShowPatch instead.
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -457,23 +548,47 @@ namespace Multipleer.Network
             _engine.SendToHost(new NetworkMessage(PacketType.LoadProgress, payload));
         }
 
-        public void OnLoadProgress(NetworkMessage msg)
+        /// <summary>Client/host: report this peer's phase-2 (native load) percent to the host.</summary>
+        public void ReportLoadProgress(byte percent)
         {
-            // Host aggregates per-peer progress (keyed by the authoritative transport sender id so it
-            // matches the lobby roster's client SteamIds) and rebroadcasts so other lobbies can show it.
+            var payload = MessageSerializer.SerializeLoadProgress(_engine.LocalSteamId, 1, percent);
             if (_engine.IsHost)
             {
-                var (_, phase, percent) = MessageSerializer.DeserializeLoadProgress(msg.Payload);
-                // Phase 0 = download (exact). Phase 1 (game-load %) is an OPEN SDK item and not emitted
-                // yet; we only record/display the exact download phase here.
-                if (phase == 0)
-                    _peerDownloadPct[msg.SenderSteamId] = percent;
-
-                _engine.BroadcastExcept(msg.SenderSteamId, msg);
+                // Host has no host→host hop: aggregate its own slot 0 (phase 1) directly.
+                _slotProgress[0] = (1, percent);
+                _tracker.Merge(0, 1, percent);
             }
-            // Client-side cross-peer progress display is best-effort and deferred (the rebroadcast
-            // payload id is not reliably mappable to roster rows on DirectIP); each client shows its
-            // own exact download % locally via LocalDownloadPercent.
+            else
+            {
+                _engine.SendToHost(new NetworkMessage(PacketType.LoadProgress, payload));
+                // Also merge into our OWN local tracker so the client shows its own phase-2 bar
+                // immediately — the host's echo can't help us (the host snapshot carries other
+                // slots), and previously the host echo was dead during phase-2 anyway. Mirrors the
+                // host merging its own slot 0 above.
+                _tracker.Merge(_engine.Session.LocalSlotIndex, 1, percent);
+            }
+        }
+
+        public void OnLoadProgress(NetworkMessage msg)
+        {
+            // Host-only aggregation. Each peer reports its OWN (phase, percent); the host maps the
+            // authoritative transport sender id to that peer's stable slotIndex and aggregates the
+            // co-op overlay snapshot monotonic-max per (slot, phase). The lobby download display still
+            // keys phase-0 by SenderSteamId via _peerDownloadPct (read by LobbyPanel).
+            if (!_engine.IsHost) return;
+
+            var (_, phase, percent) = MessageSerializer.DeserializeLoadProgress(msg.Payload);
+
+            // Phase 0 = download (exact) — keep the existing per-peer download view for the lobby.
+            if (phase == 0)
+                _peerDownloadPct[msg.SenderSteamId] = percent;
+
+            // Map the sender to its slot via the roster, then aggregate per-slot for the snapshot.
+            if (_engine.Session.TryGetSlotForPeer(msg.SenderSteamId, out var slot))
+            {
+                _slotProgress[slot] = (phase, percent);
+                _tracker.Merge(slot, phase, percent);
+            }
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -482,8 +597,33 @@ namespace Multipleer.Network
 
         public void Update()
         {
-            if (!_engine.IsHost || !_barrierOpen) return;
+            // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
+            // the phase-2 world-load (_loadPhaseActive, set in Begin() where _barrierOpen is cleared).
+            // Without _loadPhaseActive every peer's tracker would freeze the instant phase-2 begins.
+            if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive)) return;
 
+            // Broadcast the aggregated per-slot snapshot at ≤5 Hz. This runs ABOVE the timeout return
+            // below so snapshots keep flowing for the whole load (done-tracking is event-driven via
+            // LoadComplete, not a percent==100 threshold).
+            var now = NowMs();
+            if (now - _lastSnapshotMs >= SnapshotIntervalMs)
+            {
+                _lastSnapshotMs = now;
+                BroadcastSnapshot();
+            }
+
+            // During phase-2, end the load-phase broadcast once every roster slot has reported
+            // LoadComplete (consumes the existing done-set + LoadComplete mechanism). Send one final
+            // snapshot so peers see the terminal state, then stop.
+            if (_loadPhaseActive && _tracker.AllDone(_engine.Session.GetRosterSlots()))
+            {
+                BroadcastSnapshot();
+                _loadPhaseActive = false;
+                Debug.Log("[Multipleer] co-op load: roster all-done — stopping phase-2 snapshots.");
+            }
+
+            // Timeout/kick + Begin only apply while the LOADED barrier is still open (phase-1).
+            if (!_barrierOpen) return;
             if (NowMs() - _barrierOpenedAtMs <= BarrierTimeoutMs) return;
 
             // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
@@ -506,6 +646,16 @@ namespace Multipleer.Network
         //  Helpers
         // ══════════════════════════════════════════════════════════════════
 
+        // Serialize the host's current per-slot aggregate and broadcast it unreliably to all peers.
+        private void BroadcastSnapshot()
+        {
+            var rows = new List<ProgressRow>(_slotProgress.Count);
+            foreach (var kv in _slotProgress)
+                rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
+            var payload = MessageSerializer.SerializeRosterProgress(rows);
+            _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
+        }
+
         private void ResetRx()
         {
             _rxBuffer = null;
@@ -515,6 +665,45 @@ namespace Multipleer.Network
             _lastReportedDownloadPct = -1;
             _rxChunkSeen = null;
             _rxChunksRemaining = 0;
+        }
+
+        // Replicate PhoenixSaveManager.PrepareLoadGame's field set (cs:639-642) on the live
+        // SaveManager from the transferred metadata, via reflection (the fields + the LatestLoad
+        // setter are private). Matches the native order/values exactly:
+        //   LatestLoad = metaData;                                  // setter also sets _currentGameId + IsIronmanMode
+        //   _currentGameId    = metaData.GameId;
+        //   _currentDifficulty= metaData.DifficultyDef;
+        //   _enabledDlc       = metaData.EnabledDlc ?? new EntitlementDef[0];
+        // The DLC array is the load-bearing one (empty → empty geoscape); the rest keep save/ironman
+        // bookkeeping consistent. EnabledDlc/GameId/DifficultyDef live on PPSavegameMetaData (the
+        // concrete runtime type the serializer produces), not the SavegameMetaData base.
+        private static void ApplyPrepareLoadGameState(PhoenixSaveManager saveManager, SavegameMetaData meta)
+        {
+            if (saveManager == null) return;
+            try
+            {
+                var pp = meta as PPSavegameMetaData;
+                if (pp == null)
+                {
+                    Debug.LogError("[Multipleer] co-op load: metadata is not PPSavegameMetaData; " +
+                                   "cannot apply PrepareLoadGame state (EnabledDlc/GameId/Difficulty).");
+                    return;
+                }
+
+                var t = typeof(PhoenixSaveManager);
+                // LatestLoad setter (private) also assigns _currentGameId + IsIronmanMode (cs:70-78).
+                var latestLoadProp = AccessTools.Property(t, "LatestLoad");
+                latestLoadProp?.SetValue(saveManager, pp, null);
+
+                AccessTools.Field(t, "_currentGameId").SetValue(saveManager, pp.GameId);
+                AccessTools.Field(t, "_currentDifficulty").SetValue(saveManager, pp.DifficultyDef);
+                AccessTools.Field(t, "_enabledDlc")
+                    .SetValue(saveManager, pp.EnabledDlc ?? new EntitlementDef[0]);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] co-op load: failed to apply PrepareLoadGame state: " + e);
+            }
         }
 
         private static bool TryGetGame(out PhoenixGame game, out PhoenixSaveManager saveManager)

@@ -39,6 +39,12 @@ namespace Multipleer.Network
         // ready exactly as the host broadcast it). On the host the live BuildPeerList() is authoritative.
         private List<PeerListEntry> _clientRoster = new List<PeerListEntry>();
 
+        // Host-side stable slotIndex allocation (host = slot 0; clients in arrival order, reconnect
+        // reuses by PlayerGuid). Lazily built from the host identity on first BuildPeerList.
+        private SlotAllocator _slots;
+        /// <summary>This peer's own host-assigned slot (host = 0; clients learn it from PEER_LIST).</summary>
+        public byte LocalSlotIndex { get; private set; }
+
         /// <summary>
         /// Unified lobby roster for UI: host → live BuildPeerList(); client → last received PEER_LIST.
         /// Always includes the host self-entry (IsHost=true). Never null.
@@ -127,6 +133,8 @@ namespace Multipleer.Network
                     ConnectedAt = DateTime.UtcNow
                 };
                 _lastHeartbeat[steamId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+                // SlotIndex is assigned in BuildPeerList (host), keyed by the client's persistent
+                // PlayerGuid so a reconnecting client reuses its slot.
             }
         }
 
@@ -147,6 +155,22 @@ namespace Multipleer.Network
         public IEnumerable<ulong> GetConnectedClients()
         {
             return _clients.Keys;
+        }
+
+        /// <summary>All slotIndexes currently in the roster (host slot 0 + every connected client).</summary>
+        public IEnumerable<byte> GetRosterSlots()
+        {
+            yield return 0; // host
+            foreach (var c in _clients.Values) yield return c.SlotIndex;
+        }
+
+        /// <summary>Host: resolve a transport sender id to its slotIndex (host self = slot 0).</summary>
+        public bool TryGetSlotForPeer(ulong peerId, out byte slot)
+        {
+            if (peerId == _engine.LocalSteamId) { slot = 0; return true; }
+            if (_clients.TryGetValue(peerId, out var c)) { slot = c.SlotIndex; return true; }
+            slot = 0;
+            return false;
         }
 
         public int ClientCount => _clients.Count;
@@ -184,6 +208,16 @@ namespace Multipleer.Network
                 client.PlayerGuid = join.PlayerGuid;
                 if (!string.IsNullOrEmpty(join.Nickname))
                     client.PlayerName = join.Nickname;
+
+                // Co-op "allow everything" policy (no per-player permission menu yet): grant the
+                // joining client FullCommander, keyed by its persistent playerGUID (the permission
+                // key). Without this the client has 0 permissions and HostArbiter rejects every
+                // command (e.g. "Missing permission: ManageAircraft"). Host-authoritative arbiter
+                // serializes commands, so "last command wins" naturally. Granted here (not in
+                // AddClient) because PlayerGuid is only bound after AddClient returns. Mirror the
+                // resulting mask onto ClientInfo so the PEER_LIST roster reflects real permissions.
+                PermissionManager.SetPermission(client.PlayerGuid, CampaignPermission.FullCommander, true);
+                client.Permissions = PermissionManager.GetPermissions(client.PlayerGuid);
             }
 
             // Send acceptance
@@ -312,6 +346,18 @@ namespace Multipleer.Network
         {
             var peers = new List<PeerListEntry>(_clients.Count + 1);
 
+            // Host owns a single SlotAllocator instance, lazily built from its persistent identity so
+            // the host is always slot 0. Reused across every BuildPeerList call (never recreated), so
+            // a reconnecting client's PlayerGuid maps back to its original slot.
+            if (_slots == null) _slots = new SlotAllocator(ClientIdentity.PlayerGuid);
+            LocalSlotIndex = 0; // host self
+
+            // Co-op "allow everything" policy: the host also gets FullCommander, keyed by its
+            // persistent playerGUID. Idempotent (SetPermission ORs the flag), so safe to call on
+            // every roster rebuild. Even though the host bypasses the HostArbiter gate today, this
+            // keeps the permission model consistent and lets the roster show the host's real mask.
+            PermissionManager.SetPermission(ClientIdentity.PlayerGuid, CampaignPermission.FullCommander, true);
+
             // Host self-entry first: the host is not in _clients, but the lobby roster (on both the
             // host and every client) must show it. Marked IsHost so each side can identify the host
             // row regardless of its display id (LocalSteamId may be 0 on DirectIP).
@@ -320,13 +366,15 @@ namespace Multipleer.Network
                 SteamId = _engine.LocalSteamId,
                 PlayerGuid = ClientIdentity.PlayerGuid,
                 Nickname = HostNickname,
-                Permissions = 0,
+                Permissions = PermissionManager.GetPermissions(ClientIdentity.PlayerGuid),
                 Ready = HostReady,
-                IsHost = true
+                IsHost = true,
+                SlotIndex = 0
             });
 
             foreach (var c in _clients.Values)
             {
+                c.SlotIndex = _slots.Assign(c.PlayerGuid);
                 peers.Add(new PeerListEntry
                 {
                     SteamId = c.SteamId,
@@ -334,7 +382,8 @@ namespace Multipleer.Network
                     Nickname = c.PlayerName,
                     Permissions = c.Permissions,
                     Ready = c.IsReady,
-                    IsHost = false
+                    IsHost = false,
+                    SlotIndex = c.SlotIndex
                 });
             }
             return peers;
@@ -356,6 +405,11 @@ namespace Multipleer.Network
             // Cache the raw roster (incl. host self-entry + IsHost flags) for the lobby UI.
             _clientRoster = peers;
 
+            // Learn THIS peer's own host-assigned slot by matching the local persistent identity.
+            foreach (var p in peers)
+                if (p.PlayerGuid == ClientIdentity.PlayerGuid)
+                    LocalSlotIndex = p.SlotIndex;
+
             foreach (var p in peers)
             {
                 // Do NOT mirror the host self-entry into _clients: _clients holds remote *clients*
@@ -372,6 +426,7 @@ namespace Multipleer.Network
                 client.PlayerName = p.Nickname;
                 client.Permissions = p.Permissions;
                 client.IsReady = p.Ready;
+                client.SlotIndex = p.SlotIndex;
             }
         }
 
@@ -583,6 +638,7 @@ namespace Multipleer.Network
         public int Permissions { get; set; }
         public bool IsReady { get; set; }             // mirror of _readyClients for PEER_LIST broadcast
         public int LatencyMs { get; set; }
+        public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)
         public DateTime ConnectedAt { get; set; }
     }
 }

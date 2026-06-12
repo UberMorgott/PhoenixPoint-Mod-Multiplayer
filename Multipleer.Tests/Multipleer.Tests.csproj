@@ -16,11 +16,17 @@
     <Compile Include="..\src\Util\LanIpResolver.cs"><Link>LanIpResolver.cs</Link></Compile>
     <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
     <Compile Include="..\src\Network\MessageLayer\MessageSerializer.cs"><Link>MessageSerializer.cs</Link></Compile>
+    <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
+    <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>
     <Compile Include="..\src\Transport\TransportType.cs"><Link>TransportType.cs</Link></Compile>
     <Compile Include="..\src\Transport\ITransport.cs"><Link>ITransport.cs</Link></Compile>
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
     <!-- DirectTransport is Unity-free (System.Net.Sockets only) → real-loopback connect tests. -->
     <Compile Include="..\src\Transport\DirectTransport.cs"><Link>DirectTransport.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\CommandCodec.cs"><Link>CommandCodec.cs</Link></Compile>
+    <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\PermissionGate.cs"><Link>PermissionGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\InterceptRegistry.cs"><Link>InterceptRegistry.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />

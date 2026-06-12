@@ -173,6 +173,7 @@ namespace Multipleer.Network.MessageLayer
                     bw.Write(peer.Permissions);
                     bw.Write((byte)(peer.Ready ? 1 : 0));
                     bw.Write((byte)(peer.IsHost ? 1 : 0));
+                    bw.Write(peer.SlotIndex);
                 }
                 return ms.ToArray();
             }
@@ -194,7 +195,8 @@ namespace Multipleer.Network.MessageLayer
                         Nickname = br.ReadString(),
                         Permissions = br.ReadInt32(),
                         Ready = br.ReadByte() != 0,
-                        IsHost = br.ReadByte() != 0
+                        IsHost = br.ReadByte() != 0,
+                        SlotIndex = br.ReadByte()
                     });
                 }
                 return peers;
@@ -383,6 +385,64 @@ namespace Multipleer.Network.MessageLayer
             }
         }
 
+        // ROSTER_PROGRESS (RosterProgress, 0x1D): host-aggregated per-slot snapshot, UNRELIABLE.
+        public static byte[] SerializeRosterProgress(List<ProgressRow> rows)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)rows.Count);
+                foreach (var r in rows)
+                {
+                    bw.Write(r.SlotIndex);
+                    bw.Write(r.Phase);
+                    bw.Write(r.Percent);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        public static List<ProgressRow> DeserializeRosterProgress(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                var n = br.ReadByte();
+                var rows = new List<ProgressRow>(n);
+                for (var i = 0; i < n; i++)
+                    rows.Add(new ProgressRow
+                    {
+                        SlotIndex = br.ReadByte(),
+                        Phase = br.ReadByte(),
+                        Percent = br.ReadByte()
+                    });
+                return rows;
+            }
+        }
+
+        // LOAD_COMPLETE (LoadComplete, 0x1E): a slot's load truly finished, RELIABLE.
+        public static byte[] SerializeLoadComplete(byte slotIndex, Guid transferId)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(slotIndex);
+                bw.Write(transferId.ToByteArray());
+                return ms.ToArray();
+            }
+        }
+
+        public static (byte slotIndex, Guid transferId) DeserializeLoadComplete(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                var slot = br.ReadByte();
+                var id = new Guid(br.ReadBytes(16));
+                return (slot, id);
+            }
+        }
+
         // LOADED (ClientLoaded): client finished loading the save; barrier ack.
         public static byte[] SerializeClientLoaded(ulong peerSteamId, Guid transferId, bool ok)
         {
@@ -521,6 +581,15 @@ namespace Multipleer.Network.MessageLayer
         public int Permissions { get; set; }
         public bool Ready { get; set; }
         public bool IsHost { get; set; }   // true for the host's own self-entry in the roster
+        public byte SlotIndex { get; set; }   // host-assigned stable slot; 0 = host
+    }
+
+    /// <summary>One row of the host-aggregated RosterProgress snapshot (~3 bytes on the wire).</summary>
+    public struct ProgressRow
+    {
+        public byte SlotIndex;
+        public byte Phase;     // 0 = download, 1 = native load
+        public byte Percent;   // 0..100
     }
 
     public class SaveChunkMessage

@@ -7,6 +7,8 @@ Local docs are the **single source of truth** for the Multipleer cooperative-mul
 - One shared campaign; multiple players co-control a single faction by **ownership + permissions**.
 - **Authoritative host** model (not lockstep): the host runs all logic + RNG + AI; clients send actions and reproduce validated results.
 
+> **Where are we now?** → [research/00-current-state.md](research/00-current-state.md) — branch HEAD, what's built vs stub, undocumented-but-shipped working-tree changes, active next step, deferred scope, in-game test status. Read this first.
+
 ## Document Map
 
 ### `specs/` — Design
@@ -30,6 +32,19 @@ Local docs are the **single source of truth** for the Multipleer cooperative-mul
 | [research/07-tactical-concurrency.md](research/07-tactical-concurrency.md) | Simultaneous play, same-tile conflict, host receipt-order authority, destination reservation, turn-end ready-gate |
 | [research/08-geoscape-concurrency.md](research/08-geoscape-concurrency.md) | Two state layers, shared clock, events (informational vs decision), forced state transitions (yank-to-briefing) |
 | [research/09-disconnect-reconnect.md](research/09-disconnect-reconnect.md) | Orphan takeover, reconnect resync via the start-barrier, mid-battle-save caveat, host-loss, toasts |
+| [research/10-messagebox-input-prompt.md](research/10-messagebox-input-prompt.md) | Native message-box / text-input prompt API for in-game co-op dialogs |
+| [research/11-console-hotkey-suppress.md](research/11-console-hotkey-suppress.md) | Console / hotkey suppression seam |
+| [research/12-time-flow-and-sync-seams.md](research/12-time-flow-and-sync-seams.md) | Geoscape time-flow API + host-authoritative clock sync seams (grounding for Stage-2 time sync): clock owner, pause/speed API, auto-pause sites, `RecordInstanceData`/`ProcessInstanceData` settability, hook points, risks R1–R8 |
+| [research/00-current-state.md](research/00-current-state.md) | **Status note** — as-built state, branch HEAD, built-vs-stub, active/deferred work, in-game test status |
+
+### `superpowers/` — Approved Designs & Staged Plans
+
+| Doc | Scope |
+|-----|-------|
+| [superpowers/specs/2026-06-12-geoscape-command-sync-design.md](superpowers/specs/2026-06-12-geoscape-command-sync-design.md) | Host-authoritative command-result relay — architecture index, module map (CommandRelay/Codec/HostArbiter/ClientApplier/InterceptRegistry/PermissionGate), broad-intercept registry, staging (Stage 1 commands / Stage 2 time / Stage 3 events) |
+| [superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md](superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md) | Stage-1 implementation plan — command actions + real per-GUID permissions, first vertical proof `GeoVehicle.StartTravel`. **(Implemented; see 00-current-state.)** |
+| [superpowers/plans/2026-06-13-time-sync-stage2-increment1.md](superpowers/plans/2026-06-13-time-sync-stage2-increment1.md) | **Active** — Stage-2 Increment-1 host-authoritative time: `SetTimeState` action, client pause/speed intercepts, client hourly-sim suppression, continuous `0x34` clock mirror |
+| [superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md](superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md) + [plans/…-coop-loading-screen-overlay.md](superpowers/plans/2026-06-12-coop-loading-screen-overlay.md) | Co-op loading-screen roster overlay (separate milestone) |
 
 ### `engine/` — As-Built Implementation
 
@@ -38,6 +53,8 @@ Local docs are the **single source of truth** for the Multipleer cooperative-mul
 | [engine/01-networking-core.md](engine/01-networking-core.md) | `NetworkEngine` singleton + lifecycle, message routing, `PacketType`, binary message formats, `SessionManager` (heartbeat, ready-state), reliable message flow |
 | [engine/02-transport-layer.md](engine/02-transport-layer.md) | `ITransport` + three transports (Steam P2P / Direct TCP / STUN UDP), comparison table, message envelope + message-type catalog by phase, reliability |
 | [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection design; **native Load-screen intercept** for the co-op "Choose save" (open native `UIStateHomeLoadGame` + Prefix `UIModuleSaveGame.OnLoadGamePressed` to capture-and-return without loading) |
+
+> **Command-sync layer (as-built code, no dedicated engine doc yet):** `src/Network/CommandSync/` — the host-authoritative command relay built from the [geoscape-command-sync design](superpowers/specs/2026-06-12-geoscape-command-sync-design.md). Module map + line refs live in [research/00-current-state.md](research/00-current-state.md).
 
 ### `diagrams/`
 
