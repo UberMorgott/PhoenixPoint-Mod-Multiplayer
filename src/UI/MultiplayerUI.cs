@@ -125,6 +125,29 @@ namespace Multipleer.UI
             return _loadOverlay;
         }
 
+        public void ShowLoadOverlay() => EnsureLoadOverlay().Show();
+        public void HideLoadOverlay() => _loadOverlay?.Hide();
+
+        // Force the native curtain down early so phase-1 (download) shows under a vanilla-style
+        // loading screen. Resolved dynamically; on any failure we fall back to the overlay's own
+        // opaque backdrop (the overlay panel already paints a dark background).
+        private void DropCurtainEarly()
+        {
+            try
+            {
+                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                if (t == null) return;
+                var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                if (ctrl == null) return;
+                var m = HarmonyLib.AccessTools.Method(t, "DropCurtainInstant", new System.Type[0]);
+                m?.Invoke(ctrl, null);
+            }
+            catch (System.Exception e)
+            {
+                UnityEngine.Debug.LogWarning("[Multipleer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         //  Main entry — called from button click
         // ═══════════════════════════════════════════════════════════════════
@@ -209,6 +232,8 @@ namespace Multipleer.UI
 
             if (_pendingChosenSave != null)
             {
+                DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
+                ShowLoadOverlay();
                 engine.SaveTransfer?.HostStartSession(_pendingChosenSave);
                 return;
             }
@@ -217,6 +242,8 @@ namespace Multipleer.UI
             {
                 _pendingChosenSave = chosen;
                 engine.Session?.SetChosenSave(SaveDisplayName(chosen), SaveDisplayMeta(chosen));
+                DropCurtainEarly();
+                ShowLoadOverlay();
                 NetworkEngine.Instance?.SaveTransfer?.HostStartSession(chosen);
             });
         }
