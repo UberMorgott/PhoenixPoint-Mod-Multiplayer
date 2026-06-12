@@ -93,6 +93,12 @@ namespace Multipleer.Network
         private long _lastSnapshotMs = -1;
         private const long SnapshotIntervalMs = 200; // ≤5 Hz
         private bool _loadCompleteSent;
+        // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
+        // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
+        // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
+        // would freeze at the phase-1 value. Does NOT re-block FinishLevel (the Harmony gate keys on
+        // IsBarrierPending, not _barrierOpen). Cleared on all-done and reset in OpenBarrier.
+        private bool _loadPhaseActive;
 
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
@@ -238,6 +244,7 @@ namespace Multipleer.Network
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
+            _loadPhaseActive = false; // fresh session: phase-2 not started yet
             Debug.Log($"[Multipleer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
@@ -479,6 +486,8 @@ namespace Multipleer.Network
         {
             if (!_engine.IsHost || _begun) return;
             _barrierOpen = false;
+            // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
+            _loadPhaseActive = true;
 
             Debug.Log("[Multipleer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
@@ -552,6 +561,11 @@ namespace Multipleer.Network
             else
             {
                 _engine.SendToHost(new NetworkMessage(PacketType.LoadProgress, payload));
+                // Also merge into our OWN local tracker so the client shows its own phase-2 bar
+                // immediately — the host's echo can't help us (the host snapshot carries other
+                // slots), and previously the host echo was dead during phase-2 anyway. Mirrors the
+                // host merging its own slot 0 above.
+                _tracker.Merge(_engine.Session.LocalSlotIndex, 1, percent);
             }
         }
 
@@ -583,22 +597,33 @@ namespace Multipleer.Network
 
         public void Update()
         {
-            if (!_engine.IsHost || !_barrierOpen) return;
+            // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
+            // the phase-2 world-load (_loadPhaseActive, set in Begin() where _barrierOpen is cleared).
+            // Without _loadPhaseActive every peer's tracker would freeze the instant phase-2 begins.
+            if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive)) return;
 
-            // Broadcast the aggregated per-slot snapshot at ≤5 Hz while the barrier is open. This runs
-            // ABOVE the timeout return below so snapshots keep flowing for the whole barrier window
-            // (done-tracking is event-driven via LoadComplete, not a percent==100 threshold).
+            // Broadcast the aggregated per-slot snapshot at ≤5 Hz. This runs ABOVE the timeout return
+            // below so snapshots keep flowing for the whole load (done-tracking is event-driven via
+            // LoadComplete, not a percent==100 threshold).
             var now = NowMs();
             if (now - _lastSnapshotMs >= SnapshotIntervalMs)
             {
                 _lastSnapshotMs = now;
-                var rows = new List<ProgressRow>(_slotProgress.Count);
-                foreach (var kv in _slotProgress)
-                    rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
-                var payload = MessageSerializer.SerializeRosterProgress(rows);
-                _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
+                BroadcastSnapshot();
             }
 
+            // During phase-2, end the load-phase broadcast once every roster slot has reported
+            // LoadComplete (consumes the existing done-set + LoadComplete mechanism). Send one final
+            // snapshot so peers see the terminal state, then stop.
+            if (_loadPhaseActive && _tracker.AllDone(_engine.Session.GetRosterSlots()))
+            {
+                BroadcastSnapshot();
+                _loadPhaseActive = false;
+                Debug.Log("[Multipleer] co-op load: roster all-done — stopping phase-2 snapshots.");
+            }
+
+            // Timeout/kick + Begin only apply while the LOADED barrier is still open (phase-1).
+            if (!_barrierOpen) return;
             if (NowMs() - _barrierOpenedAtMs <= BarrierTimeoutMs) return;
 
             // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
@@ -620,6 +645,16 @@ namespace Multipleer.Network
         // ══════════════════════════════════════════════════════════════════
         //  Helpers
         // ══════════════════════════════════════════════════════════════════
+
+        // Serialize the host's current per-slot aggregate and broadcast it unreliably to all peers.
+        private void BroadcastSnapshot()
+        {
+            var rows = new List<ProgressRow>(_slotProgress.Count);
+            foreach (var kv in _slotProgress)
+                rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
+            var payload = MessageSerializer.SerializeRosterProgress(rows);
+            _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
+        }
 
         private void ResetRx()
         {
