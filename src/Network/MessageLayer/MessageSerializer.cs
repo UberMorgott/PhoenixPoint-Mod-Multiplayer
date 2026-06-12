@@ -173,6 +173,7 @@ namespace Multipleer.Network.MessageLayer
                     bw.Write(peer.Permissions);
                     bw.Write((byte)(peer.Ready ? 1 : 0));
                     bw.Write((byte)(peer.IsHost ? 1 : 0));
+                    bw.Write(peer.SlotIndex);
                 }
                 return ms.ToArray();
             }
@@ -194,7 +195,8 @@ namespace Multipleer.Network.MessageLayer
                         Nickname = br.ReadString(),
                         Permissions = br.ReadInt32(),
                         Ready = br.ReadByte() != 0,
-                        IsHost = br.ReadByte() != 0
+                        IsHost = br.ReadByte() != 0,
+                        SlotIndex = br.ReadByte()
                     });
                 }
                 return peers;
@@ -521,6 +523,7 @@ namespace Multipleer.Network.MessageLayer
         public int Permissions { get; set; }
         public bool Ready { get; set; }
         public bool IsHost { get; set; }   // true for the host's own self-entry in the roster
+        public byte SlotIndex { get; set; }   // host-assigned stable slot; 0 = host
     }
 
     public class SaveChunkMessage
