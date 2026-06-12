@@ -236,6 +236,7 @@ namespace Multipleer.Network
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
+            Debug.Log($"[Multipleer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -387,22 +388,31 @@ namespace Multipleer.Network
             if (!_engine.IsHost) return;
             var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
 
+            Debug.Log($"[Multipleer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
+                      $"transferId={transferId} (current {_transferId}) ok={ok}.");
+
             // Ignore a stale ack from a prior transfer: it must match the current transfer id.
             if (transferId != _transferId)
             {
-                Debug.LogWarning($"[Multipleer] LOADED from peer {steamId} for stale transfer " +
-                                 $"{transferId} (current {_transferId}); ignoring.");
+                Debug.LogWarning($"[Multipleer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
+                                 $"transfer {transferId} (current {_transferId}); ignoring.");
                 return;
             }
 
             if (ok)
             {
-                _loadedPeers.Add(steamId);
+                // Key the barrier set by the AUTHORITATIVE transport id (msg.SenderSteamId), NOT the
+                // self-reported payload steamId — mirrors _peerDownloadPct (line ~80): robust to
+                // LocalSteamId collision on DirectIP / the local 2-instance test rig. The payload
+                // steamId can collide across peers and stall release at Count=1.
+                _loadedPeers.Add(msg.SenderSteamId);
+                Debug.Log($"[Multipleer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
                 TryReleaseBarrier();
             }
             else
             {
-                Debug.LogWarning($"[Multipleer] Peer {steamId} failed to load the transferred save.");
+                Debug.LogWarning($"[Multipleer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
+                                 $"failed to load the transferred save.");
             }
         }
 
@@ -415,7 +425,11 @@ namespace Multipleer.Network
             var expected = 1; // host
             foreach (var _ in _engine.Session.GetConnectedClients()) expected++;
 
-            if (_loadedPeers.Count >= expected)
+            var release = _loadedPeers.Count >= expected;
+            Debug.Log($"[Multipleer] TryReleaseBarrier: loadedPeers={_loadedPeers.Count} " +
+                      $"expected={expected} release={release}.");
+
+            if (release)
                 Begin();
         }
 
@@ -453,6 +467,7 @@ namespace Multipleer.Network
             if (!_engine.IsHost || _begun) return;
             _barrierOpen = false;
 
+            Debug.Log("[Multipleer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
             var payload = MessageSerializer.SerializeSessionBegin(startTicks);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SessionBegin, payload));
@@ -482,6 +497,7 @@ namespace Multipleer.Network
 
             // Single convergence point for both load paths (PhoenixGame.cs:263). The FinishLevel
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
+            Debug.Log("[Multipleer] EnterLevel → FinishLevel.");
             game.FinishLevel(_pendingResult);
             _pendingResult = null;
             // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
