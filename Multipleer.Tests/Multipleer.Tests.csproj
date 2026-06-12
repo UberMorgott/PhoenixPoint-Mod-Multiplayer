@@ -17,6 +17,7 @@
     <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
     <Compile Include="..\src\Network\MessageLayer\MessageSerializer.cs"><Link>MessageSerializer.cs</Link></Compile>
     <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
+    <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>
     <Compile Include="..\src\Transport\TransportType.cs"><Link>TransportType.cs</Link></Compile>
     <Compile Include="..\src\Transport\ITransport.cs"><Link>ITransport.cs</Link></Compile>
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
