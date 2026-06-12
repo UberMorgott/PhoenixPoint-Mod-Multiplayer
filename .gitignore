@@ -1,6 +1,11 @@
 # Build artifacts
 bin/
 obj/
+[Dd]ebug/
+[Rr]elease/
+TestResults/
+[Pp]ackages/
+*.nupkg
 
 # Visual Studio / Rider / IDE
 .vs/
@@ -8,6 +13,7 @@ obj/
 *.user
 *.suo
 *.userprefs
+*.userosscache
 *.csproj.user
 
 # Tooling caches
@@ -17,3 +23,7 @@ obj/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Goldberg / second-instance emulator binaries (local test rig only)
+tools/goldberg/*.7z
+tools/goldberg/steam_api64.dll
