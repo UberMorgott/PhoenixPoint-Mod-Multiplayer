@@ -24,6 +24,8 @@
     <!-- DirectTransport is Unity-free (System.Net.Sockets only) → real-loopback connect tests. -->
     <Compile Include="..\src\Transport\DirectTransport.cs"><Link>DirectTransport.cs</Link></Compile>
     <Compile Include="..\src\Network\CommandSync\CommandCodec.cs"><Link>CommandCodec.cs</Link></Compile>
+    <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\PermissionGate.cs"><Link>PermissionGate.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
