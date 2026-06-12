@@ -47,7 +47,7 @@ REM  Steam normally injects this via the game's Steam launch options; a
 REM  standalone gbe_fork copy bypasses Steam, so we MUST pass it ourselves.
 REM  (Arg parser strips all '-' then matches "mods", so "-mods" is correct.)
 echo Launching INSTANCE #2 (CLIENT, Goldberg copy)...
-start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -mods -screen-fullscreen 0 -popupwindow -screen-width 960 -screen-height 1080
+start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -mods -screen-fullscreen 0 -screen-width 1280 -screen-height 720
 
 echo(
 echo Done. Tile this window to the RIGHT half (Win+Right).
