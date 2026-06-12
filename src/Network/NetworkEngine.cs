@@ -185,6 +185,16 @@ namespace Multipleer.Network
             Transport?.Broadcast(data);
         }
 
+        // UNRELIABLE fan-out for high-frequency, loss-tolerant state (co-op load RosterProgress
+        // snapshots). Mirrors BroadcastToAll but passes reliable: false so the transport may drop /
+        // reorder these — the receiver-side RosterProgressTracker merges monotonic-max, so a lost or
+        // late snapshot is harmless. LoadComplete / PEER_LIST stay on the reliable BroadcastToAll path.
+        public void BroadcastUnreliable(NetworkMessage msg)
+        {
+            var data = msg.Serialize();
+            Transport?.Broadcast(data, reliable: false);
+        }
+
         public void BroadcastExcept(ulong excludeSteamId, NetworkMessage msg)
         {
             var data = msg.Serialize();

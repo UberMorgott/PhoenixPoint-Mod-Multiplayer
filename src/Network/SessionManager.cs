@@ -164,6 +164,15 @@ namespace Multipleer.Network
             foreach (var c in _clients.Values) yield return c.SlotIndex;
         }
 
+        /// <summary>Host: resolve a transport sender id to its slotIndex (host self = slot 0).</summary>
+        public bool TryGetSlotForPeer(ulong peerId, out byte slot)
+        {
+            if (peerId == _engine.LocalSteamId) { slot = 0; return true; }
+            if (_clients.TryGetValue(peerId, out var c)) { slot = c.SlotIndex; return true; }
+            slot = 0;
+            return false;
+        }
+
         public int ClientCount => _clients.Count;
 
         // ─── Connection Handshake ─────────────────────────────────────────
