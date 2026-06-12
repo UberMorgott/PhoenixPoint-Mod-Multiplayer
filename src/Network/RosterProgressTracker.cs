@@ -43,5 +43,13 @@ namespace Multipleer.Network
                 if (!_done.Contains(s)) return false;
             return true;
         }
+
+        /// <summary>Convert a native 0..1 load progress to a clamped, floored 0..100 byte.</summary>
+        public static byte ProgressByte(float progress)
+        {
+            if (progress <= 0f) return 0;
+            if (progress >= 1f) return 100;
+            return (byte)System.Math.Floor(progress * 100f);
+        }
     }
 }

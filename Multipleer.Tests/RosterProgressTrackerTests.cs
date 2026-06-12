@@ -69,5 +69,17 @@ namespace Multipleer.Tests
             Assert.True(t.IsDone(0));
             Assert.True(t.AllDone(new byte[] { 0 }));
         }
+
+        [Theory]
+        [InlineData(0f, (byte)0)]
+        [InlineData(0.5f, (byte)50)]
+        [InlineData(1f, (byte)100)]
+        [InlineData(0.999f, (byte)99)]   // floor, never rounds up to a premature 100
+        [InlineData(-0.2f, (byte)0)]     // clamp low
+        [InlineData(1.5f, (byte)100)]    // clamp high
+        public void ProgressByte_Clamps_And_Floors(float progress, byte expected)
+        {
+            Assert.Equal(expected, RosterProgressTracker.ProgressByte(progress));
+        }
     }
 }
