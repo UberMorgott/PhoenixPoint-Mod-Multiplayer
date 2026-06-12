@@ -112,6 +112,20 @@ namespace Multipleer.UI
         }
 
         // ═══════════════════════════════════════════════════════════════════
+        //  Co-op loading overlay (own ScreenSpaceOverlay canvas, sortingOrder 7000)
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Lazily created on first SHOW (Tasks 11/12 wire the curtain-driven activation).
+        private LoadOverlayController _loadOverlay;
+
+        private LoadOverlayController EnsureLoadOverlay()
+        {
+            if (_loadOverlay == null)
+                _loadOverlay = gameObject.AddComponent<LoadOverlayController>();
+            return _loadOverlay;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
         //  Main entry — called from button click
         // ═══════════════════════════════════════════════════════════════════
 
