@@ -34,6 +34,14 @@ namespace Multipleer.Network
 
         public void MarkDone(byte slot) => _done.Add(slot);
 
+        /// <summary>Clear all progress + done state so a fresh co-op session starts clean
+        /// (the coordinator reuses one tracker across sessions — avoids stale overlay rows).</summary>
+        public void Reset()
+        {
+            _state.Clear();
+            _done.Clear();
+        }
+
         public bool IsDone(byte slot) => _done.Contains(slot);
 
         /// <summary>All expected slots have reported LoadComplete.</summary>

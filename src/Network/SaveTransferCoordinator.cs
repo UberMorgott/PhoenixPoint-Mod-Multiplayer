@@ -233,6 +233,7 @@ namespace Multipleer.Network
             _loadedPeers.Clear();
             _peerDownloadPct.Clear();
             _slotProgress.Clear();
+            _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
         }
@@ -483,6 +484,10 @@ namespace Multipleer.Network
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
             game.FinishLevel(_pendingResult);
             _pendingResult = null;
+
+            // All peers enter together at BEGIN → the shared load is over; hide the overlay.
+            try { Multipleer.UI.MultiplayerUI.Instance?.HideLoadOverlay(); }
+            catch (System.Exception ex) { Debug.LogWarning("[Multipleer] HideLoadOverlay on BEGIN failed: " + ex.Message); }
         }
 
         // ══════════════════════════════════════════════════════════════════

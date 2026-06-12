@@ -160,6 +160,12 @@ namespace Multipleer.UI
                     engine.SaveTransfer.ReportLoadProgress(pct);
                 }
             }
+            else if (_lastReportedLoadPct >= 0)
+            {
+                // Native load finished (LoadingProgress went null) → event-driven done.
+                _lastReportedLoadPct = -1;
+                engine.SaveTransfer.SendLoadComplete();
+            }
 
             Refresh(engine);
         }

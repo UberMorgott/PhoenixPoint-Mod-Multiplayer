@@ -70,6 +70,20 @@ namespace Multipleer.Tests
             Assert.True(t.AllDone(new byte[] { 0 }));
         }
 
+        [Fact]
+        public void Reset_Clears_State_And_Done()
+        {
+            var t = new RosterProgressTracker();
+            t.Merge(1, 1, 77);
+            t.MarkDone(1);
+
+            t.Reset();
+
+            Assert.Equal((0, 0), t.Get(1));            // progress state cleared
+            Assert.False(t.IsDone(1));                 // done-set cleared
+            Assert.False(t.AllDone(new byte[] { 1 })); // gate empty again
+        }
+
         [Theory]
         [InlineData(0f, (byte)0)]
         [InlineData(0.5f, (byte)50)]
