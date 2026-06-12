@@ -359,8 +359,13 @@ namespace Multipleer.UI
                         _lobby?.Show();
                 }, this);
 
-            // Web-style: clear the field and show a grey hint behind a blinking caret.
-            TryUpgradePromptInput("IP:port or STUN code");
+            // Normal flow is IP-only: prefill the default direct endpoint and pre-select the IP portion
+            // so the user overwrites just the IP, leaving ":<port>" intact. Port comes from
+            // SmartJoinParser.DefaultDirectPort (single source of truth — not hardcoded here). STUN /
+            // SteamId paths still work: select-all + paste a code over the prefill; SmartJoinParser
+            // auto-detects. Pressing OK unedited connects to localhost:<DefaultDirectPort> (valid).
+            var prefill = "127.0.0.1:" + SmartJoinParser.DefaultDirectPort;
+            TryUpgradePromptInput("IP:port, or paste a STUN code", prefill);
         }
 
         // ─── Nickname rename (own roster row pencil) ───────────────────────
@@ -415,7 +420,7 @@ namespace Multipleer.UI
         //   MessageBoxInputPromptController.cs:50-57 ValidateResult blocks OK on whitespace-only text
         // Also normalizes the field so ALL characters type (BUG A: prefab characterValidation rejected
         // ".") and forces a readable dark text/caret on the light field (BUG B: white-on-white text).
-        private static bool TryUpgradePromptInput(string placeholderHint)
+        private static bool TryUpgradePromptInput(string placeholderHint, string prefill = null)
         {
             var mb = GameUtl.GetMessageBox();
             if (mb == null) return false;
@@ -439,9 +444,13 @@ namespace Multipleer.UI
             field.characterValidation = InputField.CharacterValidation.None;
             field.onValidateInput = null;
 
-            // Clear any prefilled value so the placeholder hint shows. An empty submit can never
-            // rename/connect to nothing because the native ValidateResult rejects an empty OK.
-            field.text = string.Empty;
+            // Prefill (when supplied) seeds the field with a sensible default (e.g. "127.0.0.1:14242")
+            // so the normal Join is IP-only — the user overwrites just the IP and keeps ":port". When no
+            // prefill is given, clear any prefilled value so the placeholder hint shows instead. An empty
+            // submit can never rename/connect to nothing because the native ValidateResult rejects an
+            // empty OK.
+            bool hasPrefill = !string.IsNullOrEmpty(prefill);
+            field.text = hasPrefill ? prefill : string.Empty;
 
             // BUG B fix — the typed text was white-on-white (invisible). PP's prompt prefab serializes
             // the input Text white and renders over a light field background in our usage; the dev
@@ -467,7 +476,27 @@ namespace Multipleer.UI
             // own Select()+ActivateInputField from OnShowReady (harmless to repeat).
             EventSystem.current?.SetSelectedGameObject(field.gameObject);
             field.ActivateInputField();
-            field.caretPosition = 0;
+
+            if (hasPrefill)
+            {
+                // Pre-select the IP portion (everything before the LAST ':') so the user's first
+                // keystroke replaces just the IP while the ":port" suffix stays intact. For
+                // "127.0.0.1:14242" the last ':' is at index 9 → selection covers "127.0.0.1". If there
+                // is no ':' (bare host), select the whole text. Selection must be set AFTER
+                // ActivateInputField (the field must be focused/active for the highlight to stick).
+                //   uGUI: selectionAnchorPosition = fixed end, selectionFocusPosition = moving end /
+                //   where the caret renders; a non-empty selection exists when anchor != focus. We do
+                //   NOT set caretPosition here — its setter collapses anchor+focus to one point and
+                //   would clear the highlight.
+                int lastColon = prefill.LastIndexOf(':');
+                int ipLen = lastColon >= 0 ? lastColon : prefill.Length;
+                field.selectionAnchorPosition = 0;
+                field.selectionFocusPosition = ipLen;
+            }
+            else
+            {
+                field.caretPosition = 0;
+            }
             return true;
         }
 
