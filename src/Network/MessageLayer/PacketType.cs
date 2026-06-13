@@ -47,6 +47,8 @@ namespace Multipleer.Network.MessageLayer
         CampaignActionRejected = 0x32,
         CampaignActionResult = 0x33,
         CampaignStateUpdate = 0x34,
+        // 0x35 GeoStateDiff reserved for INC-3 (generic InstanceData-diff) — intentionally skipped here.
+        GeoEntityOp = 0x36,
 
         // Management
         PermissionUpdate = 0x40,

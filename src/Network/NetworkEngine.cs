@@ -313,6 +313,16 @@ namespace Multipleer.Network
             BroadcastToAll(msg);
         }
 
+        // Host -> all: authoritative entity create/destroy op (0x36 GeoEntityOp). RELIABLE + ordered
+        // (BroadcastToAll). The body is the pure GeoEntityOpCodec image; clients decode + apply via
+        // ClientEntityOpApplier under EntityReplicationScope. Mirrors BroadcastTimingState.
+        public void BroadcastGeoEntityOp(Multipleer.Network.CommandSync.GeoEntityOp op)
+        {
+            var body = Multipleer.Network.CommandSync.GeoEntityOpCodec.Encode(op);
+            var msg = new NetworkMessage(PacketType.GeoEntityOp, body);
+            BroadcastToAll(msg);
+        }
+
         // ─── Update Loop (call every frame) ──────────────────────────────
 
         public void Update()
@@ -560,6 +570,11 @@ namespace Multipleer.Network
                         var ts = Multipleer.Network.CommandSync.CommandCodec.DecodeTimeState(body);
                         Multipleer.Network.CommandSync.ClientTimeMirror.Apply(ts);
                     }
+                    break;
+
+                case PacketType.GeoEntityOp:
+                    var entityOp = Multipleer.Network.CommandSync.GeoEntityOpCodec.Decode(msg.Payload);
+                    Multipleer.Network.CommandSync.ClientEntityOpApplier.Apply(entityOp);
                     break;
 
                 default:
