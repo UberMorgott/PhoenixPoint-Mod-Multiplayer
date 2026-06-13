@@ -17,6 +17,16 @@ segment render (the second writer that caused jerk + flies-sideways).
 (rotation already streamed continuously, §2 of the spec); the host change is the SEND RATE; the client
 change is consuming pos+rot via a timestamped buffer instead of re-running native motion.
 
+> **PROGRESS (2026-06-13 EOD — deployed DLL `5F7C2F0F`, 193 xUnit green, build 0/0):**
+> INC-A `069c1ce`, INC-B `e3f0bcb`, INC-C `8f1aaa8` DONE + deployed (+ TFTV-compat fix `954b61a`).
+> 3 in-game-log-RCA'd VISUAL fixes DONE + deployed (commit subjects tagged "INC-D"): P1 jerk
+> InterpDelay 0.2→0.35 `0a877b4`, P2 travel line `a118fa4`, P3 nose-along-travel `7636db4`.
+> IN-GAME GATE (`5F7C2F0F`): sync both directions ✓, travel line ✓, nose ✓, smoother. **KNOWN
+> REMAINING (next session):** (1) client flies SLOWER than host — apparent speed mismatch (client
+> progressively behind, not constant delay); (2) still not perfectly as smooth as host — likely interp
+> cadence / snapshot inter-arrival vs render-rate; investigate from log. **INC-D cleanup still PENDING:**
+> strip DIAG (`b753111`+`fbfb3f9`+DIAG/INC-C lines), remove dead `InterpolationMath.cs` (+ tests), re-tune.
+
 **Tech stack:** C# net472, HarmonyLib (`AccessTools`; mod NEVER hard-references game types — params typed
 `object`), xUnit 2.9.2 (`Multipleer.Tests`, pure cores TDD-first), existing `NetworkEngine`
 (`BroadcastUnreliable:207`/`BroadcastToAll`, `RouteMessage` `0x35` case `:625`, `Update` tick `:373`),
@@ -47,7 +57,7 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ---
 
-## INC-A — Retire the second writer; client frozen; mirror-only placement
+## INC-A — Retire the second writer; client frozen; mirror-only placement — DONE + deployed `069c1ce`
 
 > Removes ALL client-side native-motion re-running. After INC-A the client craft JUMP to the host
 > position each push (jerky, maybe wrong nose) but the mirror is the SOLE writer. Proves freeze complete.
@@ -197,7 +207,7 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ---
 
-## INC-B — Raise the send rate + consume rotation
+## INC-B — Raise the send rate + consume rotation — DONE + deployed `e3f0bcb`
 
 ### Task B1 — Raise the continuous send/walk rate  *(impure; no unit test)*
 
@@ -222,7 +232,7 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ---
 
-## INC-C — Snapshot-interpolation buffer (lerp + slerp)
+## INC-C — Snapshot-interpolation buffer (lerp + slerp) — DONE + deployed `8f1aaa8`
 
 ### Task C1 — Pure `SnapshotBuffer` / alpha+bracket math + tests  *(pure → TDD)*
 
@@ -284,7 +294,17 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ---
 
-## INC-D — Tune + edge cases + perf + DIAG strip
+## INC-D — Tune + edge cases + perf + DIAG strip — PARTIAL (3 visual fixes deployed; cleanup PENDING)
+
+> **DONE so far (in-game-log RCA, deployed `5F7C2F0F`):** P1 jerk — `ClientVehicleInterpolator`
+> InterpDelaySeconds 0.2→0.35 (`0a877b4`); P2 travel line — `ClientTravelEmitterSuppressPatch` carves out
+> `set_Travelling` only during `EntityReplicationScope.IsApplying` so native `DrawVehiclePathLinks` draws,
+> `DestinationSites` resolved to real `GeoSite` (`a118fa4`); P3 nose — new `GeoBridge.UpdateVehicleHeadingTowards`
+> reuses native `GeoNavComponent.GetHeadingTowardsTarget`/`UpdateHeading` toward `DestinationSites[0].WorldPosition`,
+> called in `Tick` after `PlaceGlobeIconAt`, dropped per-frame `SetSurfaceRotation` (`7636db4`).
+> **STILL PENDING (next session):** D1 re-tune (the KNOWN-REMAINING speed mismatch — client flies slower /
+> progressively behind — may be delay-related), D2 edge cases + `ResetState()`, D3 DIAG strip
+> (`b753111`+`fbfb3f9`+DIAG/INC-C lines) + remove now-dead `InterpolationMath.cs` (+ its tests), D4 final gate.
 
 ### Task D1 — Tune rate + buffer  *(impure)*
 

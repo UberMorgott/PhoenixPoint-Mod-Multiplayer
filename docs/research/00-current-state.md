@@ -1,21 +1,55 @@
 # Multipleer — Current State (status note)
 
 > Single-glance "where are we now" for the co-op mod. Updated as the as-built state moves.
-> **Active arc = SD-AIDR state replication** (spec `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`).
-> Companion plans: `docs/superpowers/plans/2026-06-13-replication-increment{1,2}-*.md` + `…-increment3a-vehicle-state-mirror.md`.
-> **NEXT = INC-3a** — all-factions vehicle state mirror over `0x35 GeoStateDiff` (spec
-> `docs/superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md`; plan
-> `docs/superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md`).
-> This SUBSUMES the LIVE BLOCKER below: the `(factionGuid,VehicleID)` resolver replaces the
-> Phoenix-only `FindVehicleById`, and the host state mirror replaces the per-action StartTravel replay.
-> Latest EOD handoff: `docs/superpowers/2026-06-13-EOD-replication-handoff.md` (READ THIS FIRST to resume).
+> **Active arc = SD-AIDR state replication → THIN-CLIENT vehicle sync pivot** (spec
+> `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`).
+> **CURRENT = thin-client vehicle sync + snapshot interpolation** — host-authoritative thin client,
+> client geoscape vehicle engine FROZEN, host streams transform ~15Hz, client = pure mirror + entity
+> interpolation. Spec `docs/superpowers/specs/2026-06-13-thin-client-vehicle-sync-snapshot-interpolation.md`,
+> plan `docs/superpowers/plans/2026-06-13-thin-client-vehicle-sync-increments.md`. This re-architects the
+> client half of the INC-3a `0x35 GeoStateDiff` mirror (which already SUBSUMED the Phoenix-only
+> `FindVehicleById` blocker via the `(factionGuid,VehicleID)` resolver + all-faction snapshot).
+> Latest EOD handoff: `docs/superpowers/2026-06-13-EOD-thin-client-vehicle-sync-handoff.md` (READ FIRST to resume).
 > The older command-sync / time-sync arc (`specs/2026-06-12-geoscape-command-sync-design.md`) is now
 > SUPERSEDED by SD-AIDR — kept below under "PRIOR ARC (superseded)" for lineage only.
 
-## CURRENT STATE — 2026-06-13 LATE (SD-AIDR replication — ACTIVE)
+## CURRENT STATE — 2026-06-13 EOD (THIN-CLIENT vehicle sync + snapshot interpolation — ACTIVE)
 
-> **Read the EOD handoff `docs/superpowers/2026-06-13-EOD-replication-handoff.md` first** — it carries the
-> live blocker + numbered next steps. This block is the one-glance summary.
+> **Read the EOD handoff `docs/superpowers/2026-06-13-EOD-thin-client-vehicle-sync-handoff.md` first.**
+> This block is the one-glance summary. The SD-AIDR replication block below it is the foundation arc
+> (INC-1/INC-2/INC-3a) that this thin-client pivot builds the client render half on top of.
+
+- **Branch:** `main`. HEAD = `7636db4`. **Deployed DLL `5F7C2F0F`. 193 xUnit green, build 0/0, wire/codec UNCHANGED.** Pushed to `origin/main` this session (EOD).
+- **Architecture:** host-authoritative **THIN CLIENT + snapshot interpolation**. The client geoscape vehicle engine is FROZEN — runs NO native travel routine (single-writer invariant). Host streams the authoritative transform ~15Hz (`0x35`); client = pure mirror + entity interpolation (lerp pos; heading now DERIVED via native heading math — see P3). Spec `…/specs/2026-06-13-thin-client-vehicle-sync-snapshot-interpolation.md`, plan `…/plans/2026-06-13-thin-client-vehicle-sync-increments.md`.
+
+### Done + deployed (thin-client)
+
+- **INC-A** — single-writer mirror-only raw vehicle placement (retire the SWITCH-A native travel driver) — `069c1ce`.
+- **INC-B** — raise host vehicle stream to ~15Hz (`FlushIntervalSeconds`/`SnapshotIntervalSeconds`→0.066) for smooth client interp — `e3f0bcb`.
+- **INC-C** — client snapshot interpolation (`ClientVehicleInterpolator` ring buffer + lerp pos / slerp rot, render ~150ms back) — `8f1aaa8`.
+- **TFTV-compat fix** — per-instance log redirect installed via `AssemblyLoad` so it applies before the TFTV logger init — `954b61a`.
+- **3 in-game-log-RCA'd VISUAL fixes** (single-writer preserved, native rendering REUSED; commit subjects tagged "INC-D"):
+  - **P1 jerk** `0a877b4` — `ClientVehicleInterpolator` InterpDelaySeconds 0.2→0.35 (buffer was Hold-with-full-depth: renderTime=now−0.2s overran newest sample; real inter-arrival jitter >0.2s).
+  - **P2 travel line** `a118fa4` — `ClientTravelEmitterSuppressPatch` now carves out `set_Travelling` ONLY during mirror apply (`EntityReplicationScope.IsApplying`); was unconditionally suppressed → client `Travelling=false` → native `GeoscapeView.DrawVehiclePathLinks` never drew. `InitiateTravelling`/`OnArrived` stay suppressed; `DestinationSites` resolved to a real `GeoSite` in `ApplyVehicleState`.
+  - **P3 nose** `7636db4` — new `GeoBridge.UpdateVehicleHeadingTowards` reuses native `GeoNavComponent.GetHeadingTowardsTarget`/`UpdateHeading` (reflection) toward `DestinationSites[0].WorldPosition`, called in `ClientVehicleInterpolator.Tick` after `PlaceGlobeIconAt`; dropped the per-frame `SetSurfaceRotation`. No `NavigateRoutine` (that was the scrapped `fd45252` 2nd writer).
+
+### IN-GAME GATE RESULT (deployed `5F7C2F0F`)
+
+- Sync BOTH directions ✓; travel line on client ✓; nose along travel ✓; smoothness improved.
+- **KNOWN REMAINING (NEXT SESSION):** (1) client craft flies SLOWER than host — apparent speed mismatch (client progressively BEHIND, not just a constant delay); (2) still not perfectly as smooth as host. Likely interp cadence / snapshot inter-arrival vs render-rate — investigate from log next session.
+
+### NEXT — INC-D cleanup + speed fix (next session)
+
+- Strip temp DIAG (commits `b753111` + `fbfb3f9` + DIAG/INC-C lines); remove now-dead `InterpolationMath.cs` (+ its tests); re-tune `InterpDelaySeconds` if the speed issue is delay-related.
+- Then INC-D edge cases (reroute / removal / parked / first-mirror) + `ClientGeoStateApplier.ResetState()` + final gate.
+
+---
+
+## SD-AIDR replication — FOUNDATION (2026-06-13 LATE — INC-1/2/3a, superseded as "current" by thin-client above)
+
+> The thin-client pivot above builds the client render half on this. The LIVE BLOCKER recorded here
+> (Phoenix-only `FindVehicleById`) was already SUBSUMED by INC-3a's `(factionGuid,VehicleID)` resolver +
+> all-faction `0x35` snapshot. Kept for lineage + the INC-1/INC-2 in-game-confirmed results.
 
 - **Branch:** `main`. HEAD = `fbfb3f9` *chore(diag): temporary host/client vehicle-id set logging for movement*. 100 commits ahead of `origin/main` (NOT pushed — dev-only, no branches).
 - **Architecture PIVOT (today):** rejected per-action cherry-picking (whack-a-mole → desync). Adopted **SD-AIDR** = host is the SOLE simulator, client is a PURE mirror, client inputs are relayed to host. Spec `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md` (commit `c664128`); readiness YELLOW, 4 adversarial corrections C2/C4/C8/C15 folded in. All decompile-verified seams live in the spec/plans — reference, don't re-derive.
@@ -32,7 +66,12 @@
     1. sent `GeoVehicleDef.Guid` where `ComponentSetDef` was needed (sibling types) → `ArgumentException` on client. Fixed `53947b4`: broadcast `ComponentSetDef` guid via `GeoBridge.DefGuid(__1)`.
     2. single 4-target postfix `__0` injection on the 0-param `DestroySite` → `PatchAll` throw → whole-mod load fail. Fixed by splitting into `HostVehicleCreateBroadcastPatch` (2 create targets, `__1`; `HostEntityOpBroadcastPatch.cs:88`) + `HostEntityRemoveBroadcastPatch` (`object[] __args`; `:158`).
 
-### LIVE BLOCKER (fix next session)
+### LIVE BLOCKER — RESOLVED by INC-3a + thin-client (kept for lineage)
+
+> **RESOLVED.** INC-3a's all-faction `0x35 GeoStateDiff` mirror + `(factionGuid,VehicleID)` resolver
+> replaced the Phoenix-only `FindVehicleById`, so host→client movement now applies; the thin-client
+> pivot (top block) then re-architected the client RENDER half (single writer + snapshot interpolation).
+> The remaining gap is the speed/smoothness issue recorded in the top block, NOT this resolver blocker.
 
 - **Host→client MOVEMENT of an EXISTING aircraft fails.** Client→host works both directions; host→client = client shows nothing. NOT a creation bug (that was a detour, now fixed).
 - **ROOT CAUSE:** replication keyed on runtime `VehicleID`. Host's `PhoenixFaction.Vehicles` is a SUPERSET; client's is a SUBSET. Host orders vehicle 3/5 → `GeoBridge.FindVehicleById` (`GeoBridge.cs:40`, called `CommandExecutor.cs:48`) can't resolve on client → `"vehicle N not found"` log (`CommandExecutor.cs:49`) → abort before travel. Client→host works because the client only moves vehicles it has; the host (superset) always resolves.

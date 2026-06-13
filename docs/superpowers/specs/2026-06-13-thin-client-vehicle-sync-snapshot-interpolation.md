@@ -9,6 +9,20 @@
 >
 > - **Status:** design spec (decompile + live-code grounded). Architecture decision is LOCKED (see §1);
 >   this spec is the implementation contract for the increment plan.
+> - **BUILD STATUS (2026-06-13 EOD — deployed DLL `5F7C2F0F`, 193 xUnit green, build 0/0, wire/codec UNCHANGED):**
+>   INC-A (`069c1ce`), INC-B (`e3f0bcb`), INC-C (`8f1aaa8`) DONE + deployed. TFTV-compat fix `954b61a`.
+>   3 in-game-log-RCA'd VISUAL fixes DONE + deployed (commit subjects tagged "INC-D"): P1 jerk —
+>   `ClientVehicleInterpolator` InterpDelaySeconds 0.2→0.35 (`0a877b4`); P2 travel line — un-suppress
+>   mirrored `set_Travelling` during apply so native `DrawVehiclePathLinks` draws (`a118fa4`); P3 nose —
+>   derive heading via native `GeoNavComponent.GetHeadingTowardsTarget`/`UpdateHeading` toward
+>   `DestinationSites[0]`, drop per-frame SetSurfaceRotation (`7636db4`). IN-GAME GATE (deployed
+>   `5F7C2F0F`): sync both directions ✓, travel line ✓, nose-along-travel ✓, smoothness improved.
+>   **KNOWN REMAINING (next session):** (1) client craft flies SLOWER than host — apparent SPEED
+>   mismatch (client progressively behind, not a constant delay); (2) still not perfectly as smooth as
+>   host. Likely interp cadence / snapshot inter-arrival vs render-rate — investigate from log next
+>   session. **INC-D cleanup still PENDING (next session):** strip temp DIAG (`b753111`+`fbfb3f9`+
+>   DIAG/INC-C lines), remove now-dead `InterpolationMath.cs` (+ its tests), re-tune InterpDelay if the
+>   speed issue is delay-related.
 > - **Parent arc:** SD-AIDR (`docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`),
 >   INC-3 (`…-coop-state-replication-inc3-geostatediff.md`), INC-3a (the `0x35` slice already built).
 > - **Companion plan:** `docs/superpowers/plans/2026-06-13-thin-client-vehicle-sync-increments.md`.
@@ -313,7 +327,7 @@ hunt, the former is smoothing-only.
 Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
 
 - **INC-A — retire the second writer; client frozen; mirror-only placement. SCOPE: covers SYMPTOM A AND
-  SYMPTOM B (both are SWITCH-A regressions — see Verified RCA below).**
+  SYMPTOM B (both are SWITCH-A regressions — see Verified RCA below). — DONE + deployed `069c1ce`.**
   - **GATE-ZERO — DONE (verified `fd45252`):** the §5 ordered host→client tract is PROVEN — host emits,
     client applies EVERY `0x35` record, monotonic per-identity seq, ZERO drops / ZERO exceptions. §5 OPEN
     QUESTION resolved: stream EXISTS (jerky-class), NOT absent. The break is SWITCH-A-local, not a missing
@@ -361,7 +375,7 @@ Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
     - DIAGB shows applies arriving (seq>1) and the post-apply read-back pos == host pos; departure/arrival
       land on the correct site. (Proves single-writer + freeze complete.)
 
-- **INC-B — raise send rate + consume rotation.**
+- **INC-B — raise send rate + consume rotation. — DONE + deployed `e3f0bcb`.**
   - Files: `GeoStateSyncBroadcaster` `FlushIntervalSeconds`→0.066, `SnapshotIntervalSeconds`→0.066;
     confirm `ApplyVehicleState`/interpolator sets `Surface.rotation` from the wire quaternion each push.
   - **PASS:** craft nose points along the travel direction (sideways bug gone) and the position steps are
@@ -369,7 +383,7 @@ Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
     continuous sends/sec for a moving craft; host shows NO co-op lag (perf check — dirty-check still
     skips idle craft).
 
-- **INC-C — snapshot-interpolation buffer (lerp + slerp).**
+- **INC-C — snapshot-interpolation buffer (lerp + slerp). — DONE + deployed `8f1aaa8`.**
   - Files: rewrite `ClientVehicleInterpolator` internals to the §4 ring buffer + per-frame
     bracket/lerp/slerp at `now − InterpDelay`; `ClientGeoStateApplier`/`ApplyVehicleState` push
     `{pos,rot,t}` into the buffer instead of placing directly; new pure `SnapshotBuffer` alpha/bracket
@@ -378,10 +392,28 @@ Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
     (indistinguishable from a host-side native flight to the eye), no jerk, no overshoot; on arrival they
     land exactly on the host site with no rubber-band. Client→host StartTravel input still works.
 
-- **INC-D — tune + edge cases + perf + DIAG strip.**
+- **INC-D — tune + edge cases + perf + DIAG strip. — PARTIAL: 3 VISUAL FIXES DONE + deployed
+  (`0a877b4` P1 jerk/interp-delay 0.2→0.35, `a118fa4` P2 travel line, `7636db4` P3 nose-along-travel);
+  cleanup (DIAG strip + dead-code removal + re-tune) STILL PENDING next session.**
   - Files: tune `FlushIntervalSeconds`/`SnapshotIntervalSeconds` (try 20–30 Hz) + `InterpDelaySeconds`/
     ring capacity; verify arrival / removal / reroute (multi-hop) / parked / first-mirror; add
     `ClientGeoStateApplier.ResetState()` + wire to `Shutdown`; strip ALL DIAGB/DIAG3 instrumentation.
+  - **DONE so far (in-game-log RCA, single-writer preserved, native rendering reused):**
+    - P1 jerk `0a877b4`: `ClientVehicleInterpolator` InterpDelaySeconds 0.2→0.35 (buffer was Hold-with-
+      full-depth: renderTime=now−0.2s overran newest sample; real inter-arrival jitter >0.2s).
+    - P2 travel line `a118fa4`: `ClientTravelEmitterSuppressPatch` carves out `set_Travelling` ONLY
+      during mirror apply (`EntityReplicationScope.IsApplying`) — was unconditionally suppressed →
+      client `Travelling=false` → native `GeoscapeView.DrawVehiclePathLinks` never drew. InitiateTravelling/
+      OnArrived stay suppressed. `DestinationSites` resolved to real `GeoSite` in `ApplyVehicleState`.
+    - P3 nose `7636db4`: new `GeoBridge.UpdateVehicleHeadingTowards` reuses native
+      `GeoNavComponent.GetHeadingTowardsTarget`/`UpdateHeading` (reflection) toward
+      `DestinationSites[0].WorldPosition`, called in `ClientVehicleInterpolator.Tick` after
+      `PlaceGlobeIconAt`; dropped per-frame `SetSurfaceRotation`. No `NavigateRoutine` (the scrapped
+      `fd45252` 2nd writer).
+  - **STILL PENDING (next session):** strip temp DIAG (`b753111`+`fbfb3f9`+DIAG/INC-C lines), remove
+    now-dead `InterpolationMath.cs` (+ its tests), re-tune `InterpDelaySeconds` if the SPEED-mismatch
+    issue (client flies slower/progressively behind) is delay-related; verify edge cases; add
+    `ResetState()`.
   - **PASS:** all edge cases correct (reroute mid-flight re-targets smoothly; removed craft vanish;
     parked craft static; first mirror snaps exactly); host steady at the chosen rate with no lag over a
     long session; no console errors either instance; clean build 0/0 + full test suite green after the
