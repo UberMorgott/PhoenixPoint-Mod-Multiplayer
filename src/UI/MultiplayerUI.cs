@@ -29,7 +29,6 @@ namespace Multipleer.UI
         // ─── In-game bottom bar ─────────────────────────────────────────────
         private GameObject _inGameBar;
         private Text _barStatusText;
-        private Text _barNickText;
 
         // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
@@ -721,15 +720,6 @@ namespace Multipleer.UI
 
         public void ShowInGameBar()
         {
-            // (Re)apply the native menu font here, not just at build time. The bar is BUILT in Awake()
-            // (mod load) — BEFORE the main menu's Init postfix runs NativeWidgetFactory
-            // .CaptureFromMainMenu, so MenuFont is still null then and the label would otherwise be
-            // pinned to the Arial fallback forever. The bar is only ever SHOWN after a session starts,
-            // i.e. after the player passed through the main menu, by which point MenuFont is captured.
-            if (_barNickText != null)
-                _barNickText.font = NativeWidgetFactory.MenuFont
-                    ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
-
             _inGameBar.SetActive(true);
         }
 
@@ -751,17 +741,8 @@ namespace Multipleer.UI
             var bg = bar.AddComponent<Image>();
             bg.color = new Color(0, 0, 0, 0.7f);
 
-            // Local player's nickname, far-left. Uses the captured NATIVE menu font (mirrors
-            // LoadOverlayController's font fallback chain) so it matches the game's look; the status
-            // text below is shifted RIGHT past it so the two never overlap.
-            _barNickText = CreateText(bar, "Nick",
-                new Vector2(10, 2), new Vector2(180, 24),
-                "");
-            _barNickText.font = NativeWidgetFactory.MenuFont
-                ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
-
             _barStatusText = CreateText(bar, "Status",
-                new Vector2(200, 2), new Vector2(500, 24),
+                new Vector2(10, 2), new Vector2(500, 24),
                 "Not connected");
 
             _inGameBar = bar;
@@ -800,16 +781,11 @@ namespace Multipleer.UI
                         $" | {(engine.IsHost ? "Host" : "Client")}" +
                         $" | {engine.Session?.ClientCount ?? 0} player(s)";
                 }
-
-                if (_barNickText != null)
-                    _barNickText.text = LocalNickname(engine);
             }
             else
             {
                 if (_barStatusText != null)
                     _barStatusText.text = "Not connected";
-                if (_barNickText != null)
-                    _barNickText.text = "";
             }
 
             // Refresh the lobby panel EVERY frame while it is visible — UNCONDITIONALLY, i.e. not
@@ -844,34 +820,6 @@ namespace Multipleer.UI
             text.alignment = TextAnchor.MiddleLeft;
             text.text = content;
             return text;
-        }
-
-        // Resolve the LOCAL player's lobby nickname for the in-game status bar. Host → Session
-        // .HostNickname; client → the roster entry whose SlotIndex matches Session.LocalSlotIndex
-        // (mirrors LoadOverlayController.Refresh's roster read + "Player N" fallback). Fully
-        // null-guarded: a null session/roster or a missing self-entry yields a safe placeholder,
-        // never an NRE.
-        private static string LocalNickname(NetworkEngine engine)
-        {
-            var session = engine?.Session;
-            if (session == null) return "Player";
-
-            if (engine.IsHost)
-            {
-                var host = session.HostNickname;
-                return string.IsNullOrEmpty(host) ? "Player 0" : host;
-            }
-
-            var roster = session.GetLobbyRoster();
-            if (roster != null)
-            {
-                foreach (var p in roster)
-                {
-                    if (p.SlotIndex != session.LocalSlotIndex) continue;
-                    return string.IsNullOrEmpty(p.Nickname) ? "Player " + p.SlotIndex : p.Nickname;
-                }
-            }
-            return "Player " + session.LocalSlotIndex;
         }
 
         public void InvitePlayers()
