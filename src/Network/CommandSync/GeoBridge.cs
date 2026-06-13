@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using HarmonyLib;
+using UnityEngine;
 
 namespace Multipleer.Network.CommandSync
 {
@@ -76,5 +77,94 @@ namespace Multipleer.Network.CommandSync
         // GeoSite.SiteId — public int FIELD.
         public static string SiteId(object site)
             => AccessTools.Field(site.GetType(), "SiteId")?.GetValue(site)?.ToString() ?? "";
+
+        // DefRepository.GetDef(string guid) -> BaseDef, via GameUtl.GameComponent<DefRepository>().
+        // Returns the def object (ComponentSetDef-derived for vehicles) or null.
+        public static object FindDefByGuid(string guid)
+        {
+            if (string.IsNullOrEmpty(guid)) return null;
+            var defRepoType = AccessTools.TypeByName("Base.Defs.DefRepository");
+            var gameUtlType = AccessTools.TypeByName("Base.Core.GameUtl");
+            if (defRepoType == null || gameUtlType == null) return null;
+            // GameUtl.GameComponent<DefRepository>() — generic static; make + invoke.
+            var generic = AccessTools.Method(gameUtlType, "GameComponent");
+            var repo = generic?.MakeGenericMethod(defRepoType)?.Invoke(null, null);
+            if (repo == null) return null;
+            return AccessTools.Method(repo.GetType(), "GetDef", new[] { typeof(string) })
+                              ?.Invoke(repo, new object[] { guid });
+        }
+
+        // Resolve a GeoFaction by its Def.Guid from GeoLevelController.Factions; falls back to
+        // PhoenixFaction (the common INC-2 case: manufactured aircraft) when guid is empty/unmatched.
+        public static object FindFactionByGuid(object geoLevel, string factionGuid)
+        {
+            var phoenix = AccessTools.Property(geoLevel.GetType(), "PhoenixFaction")?.GetValue(geoLevel);
+            if (string.IsNullOrEmpty(factionGuid)) return phoenix;
+            var factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable;
+            if (factions == null) return phoenix;
+            foreach (var f in factions)
+                if (FactionGuid(f) == factionGuid) return f;
+            return phoenix;
+        }
+
+        // GeoFaction.Def.Guid (Def -> BaseDef.Guid). Empty string if unresolved.
+        public static string FactionGuid(object faction)
+        {
+            var def = AccessTools.Property(faction.GetType(), "Def")?.GetValue(faction);
+            if (def == null) return "";
+            return AccessTools.Field(def.GetType(), "Guid")?.GetValue(def)?.ToString() ?? "";
+        }
+
+        // BaseDef.Guid of a vehicle's def: GeoVehicle.VehicleDef.Guid (VehicleDef -> BaseDef.Guid).
+        public static string VehicleDefGuid(object vehicle)
+        {
+            var def = AccessTools.Property(vehicle.GetType(), "VehicleDef")?.GetValue(vehicle);
+            if (def == null) return "";
+            return AccessTools.Field(def.GetType(), "Guid")?.GetValue(def)?.ToString() ?? "";
+        }
+
+        // GeoSite by int SiteId (string key), scanning GeoMap.AllSites. Null if not found.
+        public static object FindSiteById(object geoLevel, int siteId)
+        {
+            var map = AccessTools.Field(geoLevel.GetType(), "Map")?.GetValue(geoLevel);
+            var sites = AccessTools.Property(map?.GetType(), "AllSites")?.GetValue(map) as IEnumerable;
+            if (sites == null) return null;
+            foreach (var s in sites)
+                if (SiteId(s) == siteId.ToString()) return s;
+            return null;
+        }
+
+        // GeoFaction.CreateVehicle(GeoSite, ComponentSetDef) — runs the full native lifecycle
+        // (Instantiate -> DoEnterPlay -> OnLevelStart -> TeleportToSite -> VehicleAdded). Returns the
+        // new GeoVehicle, or null if the method/types are unresolved.
+        public static object CreateVehicleAtSite(object faction, object site, object vehicleDef)
+        {
+            var siteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            var csdType = AccessTools.TypeByName("Base.Core.ComponentSetDef");
+            if (siteType == null || csdType == null) return null;
+            var m = AccessTools.Method(faction.GetType(), "CreateVehicle", new[] { siteType, csdType });
+            return m?.Invoke(faction, new[] { site, vehicleDef });
+        }
+
+        // GeoFaction.CreateVehicleAtPosition(Vector3, ComponentSetDef) — full native lifecycle (pos path).
+        public static object CreateVehicleAtPosition(object faction, Vector3 pos, object vehicleDef)
+        {
+            var csdType = AccessTools.TypeByName("Base.Core.ComponentSetDef");
+            if (csdType == null) return null;
+            var m = AccessTools.Method(faction.GetType(), "CreateVehicleAtPosition",
+                new[] { typeof(Vector3), csdType });
+            return m?.Invoke(faction, new object[] { pos, vehicleDef });
+        }
+
+        // Reconcile the new vehicle's id to the host's authoritative VehicleID and clamp the faction's
+        // private _lastVehicleIndex so it never re-issues that id (collision-free, §9/C8).
+        public static void ReconcileVehicleId(object faction, object vehicle, int authoritativeId)
+        {
+            AccessTools.Field(vehicle.GetType(), "VehicleID")?.SetValue(vehicle, authoritativeId);
+            var fld = AccessTools.Field(faction.GetType(), "_lastVehicleIndex");
+            var cur = fld?.GetValue(faction);
+            if (cur is int c && authoritativeId > c)
+                fld.SetValue(faction, authoritativeId);
+        }
     }
 }
