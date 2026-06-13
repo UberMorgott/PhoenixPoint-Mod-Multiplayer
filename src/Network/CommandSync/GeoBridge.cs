@@ -338,13 +338,14 @@ namespace Multipleer.Network.CommandSync
                 if ((mask & GeoStateMask.SurfaceRot) != 0)
                     surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
                 // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
-                // normally driven each frame by NavigateRoutine which the client never runs). Place the icon RAW
-                // at the latest applied world position via the interpolator (pure render — no lerp/slerp, no sim;
-                // smoothing is INC-C). Jerky-but-continuous is the expected INC-A result.
+                // normally driven each frame by NavigateRoutine which the client never runs). Push this applied
+                // transform sample into the interpolator's per-identity ring buffer; the interpolator's own Tick
+                // is the SOLE writer that renders the icon at now − InterpDelay by lerp/slerp (INC-C smoothing).
                 if ((mask & GeoStateMask.SurfacePos) != 0)
                     ClientVehicleInterpolator.SetTarget(
                         vehicle, (r.FactionGuid ?? "", r.VehicleID),
-                        new Vector3(r.PosX, r.PosY, r.PosZ));
+                        new Vector3(r.PosX, r.PosY, r.PosZ),
+                        new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
             }
 
             // 4) RangeRemaining via new EarthUnits(value) (public setter).
@@ -441,11 +442,13 @@ namespace Multipleer.Network.CommandSync
                        ?.Invoke(vehicle, new[] { data });
 
             // The native ProcessInstanceData sets Surface.position/.rotation (GeoVehicle.cs:1089-1090) but
-            // does NOT re-orient the globe ICON pivot. First mirror => place the icon RAW at this position so the
-            // craft appears at the right spot exactly; subsequent applied pushes place RAW from here (INC-A).
+            // does NOT re-orient the globe ICON pivot. Seed the interpolator's ring buffer with this first
+            // transform sample; with a single sample the interpolator renders it directly (Direct mode) so the
+            // craft appears at the right spot exactly, then smooths once ≥2 samples have arrived (INC-C).
             ClientVehicleInterpolator.SetTarget(
                 vehicle, (r.FactionGuid ?? "", r.VehicleID),
-                new Vector3(r.PosX, r.PosY, r.PosZ));
+                new Vector3(r.PosX, r.PosY, r.PosZ),
+                new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
         }
 
         // INC-3a globe-icon placement (PURE MIRROR — no client sim): orient the on-globe vehicle ICON from an
@@ -466,6 +469,24 @@ namespace Multipleer.Network.CommandSync
             EnsureReflect();
             if (_setOrientedGlobeWorldPos == null) return;
             try { _setOrientedGlobeWorldPos.Invoke(vehicle, new object[] { worldPos }); }
+            catch { }
+        }
+
+        // INC-C (P4): write ONLY Surface.rotation (the craft's authoritative in-plane heading/nose) from the
+        // slerp'd wire quaternion. This is a DIFFERENT transform than the icon PivotTransform that
+        // SetOrientedGlobeWorldPosition orients (GeoActor.cs:76), so it never clashes with PlaceGlobeIconAt; the
+        // interpolator calls this AFTER placement so the wire quaternion is the SOLE/LAST orientation writer.
+        // Reflection-only, null-guarded, never throws — a missing handle is a no-op.
+        public static void SetSurfaceRotation(object vehicle, Quaternion worldRot)
+        {
+            if (vehicle == null) return;
+            EnsureReflect();
+            if (_surfaceProp == null) return;
+            try
+            {
+                var surface = _surfaceProp.GetValue(vehicle) as Transform;
+                if (surface != null) surface.rotation = worldRot;
+            }
             catch { }
         }
 
