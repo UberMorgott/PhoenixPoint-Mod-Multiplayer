@@ -75,35 +75,46 @@ namespace Multipleer.Network.CommandSync
             => AccessTools.Field(vehicle.GetType(), "VehicleID")?.GetValue(vehicle)?.ToString() ?? "";
 
         // [DIAG2] TEMPORARY diagnostic (logging only, no behavior change). Build a compact, fully
-        // null-guarded snapshot of a faction's whole vehicle set: "id:defname, id:defname, ..." plus
-        // the count. Reuses the SAME accessor chain as FindVehicleById (geoLevel.PhoenixFaction ->
-        // GeoFaction.Vehicles). Def name = GeoVehicle.VehicleDef (property) -> UnityEngine.Object.name
-        // (e.g. "NA_Manticore_GeoVehicleDef"); falls back to the def Guid, then the runtime type name.
+        // null-guarded snapshot of EVERY faction's whole vehicle set, each entry keyed by the real
+        // (factionGuid,VehicleID) identity: "factionGuid#id:defname, factionGuid#id:defname, ..." plus
+        // the total count across all factions. Walks geoLevel.Factions (the same IList<GeoFaction> field
+        // FindFactionByGuid reads at cs:160) -> per faction GeoFaction.Vehicles (the property
+        // FindVehicleById uses). This exposes the live bug: the host moves a faction-keyed non-Phoenix
+        // craft (e.g. a New Jericho Thunderbird) that the client's Phoenix-only FindVehicleById can never
+        // resolve. Def name = GeoVehicle.VehicleDef (property) -> UnityEngine.Object.name (e.g.
+        // "NA_Manticore_GeoVehicleDef"); falls back to the def Guid, then the runtime type name.
         // Defensive at every step so it can never throw or change control flow.
         public static (int Count, string List) DescribeVehicles(object geoLevel)
         {
             if (geoLevel == null) return (0, "<no-geoLevel>");
-            object faction;
-            try { faction = AccessTools.Property(geoLevel.GetType(), "PhoenixFaction")?.GetValue(geoLevel); }
-            catch { return (0, "<faction-err>"); }
-            if (faction == null) return (0, "<no-faction>");
-
-            IEnumerable vehicles;
-            try { vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable; }
-            catch { return (0, "<vehicles-err>"); }
-            if (vehicles == null) return (0, "<no-vehicles>");
+            IEnumerable factions;
+            try { factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable; }
+            catch { return (0, "<factions-err>"); }
+            if (factions == null) return (0, "<no-factions>");
 
             var sb = new System.Text.StringBuilder();
             int count = 0;
-            foreach (var v in vehicles)
+            foreach (var faction in factions)
             {
-                if (v == null) continue;
-                if (count > 0) sb.Append(", ");
-                string id, name;
-                try { id = VehicleId(v); } catch { id = "?"; }
-                try { name = VehicleDefNameOf(v); } catch { name = "?"; }
-                sb.Append(id).Append(':').Append(name);
-                count++;
+                if (faction == null) continue;
+                string fguid;
+                try { fguid = FactionGuid(faction); } catch { fguid = "?"; }
+
+                IEnumerable vehicles;
+                try { vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable; }
+                catch { continue; }
+                if (vehicles == null) continue;
+
+                foreach (var v in vehicles)
+                {
+                    if (v == null) continue;
+                    if (count > 0) sb.Append(", ");
+                    string id, name;
+                    try { id = VehicleId(v); } catch { id = "?"; }
+                    try { name = VehicleDefNameOf(v); } catch { name = "?"; }
+                    sb.Append(fguid).Append('#').Append(id).Append(':').Append(name);
+                    count++;
+                }
             }
             return (count, sb.ToString());
         }
