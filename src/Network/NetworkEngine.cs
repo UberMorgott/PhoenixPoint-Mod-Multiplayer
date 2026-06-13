@@ -112,6 +112,10 @@ namespace Multipleer.Network
             IsActive = false;
             IsHost = false;
 
+            // INC-3a: drop all client render-interpolation state so a stale vehicle ref can't survive a
+            // host/join/leave cycle and place a destroyed icon on the next session.
+            Multipleer.Network.CommandSync.ClientVehicleInterpolator.Reset();
+
             // Singleton persists across host/join/leave cycles (Instance is never nulled),
             // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
             OnConnectionFailed = null;
@@ -364,6 +368,9 @@ namespace Multipleer.Network
             Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
             // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick.
             Multipleer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
+            // INC-3a render smoothing: CLIENT-only per-frame ease of mirrored vehicle icons between the ~10Hz
+            // host snapshots (pure render — no extrapolation, no sim). Self-gates to client inside Tick (host skips).
+            Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────

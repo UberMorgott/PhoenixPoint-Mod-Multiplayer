@@ -85,6 +85,9 @@ namespace Multipleer.Network.CommandSync
             var vehicle = GeoBridge.FindVehicleByFactionAndId(geoLevel, op.OwnerFactionGuid, op.EntityId);
             if (vehicle == null) { Debug.Log($"[Multipleer] VehicleRemoved: id {op.EntityId} absent, nothing to remove."); return; }
             AccessTools.Method(vehicle.GetType(), "Destroy", System.Type.EmptyTypes)?.Invoke(vehicle, null);
+            // Stop render-interpolating the now-destroyed icon (best-effort fast-path; a guid-mismatched leftover
+            // self-drops on the next interpolator Tick when its vehicle ref reads as a destroyed Unity object).
+            ClientVehicleInterpolator.Remove((op.OwnerFactionGuid ?? "", op.EntityId));
             Debug.Log($"[Multipleer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
         }
 
