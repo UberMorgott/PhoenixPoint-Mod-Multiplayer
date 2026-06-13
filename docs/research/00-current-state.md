@@ -2,7 +2,12 @@
 
 > Single-glance "where are we now" for the co-op mod. Updated as the as-built state moves.
 > **Active arc = SD-AIDR state replication** (spec `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`).
-> Companion plans: `docs/superpowers/plans/2026-06-13-replication-increment{1,2}-*.md`.
+> Companion plans: `docs/superpowers/plans/2026-06-13-replication-increment{1,2}-*.md` + `…-increment3a-vehicle-state-mirror.md`.
+> **NEXT = INC-3a** — all-factions vehicle state mirror over `0x35 GeoStateDiff` (spec
+> `docs/superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md`; plan
+> `docs/superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md`).
+> This SUBSUMES the LIVE BLOCKER below: the `(factionGuid,VehicleID)` resolver replaces the
+> Phoenix-only `FindVehicleById`, and the host state mirror replaces the per-action StartTravel replay.
 > Latest EOD handoff: `docs/superpowers/2026-06-13-EOD-replication-handoff.md` (READ THIS FIRST to resume).
 > The older command-sync / time-sync arc (`specs/2026-06-12-geoscape-command-sync-design.md`) is now
 > SUPERSEDED by SD-AIDR — kept below under "PRIOR ARC (superseded)" for lineage only.
@@ -45,7 +50,7 @@
 
 1. User runs 2-instance, moves aircraft host→client AND client→host, captures `multipleer.log` + `multipleer-2.log` IMMEDIATELY (don't relaunch — logs rotate/clobber).
 2. Grep `DIAG2`: compare `DIAG2 host vehicles[N]` vs `DIAG2 client vehicles[N]`; is `requestedVehicleId` in the client set? `AT LOAD` vs apply-time distinguishes under-restore vs post-load-loss vs host-extra.
-3. Decide fix after DIAG2 data: (i) make client mirror host's FULL vehicle set — relay client-origin deploy + broadcast all host vehicle creates (hook `VehicleAdded` generically, gate load-time); or (ii) build **INC-3 generic state-diff `0x35 GeoStateDiff`** (native InstanceData-diff) so the client mirrors the host's whole geoscape state — likely SUBSUMES this (also covers base-attack progress / ownership / prices / faction-traffic / arrival authority + SiteCreated).
+3. **DECIDED → build INC-3a (`0x35 GeoStateDiff`).** Chosen option (ii) generalized: the generic host→client state mirror SUBSUMES the live blocker (also covers base-attack progress / ownership / prices / faction-traffic / arrival authority + SiteCreated in later slices). Root cause is keyed on the Phoenix-only `FindVehicleById` + faction-less payload — INC-3a's `(factionGuid,VehicleID)` resolver + all-faction snapshot fixes it directly without a separate per-action relay. Spec `docs/superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md`, plan `docs/superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md` (14 tasks; Task 0 = all-factions `DescribeVehicles` DIAG now to capture pre-fix evidence; Task 13 = revert `b753111`+`fbfb3f9` after in-game GATE).
 4. After root cause confirmed: REMOVE DIAG/DIAG2 temp logging — revert `b753111` + `fbfb3f9`, delete `DiagDeployLogPatch.cs`, strip DIAG blocks.
 5. Remaining for full sync (all INC-3): base-attacks, prices, faction traffic, random events, arrival / `CurrentSite` authority on client.
 
