@@ -94,14 +94,24 @@ namespace Multipleer.Network.CommandSync
 
             // (c) APPLY: first mirror of this identity => HEAVY (ProcessInstanceData) so unsynced fields fill;
             // thereafter LIGHT reflected setters (cheap per-tick).
+            //
+            // SWITCH-A: drive the NATIVE NavigateRoutine off the mirrored travel intent so pos+heading+arc are
+            // native by construction. On a NON-first record the driver runs FIRST so IsNativeTravelling is
+            // up to date when ApplyVehicleState decides whether to skip its Surface pos/rot writes (the routine
+            // owns those during travel; a Travelling=true start enters native mode, an arrival exits it). On
+            // the FIRST mirror the heavy full apply must place the craft first, THEN the driver starts the
+            // routine from that placed position. Host-authority transitions (CurrentSite/occupancy) are
+            // unaffected — they still land via the suppressed emitters + discrete 0x35.
             bool firstMirror = !_firstMirrorDone.Contains(identity);
             if (firstMirror)
             {
                 GeoBridge.ApplyVehicleStateFull(vehicle, record);
                 _firstMirrorDone.Add(identity);
+                ClientNativeTravelDriver.OnRecord(geoLevel, vehicle, record);
             }
             else
             {
+                ClientNativeTravelDriver.OnRecord(geoLevel, vehicle, record);
                 GeoBridge.ApplyVehicleState(vehicle, record);
             }
 

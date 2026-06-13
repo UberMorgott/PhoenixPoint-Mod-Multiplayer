@@ -345,8 +345,15 @@ namespace Multipleer.Network.CommandSync
             }
 
             // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
+            // SWITCH-A: while this identity is rendered by the NATIVE NavigateRoutine, the routine OWNS pos +
+            // heading + arc (GeoNavComponent.cs:117-124). SKIP the Surface.position/.rotation writes AND the
+            // interpolator routing — a continuous 0x35 SurfacePos must NOT snap the transform (that is the
+            // jerk), and a second driver would fight the routine. Discrete arrival exits native mode FIRST
+            // (ClientNativeTravelDriver.OnRecord runs before this), so the arrival snap still lands here.
+            bool nativeTravelling = ClientNativeTravelDriver.IsNativeTravelling(
+                (r.FactionGuid ?? "", r.VehicleID));
             var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
-            if (surface != null)
+            if (surface != null && !nativeTravelling)
             {
                 if ((mask & GeoStateMask.SurfacePos) != 0)
                     surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
@@ -683,6 +690,40 @@ namespace Multipleer.Network.CommandSync
                 if (byId.TryGetValue(id, out var site)) list.Add(site);
                 else return null;
             return list;
+        }
+
+        // SWITCH-A: invoke the native GeoVehicle.StartTravel(List<GeoSite>) — OVERLOADED with
+        // StartTravel(List<Vector3>), so disambiguate by the GeoSite list type. On the CLIENT this is called
+        // ONLY from ClientNativeTravelDriver under EntityReplicationScope so StartTravelInterceptPatch.Prefix
+        // recognizes a replicated apply (not a player input) and lets it execute (it would otherwise relay to
+        // the host + block). StartTravel -> Navigation.Navigate schedules the native NavigateRoutine which
+        // renders pos+heading+arc natively; set_Travelling/InitiateTravelling/OnArrived remain suppressed on
+        // the client (ClientTravelEmitterSuppressPatch) so no authority side-effects fire. `path` is the typed
+        // List<GeoSite> object (as returned by BuildSitePath). Reflection-only, null-guarded, never throws.
+        public static void StartVehicleTravel(object vehicle, object path)
+        {
+            if (vehicle == null || path == null) return;
+            var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            if (geoSiteType == null) return;
+            var listType = typeof(List<>).MakeGenericType(geoSiteType);
+            var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
+            if (method == null) return;
+            try { method.Invoke(vehicle, new[] { path }); }
+            catch (Exception ex) { Debug.LogWarning($"[Multipleer] StartVehicleTravel failed: {ex.Message}"); }
+        }
+
+        // SWITCH-A: cancel a vehicle's native navigation render (GeoNavComponent.CancelNavigation,
+        // GeoNavComponent.cs:180 — ActionComponent.CancelAction + CurrentPath.Clear). Called on a discrete
+        // ARRIVAL to stop any lingering routine before the normal mirror placement resumes, so no residual
+        // driver fights the snapped position. Reads the public GeoVehicle.Navigation field (GeoVehicle.cs:39).
+        // Reflection-only, null-guarded, never throws.
+        public static void CancelVehicleNavigation(object vehicle)
+        {
+            if (vehicle == null) return;
+            var nav = AccessTools.Field(vehicle.GetType(), "Navigation")?.GetValue(vehicle);
+            if (nav == null) return;
+            try { AccessTools.Method(nav.GetType(), "CancelNavigation", Type.EmptyTypes)?.Invoke(nav, null); }
+            catch (Exception ex) { Debug.LogWarning($"[Multipleer] CancelVehicleNavigation failed: {ex.Message}"); }
         }
 
         // GeoVehicle.VehicleID — public int FIELD.

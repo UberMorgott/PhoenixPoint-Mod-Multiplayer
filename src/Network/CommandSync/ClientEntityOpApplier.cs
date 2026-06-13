@@ -88,6 +88,9 @@ namespace Multipleer.Network.CommandSync
             // Stop render-interpolating the now-destroyed icon (best-effort fast-path; a guid-mismatched leftover
             // self-drops on the next interpolator Tick when its vehicle ref reads as a destroyed Unity object).
             ClientVehicleInterpolator.Remove((op.OwnerFactionGuid ?? "", op.EntityId));
+            // SWITCH-A: drop native-travel tracking for the removed craft (its native OnExitPlay cancels its
+            // own routine).
+            ClientNativeTravelDriver.OnRemoved((op.OwnerFactionGuid ?? "", op.EntityId));
             Debug.Log($"[Multipleer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
         }
 

@@ -205,6 +205,14 @@ namespace Multipleer.Network.CommandSync
                     continue;
                 }
 
+                // SWITCH-A: while a native NavigateRoutine is rendering this identity (pos+heading+arc), the
+                // interpolator is DISABLED for it — skip placement so we don't fight the routine's per-frame
+                // icon driver. The entry is KEPT (not dropped): on discrete arrival the driver exits native
+                // mode and the apply path snaps via SetTarget/EndSegmentSnap (Current reseeds to host pos
+                // exactly → no residual offset), and the interpolator resumes for any later non-native push.
+                if (ClientNativeTravelDriver.IsNativeTravelling(kv.Key))
+                    continue;
+
                 if (e.SegActive && !double.IsNaN(nowSec))
                 {
                     // NATIVE EQUATION: num = Clamp01((Now-start)/totalTime); pos = Slerp(start,end,num). The
