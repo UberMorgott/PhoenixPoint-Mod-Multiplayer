@@ -31,6 +31,26 @@ namespace Multipleer.Harmony
 
         public static MethodBase TargetMethod() => _targetMethod;
 
+        // Suppress the native auto-LiftCurtain on Loaded→Playing during a co-op session so every peer
+        // holds at the (still-visible) native loading screen until the host's RevealAll lifts all at once.
+        // Returns false ONLY for that exact state pair while held; all other transitions run natively.
+        public static bool Prefix(object prevState, object newState)
+        {
+            try
+            {
+                if (prevState == null || newState == null) return true;
+                if (prevState.ToString() != "Loaded" || newState.ToString() != "Playing") return true;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive) return true;
+                var coord = engine.SaveTransfer;
+                if (coord == null || !coord.SessionStarted) return true;   // non-co-op: native lift as normal
+                if (coord.Revealed) return true;                            // already revealed: let it lift
+                Debug.Log("[Multipleer] curtain Loaded→Playing: SUPPRESS auto-lift (co-op hold)");
+                return false; // skip native LiftCurtain; deferred lift happens on RevealAll
+            }
+            catch (Exception e) { Debug.LogError("[Multipleer] CurtainShowPatch.Prefix failed: " + e.Message); return true; }
+        }
+
         // Signature: OnLevelStateChanged(Level level, Level.State prevState, Level.State newState).
         // Harmony binds injected params BY NAME to the original (verified names: level/prevState/
         // newState, decompile LevelSwitchCurtainController.cs:46); typed as object to avoid hard

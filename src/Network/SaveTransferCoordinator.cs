@@ -138,6 +138,10 @@ namespace Multipleer.Network
         /// <summary>True once BEGIN has released this peer into the level (session has started).</summary>
         public bool SessionStarted => _begun;
 
+        /// <summary>True once the deferred reveal (native LiftCurtain + overlay hide) has run; used by
+        /// CurtainShowPatch.Prefix so a later Loaded→Playing after RevealAll is NOT suppressed.</summary>
+        public bool Revealed => _revealed;
+
         /// <summary>True while this peer is in phase-2 native world-load (begun, not yet done).</summary>
         public bool InPhase2 => RosterProgressTracker.InPhase2(_begun, _loadCompleteSent);
 
@@ -521,6 +525,7 @@ namespace Multipleer.Network
         {
             if (_loadCompleteSent) return;
             _loadCompleteSent = true;
+            Debug.Log("[Multipleer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex);
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
             if (_engine.IsHost) { TryReleaseBarrier(); return; }
@@ -552,25 +557,36 @@ namespace Multipleer.Network
         /// <summary>All peers: host says everyone is loaded → lift the held overlay now.</summary>
         public void OnRevealAll(NetworkMessage msg)
         {
+            Debug.Log("[Multipleer] OnRevealAll received → PerformDeferredLift");
             PerformDeferredLift();
         }
 
-        // Lift the held synced overlay (reveals the already-loaded world). Once-guarded; never throws.
+        // Lift the held synced reveal (native curtain we suppressed + the mod overlay roster) so the
+        // already-loaded world appears on every peer at once. Once-guarded FIRST; never throws.
         private void PerformDeferredLift()
         {
             if (_revealed) return;
             _revealed = true;
-            Debug.Log("[Multipleer] PerformDeferredLift → reveal");
+            Debug.Log("[Multipleer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
+            // Lift the native curtain we suppressed (animated alpha→0, unpauses rendering, fires
+            // OnCurtainLifted → GeoscapeView unlocks input + enables sound). Reflection: mod can't ref the type.
             try
             {
-                // The overlay IS the curtain; hiding it reveals the already-loaded world. Same
-                // accessor CurtainShowPatch uses.
-                MultiplayerUI.Instance?.HideLoadOverlay();
+                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                if (t != null)
+                {
+                    var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                    if (ctrl != null)
+                    {
+                        var m = HarmonyLib.AccessTools.Method(t, "LiftCurtain", new System.Type[0]);
+                        m?.Invoke(ctrl, null);
+                    }
+                }
             }
-            catch (Exception e)
-            {
-                Debug.LogError("[Multipleer] PerformDeferredLift failed: " + e);
-            }
+            catch (Exception e) { Debug.LogError("[Multipleer] native LiftCurtain failed: " + e.Message); }
+            // Hide the mod overlay roster.
+            try { MultiplayerUI.Instance?.HideLoadOverlay(); }
+            catch (Exception e) { Debug.LogError("[Multipleer] HideLoadOverlay failed: " + e.Message); }
         }
 
         /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>

@@ -238,18 +238,21 @@ namespace Multipleer.UI
         private void Refresh(NetworkEngine engine)
         {
             var tracker = engine.SaveTransfer.Tracker;
-            // Build a row for EVERY slot in the roster INCLUDING the local one (user wants self +
-            // others shown). The tracker holds merged per-slot progress for ALL slots, the local one
-            // included, so a single uniform drive path covers every row.
+            // Build a row for every OTHER slot in the roster — HIDE the local player's own row (the
+            // overlay shows who ELSE is still loading, not yourself). The tracker holds merged
+            // per-slot progress for all remote slots.
             foreach (var p in engine.Session.GetLobbyRoster())
             {
+                if (p.SlotIndex == engine.Session.LocalSlotIndex) continue; // skip self
+                // Empty nickname → fallback label so the bar still says WHO it is.
+                var label = string.IsNullOrEmpty(p.Nickname) ? "Player " + p.SlotIndex : p.Nickname;
                 if (!_rows.TryGetValue(p.SlotIndex, out var row))
                 {
                     EnsureCanvas();
-                    row = BuildRow(p.SlotIndex, p.Nickname);
+                    row = BuildRow(p.SlotIndex, label);
                     _rows[p.SlotIndex] = row;
                 }
-                row.Name.text = p.Nickname;
+                row.Name.text = label;
                 var (phase, percent) = tracker.Get(p.SlotIndex);
 
                 if (row.Native && row.NativeFill != null)
