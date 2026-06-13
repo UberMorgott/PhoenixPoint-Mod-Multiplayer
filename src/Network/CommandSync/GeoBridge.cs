@@ -69,6 +69,83 @@ namespace Multipleer.Network.CommandSync
             return null;
         }
 
+        // ALL-FACTIONS host snapshot (INC-3a): record one GeoVehicle's authoritative durable state into a
+        // pure GeoVehicleStateRecord for the 0x35 GeoStateDiff mirror. Mirrors TimeBridge.RecordHostState's
+        // native-RecordInstanceData pattern (TimeBridge.cs:85-103): allocate a FRESH GeoVehicleInstanceData
+        // and invoke the native protected GeoVehicle.RecordInstanceData(ActorInstanceData) (GeoVehicle.cs:1053,
+        // a void override that FILLS the passed data) so the snapshot is isolated and has zero side-effects on
+        // game state — never the shared SerializationData getter (ActorComponent.cs:55-66, which mutates the
+        // persisted instance). Then read the durable fields off OUR filled instance:
+        //   SurfacePos (Vector3, GeoVehicleInstanceData.cs:17) -> PosX/Y/Z
+        //   SurfaceRot (Quaternion, cs:19)                     -> RotX/Y/Z/W
+        //   RangeRemaining (float, cs:23)                      -> RangeRemaining (set from EarthUnits.Value at cs:1065)
+        //   Travelling (bool, cs:32)
+        //   HitPoints (INT field, cs:26; set from Stats.HitPoints at cs:1072) -> cast to record's float
+        //   CurrentSite (GeoSite, cs:28) -> CurrentSiteId via GeoSite.SiteId int field (GeoSite.cs:45); -1 if none
+        //   DestinationSites (List<GeoSite>, cs:30) -> ordered int[] of SiteId
+        //   VehicleID (int, cs:45; set at cs:1076)
+        // FactionGuid comes from the live GeoVehicle.Owner (property, GeoVehicle.cs:111) via FactionGuid().
+        // Seq + ChangedMask are LEFT DEFAULT (0) — the host broadcaster/differ (Task 7/10) assigns them.
+        // Returns default(GeoVehicleStateRecord) if the vehicle or the InstanceData type is unavailable.
+        public static GeoVehicleStateRecord RecordVehicleState(object vehicle)
+        {
+            if (vehicle == null) return default(GeoVehicleStateRecord);
+
+            var gvidType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData");
+            var actorDataType = AccessTools.TypeByName("Base.Entities.ActorInstanceData");
+            if (gvidType == null || actorDataType == null) return default(GeoVehicleStateRecord);
+
+            // FRESH isolated snapshot target; the native void override fills it in place.
+            var data = Activator.CreateInstance(gvidType);
+            AccessTools.Method(vehicle.GetType(), "RecordInstanceData", new[] { actorDataType })
+                       ?.Invoke(vehicle, new[] { data });
+
+            var record = new GeoVehicleStateRecord();
+
+            var owner = AccessTools.Property(vehicle.GetType(), "Owner")?.GetValue(vehicle);
+            record.FactionGuid = owner != null ? FactionGuid(owner) : "";
+
+            var vehicleId = AccessTools.Field(gvidType, "VehicleID")?.GetValue(data);
+            record.VehicleID = vehicleId is int vid ? vid : 0;
+
+            var pos = AccessTools.Field(gvidType, "SurfacePos")?.GetValue(data);
+            if (pos is Vector3 p) { record.PosX = p.x; record.PosY = p.y; record.PosZ = p.z; }
+
+            var rot = AccessTools.Field(gvidType, "SurfaceRot")?.GetValue(data);
+            if (rot is Quaternion q) { record.RotX = q.x; record.RotY = q.y; record.RotZ = q.z; record.RotW = q.w; }
+
+            var range = AccessTools.Field(gvidType, "RangeRemaining")?.GetValue(data);
+            record.RangeRemaining = range is float rr ? rr : 0f;
+
+            var travelling = AccessTools.Field(gvidType, "Travelling")?.GetValue(data);
+            record.Travelling = travelling is bool tv && tv;
+
+            // GeoVehicleInstanceData.HitPoints is an INT (cs:26); the wire record carries it as float.
+            var hp = AccessTools.Field(gvidType, "HitPoints")?.GetValue(data);
+            record.HitPoints = hp is int hpi ? hpi : 0;
+
+            var currentSite = AccessTools.Field(gvidType, "CurrentSite")?.GetValue(data);
+            record.CurrentSiteId = SiteIdInt(currentSite); // -1 when no current site
+
+            var destSites = AccessTools.Field(gvidType, "DestinationSites")?.GetValue(data) as IEnumerable;
+            var destIds = new List<int>();
+            if (destSites != null)
+                foreach (var s in destSites)
+                    destIds.Add(SiteIdInt(s));
+            record.DestinationSiteIds = destIds.ToArray();
+
+            return record;
+        }
+
+        // GeoSite.SiteId (public int FIELD, default -1, GeoSite.cs:45) read as int. Returns -1 for a null site
+        // (no current site / unresolved) or if the field is unreadable — matches the engine's own -1 default.
+        private static int SiteIdInt(object site)
+        {
+            if (site == null) return -1;
+            var v = AccessTools.Field(site.GetType(), "SiteId")?.GetValue(site);
+            return v is int i ? i : -1;
+        }
+
         // Build a List<GeoSite> from string ids, in order. Returns the typed list as object, or null
         // if the map/sites are unavailable or any id fails to resolve (caller aborts the apply).
         public static object BuildSitePath(object geoLevel, string[] siteIds)
