@@ -48,7 +48,14 @@ namespace Multipleer.Network.CommandSync
         // Starts at TimeSyncBroadcaster's 0.5s; tune to 0.2–0.3s in-game for smoother vehicle motion.
         private const float FlushIntervalSeconds = 0.5f;
 
-        private static float _accum;
+        // PERF (host-lag fix): cadence of the whole faction×vehicle snapshot/diff WALK. The expensive native
+        // RecordVehicleState used to run at 60Hz per vehicle; gate it to ~10Hz instead. Discrete-change
+        // (arrival/departure/HP) detection latency becomes ≤0.1s — fine for a strategic geoscape mirror. The
+        // 0.5s continuous flush above is an exact multiple of this, so the two cadences stay coherent.
+        private const float SnapshotIntervalSeconds = 0.1f;
+
+        private static float _accum;          // continuous-flush accumulator (0.5s)
+        private static float _snapshotAccum;  // snapshot/diff WALK accumulator (0.1s)
 
         // ONE shared diff/seq core — a single monotonic seq line per (FactionGuid,VehicleID) across BOTH channels.
         private static readonly GeoVehicleStateDiffer _differ = new GeoVehicleStateDiffer();
@@ -56,6 +63,12 @@ namespace Multipleer.Network.CommandSync
         // Continuous-ONLY changed records awaiting the throttled unreliable flush; latest record per identity wins.
         private static readonly Dictionary<(string, int), GeoVehicleStateRecord> _continuousPending
             = new Dictionary<(string, int), GeoVehicleStateRecord>();
+
+        // PERF dirty pre-check: last CHEAP signature recorded per identity (managed pos/rot + Travelling/
+        // CurrentSite/HitPoints). On a snapshot tick, if a vehicle's fresh cheap sig matches its last one
+        // within epsilon, we SKIP the expensive RecordVehicleState entirely (steady-state idle = alloc-free).
+        private static readonly Dictionary<(string, int), GeoVehicleCheapSig> _lastSig
+            = new Dictionary<(string, int), GeoVehicleCheapSig>();
 
         // Call once per frame from the host's NetworkEngine.Update().
         public static void Tick(NetworkEngine engine, float deltaTime)
@@ -74,44 +87,66 @@ namespace Multipleer.Network.CommandSync
                 var factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable;
                 if (factions == null) return;
 
+                // PERF: gate the expensive faction×vehicle snapshot/diff WALK to ~10Hz (was every frame).
+                // Both accumulators advance by real dt every frame so the 0.5s flush below still fires on
+                // schedule even on frames where no snapshot is taken.
+                _snapshotAccum += deltaTime;
+                bool doSnapshot = _snapshotAccum >= SnapshotIntervalSeconds;
+                if (doSnapshot) _snapshotAccum = 0f;
+
                 List<GeoVehicleStateRecord> reliableRecords = null; // discrete transitions, sent NOW
 
-                foreach (var faction in factions)
+                if (doSnapshot)
                 {
-                    if (faction == null) continue;
-                    var vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable;
-                    if (vehicles == null) continue;
-
-                    foreach (var v in vehicles)
+                    foreach (var faction in factions)
                     {
-                        if (v == null) continue;
+                        if (faction == null) continue;
+                        var vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable;
+                        if (vehicles == null) continue;
 
-                        var snap = GeoBridge.RecordVehicleState(v);
-                        var diffed = _differ.Diff(snap);
-                        if (diffed.ChangedMask == 0) continue; // nothing moved for this identity
-
-                        var key = (diffed.FactionGuid ?? "", diffed.VehicleID);
-
-                        if (GeoVehicleStateDiffer.DiscreteBits(diffed.ChangedMask) != 0)
+                        foreach (var v in vehicles)
                         {
-                            // Transition (Travelling/CurrentSite/DestinationSites/HitPoints) — send the whole
-                            // changed record reliably this frame. A newer combined record supersedes any older
-                            // buffered continuous-only record for this identity.
-                            (reliableRecords ?? (reliableRecords = new List<GeoVehicleStateRecord>())).Add(diffed);
-                            _continuousPending.Remove(key);
-                        }
-                        else
-                        {
-                            // Continuous-only change — hold the freshest record (with its assigned seq) for the
-                            // throttled unreliable flush. Latest wins; the held seq keeps it lossless.
-                            _continuousPending[key] = diffed;
+                            if (v == null) continue;
+
+                            // PERF dirty pre-check: a CHEAP managed signature (no native fill, no alloc) skips the
+                            // expensive RecordVehicleState when nothing relevant moved. Guards pos/rot (epsilon) +
+                            // the cheap discrete triggers Travelling/CurrentSite/HitPoints. (DestinationSites-only
+                            // re-routes self-heal on the next discrete change — see GeoVehicleCheapSig.)
+                            if (GeoBridge.TryGetCheapVehicleSignature(v, out var sig))
+                            {
+                                var sigKey = (sig.FactionGuid ?? "", sig.VehicleID);
+                                if (_lastSig.TryGetValue(sigKey, out var prevSig) && !SigChanged(prevSig, sig))
+                                    continue; // unchanged since last snapshot → skip the heavy record
+                                _lastSig[sigKey] = sig; // remember for next tick (first-seen also records below)
+                            }
+
+                            var snap = GeoBridge.RecordVehicleState(v);
+                            var diffed = _differ.Diff(snap);
+                            if (diffed.ChangedMask == 0) continue; // nothing moved for this identity
+
+                            var key = (diffed.FactionGuid ?? "", diffed.VehicleID);
+
+                            if (GeoVehicleStateDiffer.DiscreteBits(diffed.ChangedMask) != 0)
+                            {
+                                // Transition (Travelling/CurrentSite/DestinationSites/HitPoints) — send the whole
+                                // changed record reliably this frame. A newer combined record supersedes any older
+                                // buffered continuous-only record for this identity.
+                                (reliableRecords ?? (reliableRecords = new List<GeoVehicleStateRecord>())).Add(diffed);
+                                _continuousPending.Remove(key);
+                            }
+                            else
+                            {
+                                // Continuous-only change — hold the freshest record (with its assigned seq) for the
+                                // throttled unreliable flush. Latest wins; the held seq keeps it lossless.
+                                _continuousPending[key] = diffed;
+                            }
                         }
                     }
-                }
 
-                // DISCRETE channel: immediate, reliable, ordered. Never throttled.
-                if (reliableRecords != null && reliableRecords.Count > 0)
-                    engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = reliableRecords }, reliable: true);
+                    // DISCRETE channel: immediate, reliable, ordered. Never throttled (now at snapshot cadence).
+                    if (reliableRecords != null && reliableRecords.Count > 0)
+                        engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = reliableRecords }, reliable: true);
+                }
 
                 // CONTINUOUS channel: throttled accumulator → one batched unreliable envelope on flush.
                 _accum += deltaTime;
@@ -132,6 +167,22 @@ namespace Multipleer.Network.CommandSync
             }
         }
 
+        // Cheap dirty test: did the vehicle's signature change since its last recorded snapshot? Continuous
+        // pos/rot/range use the SAME epsilon as the differ (so the pre-check and the differ agree — a sig the
+        // differ would treat as unchanged is also skipped here); the discrete triggers compare exactly.
+        private static bool SigChanged(in GeoVehicleCheapSig a, in GeoVehicleCheapSig b)
+        {
+            const float eps = GeoVehicleStateDiffer.Epsilon;
+            if (Math.Abs(a.PosX - b.PosX) > eps || Math.Abs(a.PosY - b.PosY) > eps || Math.Abs(a.PosZ - b.PosZ) > eps)
+                return true;
+            if (Math.Abs(a.RotX - b.RotX) > eps || Math.Abs(a.RotY - b.RotY) > eps
+                || Math.Abs(a.RotZ - b.RotZ) > eps || Math.Abs(a.RotW - b.RotW) > eps)
+                return true;
+            if (Math.Abs(a.RangeRemaining - b.RangeRemaining) > eps)
+                return true;
+            return a.Travelling != b.Travelling || a.CurrentSiteId != b.CurrentSiteId || a.HitPoints != b.HitPoints;
+        }
+
         // Drop all per-identity diff/seq state + the pending buffer so a fresh co-op session starts clean.
         // Not wired to any session boundary yet (no Task-10 bullet; TimeSyncBroadcaster has none either) —
         // exposed for a future session-reset hook.
@@ -139,7 +190,9 @@ namespace Multipleer.Network.CommandSync
         {
             _differ.Reset();
             _continuousPending.Clear();
+            _lastSig.Clear();
             _accum = 0f;
+            _snapshotAccum = 0f;
         }
     }
 }

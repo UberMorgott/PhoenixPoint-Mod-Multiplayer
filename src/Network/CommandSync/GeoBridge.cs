@@ -1,11 +1,32 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
 namespace Multipleer.Network.CommandSync
 {
+    // PERF (INC-3a host-lag fix): a cheap, alloc-free managed signature of a GeoVehicle's CONTINUOUS
+    // pos/rot/range plus the cheap DISCRETE trigger fields (Travelling/CurrentSite/HitPoints). Read WITHOUT
+    // the native RecordInstanceData fill or any Activator allocation, so the host's per-tick dirty pre-check
+    // can skip the expensive RecordVehicleState for a vehicle that has not moved. It is a struct (no heap
+    // alloc), identity = (FactionGuid,VehicleID). DestinationSites is intentionally NOT in the cheap signature
+    // — a pure re-route that flips neither Travelling nor CurrentSite is detected on the next discrete change
+    // (or once it actually moves); DestinationSites is a cosmetic path preview, so the tiny latency is fine.
+    // RangeRemaining IS included (defense-in-depth on the lossless mirror): a future parked/gradual-refuel
+    // path could change range without any pos/rot/discrete move, and must never be silently dropped.
+    internal struct GeoVehicleCheapSig
+    {
+        public string FactionGuid;
+        public int VehicleID;
+        public float PosX, PosY, PosZ;
+        public float RotX, RotY, RotZ, RotW;
+        public float RangeRemaining;
+        public bool Travelling;
+        public int CurrentSiteId;
+        public int HitPoints;
+    }
     // Engine-side id<->entity bridge for command apply. Uses AccessTools reflection so the mod never
     // hard-references game types at compile time (matching the CampaignPatches stub strategy).
     //
@@ -20,6 +41,74 @@ namespace Multipleer.Network.CommandSync
     //   * GeoSite.SiteId                     -> public int FIELD (GeoSite.cs:45)   = stable site id.
     internal static class GeoBridge
     {
+        // ─── PERF: cached reflection handles for the host snapshot hot path (INC-3a lag fix) ───
+        // RecordVehicleState used to AccessTools.TypeByName/Method/Field/Property on EVERY call (12+ lookups
+        // per vehicle per frame across all factions). The shapes are FIXED game types, so resolve them ONCE
+        // (lazy, defensively — a missing type leaves the handles null and the callers fall back exactly as
+        // before). All Field/Method/Property handles are read-only after init. _reflectReady gates the lazy
+        // resolve; resolution failures (type not yet loaded) leave it false so a later tick retries.
+        private static bool _reflectReady;
+        private static Type _gvidType;          // PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData (native fill target)
+        private static MethodInfo _recordInstanceData; // GeoVehicle.RecordInstanceData(ActorInstanceData) — native fill
+        private static PropertyInfo _ownerProp;        // GeoVehicle.Owner
+        private static FieldInfo _fInstVehicleID;       // GeoVehicleInstanceData.VehicleID
+        private static FieldInfo _fSurfacePos, _fSurfaceRot, _fRangeRemaining, _fTravellingData, _fHitPointsData;
+        private static FieldInfo _fCurrentSite, _fDestinationSites;
+        // Cheap (managed, no-native-fill) signature handles, all on the live GeoVehicle / its members:
+        private static FieldInfo _fVehicleID;          // GeoVehicle.VehicleID (public int field)
+        private static PropertyInfo _surfaceProp;      // GeoVehicle.Surface (Transform)
+        private static PropertyInfo _travellingProp;   // GeoVehicle.Travelling (bool)
+        private static PropertyInfo _currentSiteProp;  // GeoVehicle.CurrentSite (GeoSite)
+        private static PropertyInfo _rangeRemainingProp; // GeoVehicle.RangeRemaining (EarthUnits)
+        private static FieldInfo _euValueField;        // EarthUnits.Value (public float field, EarthUnits.cs:21)
+        private static FieldInfo _statsField;          // GeoVehicle.Stats
+        private static FieldInfo _statsHitPoints;      // GeoVehicleStats.HitPoints (int)
+        private static FieldInfo _siteIdField;         // GeoSite.SiteId (int)
+
+        // Resolve the fixed game-type handles once. Defensive: any failure leaves _reflectReady false so the
+        // next tick retries (the geoscape types may not be loaded the first time this runs).
+        private static void EnsureReflect()
+        {
+            if (_reflectReady) return;
+            try
+            {
+                var gvidType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData");
+                var actorDataType = AccessTools.TypeByName("Base.Entities.ActorInstanceData");
+                var geoVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicle");
+                var statsType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicleStats");
+                var siteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                if (gvidType == null || actorDataType == null || geoVehicleType == null) return;
+
+                _gvidType = gvidType;
+                _recordInstanceData = AccessTools.Method(geoVehicleType, "RecordInstanceData", new[] { actorDataType });
+                _ownerProp = AccessTools.Property(geoVehicleType, "Owner");
+
+                _fInstVehicleID = AccessTools.Field(gvidType, "VehicleID");
+                _fSurfacePos = AccessTools.Field(gvidType, "SurfacePos");
+                _fSurfaceRot = AccessTools.Field(gvidType, "SurfaceRot");
+                _fRangeRemaining = AccessTools.Field(gvidType, "RangeRemaining");
+                _fTravellingData = AccessTools.Field(gvidType, "Travelling");
+                _fHitPointsData = AccessTools.Field(gvidType, "HitPoints");
+                _fCurrentSite = AccessTools.Field(gvidType, "CurrentSite");
+                _fDestinationSites = AccessTools.Field(gvidType, "DestinationSites");
+
+                _fVehicleID = AccessTools.Field(geoVehicleType, "VehicleID");
+                _surfaceProp = AccessTools.Property(geoVehicleType, "Surface");
+                _travellingProp = AccessTools.Property(geoVehicleType, "Travelling");
+                _currentSiteProp = AccessTools.Property(geoVehicleType, "CurrentSite");
+                _rangeRemainingProp = AccessTools.Property(geoVehicleType, "RangeRemaining");
+                // EarthUnits.Value (the property's struct return type holds a public float Value field).
+                var euType = _rangeRemainingProp?.PropertyType ?? AccessTools.TypeByName("PhoenixPoint.Common.Core.EarthUnits");
+                _euValueField = euType != null ? AccessTools.Field(euType, "Value") : null;
+                _statsField = AccessTools.Field(geoVehicleType, "Stats");
+                _statsHitPoints = statsType != null ? AccessTools.Field(statsType, "HitPoints") : null;
+                _siteIdField = siteType != null ? AccessTools.Field(siteType, "SiteId") : null;
+
+                _reflectReady = true;
+            }
+            catch { /* leave _reflectReady false; a later tick retries */ }
+        }
+
         // GameUtl.CurrentLevel().GetComponent<GeoLevelController>() — the active geoscape controller,
         // or null when no geoscape level is loaded (single-menu / tactical / between-loads).
         public static object GetGeoLevelController()
@@ -91,43 +180,41 @@ namespace Multipleer.Network.CommandSync
         {
             if (vehicle == null) return default(GeoVehicleStateRecord);
 
-            var gvidType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData");
-            var actorDataType = AccessTools.TypeByName("Base.Entities.ActorInstanceData");
-            if (gvidType == null || actorDataType == null) return default(GeoVehicleStateRecord);
+            EnsureReflect();
+            if (_gvidType == null) return default(GeoVehicleStateRecord);
 
             // FRESH isolated snapshot target; the native void override fills it in place.
-            var data = Activator.CreateInstance(gvidType);
-            AccessTools.Method(vehicle.GetType(), "RecordInstanceData", new[] { actorDataType })
-                       ?.Invoke(vehicle, new[] { data });
+            var data = Activator.CreateInstance(_gvidType);
+            _recordInstanceData?.Invoke(vehicle, new[] { data });
 
             var record = new GeoVehicleStateRecord();
 
-            var owner = AccessTools.Property(vehicle.GetType(), "Owner")?.GetValue(vehicle);
+            var owner = _ownerProp?.GetValue(vehicle);
             record.FactionGuid = owner != null ? FactionGuid(owner) : "";
 
-            var vehicleId = AccessTools.Field(gvidType, "VehicleID")?.GetValue(data);
+            var vehicleId = _fInstVehicleID?.GetValue(data);
             record.VehicleID = vehicleId is int vid ? vid : 0;
 
-            var pos = AccessTools.Field(gvidType, "SurfacePos")?.GetValue(data);
+            var pos = _fSurfacePos?.GetValue(data);
             if (pos is Vector3 p) { record.PosX = p.x; record.PosY = p.y; record.PosZ = p.z; }
 
-            var rot = AccessTools.Field(gvidType, "SurfaceRot")?.GetValue(data);
+            var rot = _fSurfaceRot?.GetValue(data);
             if (rot is Quaternion q) { record.RotX = q.x; record.RotY = q.y; record.RotZ = q.z; record.RotW = q.w; }
 
-            var range = AccessTools.Field(gvidType, "RangeRemaining")?.GetValue(data);
+            var range = _fRangeRemaining?.GetValue(data);
             record.RangeRemaining = range is float rr ? rr : 0f;
 
-            var travelling = AccessTools.Field(gvidType, "Travelling")?.GetValue(data);
+            var travelling = _fTravellingData?.GetValue(data);
             record.Travelling = travelling is bool tv && tv;
 
             // GeoVehicleInstanceData.HitPoints is an INT (cs:26); the wire record carries it as float.
-            var hp = AccessTools.Field(gvidType, "HitPoints")?.GetValue(data);
+            var hp = _fHitPointsData?.GetValue(data);
             record.HitPoints = hp is int hpi ? hpi : 0;
 
-            var currentSite = AccessTools.Field(gvidType, "CurrentSite")?.GetValue(data);
+            var currentSite = _fCurrentSite?.GetValue(data);
             record.CurrentSiteId = SiteIdInt(currentSite); // -1 when no current site
 
-            var destSites = AccessTools.Field(gvidType, "DestinationSites")?.GetValue(data) as IEnumerable;
+            var destSites = _fDestinationSites?.GetValue(data) as IEnumerable;
             var destIds = new List<int>();
             if (destSites != null)
                 foreach (var s in destSites)
@@ -135,6 +222,55 @@ namespace Multipleer.Network.CommandSync
             record.DestinationSiteIds = destIds.ToArray();
 
             return record;
+        }
+
+        // PERF (INC-3a lag fix): build a CHEAP managed signature of a GeoVehicle for the host's per-tick dirty
+        // pre-check, WITHOUT the native RecordInstanceData fill or any Activator allocation that RecordVehicleState
+        // does. Reads only live managed members via the cached handles: Surface.position/rotation (pure Transform
+        // reads), VehicleID (field), Owner→Def.Guid (FactionGuid), RangeRemaining (prop→EarthUnits.Value),
+        // Travelling (prop), CurrentSite→SiteId, Stats.HitPoints. Returns false (and a default sig) if the
+        // core reflection handles aren't resolved yet — the
+        // caller then falls back to the full RecordVehicleState path. The sig is a struct (out param), so the
+        // steady-state no-change path allocates nothing on the heap except the small boxing of the bool/int
+        // reflected reads (a ~95% cut vs the full native snapshot — full zero-alloc would need typed accessors,
+        // not worth the complexity here).
+        public static bool TryGetCheapVehicleSignature(object vehicle, out GeoVehicleCheapSig sig)
+        {
+            sig = default(GeoVehicleCheapSig);
+            if (vehicle == null) return false;
+
+            EnsureReflect();
+            if (_surfaceProp == null || _fVehicleID == null) return false;
+
+            var owner = _ownerProp?.GetValue(vehicle);
+            sig.FactionGuid = owner != null ? FactionGuid(owner) : "";
+
+            var vid = _fVehicleID.GetValue(vehicle);
+            sig.VehicleID = vid is int i ? i : 0;
+
+            var surface = _surfaceProp.GetValue(vehicle) as Transform;
+            if (surface != null)
+            {
+                var pos = surface.position; sig.PosX = pos.x; sig.PosY = pos.y; sig.PosZ = pos.z;
+                var rot = surface.rotation; sig.RotX = rot.x; sig.RotY = rot.y; sig.RotZ = rot.z; sig.RotW = rot.w;
+            }
+
+            // RangeRemaining is an EarthUnits struct; read its public float Value field (managed, no native fill).
+            var range = _rangeRemainingProp?.GetValue(vehicle);
+            var rangeVal = range != null ? _euValueField?.GetValue(range) : null;
+            sig.RangeRemaining = rangeVal is float rv ? rv : 0f;
+
+            var travelling = _travellingProp?.GetValue(vehicle);
+            sig.Travelling = travelling is bool tv && tv;
+
+            var currentSite = _currentSiteProp?.GetValue(vehicle);
+            sig.CurrentSiteId = currentSite != null && _siteIdField?.GetValue(currentSite) is int csid ? csid : -1;
+
+            var stats = _statsField?.GetValue(vehicle);
+            var hp = stats != null ? _statsHitPoints?.GetValue(stats) : null;
+            sig.HitPoints = hp is int hpi2 ? hpi2 : 0;
+
+            return true;
         }
 
         // ALL-FACTIONS client mirror — LIGHT path (INC-3a): apply a 0x35 GeoStateDiff Vehicle record onto a
