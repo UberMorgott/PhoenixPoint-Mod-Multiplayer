@@ -94,26 +94,30 @@ namespace Multipleer.UI
 
         private Row BuildRow(byte slot, string name)
         {
-            // Compact row container (one name label + one bar). Height ~30px so several fit the
+            // Compact row container (one name label + one bar). Height ~36px so a 20px nickname on
+            // the top strip plus the bar below it both fit without clipping; several still fit the
             // ~270px-tall top-right panel.
             var go = new GameObject("Row" + slot);
             go.transform.SetParent(_root, false);
-            go.AddComponent<RectTransform>().sizeDelta = new Vector2(0f, 30f);
+            go.AddComponent<RectTransform>().sizeDelta = new Vector2(0f, 36f);
             var rowLe = go.AddComponent<LayoutElement>();
-            rowLe.minHeight = 30f;
+            rowLe.minHeight = 36f;
 
-            // Name label (top half). Builtin Arial is fine; the captured menu font is optional polish.
+            // Name label (top strip). Default to the captured native menu font (a real PP font);
+            // the NATIVE-clone branch below upgrades this to the native loading-screen font read
+            // off the cloned bar's ProgressText. Fallback chain always yields a non-null Font.
             var nameGo = new GameObject("Name");
             nameGo.transform.SetParent(go.transform, false);
             var nameTxt = nameGo.AddComponent<Text>();
-            nameTxt.font = NativeWidgetFactory.MenuFont != null
-                ? NativeWidgetFactory.MenuFont
-                : Resources.GetBuiltinResource<Font>("Arial.ttf");
-            nameTxt.fontSize = 16;
+            nameTxt.font = NativeWidgetFactory.MenuFont
+                ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
+            nameTxt.fontSize = 20;
             nameTxt.color = Color.white;
             nameTxt.text = name;
+            // Name occupies the TOP strip (above the bar at 0..0.5); give it the upper ~55% of the
+            // 36px row so a 20px glyph isn't clipped.
             var nrt = nameTxt.rectTransform;
-            nrt.anchorMin = new Vector2(0f, 0.55f); nrt.anchorMax = new Vector2(1f, 1f);
+            nrt.anchorMin = new Vector2(0f, 0.45f); nrt.anchorMax = new Vector2(1f, 1f);
             nrt.offsetMin = new Vector2(6f, 0f); nrt.offsetMax = new Vector2(-6f, 0f);
 
             // ── NATIVE PATH: clone the vanilla loading bar, disable its self-driving Update(), and
@@ -130,6 +134,18 @@ namespace Multipleer.UI
                     if (nativeFill != null)
                     {
                         var nativePct = NativeWidgetFactory.GetProgressText(pbc);
+
+                        // The cloned native ProgressText carries the native PP loading-screen font
+                        // (same legacy Text+Font family as the geoscape bottom nav bar). Capture it
+                        // and reuse it for our nickname label so the label matches the native look.
+                        // Priority: native loading font → captured menu font → builtin Arial.
+                        var nativeFont = nativePct != null ? nativePct.font : null;
+                        nameTxt.font = nativeFont
+                            ?? NativeWidgetFactory.MenuFont
+                            ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
+                        // Keep the native ProgressText's own font as-is (it IS the native component);
+                        // just ensure its size renders readable in our shrunk clone.
+                        if (nativePct != null && nativePct.fontSize < 16) nativePct.fontSize = 16;
 
                         // Constrain the cloned bar to the bottom strip of the row: stretch full width,
                         // compact height. The native bar may carry its own RectTransform size, so we
@@ -190,7 +206,8 @@ namespace Multipleer.UI
             var labelGo = new GameObject("Label");
             labelGo.transform.SetParent(barBg.transform, false);
             var label = labelGo.AddComponent<Text>();
-            label.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            label.font = NativeWidgetFactory.MenuFont
+                ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
             label.fontSize = 14;
             label.alignment = TextAnchor.MiddleLeft;
             label.color = Color.white;
@@ -201,7 +218,8 @@ namespace Multipleer.UI
             var pctGo = new GameObject("Pct");
             pctGo.transform.SetParent(barBg.transform, false);
             var pct = pctGo.AddComponent<Text>();
-            pct.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            pct.font = NativeWidgetFactory.MenuFont
+                ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
             pct.fontSize = 14;
             pct.alignment = TextAnchor.MiddleRight;
             pct.color = Color.white;

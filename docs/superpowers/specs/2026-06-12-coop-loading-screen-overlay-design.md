@@ -1,6 +1,8 @@
 # Co-op Loading Screen Overlay — Design
 
-**Status:** Approved (2026-06-12). **Mod:** Multipleer (Phoenix Point co-op). **Topic:** shared loading screen showing every player's two-phase load progress.
+**Status:** Approved (2026-06-12); SHIPPED + in-game-confirmed over DirectIP (`4976474`). **Mod:** Multipleer (Phoenix Point co-op). **Topic:** shared loading screen showing every player's two-phase load progress.
+
+> **AS-BUILT DIVERGENCE (authoritative = [00-current-state](../../research/00-current-state.md) §Co-op loading screen + [09-disconnect-reconnect](../../research/09-disconnect-reconnect.md) §Co-op Loading Overlay).** This design doc records the original plan; the shipped form differs on three points: (1) overlay shows ONLY OTHER players (self-row hidden), not "ALL including host"; (2) simultaneous reveal is via **native-curtain-HOLD** (Harmony prefix suppresses the auto-`LiftCurtain`, peers hold at the still-visible native screen) — NOT a from-code fullscreen black cover (that "Cover" was added then removed); (3) phase-2 bar value = the live native `ProgressFill.fillAmount` forwarded RAW (no mod-side easing; `FillEase` deleted). Engine facts below remain accurate.
 
 ## Goal
 
