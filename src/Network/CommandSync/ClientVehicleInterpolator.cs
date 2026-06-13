@@ -18,8 +18,9 @@ namespace Multipleer.Network.CommandSync
     //
     //   • Timestamp = Time.realtimeSinceStartup at apply time (monotonic, pause-independent, self-consistent:
     //     stamp local, render at the same local now − delay). No clock crosses the wire.
-    //   • InterpDelaySeconds = 0.2f ≈ 3× the host send interval (0.066s, INC-B) + jitter headroom. Tune DOWN in
-    //     INC-D, never up.
+    //   • InterpDelaySeconds = 0.35f ≈ 5× the host send interval (0.066s, INC-B) + jitter headroom. INC-D raised
+    //     it from 0.2f after the live log showed constant mid-travel underrun (renderTime overran the newest
+    //     sample → Hold → jerk); see the const below for the evidence.
     //   • UNDERRUN (renderTime newer than the newest sample, e.g. host paused / craft parked): HOLD the last
     //     sample. NO extrapolation — the icon simply stands still until fresh samples arrive.
     //   • EDGES: first sample (or buffer of one) → place directly (full mirror until ≥2 samples). Arrival /
@@ -34,11 +35,20 @@ namespace Multipleer.Network.CommandSync
     internal static class ClientVehicleInterpolator
     {
         // Per-identity render-delay: render the host stream this far in the past so two real samples almost always
-        // bracket renderTime. ≈3× INC-B send interval (0.066s) + jitter. INC-D tunes DOWN, not up.
-        private const float InterpDelaySeconds = 0.2f;
+        // bracket renderTime. INC-D (jerk RCA): the 0.2s value UNDERRAN constantly mid-travel — the live client
+        // log showed the moving craft flipping Interp↔Hold every ~1s with a FULL depth=12 buffer and underruns
+        // climbing into the hundreds (renderTime = now−delay overran the newest sample because real inter-arrival
+        // jitter exceeds 0.2s, even though the host flush nominally runs at 15Hz/0.066s). Each overrun HOLDs the
+        // last sample then jumps when the next arrives → the "надрывно"/stepped jerk. Raising the delay to 0.35s
+        // (≈5× the 0.066s send interval) pushes renderTime back far enough that two real samples bracket it across
+        // the observed jitter; the 12-sample/~0.8s ring still has comfortable headroom. Trade-off: +0.15s of
+        // intentional render latency on the (slow) geoscape craft — invisible to the eye and far preferable to the
+        // stutter. Still a PURE single-writer mirror (no extrapolation; underrun holds the last sample).
+        private const float InterpDelaySeconds = 0.35f;
 
-        // Ring-buffer capacity per identity. At 15Hz, 12 samples ≈ 0.8s of history — comfortably more than the
-        // 0.2s render delay needs, with slack for a brief send-rate spike. Oldest is overwritten when full.
+        // Ring-buffer capacity per identity. At 15Hz, 12 samples ≈ 0.8s of history — still comfortably more than the
+        // 0.35s render delay (INC-D) needs to bracket renderTime, with slack for a brief send-rate spike. Oldest is
+        // overwritten when full.
         private const int RingCapacity = 12;
 
         private sealed class Entry
@@ -163,10 +173,14 @@ namespace Multipleer.Network.CommandSync
 
                 // POSITION: orient the icon pivot tangent to the globe at the interpolated position.
                 GeoBridge.PlaceGlobeIconAt(e.Vehicle, pos);
-                // HEADING (P4): the slerp'd wire quaternion is the SOLE/LAST orientation writer — set AFTER
-                // placement. PlaceGlobeIconAt writes PivotTransform.localRotation (globe tangent), a DIFFERENT
-                // transform than Surface.rotation, so this never clobbers it; setting it here keeps heading smooth.
-                GeoBridge.SetSurfaceRotation(e.Vehicle, rot);
+                // HEADING (INC-D P3): point the NOSE along travel by reusing native GeoNavComponent heading math
+                // (GetHeadingTowardsTarget + UpdateHeading) toward DestinationSites[0].WorldPosition, set AFTER
+                // placement. The visible nose is Surface.localEulerAngles.z — the streamed Surface.rotation world
+                // quat does NOT encode it (writing it left the client nose "up"), so we no longer use the wire
+                // quaternion for heading. PlaceGlobeIconAt zeroes the pivot Z (GeoActor.cs:76), so this owns the
+                // nose without clashing. No movement routine is run — single-writer mirror intact. (`rot` from the
+                // slerp is now unused for heading; it still rides the first-mirror placement via ProcessInstanceData.)
+                GeoBridge.UpdateVehicleHeadingTowards(e.Vehicle);
 
                 MaybeLogDiag(kv.Key, e.Count, b.Mode);
             }
