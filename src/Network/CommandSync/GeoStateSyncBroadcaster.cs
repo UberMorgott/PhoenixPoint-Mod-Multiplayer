@@ -45,17 +45,20 @@ namespace Multipleer.Network.CommandSync
     public static class GeoStateSyncBroadcaster
     {
         // Throttle for the CONTINUOUS (unreliable pos/rot/range) channel only — discrete transitions ignore it.
-        // Starts at TimeSyncBroadcaster's 0.5s; tune to 0.2–0.3s in-game for smoother vehicle motion.
-        private const float FlushIntervalSeconds = 0.5f;
+        // INC-B: raised to ~15Hz (0.066s) so the client snapshot-interpolation buffer (ClientVehicleInterpolator,
+        // InterpDelaySeconds 0.2s ≈ 3× this) has dense samples to lerp/slerp between → native-like smooth motion.
+        // The cheap dirty pre-check below means a higher rate is FREE for idle/parked craft (no record, no alloc).
+        private const float FlushIntervalSeconds = 0.066f;
 
         // PERF (host-lag fix): cadence of the whole faction×vehicle snapshot/diff WALK. The expensive native
-        // RecordVehicleState used to run at 60Hz per vehicle; gate it to ~10Hz instead. Discrete-change
-        // (arrival/departure/HP) detection latency becomes ≤0.1s — fine for a strategic geoscape mirror. The
-        // 0.5s continuous flush above is an exact multiple of this, so the two cadences stay coherent.
-        private const float SnapshotIntervalSeconds = 0.1f;
+        // RecordVehicleState used to run at 60Hz per vehicle. INC-B raises this from ~10Hz to ~15Hz (0.066s) to
+        // feed the client interpolator denser samples; the cheap-sig pre-check keeps idle craft alloc-free, so the
+        // extra cadence costs nothing in steady state. Flush above equals this, so both cadences stay coherent
+        // (every snapshot tick that produces a continuous change flushes it the same frame).
+        private const float SnapshotIntervalSeconds = 0.066f;
 
-        private static float _accum;          // continuous-flush accumulator (0.5s)
-        private static float _snapshotAccum;  // snapshot/diff WALK accumulator (0.1s)
+        private static float _accum;          // continuous-flush accumulator (0.066s)
+        private static float _snapshotAccum;  // snapshot/diff WALK accumulator (0.066s)
 
         // [DIAGB] TEMPORARY (logging only, no behavior change). ~1s accumulator so the per-snapshot summary
         // line is throttled to roughly 1/sec rather than firing every 0.1s snapshot tick. Reverted with the DIAG set.
@@ -91,8 +94,8 @@ namespace Multipleer.Network.CommandSync
                 var factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable;
                 if (factions == null) return;
 
-                // PERF: gate the expensive faction×vehicle snapshot/diff WALK to ~10Hz (was every frame).
-                // Both accumulators advance by real dt every frame so the 0.5s flush below still fires on
+                // PERF: gate the expensive faction×vehicle snapshot/diff WALK to ~15Hz (was every frame; INC-B).
+                // Both accumulators advance by real dt every frame so the 0.066s flush below still fires on
                 // schedule even on frames where no snapshot is taken.
                 _snapshotAccum += deltaTime;
                 bool doSnapshot = _snapshotAccum >= SnapshotIntervalSeconds;
