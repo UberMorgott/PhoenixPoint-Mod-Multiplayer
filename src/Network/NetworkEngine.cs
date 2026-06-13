@@ -320,6 +320,18 @@ namespace Multipleer.Network
         {
             var body = Multipleer.Network.CommandSync.GeoEntityOpCodec.Encode(op);
             var msg = new NetworkMessage(PacketType.GeoEntityOp, body);
+            // [DIAG] TEMPORARY boundary log (logging only). Peer count null-guarded.
+            try
+            {
+                var peerCount = -1;
+                if (Session != null)
+                {
+                    var clients = Session.GetConnectedClients();
+                    if (clients != null) { foreach (var _ in clients) peerCount = peerCount < 0 ? 1 : peerCount + 1; }
+                }
+                Debug.Log($"[Multipleer] DIAG BroadcastGeoEntityOp send op-type={op.OpType} id={op.EntityId} bytes={(body != null ? body.Length : -1)} toPeers={peerCount}");
+            }
+            catch (System.Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAG BroadcastGeoEntityOp log failed: {diagEx.Message}"); }
             BroadcastToAll(msg);
         }
 
@@ -573,6 +585,8 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.GeoEntityOp:
+                    // [DIAG] TEMPORARY boundary log (logging only) BEFORE decode — proves the op reached this peer.
+                    Debug.Log($"[Multipleer] DIAG recv 0x36 GeoEntityOp bytes={(msg.Payload != null ? msg.Payload.Length : -1)}");
                     var entityOp = Multipleer.Network.CommandSync.GeoEntityOpCodec.Decode(msg.Payload);
                     Multipleer.Network.CommandSync.ClientEntityOpApplier.Apply(entityOp);
                     break;

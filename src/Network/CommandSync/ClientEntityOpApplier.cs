@@ -18,6 +18,12 @@ namespace Multipleer.Network.CommandSync
         public static void Apply(GeoEntityOp op)
         {
             var engine = NetworkEngine.Instance;
+            // [DIAG] TEMPORARY boundary log (logging only) at the TOP — fires for EVERY received op, BEFORE the
+            // IsHost-return and the op-type branch, so we see ops dropped by the host-gate or an unknown op-type.
+            Debug.Log($"[Multipleer] DIAG ClientEntityOpApplier.Apply op-type={op.OpType} id={op.EntityId} " +
+                $"IsHost={(engine != null ? engine.IsHost.ToString() : "noEngine")} " +
+                $"IsActive={(engine != null ? engine.IsActive.ToString() : "noEngine")}");
+
             if (engine == null || !engine.IsActive || engine.IsHost) return; // client-only
 
             var geoLevel = GeoBridge.GetGeoLevelController();

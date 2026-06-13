@@ -101,7 +101,26 @@ namespace Multipleer.Harmony
         // index 1). __originalMethod distinguishes the site-anchor vs position overload.
         public static void Postfix(object __instance, object __result, object __1, MethodBase __originalMethod)
         {
-            if (!HostEntityOpBroadcast.ShouldBroadcast()) return;
+            // [DIAG] TEMPORARY boundary log (logging only, no flow change). Entry + gate snapshot, null-guarded.
+            try
+            {
+                var engDiag = NetworkEngine.Instance;
+                var createdIdDiag = (__result != null) ? GeoBridge.VehicleId(__result) : "null";
+                Debug.Log($"[Multipleer] DIAG CreatePostfix fired: method={__originalMethod?.Name} " +
+                    $"IsHost={(engDiag != null ? engDiag.IsHost.ToString() : "noEngine")} " +
+                    $"IsActive={(engDiag != null ? engDiag.IsActive.ToString() : "noEngine")} " +
+                    $"ShouldBroadcast={HostEntityOpBroadcast.ShouldBroadcast()} " +
+                    $"CommandRelay.IsApplying={CommandRelay.IsApplying} " +
+                    $"EntityReplicationScope.IsApplying={EntityReplicationScope.IsApplying} " +
+                    $"VehicleID={createdIdDiag}");
+            }
+            catch (Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAG CreatePostfix log failed: {diagEx.Message}"); }
+
+            if (!HostEntityOpBroadcast.ShouldBroadcast())
+            {
+                Debug.Log("[Multipleer] DIAG CreatePostfix SKIP (ShouldBroadcast false)"); // [DIAG] TEMPORARY
+                return;
+            }
             try
             {
                 var vehicle = __result; // the new GeoVehicle
@@ -121,6 +140,8 @@ namespace Multipleer.Harmony
                     var pos = HostEntityOpBroadcast.WorldPositionOf(vehicle);
                     op.PosX = pos.x; op.PosY = pos.y; op.PosZ = pos.z;
                 }
+                // [DIAG] TEMPORARY: right before the actual broadcast send.
+                Debug.Log($"[Multipleer] DIAG CreatePostfix -> BroadcastGeoEntityOp VehicleCreated id={op.EntityId} defGuid={op.DefGuid} siteId={op.SiteId}");
                 NetworkEngine.Instance.BroadcastGeoEntityOp(op);
             }
             catch (Exception ex)
