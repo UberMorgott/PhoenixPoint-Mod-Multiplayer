@@ -10,6 +10,11 @@ namespace Multipleer.Network
     {
         public static NetworkEngine Instance { get; private set; }
 
+        // [DIAGB] TEMPORARY recv-rate gate for the 0x35 GeoStateDiff boundary log. The mirror stream runs at
+        // ~10Hz+, so an unconditional per-packet log would flood; cap to ~3/sec via realtimeSinceStartup
+        // (UnityEngine.Time already drives the broadcasters in Update). Removed with the rest of DIAGB.
+        private static float _diagbRecvNextLogTime;
+
         public ITransport Transport { get; private set; }
         public bool IsActive { get; private set; }
         public bool IsHost { get; private set; }
@@ -608,6 +613,17 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.GeoStateDiff:
+                    // [DIAGB] TEMPORARY boundary log (logging only) BEFORE decode — proves the 0x35 mirror
+                    // reached this peer even for seq>1 packets. Rate-limited to ~3/sec so the ~10Hz stream
+                    // does not flood; mirrors the 0x36 boundary log above.
+                    {
+                        float now = Time.realtimeSinceStartup;
+                        if (now >= _diagbRecvNextLogTime)
+                        {
+                            _diagbRecvNextLogTime = now + 0.33f;
+                            Debug.Log($"[Multipleer] DIAGB recv 0x35: bytes={(msg.Payload != null ? msg.Payload.Length : -1)}");
+                        }
+                    }
                     var stateDiff = Multipleer.Network.CommandSync.GeoStateDiffCodec.Decode(msg.Payload);
                     Multipleer.Network.CommandSync.ClientGeoStateApplier.Apply(stateDiff);
                     break;

@@ -27,9 +27,9 @@ namespace Multipleer.Network.CommandSync
     //
     // The whole record loop runs inside using (EntityReplicationScope.Enter()) so any host re-broadcast
     // postfix the native apply trips (HostEntityOpBroadcast.ShouldBroadcast) sees IsApplying and does NOT
-    // re-emit. DIAG3: PERIODIC post-apply nav log (firstMirror + every 30th apply per identity + one-shot
-    // unresolved) emitting Surface.position / Travelling / CurrentSite + seq/mask, to confirm the mirror
-    // actually wrote vs NavigateRoutine fighting it AND that applies keep flowing (seq>1) past the load.
+    // re-emit. DIAGB: post-apply read-back log (rate-limited ~3/sec PER identity + one-shot unresolved)
+    // emitting appliedPos / Travelling / CurrentSite + seq/mask, to confirm the mirror actually wrote vs
+    // NavigateRoutine fighting it AND that applies keep flowing (seq>1) past the load.
     // Removed in Phase B (Task 13) after the in-game GATE passes.
     public static class ClientGeoStateApplier
     {
@@ -40,11 +40,12 @@ namespace Multipleer.Network.CommandSync
         // Identities that have had at least one FULL (heavy) mirror — first mirror uses ProcessInstanceData.
         private static readonly HashSet<(string, int)> _firstMirrorDone = new HashSet<(string, int)>();
 
-        // DIAG3 per-identity apply COUNTER — periodic (firstMirror OR every 30th apply, ~1 line/identity/~3s
-        // @10Hz) so the log proves seq>1 continuous/discrete applies keep flowing post-load, without flooding.
+        // DIAGB per-identity apply RATE GATE — next allowed log time (realtimeSinceStartup) per identity.
+        // Caps the read-back log to ~3/sec PER identity so EVERY apply during travel (seq>1, continuous +
+        // discrete) is visible without flooding — vs the old every-30th gate which hid post-load applies.
         // Phase-B revert removes the logging; this stays harmless.
-        private static readonly Dictionary<(string, int), int> _diag3ApplyCount =
-            new Dictionary<(string, int), int>();
+        private static readonly Dictionary<(string, int), float> _diagbApplyNextLogTime =
+            new Dictionary<(string, int), float>();
 
         // One-shot DIAG3 gate for the UNRESOLVED (no-vehicle-yet) path — unchanged (no apply happened).
         private static readonly HashSet<(string, int)> _diag3Unresolved = new HashSet<(string, int)>();
@@ -106,22 +107,23 @@ namespace Multipleer.Network.CommandSync
 
             _lastAppliedSeq[identity] = record.Seq;
 
-            // DIAG3: PERIODIC post-apply nav log — confirms the mirror WROTE the host's values (vs a client
-            // NavigateRoutine fighting it) AND that applies keep arriving (seq>1) after the load mirror.
-            // Reads back the same accessors GeoBridge writes. Log on the first apply OR every 30th thereafter.
-            _diag3ApplyCount.TryGetValue(identity, out var applyCount);
-            applyCount++;
-            _diag3ApplyCount[identity] = applyCount;
-            if (applyCount == 1 || applyCount % 30 == 0)
+            // DIAGB: post-apply read-back — confirms the mirror WROTE the host's values (vs a client
+            // NavigateRoutine fighting it) AND that applies keep arriving (seq>1) past the load mirror.
+            // Reads back the same accessors GeoBridge writes. Rate-limited to ~3/sec PER identity so EVERY
+            // apply (continuous pos + discrete) during travel is visible without flooding.
+            float now = Time.realtimeSinceStartup;
+            _diagbApplyNextLogTime.TryGetValue(identity, out var nextLogTime);
+            if (now >= nextLogTime)
             {
+                _diagbApplyNextLogTime[identity] = now + 0.33f;
                 var vt = vehicle.GetType();
                 var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
-                var pos = surface != null ? surface.position : Vector3.zero;
+                var appliedPos = surface != null ? surface.position : Vector3.zero;
                 var travelling = AccessTools.Property(vt, "Travelling")?.GetValue(vehicle);
                 var currentSite = AccessTools.Property(vt, "CurrentSite")?.GetValue(vehicle);
-                Debug.Log($"[Multipleer] DIAG3 GeoState: id {record.FactionGuid}#{record.VehicleID} RESOLVED " +
+                Debug.Log($"[Multipleer] DIAGB apply: id {record.FactionGuid}#{record.VehicleID} RESOLVED " +
                           $"firstMirror={firstMirror} seq={record.Seq} mask={record.ChangedMask} -> " +
-                          $"pos={pos} Travelling={travelling} CurrentSite={(currentSite != null ? "set" : "null")}");
+                          $"appliedPos={appliedPos} Travelling={travelling} CurrentSite={(currentSite != null ? "set" : "null")}");
             }
         }
     }
