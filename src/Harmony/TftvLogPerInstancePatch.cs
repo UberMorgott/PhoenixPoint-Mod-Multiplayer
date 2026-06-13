@@ -19,12 +19,17 @@ namespace Multipleer.Harmony
     // mirrors the value into TFTVMain.LogPath (internal static, TFTVMain.cs:57) which the error dialog
     // text interpolates (TFTVLogger.cs:70), so the dialog reports the right file too.
     //
-    // GATE (stays INERT for single instance AND real cross-machine co-op): we are "secondary" only when
-    // an EARLIER same-machine instance already holds our canonical primary lock file. Detected first via
-    // the live MultipleerLog signal (its own log fell back to multipleer-N.log) and, order-independently,
-    // via an exclusive-open lock probe on <persistentDataPath>/Multipleer/multipleer.log. A lone instance
-    // or a separate-machine peer never finds that local file locked => no redirect. The decision lives in
-    // the shared TftvLogInstanceGate below so the PRMLogger sibling patch reuses the SAME gate (no fork).
+    // GATE (stays INERT for single instance AND real cross-machine co-op): the redirect is driven SOLELY
+    // by MultipleerLog.InstanceIndex — the 1-based same-machine index the PROVEN MultipleerLog.Init fallback
+    // loop already computes (multipleer.log => 1, multipleer-2.log => 2, …). MultipleerMain.OnModEnabled
+    // (which runs that loop) sorts before TFTV (mod ID "Morgott.Multipleer" < "phoenixrising.tftv"), so the
+    // index is set BEFORE TFTVLogger/PRMLogger.Initialize run. index 1 => leave TFTV.log unchanged (solo /
+    // first instance = vanilla, no behavior change for normal play); index N>=2 => redirect to TFTV-N.log in
+    // the same directory. This is BILATERAL in effect: the two instances get DISTINCT files (TFTV.log vs
+    // TFTV-2.log) so neither blocks the other. No exclusive-open probe and no LogPath string-parse: the prior
+    // version's race-prone probe could leave an instance un-redirected, so both wrote the shared junctioned
+    // TFTV.log and the IOException sharing-violation dialog returned. The decision lives in the shared
+    // TftvLogInstanceGate below so the PRMLogger sibling patch reuses the SAME gate (no fork).
     [HarmonyPatch]
     public static class TftvLogPerInstancePatch
     {
@@ -100,16 +105,14 @@ namespace Multipleer.Harmony
         }
     }
 
-    // Shared secondary-instance gate + redirect step, used identically by BOTH the TFTVLogger and the
-    // PRMLogger prefixes so the decision logic is defined exactly once. Pure path math lives in
-    // TftvLogRedirect; this layer only resolves instance-ness (init-order-independently) and applies it.
+    // Shared per-instance gate + redirect step, used identically by BOTH the TFTVLogger and the PRMLogger
+    // prefixes so the decision logic is defined exactly once. The instance signal is MultipleerLog.InstanceIndex
+    // (computed by the proven MultipleerLog.Init fallback loop); pure path math lives in TftvLogRedirect.
     internal static class TftvLogInstanceGate
     {
-        private const string DirName = "Multipleer";
-        private const string PrimaryLogName = "multipleer.log";
-
-        // Rewrite logPath to the per-instance filename iff we are a secondary same-machine instance.
-        // Any exception falls through to the original path — never break the caller's logger init.
+        // Rewrite logPath to the per-instance filename when this is same-machine instance N>=2.
+        // index 1 => unchanged (vanilla TFTV.log). Any exception falls through to the original path —
+        // never break the caller's logger init.
         public static void RedirectIfSecondary(ref string logPath, string label)
         {
             try
@@ -117,91 +120,30 @@ namespace Multipleer.Harmony
                 if (string.IsNullOrEmpty(logPath))
                     return;
 
-                if (!TryResolveInstance(out var isSecondary, out var index) || !isSecondary)
+                // Authoritative same-machine index from the proven MultipleerLog.Init fallback loop,
+                // which has already run (Multipleer sorts before TFTV in mod load order).
+                var index = MultipleerLog.InstanceIndex;
+
+                if (index <= 1)
+                {
+                    // Solo / first instance: keep vanilla TFTV.log untouched. Confirm what happened.
+                    Debug.Log("[Multipleer] " + label + ": instance 1, no redirect (" +
+                              Path.GetFileName(logPath) + ")");
                     return;
+                }
 
                 var redirected = TftvLogRedirect.ResolveRedirectedPath(logPath, isSecondary: true, instanceIndex: index);
                 if (!string.Equals(redirected, logPath, StringComparison.Ordinal))
                 {
-                    Debug.Log("[Multipleer] secondary instance: redirecting " + label + " " +
-                              Path.GetFileName(logPath) + " -> " + Path.GetFileName(redirected));
                     logPath = redirected;
+                    Debug.Log("[Multipleer] " + label + " redirect: instance " + index + " -> " +
+                              Path.GetFileName(redirected));
                 }
             }
             catch (Exception e)
             {
                 // Never let a logging redirect break logger init — fall through to original path on any fault.
                 Debug.LogWarning("[Multipleer] " + label + " redirect prefix failed: " + e.Message);
-            }
-        }
-
-        // Decide secondary-ness + which instance suffix to use, init-order-independently.
-        private static bool TryResolveInstance(out bool isSecondary, out int index)
-        {
-            isSecondary = false;
-            index = 1;
-
-            // 1) Prefer the live signal: if our own MultipleerLog already fell back to multipleer-N.log,
-            //    reuse that N for consistency (same suffix across both our log and TFTV's).
-            var ownLog = MultipleerLog.LogPath;
-            if (!string.IsNullOrEmpty(ownLog))
-            {
-                var n = ParseOwnInstanceIndex(ownLog);
-                if (n > 1)
-                {
-                    isSecondary = true;
-                    index = n;
-                    return true;
-                }
-                // ownLog present and unsuffixed => MultipleerLog ran and we are the PRIMARY. Stay inert.
-                return true;
-            }
-
-            // 2) Order-independent fallback (TFTV may init before our OnModEnabled): probe the canonical
-            //    primary lock file with exclusive open. Locked => an earlier same-machine instance exists.
-            var primaryLock = TryGetPrimaryLockPath();
-            if (primaryLock == null)
-                return false; // cannot determine path safely => do not redirect.
-
-            if (TftvLogRedirect.ProbePrimaryLocked(primaryLock))
-            {
-                isSecondary = true;
-                index = TftvLogRedirect.ResolveSecondaryIndex(MultipleerLog.LogPath ?? primaryLock);
-                if (index < 2) index = 2;
-                return true;
-            }
-
-            return true; // primary / lone / cross-machine => not secondary.
-        }
-
-        // Our own log filename "multipleer-N.log" => N; "multipleer.log" or unparseable => 1.
-        private static int ParseOwnInstanceIndex(string ownLogPath)
-        {
-            try
-            {
-                var name = Path.GetFileNameWithoutExtension(ownLogPath); // e.g. "multipleer-2"
-                var dash = name.LastIndexOf('-');
-                if (dash <= 0 || dash == name.Length - 1)
-                    return 1;
-                var tail = name.Substring(dash + 1);
-                return int.TryParse(tail, out var n) && n >= 2 ? n : 1;
-            }
-            catch
-            {
-                return 1;
-            }
-        }
-
-        private static string TryGetPrimaryLockPath()
-        {
-            try
-            {
-                var dir = Path.Combine(Application.persistentDataPath, DirName);
-                return Path.Combine(dir, PrimaryLogName);
-            }
-            catch
-            {
-                return null;
             }
         }
     }

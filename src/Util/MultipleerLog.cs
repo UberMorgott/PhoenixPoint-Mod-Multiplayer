@@ -36,6 +36,15 @@ namespace Multipleer.Util
         public static string LogPath { get; private set; }
 
         /// <summary>
+        /// 1-based same-machine instance index, computed by the proven <see cref="Init"/> fallback loop:
+        /// the FIRST instance opens multipleer.log => 1; a SECOND same-machine instance finds it locked,
+        /// falls back to multipleer-2.log => 2; and so on. Defaults to 1 (single instance / before Init).
+        /// This is the SINGLE authoritative instance signal — other subsystems (e.g. the TFTV per-instance
+        /// log redirect) must read THIS rather than re-deriving instance-ness with their own race-prone probe.
+        /// </summary>
+        public static int InstanceIndex { get; private set; } = 1;
+
+        /// <summary>
         /// Idempotent. Rotates the previous log, opens a fresh one, writes a launch header and
         /// subscribes the sink. Safe to call more than once (subsequent calls are no-ops).
         /// </summary>
@@ -87,6 +96,7 @@ namespace Multipleer.Util
                         {
                             _writer = new StreamWriter(attemptPath, append: false) { AutoFlush = true };
                             LogPath = attemptPath;
+                            InstanceIndex = instance; // authoritative 1-based same-machine index for all subsystems.
                             fellBack = instance > 1;
                         }
                         catch (IOException)
