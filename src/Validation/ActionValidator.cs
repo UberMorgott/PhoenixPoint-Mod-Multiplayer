@@ -90,6 +90,8 @@ namespace Multipleer.Validation
                 case CampaignActionType.RemoveSoldier:
                 case CampaignActionType.StartTravel:
                     return CampaignPermission.ManageAircraft;
+                case CampaignActionType.SetTimeState:
+                    return CampaignPermission.ControlTime;
                 default:
                     return CampaignPermission.FullCommander;
             }
