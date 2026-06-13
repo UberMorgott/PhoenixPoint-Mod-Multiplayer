@@ -45,6 +45,7 @@ Local docs are the **single source of truth** for the Multipleer cooperative-mul
 | [superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md](superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md) | Stage-1 implementation plan — command actions + real per-GUID permissions, first vertical proof `GeoVehicle.StartTravel`. **(Implemented; see 00-current-state.)** |
 | [superpowers/plans/2026-06-13-time-sync-stage2-increment1.md](superpowers/plans/2026-06-13-time-sync-stage2-increment1.md) | **Active** — Stage-2 Increment-1 host-authoritative time: `SetTimeState` action, client pause/speed intercepts, client hourly-sim suppression, continuous `0x34` clock mirror |
 | [superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md](superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md) + [plans/…-coop-loading-screen-overlay.md](superpowers/plans/2026-06-12-coop-loading-screen-overlay.md) | Co-op loading-screen roster overlay (separate milestone) |
+| [superpowers/specs/2026-06-13-coop-state-replication-design.md](superpowers/specs/2026-06-13-coop-state-replication-design.md) | **Host-authoritative geoscape state replication (SD-AIDR)** — slaved-clock spectator-drive + native InstanceData-diff stream; supersedes per-action StartTravel intercept; verified seams (clock C1/travel-render C3/entity-lifecycle C7/input-funnel C9/reload C14), 13-producer client-suppress set, 3 travel emitters, launch-loop gating, `0x35`/`0x36` packets, 5-increment rollout |
 
 ### `engine/` — As-Built Implementation
 
