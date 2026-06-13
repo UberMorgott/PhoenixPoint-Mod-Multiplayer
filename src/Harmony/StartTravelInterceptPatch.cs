@@ -77,6 +77,19 @@ namespace Multipleer.Harmony
                 Payload = CommandCodec.EncodeStartTravel(payload),
                 Timestamp = DateTime.UtcNow.Ticks
             };
+
+            // [DIAG2] TEMPORARY (logging only, no behavior change). On the HOST-ORIGIN broadcast path:
+            // dump the id being sent + the host's FULL PhoenixFaction.Vehicles set, so it can be diffed
+            // against the client's set (DIAG2 client vehicles) to see which ids the client is missing.
+            try
+            {
+                var geoLevel = GeoBridge.GetGeoLevelController();
+                var snap = GeoBridge.DescribeVehicles(geoLevel);
+                UnityEngine.Debug.Log($"[Multipleer] DIAG2 host StartTravel broadcast: vehicleId={payload.VehicleId} def={GeoBridge.VehicleDefNameOf(__instance)}");
+                UnityEngine.Debug.Log($"[Multipleer] DIAG2 host vehicles[{snap.Count}]: {snap.List}");
+            }
+            catch (Exception diagEx) { UnityEngine.Debug.LogWarning($"[Multipleer] DIAG2 host log failed: {diagEx.Message}"); }
+
             engine.BroadcastCampaignActionResult(msg);
         }
 

@@ -33,6 +33,18 @@ namespace Multipleer.Network.CommandSync
             var geoLevel = GeoBridge.GetGeoLevelController();
             if (geoLevel == null) { Debug.LogWarning("[Multipleer] StartTravel apply: no GeoLevelController."); return; }
 
+            // [DIAG2] TEMPORARY (logging only, no behavior change). On the CLIENT apply path: dump the
+            // requested vehicle id + the client's FULL PhoenixFaction.Vehicles set on BOTH outcomes
+            // (found or not-found), so it can be diffed against "DIAG2 host vehicles" to see whether the
+            // requestedVehicleId is present in the client's set.
+            try
+            {
+                var snap = GeoBridge.DescribeVehicles(geoLevel);
+                Debug.Log($"[Multipleer] DIAG2 client StartTravel apply: requestedVehicleId={p.VehicleId}");
+                Debug.Log($"[Multipleer] DIAG2 client vehicles[{snap.Count}]: {snap.List}");
+            }
+            catch (System.Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAG2 client log failed: {diagEx.Message}"); }
+
             var vehicle = GeoBridge.FindVehicleById(geoLevel, p.VehicleId);
             if (vehicle == null) { Debug.LogWarning($"[Multipleer] StartTravel apply: vehicle {p.VehicleId} not found."); return; }
 

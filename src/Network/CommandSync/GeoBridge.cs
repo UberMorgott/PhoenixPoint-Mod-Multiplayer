@@ -74,6 +74,63 @@ namespace Multipleer.Network.CommandSync
         public static string VehicleId(object vehicle)
             => AccessTools.Field(vehicle.GetType(), "VehicleID")?.GetValue(vehicle)?.ToString() ?? "";
 
+        // [DIAG2] TEMPORARY diagnostic (logging only, no behavior change). Build a compact, fully
+        // null-guarded snapshot of a faction's whole vehicle set: "id:defname, id:defname, ..." plus
+        // the count. Reuses the SAME accessor chain as FindVehicleById (geoLevel.PhoenixFaction ->
+        // GeoFaction.Vehicles). Def name = GeoVehicle.VehicleDef (property) -> UnityEngine.Object.name
+        // (e.g. "NA_Manticore_GeoVehicleDef"); falls back to the def Guid, then the runtime type name.
+        // Defensive at every step so it can never throw or change control flow.
+        public static (int Count, string List) DescribeVehicles(object geoLevel)
+        {
+            if (geoLevel == null) return (0, "<no-geoLevel>");
+            object faction;
+            try { faction = AccessTools.Property(geoLevel.GetType(), "PhoenixFaction")?.GetValue(geoLevel); }
+            catch { return (0, "<faction-err>"); }
+            if (faction == null) return (0, "<no-faction>");
+
+            IEnumerable vehicles;
+            try { vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable; }
+            catch { return (0, "<vehicles-err>"); }
+            if (vehicles == null) return (0, "<no-vehicles>");
+
+            var sb = new System.Text.StringBuilder();
+            int count = 0;
+            foreach (var v in vehicles)
+            {
+                if (v == null) continue;
+                if (count > 0) sb.Append(", ");
+                string id, name;
+                try { id = VehicleId(v); } catch { id = "?"; }
+                try { name = VehicleDefNameOf(v); } catch { name = "?"; }
+                sb.Append(id).Append(':').Append(name);
+                count++;
+            }
+            return (count, sb.ToString());
+        }
+
+        // [DIAG2] TEMPORARY. Best-effort human-readable def name for a GeoVehicle. Tries VehicleDef
+        // (property) -> name; then VehicleDef -> Guid; then the vehicle's runtime type. Never throws.
+        public static string VehicleDefNameOf(object vehicle)
+        {
+            if (vehicle == null) return "<null>";
+            object def = null;
+            try { def = AccessTools.Property(vehicle.GetType(), "VehicleDef")?.GetValue(vehicle); }
+            catch { /* fall through */ }
+            if (def != null)
+            {
+                try
+                {
+                    // BaseDef : ScriptableObject -> UnityEngine.Object.name is a property.
+                    var n = AccessTools.Property(def.GetType(), "name")?.GetValue(def) as string;
+                    if (!string.IsNullOrEmpty(n)) return n;
+                }
+                catch { /* fall through */ }
+                var guid = DefGuid(def);
+                if (!string.IsNullOrEmpty(guid)) return guid;
+            }
+            return vehicle.GetType().Name;
+        }
+
         // GeoSite.SiteId — public int FIELD.
         public static string SiteId(object site)
             => AccessTools.Field(site.GetType(), "SiteId")?.GetValue(site)?.ToString() ?? "";

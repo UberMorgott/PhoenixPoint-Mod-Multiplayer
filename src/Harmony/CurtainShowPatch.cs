@@ -79,7 +79,25 @@ namespace Multipleer.Harmony
                         // outside co-op, drop it immediately (unchanged behaviour).
                         var playingCoord = engine.SaveTransfer;
                         if (playingCoord != null && playingCoord.SessionStarted)
+                        {
+                            // [DIAG2] TEMPORARY (logging only, no behavior change). First geoscape-ready
+                            // seam on the CLIENT after a co-op blob-restore: the curtain lifted, so the
+                            // GeoLevelController + restored PhoenixFaction.Vehicles are now resolvable.
+                            // Dump the client's set ONCE here to compare against the StartTravel-time set
+                            // (catches a later host-created/extra vehicle vs an under-restored save).
+                            try
+                            {
+                                if (!engine.IsHost)
+                                {
+                                    var geoLevel = Multipleer.Network.CommandSync.GeoBridge.GetGeoLevelController();
+                                    var snap = Multipleer.Network.CommandSync.GeoBridge.DescribeVehicles(geoLevel);
+                                    Debug.Log($"[Multipleer] DIAG2 client vehicles AT LOAD[{snap.Count}]: {snap.List}");
+                                }
+                            }
+                            catch (Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAG2 client AT LOAD log failed: {diagEx.Message}"); }
+
                             playingCoord.OnReachedPlaying();           // co-op: hold until RevealAll
+                        }
                         else
                             MultiplayerUI.Instance?.HideLoadOverlay();  // non-co-op: unchanged
                     }
