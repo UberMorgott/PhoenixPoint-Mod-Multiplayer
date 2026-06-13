@@ -18,6 +18,16 @@ namespace Multipleer.Network.CommandSync
         public int PresetIndex;
     }
 
+    public struct TimeStatePayload
+    {
+        public bool Paused;
+        public float Scale;
+        public long StartTimeTicks;
+        public long StartFixedTicks;
+        public long OwnNowTicks;
+        public long OwnFixedTicks;
+    }
+
     public static class CommandCodec
     {
         public static byte[] EncodeStartTravel(StartTravelPayload p)
@@ -63,6 +73,38 @@ namespace Multipleer.Network.CommandSync
             using (var br = new BinaryReader(ms))
             {
                 return new SetTimePayload { Paused = br.ReadBoolean(), PresetIndex = br.ReadInt32() };
+            }
+        }
+
+        public static byte[] EncodeTimeState(TimeStatePayload p)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(p.Paused);
+                bw.Write(p.Scale);
+                bw.Write(p.StartTimeTicks);
+                bw.Write(p.StartFixedTicks);
+                bw.Write(p.OwnNowTicks);
+                bw.Write(p.OwnFixedTicks);
+                return ms.ToArray();
+            }
+        }
+
+        public static TimeStatePayload DecodeTimeState(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                return new TimeStatePayload
+                {
+                    Paused = br.ReadBoolean(),
+                    Scale = br.ReadSingle(),
+                    StartTimeTicks = br.ReadInt64(),
+                    StartFixedTicks = br.ReadInt64(),
+                    OwnNowTicks = br.ReadInt64(),
+                    OwnFixedTicks = br.ReadInt64()
+                };
             }
         }
     }
