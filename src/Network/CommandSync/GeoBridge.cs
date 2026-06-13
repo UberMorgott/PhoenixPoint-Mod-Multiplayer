@@ -64,6 +64,11 @@ namespace Multipleer.Network.CommandSync
         private static FieldInfo _statsField;          // GeoVehicle.Stats
         private static FieldInfo _statsHitPoints;      // GeoVehicleStats.HitPoints (int)
         private static FieldInfo _siteIdField;         // GeoSite.SiteId (int)
+        // INC-3a globe-icon placement: GeoActor.SetOrientedGlobeWorldPosition(Vector3) — the native primitive
+        // that orients the on-globe icon by rotating PivotTransform.localRotation from a WORLD position
+        // (GeoActor.cs:66-77; same effect NavigateRoutine produces per-frame at GeoNavComponent.cs:117-119).
+        // Inherited from GeoActor by GeoVehicle, so AccessTools.Method on the GeoVehicle type resolves it.
+        private static MethodInfo _setOrientedGlobeWorldPos; // void GeoActor.SetOrientedGlobeWorldPosition(Vector3)
 
         // Resolve the fixed game-type handles once. Defensive: any failure leaves _reflectReady false so the
         // next tick retries (the geoscape types may not be loaded the first time this runs).
@@ -103,6 +108,10 @@ namespace Multipleer.Network.CommandSync
                 _statsField = AccessTools.Field(geoVehicleType, "Stats");
                 _statsHitPoints = statsType != null ? AccessTools.Field(statsType, "HitPoints") : null;
                 _siteIdField = siteType != null ? AccessTools.Field(siteType, "SiteId") : null;
+                // GeoActor.SetOrientedGlobeWorldPosition(Vector3) — inherited by GeoVehicle; resolve on the
+                // GeoVehicle type so the icon-placement primitive is cached alongside the apply handles.
+                _setOrientedGlobeWorldPos = AccessTools.Method(geoVehicleType,
+                    "SetOrientedGlobeWorldPosition", new[] { typeof(Vector3) });
 
                 _reflectReady = true;
             }
@@ -325,6 +334,11 @@ namespace Multipleer.Network.CommandSync
                     surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
                 if ((mask & GeoStateMask.SurfaceRot) != 0)
                     surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
+                // Writing Surface.position does not move the on-globe ICON (placed by the pivot rotation,
+                // normally driven by NavigateRoutine which the client never runs). Re-orient the icon pivot
+                // from the mirrored world position whenever position changed (the continuous pos channel).
+                if ((mask & GeoStateMask.SurfacePos) != 0)
+                    DriveGlobeIconPlacement(vehicle);
             }
 
             // 4) RangeRemaining via new EarthUnits(value) (public setter).
@@ -419,6 +433,34 @@ namespace Multipleer.Network.CommandSync
 
             AccessTools.Method(vehicle.GetType(), "ProcessInstanceData", new[] { actorDataType })
                        ?.Invoke(vehicle, new[] { data });
+
+            // The native ProcessInstanceData sets Surface.position/.rotation (GeoVehicle.cs:1089-1090) but
+            // does NOT re-orient the globe ICON pivot — drive it explicitly from the mirrored world position.
+            DriveGlobeIconPlacement(vehicle);
+        }
+
+        // INC-3a globe-icon fix (PURE MIRROR — no client sim): re-place the on-globe vehicle ICON from the
+        // already-mirrored Surface.position by invoking the native GeoActor.SetOrientedGlobeWorldPosition
+        // (GeoActor.cs:66-77), which orients PivotTransform.localRotation from a WORLD position. Writing
+        // Surface.position alone does NOT move the icon: on the geoscape the icon is positioned by the pivot
+        // rotation, normally driven each frame by GeoNavComponent.NavigateRoutine (GeoNavComponent.cs:117-119)
+        // — a coroutine the client never runs (INC-3a retired the client StartTravel/Navigate + the geo
+        // producers are suppressed). GeoActor.WorldPosition == Surface.position (GeoActor.cs:25), so passing
+        // Surface.position reproduces the native placement exactly, for ANY faction's mirrored craft. The
+        // separately-mirrored Surface.rotation (in-plane heading) is preserved; this only sets the pivot
+        // orientation that carries the icon to the right spot on the globe. Reflection-only, null-guarded,
+        // never throws — a missing handle leaves the icon where it was (no worse than today).
+        private static void DriveGlobeIconPlacement(object vehicle)
+        {
+            if (vehicle == null) return;
+            EnsureReflect();
+            if (_setOrientedGlobeWorldPos == null || _surfaceProp == null) return;
+            var surface = _surfaceProp.GetValue(vehicle) as Transform;
+            if (surface == null) return;
+            // Best-effort visual placement: swallow a pathological throw on one vehicle so it
+            // cannot abort the remaining records in the apply batch.
+            try { _setOrientedGlobeWorldPos.Invoke(vehicle, new object[] { surface.position }); }
+            catch { }
         }
 
         // Build a EarthUnits (PhoenixPoint.Common.Core.EarthUnits, ctor(float) at EarthUnits.cs:33) boxed as
