@@ -234,6 +234,8 @@ namespace Multipleer.Network.CommandSync
         // pattern as RecordVehicleState), THEN overwrite ONLY the 7 synced fields, THEN ProcessInstanceData.
         // CurrentSite/DestinationSites are resolved from int site ids; an unresolved DestinationSites set is
         // left as the live-recorded value (best-effort, consistent with the light path's skip).
+        // HitPoints: we set GVID.InstanceDataVersion=3 before ProcessInstanceData so it takes the DIRECT HP branch
+        // (cs:1130) instead of the legacy invert branch (cs:1124-1127) — see the inline note below.
         // Reflection-only over live types; null-guarded; never throws.
         public static void ApplyVehicleStateFull(object vehicle, GeoVehicleStateRecord r)
         {
@@ -255,6 +257,18 @@ namespace Multipleer.Network.CommandSync
             AccessTools.Field(gvidType, "RangeRemaining")?.SetValue(data, r.RangeRemaining);
             AccessTools.Field(gvidType, "Travelling")?.SetValue(data, r.Travelling);
             AccessTools.Field(gvidType, "HitPoints")?.SetValue(data, (int)r.HitPoints); // GVID.HitPoints is INT (cs:26)
+
+            // CRITICAL: force the CURRENT-FORMAT HitPoints branch in ProcessInstanceData. A fresh
+            // Activator.CreateInstance'd GVID has InstanceDataVersion=0 (the field is [DoNotSerialize], cs:54, and
+            // is ONLY assigned in the PostRead OnDeserialized callback to serObj.SerializedVersion, cs:66-70 — a
+            // hand-built instance never runs that). With version<3, ProcessInstanceData takes the LEGACY branch
+            // (GeoVehicle.cs:1124-1127) Stats.HitPoints = Clamp(MaxHitPoints - gvData.HitPoints), INVERTING our
+            // direct HP — a first-mirror full-HP craft (HitPoints==MaxHitPoints) would land at HP=0 and trip
+            // OnAircraftBreakingDown. Our HitPoints (both the RecordInstanceData-filled value at cs:1072 and the
+            // overwritten wire r.HitPoints) are DIRECT current-HP, i.e. the current format (SerializeType
+            // Version=3, cs:12), so set InstanceDataVersion=3 to select the DIRECT branch (cs:1130)
+            // Stats.HitPoints = Clamp(gvData.HitPoints). No-op on the light path (it sets Stats.HitPoints directly).
+            AccessTools.Field(gvidType, "InstanceDataVersion")?.SetValue(data, 3);
 
             var geoLevel = GetGeoLevelController();
             if (geoLevel != null)
