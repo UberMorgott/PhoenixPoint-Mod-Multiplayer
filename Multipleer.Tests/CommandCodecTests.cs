@@ -9,6 +9,9 @@ public class CommandCodecTests
         var src = new StartTravelPayload
         {
             VehicleId = "veh-7",
+            // INC-3a: client->host input relay now carries the owning faction guid so the host
+            // resolves a client-originated vehicle by (factionGuid, VehicleID), not Phoenix-only.
+            OwnerFactionGuid = "njf-guid",
             SiteIds = new[] { "site-a", "site-b", "site-c" }
         };
 
@@ -16,6 +19,7 @@ public class CommandCodecTests
         var back = CommandCodec.DecodeStartTravel(bytes);
 
         Assert.Equal("veh-7", back.VehicleId);
+        Assert.Equal("njf-guid", back.OwnerFactionGuid);
         Assert.Equal(new[] { "site-a", "site-b", "site-c" }, back.SiteIds);
     }
 

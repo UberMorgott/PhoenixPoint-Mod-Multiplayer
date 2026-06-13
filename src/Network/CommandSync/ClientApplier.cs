@@ -26,6 +26,14 @@ namespace Multipleer.Network.CommandSync
         public void HandleResult(CampaignActionMessage action)
         {
             if (_engine.IsHost) return; // host already applied in HostArbiter
+
+            // INC-3a: RETIRE the host->client StartTravel command-REPLAY. The client no longer replays an
+            // approved StartTravel (whether host-origin or its own relayed order echoed back) — the 0x35
+            // GeoStateDiff state mirror drives the client's vehicle motion (Travelling + DestinationSites +
+            // per-tick pos/rot/range). Replaying StartTravel here would start a client-side NavigateRoutine
+            // that fights the authoritative mirror. Other action types (e.g. SetTimeState) still replay.
+            if (action.ActionType == CampaignActionType.StartTravel) return;
+
             try
             {
                 _relay.ApplyResult(action);

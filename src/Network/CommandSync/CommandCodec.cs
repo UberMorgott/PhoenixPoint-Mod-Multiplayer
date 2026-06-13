@@ -9,6 +9,12 @@ namespace Multipleer.Network.CommandSync
     public struct StartTravelPayload
     {
         public string VehicleId;
+        // INC-3a: the owning faction's Def.Guid, set by the client-side intercept Prefix from the
+        // vehicle's Owner. The host resolves a client-originated craft by (OwnerFactionGuid, VehicleID)
+        // via GeoBridge.FindVehicleByFactionAndId instead of the Phoenix-only FindVehicleById, so a
+        // client can order a non-Phoenix craft to travel. Empty -> host strict-resolves to Phoenix
+        // (the legacy Phoenix-manufactured-aircraft case).
+        public string OwnerFactionGuid;
         public string[] SiteIds;
     }
 
@@ -36,6 +42,7 @@ namespace Multipleer.Network.CommandSync
             using (var bw = new BinaryWriter(ms))
             {
                 bw.Write(p.VehicleId ?? "");
+                bw.Write(p.OwnerFactionGuid ?? "");
                 var ids = p.SiteIds ?? new string[0];
                 bw.Write(ids.Length);
                 foreach (var id in ids) bw.Write(id ?? "");
@@ -48,7 +55,7 @@ namespace Multipleer.Network.CommandSync
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
             {
-                var p = new StartTravelPayload { VehicleId = br.ReadString() };
+                var p = new StartTravelPayload { VehicleId = br.ReadString(), OwnerFactionGuid = br.ReadString() };
                 var count = br.ReadInt32();
                 p.SiteIds = new string[count];
                 for (var i = 0; i < count; i++) p.SiteIds[i] = br.ReadString();

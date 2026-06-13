@@ -6,8 +6,11 @@ using UnityEngine;
 namespace Multipleer.Network.CommandSync
 {
     // Resolves an InterceptEntry to the live game method via AccessTools and invokes it with the
-    // decoded payload. Stage 1 implements ONLY the StartTravel apply (the confirmed vertical proof);
-    // other confirmed entries get their apply branch as they are wired in Task 7.
+    // decoded payload. INC-3a: the StartTravel branch is now driven ONLY by the HOST (HostArbiter
+    // executing a client-originated travel order = the kept client->host INPUT relay). The CLIENT no
+    // longer replays StartTravel here — ClientApplier.HandleResult skips it because the 0x35 GeoStateDiff
+    // state mirror drives client vehicle motion (the host->client command-REPLAY is retired). SetTimeState
+    // still replays on both host and client (time is not carried by the 0x35 mirror).
     internal static class CommandExecutor
     {
         public static void Execute(InterceptEntry entry, CampaignActionMessage action)
@@ -45,8 +48,13 @@ namespace Multipleer.Network.CommandSync
             }
             catch (System.Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAG2 client log failed: {diagEx.Message}"); }
 
-            var vehicle = GeoBridge.FindVehicleById(geoLevel, p.VehicleId);
-            if (vehicle == null) { Debug.LogWarning($"[Multipleer] StartTravel apply: vehicle {p.VehicleId} not found."); return; }
+            // INC-3a: resolve by the real (factionGuid, VehicleID) identity carried in the payload, so a
+            // client-originated NON-Phoenix craft resolves too (the Phoenix-only FindVehicleById could not).
+            // Empty OwnerFactionGuid -> strict resolver falls back to Phoenix (legacy Phoenix-craft case).
+            if (!int.TryParse(p.VehicleId, out var vehicleIdInt))
+            { Debug.LogWarning($"[Multipleer] StartTravel apply: non-integer vehicle id '{p.VehicleId}'."); return; }
+            var vehicle = GeoBridge.FindVehicleByFactionAndId(geoLevel, p.OwnerFactionGuid, vehicleIdInt);
+            if (vehicle == null) { Debug.LogWarning($"[Multipleer] StartTravel apply: vehicle {p.VehicleId} (faction '{p.OwnerFactionGuid}') not found."); return; }
 
             var path = GeoBridge.BuildSitePath(geoLevel, p.SiteIds);
             if (path == null) { Debug.LogWarning("[Multipleer] StartTravel apply: could not resolve site path."); return; }
