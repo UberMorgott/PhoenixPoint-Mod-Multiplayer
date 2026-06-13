@@ -301,6 +301,18 @@ namespace Multipleer.Network
             BroadcastToAll(msg);
         }
 
+        // Host -> all: authoritative geoscape clock snapshot. 0x34 payload = [subtype:byte][body];
+        // subtype 0x01 = TimingState (Increment-1). Future increments add 0x02 = WorldDelta.
+        public void BroadcastTimingState(Multipleer.Network.CommandSync.TimeStatePayload payload)
+        {
+            var body = Multipleer.Network.CommandSync.CommandCodec.EncodeTimeState(payload);
+            var buf = new byte[body.Length + 1];
+            buf[0] = 0x01; // TimingState subtype
+            System.Array.Copy(body, 0, buf, 1, body.Length);
+            var msg = new NetworkMessage(PacketType.CampaignStateUpdate, buf);
+            BroadcastToAll(msg);
+        }
+
         // ─── Update Loop (call every frame) ──────────────────────────────
 
         public void Update()
@@ -308,6 +320,7 @@ namespace Multipleer.Network
             Transport?.Update();
             Session?.Update();
             SaveTransfer?.Update();
+            Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────
@@ -540,7 +553,13 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.CampaignStateUpdate:
-                    // TODO(geoscape-sync): campaign state-sync application.
+                    if (msg.Payload != null && msg.Payload.Length >= 1 && msg.Payload[0] == 0x01)
+                    {
+                        var body = new byte[msg.Payload.Length - 1];
+                        System.Array.Copy(msg.Payload, 1, body, 0, body.Length);
+                        var ts = Multipleer.Network.CommandSync.CommandCodec.DecodeTimeState(body);
+                        Multipleer.Network.CommandSync.ClientTimeMirror.Apply(ts);
+                    }
                     break;
 
                 default:
