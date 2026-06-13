@@ -17,6 +17,9 @@ namespace Multipleer.Network.CommandSync
                 case CampaignActionType.StartTravel:
                     ApplyStartTravel(action);
                     break;
+                case CampaignActionType.SetTimeState:
+                    ApplySetTime(action);
+                    break;
                 default:
                     Debug.LogWarning($"[Multipleer] CommandExecutor: no apply branch for {action.ActionType}.");
                     break;
@@ -45,6 +48,16 @@ namespace Multipleer.Network.CommandSync
             var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
             if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
             method.Invoke(vehicle, new object[] { path });
+        }
+
+        // Apply an authorized time change on host + clients. Decodes {Paused, PresetIndex} and drives
+        // the live UIModuleTimeControl via TimeBridge (coherent Scale/animator/pause). Runs under
+        // CommandRelay.IsApplying (set by ApplyResult) so the OnPauseTime/SelectTimePreset prefixes
+        // see a re-entrant apply and execute the real writes instead of re-sending.
+        private static void ApplySetTime(CampaignActionMessage action)
+        {
+            var p = CommandCodec.DecodeSetTime(action.Payload);
+            TimeBridge.ApplySetTime(p);
         }
     }
 }
