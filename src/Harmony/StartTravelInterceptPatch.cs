@@ -35,11 +35,11 @@ namespace Multipleer.Harmony
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true;     // single player: pass through
-            if (CommandRelay.IsApplying) return true;                 // re-entrant apply: execute the real method
-            // SWITCH-A: a StartTravel issued inside a replicated state apply (ClientNativeTravelDriver driving
-            // the native NavigateRoutine off the host's mirrored intent) is NOT a player input — let it
-            // execute instead of relaying it to the host + blocking. EntityReplicationScope marks that window.
-            if (EntityReplicationScope.IsApplying) return true;
+            if (CommandRelay.IsApplying) return true;                 // re-entrant apply (host executing an
+                                                                      // approved order): execute the real method
+            // INC-A: the client runs NO native StartTravel routine of its own — it is a pure mirror, driven only
+            // by applied 0x35 state. There is no EntityReplicationScope carve-out for StartTravel anymore (the
+            // client second-writer that used it is removed), so a client-origin call always relays + blocks.
             if (engine.IsHost) return true;                          // host-origin: execute, postfix broadcasts
 
             // Client-origin: encode + relay to host + block local execution. Carry the owning faction's

@@ -115,9 +115,6 @@ namespace Multipleer.Network
             // INC-3a: drop all client render-interpolation state so a stale vehicle ref can't survive a
             // host/join/leave cycle and place a destroyed icon on the next session.
             Multipleer.Network.CommandSync.ClientVehicleInterpolator.Reset();
-            // SWITCH-A: drop native-travel tracking too (clear which identities were being rendered by a
-            // native NavigateRoutine) so the next session starts clean.
-            Multipleer.Network.CommandSync.ClientNativeTravelDriver.Reset();
 
             // Singleton persists across host/join/leave cycles (Instance is never nulled),
             // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.

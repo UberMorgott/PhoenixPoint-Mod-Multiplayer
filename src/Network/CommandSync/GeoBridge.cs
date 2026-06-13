@@ -69,13 +69,6 @@ namespace Multipleer.Network.CommandSync
         // (GeoActor.cs:66-77; same effect NavigateRoutine produces per-frame at GeoNavComponent.cs:117-119).
         // Inherited from GeoActor by GeoVehicle, so AccessTools.Method on the GeoVehicle type resolves it.
         private static MethodInfo _setOrientedGlobeWorldPos; // void GeoActor.SetOrientedGlobeWorldPosition(Vector3)
-        // Native-equation segment render (pure-render flight): handles to derive a travel segment's speed and
-        // its destination world point without widening the wire.
-        private static FieldInfo _statsSpeedField;     // GeoVehicleStats.Speed (EarthUnits field, GeoVehicleStats.cs:10)
-        private static PropertyInfo _siteWorldPosProp; // GeoSite.WorldPosition (inherited GeoActor.WorldPosition => Surface.position, GeoActor.cs:25)
-        private static PropertyInfo _globeCenterProp;  // GlobeUnits.GlobeCenter (static Vector3; == GlobeCollider.transform.position, GeoLevelController.cs:445)
-        private static PropertyInfo _timingNowProp;    // Timing.Now (TimeUnit => StartTime+OwnNow, Timing.cs:55)
-        private static PropertyInfo _timeSpanProp;     // TimeUnit.TimeSpan (public TimeSpan getter, TimeUnit.cs:23)
 
         // Resolve the fixed game-type handles once. Defensive: any failure leaves _reflectReady false so the
         // next tick retries (the geoscape types may not be loaded the first time this runs).
@@ -119,17 +112,6 @@ namespace Multipleer.Network.CommandSync
                 // GeoVehicle type so the icon-placement primitive is cached alongside the apply handles.
                 _setOrientedGlobeWorldPos = AccessTools.Method(geoVehicleType,
                     "SetOrientedGlobeWorldPosition", new[] { typeof(Vector3) });
-
-                // Native-equation segment render handles (best-effort; a null leaves segment mode unavailable
-                // for that datum and the interpolator falls back to ease — never breaks).
-                _statsSpeedField = statsType != null ? AccessTools.Field(statsType, "Speed") : null;
-                _siteWorldPosProp = siteType != null ? AccessTools.Property(siteType, "WorldPosition") : null;
-                var globeUnitsType = AccessTools.TypeByName("PhoenixPoint.Common.Core.GlobeUnits");
-                _globeCenterProp = globeUnitsType != null ? AccessTools.Property(globeUnitsType, "GlobeCenter") : null;
-                var timingType = AccessTools.TypeByName("Base.Core.Timing");
-                _timingNowProp = timingType != null ? AccessTools.Property(timingType, "Now") : null;
-                var timeUnitType = AccessTools.TypeByName("Base.Core.TimeUnit");
-                _timeSpanProp = timeUnitType != null ? AccessTools.Property(timeUnitType, "TimeSpan") : null;
 
                 _reflectReady = true;
             }
@@ -345,26 +327,24 @@ namespace Multipleer.Network.CommandSync
             }
 
             // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
-            // SWITCH-A: while this identity is rendered by the NATIVE NavigateRoutine, the routine OWNS pos +
-            // heading + arc (GeoNavComponent.cs:117-124). SKIP the Surface.position/.rotation writes AND the
-            // interpolator routing — a continuous 0x35 SurfacePos must NOT snap the transform (that is the
-            // jerk), and a second driver would fight the routine. Discrete arrival exits native mode FIRST
-            // (ClientNativeTravelDriver.OnRecord runs before this), so the arrival snap still lands here.
-            bool nativeTravelling = ClientNativeTravelDriver.IsNativeTravelling(
-                (r.FactionGuid ?? "", r.VehicleID));
+            // INC-A (single-writer mirror): the client runs NO native NavigateRoutine, so the 0x35 mirror is the
+            // SOLE writer of the transform + icon for EVERY vehicle — ALWAYS write Surface.position/.rotation
+            // from the latest applied record (no native-travel carve-out, no second driver to fight).
             var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
-            if (surface != null && !nativeTravelling)
+            if (surface != null)
             {
                 if ((mask & GeoStateMask.SurfacePos) != 0)
                     surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
                 if ((mask & GeoStateMask.SurfaceRot) != 0)
                     surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
-                // Writing Surface.position does not move the on-globe ICON (placed by the pivot rotation,
-                // normally driven by NavigateRoutine which the client never runs). Route the new world position
-                // to the per-frame ClientVehicleInterpolator (pure render — no extrapolation, no sim). See
-                // RouteVehicleRender for the segment-vs-ease decision (native-equation flight when possible).
+                // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
+                // normally driven each frame by NavigateRoutine which the client never runs). Place the icon RAW
+                // at the latest applied world position via the interpolator (pure render — no lerp/slerp, no sim;
+                // smoothing is INC-C). Jerky-but-continuous is the expected INC-A result.
                 if ((mask & GeoStateMask.SurfacePos) != 0)
-                    RouteVehicleRender(vehicle, r, mask);
+                    ClientVehicleInterpolator.SetTarget(
+                        vehicle, (r.FactionGuid ?? "", r.VehicleID),
+                        new Vector3(r.PosX, r.PosY, r.PosZ));
             }
 
             // 4) RangeRemaining via new EarthUnits(value) (public setter).
@@ -396,57 +376,6 @@ namespace Multipleer.Network.CommandSync
                 if (stats != null)
                     AccessTools.Field(stats.GetType(), "HitPoints")?.SetValue(stats, (int)r.HitPoints);
             }
-        }
-
-        // Render-routing for an applied 0x35 SurfacePos (PURE RENDER, client-only). Decides between
-        // NATIVE-EQUATION segment render and the EASE fallback for the on-globe icon, off the mirrored record
-        // ONLY (no wire widening, no game-logic sim, no authority side-effect):
-        //   * DISCRETE ARRIVAL (Travelling→false, or a CurrentSite is set) → EndSegmentSnap: end segment, land
-        //     exactly on the host position.
-        //   * TRAVELLING (Travelling bit set true): (re)start a native segment from the current rendered pos to
-        //     DestinationSites[0].WorldPosition at the slaved clock + mirrored Speed. Covers initial launch,
-        //     multi-hop (next leg → segEnd moves → StartSegment re-derives), and reroute. If the destination is
-        //     not yet synced / speed unreadable / leg degenerate / no clock → StartSegment fails and we EASE.
-        //   * CONTINUOUS pos push while a segment is active (no Travelling bit) → CorrectionSample: gentle
-        //     bounded phase correction (no snap).
-        //   * Otherwise → EASE toward the latest host pos (original behaviour).
-        private static void RouteVehicleRender(object vehicle, GeoVehicleStateRecord r, int mask)
-        {
-            var identity = (r.FactionGuid ?? "", r.VehicleID);
-            var pos = new Vector3(r.PosX, r.PosY, r.PosZ);
-
-            bool arrived = ((mask & GeoStateMask.Travelling) != 0 && !r.Travelling)
-                        || ((mask & GeoStateMask.CurrentSite) != 0 && r.CurrentSiteId >= 0);
-            if (arrived)
-            {
-                ClientVehicleInterpolator.EndSegmentSnap(vehicle, identity, pos);
-                return;
-            }
-
-            bool travellingTrue = (mask & GeoStateMask.Travelling) != 0 && r.Travelling;
-            if (travellingTrue)
-            {
-                // Try to start native-equation render. Needs destination + speed + globe centre + clock.
-                if (TryFirstDestinationWorldPos(r, out var segEnd)
-                    && TryGetGlobeCenter(out var center))
-                {
-                    float speed = VehicleSpeedValue(vehicle);
-                    double startSec = NowSeconds();
-                    if (speed > 0f && !double.IsNaN(startSec)
-                        && ClientVehicleInterpolator.StartSegment(
-                            vehicle, identity, pos, segEnd, center, startSec, speed))
-                        return; // segment running
-                }
-                // Couldn't derive a segment yet → ease toward the host pos (self-heals on a later push).
-                ClientVehicleInterpolator.SetTarget(vehicle, identity, pos, snap: false);
-                return;
-            }
-
-            // Continuous pos push (no discrete bits): correct an active segment's phase, else ease.
-            if (ClientVehicleInterpolator.IsSegmentActive(identity))
-                ClientVehicleInterpolator.CorrectionSample(identity, pos, NowSeconds());
-            else
-                ClientVehicleInterpolator.SetTarget(vehicle, identity, pos, snap: false);
         }
 
         // ALL-FACTIONS client mirror — HEAVY path (INC-3a): force the full authoritative state onto a live
@@ -512,12 +441,11 @@ namespace Multipleer.Network.CommandSync
                        ?.Invoke(vehicle, new[] { data });
 
             // The native ProcessInstanceData sets Surface.position/.rotation (GeoVehicle.cs:1089-1090) but
-            // does NOT re-orient the globe ICON pivot. First mirror => SNAP the interpolator to this position
-            // (seeds Current = Target and places the icon NOW) so the craft appears at the right spot exactly,
-            // and subsequent continuous pushes ease from here.
+            // does NOT re-orient the globe ICON pivot. First mirror => place the icon RAW at this position so the
+            // craft appears at the right spot exactly; subsequent applied pushes place RAW from here (INC-A).
             ClientVehicleInterpolator.SetTarget(
                 vehicle, (r.FactionGuid ?? "", r.VehicleID),
-                new Vector3(r.PosX, r.PosY, r.PosZ), snap: true);
+                new Vector3(r.PosX, r.PosY, r.PosZ));
         }
 
         // INC-3a globe-icon placement (PURE MIRROR — no client sim): orient the on-globe vehicle ICON from an
@@ -539,92 +467,6 @@ namespace Multipleer.Network.CommandSync
             if (_setOrientedGlobeWorldPos == null) return;
             try { _setOrientedGlobeWorldPos.Invoke(vehicle, new object[] { worldPos }); }
             catch { }
-        }
-
-        // ─── Native-equation segment render readers (PURE RENDER, client-only) ───────────────────────────
-        // All best-effort + null-guarded: a failure returns the sentinel and the interpolator falls back to
-        // the ease path. None of these mutate game state (reads only).
-
-        // Host-slaved clock seconds = GeoLevelController.Timing.Now (TimeUnit, Timing.cs:55) as float seconds
-        // (TimeUnit→float implicit == TotalSeconds, TimeUnit.cs:100-103). The client clock is forced to host
-        // by the 0x34 TimeSync (ClientTimeMirror/TimeBridge), so this is the host's travel clock ±0.5s.
-        // Returns NaN if no geoscape clock (caller treats as "unavailable" and holds / falls back).
-        public static double NowSeconds()
-        {
-            var timing = TimeBridge.GetTiming();
-            if (timing == null) return double.NaN;
-            EnsureReflect();
-            var now = (_timingNowProp ?? AccessTools.Property(timing.GetType(), "Now"))?.GetValue(timing);
-            if (now == null) return double.NaN;
-            // TimeUnit has an implicit float conversion (TotalSeconds); unbox via the public TimeSpan getter
-            // (cached handle) for exactness over a long campaign clock (avoids float seconds precision loss at
-            // large values).
-            var ts = (_timeSpanProp ?? AccessTools.Property(now.GetType(), "TimeSpan"))?.GetValue(now);
-            return ts is TimeSpan t ? t.TotalSeconds : double.NaN;
-        }
-
-        // GlobeUnits.GlobeCenter (static Vector3 prop) — the globe centre GeoMap.Distance measures angles from
-        // (== GlobeCollider.transform.position, set at GeoLevelController.cs:445). Returns false if unset
-        // (not on geoscape) — the interpolator then cannot derive the native angle and falls back to ease.
-        public static bool TryGetGlobeCenter(out Vector3 center)
-        {
-            center = default(Vector3);
-            EnsureReflect();
-            if (_globeCenterProp == null) return false;
-            try
-            {
-                var v = _globeCenterProp.GetValue(null);
-                if (v is Vector3 c) { center = c; return true; }
-            }
-            catch { }
-            return false;
-        }
-
-        // GeoVehicle.Speed.Value (Stats.Speed EarthUnits.Value, GeoVehicle.cs:254 / GeoVehicleStats.cs:10 /
-        // EarthUnits.cs:21). Returns -1 (INVALID) if unreadable so the caller falls back to ease.
-        public static float VehicleSpeedValue(object vehicle)
-        {
-            if (vehicle == null) return -1f;
-            EnsureReflect();
-            var stats = _statsField?.GetValue(vehicle);
-            if (stats == null) return -1f;
-            var speed = (_statsSpeedField ?? AccessTools.Field(stats.GetType(), "Speed"))?.GetValue(stats);
-            if (speed == null) return -1f;
-            var val = (_euValueField ?? AccessTools.Field(speed.GetType(), "Value"))?.GetValue(speed);
-            return val is float f ? f : -1f;
-        }
-
-        // GeoSite.WorldPosition (inherited GeoActor.WorldPosition => Surface.position, GeoActor.cs:25) — the
-        // segment END world point for the native arc. Returns false if the site/handle is unavailable.
-        public static bool TrySiteWorldPosition(object site, out Vector3 worldPos)
-        {
-            worldPos = default(Vector3);
-            if (site == null) return false;
-            EnsureReflect();
-            var prop = _siteWorldPosProp ?? AccessTools.Property(site.GetType(), "WorldPosition");
-            if (prop == null) return false;
-            try
-            {
-                var v = prop.GetValue(site);
-                if (v is Vector3 p) { worldPos = p; return true; }
-            }
-            catch { }
-            return false;
-        }
-
-        // Resolve the world position of the FIRST destination site for a state record (the next hop's segment
-        // end), via the record's ordered DestinationSiteIds. Returns false if there is no destination, the
-        // site is not yet synced on the client, or the geoscape is unavailable — caller then falls back to
-        // ease until a later push resolves it (self-heals).
-        public static bool TryFirstDestinationWorldPos(GeoVehicleStateRecord r, out Vector3 worldPos)
-        {
-            worldPos = default(Vector3);
-            var ids = r.DestinationSiteIds;
-            if (ids == null || ids.Length == 0) return false;
-            var geoLevel = GetGeoLevelController();
-            if (geoLevel == null) return false;
-            var site = FindSiteById(geoLevel, ids[0]);
-            return site != null && TrySiteWorldPosition(site, out worldPos);
         }
 
         // Build a EarthUnits (PhoenixPoint.Common.Core.EarthUnits, ctor(float) at EarthUnits.cs:33) boxed as
@@ -690,40 +532,6 @@ namespace Multipleer.Network.CommandSync
                 if (byId.TryGetValue(id, out var site)) list.Add(site);
                 else return null;
             return list;
-        }
-
-        // SWITCH-A: invoke the native GeoVehicle.StartTravel(List<GeoSite>) — OVERLOADED with
-        // StartTravel(List<Vector3>), so disambiguate by the GeoSite list type. On the CLIENT this is called
-        // ONLY from ClientNativeTravelDriver under EntityReplicationScope so StartTravelInterceptPatch.Prefix
-        // recognizes a replicated apply (not a player input) and lets it execute (it would otherwise relay to
-        // the host + block). StartTravel -> Navigation.Navigate schedules the native NavigateRoutine which
-        // renders pos+heading+arc natively; set_Travelling/InitiateTravelling/OnArrived remain suppressed on
-        // the client (ClientTravelEmitterSuppressPatch) so no authority side-effects fire. `path` is the typed
-        // List<GeoSite> object (as returned by BuildSitePath). Reflection-only, null-guarded, never throws.
-        public static void StartVehicleTravel(object vehicle, object path)
-        {
-            if (vehicle == null || path == null) return;
-            var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
-            if (geoSiteType == null) return;
-            var listType = typeof(List<>).MakeGenericType(geoSiteType);
-            var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
-            if (method == null) return;
-            try { method.Invoke(vehicle, new[] { path }); }
-            catch (Exception ex) { Debug.LogWarning($"[Multipleer] StartVehicleTravel failed: {ex.Message}"); }
-        }
-
-        // SWITCH-A: cancel a vehicle's native navigation render (GeoNavComponent.CancelNavigation,
-        // GeoNavComponent.cs:180 — ActionComponent.CancelAction + CurrentPath.Clear). Called on a discrete
-        // ARRIVAL to stop any lingering routine before the normal mirror placement resumes, so no residual
-        // driver fights the snapped position. Reads the public GeoVehicle.Navigation field (GeoVehicle.cs:39).
-        // Reflection-only, null-guarded, never throws.
-        public static void CancelVehicleNavigation(object vehicle)
-        {
-            if (vehicle == null) return;
-            var nav = AccessTools.Field(vehicle.GetType(), "Navigation")?.GetValue(vehicle);
-            if (nav == null) return;
-            try { AccessTools.Method(nav.GetType(), "CancelNavigation", Type.EmptyTypes)?.Invoke(nav, null); }
-            catch (Exception ex) { Debug.LogWarning($"[Multipleer] CancelVehicleNavigation failed: {ex.Message}"); }
         }
 
         // GeoVehicle.VehicleID — public int FIELD.
