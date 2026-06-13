@@ -92,11 +92,38 @@ namespace Multipleer.UI
             }
         }
 
+        // Stretch a RectTransform to fully fill its parent (anchors span, zero offsets).
+        private static void ForceStretchFill(RectTransform rt)
+        {
+            if (rt == null) return;
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+        }
+
+        // Force every RectTransform from <paramref name="leaf"/> UP TO AND INCLUDING the child that is
+        // a direct child of <paramref name="stopRoot"/> to stretch-fill its parent. Used so a cloned
+        // native bar's track + fill (whatever the nesting) span the right cell, instead of keeping the
+        // prefab's serialized (thin/top-right) layout. Stops at stopRoot's direct child (the bar root
+        // itself is anchored into the cell separately by the caller).
+        private static void ForceStretchFillChain(RectTransform leaf, Transform stopRoot)
+        {
+            var rt = leaf;
+            int guard = 0;
+            while (rt != null && rt.transform != stopRoot && guard++ < 16)
+            {
+                ForceStretchFill(rt);
+                rt = rt.parent as RectTransform;
+            }
+        }
+
         private Row BuildRow(byte slot, string name)
         {
-            // Compact row container (one name label + one bar). Height ~36px so a 20px nickname on
-            // the top strip plus the bar below it both fit without clipping; several still fit the
-            // ~270px-tall top-right panel.
+            // Compact row container laid out as ONE horizontal line via two explicit anchored cells:
+            // NICKNAME in the LEFT half, progress bar in the RIGHT half. Height ~36px; several rows
+            // still fit the ~270px-tall top-right panel. Explicit sub-rects (not a layout group) keep
+            // the two cells from ever overlapping by construction.
             var go = new GameObject("Row" + slot);
             go.transform.SetParent(_root, false);
             go.AddComponent<RectTransform>().sizeDelta = new Vector2(0f, 36f);
@@ -113,12 +140,14 @@ namespace Multipleer.UI
                 ?? Resources.GetBuiltinResource<Font>("Arial.ttf");
             nameTxt.fontSize = 20;
             nameTxt.color = Color.white;
+            nameTxt.alignment = TextAnchor.MiddleLeft; // vertically centered, left-aligned in its cell
+            nameTxt.horizontalOverflow = HorizontalWrapMode.Overflow;
             nameTxt.text = name;
-            // Name occupies the TOP strip (above the bar at 0..0.5); give it the upper ~55% of the
-            // 36px row so a 20px glyph isn't clipped.
+            // Name occupies the LEFT cell (left ~half of the row), full row height so a 20px glyph
+            // sits centered without clipping. The bar lives in the RIGHT cell (0.5..1) — no overlap.
             var nrt = nameTxt.rectTransform;
-            nrt.anchorMin = new Vector2(0f, 0.45f); nrt.anchorMax = new Vector2(1f, 1f);
-            nrt.offsetMin = new Vector2(6f, 0f); nrt.offsetMax = new Vector2(-6f, 0f);
+            nrt.anchorMin = new Vector2(0f, 0f); nrt.anchorMax = new Vector2(0.5f, 1f);
+            nrt.offsetMin = new Vector2(6f, 0f); nrt.offsetMax = new Vector2(-2f, 0f);
 
             // ── NATIVE PATH: clone the vanilla loading bar, disable its self-driving Update(), and
             //    drive its ProgressFill manually. Falls through to the from-code path if anything
@@ -147,23 +176,26 @@ namespace Multipleer.UI
                         // just ensure its size renders readable in our shrunk clone.
                         if (nativePct != null && nativePct.fontSize < 16) nativePct.fontSize = 16;
 
-                        // Constrain the cloned bar to the bottom strip of the row: stretch full width,
-                        // compact height. The native bar may carry its own RectTransform size, so we
-                        // explicitly anchor-stretch it and add a LayoutElement so the VerticalLayoutGroup
-                        // keeps it inside the ~460px-wide panel.
+                        // Place the cloned bar ROOT into the RIGHT cell (0.5..1 of the row), full row
+                        // height with small margins. CloneLoadingBar clones the ENTIRE native subtree
+                        // and the native children keep their own serialized anchors, so re-anchoring
+                        // ONLY the root is not enough — the bar would render at its own size/position.
+                        // ROBUST (2b-lite): after re-anchoring the root, force every RectTransform from
+                        // the ProgressFill Image UP to the bar root to stretch-fill its parent, so the
+                        // track + fill are guaranteed to span the right cell regardless of the prefab's
+                        // serialized layout.
                         var brt = bar.GetComponent<RectTransform>();
                         if (brt != null)
                         {
-                            brt.anchorMin = new Vector2(0f, 0f);
-                            brt.anchorMax = new Vector2(1f, 0.5f);
-                            brt.offsetMin = new Vector2(6f, 2f);
-                            brt.offsetMax = new Vector2(-6f, -1f);
-                            brt.sizeDelta = new Vector2(brt.sizeDelta.x < 0 ? brt.sizeDelta.x : 0f, 0f);
+                            brt.anchorMin = new Vector2(0.5f, 0f);
+                            brt.anchorMax = new Vector2(1f, 1f);
+                            brt.offsetMin = new Vector2(2f, 4f);
+                            brt.offsetMax = new Vector2(-6f, -4f);
                         }
-                        var barLe = bar.GetComponent<LayoutElement>();
-                        if (barLe == null) barLe = bar.AddComponent<LayoutElement>();
-                        barLe.preferredHeight = 24f;
-                        barLe.flexibleWidth = 1f;
+                        // Stretch-fill the whole chain root → … → ProgressFill so the bar fills the cell.
+                        ForceStretchFillChain(nativeFill.rectTransform, bar.transform);
+                        // Stretch the % text too (if present) so it centers inside the bar, not off-cell.
+                        if (nativePct != null) ForceStretchFill(nativePct.rectTransform);
 
                         nativeFill.fillAmount = 0f;
                         return new Row
@@ -187,9 +219,11 @@ namespace Multipleer.UI
             barBg.transform.SetParent(go.transform, false);
             var barBgImg = barBg.AddComponent<Image>();
             barBgImg.color = new Color(1f, 1f, 1f, 0.15f);
+            // RIGHT cell (0.5..1), full row height — matches the native path so the from-code bar sits
+            // beside the LEFT-cell Name without overlapping it.
             var brt2 = barBgImg.rectTransform;
-            brt2.anchorMin = new Vector2(0f, 0f); brt2.anchorMax = new Vector2(1f, 0.5f);
-            brt2.offsetMin = new Vector2(6f, 2f); brt2.offsetMax = new Vector2(-6f, -1f);
+            brt2.anchorMin = new Vector2(0.5f, 0f); brt2.anchorMax = new Vector2(1f, 1f);
+            brt2.offsetMin = new Vector2(2f, 4f); brt2.offsetMax = new Vector2(-6f, -4f);
 
             var fillGo = new GameObject("Fill");
             fillGo.transform.SetParent(barBg.transform, false);
