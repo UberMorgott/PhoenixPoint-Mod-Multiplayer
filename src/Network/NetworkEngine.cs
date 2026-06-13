@@ -357,6 +357,8 @@ namespace Multipleer.Network
             Session?.Update();
             SaveTransfer?.Update();
             Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
+            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick.
+            Multipleer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────
