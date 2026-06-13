@@ -38,16 +38,8 @@ namespace Multipleer.UI
             public Image Fill;
             public Text Label;   // "Downloading" / "Loading"
             public Text Percent;
-            // Eased DISPLAY fill (0..1). The native LoadingProgress source is coarse/step-quantized,
-            // so we animate this toward the raw target each frame (FillEase) instead of snapping —
-            // turns 0/40/69/80 into a continuously climbing bar. Reset to 0 on (re)build + on Show().
-            public float DisplayFill;
         }
 
-        // Per-second catch-up speed of the eased bar fill (fraction of the full bar / sec). A full
-        // 0→1 sweep takes ~1/RATE s of catch-up; on a coarse step the bar ramps smoothly instead of
-        // snapping, and during the ~4.5s plateau (once caught up) it simply holds at the real target.
-        private const float FillEaseRate = 0.6f;
         private readonly Dictionary<byte, Row> _rows = new Dictionary<byte, Row>();
 
         private void EnsureCanvas()
@@ -224,11 +216,10 @@ namespace Multipleer.UI
         {
             EnsureCanvas();
             // Rows persist across sessions (_rows is never cleared; Hide() only deactivates the canvas).
-            // Reset each row's eased fill + visible bar/text to 0 so a 2nd co-op load animates from 0
-            // instead of starting at the prior run's filled state.
+            // Reset each row's visible bar/text to 0 so a 2nd co-op load starts from 0 instead of the
+            // prior run's filled state.
             foreach (var row in _rows.Values)
             {
-                row.DisplayFill = 0f;
                 if (row.NativeFill != null) row.NativeFill.fillAmount = 0f;
                 if (row.NativePct != null) row.NativePct.text = "0%";
                 if (row.Fill != null) row.Fill.fillAmount = 0f;
@@ -275,26 +266,23 @@ namespace Multipleer.UI
                 row.Name.text = label;
                 var (phase, percent) = tracker.Get(p.SlotIndex);
 
-                // The native LoadingProgress source is coarse/step-quantized (pct 0→40→69→80→done),
-                // so rendering it raw snaps + plateaus. Ease the DISPLAYED fill toward the raw target
-                // a bounded step per frame (monotonic-up, clamped 0..1) so the bar climbs continuously
-                // and steps glide instead of jumping. Show the eased % so the number tracks the bar.
-                var target = percent / 100f;
-                row.DisplayFill = FillEase.EaseFill(row.DisplayFill, target, FillEaseRate * Time.deltaTime);
-                var displayPct = Mathf.RoundToInt(row.DisplayFill * 100f);
+                // Render the REAL received value 1:1 — no easing/prediction. The percent already
+                // carries the source peer's live native bar fillAmount (forwarded frequently), so
+                // drive the bar directly and show the raw percent.
+                var fillAmount = percent / 100f;
 
                 if (row.Native && row.NativeFill != null)
                 {
                     // Native cloned bar (its own Update() disabled): drive ProgressFill directly.
-                    row.NativeFill.fillAmount = row.DisplayFill;
-                    if (row.NativePct != null) row.NativePct.text = displayPct + "%";
+                    row.NativeFill.fillAmount = fillAmount;
+                    if (row.NativePct != null) row.NativePct.text = percent + "%";
                 }
                 else if (!row.Native && row.Fill != null)
                 {
                     // From-code fallback row. Guarded on !Native so a native row whose cloned
                     // ProgressFill was destroyed at runtime is skipped, not NRE'd (its Fill is null).
-                    row.Fill.fillAmount = row.DisplayFill;
-                    row.Percent.text = displayPct + "%";
+                    row.Fill.fillAmount = fillAmount;
+                    row.Percent.text = percent + "%";
                     row.Label.text = phase == 0 ? "Downloading" : "Loading";
                 }
             }

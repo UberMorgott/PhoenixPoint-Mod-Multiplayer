@@ -15,7 +15,6 @@
     <Compile Include="..\src\Util\SmartJoinParser.cs"><Link>SmartJoinParser.cs</Link></Compile>
     <Compile Include="..\src\Util\LanIpResolver.cs"><Link>LanIpResolver.cs</Link></Compile>
     <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
-    <Compile Include="..\src\UI\FillEase.cs"><Link>FillEase.cs</Link></Compile>
     <Compile Include="..\src\Network\MessageLayer\MessageSerializer.cs"><Link>MessageSerializer.cs</Link></Compile>
     <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
     <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>

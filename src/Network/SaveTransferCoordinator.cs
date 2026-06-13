@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Base.Core;
 using Base.Platforms;
 using Base.Serialization;
@@ -92,7 +93,7 @@ namespace Multipleer.Network
         // Shared receiver-side view (host + every client): monotonic-max merge + event-driven done-set.
         private readonly RosterProgressTracker _tracker = new RosterProgressTracker();
         private long _lastSnapshotMs = -1;
-        private const long SnapshotIntervalMs = 200; // ≤5 Hz
+        private const long SnapshotIntervalMs = 50; // ≈20 Hz — re-broadcast the smooth real fillAmount frequently
         private bool _loadCompleteSent;
         // Phase-2 native-load driver state (moved here from LoadOverlayController): last percent this
         // peer reported, so the session-scoped pump throttles to whole-percent steps and detects the
@@ -105,6 +106,12 @@ namespace Multipleer.Network
         // the pump would read null every frame and never report phase-1 progress. The loading Level's
         // LoadingProgress is non-null from load-start (Level.cs:137) until done (Level.cs:149→null).
         private Base.Levels.Level _loadingLevel;
+        // The LIVE native ProgressBarController component for the bar currently on screen. Its
+        // ProgressFill.fillAmount is the REAL eased on-screen value (the game eases it toward the
+        // coarse LoadingProgress.Progress). Captured once when phase-2 begins (SetLoadingLevel with a
+        // non-null level), cleared on Playing/Loaded + OpenBarrier. The pump prefers this over the
+        // coarse lp.Progress so peers see the same smooth bar the source player sees.
+        private UnityEngine.Component _liveProgressBar;
         // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
         // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
         // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
@@ -153,6 +160,11 @@ namespace Multipleer.Network
         public void SetLoadingLevel(object level)
         {
             _loadingLevel = level as Base.Levels.Level;
+            // Capture the LIVE native bar when phase-2 begins (Loading), clear it on Playing/Loaded.
+            // Done ONCE here (not per-frame) so the pump never FindObjectOfType's every tick.
+            _liveProgressBar = _loadingLevel != null
+                ? Multipleer.UI.NativeWidgetFactory.CaptureLiveProgressBar()
+                : null;
         }
 
         /// <summary>
@@ -293,6 +305,7 @@ namespace Multipleer.Network
             _loadCompleteSent = false;
             _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
             _loadingLevel = null;      // fresh session: no level captured yet
+            _liveProgressBar = null;   // fresh session: live native bar not captured yet
             _loadPhaseActive = false; // fresh session: phase-2 not started yet
             // Second barrier (reveal) state — fresh session.
             _reachedPlaying = false;
@@ -602,7 +615,8 @@ namespace Multipleer.Network
         public void OnRosterProgress(NetworkMessage msg)
         {
             var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
-            Debug.Log($"[Multipleer] RosterProgress RECV rows={rows.Count}");
+            var recvDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
+            Debug.Log($"[Multipleer] RosterProgress RECV [{recvDetail}]");
             foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
@@ -734,12 +748,27 @@ namespace Multipleer.Network
                 var lp = _loadingLevel != null ? _loadingLevel.LoadingProgress : null;
                 if (lp != null)
                 {
-                    var pct = RosterProgressTracker.ProgressByte(lp.Progress);
+                    // Prefer the REAL on-screen value: the live native bar's eased ProgressFill.fillAmount
+                    // (the game eases it toward the coarse lp.Progress). Fall back to lp.Progress only if
+                    // the live bar wasn't captured. Done is NOT derived from fillAmount (it holds ~1.0 and
+                    // won't null) — see the else branch on LoadingProgress==null.
+                    byte pct;
+                    if (_liveProgressBar != null)
+                    {
+                        var fill = Multipleer.UI.NativeWidgetFactory.GetProgressFill(_liveProgressBar);
+                        pct = fill != null
+                            ? RosterProgressTracker.ProgressByte(fill.fillAmount)
+                            : RosterProgressTracker.ProgressByte(lp.Progress);
+                    }
+                    else
+                    {
+                        pct = RosterProgressTracker.ProgressByte(lp.Progress);
+                    }
                     if (pct != _lastReportedLoadPct)
                     {
                         _lastReportedLoadPct = pct;
                         Debug.Log($"[Multipleer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
-                                  $"pct={pct} (loadingLevel={(_loadingLevel != null)})");
+                                  $"pct={pct} (src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})");
                         ReportLoadProgress(pct);
                     }
                 }
@@ -835,7 +864,8 @@ namespace Multipleer.Network
             var rows = new List<ProgressRow>(_slotProgress.Count);
             foreach (var kv in _slotProgress)
                 rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
-            Debug.Log($"[Multipleer] RosterProgress SEND rows={rows.Count}");
+            var sendDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
+            Debug.Log($"[Multipleer] RosterProgress SEND [{sendDetail}]");
             var payload = MessageSerializer.SerializeRosterProgress(rows);
             _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
         }

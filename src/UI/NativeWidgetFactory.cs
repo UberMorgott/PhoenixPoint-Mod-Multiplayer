@@ -324,6 +324,32 @@ namespace Multipleer.UI
             return result;
         }
 
+        /// <summary>
+        /// Capture the LIVE native ProgressBarController COMPONENT (not the template GameObject):
+        /// SceneFadeController.ProgressBar. Its ProgressFill.fillAmount is the REAL on-screen eased
+        /// value (ProgressBarController.Update eases fillAmount toward the coarse Progress). Returns
+        /// null on any failure. Used as the per-frame percent source for the co-op load bars.
+        /// </summary>
+        public static Component CaptureLiveProgressBar()
+        {
+            Component result = null;
+            try
+            {
+                var sfcType = HarmonyLib.AccessTools.TypeByName("Base.Utils.SceneFadeController");
+                if (sfcType == null) return null;
+                var sfc = UnityEngine.Object.FindObjectOfType(sfcType);
+                if (sfc == null) return null;
+                result = HarmonyLib.AccessTools.Field(sfcType, "ProgressBar").GetValue(sfc) as Component;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] CaptureLiveProgressBar failed: " + e.Message);
+                result = null;
+            }
+            Debug.Log("[Multipleer] live progress bar " + (result != null ? "captured" : "NOT found"));
+            return result;
+        }
+
         /// <summary>Clone a captured loading-bar template under <paramref name="parent"/> and activate it.</summary>
         public static GameObject CloneLoadingBar(GameObject template, Transform parent)
         {
