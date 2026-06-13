@@ -30,4 +30,13 @@ public class InterceptRegistryTests
     {
         Assert.Null(InterceptRegistry.Lookup(CampaignActionType.AssignSoldier));
     }
+
+    [Fact]
+    public void Lookup_SetTimeState_ReturnsConfirmedControlTimeEntry()
+    {
+        var e = InterceptRegistry.Lookup(CampaignActionType.SetTimeState);
+        Assert.NotNull(e);
+        Assert.Equal(CampaignPermission.ControlTime, e.RequiredPermission);
+        Assert.True(e.SignatureConfirmed);
+    }
 }

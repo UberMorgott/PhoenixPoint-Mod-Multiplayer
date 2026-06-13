@@ -32,6 +32,17 @@ namespace Multipleer.Network.CommandSync
                 ParamTypeNames = new[] { "System.Collections.Generic.List`1[PhoenixPoint.Geoscape.Entities.GeoSite]" },
                 SignatureConfirmed = true
             },
+            [CampaignActionType.SetTimeState] = new InterceptEntry
+            {
+                ActionType = CampaignActionType.SetTimeState,
+                RequiredPermission = CampaignPermission.ControlTime,
+                // Applied via the live UIModuleTimeControl (SelectTimePreset + OnPauseTime),
+                // resolved in CommandExecutor.ApplySetTime — not by the registry resolver.
+                DeclaringTypeName = "PhoenixPoint.Geoscape.View.ViewModules.UIModuleTimeControl",
+                MethodName = "SetTimeState",
+                ParamTypeNames = null,
+                SignatureConfirmed = true
+            },
             [CampaignActionType.StartResearch] = new InterceptEntry
             {
                 ActionType = CampaignActionType.StartResearch,
