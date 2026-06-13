@@ -9,7 +9,7 @@ public class GeoEntityOpCodecTests
         var src = new GeoEntityOp
         {
             OpType = GeoEntityOpType.VehicleCreated,
-            DefGuid = "VEH_DEF_GUID",
+            DefGuid = "CSD_DEF_GUID", // ComponentSetDef guid (the create method's def arg), not GeoVehicleDef
             OwnerFactionGuid = "FAC_PHX_GUID",
             SiteId = 7,
             PosX = 1.5f, PosY = -2.25f, PosZ = 3.75f,
@@ -17,7 +17,7 @@ public class GeoEntityOpCodecTests
         };
         var back = GeoEntityOpCodec.Decode(GeoEntityOpCodec.Encode(src));
         Assert.Equal(GeoEntityOpType.VehicleCreated, back.OpType);
-        Assert.Equal("VEH_DEF_GUID", back.DefGuid);
+        Assert.Equal("CSD_DEF_GUID", back.DefGuid);
         Assert.Equal("FAC_PHX_GUID", back.OwnerFactionGuid);
         Assert.Equal(7, back.SiteId);
         Assert.Equal(1.5f, back.PosX);

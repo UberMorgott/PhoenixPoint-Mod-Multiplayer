@@ -115,10 +115,12 @@ namespace Multipleer.Network.CommandSync
             return AccessTools.Field(def.GetType(), "Guid")?.GetValue(def)?.ToString() ?? "";
         }
 
-        // BaseDef.Guid of a vehicle's def: GeoVehicle.VehicleDef.Guid (VehicleDef -> BaseDef.Guid).
-        public static string VehicleDefGuid(object vehicle)
+        // BaseDef.Guid of an arbitrary def object. Used to broadcast the ComponentSetDef the create method
+        // received (its 2nd arg), NOT GeoVehicle.VehicleDef (a GeoVehicleDef — a SIBLING of ComponentSetDef
+        // under BaseDef, so it would NOT resolve to a ComponentSetDef on the client). ComponentSetDef :
+        // ObjectDef : BaseDef, and BaseDef.Guid is a public string FIELD, so this reads on any def.
+        public static string DefGuid(object def)
         {
-            var def = AccessTools.Property(vehicle.GetType(), "VehicleDef")?.GetValue(vehicle);
             if (def == null) return "";
             return AccessTools.Field(def.GetType(), "Guid")?.GetValue(def)?.ToString() ?? "";
         }
