@@ -12,6 +12,12 @@ namespace Multipleer.Network.CommandSync
         public string[] SiteIds;
     }
 
+    public struct SetTimePayload
+    {
+        public bool Paused;
+        public int PresetIndex;
+    }
+
     public static class CommandCodec
     {
         public static byte[] EncodeStartTravel(StartTravelPayload p)
@@ -37,6 +43,26 @@ namespace Multipleer.Network.CommandSync
                 p.SiteIds = new string[count];
                 for (var i = 0; i < count; i++) p.SiteIds[i] = br.ReadString();
                 return p;
+            }
+        }
+
+        public static byte[] EncodeSetTime(SetTimePayload p)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(p.Paused);
+                bw.Write(p.PresetIndex);
+                return ms.ToArray();
+            }
+        }
+
+        public static SetTimePayload DecodeSetTime(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                return new SetTimePayload { Paused = br.ReadBoolean(), PresetIndex = br.ReadInt32() };
             }
         }
     }

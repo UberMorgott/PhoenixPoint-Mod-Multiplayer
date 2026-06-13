@@ -568,7 +568,8 @@ namespace Multipleer.Network.MessageLayer
         DismissSoldier = 10,
         AssignSoldier = 11,
         RemoveSoldier = 12,
-        StartTravel = 13
+        StartTravel = 13,
+        SetTimeState = 14
     }
 
     public class TacticalActionMessage
