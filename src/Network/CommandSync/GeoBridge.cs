@@ -69,6 +69,17 @@ namespace Multipleer.Network.CommandSync
         // (GeoActor.cs:66-77; same effect NavigateRoutine produces per-frame at GeoNavComponent.cs:117-119).
         // Inherited from GeoActor by GeoVehicle, so AccessTools.Method on the GeoVehicle type resolves it.
         private static MethodInfo _setOrientedGlobeWorldPos; // void GeoActor.SetOrientedGlobeWorldPosition(Vector3)
+        // INC-D P3 (client nose/heading): the native heading math on GeoNavComponent. The visible nose is
+        // Surface.localEulerAngles.z, set EVERY FRAME by NavigateRoutine via UpdateHeading(GetHeadingTowardsTarget
+        // (worldTarget), instant:false) (GeoNavComponent.cs:201-264) — a coroutine the client never runs. We REUSE
+        // these two PRIVATE methods directly (no movement routine, single-writer intact) to drive the nose toward
+        // the streamed destination. GeoVehicle.Navigation is a public GeoNavComponent field (GeoVehicle.cs:39),
+        // GeoSite.WorldPosition is the world target (GeoActor.WorldPosition => Surface.position, GeoActor.cs:25).
+        private static FieldInfo _navigationField;        // GeoVehicle.Navigation (GeoNavComponent)
+        private static MethodInfo _getHeadingTowardsTarget; // float GeoNavComponent.GetHeadingTowardsTarget(Vector3) [private]
+        private static MethodInfo _updateHeading;           // bool GeoNavComponent.UpdateHeading(float, bool) [private]
+        private static FieldInfo _destinationSitesField;   // GeoVehicle._destinationSites (List<GeoSite>)
+        private static PropertyInfo _siteWorldPosProp;     // GeoSite.WorldPosition (Vector3, inherited from GeoActor)
 
         // Resolve the fixed game-type handles once. Defensive: any failure leaves _reflectReady false so the
         // next tick retries (the geoscape types may not be loaded the first time this runs).
@@ -112,6 +123,18 @@ namespace Multipleer.Network.CommandSync
                 // GeoVehicle type so the icon-placement primitive is cached alongside the apply handles.
                 _setOrientedGlobeWorldPos = AccessTools.Method(geoVehicleType,
                     "SetOrientedGlobeWorldPosition", new[] { typeof(Vector3) });
+
+                // INC-D P3 native heading reuse: GeoVehicle.Navigation field + the two PRIVATE GeoNavComponent
+                // heading methods + GeoVehicle._destinationSites + GeoSite.WorldPosition. AccessTools resolves
+                // non-public members; any null handle makes UpdateVehicleHeadingTowards a no-op (nose unchanged).
+                var navType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoNavComponent");
+                _navigationField = AccessTools.Field(geoVehicleType, "Navigation");
+                _getHeadingTowardsTarget = navType != null
+                    ? AccessTools.Method(navType, "GetHeadingTowardsTarget", new[] { typeof(Vector3) }) : null;
+                _updateHeading = navType != null
+                    ? AccessTools.Method(navType, "UpdateHeading", new[] { typeof(float), typeof(bool) }) : null;
+                _destinationSitesField = AccessTools.Field(geoVehicleType, "_destinationSites");
+                _siteWorldPosProp = siteType != null ? AccessTools.Property(siteType, "WorldPosition") : null;
 
                 _reflectReady = true;
             }
@@ -472,11 +495,11 @@ namespace Multipleer.Network.CommandSync
             catch { }
         }
 
-        // INC-C (P4): write ONLY Surface.rotation (the craft's authoritative in-plane heading/nose) from the
-        // slerp'd wire quaternion. This is a DIFFERENT transform than the icon PivotTransform that
-        // SetOrientedGlobeWorldPosition orients (GeoActor.cs:76), so it never clashes with PlaceGlobeIconAt; the
-        // interpolator calls this AFTER placement so the wire quaternion is the SOLE/LAST orientation writer.
-        // Reflection-only, null-guarded, never throws — a missing handle is a no-op.
+        // INC-C (P4) legacy: write the whole Surface.rotation world quaternion. SUPERSEDED for the per-frame
+        // nose by UpdateVehicleHeadingTowards (INC-D P3): the streamed world quat does NOT encode the in-plane
+        // heading (the visible nose = Surface.localEulerAngles.z, which the host sets via NavigateRoutine's
+        // UpdateHeading, NOT captured by SurfaceRot), so writing it left the client nose pointing "up". The
+        // interpolator no longer calls this per frame; kept for completeness/first-mirror parity. Reflection-only.
         public static void SetSurfaceRotation(object vehicle, Quaternion worldRot)
         {
             if (vehicle == null) return;
@@ -486,6 +509,60 @@ namespace Multipleer.Network.CommandSync
             {
                 var surface = _surfaceProp.GetValue(vehicle) as Transform;
                 if (surface != null) surface.rotation = worldRot;
+            }
+            catch { }
+        }
+
+        // INC-D P3 (client nose/heading, PURE MIRROR — no movement routine): point the mirrored craft's nose
+        // along its travel direction by REUSING the native heading math, exactly as NavigateRoutine does each
+        // frame (GeoNavComponent.cs:201-264): heading = GetHeadingTowardsTarget(destWorldPos); UpdateHeading(
+        // heading, instant:false) writes Surface.localEulerAngles.z (the visible nose) smoothing from the current
+        // pivot orientation. We call this from ClientVehicleInterpolator.Tick AFTER PlaceGlobeIconAt (which sets
+        // PivotTransform.localRotation with Z ZEROED, GeoActor.cs:76 — placement only, never the nose), so the two
+        // never clash. destWorldPos = DestinationSites[0].WorldPosition (the next waypoint the host streamed; the
+        // native code aims at segment.End which is that same next waypoint). This is NOT a second simulator: it
+        // runs no NavigateRoutine, integrates no position, and only orients the nose the host already implies via
+        // the streamed DestinationSites. No DestinationSites (parked) → no-op (nose held). Reflection-only,
+        // null-guarded, never throws — any missing handle leaves the nose unchanged (no worse than before).
+        public static void UpdateVehicleHeadingTowards(object vehicle)
+        {
+            if (vehicle == null) return;
+            EnsureReflect();
+            if (_navigationField == null || _getHeadingTowardsTarget == null || _updateHeading == null
+                || _destinationSitesField == null || _siteWorldPosProp == null) return;
+            try
+            {
+                var nav = _navigationField.GetValue(vehicle);
+                if (nav == null) return;
+
+                // Next waypoint = first destination site. The native loop heads toward segment.End (the next
+                // waypoint); DestinationSites[0] is that next site for the current leg.
+                var destSites = _destinationSitesField.GetValue(vehicle) as IList;
+                if (destSites == null || destSites.Count == 0) return; // parked / no path → leave nose as-is
+                var firstSite = destSites[0];
+                if (firstSite == null) return;
+                if (!(_siteWorldPosProp.GetValue(firstSite) is Vector3 targetWorldPos)) return;
+
+                // NOT-ARRIVED guard (mirror analogue of native NavigateRoutine's `if (num < 1f)` gate,
+                // GeoNavComponent.cs:117): when the craft is essentially ON its next waypoint, the target
+                // direction (targetPos − WorldPosition) collapses to ~zero and GetHeadingTowardsTarget's
+                // Cross/normalized → NaN heading, which would write a NaN Surface.localEulerAngles.z that can
+                // stick in the Transform until the next push dequeues the site. Skip the heading update for that
+                // frame (nose held); the host's next 0x35 drops the reached site so this self-heals immediately.
+                var surfaceForPos = _surfaceProp?.GetValue(vehicle) as Transform;
+                if (surfaceForPos != null
+                    && (targetWorldPos - surfaceForPos.position).sqrMagnitude < 1e-6f) return;
+
+                // GetHeadingTowardsTarget expects a WORLD position (it subtracts NavActor.Actor.WorldPosition);
+                // GeoSite.WorldPosition is already world, so pass it directly (no NavigationParent.TransformPoint,
+                // which native uses only because its segment.End is in NavigationParent-local space).
+                var headingObj = _getHeadingTowardsTarget.Invoke(nav, new object[] { targetWorldPos });
+                if (!(headingObj is float heading) || float.IsNaN(heading) || float.IsInfinity(heading)) return;
+
+                // instant:false → smooth-rotate toward the target each Tick (the geoscape Timing still ticks on
+                // the client, host-synced via 0x34, so UpdateHeading's Timing.Delta-based slerp is well-defined),
+                // matching the native per-frame feel without re-running the travel coroutine.
+                _updateHeading.Invoke(nav, new object[] { heading, false });
             }
             catch { }
         }
