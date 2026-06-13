@@ -137,6 +137,173 @@ namespace Multipleer.Network.CommandSync
             return record;
         }
 
+        // ALL-FACTIONS client mirror — LIGHT path (INC-3a): apply a 0x35 GeoStateDiff Vehicle record onto a
+        // live GeoVehicle by writing ONLY the fields whose ChangedMask bit is set, via direct property/field
+        // setters (no Stats re-clone, no equipment/unit rebuild — cheap enough to run per UNRELIABLE pos tick).
+        // The net field writes mirror GeoVehicle.ProcessInstanceData (decompile GeoVehicle.cs:1082-1140) for
+        // exactly these 7 synced fields:
+        //   SurfacePos  -> Surface.position   (GeoVehicle.Surface is a UnityEngine.Transform property, cs:89; ProcessInstanceData sets .position at cs:1089)
+        //   SurfaceRot  -> Surface.rotation   (cs:1090)
+        //   RangeRemaining -> new EarthUnits(value) assigned to the RangeRemaining property (public setter does Range.Range=value, cs:156-166; ProcessInstanceData cs:1093)
+        //   Travelling  -> Travelling property (public setter; side-effect: set TRUE clears CurrentSite via VehicleLeft, cs:201-219 / cs:1097)
+        //   CurrentSite -> CurrentSite property (PRIVATE setter, reflected; cs:168 / cs:1094)
+        //   DestinationSites -> _destinationSites private List<GeoSite> field cleared+refilled (cs:53 / cs:1095-1096)
+        //   HitPoints   -> Stats.HitPoints int field (GeoVehicle.Stats field cs:41, GeoVehicleStats.HitPoints int cs:19 / cs:1072)
+        // ORDERING (matches ProcessInstanceData's net result + the Travelling side-effect at cs:212-216 where
+        // Travelling=true clears CurrentSite): set Travelling FIRST, then CurrentSite, then the rest — so an
+        // arrival record (Travelling=false + CurrentSite=site) lands CurrentSite without the depart side-effect
+        // nulling it, and a departure record (Travelling=true) clears CurrentSite as the engine would.
+        // DestinationSites is SKIPPED (left untouched) if any of its site ids cannot resolve yet (the site is
+        // not synced on the client) — a later periodic push self-heals once that site arrives.
+        // EarthUnits is PhoenixPoint.Common.Core.EarthUnits (decompile EarthUnits.cs:8-36, ctor(float)) — NOT
+        // Base.Utils.EarthUnits (no such type; grounding correction vs the plan).
+        // Reflection-only over live types; null-guarded; never throws on a missing member.
+        public static void ApplyVehicleState(object vehicle, GeoVehicleStateRecord r)
+        {
+            if (vehicle == null) return;
+            var vt = vehicle.GetType();
+            int mask = r.ChangedMask;
+            object geoLevel = null; // resolved lazily only if a site lookup is needed
+
+            // 1) Travelling FIRST (its setter may clear CurrentSite, cs:212-216).
+            if ((mask & GeoStateMask.Travelling) != 0)
+                AccessTools.Property(vt, "Travelling")?.SetValue(vehicle, r.Travelling);
+
+            // 2) CurrentSite (private setter; -1 => null).
+            if ((mask & GeoStateMask.CurrentSite) != 0)
+            {
+                object site = null;
+                if (r.CurrentSiteId >= 0)
+                {
+                    geoLevel = geoLevel ?? GetGeoLevelController();
+                    if (geoLevel != null) site = FindSiteById(geoLevel, r.CurrentSiteId);
+                }
+                AccessTools.Property(vt, "CurrentSite")?.SetValue(vehicle, site);
+            }
+
+            // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
+            var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
+            if (surface != null)
+            {
+                if ((mask & GeoStateMask.SurfacePos) != 0)
+                    surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
+                if ((mask & GeoStateMask.SurfaceRot) != 0)
+                    surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
+            }
+
+            // 4) RangeRemaining via new EarthUnits(value) (public setter).
+            if ((mask & GeoStateMask.RangeRemaining) != 0)
+            {
+                var eu = MakeEarthUnits(r.RangeRemaining);
+                if (eu != null) AccessTools.Property(vt, "RangeRemaining")?.SetValue(vehicle, eu);
+            }
+
+            // 5) DestinationSites: rebuild _destinationSites only if EVERY id resolves; else skip (self-heals).
+            if ((mask & GeoStateMask.DestinationSites) != 0)
+            {
+                geoLevel = geoLevel ?? GetGeoLevelController();
+                if (geoLevel != null && TryResolveSites(geoLevel, r.DestinationSiteIds, out var sites))
+                {
+                    var dest = AccessTools.Field(vt, "_destinationSites")?.GetValue(vehicle) as IList;
+                    if (dest != null && sites is IEnumerable resolved)
+                    {
+                        dest.Clear();
+                        foreach (var s in resolved) dest.Add(s);
+                    }
+                }
+            }
+
+            // 6) HitPoints onto Stats.HitPoints (int field; record carries it as float).
+            if ((mask & GeoStateMask.HitPoints) != 0)
+            {
+                var stats = AccessTools.Field(vt, "Stats")?.GetValue(vehicle);
+                if (stats != null)
+                    AccessTools.Field(stats.GetType(), "HitPoints")?.SetValue(stats, (int)r.HitPoints);
+            }
+        }
+
+        // ALL-FACTIONS client mirror — HEAVY path (INC-3a): force the full authoritative state onto a live
+        // GeoVehicle through the native GeoVehicle.ProcessInstanceData (decompile GeoVehicle.cs:1082) — the
+        // literal mirror of TimeBridge.ApplyTimeState (TimeBridge.cs:107-122). Used ONLY for the FIRST mirror
+        // of a vehicle on the client + a CRC-heal correction (it re-clones Stats at cs:1092 and rebuilds
+        // equipment — too heavy to run per pos tick).
+        // CRITICAL: ProcessInstanceData clobbers EVERYTHING it reads from the data — Name, Owner, weapons,
+        // modules, tac units (cs:1088-1138). The wire record carries ONLY the 7 synced fields, so to avoid
+        // WIPING the vehicle's existing weapons/units/name/owner we first RECORD the live vehicle's current
+        // full state into a fresh instance (native void RecordInstanceData fill, GeoVehicle.cs:1053 — same
+        // pattern as RecordVehicleState), THEN overwrite ONLY the 7 synced fields, THEN ProcessInstanceData.
+        // CurrentSite/DestinationSites are resolved from int site ids; an unresolved DestinationSites set is
+        // left as the live-recorded value (best-effort, consistent with the light path's skip).
+        // Reflection-only over live types; null-guarded; never throws.
+        public static void ApplyVehicleStateFull(object vehicle, GeoVehicleStateRecord r)
+        {
+            if (vehicle == null) return;
+
+            var gvidType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData");
+            var actorDataType = AccessTools.TypeByName("Base.Entities.ActorInstanceData");
+            if (gvidType == null || actorDataType == null) return;
+
+            // Fill a fresh instance with the vehicle's CURRENT full state so unsynced fields (weapons/units/
+            // name/owner) survive the round-trip through ProcessInstanceData.
+            var data = Activator.CreateInstance(gvidType);
+            AccessTools.Method(vehicle.GetType(), "RecordInstanceData", new[] { actorDataType })
+                       ?.Invoke(vehicle, new[] { data });
+
+            // Overwrite ONLY the 7 synced wire fields onto the recorded data.
+            AccessTools.Field(gvidType, "SurfacePos")?.SetValue(data, new Vector3(r.PosX, r.PosY, r.PosZ));
+            AccessTools.Field(gvidType, "SurfaceRot")?.SetValue(data, new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
+            AccessTools.Field(gvidType, "RangeRemaining")?.SetValue(data, r.RangeRemaining);
+            AccessTools.Field(gvidType, "Travelling")?.SetValue(data, r.Travelling);
+            AccessTools.Field(gvidType, "HitPoints")?.SetValue(data, (int)r.HitPoints); // GVID.HitPoints is INT (cs:26)
+
+            var geoLevel = GetGeoLevelController();
+            if (geoLevel != null)
+            {
+                object site = r.CurrentSiteId >= 0 ? FindSiteById(geoLevel, r.CurrentSiteId) : null;
+                AccessTools.Field(gvidType, "CurrentSite")?.SetValue(data, site);
+
+                if (TryResolveSites(geoLevel, r.DestinationSiteIds, out var sites))
+                    AccessTools.Field(gvidType, "DestinationSites")?.SetValue(data, sites);
+                // else: leave the live-recorded DestinationSites (best-effort, self-heals on next push).
+            }
+
+            AccessTools.Method(vehicle.GetType(), "ProcessInstanceData", new[] { actorDataType })
+                       ?.Invoke(vehicle, new[] { data });
+        }
+
+        // Build a EarthUnits (PhoenixPoint.Common.Core.EarthUnits, ctor(float) at EarthUnits.cs:33) boxed as
+        // object for reflective property assignment. Null if the type is unavailable.
+        private static object MakeEarthUnits(float value)
+        {
+            var euType = AccessTools.TypeByName("PhoenixPoint.Common.Core.EarthUnits");
+            if (euType == null) return null;
+            return Activator.CreateInstance(euType, new object[] { value });
+        }
+
+        // Resolve int site ids to a typed List<GeoSite> (as object), in order. Returns true with the list ONLY
+        // if EVERY id resolves (a missing site = not yet synced on the client); false otherwise so the caller
+        // can skip the DestinationSites apply and let a later push self-heal. An empty/null id array resolves
+        // to an empty list (true) — a cleared destination set is a valid synced state.
+        private static bool TryResolveSites(object geoLevel, int[] siteIds, out object list)
+        {
+            list = null;
+            var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            if (geoSiteType == null) return false;
+            var listType = typeof(List<>).MakeGenericType(geoSiteType);
+            var typed = (IList)Activator.CreateInstance(listType);
+            if (siteIds != null)
+            {
+                foreach (var id in siteIds)
+                {
+                    var site = FindSiteById(geoLevel, id);
+                    if (site == null) return false; // not synced yet
+                    typed.Add(site);
+                }
+            }
+            list = typed;
+            return true;
+        }
+
         // GeoSite.SiteId (public int FIELD, default -1, GeoSite.cs:45) read as int. Returns -1 for a null site
         // (no current site / unresolved) or if the field is unreadable — matches the engine's own -1 default.
         private static int SiteIdInt(object site)
