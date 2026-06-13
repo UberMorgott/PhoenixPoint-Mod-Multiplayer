@@ -68,6 +68,21 @@ namespace Multipleer.Network.CommandSync
             var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
             if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
             method.Invoke(vehicle, new object[] { path });
+
+            // [DIAGB] TEMPORARY (logging only, no behavior change). Read back the RESOLVED vehicle's identity +
+            // state right after StartTravel so we can confirm (a) whether the craft actually flipped
+            // Travelling=true and got a destination, and (b) which identity StartTravel resolved — if the
+            // payload's OwnerFactionGuid was EMPTY the strict resolver fell back to Phoenix (id=1), the
+            // suspected wrong-vehicle case. Reverted with the DIAG set.
+            try
+            {
+                var payloadFaction = string.IsNullOrEmpty(p.OwnerFactionGuid) ? "EMPTY" : p.OwnerFactionGuid;
+                var rb = GeoBridge.RecordVehicleState(vehicle);
+                var resolvedFaction = string.IsNullOrEmpty(rb.FactionGuid) ? "EMPTY" : rb.FactionGuid;
+                var destCount = rb.DestinationSiteIds != null ? rb.DestinationSiteIds.Length : 0;
+                Debug.Log($"[Multipleer] DIAGB starttravel applied: payloadFaction={payloadFaction} resolved={resolvedFaction}#{rb.VehicleID} Travelling={rb.Travelling} pos=({rb.PosX:F1},{rb.PosY:F1},{rb.PosZ:F1}) destSites={destCount}");
+            }
+            catch (System.Exception diagEx) { Debug.LogWarning($"[Multipleer] DIAGB starttravel read-back failed: {diagEx.Message}"); }
         }
 
         // Apply an authorized time change on host + clients. Decodes {Paused, PresetIndex} and drives

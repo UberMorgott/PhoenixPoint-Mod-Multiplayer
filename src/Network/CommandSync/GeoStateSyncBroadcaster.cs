@@ -57,6 +57,10 @@ namespace Multipleer.Network.CommandSync
         private static float _accum;          // continuous-flush accumulator (0.5s)
         private static float _snapshotAccum;  // snapshot/diff WALK accumulator (0.1s)
 
+        // [DIAGB] TEMPORARY (logging only, no behavior change). ~1s accumulator so the per-snapshot summary
+        // line is throttled to roughly 1/sec rather than firing every 0.1s snapshot tick. Reverted with the DIAG set.
+        private static float _diagLogAccum;
+
         // ONE shared diff/seq core — a single monotonic seq line per (FactionGuid,VehicleID) across BOTH channels.
         private static readonly GeoVehicleStateDiffer _differ = new GeoVehicleStateDiffer();
 
@@ -96,6 +100,15 @@ namespace Multipleer.Network.CommandSync
 
                 List<GeoVehicleStateRecord> reliableRecords = null; // discrete transitions, sent NOW
 
+                // [DIAGB] TEMPORARY (logging only). Per-snapshot counters for the throttled summary line below.
+                // Decide ONCE per tick whether this snapshot's summary should be logged (≈1/sec) so the heavier
+                // travelling-list build stays off the hot path on the other ~9 snapshots/sec.
+                _diagLogAccum += deltaTime;
+                bool diagLogThisTick = doSnapshot && _diagLogAccum >= 1f;
+                if (diagLogThisTick) _diagLogAccum = 0f;
+                int diagVehicles = 0, diagTravelling = 0, diagRecorded = 0, diagBcastReliable = 0, diagBcastUnreliable = 0;
+                List<string> diagTravellingIds = diagLogThisTick ? new List<string>() : null;
+
                 if (doSnapshot)
                 {
                     foreach (var faction in factions)
@@ -107,6 +120,7 @@ namespace Multipleer.Network.CommandSync
                         foreach (var v in vehicles)
                         {
                             if (v == null) continue;
+                            diagVehicles++; // [DIAGB] count every vehicle walked this snapshot
 
                             // PERF dirty pre-check: a CHEAP managed signature (no native fill, no alloc) skips the
                             // expensive RecordVehicleState when nothing relevant moved. Guards pos/rot (epsilon) +
@@ -114,6 +128,12 @@ namespace Multipleer.Network.CommandSync
                             // re-routes self-heal on the next discrete change — see GeoVehicleCheapSig.)
                             if (GeoBridge.TryGetCheapVehicleSignature(v, out var sig))
                             {
+                                // [DIAGB] note Travelling craft (only when we will actually log this tick).
+                                if (diagTravellingIds != null && sig.Travelling)
+                                {
+                                    diagTravelling++;
+                                    diagTravellingIds.Add($"{sig.FactionGuid ?? "EMPTY"}#{sig.VehicleID}");
+                                }
                                 var sigKey = (sig.FactionGuid ?? "", sig.VehicleID);
                                 if (_lastSig.TryGetValue(sigKey, out var prevSig) && !SigChanged(prevSig, sig))
                                     continue; // unchanged since last snapshot → skip the heavy record
@@ -121,6 +141,7 @@ namespace Multipleer.Network.CommandSync
                             }
 
                             var snap = GeoBridge.RecordVehicleState(v);
+                            diagRecorded++; // [DIAGB] passed the cheap pre-check → expensive record taken
                             var diffed = _differ.Diff(snap);
                             if (diffed.ChangedMask == 0) continue; // nothing moved for this identity
 
@@ -145,7 +166,13 @@ namespace Multipleer.Network.CommandSync
 
                     // DISCRETE channel: immediate, reliable, ordered. Never throttled (now at snapshot cadence).
                     if (reliableRecords != null && reliableRecords.Count > 0)
+                    {
                         engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = reliableRecords }, reliable: true);
+                        diagBcastReliable++; // [DIAGB] one reliable envelope sent this tick
+                        // [DIAGB] one line per actual send (NOT throttled — discrete sends are rare).
+                        foreach (var r in reliableRecords)
+                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=true mask={r.ChangedMask} seq={r.Seq} records={reliableRecords.Count}");
+                    }
                 }
 
                 // CONTINUOUS channel: throttled accumulator → one batched unreliable envelope on flush.
@@ -157,8 +184,21 @@ namespace Multipleer.Network.CommandSync
                     {
                         var contList = new List<GeoVehicleStateRecord>(_continuousPending.Values);
                         engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = contList }, reliable: false);
+                        diagBcastUnreliable++; // [DIAGB] one unreliable envelope sent this flush
+                        // [DIAGB] one line per actual send (NOT throttled — flushes are ~2/sec at most).
+                        foreach (var r in contList)
+                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=false mask={r.ChangedMask} seq={r.Seq} records={contList.Count}");
                         _continuousPending.Clear();
                     }
+                }
+
+                // [DIAGB] TEMPORARY throttled (~1/sec) snapshot summary — see, on the host, whether the walk
+                // observes Travelling craft and whether anything was recorded/broadcast this tick.
+                if (diagLogThisTick)
+                {
+                    var travel = diagTravellingIds != null && diagTravellingIds.Count > 0
+                        ? string.Join(",", diagTravellingIds) : "";
+                    Debug.Log($"[Multipleer] DIAGB snapshot: vehicles={diagVehicles} travelling=[{travel}] recorded={diagRecorded} bcastReliable={diagBcastReliable} bcastUnreliable={diagBcastUnreliable}");
                 }
             }
             catch (Exception ex)
@@ -193,6 +233,7 @@ namespace Multipleer.Network.CommandSync
             _lastSig.Clear();
             _accum = 0f;
             _snapshotAccum = 0f;
+            _diagLogAccum = 0f; // [DIAGB] TEMPORARY — reverted with the DIAG set
         }
     }
 }
