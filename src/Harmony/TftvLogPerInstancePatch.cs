@@ -147,4 +147,120 @@ namespace Multipleer.Harmony
             }
         }
     }
+
+    // Deferred installer for the TFTV/PRM log redirect.
+    //
+    // WHY: Multipleer.OnModEnabled runs harmony.PatchAll BEFORE TFTV is enabled (PP enables mods
+    // sequentially; "Morgott.Multipleer" sorts before "phoenixrising.tftv"). At PatchAll time the
+    // TFTV.TFTVLogger / PRMBetterClasses.PRMLogger types are NOT yet loaded, so the [HarmonyPatch]
+    // classes above hit their Prepare()/TargetMethod() null-gate and are SILENTLY skipped forever —
+    // TFTV then inits its logger unpatched and both same-machine instances clobber the shared TFTV.log
+    // (IOException sharing-violation popups). See commit e08a57a regression notes.
+    //
+    // FIX: subscribe to AppDomain.AssemblyLoad. That event fires synchronously while the CLR loads
+    // TFTV's assembly (and lazily the bundled PRMBetterClasses assembly when TFTVMain.OnModEnabled is
+    // JITted), which necessarily precedes the execution of TFTV's synchronous *Logger.Initialize calls.
+    // The moment each logger type resolves we install the SAME existing Prefix/Postfix via harmony.Patch
+    // — no forked redirect logic, the gate/redirect math is unchanged. A static guard per target makes
+    // the patch idempotent across the multiple AssemblyLoad events.
+    //
+    // If TFTV is ALREADY loaded when we install (unexpected load-order), the [HarmonyPatch]/PatchAll path
+    // above already covered it; we set the guards and do nothing, so there is never a double patch.
+    internal static class TftvLogDeferredInstaller
+    {
+        private static readonly object _lock = new object();
+        private static HarmonyLib.Harmony _harmony;
+        private static AssemblyLoadEventHandler _handler;
+        private static bool _tftvLogPatched;
+        private static bool _prmLogPatched;
+
+        // Called from MultipleerMain.OnModEnabled right after PatchAll, with the mod's Harmony instance.
+        public static void Install(HarmonyLib.Harmony harmony)
+        {
+            if (harmony == null)
+                return;
+
+            _harmony = harmony;
+
+            // Already loaded (e.g. load order changed)? Then PatchAll's [HarmonyPatch] classes already
+            // patched it — mark as handled and do NOT patch again (avoid a duplicate prefix).
+            if (AccessTools.TypeByName("TFTV.TFTVLogger") != null)
+            {
+                _tftvLogPatched = true;
+                _prmLogPatched = true; // PRM (if present) was likewise covered by PatchAll at this point.
+                Debug.Log("[Multipleer] TFTV already loaded at PatchAll time; redirect handled by PatchAll.");
+                return;
+            }
+
+            _handler = (sender, args) => OnAssemblyLoad();
+            AppDomain.CurrentDomain.AssemblyLoad += _handler;
+            Debug.Log("[Multipleer] deferred TFTV-log redirect armed (instance " +
+                      MultipleerLog.InstanceIndex + "); waiting for TFTV assembly load.");
+        }
+
+        private static void OnAssemblyLoad()
+        {
+            // NEVER throw into an AppDomain event — that can destabilize the host. Swallow everything.
+            try
+            {
+                lock (_lock)
+                {
+                    TryPatchTftvLogger();
+                    TryPatchPrmLogger();
+
+                    if (_tftvLogPatched && _prmLogPatched)
+                        Unsubscribe();
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Multipleer] deferred TFTV-log redirect handler failed: " + e.Message);
+            }
+        }
+
+        private static void TryPatchTftvLogger()
+        {
+            if (_tftvLogPatched)
+                return;
+
+            var target = TftvLogPerInstancePatch.TargetMethod(); // null until TFTV.TFTVLogger resolves.
+            if (target == null)
+                return;
+
+            _harmony.Patch(
+                target,
+                prefix: new HarmonyMethod(typeof(TftvLogPerInstancePatch), nameof(TftvLogPerInstancePatch.Prefix)),
+                postfix: new HarmonyMethod(typeof(TftvLogPerInstancePatch), nameof(TftvLogPerInstancePatch.Postfix)));
+
+            _tftvLogPatched = true;
+            Debug.Log("[Multipleer] deferred TFTV-log redirect installed (instance " +
+                      MultipleerLog.InstanceIndex + ").");
+        }
+
+        private static void TryPatchPrmLogger()
+        {
+            if (_prmLogPatched)
+                return;
+
+            var target = PrmLogPerInstancePatch.TargetMethod(); // null until PRMBetterClasses.PRMLogger resolves.
+            if (target == null)
+                return;
+
+            _harmony.Patch(
+                target,
+                prefix: new HarmonyMethod(typeof(PrmLogPerInstancePatch), nameof(PrmLogPerInstancePatch.Prefix)));
+
+            _prmLogPatched = true;
+            Debug.Log("[Multipleer] deferred PRM-log redirect installed (instance " +
+                      MultipleerLog.InstanceIndex + ").");
+        }
+
+        private static void Unsubscribe()
+        {
+            if (_handler == null)
+                return;
+            AppDomain.CurrentDomain.AssemblyLoad -= _handler;
+            _handler = null;
+        }
+    }
 }

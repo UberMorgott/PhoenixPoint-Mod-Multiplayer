@@ -26,6 +26,12 @@ namespace Multipleer
                 var harmony = (HarmonyLib.Harmony)HarmonyInstance;
                 harmony.PatchAll(Assembly.GetExecutingAssembly());
                 Logger.LogInfo("[Multipleer] PatchAll done");
+
+                // TFTV is enabled AFTER Multipleer, so its logger types are not loaded yet and the
+                // [HarmonyPatch] TFTV/PRM log-redirect classes get silently skipped by PatchAll. Arm a
+                // deferred installer that patches them the instant their assembly loads (which precedes
+                // TFTV's synchronous *Logger.Initialize), giving the secondary instance its own log file.
+                Multipleer.Harmony.TftvLogDeferredInstaller.Install(harmony);
             }
             catch (System.Exception e)
             {
