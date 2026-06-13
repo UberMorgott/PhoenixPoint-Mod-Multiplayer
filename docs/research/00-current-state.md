@@ -1,10 +1,59 @@
 # Multipleer — Current State (status note)
 
 > Single-glance "where are we now" for the co-op mod. Updated as the as-built state moves.
-> Companion to the design index (`docs/superpowers/specs/2026-06-12-geoscape-command-sync-design.md`)
-> and the staging plans (`docs/superpowers/plans/`). Engine as-built detail: `docs/engine/`.
+> **Active arc = SD-AIDR state replication** (spec `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`).
+> Companion plans: `docs/superpowers/plans/2026-06-13-replication-increment{1,2}-*.md`.
+> Latest EOD handoff: `docs/superpowers/2026-06-13-EOD-replication-handoff.md` (READ THIS FIRST to resume).
+> The older command-sync / time-sync arc (`specs/2026-06-12-geoscape-command-sync-design.md`) is now
+> SUPERSEDED by SD-AIDR — kept below under "PRIOR ARC (superseded)" for lineage only.
 
-## CURRENT STATE — 2026-06-13
+## CURRENT STATE — 2026-06-13 LATE (SD-AIDR replication — ACTIVE)
+
+> **Read the EOD handoff `docs/superpowers/2026-06-13-EOD-replication-handoff.md` first** — it carries the
+> live blocker + numbered next steps. This block is the one-glance summary.
+
+- **Branch:** `main`. HEAD = `fbfb3f9` *chore(diag): temporary host/client vehicle-id set logging for movement*. 100 commits ahead of `origin/main` (NOT pushed — dev-only, no branches).
+- **Architecture PIVOT (today):** rejected per-action cherry-picking (whack-a-mole → desync). Adopted **SD-AIDR** = host is the SOLE simulator, client is a PURE mirror, client inputs are relayed to host. Spec `docs/superpowers/specs/2026-06-13-coop-state-replication-design.md` (commit `c664128`); readiness YELLOW, 4 adversarial corrections C2/C4/C8/C15 folded in. All decompile-verified seams live in the spec/plans — reference, don't re-derive.
+
+### Done + in repo (SD-AIDR)
+
+- **INC-1 — client geoscape INERT** (plan `2026-06-13-replication-increment1-client-inert.md` `95d416e`; commits `d8dd1ac`/`25e2965`/`6ef9348`). **IN-GAME OK.**
+  - `ClientGeoSimSuppressPatch` — closed 13-producer set, prefix → `NextUpdate.Never` (auditable table, pure, TDD).
+  - `ClientTravelEmitterSuppressPatch` — suppresses 3 GeoVehicle travel emitters on client (render-only).
+  - RESULT: client clock SYNCS host-authoritative (slaved + advancing); client stopped self-simulating. Correct.
+- **INC-2 — entity create/destroy** over packet `0x36 GeoEntityOp` (plan `2026-06-13-replication-increment2-entity-lifecycle.md` `9bf7e57`; commits `b56476e`..`786523d` + critical fix `53947b4`). **IN-GAME: SiteRemoved (base destruction) SYNCS ✓.**
+  - Codec `GeoEntityOp` (4 op-types, pure, TDD) `b56476e`; `EntityReplicationScope` `[ThreadStatic]` replay guard `7d7cba1`; packet wire + `BroadcastGeoEntityOp` + route `f1c218b`; `GeoBridge` entity-op resolvers (def/faction/site + native create + id reconcile) `030eadb`; `ClientEntityOpApplier` (native lifecycle replay + VehicleID reconcile) `12cc619`; `HostEntityOpBroadcastPatch` `786523d`.
+  - **Two load-breakers caught (independent review + empirical Harmony probe) and fixed:**
+    1. sent `GeoVehicleDef.Guid` where `ComponentSetDef` was needed (sibling types) → `ArgumentException` on client. Fixed `53947b4`: broadcast `ComponentSetDef` guid via `GeoBridge.DefGuid(__1)`.
+    2. single 4-target postfix `__0` injection on the 0-param `DestroySite` → `PatchAll` throw → whole-mod load fail. Fixed by splitting into `HostVehicleCreateBroadcastPatch` (2 create targets, `__1`; `HostEntityOpBroadcastPatch.cs:88`) + `HostEntityRemoveBroadcastPatch` (`object[] __args`; `:158`).
+
+### LIVE BLOCKER (fix next session)
+
+- **Host→client MOVEMENT of an EXISTING aircraft fails.** Client→host works both directions; host→client = client shows nothing. NOT a creation bug (that was a detour, now fixed).
+- **ROOT CAUSE:** replication keyed on runtime `VehicleID`. Host's `PhoenixFaction.Vehicles` is a SUPERSET; client's is a SUBSET. Host orders vehicle 3/5 → `GeoBridge.FindVehicleById` (`GeoBridge.cs:40`, called `CommandExecutor.cs:48`) can't resolve on client → `"vehicle N not found"` log (`CommandExecutor.cs:49`) → abort before travel. Client→host works because the client only moves vehicles it has; the host (superset) always resolves.
+- **NOT id-divergence:** client co-op load uses native restore (`SaveTransferCoordinator.PrepareEntryFromBlobCrt:469 CreateSceneBinding` → `GeoVehicle.ProcessInstanceData`) which PRESERVES the saved `VehicleID` (`GeoVehicle.cs:1134`, `GeoVehicleInstanceData.cs:45`).
+- **OPEN QUESTION — why client's set is a SUBSET of the same blob:** (a) host-created-during-play vehicles never replicated (deploy/manufacture is a per-machine UI action with NO client→host relay — `GeoPhoenixFaction.DeployAsset:714` → `CreateVehicle`; client-origin deploy runs on the client, never broadcast); (b) client under-restored the blob; (c) host-extra at save. UNRESOLVED — needs the DIAG2 vehicle-set dump.
+
+### DIAG instrumentation deployed (TEMPORARY — remove after root cause confirmed)
+
+- `b753111` — DIAG creation-path boundary logs (`DiagDeployLogPatch.cs:16`, prefix on `DeployAsset`).
+- `fbfb3f9` — DIAG2 vehicle-set logs: host StartTravel broadcast id + host vehicle list (`StartTravelInterceptPatch.cs:88-89`); client apply requestedVehicleId + client list (`CommandExecutor.cs:43-44`); client vehicles AT LOAD (`CurtainShowPatch.cs:94`).
+- Helpers: `GeoBridge.DescribeVehicles` (`GeoBridge.cs:83`), `GeoBridge.VehicleDefNameOf` (`:113`).
+- Temp patch file: `src/Harmony/DiagDeployLogPatch.cs`. Deployed DLL SHA256 `B539C82A…F1E6`.
+
+### EXACT NEXT STEPS (numbered)
+
+1. User runs 2-instance, moves aircraft host→client AND client→host, captures `multipleer.log` + `multipleer-2.log` IMMEDIATELY (don't relaunch — logs rotate/clobber).
+2. Grep `DIAG2`: compare `DIAG2 host vehicles[N]` vs `DIAG2 client vehicles[N]`; is `requestedVehicleId` in the client set? `AT LOAD` vs apply-time distinguishes under-restore vs post-load-loss vs host-extra.
+3. Decide fix after DIAG2 data: (i) make client mirror host's FULL vehicle set — relay client-origin deploy + broadcast all host vehicle creates (hook `VehicleAdded` generically, gate load-time); or (ii) build **INC-3 generic state-diff `0x35 GeoStateDiff`** (native InstanceData-diff) so the client mirrors the host's whole geoscape state — likely SUBSUMES this (also covers base-attack progress / ownership / prices / faction-traffic / arrival authority + SiteCreated).
+4. After root cause confirmed: REMOVE DIAG/DIAG2 temp logging — revert `b753111` + `fbfb3f9`, delete `DiagDeployLogPatch.cs`, strip DIAG blocks.
+5. Remaining for full sync (all INC-3): base-attacks, prices, faction traffic, random events, arrival / `CurrentSite` authority on client.
+
+- **Test rig:** 2nd Goldberg instance, DirectIP (STUN best-effort). Deploy via `deploy.ps1`. Commit inner `main`, NO push, NO branches.
+
+---
+
+## PRIOR ARC (superseded) — command-sync / time-sync — 2026-06-13
 
 - **Branch:** `feat/geoscape-command-sync`. HEAD = `c5e2b2a` *feat(geo-sync): CommandRelay + StartTravel intercept end-to-end (first vertical proof)*.
 - **Uncommitted working-tree changes** (4 src files + 2 new docs + goldberg tooling) — see "Undocumented-but-shipped" below; NOT yet committed.
