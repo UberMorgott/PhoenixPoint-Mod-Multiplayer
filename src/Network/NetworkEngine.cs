@@ -335,6 +335,20 @@ namespace Multipleer.Network
             BroadcastToAll(msg);
         }
 
+        // Host -> all: authoritative all-faction vehicle state diff (0x35 GeoStateDiff). The body is the
+        // pure GeoStateDiffCodec image of a batch envelope (MANY records packed per call). reliable:true
+        // (BroadcastToAll, ordered) carries DISCRETE transitions (Travelling/CurrentSite/DestinationSites/
+        // HitPoints) — arrival/departure must be exact; reliable:false (BroadcastUnreliable, loss-tolerant)
+        // carries the CONTINUOUS pos/rot/range stream — the client seq-guards stale unreliable packets
+        // (newest-wins) so a dropped/reordered one is harmless. Mirrors BroadcastGeoEntityOp/BroadcastTimingState.
+        public void BroadcastGeoStateDiff(Multipleer.Network.CommandSync.GeoStateDiff diff, bool reliable)
+        {
+            var body = Multipleer.Network.CommandSync.GeoStateDiffCodec.Encode(diff);
+            var msg = new NetworkMessage(PacketType.GeoStateDiff, body);
+            if (reliable) BroadcastToAll(msg);
+            else BroadcastUnreliable(msg);
+        }
+
         // ─── Update Loop (call every frame) ──────────────────────────────
 
         public void Update()
@@ -589,6 +603,11 @@ namespace Multipleer.Network
                     Debug.Log($"[Multipleer] DIAG recv 0x36 GeoEntityOp bytes={(msg.Payload != null ? msg.Payload.Length : -1)}");
                     var entityOp = Multipleer.Network.CommandSync.GeoEntityOpCodec.Decode(msg.Payload);
                     Multipleer.Network.CommandSync.ClientEntityOpApplier.Apply(entityOp);
+                    break;
+
+                case PacketType.GeoStateDiff:
+                    var stateDiff = Multipleer.Network.CommandSync.GeoStateDiffCodec.Decode(msg.Payload);
+                    Multipleer.Network.CommandSync.ClientGeoStateApplier.Apply(stateDiff);
                     break;
 
                 default:
