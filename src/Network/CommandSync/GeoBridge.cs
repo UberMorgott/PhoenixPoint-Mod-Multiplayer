@@ -36,7 +36,10 @@ namespace Multipleer.Network.CommandSync
             return getComponent?.Invoke(currentLevel, new object[] { geoLevelType });
         }
 
-        // Vehicle id == GeoVehicle.VehicleID (public int field) rendered as string by the codec.
+        // LEGACY Phoenix-only resolver: scans ONLY PhoenixFaction.Vehicles. Vehicle id == GeoVehicle.VehicleID
+        // (public int FIELD, GeoVehicle.cs:51) rendered as string by the codec. KEPT for legacy Phoenix
+        // callers (the 0x34/StartTravel-input paths where the craft is always Phoenix-manufactured). For an
+        // all-faction state diff use FindVehicleByFactionAndId instead — a non-Phoenix craft never resolves here.
         public static object FindVehicleById(object geoLevel, string vehicleId)
         {
             var faction = AccessTools.Property(geoLevel.GetType(), "PhoenixFaction")?.GetValue(geoLevel);
@@ -44,6 +47,25 @@ namespace Multipleer.Network.CommandSync
             if (vehicles == null) return null;
             foreach (var v in vehicles)
                 if (VehicleId(v) == vehicleId) return v;
+            return null;
+        }
+
+        // ALL-FACTIONS resolver (INC-3a): resolve a GeoVehicle by its real (factionGuid, VehicleID) identity.
+        // THE live-bug fix — the Phoenix-only FindVehicleById can never find a host-moved non-Phoenix craft
+        // (e.g. a New Jericho Thunderbird), so a faction-keyed state record could not be applied on the client.
+        // Resolves the owning faction STRICTLY (FindFactionByGuidStrict: NO Phoenix fallback when a non-empty
+        // guid is unmatched — a stale/unknown non-Phoenix guid must NOT silently mirror onto a Phoenix craft),
+        // then scans THAT faction's GeoFaction.Vehicles (IEnumerable<GeoVehicle>, GeoFaction.cs:137) for the
+        // matching VehicleID. Returns the GeoVehicle or null (faction not found, or no such id in that faction).
+        public static object FindVehicleByFactionAndId(object geoLevel, string factionGuid, int vehicleID)
+        {
+            var faction = FindFactionByGuidStrict(geoLevel, factionGuid);
+            if (faction == null) return null;
+            var vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable;
+            if (vehicles == null) return null;
+            var idStr = vehicleID.ToString();
+            foreach (var v in vehicles)
+                if (VehicleId(v) == idStr) return v;
             return null;
         }
 
@@ -173,6 +195,23 @@ namespace Multipleer.Network.CommandSync
             foreach (var f in factions)
                 if (FactionGuid(f) == factionGuid) return f;
             return phoenix;
+        }
+
+        // STRICT faction resolver (INC-3a): like FindFactionByGuid but with NO Phoenix fallback for a
+        // non-empty-but-unmatched guid. An EMPTY/null guid still resolves to PhoenixFaction (the INC-2
+        // convention for Phoenix-manufactured aircraft that carry no owner guid on the wire); a NON-EMPTY
+        // guid that matches no faction returns NULL rather than silently falling back to Phoenix. Required by
+        // the all-faction (factionGuid,VehicleID) resolver: a stale/unknown non-Phoenix guid must never
+        // mis-resolve to a Phoenix craft of the same VehicleID. Used by FindVehicleByFactionAndId.
+        public static object FindFactionByGuidStrict(object geoLevel, string factionGuid)
+        {
+            if (string.IsNullOrEmpty(factionGuid))
+                return AccessTools.Property(geoLevel.GetType(), "PhoenixFaction")?.GetValue(geoLevel);
+            var factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable;
+            if (factions == null) return null;
+            foreach (var f in factions)
+                if (FactionGuid(f) == factionGuid) return f;
+            return null;
         }
 
         // GeoFaction.Def.Guid (Def -> BaseDef.Guid). Empty string if unresolved.

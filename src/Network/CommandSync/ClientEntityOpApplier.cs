@@ -45,8 +45,10 @@ namespace Multipleer.Network.CommandSync
 
         private static void ApplyVehicleCreated(object geoLevel, GeoEntityOp op)
         {
-            // Idempotency: if the vehicle id already exists (duplicate op / reload race), skip.
-            if (GeoBridge.FindVehicleById(geoLevel, op.EntityId.ToString()) != null)
+            // Idempotency: if the vehicle id already exists (duplicate op / reload race), skip. Resolve by
+            // (factionGuid,VehicleID) — 0x36 VehicleCreated carries OwnerFactionGuid (HostEntityOpBroadcastPatch
+            // .cs:133), so a non-Phoenix create reconciles too (Phoenix-only FindVehicleById missed it).
+            if (GeoBridge.FindVehicleByFactionAndId(geoLevel, op.OwnerFactionGuid, op.EntityId) != null)
             {
                 Debug.Log($"[Multipleer] EntityOp VehicleCreated: id {op.EntityId} already present, skip.");
                 return;
@@ -77,7 +79,10 @@ namespace Multipleer.Network.CommandSync
 
         private static void ApplyVehicleRemoved(object geoLevel, GeoEntityOp op)
         {
-            var vehicle = GeoBridge.FindVehicleById(geoLevel, op.EntityId.ToString());
+            // Resolve by (factionGuid,VehicleID). For a removal whose op carries no OwnerFactionGuid (empty),
+            // FindFactionByGuidStrict resolves to Phoenix — identical to the legacy Phoenix-only behavior here;
+            // a non-empty guid resolves the owning faction exactly so non-Phoenix removals reconcile too.
+            var vehicle = GeoBridge.FindVehicleByFactionAndId(geoLevel, op.OwnerFactionGuid, op.EntityId);
             if (vehicle == null) { Debug.Log($"[Multipleer] VehicleRemoved: id {op.EntityId} absent, nothing to remove."); return; }
             AccessTools.Method(vehicle.GetType(), "Destroy", System.Type.EmptyTypes)?.Invoke(vehicle, null);
             Debug.Log($"[Multipleer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
