@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Multipleer.Network.MessageLayer;
+using Multipleer.Network.TimeSync;
 using Multipleer.Transport;
 using UnityEngine;
 
@@ -16,6 +17,7 @@ namespace Multipleer.Network
         public ulong LocalSteamId { get; private set; }
         public SessionManager Session { get; private set; }
         public SaveTransferCoordinator SaveTransfer { get; private set; }
+        public TimeSyncManager TimeSync { get; private set; }
 
         // Set true at the START of every intentional teardown (Disconnect/Shutdown). Tearing a
         // CompositeTransport down disconnects its children one-by-one; once the hosting child goes
@@ -49,6 +51,7 @@ namespace Multipleer.Network
             Transport = CreateTransport(transportType);
             Session = new SessionManager(this);
             SaveTransfer = new SaveTransferCoordinator(this);
+            TimeSync = new TimeSyncManager(this);
             LocalSteamId = ResolveLocalSteamId();
 
             Transport.OnPacketReceived += OnPacketReceived;
@@ -77,6 +80,7 @@ namespace Multipleer.Network
             Transport = transport;
             Session = new SessionManager(this);
             SaveTransfer = new SaveTransferCoordinator(this);
+            TimeSync = new TimeSyncManager(this);
             LocalSteamId = ResolveLocalSteamId();
 
             Transport.OnPacketReceived += OnPacketReceived;
@@ -101,6 +105,7 @@ namespace Multipleer.Network
             Transport = null;
             Session = null;
             SaveTransfer = null;
+            TimeSync = null;
             IsActive = false;
             IsHost = false;
 
@@ -257,6 +262,7 @@ namespace Multipleer.Network
             Transport?.Update();
             Session?.Update();
             SaveTransfer?.Update();
+            TimeSync?.Tick();
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────
@@ -442,6 +448,17 @@ namespace Multipleer.Network
 
                 case PacketType.LoadComplete:
                     SaveTransfer?.OnLoadComplete(msg);
+                    break;
+
+                // ─── Geoscape time sync (host-authoritative pause/speed + heartbeat). ─
+                case PacketType.TimeState:
+                    // Host->all authoritative state. Clients apply (host ignores its own).
+                    TimeSync?.OnHostStateReceived(msg.Payload, msg.Timestamp);
+                    break;
+
+                case PacketType.TimeRequest:
+                    // Client->host time-control request. Host applies last-writer-wins + rebroadcasts.
+                    TimeSync?.OnClientRequestReceived(msg.Payload, msg.Timestamp);
                     break;
 
                 // ─── STUB + TODO: members no longer silently fall through. ───────────

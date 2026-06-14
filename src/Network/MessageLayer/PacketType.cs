@@ -49,6 +49,8 @@ namespace Multipleer.Network.MessageLayer
         CampaignStateUpdate = 0x34,
         GeoStateDiff = 0x35,
         GeoEntityOp = 0x36,
+        TimeState = 0x37,    // host->all: authoritative geoscape time {paused, speedIndex, now}
+        TimeRequest = 0x38,  // client->host: time-control request {paused, speedIndex, now}
 
         // Management
         PermissionUpdate = 0x40,
