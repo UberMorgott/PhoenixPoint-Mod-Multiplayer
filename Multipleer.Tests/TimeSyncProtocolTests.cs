@@ -85,36 +85,96 @@ namespace Multipleer.Tests
             return p;
         }
 
-        // ─── Re-snap threshold decision ───────────────────────────────────
+        // ─── Continuous soft clock-rate correction (time dilation) ────────
+        // error = host.Now - client.Now ; positive ⇒ client BEHIND host.
+
         [Fact]
-        public void NeedsResnap_WithinThreshold_False()
+        public void Correction_WithinDeadband_NoChange()
         {
-            // 1 in-game hour drift, threshold = 2h → no resnap
-            Assert.False(TimeSyncProtocol.NeedsResnap(clientNow: 10_000, hostNow: 10_000 + 3600));
+            var c = TimeSyncProtocol.ComputeCorrection(0.5); // < 1s deadband
+            Assert.False(c.HardSnap);
+            Assert.Equal(1.0, c.ScaleMultiplier, 9);
         }
 
         [Fact]
-        public void NeedsResnap_BeyondThreshold_True()
+        public void Correction_ClientBehind_DilatesFaster()
         {
-            // 3 in-game hours drift, threshold = 2h → resnap
-            Assert.True(TimeSyncProtocol.NeedsResnap(clientNow: 10_000, hostNow: 10_000 + 3 * 3600));
+            // 20s behind → run faster (mult > 1), no hard snap
+            var c = TimeSyncProtocol.ComputeCorrection(20.0);
+            Assert.False(c.HardSnap);
+            Assert.True(c.ScaleMultiplier > 1.0);
+            Assert.True(c.ScaleMultiplier <= 1.0 + TimeSyncProtocol.MaxDilation);
         }
 
         [Fact]
-        public void NeedsResnap_ExactlyAtThreshold_False()
+        public void Correction_ClientAhead_DilatesSlower()
         {
-            // strict > comparison: drift == threshold does NOT resnap
-            Assert.False(TimeSyncProtocol.NeedsResnap(
-                clientNow: 0, hostNow: TimeSyncProtocol.ResnapThresholdSeconds,
-                thresholdSeconds: TimeSyncProtocol.ResnapThresholdSeconds));
+            // 20s ahead → run slower (mult < 1), no hard snap (no backward jump)
+            var c = TimeSyncProtocol.ComputeCorrection(-20.0);
+            Assert.False(c.HardSnap);
+            Assert.True(c.ScaleMultiplier < 1.0);
+            Assert.True(c.ScaleMultiplier >= 1.0 - TimeSyncProtocol.MaxDilation);
         }
 
         [Fact]
-        public void NeedsResnap_IsSymmetric()
+        public void Correction_ConvergesToOneAsErrorShrinks()
         {
-            // sign of the drift must not matter (client ahead OR behind host)
-            Assert.True(TimeSyncProtocol.NeedsResnap(20_000, 0, 7200));
-            Assert.True(TimeSyncProtocol.NeedsResnap(0, 20_000, 7200));
+            // monotone: smaller |error| → multiplier closer to 1
+            double m20 = TimeSyncProtocol.ComputeCorrection(20.0).ScaleMultiplier;
+            double m10 = TimeSyncProtocol.ComputeCorrection(10.0).ScaleMultiplier;
+            double m2 = TimeSyncProtocol.ComputeCorrection(2.0).ScaleMultiplier;
+            Assert.True(m20 > m10 && m10 > m2 && m2 > 1.0);
+        }
+
+        [Theory]
+        [InlineData(15.0)]
+        [InlineData(7.5)]
+        [InlineData(50.0)]
+        [InlineData(123.4)]
+        public void Correction_IsSymmetric(double err)
+        {
+            // linear+clamped ⇒ mult(e) + mult(-e) == 2
+            double pos = TimeSyncProtocol.ComputeCorrection(err).ScaleMultiplier;
+            double neg = TimeSyncProtocol.ComputeCorrection(-err).ScaleMultiplier;
+            Assert.Equal(2.0, pos + neg, 9);
+        }
+
+        [Fact]
+        public void Correction_ClampsToMaxDilation()
+        {
+            // error past the ramp but below the hard threshold saturates at ±MaxDilation (no snap)
+            var behind = TimeSyncProtocol.ComputeCorrection(200.0);
+            Assert.False(behind.HardSnap);
+            Assert.Equal(1.0 + TimeSyncProtocol.MaxDilation, behind.ScaleMultiplier, 9);
+
+            var ahead = TimeSyncProtocol.ComputeCorrection(-200.0);
+            Assert.False(ahead.HardSnap);
+            Assert.Equal(1.0 - TimeSyncProtocol.MaxDilation, ahead.ScaleMultiplier, 9);
+        }
+
+        [Fact]
+        public void Correction_LargeForwardError_HardSnaps()
+        {
+            // client far behind (> 10 in-game min) → forward hard snap
+            var c = TimeSyncProtocol.ComputeCorrection(TimeSyncProtocol.ResnapHardForwardSeconds + 1);
+            Assert.True(c.HardSnap);
+        }
+
+        [Fact]
+        public void Correction_ModerateBackwardError_DilatesNotSnaps()
+        {
+            // client ahead by 10 in-game min (past forward threshold but well within backward) →
+            // dilate slower, do NOT backward-snap (backward jump only when catastrophic ≥ 1h)
+            var c = TimeSyncProtocol.ComputeCorrection(-(TimeSyncProtocol.ResnapHardForwardSeconds + 60));
+            Assert.False(c.HardSnap);
+            Assert.Equal(1.0 - TimeSyncProtocol.MaxDilation, c.ScaleMultiplier, 9);
+        }
+
+        [Fact]
+        public void Correction_CatastrophicBackwardError_HardSnaps()
+        {
+            var c = TimeSyncProtocol.ComputeCorrection(-(TimeSyncProtocol.ResnapHardBackwardSeconds + 1));
+            Assert.True(c.HardSnap);
         }
     }
 }

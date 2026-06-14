@@ -41,16 +41,47 @@ namespace Multipleer.Network.TimeSync
     /// Wire layout (21 bytes): [0..7]=version(int64 LE) [8]=paused(1) [9..12]=speedIndex(int32 LE)
     /// [13..20]=now(double LE).
     /// </summary>
+    /// <summary>
+    /// Per-heartbeat client clock-correction decision. Either a continuous soft rate dilation
+    /// (<see cref="ScaleMultiplier"/> applied to the host-commanded raw Scale) or, for a catastrophic
+    /// gap, a one-shot <see cref="HardSnap"/> via Timing.ProcessInstanceData.
+    /// </summary>
+    public struct ClockCorrection
+    {
+        /// <summary>True → hard-resnap the clock to host.Now (large gap). False → apply dilation.</summary>
+        public bool HardSnap;
+        /// <summary>Multiplier on the host-commanded Scale. >1 client behind (catch up), &lt;1 ahead
+        /// (run slower so host catches up), exactly 1 inside the deadband / on a hard snap.</summary>
+        public double ScaleMultiplier;
+    }
+
     public static class TimeSyncProtocol
     {
-        /// <summary>
-        /// Lag re-snap threshold, in geoscape SECONDS. If |client.Now - host.Now| exceeds this on a
-        /// heartbeat, the client hard-resnaps its clock via Timing.ProcessInstanceData. Chosen at
-        /// 7200s = 2 in-game hours: large enough that normal frame-rate jitter / a few dropped
-        /// heartbeats never trigger a visible time-jump, small enough that a real desync is corrected
-        /// before the next hourly sim tick diverges noticeably.
-        /// </summary>
-        public const double ResnapThresholdSeconds = 7200.0;
+        // ── Continuous soft clock-rate correction (standard netcode "time dilation") ──
+        // error = host.Now - client.Now, in geoscape SECONDS.
+
+        /// <summary>No correction while |error| is below this (≈1 in-game sec) — kills micro-jitter so
+        /// the client settles exactly at the host rate instead of dithering around it.</summary>
+        public const double SyncDeadbandSeconds = 1.0;
+
+        /// <summary>|error| at which the dilation saturates to ±<see cref="MaxDilation"/>. Below it the
+        /// dilation ramps linearly with error, so small drift (e.g. 20s) converges in ~1-2s and large
+        /// drift pulls at the capped rate. 30s chosen so a 20s desync glides back into lock quickly.</summary>
+        public const double RampFullScaleErrorSeconds = 30.0;
+
+        /// <summary>Max fractional rate dilation: client Scale ∈ host*[1-MaxDilation .. 1+MaxDilation].
+        /// 0.25 = up to ±25% rate delta — fast enough to close drift, slow enough to stay invisible.</summary>
+        public const double MaxDilation = 0.25;
+
+        /// <summary>Client BEHIND host by more than this → forward hard-snap (acceptable: time only
+        /// jumps forward). 600s = 10 in-game min: well above what dilation handles (≤ a minute or two
+        /// of drift), so only a genuine stall/desync snaps.</summary>
+        public const double ResnapHardForwardSeconds = 600.0;
+
+        /// <summary>Client AHEAD of host by more than this → backward hard-snap (a visible BACKWARD
+        /// time jump — only tolerated when catastrophically large; normal "ahead" drift is corrected by
+        /// running the client slower via dilation). 3600s = 1 in-game hour.</summary>
+        public const double ResnapHardBackwardSeconds = 3600.0;
 
         public const int WireSize = 8 + 1 + 4 + 8;
 
@@ -91,13 +122,25 @@ namespace Multipleer.Network.TimeSync
         public static bool IsNewer(long a, long b) => a > b;
 
         /// <summary>
-        /// Re-snap decision: returns true when the client clock has drifted from the host clock by
-        /// more than <paramref name="thresholdSeconds"/> (default <see cref="ResnapThresholdSeconds"/>).
+        /// Decide how the client should reconcile its clock to the host this heartbeat.
+        /// <paramref name="errorSeconds"/> = host.Now - client.Now (positive ⇒ client behind).
+        ///   • |error| beyond the (asymmetric) hard thresholds ⇒ HardSnap (mult 1).
+        ///   • |error| inside the deadband ⇒ no-op (mult exactly 1).
+        ///   • otherwise ⇒ soft dilation: mult = 1 + clamp(error/Ramp * MaxDilation, ±MaxDilation),
+        ///     so the client runs faster when behind / slower when ahead and settles to host rate as
+        ///     error → 0. Linear+clamped ⇒ symmetric (mult(e)+mult(-e)==2) and monotone toward 1.
         /// </summary>
-        public static bool NeedsResnap(double clientNow, double hostNow, double thresholdSeconds)
-            => Math.Abs(clientNow - hostNow) > thresholdSeconds;
+        public static ClockCorrection ComputeCorrection(double errorSeconds)
+        {
+            if (errorSeconds > ResnapHardForwardSeconds || errorSeconds < -ResnapHardBackwardSeconds)
+                return new ClockCorrection { HardSnap = true, ScaleMultiplier = 1.0 };
 
-        public static bool NeedsResnap(double clientNow, double hostNow)
-            => NeedsResnap(clientNow, hostNow, ResnapThresholdSeconds);
+            if (Math.Abs(errorSeconds) < SyncDeadbandSeconds)
+                return new ClockCorrection { HardSnap = false, ScaleMultiplier = 1.0 };
+
+            double raw = (errorSeconds / RampFullScaleErrorSeconds) * MaxDilation;
+            double clamped = Math.Max(-MaxDilation, Math.Min(MaxDilation, raw));
+            return new ClockCorrection { HardSnap = false, ScaleMultiplier = 1.0 + clamped };
+        }
     }
 }

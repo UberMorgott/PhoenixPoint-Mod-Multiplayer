@@ -203,19 +203,30 @@ namespace Multipleer.Network.TimeSync
             IsApplyingRemote = true;
             try
             {
-                // 1) Lag resnap FIRST (raw field write via ProcessInstanceData; fires no events) so the
-                //    subsequent property writes can emit the UI events on top of the corrected clock.
                 double clientNow = GetNowSeconds(timing);
-                if (TimeSyncProtocol.NeedsResnap(clientNow, p.Now))
-                    ResnapClock(timing, p);
+                var corr = TimeSyncProtocol.ComputeCorrection(p.Now - clientNow);
 
-                // 2) Smooth local advance. Write Timing.Scale DIRECTLY from the index (independent of
-                //    the UI mirror) — SelectTimePreset is a no-op when the preset index already matches,
-                //    which would otherwise leave Scale un-rewritten after a resnap. Then mirror the UI
-                //    widget + pause state (setting Paused fires OnPausedEvent → UI refresh).
-                SetScale(timing, ScaleForIndex(p.SpeedIndex, timing));
-                MirrorSpeedUi(p.SpeedIndex);
-                SetPaused(timing, p.Paused);
+                if (corr.HardSnap)
+                {
+                    // Catastrophic gap → one-shot exact resnap to host.Now (raw field write via
+                    // ProcessInstanceData; fires no events), then commit commanded speed/pause/UI.
+                    ResnapClock(timing, p);
+                    MirrorSpeedUi(p.SpeedIndex);
+                    SetPaused(timing, p.Paused);
+                    SetScale(timing, ScaleForIndex(p.SpeedIndex, timing));
+                }
+                else
+                {
+                    // Continuous soft correction. ORDER MATTERS: mirror the UI (SelectTimePreset writes
+                    // the UN-dilated PresetTimes[idx] into Timing.Scale + sets the widget index) and the
+                    // pause state FIRST, then overwrite Timing.Scale LAST with the dilated value so the
+                    // raw clock rate carries the correction while the UI widget still shows the
+                    // host-commanded speed index (the dilation is never seen as a user speed change).
+                    MirrorSpeedUi(p.SpeedIndex);
+                    SetPaused(timing, p.Paused);
+                    double hostScale = ScaleForIndex(p.SpeedIndex, timing);
+                    SetScale(timing, (float)(hostScale * corr.ScaleMultiplier));
+                }
             }
             catch (Exception ex)
             {
