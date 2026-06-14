@@ -99,4 +99,39 @@ namespace Multipleer.Harmony
             }
         }
     }
+
+    /// <summary>
+    /// Client-side shared-clock guard. Native auto-pauses from opening side panels (Research /
+    /// Manufacturing / Diplomacy / Geoscape-Log / vehicle-selected) funnel through
+    /// GeoscapeView.SetGamePauseState, which writes Timing.Paused DIRECTLY — bypassing the OnPauseTime
+    /// relay. On a client that would locally pause the SHARED clock and then fight the host heartbeat
+    /// (flicker/desync). Policy (host-authoritative): a client must NEVER write the shared Timing
+    /// locally — so block the local write. The pause BUTTON still works via the OnPauseTime → host
+    /// relay; the host-applied path (IsApplyingRemote) still passes through. Host is unaffected.
+    /// </summary>
+    [HarmonyPatch]
+    public static class GeoscapeViewPausePatch
+    {
+        private static Type _targetType;
+        private static MethodBase _targetMethod;
+
+        public static bool Prepare()
+        {
+            _targetType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+            if (_targetType == null) return false;
+            _targetMethod = AccessTools.Method(_targetType, "SetGamePauseState", new[] { typeof(bool) });
+            return _targetMethod != null;
+        }
+
+        public static MethodBase TargetMethod() => _targetMethod;
+
+        public static bool Prefix()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive) return true; // no session → local
+            if (engine.IsHost) return true;                      // host owns the shared clock
+            if (TimeSyncManager.IsApplyingRemote) return true;   // our host-applied path → let through
+            return false;                                        // client: block local shared-clock write
+        }
+    }
 }

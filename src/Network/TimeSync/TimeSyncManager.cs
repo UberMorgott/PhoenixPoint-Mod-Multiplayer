@@ -39,10 +39,11 @@ namespace Multipleer.Network.TimeSync
         /// </summary>
         public static bool IsApplyingRemote { get; private set; }
 
-        // Client: last applied host-TimeState header ts (stale-drop).
-        private long _clientLastAppliedTs;
-        // Host: last applied client-TimeRequest header ts (last-writer-wins).
-        private long _hostLastRequestTs;
+        // Client: last applied HOST-stamped TimeState version (stale-drop on the single host clock —
+        // NOT the per-sender header ts, which would skew across machines).
+        private long _clientLastAppliedVersion;
+        // Host: monotonic ordering counter stamped onto every outgoing TimeState (single source).
+        private long _hostVersion;
 
         // Host change-detection cache + heartbeat accumulator.
         private bool _haveCache;
@@ -176,6 +177,11 @@ namespace Multipleer.Network.TimeSync
 
         private void Broadcast(TimeStatePayload p, bool reliable)
         {
+            // Stamp the single-source host-monotonic ordering version onto every outgoing TimeState
+            // (reliable change, heartbeat, AND request-echo) so clients order on one clock, never on
+            // the cross-machine header ts.
+            _hostVersion = TimeSyncProtocol.NextVersion(_hostVersion);
+            p.Version = _hostVersion;
             var msg = new NetworkMessage(PacketType.TimeState, TimeSyncProtocol.EncodeTimeState(p));
             if (reliable) _engine.BroadcastToAll(msg);
             else _engine.BroadcastUnreliable(msg);
@@ -187,8 +193,9 @@ namespace Multipleer.Network.TimeSync
         {
             if (_engine == null || _engine.IsHost) return; // host never applies its own state
             if (!TimeSyncProtocol.TryDecodeTimeState(payload, out var p)) return;
-            if (!TimeSyncProtocol.ShouldApply(headerTs, _clientLastAppliedTs)) return; // stale-drop
-            _clientLastAppliedTs = headerTs;
+            // Stale-drop on the HOST-stamped version (single clock), NOT the per-sender header ts.
+            if (!TimeSyncProtocol.ShouldApply(p.Version, _clientLastAppliedVersion)) return;
+            _clientLastAppliedVersion = p.Version;
 
             var timing = GetTiming();
             if (timing == null) return; // not in geoscape → no-op
@@ -202,9 +209,11 @@ namespace Multipleer.Network.TimeSync
                 if (TimeSyncProtocol.NeedsResnap(clientNow, p.Now))
                     ResnapClock(timing, p);
 
-                // 2) Smooth local advance: mirror speed (via the UI preset, which also sets Scale and
-                //    keeps SelectedPresetTime synced) and pause state. Setting Paused fires the native
-                //    OnPausedEvent → UIModuleTimeControl refreshes its pause graphic automatically.
+                // 2) Smooth local advance. Write Timing.Scale DIRECTLY from the index (independent of
+                //    the UI mirror) — SelectTimePreset is a no-op when the preset index already matches,
+                //    which would otherwise leave Scale un-rewritten after a resnap. Then mirror the UI
+                //    widget + pause state (setting Paused fires OnPausedEvent → UI refresh).
+                SetScale(timing, ScaleForIndex(p.SpeedIndex, timing));
                 MirrorSpeedUi(p.SpeedIndex);
                 SetPaused(timing, p.Paused);
             }
@@ -224,15 +233,17 @@ namespace Multipleer.Network.TimeSync
         {
             if (_engine == null || !_engine.IsHost) return;
             if (!TimeSyncProtocol.TryDecodeTimeState(payload, out var p)) return;
-            if (!TimeSyncProtocol.IsNewer(headerTs, _hostLastRequestTs)) return; // last-writer-wins
-            _hostLastRequestTs = headerTs;
 
             var timing = GetTiming();
             if (timing == null) return; // host not in geoscape → ignore
 
+            // Last-writer-wins = ARRIVAL ORDER on the host's single thread. NO cross-client ts compare
+            // (sender wall-clock skew could otherwise permanently starve a slightly-behind client).
+            // Each request is simply applied; the most-recently-processed one wins.
             IsApplyingRemote = true;
             try
             {
+                SetScale(timing, ScaleForIndex(p.SpeedIndex, timing));
                 MirrorSpeedUi(p.SpeedIndex);
                 SetPaused(timing, p.Paused);
             }
@@ -262,6 +273,9 @@ namespace Multipleer.Network.TimeSync
 
         private static void SetPaused(object timing, bool paused)
             => AccessTools.Property(timing.GetType(), "Paused").SetValue(timing, paused, null);
+
+        private static void SetScale(object timing, float scale)
+            => AccessTools.Property(timing.GetType(), "Scale").SetValue(timing, scale, null);
 
         private static void MirrorSpeedUi(int speedIndex)
         {
