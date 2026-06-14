@@ -36,6 +36,9 @@
     <Compile Include="..\src\Network\CommandSync\GeoVehicleStateDiffer.cs"><Link>GeoVehicleStateDiffer.cs</Link></Compile>
     <Compile Include="..\src\Network\CommandSync\InterpolationMath.cs"><Link>InterpolationMath.cs</Link></Compile>
     <Compile Include="..\src\Network\CommandSync\ClientInterpolationCore.cs"><Link>ClientInterpolationCore.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\HostClockOffsetEstimator.cs"><Link>HostClockOffsetEstimator.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\AdaptiveRenderWindow.cs"><Link>AdaptiveRenderWindow.cs</Link></Compile>
+    <Compile Include="..\src\Network\CommandSync\ClientHostClockInterpolation.cs"><Link>ClientHostClockInterpolation.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />

@@ -16,6 +16,16 @@ namespace Multipleer.Network.CommandSync
         // (the legacy Phoenix-manufactured-aircraft case).
         public string OwnerFactionGuid;
         public string[] SiteIds;
+        // PIVOT Step A start-time alignment. The host stamps the geoscape game-time (seconds, DOUBLE) and
+        // the vehicle's RangeRemaining (meters) at the instant it ran StartTravel, so the client's own native
+        // NavigateRoutine — which captures its progress origin as a LOCAL startTime = Timing.Now at the call
+        // moment (GeoNavComponent.NavigateRoutine) — can be reconciled against the SAME host origin (no
+        // constant offset). DOUBLE for StartGameTime: the geoscape clock reaches ~6.4e10 game-seconds where a
+        // float32 ULP (~8192 s) dwarfs the inter-sample gap; a float cast would collapse the value (same
+        // reason TimeBridge.GetHostNowSeconds reads TimeSpan.TotalSeconds, never (float)TimeUnit). 0 => absent
+        // (older sender / unresolved clock) -> client falls back to its own local startTime capture.
+        public double StartGameTime;
+        public float StartRangeRemaining;
     }
 
     public struct SetTimePayload
@@ -46,6 +56,9 @@ namespace Multipleer.Network.CommandSync
                 var ids = p.SiteIds ?? new string[0];
                 bw.Write(ids.Length);
                 foreach (var id in ids) bw.Write(id ?? "");
+                // Appended AFTER the variable-length site list so existing fixed fields keep their offsets.
+                bw.Write(p.StartGameTime);       // double (8B) — geoscape game-time origin, see field doc
+                bw.Write(p.StartRangeRemaining); // float  (4B) — vehicle range-remaining at the host StartTravel
                 return ms.ToArray();
             }
         }
@@ -59,6 +72,10 @@ namespace Multipleer.Network.CommandSync
                 var count = br.ReadInt32();
                 p.SiteIds = new string[count];
                 for (var i = 0; i < count; i++) p.SiteIds[i] = br.ReadString();
+                // Trailing start-time alignment fields. Guard EOF so a pre-pivot sender (no trailer) still
+                // decodes — missing trailer -> StartGameTime=0 (absent) -> client uses its local capture.
+                if (ms.Position < ms.Length) p.StartGameTime = br.ReadDouble();
+                if (ms.Position < ms.Length) p.StartRangeRemaining = br.ReadSingle();
                 return p;
             }
         }

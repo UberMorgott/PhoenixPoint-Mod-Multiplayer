@@ -81,6 +81,108 @@ namespace Multipleer.Network.CommandSync
         private static FieldInfo _destinationSitesField;   // GeoVehicle._destinationSites (List<GeoSite>)
         private static PropertyInfo _siteWorldPosProp;     // GeoSite.WorldPosition (Vector3, inherited from GeoActor)
 
+        // DIAG-NAV ~1/sec-per-id throttle for the decisive per-tick travel-progress probe.
+        private static readonly Dictionary<(string, int), float> _navProbeNextLogTime =
+            new Dictionary<(string, int), float>();
+        // DIAG-NAV previous sample (WorldPosition + RangeRemaining) per id, to report PER-SECOND DELTAS so the
+        // reader sees instantly whether a craft is advancing without diffing log lines by hand.
+        private static readonly Dictionary<(string, int), (Vector3 pos, float range)> _navProbeLast =
+            new Dictionary<(string, int), (Vector3, float)>();
+
+        // Clear the DIAG-NAV probe state for one identity (vehicle removal) or all (session Reset). Pure DIAG
+        // bookkeeping — no behavior depends on it.
+        public static void ResetNavProbe((string, int)? identity = null)
+        {
+            if (identity.HasValue)
+            {
+                _navProbeNextLogTime.Remove(identity.Value);
+                _navProbeLast.Remove(identity.Value);
+            }
+            else
+            {
+                _navProbeNextLogTime.Clear();
+                _navProbeLast.Clear();
+            }
+        }
+
+        // DECISIVE PROBE (marker DIAG-NAV): for a TRAVELLING vehicle, sample the PUBLIC native travel-progress
+        // signals the game's own UI reads (UIStateVehicleSelected.cs:1384 uses GeoMap.Distance(vehicle.WorldPosition,
+        // site.WorldPosition) + vehicle.RangeRemaining). Per id (~1/sec) logs def name (player PP/NA_Manticore vs
+        // AI NJ/SYN/ANU), the actual rendered WorldPosition (= Surface.position), RangeRemaining, distance to the
+        // FinalDestination, Speed, AND the per-second DELTAS of pos+range. Reading guide:
+        //   - posDelta > 0 && rangeDelta < 0  -> craft IS advancing (baseline 'moving', expect for AI).
+        //   - posDelta ~0  && rangeDelta < 0  -> routine RUNS (range decremented at GeoNavComponent.cs:124) but the
+        //                                        rendered position is frozen/reverted elsewhere (H1: engine-freeze
+        //                                        / a mod re-snap), NOT a time/num issue.
+        //   - posDelta ~0  && rangeDelta ~0   -> routine NOT progressing: num=0 (Ratio01=0, startTime>=Now) (H2: time).
+        //   - both tiny but nonzero            -> glacial: totalTime inflated (H3).
+        // Read-only; ~1/sec per id; never throws. Reflection via cached helpers (VehicleDefNameOf/ReadRangeRemaining).
+        public static void DiagNavObserve(object vehicle, (string, int) identity)
+        {
+            try
+            {
+                var vt = vehicle.GetType();
+                var travelling = AccessTools.Property(vt, "Travelling")?.GetValue(vehicle);
+                if (!(travelling is bool tb && tb)) return; // only travelling crafts are interesting
+
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                _navProbeNextLogTime.TryGetValue(identity, out var next);
+                if (now < next) return;
+                _navProbeNextLogTime[identity] = now + 1.0f;
+
+                // WorldPosition (= Surface.position): the ACTUAL rendered globe position.
+                var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
+                Vector3 pos = surface != null ? surface.position : Vector3.zero;
+                float range = ReadRangeRemaining(vehicle);
+                string defName = VehicleDefNameOf(vehicle);
+
+                // Distance to FinalDestination via the SAME public API the UI uses (GeoMap.Distance(Vector3,Vector3)).
+                float distToDest = -1f;
+                try
+                {
+                    var finalDest = AccessTools.Property(vt, "FinalDestination")?.GetValue(vehicle);
+                    var destPos = finalDest != null ? AccessTools.Property(finalDest.GetType(), "WorldPosition")?.GetValue(finalDest) : null;
+                    if (destPos is Vector3 dp)
+                    {
+                        var geoMapType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoMap");
+                        var distM = geoMapType != null ? AccessTools.Method(geoMapType, "Distance", new[] { typeof(Vector3), typeof(Vector3) }) : null;
+                        var d = distM?.Invoke(null, new object[] { pos, dp });
+                        // GeoMap.Distance returns EarthUnits -> read .Value (meters) via the cached EarthUnits field.
+                        var dv = d != null ? _euValueField?.GetValue(d) : null;
+                        if (dv is float dfm) distToDest = dfm;
+                    }
+                }
+                catch { /* leave distToDest=-1 (absent) */ }
+
+                // Speed (EarthUnits.Value meters/h) — totalTime proxy alongside distance.
+                float speed = 0f;
+                try
+                {
+                    var sp = AccessTools.Property(vt, "Speed")?.GetValue(vehicle);
+                    var spv = sp != null ? _euValueField?.GetValue(sp) : null;
+                    if (spv is float spf) speed = spf;
+                }
+                catch { /* leave 0 */ }
+
+                // Per-second deltas vs the previous sample (first sample => deltas absent).
+                Vector3 posDelta = Vector3.zero; float rangeDelta = 0f; bool haveDelta = false;
+                if (_navProbeLast.TryGetValue(identity, out var prev))
+                {
+                    posDelta = pos - prev.pos;
+                    rangeDelta = range - prev.range;
+                    haveDelta = true;
+                }
+                _navProbeLast[identity] = (pos, range);
+
+                UnityEngine.Debug.Log($"[Multipleer] DIAG-NAV id {identity.Item1}#{identity.Item2} def={defName} " +
+                    $"pos={pos} range={range:F1} distToDest={distToDest:F1} speed={speed:F1} " +
+                    (haveDelta
+                        ? $"posDelta={posDelta.magnitude:F4} rangeDelta={rangeDelta:F2}"
+                        : "posDelta=NA rangeDelta=NA"));
+            }
+            catch { /* never throw from a DIAG read */ }
+        }
+
         // Resolve the fixed game-type handles once. Defensive: any failure leaves _reflectReady false so the
         // next tick retries (the geoscape types may not be loaded the first time this runs).
         private static void EnsureReflect()
@@ -333,6 +435,15 @@ namespace Multipleer.Network.CommandSync
             int mask = r.ChangedMask;
             object geoLevel = null; // resolved lazily only if a site lookup is needed
 
+            // PRE-APPLY Travelling snapshot (read BEFORE step 1 writes the diff's Travelling bit). Used to gate
+            // the RangeRemaining write below: while the client craft is locally Travelling, its OWN native
+            // NavigateRoutine OWNS RangeRemaining (it decrements it each frame at GeoNavComponent.cs:124), so the
+            // host's streamed RangeRemaining must NOT clobber it mid-flight (DIAG-NAV saw a +1482 backward jump,
+            // 510->1992). Reading PRE-apply ensures an ARRIVAL diff still lands the authoritative range: a craft
+            // that is no longer travelling (arrived/idle) has wasTravellingPreApply=false -> range applies.
+            EnsureReflect();
+            bool wasTravellingPreApply = _travellingProp?.GetValue(vehicle) is bool wt && wt;
+
             // 1) Travelling FIRST (its setter may clear CurrentSite, cs:212-216).
             if ((mask & GeoStateMask.Travelling) != 0)
                 AccessTools.Property(vt, "Travelling")?.SetValue(vehicle, r.Travelling);
@@ -350,29 +461,46 @@ namespace Multipleer.Network.CommandSync
             }
 
             // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
-            // INC-A (single-writer mirror): the client runs NO native NavigateRoutine, so the 0x35 mirror is the
-            // SOLE writer of the transform + icon for EVERY vehicle — ALWAYS write Surface.position/.rotation
-            // from the latest applied record (no native-travel carve-out, no second driver to fight).
-            var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
-            if (surface != null)
+            // PIVOT Step A: with command-replication the client runs its OWN NavigateRoutine off the synced clock,
+            // which positions the craft every frame. The 0x35 per-tick transform stream would FIGHT that native
+            // sim, so the POSITION apply (SurfacePos/SurfaceRot + interpolator push) is gated off when
+            // !USE_TRANSFORM_STREAM. Discrete state (Travelling/CurrentSite/DestinationSites/HitPoints) above +
+            // below STILL applies — only the position fight is removed. Flip USE_TRANSFORM_STREAM=true to restore
+            // the legacy transform-stream mirror.
+            if (Multipleer.Network.NetworkEngine.USE_TRANSFORM_STREAM)
             {
-                if ((mask & GeoStateMask.SurfacePos) != 0)
-                    surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
-                if ((mask & GeoStateMask.SurfaceRot) != 0)
-                    surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
-                // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
-                // normally driven each frame by NavigateRoutine which the client never runs). Push this applied
-                // transform sample into the interpolator's per-identity ring buffer; the interpolator's own Tick
-                // is the SOLE writer that renders the icon at now − InterpDelay by lerp/slerp (INC-C smoothing).
-                if ((mask & GeoStateMask.SurfacePos) != 0)
-                    ClientVehicleInterpolator.SetTarget(
-                        vehicle, (r.FactionGuid ?? "", r.VehicleID),
-                        new Vector3(r.PosX, r.PosY, r.PosZ),
-                        new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
+                var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
+                if (surface != null)
+                {
+                    if ((mask & GeoStateMask.SurfacePos) != 0)
+                        surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
+                    if ((mask & GeoStateMask.SurfaceRot) != 0)
+                        surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
+                    // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
+                    // normally driven each frame by NavigateRoutine which the client never runs). Push this applied
+                    // transform sample into the interpolator's per-identity ring buffer; the interpolator's own Tick
+                    // is the SOLE writer that renders the icon at now − InterpDelay by lerp/slerp (INC-C smoothing).
+                    if ((mask & GeoStateMask.SurfacePos) != 0)
+                        ClientVehicleInterpolator.SetTarget(
+                            vehicle, (r.FactionGuid ?? "", r.VehicleID),
+                            new Vector3(r.PosX, r.PosY, r.PosZ),
+                            new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW),
+                            // HostSendTime is valid only when its mask bit is set; 0 → arrival-time fallback. double
+                            // (geoscape clock ~6.4e10) — see GeoVehicleStateRecord.HostSendTime.
+                            (mask & GeoStateMask.HostSendTime) != 0 ? r.HostSendTime : 0.0);
+                }
             }
 
-            // 4) RangeRemaining via new EarthUnits(value) (public setter).
-            if ((mask & GeoStateMask.RangeRemaining) != 0)
+            // 4) RangeRemaining via new EarthUnits(value) (public setter). GATED on !wasTravellingPreApply:
+            // while the client craft is LOCALLY travelling, its OWN native NavigateRoutine owns + monotonically
+            // decrements RangeRemaining off the synced clock (GeoNavComponent.cs:124); the host's ~per-diff
+            // streamed value lags/leads and CLOBBERS it mid-flight (DIAG-NAV: +1482 backward jump 510->1992),
+            // poisoning the local travel. So during local flight we DEFER to the routine and skip the write.
+            // When NOT travelling (arrived/idle — wasTravellingPreApply=false) the authoritative host range
+            // MUST land so the native reachability check (GeoFaction.CalculateRemainingPossibleRange /
+            // vehicle.RangeRemaining) stays correct (else destinations show "too far"). Pre-apply read means an
+            // arrival diff (Travelling true->false) lands range only once the craft is actually no longer flying.
+            if ((mask & GeoStateMask.RangeRemaining) != 0 && !wasTravellingPreApply)
             {
                 var eu = MakeEarthUnits(r.RangeRemaining);
                 if (eu != null) AccessTools.Property(vt, "RangeRemaining")?.SetValue(vehicle, eu);
@@ -400,6 +528,11 @@ namespace Multipleer.Network.CommandSync
                 if (stats != null)
                     AccessTools.Field(stats.GetType(), "HitPoints")?.SetValue(stats, (int)r.HitPoints);
             }
+
+            // DECISIVE PROBE (DIAG-NAV): host streams 0x35 for EVERY craft it sees travelling (incl. a player
+            // craft frozen on the client), so this per-record light path is hit for both player + AI crafts.
+            // Sample the public travel-progress signals here to compare advancing (AI) vs frozen (player).
+            DiagNavObserve(vehicle, (r.FactionGuid ?? "", r.VehicleID));
         }
 
         // ALL-FACTIONS client mirror — HEAVY path (INC-3a): force the full authoritative state onto a live
@@ -464,6 +597,10 @@ namespace Multipleer.Network.CommandSync
             AccessTools.Method(vehicle.GetType(), "ProcessInstanceData", new[] { actorDataType })
                        ?.Invoke(vehicle, new[] { data });
 
+            // (REVERTED) The per-vehicle monotonic Now-clamp that used to run here was confirmed DEAD
+            // (backwardPrevented=False always; vehNow rose for all crafts) and is removed — the native
+            // ProcessInstanceData rebase is left exactly as stock.
+
             // The native ProcessInstanceData sets Surface.position/.rotation (GeoVehicle.cs:1089-1090) but
             // does NOT re-orient the globe ICON pivot. Seed the interpolator's ring buffer with this first
             // transform sample; with a single sample the interpolator renders it directly (Direct mode) so the
@@ -471,7 +608,10 @@ namespace Multipleer.Network.CommandSync
             ClientVehicleInterpolator.SetTarget(
                 vehicle, (r.FactionGuid ?? "", r.VehicleID),
                 new Vector3(r.PosX, r.PosY, r.PosZ),
-                new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
+                new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW),
+                // First-mirror record is a FULL mask → HostSendTime bit is set; 0 → arrival-time fallback. double
+                // (geoscape clock ~6.4e10) — see GeoVehicleStateRecord.HostSendTime.
+                (r.ChangedMask & GeoStateMask.HostSendTime) != 0 ? r.HostSendTime : 0.0);
         }
 
         // INC-3a globe-icon placement (PURE MIRROR — no client sim): orient the on-globe vehicle ICON from an
@@ -565,6 +705,64 @@ namespace Multipleer.Network.CommandSync
                 _updateHeading.Invoke(nav, new object[] { heading, false });
             }
             catch { }
+        }
+
+        // FIX B (client nose/heading, PURE MIRROR along the INTERPOLATED TRAVEL DIRECTION): point the mirrored
+        // craft's nose along its instantaneous motion vector — the delta between the two interpolation-bracket
+        // samples (worldDir = pos[i1] − pos[i0]) — instead of aiming at the far DestinationSites[0] waypoint.
+        //
+        // WHY NOT the streamed SurfaceRot: a prior iteration (INC-D P3) tried writing the streamed Surface world
+        // quaternion to the nose and it left the craft pointing "up" — the visible nose is Surface.localEulerAngles.z
+        // (set host-side by NavigateRoutine.UpdateHeading) and is NOT encoded in the SurfaceRot world quat, so the
+        // wire quat cannot drive the nose. That route is documented-broken; we do not revisit it.
+        //
+        // WHY this over the waypoint aim: aiming at the fixed far waypoint with instant:false slerps the nose
+        // toward a constant bearing while the interpolated position jitters → the slerp chases a moving error =
+        // side-to-side wobble. Aiming along the per-frame interpolated travel direction with instant:TRUE snaps the
+        // nose exactly onto the host's actual motion vector every frame (no slerp to fight), and with FIX A the
+        // samples are now dense so the direction is smooth → straight, wobble-free flight that mirrors the host.
+        // Reuses the SAME native heading math (GetHeadingTowardsTarget builds the bearing from a world target, which
+        // it offsets by NavActor.Actor.WorldPosition): we synthesize a target one travel-step AHEAD of the craft's
+        // current (just-placed) world position. Near-zero delta (parked / arrived / between identical samples) →
+        // hold the nose (skip), mirroring the native not-arrived guard and avoiding a NaN heading. Reflection-only,
+        // null-guarded, never throws — any missing handle leaves the nose unchanged.
+        public static void UpdateVehicleHeadingAlong(object vehicle, Vector3 currentWorldPos, Vector3 worldDir)
+        {
+            if (vehicle == null) return;
+            // Sub-epsilon motion: no reliable direction this frame → hold nose (also dodges the GetHeadingTowardsTarget
+            // NaN when the direction normalizes from ~zero). 1e-6 matches the not-arrived guard in the sibling method.
+            if (worldDir.sqrMagnitude < 1e-6f) return;
+            EnsureReflect();
+            if (_navigationField == null || _getHeadingTowardsTarget == null || _updateHeading == null) return;
+            try
+            {
+                var nav = _navigationField.GetValue(vehicle);
+                if (nav == null) return;
+
+                // Target = a point one travel-step ahead of where we just placed the icon. GetHeadingTowardsTarget
+                // subtracts the craft's own WorldPosition internally, so only the DIRECTION of (target − pos) matters.
+                var targetWorldPos = currentWorldPos + worldDir;
+                var headingObj = _getHeadingTowardsTarget.Invoke(nav, new object[] { targetWorldPos });
+                if (!(headingObj is float heading) || float.IsNaN(heading) || float.IsInfinity(heading)) return;
+
+                // instant:TRUE — snap straight onto the travel bearing each frame (no slerp lag fighting the
+                // interpolated position). With FIX A's dense samples the bearing itself is smooth.
+                _updateHeading.Invoke(nav, new object[] { heading, true });
+            }
+            catch { }
+        }
+
+        // PIVOT Step A: read a single GeoVehicle's RangeRemaining as a float (meters via EarthUnits.Value),
+        // reusing the cached _rangeRemainingProp/_euValueField the full snapshot uses. Stamped into the
+        // host-origin StartTravel command (StartRangeRemaining) so the client's NavigateRoutine progress can
+        // be reconciled against the host's range origin. 0 on any missing handle (caller treats 0 as absent).
+        public static float ReadRangeRemaining(object vehicle)
+        {
+            if (vehicle == null) return 0f;
+            EnsureReflect();
+            var range = _rangeRemainingProp?.GetValue(vehicle);
+            var rangeVal = range != null ? _euValueField?.GetValue(range) : null;
+            return rangeVal is float rv ? rv : 0f;
         }
 
         // Build a EarthUnits (PhoenixPoint.Common.Core.EarthUnits, ctor(float) at EarthUnits.cs:33) boxed as
@@ -679,6 +877,51 @@ namespace Multipleer.Network.CommandSync
                 }
             }
             return (count, sb.ToString());
+        }
+
+        // DIAG-A1 TEMP (strip after RCA) — lockstep readout helper. Scans all factions' Vehicles for the FIRST
+        // one with Travelling==true and reports routineActive=true + its globe Surface.position. routineActive is
+        // a proxy for "a native NavigateRoutine is live on this client" (Travelling is set true by the routine's
+        // InitiateTravelling and cleared at arrival). craftPos is the rendered on-globe position. (false, zero) if
+        // none travelling / unreachable. Best-effort, never throws (mirrors DescribeVehicles' defensive walk).
+        public static void DescribeFirstTravellingVehicle(out bool routineActive, out Vector3 craftPos)
+        {
+            routineActive = false;
+            craftPos = Vector3.zero;
+            var geoLevel = GetGeoLevelController();
+            if (geoLevel == null) return;
+            EnsureReflect();
+            IEnumerable factions;
+            try { factions = AccessTools.Field(geoLevel.GetType(), "Factions")?.GetValue(geoLevel) as IEnumerable; }
+            catch { return; }
+            if (factions == null) return;
+
+            foreach (var faction in factions)
+            {
+                if (faction == null) continue;
+                IEnumerable vehicles;
+                try { vehicles = AccessTools.Property(faction.GetType(), "Vehicles")?.GetValue(faction) as IEnumerable; }
+                catch { continue; }
+                if (vehicles == null) continue;
+
+                foreach (var v in vehicles)
+                {
+                    if (v == null) continue;
+                    bool travelling;
+                    try { travelling = _travellingProp?.GetValue(v) is bool tb && tb; }
+                    catch { continue; }
+                    if (!travelling) continue;
+
+                    routineActive = true;
+                    try
+                    {
+                        var surface = AccessTools.Property(v.GetType(), "Surface")?.GetValue(v) as Transform;
+                        if (surface != null) craftPos = surface.position;
+                    }
+                    catch { /* leave craftPos zero */ }
+                    return; // first travelling vehicle is enough for the lockstep readout
+                }
+            }
         }
 
         // [DIAG2] TEMPORARY. Best-effort human-readable def name for a GeoVehicle. Tries VehicleDef

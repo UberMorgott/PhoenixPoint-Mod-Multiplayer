@@ -114,6 +114,10 @@ namespace Multipleer.Network.CommandSync
 
                 if (doSnapshot)
                 {
+                    // Read the host geoscape clock ONCE per snapshot pass (all samples this pass share the same
+                    // emission instant) → stamps every record's HostSendTime for host-clock client rendering.
+                    double hostNowSec = TimeBridge.GetHostNowSeconds();
+
                     foreach (var faction in factions)
                     {
                         if (faction == null) continue;
@@ -144,6 +148,17 @@ namespace Multipleer.Network.CommandSync
                             }
 
                             var snap = GeoBridge.RecordVehicleState(v);
+                            // Stamp the host geoscape clock at sample emission so the client can render this
+                            // sample on the HOST timeline (renderHost − delay) instead of packet-arrival time —
+                            // the fix for the client-renders-slower/jerky flaw. The differ pairs the HostSendTime
+                            // mask bit with SurfacePos; an unreachable clock (0) makes the client fall back to
+                            // arrival-time rendering (backward-sane).
+                            snap.HostSendTime = hostNowSec;
+                            // DIAG-SEND (TEMP, logging only): on the ~1/sec diag tick, show the position the host
+                            // SERIALIZES for each vehicle + its Travelling flag — proves whether the host streams the
+                            // live moving pos or a frozen departure pos. Throttled to diagLogThisTick (≈1/sec).
+                            if (diagLogThisTick)
+                                Debug.Log($"[Multipleer] DIAG-SEND veh {(string.IsNullOrEmpty(snap.FactionGuid) ? "EMPTY" : snap.FactionGuid)}#{snap.VehicleID} pos=({snap.PosX:F1},{snap.PosY:F1},{snap.PosZ:F1}) Travelling={snap.Travelling}");
                             diagRecorded++; // [DIAGB] passed the cheap pre-check → expensive record taken
                             var diffed = _differ.Diff(snap);
                             if (diffed.ChangedMask == 0) continue; // nothing moved for this identity
@@ -161,7 +176,7 @@ namespace Multipleer.Network.CommandSync
                             else
                             {
                                 // Continuous-only change — hold the freshest record (with its assigned seq) for the
-                                // throttled unreliable flush. Latest wins; the held seq keeps it lossless.
+                                // throttled flush. Latest wins; the held seq keeps newest-wins ordering on the client.
                                 _continuousPending[key] = diffed;
                             }
                         }
@@ -178,7 +193,13 @@ namespace Multipleer.Network.CommandSync
                     }
                 }
 
-                // CONTINUOUS channel: throttled accumulator → one batched unreliable envelope on flush.
+                // CONTINUOUS channel: throttled accumulator → one batched RELIABLE-ORDERED envelope on flush.
+                // FIX A: was reliable:false (Steam P2P unreliable) → ~76% of the continuous pos/rot stream was
+                // dropped on the wire (host emitted 38 samples, client applied 9), starving the interpolator
+                // (coarse jerk + a ~4s startup stall because motion can't begin until 2 distinct samples exist).
+                // The geoscape stream is low-bandwidth (~13Hz × ~6 records), so reliable-ordered is cheap and
+                // head-of-line blocking is negligible; loss 76%→0 is the priority. Steam reliable (sendType 0) is
+                // in-order; DirectTransport is TCP (always ordered). Newest-wins seq guard kept as belt-and-braces.
                 _accum += deltaTime;
                 if (_accum >= FlushIntervalSeconds)
                 {
@@ -186,11 +207,11 @@ namespace Multipleer.Network.CommandSync
                     if (_continuousPending.Count > 0)
                     {
                         var contList = new List<GeoVehicleStateRecord>(_continuousPending.Values);
-                        engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = contList }, reliable: false);
-                        diagBcastUnreliable++; // [DIAGB] one unreliable envelope sent this flush
+                        engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = contList }, reliable: true);
+                        diagBcastUnreliable++; // [DIAGB] one continuous envelope sent this flush
                         // [DIAGB] one line per actual send (NOT throttled — flushes are ~2/sec at most).
                         foreach (var r in contList)
-                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=false mask={r.ChangedMask} seq={r.Seq} records={contList.Count}");
+                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=true(continuous) mask={r.ChangedMask} seq={r.Seq} records={contList.Count}");
                         _continuousPending.Clear();
                     }
                 }

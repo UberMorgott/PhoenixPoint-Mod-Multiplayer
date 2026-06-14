@@ -25,17 +25,29 @@ namespace Multipleer.Network.CommandSync
 
         public void HandleResult(CampaignActionMessage action)
         {
-            if (_engine.IsHost) return; // host already applied in HostArbiter
+            // DIAG-A1 TEMP (strip after RCA) — boundary (d): client routing. isHost gate decides if we apply.
+            Debug.Log($"[Multipleer] DIAG-A1 HandleResult action={action.ActionType} target={action.TargetId} isHost={_engine.IsHost}"); // DIAG-A1 TEMP (strip after RCA)
+            if (_engine.IsHost)
+            {
+                Debug.Log("[Multipleer] DIAG-A1 HandleResult SKIP (isHost=true: host already applied in HostArbiter)"); // DIAG-A1 TEMP (strip after RCA)
+                return; // host already applied in HostArbiter
+            }
 
-            // INC-3a: RETIRE the host->client StartTravel command-REPLAY. The client no longer replays an
-            // approved StartTravel (whether host-origin or its own relayed order echoed back) — the 0x35
-            // GeoStateDiff state mirror drives the client's vehicle motion (Travelling + DestinationSites +
-            // per-tick pos/rot/range). Replaying StartTravel here would start a client-side NavigateRoutine
-            // that fights the authoritative mirror. Other action types (e.g. SetTimeState) still replay.
-            if (action.ActionType == CampaignActionType.StartTravel) return;
+            // PIVOT Step A: RE-ENABLE the host->client StartTravel command-REPLAY. The client now replays an
+            // approved StartTravel (CommandExecutor.ApplyStartTravel) so its OWN native NavigateRoutine drives
+            // the craft's motion off the host-synced Timing clock (deterministic parametric playback:
+            // pos=Slerp(start,end,(Now-startTime)/total)). The old transform-stream (0x35 per-tick pos/rot)
+            // is being retired (see USE_TRANSFORM_STREAM in NetworkEngine) — command replication + the synced
+            // clock are the new motion source. Arrival stays host-authoritative: GeoVehicle.OnArrived remains
+            // suppressed on the client (ClientTravelEmitterSuppressPatch), so the client NavigateRoutine renders
+            // motion + travel-line/anim but never authors site exploration / mission spawn. SetTimeState still
+            // replays too. ApplyStartTravel runs under CommandRelay.IsApplying (set by _relay.ApplyResult).
 
             try
             {
+                // DIAG-A1 TEMP (strip after RCA) — boundary (d): about to dispatch into CommandRelay.ApplyResult
+                // -> CommandExecutor.Execute -> ApplyStartTravel. If we reach here the client WILL try to apply.
+                Debug.Log($"[Multipleer] DIAG-A1 HandleResult -> _relay.ApplyResult action={action.ActionType}"); // DIAG-A1 TEMP (strip after RCA)
                 _relay.ApplyResult(action);
             }
             catch (Exception ex)

@@ -1,0 +1,911 @@
+diff --git a/src/Network/CommandSync/ClientInterpolationCore.cs b/src/Network/CommandSync/ClientInterpolationCore.cs
+index ceaf85d..b7f5977 100644
+--- a/src/Network/CommandSync/ClientInterpolationCore.cs
++++ b/src/Network/CommandSync/ClientInterpolationCore.cs
+@@ -39,7 +39,12 @@ namespace Multipleer.Network.CommandSync
+         //   renderTime >= newest → Hold(newest)             (underrun: hold last, never extrapolate)
+         //   otherwise         → Interp(i0,i1,frac) where times[i0] <= renderTime < times[i1], adjacent.
+         // Equal adjacent timestamps (zero gap) degenerate to frac 0 (place i0) — no divide-by-zero.
+-        internal static Bracket Select(float[] times, int count, float renderTime)
++        // times[] / renderTime are DOUBLE: the host-time keys are the geoscape clock (~6.4e10 game-seconds),
++        // where a float32 ULP (~8192 s) exceeds the ~231 s between samples → float keys collapse to one value →
++        // renderTime always <= times[0] → Direct every frame → no interpolation (the in-game lag/jerk). double
++        // keeps the keys distinct so the bracket is real. Frac stays float (positions/lerp are float; [0,1] is
++        // precise in float).
++        internal static Bracket Select(double[] times, int count, double renderTime)
+         {
+             if (times == null || count <= 0)
+                 return new Bracket { Mode = SampleMode.Empty, I0 = 0, I1 = 0, Frac = 0f };
+@@ -60,12 +65,12 @@ namespace Multipleer.Network.CommandSync
+             // Find adjacent pair with times[i] <= renderTime < times[i+1]. Buffer is tiny (~12) → linear scan.
+             for (int i = 0; i < newest; i++)
+             {
+-                float t0 = times[i];
+-                float t1 = times[i + 1];
++                double t0 = times[i];
++                double t1 = times[i + 1];
+                 if (renderTime >= t0 && renderTime < t1)
+                 {
+-                    float span = t1 - t0;
+-                    float frac = span > 0f ? (renderTime - t0) / span : 0f;
++                    double span = t1 - t0;
++                    float frac = span > 0.0 ? (float)((renderTime - t0) / span) : 0f;
+                     if (frac < 0f) frac = 0f; else if (frac > 1f) frac = 1f;
+                     return new Bracket { Mode = SampleMode.Interp, I0 = i, I1 = i + 1, Frac = frac };
+                 }
+diff --git a/src/Network/CommandSync/ClientVehicleInterpolator.cs b/src/Network/CommandSync/ClientVehicleInterpolator.cs
+index a2b595d..ffd7e4e 100644
+--- a/src/Network/CommandSync/ClientVehicleInterpolator.cs
++++ b/src/Network/CommandSync/ClientVehicleInterpolator.cs
+@@ -55,20 +55,36 @@ namespace Multipleer.Network.CommandSync
+         {
+             public object Vehicle;                    // resolved live GeoVehicle ref (refreshed each SetTarget)
+ 
++            // Per-identity host↔local clock offset estimator. The ring Times are now keyed by the host's
++            // HostSendTime (geoscape clock at sample emission), and we render at (estimatedHostNow − delay) so
++            // the mirrored craft tracks HOST speed (no playback stretch from irregular packet arrival spacing).
++            // Fallback: if a record carries no HostSendTime (0), SetTarget feeds local-arrival as the host time
++            // AND observes (arrival,arrival) → offset 0 → the previous arrival-time behavior (backward-sane).
++            public readonly HostClockOffsetEstimator Offset = new HostClockOffsetEstimator();
++
++            // Scale-aware render window: tracks the observed inter-sample HostSendTime gap so the render delay
++            // adapts to the geoscape time-scale (gap ≈ 0.066 × Scale game-s). The fixed InterpDelaySeconds is the
++            // floor. This is what fixes the high-scale "lags + jerky bursts": a fixed 0.35 game-s delay is far
++            // newer than the newest buffered sample at Scale=3600 (samples ~237 game-s apart) → chronic underrun.
++            public readonly AdaptiveRenderWindow Window = new AdaptiveRenderWindow();
++
+             // Parallel ring buffers (no per-frame heap alloc; written in place). Ordered oldest→newest in
+-            // [0..Count) after compaction in Tick. We append at Head and keep Count<=RingCapacity.
+-            public readonly float[] Times = new float[RingCapacity];
++            // [0..Count) after compaction in Tick. We append at Head and keep Count<=RingCapacity. Times is
++            // DOUBLE: it is keyed by HostSendTime (the geoscape clock, ~6.4e10 game-s) where a float32 ULP
++            // (~8192 s) exceeds the ~231 s between samples — a float key collapsed every buffered sample to one
++            // value → Select returned Direct every frame → the in-game lag/jerk. double keeps the keys distinct.
++            public readonly double[] Times = new double[RingCapacity];  // keyed by HostSendTime (host clock seconds)
+             public readonly Vector3[] Pos = new Vector3[RingCapacity];
+             public readonly Quaternion[] Rot = new Quaternion[RingCapacity];
+             public int Count;                         // number of valid samples
+             public int Head;                          // index of the NEXT write slot (circular)
+ 
+             // Scratch ascending views reused each Tick so Select() sees a contiguous oldest→newest array with no
+-            // allocation. Sized to RingCapacity once.
+-            public readonly float[] OrderedTimes = new float[RingCapacity];
++            // allocation. Sized to RingCapacity once. Times are double (see above).
++            public readonly double[] OrderedTimes = new double[RingCapacity];
+             public readonly int[] OrderedIdx = new int[RingCapacity];
+ 
+-            public void Push(float t, Vector3 p, Quaternion r)
++            public void Push(double t, Vector3 p, Quaternion r)
+             {
+                 Times[Head] = t; Pos[Head] = p; Rot[Head] = r;
+                 Head = (Head + 1) % RingCapacity;
+@@ -110,13 +126,26 @@ namespace Multipleer.Network.CommandSync
+         // 0x35 apply path on every SurfacePos record (first mirror + every push). NO placement happens here —
+         // Tick is the sole writer and renders the buffered samples at now − InterpDelay. (INC-A placed raw here;
+         // that reintroduced jerk and a second write per frame — removed in INC-C.)
+-        public static void SetTarget(object vehicle, (string, int) identity, Vector3 worldPos, Quaternion worldRot)
++        public static void SetTarget(object vehicle, (string, int) identity, Vector3 worldPos, Quaternion worldRot,
++            double hostSendTime)
+         {
+             if (vehicle == null) return;
+ 
+             var e = GetOrCreate(identity);
+             e.Vehicle = vehicle;                              // refresh the ref
+-            e.Push(Time.realtimeSinceStartup, worldPos, worldRot);
++
++            double localArrival = Time.realtimeSinceStartup;
++            // Key the ring by HOST time so renderTime (estimatedHostNow − delay) replays host SAMPLING spacing,
++            // not packet ARRIVAL spacing. Missing/old record (hostSendTime <= 0) → fall back to arrival time:
++            // observe (arrival,arrival) so the offset floor is 0 and rendering matches the legacy behavior.
++            // hostSendTime is DOUBLE (geoscape clock ~6.4e10) — a float key here collapsed all samples in-game.
++            bool haveHostTime = hostSendTime > 0.0;
++            double timeKey = haveHostTime ? hostSendTime : localArrival;
++            e.Offset.Observe(timeKey, localArrival);
++            // Feed the host-time gap estimator only with REAL host stamps (the arrival-fallback key is not a
++            // host-clock spacing). At Scale=1 / fallback the window stays at the InterpDelaySeconds floor.
++            if (haveHostTime) e.Window.Observe(hostSendTime);
++            e.Push(timeKey, worldPos, worldRot);
+         }
+ 
+         // Per-frame client tick: render every tracked vehicle's icon at renderTime = now − InterpDelaySeconds by
+@@ -128,7 +157,18 @@ namespace Multipleer.Network.CommandSync
+             if (engine == null || !engine.IsActive || engine.IsHost) return; // client-only
+             if (_tracked.Count == 0) return;
+ 
+-            float renderTime = Time.realtimeSinceStartup - InterpDelaySeconds;
++            float localNow = Time.realtimeSinceStartup;
++
++            // RENDER CLOCK = the per-identity SAMPLE-STREAM host-time ESTIMATE (offset + rate), NOT the stamped
++            // geoscape Timing.Now. RCA: the host-slaved Timing.Now is re-anchored only every ~0.5s by host
++            // TimingState stamps and chronically LAGS the host's true now by MORE than the entire ring span, so
++            // every frame snapped to the OLDEST buffered sample (DIAG showed mode=Direct, underruns=0) → stepped
++            // ~1s-cadence jerk + huge lag. The fix: HostClockOffsetEstimator estimates host-now from the received
++            // (HostSendTime, localArrival) stream — phase + a RATE derived from the timestamps (≈ Scale, never
++            // read off the engine) — and advances smoothly EVERY frame at that rate, so renderTime lands between
++            // the two newest-ish samples → Interp every frame at ANY time-scale. (TimeBridge.GetHostNowSeconds is
++            // still used HOST-side to stamp records and by ClientTimeMirror for the clock DISPLAY — just not as
++            // the client RENDER clock.) Per-entry below: renderTime = estimateHostNow(localNow) − adaptiveWindow.
+ 
+             _dead.Clear();
+             foreach (var kv in _tracked)
+@@ -143,11 +183,24 @@ namespace Multipleer.Network.CommandSync
+                 }
+                 if (e.Count == 0) continue;
+ 
++                // Render at renderTime = estimateHostNow(localNow) − W, where W is the SCALE-AWARE adaptive
++                // window (≥ InterpDelaySeconds floor) and estimateHostNow is the per-identity sample-stream clock
++                // estimate (offset + derived rate). The ring Times are host-time keyed, so Select brackets on the
++                // host timeline; the estimate advances smoothly at the host rate every frame so two real samples
++                // bracket renderTime at ANY geoscape time-scale → Interp every frame (the fix for the in-game
++                // stepped jerk + lag). No dependency on the lagging stamped Timing.Now.
++                // All TIME math stays double — renderTime keys the geoscape clock (~6.4e10); a float cast here
++                // would re-introduce the precision collapse the ring fix removes.
++                double window = e.Window.Window(InterpDelaySeconds);
++                double hostNowEst = e.Offset.EstimateHostNow(localNow);
++                double renderTime = hostNowEst - window;
++
+                 int n = e.BuildOrdered();
+                 var b = ClientInterpolationCore.Select(e.OrderedTimes, n, renderTime);
+ 
+                 Vector3 pos;
+                 Quaternion rot;
++                Vector3 travelDir = Vector3.zero; // FIX B: instantaneous motion vector (only known in the Interp case)
+                 switch (b.Mode)
+                 {
+                     case ClientInterpolationCore.SampleMode.Empty:
+@@ -158,6 +211,7 @@ namespace Multipleer.Network.CommandSync
+                         int i1 = e.OrderedIdx[b.I1];
+                         pos = Vector3.Lerp(e.Pos[i0], e.Pos[i1], b.Frac);
+                         rot = Quaternion.Slerp(e.Rot[i0], e.Rot[i1], b.Frac);
++                        travelDir = e.Pos[i1] - e.Pos[i0]; // direction the host is moving this bracket
+                         break;
+                     }
+                     default: // Direct / Hold → place the single bracket sample raw (no interpolation, no extrapolation)
+@@ -173,16 +227,24 @@ namespace Multipleer.Network.CommandSync
+ 
+                 // POSITION: orient the icon pivot tangent to the globe at the interpolated position.
+                 GeoBridge.PlaceGlobeIconAt(e.Vehicle, pos);
+-                // HEADING (INC-D P3): point the NOSE along travel by reusing native GeoNavComponent heading math
+-                // (GetHeadingTowardsTarget + UpdateHeading) toward DestinationSites[0].WorldPosition, set AFTER
+-                // placement. The visible nose is Surface.localEulerAngles.z — the streamed Surface.rotation world
+-                // quat does NOT encode it (writing it left the client nose "up"), so we no longer use the wire
+-                // quaternion for heading. PlaceGlobeIconAt zeroes the pivot Z (GeoActor.cs:76), so this owns the
+-                // nose without clashing. No movement routine is run — single-writer mirror intact. (`rot` from the
+-                // slerp is now unused for heading; it still rides the first-mirror placement via ProcessInstanceData.)
+-                GeoBridge.UpdateVehicleHeadingTowards(e.Vehicle);
+-
+-                MaybeLogDiag(kv.Key, e.Count, b.Mode);
++                // HEADING (FIX B): point the NOSE along the INTERPOLATED TRAVEL DIRECTION (the delta between the two
++                // bracket samples) with instant:true, so the client nose mirrors the host's instantaneous motion
++                // vector smoothly — no per-frame slerp fighting the interpolated position (the old wobble). The
++                // streamed Surface world quat does NOT encode the visible nose (Surface.localEulerAngles.z), so it is
++                // unused for heading. PlaceGlobeIconAt zeroes the pivot Z (GeoActor.cs:76), so this owns the nose
++                // without clashing; no movement routine runs — single-writer mirror intact. In Direct/Hold (single
++                // sample, no motion vector) we fall back to the waypoint-aim heading toward DestinationSites[0].
++                if (travelDir.sqrMagnitude > 1e-6f)
++                    GeoBridge.UpdateVehicleHeadingAlong(e.Vehicle, pos, travelDir);
++                else
++                    GeoBridge.UpdateVehicleHeadingTowards(e.Vehicle);
++
++                // DIAG TEMP: confirms in-game that the render clock now brackets samples (mode flips Direct→Interp)
++                // and renderTime sits BETWEEN oldest/newest host-time, at the estimated host rate. Remove with the
++                // rest of the DIAG.
++                MaybeLogDiag(kv.Key, e.Count, b.Mode, renderTime,
++                    n > 0 ? e.OrderedTimes[0] : 0.0, n > 0 ? e.OrderedTimes[n - 1] : 0.0,
++                    window, e.Offset.EstimatedRate);
+             }
+ 
+             // Reap dead refs via Remove() so the per-identity DIAG dicts are cleared too (not just _tracked) —
+@@ -225,15 +287,20 @@ namespace Multipleer.Network.CommandSync
+             _diagUnderruns[identity] = c + 1;
+         }
+ 
+-        // DIAG/INC-C: rate-limited (~1/sec per identity) buffer-depth + underrun log. Reverted in INC-D.
+-        private static void MaybeLogDiag((string, int) identity, int depth, ClientInterpolationCore.SampleMode mode)
++        // DIAG TEMP: rate-limited (~1/sec per identity) render-clock trace. Confirms the render clock estimate
++        // brackets the buffered samples (renderTime between oldest/newest host-time → mode=Interp) and exposes
++        // the derived host rate (estRate ≈ Scale). Remove with the rest of the DIAG.
++        private static void MaybeLogDiag((string, int) identity, int depth, ClientInterpolationCore.SampleMode mode,
++            double renderTime, double oldestHostTime, double newestHostTime, double window, double estRate)
+         {
+             float now = Time.realtimeSinceStartup;
+             _diagNextLogTime.TryGetValue(identity, out var nextLog);
+             if (now < nextLog) return;
+             _diagNextLogTime[identity] = now + 1f;
+             _diagUnderruns.TryGetValue(identity, out var underruns);
+-            Debug.Log($"[Multipleer] DIAG/INC-C interp {identity.Item1}#{identity.Item2} depth={depth} mode={mode} underruns={underruns}");
++            Debug.Log($"[Multipleer] DIAG TEMP interp {identity.Item1}#{identity.Item2} depth={depth} mode={mode} " +
++                      $"renderTime={renderTime:F2} oldestHostTime={oldestHostTime:F2} newestHostTime={newestHostTime:F2} " +
++                      $"window={window:F3} estRate={estRate:F1} underruns={underruns}");
+         }
+     }
+ }
+diff --git a/src/Network/CommandSync/GeoStateDiffCodec.cs b/src/Network/CommandSync/GeoStateDiffCodec.cs
+index cf47dc8..ee9c3e2 100644
+--- a/src/Network/CommandSync/GeoStateDiffCodec.cs
++++ b/src/Network/CommandSync/GeoStateDiffCodec.cs
+@@ -17,6 +17,9 @@ namespace Multipleer.Network.CommandSync
+         public const int CurrentSite = 1 << 4;       // bit4 = 16
+         public const int DestinationSites = 1 << 5;  // bit5 = 32
+         public const int HitPoints = 1 << 6;         // bit6 = 64
++        public const int HostSendTime = 1 << 7;      // bit7 = 128 — host clock (Timing.Now) at sample emission;
++                                                     // rides the CONTINUOUS channel paired with SurfacePos so the
++                                                     // client can render on the host timeline (fixes playback stretch).
+     }
+ 
+     // Pure, Unity-free. One vehicle's authoritative state snapshot for the 0x35 GeoStateDiff mirror,
+@@ -45,6 +48,15 @@ namespace Multipleer.Network.CommandSync
+         public int CurrentSiteId;         // GeoSite.SiteId of CurrentSite; -1 = none
+         public int[] DestinationSiteIds;  // ordered GeoSite.SiteId of DestinationSites
+         public float HitPoints;           // GeoVehicleInstanceData.HitPoints
++        public double HostSendTime;       // host geoscape clock (GeoLevelController.Timing.Now, seconds) when this
++                                          // sample was emitted; valid only when the HostSendTime mask bit is set.
++                                          // DOUBLE (not float): the geoscape clock reaches ~6.4e10 game-seconds,
++                                          // where a float32 ULP is ~8192 s — far larger than the ~231 s between
++                                          // consecutive samples, so a float stamp collapses all buffered samples to
++                                          // one value → no interpolation possible (the in-game lag/jerk). double
++                                          // preserves sub-second resolution at that magnitude. Client renders the
++                                          // buffered samples on THIS host timeline (not packet arrival time) so the
++                                          // mirrored craft tracks host speed without stretch.
+     }
+ 
+     // Pure, Unity-free envelope: a batch of state records for one 0x35 GeoStateDiff broadcast. Many vehicle
+@@ -162,6 +174,10 @@ namespace Multipleer.Network.CommandSync
+             {
+                 bw.Write(r.HitPoints);
+             }
++            if ((r.ChangedMask & GeoStateMask.HostSendTime) != 0)
++            {
++                bw.Write(r.HostSendTime);
++            }
+         }
+ 
+         private static GeoVehicleStateRecord ReadVehicleBody(BinaryReader br, ulong seq, string factionGuid, int vehicleID, int mask)
+@@ -213,6 +229,10 @@ namespace Multipleer.Network.CommandSync
+             {
+                 r.HitPoints = br.ReadSingle();
+             }
++            if ((mask & GeoStateMask.HostSendTime) != 0)
++            {
++                r.HostSendTime = br.ReadDouble(); // 8 bytes — matches bw.Write(double); see field comment (6.4e10 precision)
++            }
+             return r;
+         }
+     }
+diff --git a/src/Network/CommandSync/GeoStateSyncBroadcaster.cs b/src/Network/CommandSync/GeoStateSyncBroadcaster.cs
+index ea127e7..7409502 100644
+--- a/src/Network/CommandSync/GeoStateSyncBroadcaster.cs
++++ b/src/Network/CommandSync/GeoStateSyncBroadcaster.cs
+@@ -114,6 +114,10 @@ namespace Multipleer.Network.CommandSync
+ 
+                 if (doSnapshot)
+                 {
++                    // Read the host geoscape clock ONCE per snapshot pass (all samples this pass share the same
++                    // emission instant) → stamps every record's HostSendTime for host-clock client rendering.
++                    double hostNowSec = TimeBridge.GetHostNowSeconds();
++
+                     foreach (var faction in factions)
+                     {
+                         if (faction == null) continue;
+@@ -144,6 +148,12 @@ namespace Multipleer.Network.CommandSync
+                             }
+ 
+                             var snap = GeoBridge.RecordVehicleState(v);
++                            // Stamp the host geoscape clock at sample emission so the client can render this
++                            // sample on the HOST timeline (renderHost − delay) instead of packet-arrival time —
++                            // the fix for the client-renders-slower/jerky flaw. The differ pairs the HostSendTime
++                            // mask bit with SurfacePos; an unreachable clock (0) makes the client fall back to
++                            // arrival-time rendering (backward-sane).
++                            snap.HostSendTime = hostNowSec;
+                             diagRecorded++; // [DIAGB] passed the cheap pre-check → expensive record taken
+                             var diffed = _differ.Diff(snap);
+                             if (diffed.ChangedMask == 0) continue; // nothing moved for this identity
+@@ -161,7 +171,7 @@ namespace Multipleer.Network.CommandSync
+                             else
+                             {
+                                 // Continuous-only change — hold the freshest record (with its assigned seq) for the
+-                                // throttled unreliable flush. Latest wins; the held seq keeps it lossless.
++                                // throttled flush. Latest wins; the held seq keeps newest-wins ordering on the client.
+                                 _continuousPending[key] = diffed;
+                             }
+                         }
+@@ -178,7 +188,13 @@ namespace Multipleer.Network.CommandSync
+                     }
+                 }
+ 
+-                // CONTINUOUS channel: throttled accumulator → one batched unreliable envelope on flush.
++                // CONTINUOUS channel: throttled accumulator → one batched RELIABLE-ORDERED envelope on flush.
++                // FIX A: was reliable:false (Steam P2P unreliable) → ~76% of the continuous pos/rot stream was
++                // dropped on the wire (host emitted 38 samples, client applied 9), starving the interpolator
++                // (coarse jerk + a ~4s startup stall because motion can't begin until 2 distinct samples exist).
++                // The geoscape stream is low-bandwidth (~13Hz × ~6 records), so reliable-ordered is cheap and
++                // head-of-line blocking is negligible; loss 76%→0 is the priority. Steam reliable (sendType 0) is
++                // in-order; DirectTransport is TCP (always ordered). Newest-wins seq guard kept as belt-and-braces.
+                 _accum += deltaTime;
+                 if (_accum >= FlushIntervalSeconds)
+                 {
+@@ -186,11 +202,11 @@ namespace Multipleer.Network.CommandSync
+                     if (_continuousPending.Count > 0)
+                     {
+                         var contList = new List<GeoVehicleStateRecord>(_continuousPending.Values);
+-                        engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = contList }, reliable: false);
+-                        diagBcastUnreliable++; // [DIAGB] one unreliable envelope sent this flush
++                        engine.BroadcastGeoStateDiff(new GeoStateDiff { Records = contList }, reliable: true);
++                        diagBcastUnreliable++; // [DIAGB] one continuous envelope sent this flush
+                         // [DIAGB] one line per actual send (NOT throttled — flushes are ~2/sec at most).
+                         foreach (var r in contList)
+-                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=false mask={r.ChangedMask} seq={r.Seq} records={contList.Count}");
++                            Debug.Log($"[Multipleer] DIAGB send: {(string.IsNullOrEmpty(r.FactionGuid) ? "EMPTY" : r.FactionGuid)}#{r.VehicleID} reliable=true(continuous) mask={r.ChangedMask} seq={r.Seq} records={contList.Count}");
+                         _continuousPending.Clear();
+                     }
+                 }
+diff --git a/src/Network/CommandSync/GeoVehicleStateDiffer.cs b/src/Network/CommandSync/GeoVehicleStateDiffer.cs
+index dcd3910..e2ccf44 100644
+--- a/src/Network/CommandSync/GeoVehicleStateDiffer.cs
++++ b/src/Network/CommandSync/GeoVehicleStateDiffer.cs
+@@ -34,11 +34,12 @@ namespace Multipleer.Network.CommandSync
+         public const int FullMask =
+             GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining
+             | GeoStateMask.Travelling | GeoStateMask.CurrentSite | GeoStateMask.DestinationSites
+-            | GeoStateMask.HitPoints;
++            | GeoStateMask.HitPoints | GeoStateMask.HostSendTime;
+ 
+-        /// <summary>CONTINUOUS channel bits: pos/rot/range — ride the UNRELIABLE stream.</summary>
++        /// <summary>CONTINUOUS channel bits: pos/rot/range (+ HostSendTime, paired with pos) — ride the UNRELIABLE stream.</summary>
+         public const int ContinuousMask =
+-            GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining;
++            GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining
++            | GeoStateMask.HostSendTime;
+ 
+         /// <summary>DISCRETE channel bits: travelling/currentsite/dest/hp — ride the RELIABLE stream.</summary>
+         public const int DiscreteMask =
+@@ -108,7 +109,7 @@ namespace Multipleer.Network.CommandSync
+             int mask = 0;
+ 
+             if (Differs(cur.PosX, last.PosX) || Differs(cur.PosY, last.PosY) || Differs(cur.PosZ, last.PosZ))
+-                mask |= GeoStateMask.SurfacePos;
++                mask |= GeoStateMask.SurfacePos | GeoStateMask.HostSendTime; // HostSendTime always rides with a pos move
+ 
+             if (Differs(cur.RotX, last.RotX) || Differs(cur.RotY, last.RotY)
+                 || Differs(cur.RotZ, last.RotZ) || Differs(cur.RotW, last.RotW))
+--- NEW FILE: AdaptiveRenderWindow.cs ---
+diff --git a/src/Network/CommandSync/AdaptiveRenderWindow.cs b/src/Network/CommandSync/AdaptiveRenderWindow.cs
+new file mode 100644
+index 0000000..e0cc81d
+--- /dev/null
++++ b/src/Network/CommandSync/AdaptiveRenderWindow.cs
+@@ -0,0 +1,69 @@
++namespace Multipleer.Network.CommandSync
++{
++    // ── PURE (Unity-free) SCALE-AWARE RENDER-WINDOW estimator ─────────────────────────────────────────────
++    //
++    // Snapshot interpolation renders the host stream at renderTime = hostNow − W and lerps between the two
++    // buffered samples that bracket renderTime. W (the render window / delay) must be large enough that two real
++    // samples always bracket renderTime. The hard part is the GEOSCAPE TIME-SCALE: HostSendTime is the geoscape
++    // GAME clock (Timing.Now), which advances at Scale × real-time (TimeControlModule SelectedTimeScale; observed
++    // Scale=3600). The host flushes the transform every ~0.066 REAL seconds, so consecutive HostSendTime stamps
++    // are 0.066 × Scale GAME-seconds apart (≈237 game-s at Scale=3600). A FIXED game-time delay (e.g. 0.35s) is
++    // then far newer than the newest buffered sample → chronic underrun → the lived "client lags + jerky bursts".
++    //
++    // FIX: track the OBSERVED inter-sample host-time gap and set W ≈ GapMultiplier × smoothedGap (clamped to a
++    // sane floor). Because the gap already equals 0.066 × Scale, W is implicitly scale-aware with NO need to plumb
++    // Scale in — and a scale CHANGE just changes the observed gap, which W follows. Smoothing shape mirrors
++    // HostClockOffsetEstimator's floor: SNAP DOWN when the gap shrinks (host slows → W must collapse promptly so
++    // the render point re-anchors in ONE bounded catch-up step, not a multi-frame race), EASE UP when the gap
++    // grows (host speeds up → add the extra lag smoothly, never as a single backward jump).
++    internal sealed class AdaptiveRenderWindow
++    {
++        internal const double GapMultiplier = 2.0;   // trail ~2 sample gaps behind newest → robust two-sample bracket
++        internal const double LeakUp = 0.2;          // EMA factor when the gap GROWS (host speeds up)
++
++        private double _smoothedGap;                 // smoothed consecutive HostSendTime delta (game-seconds)
++        private bool _have;
++        private double _lastHostTime;                // newest in-order HostSendTime fed so far
++        private bool _haveLast;
++
++        // Feed a received sample's HostSendTime (game-seconds). Only a forward step past the current newest
++        // defines a fresh gap; out-of-order / duplicate stamps are ignored (they don't define spacing).
++        public void Observe(double hostSendTime)
++        {
++            if (_haveLast)
++            {
++                double gap = hostSendTime - _lastHostTime;
++                if (gap > 0.0)
++                {
++                    if (!_have) { _smoothedGap = gap; _have = true; }
++                    else if (gap < _smoothedGap) _smoothedGap = gap;              // snap DOWN (host slowed)
++                    else _smoothedGap += (gap - _smoothedGap) * LeakUp;           // ease UP (host sped up)
++                }
++            }
++            if (!_haveLast || hostSendTime > _lastHostTime)
++            {
++                _lastHostTime = hostSendTime;
++                _haveLast = true;
++            }
++        }
++
++        // The render window to apply: max(floor, GapMultiplier × smoothedGap). Before any gap is observed, the
++        // floor (the legacy fixed delay) is used so behavior at Scale=1 / startup is unchanged.
++        public double Window(double floorSeconds)
++        {
++            if (!_have) return floorSeconds;
++            double w = GapMultiplier * _smoothedGap;
++            return w > floorSeconds ? w : floorSeconds;
++        }
++
++        public bool HasGap => _have;
++
++        public void Reset()
++        {
++            _smoothedGap = 0.0;
++            _have = false;
++            _lastHostTime = 0.0;
++            _haveLast = false;
++        }
++    }
++}
+--- NEW FILE: ClientHostClockInterpolation.cs ---
+diff --git a/src/Network/CommandSync/ClientHostClockInterpolation.cs b/src/Network/CommandSync/ClientHostClockInterpolation.cs
+new file mode 100644
+index 0000000..4f729eb
+--- /dev/null
++++ b/src/Network/CommandSync/ClientHostClockInterpolation.cs
+@@ -0,0 +1,198 @@
++using System;
++
++namespace Multipleer.Network.CommandSync
++{
++    // ── PURE (Unity-free) HOST-CLOCK snapshot interpolation core ──────────────────────────────────────────
++    //
++    // Replaces ARRIVAL-time keyed snapshot interpolation (the cause of the in-game "client renders slower +
++    // jerky" flaw). The host now stamps each 0x35 vehicle record with HostSendTime (geoscape Timing.Now). This
++    // core buffers samples keyed by that HOST time and renders at (estimatedHostNow − delay), so the rendered
++    // timeline is reconstructed from HOST SAMPLING spacing — NOT from irregular packet ARRIVAL spacing. That is
++    // what removes the playback stretch: each fixed host-distance segment is replayed over the host-time gap the
++    // host actually used, regardless of network jitter or the dirty-epsilon send cadence.
++    //
++    // WHY this is correct (and still a PURE single-writer mirror — no extrapolation, no second simulator):
++    //   • Host and client real-time clocks both advance 1:1 with wall time but have an unknown constant skew +
++    //     a variable one-way latency. For sample i, (localArrival_i − hostSend_i) = latency_i + skew. The
++    //     MINIMUM of that over recent samples is the best floor estimate of (latency_floor + skew) — the lucky
++    //     lowest-latency packet. So estimatedHostNow(localNow) = localNow − minDelayFloor. (We TRACK the min
++    //     with a slow upward leak so the floor can rise if the network's latency floor genuinely increases,
++    //     and never get pinned forever by one outlier-low packet.)
++    //   • renderHostTime = estimatedHostNow − delay. Bracketing reuses the proven ClientInterpolationCore.Select
++    //     over the host-time ring (clamp-to-oldest Direct / interior Interp / underrun Hold — never extrapolate).
++    //
++    // The interpolator (Unity glue) owns the Vector3.Lerp/Quaternion.Slerp; this core owns ONLY the scalar
++    // timeline (offset estimate + bracket) so it is fully unit-testable without Unity. The harness drives this
++    // exact class. A generic <T> value path keeps the test (double) and the interpolator (Vector3/Quaternion)
++    // on the SAME timeline code; the test exercises the double instantiation.
++    //
++    // BACKWARD-SANE: if a record carries no HostSendTime (old/absent → 0), the caller stamps the sample's
++    // localArrival as the host time AND feeds the same value as both hostSend and localArrival, which makes the
++    // offset floor 0 and degenerates this core to the previous arrival-time behavior — nothing hard-crashes.
++    internal sealed class ClientHostClockInterpolation
++    {
++        // Match the interpolator's ring (12 ≈ 0.8s @ 15Hz) so the pure core and the Unity component agree.
++        internal const int Capacity = 12;
++
++        private readonly float _delaySeconds;
++
++        // ── SCALE-AWARE ADAPTIVE RENDER WINDOW ────────────────────────────────────────────────────────────
++        // The fixed _delaySeconds is a GAME-time constant, but HostSendTime is the geoscape GAME clock which
++        // advances at Scale × real-time (TimeControlModule SelectedTimeScale; Timing.cs Now = StartTime+OwnNow,
++        // OwnNow scales by Scale). The host flushes every ~0.066 REAL seconds, so consecutive HostSendTime
++        // stamps are 0.066 × Scale GAME-seconds apart (≈237 game-s at Scale=3600). A fixed 0.35 game-s delay is
++        // then FAR newer than the newest buffered sample → chronic underrun → the lived "lags + jerky bursts".
++        //
++        // FIX: render at hostNow − W where W tracks the OBSERVED inter-sample host-time gap, so the render point
++        // always trails ~WindowGapMultiplier real samples behind the newest at ANY time-scale (and back to the
++        // 0.35 floor at Scale=1). W is derived purely from the host-time spacing the host actually used, so it is
++        // implicitly scale-aware with NO need to plumb Scale into the core — a scale change simply changes the
++        // observed gap and W follows it smoothly. The smoothed gap also damps per-arrival jitter.
++        private readonly bool _adaptiveWindow;
++
++        // Scale-aware render window estimator (snap-down/leak-up over the observed inter-sample host-time gap).
++        // Shared, tested, and identical to the one the live ClientVehicleInterpolator uses.
++        private readonly AdaptiveRenderWindow _window = new AdaptiveRenderWindow();
++
++        // Parallel host-time-keyed ring (oldest→newest after compaction). We keep them ASCENDING by HostSendTime
++        // on insert (out-of-order / duplicate safe) so Select sees a clean ascending window with no per-render sort.
++        private readonly double[] _hostTimes = new double[Capacity];
++        private readonly double[] _values = new double[Capacity];
++        private int _count;
++
++        // The host-time ring _hostTimes is already DOUBLE and ascending, so it is passed straight to
++        // ClientInterpolationCore.Select (which now takes double[]). No float scratch / rebase: double holds the
++        // geoscape clock (~6.4e10 game-s) at full sub-second resolution, so narrowing to float here (the old
++        // _selTimes) is exactly what collapsed every sample to one value in-game — removed.
++
++        // Host↔local clock offset (the smoothed minimum one-way delay floor) — the SAME pure estimator the live
++        // ClientVehicleInterpolator uses, so the offline harness exercises the production offset code.
++        private readonly HostClockOffsetEstimator _offset = new HostClockOffsetEstimator();
++
++        public ClientHostClockInterpolation(float delaySeconds, bool adaptiveWindow = true)
++        {
++            _delaySeconds = delaySeconds;
++            _adaptiveWindow = adaptiveWindow;
++        }
++
++        public int Count => _count;
++
++        // The render window actually applied: the scale-aware adaptive window (≥ the fixed floor) when enabled,
++        // else the legacy fixed delay. Public for the interpolator/diagnostics.
++        public double EffectiveWindow =>
++            _adaptiveWindow ? _window.Window(_delaySeconds) : _delaySeconds;
++
++        // Ingest one received sample. hostSendTime = the wire HostSendTime (host Timing.Now at emission);
++        // localArrival = the client's local clock when the packet was applied; value = the sample payload.
++        public void Observe(double hostSendTime, double localArrival, double value)
++        {
++            // (1) Update the host↔local offset floor from this sample's observed one-way delay.
++            _offset.Observe(hostSendTime, localArrival);
++
++            // (2) Track the smoothed inter-sample HOST-time gap (game-s) → scale-aware render window.
++            _window.Observe(hostSendTime);
++
++            // (3) Insert into the host-time-keyed ring, kept ASCENDING (out-of-order safe). A duplicate host time
++            // overwrites in place (newest value for that host instant wins) — harmless for a pure mirror.
++            InsertSorted(hostSendTime, value);
++        }
++
++        // Estimated host clock NOW for a given local clock now: anchorHost + rate*(localNow − anchorLocal)
++        // (offset+rate clock-sync; see HostClockOffsetEstimator).
++        public double EstimateHostNow(double localNow)
++        {
++            return _offset.EstimateHostNow(localNow);
++        }
++
++        // Estimated host rate (game-seconds per real-second ≈ Scale), derived from the timestamp stream. For
++        // diagnostics + the scale-convergence tests.
++        public double EstimatedRate => _offset.EstimatedRate;
++
++        // Render the value at renderHostTime = EstimateHostNow(localNow) − EffectiveWindow by bracketing the
++        // host-time ring. EstimateHostNow maps the LOCAL clock to host time via the received-stamp offset floor;
++        // this overload is for callers that only have a local clock. Prefer TryRenderAt on the client, where the
++        // host-slaved geoscape clock (ClientTimeMirror) already gives host game-now directly (and advances at the
++        // host's Scale × real rate between samples → smooth at any time-scale).
++        public bool TryRender(double localNow, out double rendered)
++        {
++            return TryRenderAt(EstimateHostNow(localNow), out rendered, out _);
++        }
++
++        // Render at hostGameNow − EffectiveWindow, where hostGameNow is the host GAME clock NOW (on the client,
++        // read the host-slaved Timing.Now). The window is scale-aware (adaptive to the observed host-time gap) so
++        // the render point always brackets two real samples at any geoscape time-scale. Returns false only when
++        // the buffer is empty. Outputs the bracket mode (Interp / Direct / Hold) for diagnostics + tests.
++        public bool TryRenderAt(double hostGameNow, out double rendered, out ClientInterpolationCore.SampleMode mode)
++        {
++            rendered = 0.0;
++            mode = ClientInterpolationCore.SampleMode.Empty;
++            if (_count == 0) return false;
++
++            double renderHost = hostGameNow - EffectiveWindow;
++
++            // Bracket directly on the DOUBLE host-time ring — no float narrowing (that was the precision collapse).
++            var b = ClientInterpolationCore.Select(_hostTimes, _count, renderHost);
++            mode = b.Mode;
++            switch (b.Mode)
++            {
++                case ClientInterpolationCore.SampleMode.Interp:
++                    rendered = _values[b.I0] + (_values[b.I1] - _values[b.I0]) * b.Frac;
++                    return true;
++                case ClientInterpolationCore.SampleMode.Empty:
++                    return false;
++                default: // Direct / Hold
++                    rendered = _values[b.I0];
++                    return true;
++            }
++        }
++
++        public void Reset()
++        {
++            _count = 0;
++            _offset.Reset();
++            _window.Reset();
++        }
++
++        // Insert (hostTime,value) keeping _hostTimes ascending. Duplicate host time → overwrite the value in
++        // place. When full, the OLDEST (index 0) is dropped to make room (shift-left) — bounded, alloc-free.
++        private void InsertSorted(double hostTime, double value)
++        {
++            // Find insertion index (first slot whose host time is >= hostTime).
++            int idx = 0;
++            while (idx < _count && _hostTimes[idx] < hostTime) idx++;
++
++            // Duplicate host instant → overwrite newest value for it (no growth).
++            if (idx < _count && _hostTimes[idx] == hostTime)
++            {
++                _values[idx] = value;
++                return;
++            }
++
++            if (_count < Capacity)
++            {
++                // Shift [idx.._count) right by one to open a slot at idx.
++                for (int j = _count; j > idx; j--)
++                {
++                    _hostTimes[j] = _hostTimes[j - 1];
++                    _values[j] = _values[j - 1];
++                }
++                _hostTimes[idx] = hostTime;
++                _values[idx] = value;
++                _count++;
++            }
++            else
++            {
++                // Full ring. If the new sample is older than everything, it's stale → drop it.
++                if (idx == 0) return;
++                // Drop the oldest by shifting [1..idx) left into [0..idx-1), then place at idx-1.
++                for (int j = 1; j < idx; j++)
++                {
++                    _hostTimes[j - 1] = _hostTimes[j];
++                    _values[j - 1] = _values[j];
++                }
++                _hostTimes[idx - 1] = hostTime;
++                _values[idx - 1] = value;
++            }
++        }
++    }
++}
+--- NEW FILE: HostClockOffsetEstimator.cs ---
+diff --git a/src/Network/CommandSync/HostClockOffsetEstimator.cs b/src/Network/CommandSync/HostClockOffsetEstimator.cs
+new file mode 100644
+index 0000000..92ab8ae
+--- /dev/null
++++ b/src/Network/CommandSync/HostClockOffsetEstimator.cs
+@@ -0,0 +1,253 @@
++namespace Multipleer.Network.CommandSync
++{
++    // ── PURE (Unity-free) host-clock ESTIMATOR — OFFSET *and* RATE (clock-sync netcode) ───────────────────
++    //
++    // Estimates the host's GAME clock NOW from the client's LOCAL (real) clock, using only the
++    // (HostSendTime, localArrival) pairs carried by received 0x35 vehicle records.
++    //
++    // WHY the previous version was wrong in-game: it modeled hostNow = localNow − delayFloor, i.e. it advanced
++    // the render clock at the client's REAL rate. But HostSendTime is the GEOSCAPE GAME clock (Timing.Now),
++    // which advances at Scale × real-time (observed Scale up to 3600). So at high scale the host timeline runs
++    // far faster than the real render cadence and the real-rate estimate can NEVER sit between two host-time-
++    // keyed samples → the bracket selector returns Direct/Hold every frame → the stepped jerk + huge lag.
++    //
++    // FIX (standard clock-sync): estimate BOTH a phase (anchor) AND a RATE from the timestamp stream.
++    //   • estimateHostNow(localNow) = anchorHost + rate * (localNow − anchorLocal)  — advances SMOOTHLY every
++    //     frame at the estimated host rate (NO dependency on the lagging stamped geoscape Timing.Now).
++    //   • rate ≈ d(HostSendTime)/d(localArrival) ≈ Scale — derived from the timestamp stream, NEVER read off the
++    //     engine, so it auto-tracks ANY geoscape time-scale. CRITICAL: the rate is measured over a SLIDING
++    //     MULTI-SAMPLE BASELINE (≥ MinSpanReal of real time), not adjacent pairs — when arrival jitter is
++    //     comparable to the send gap (the Scale≈1 case), a single-pair ratio is wildly noisy, but over a
++    //     ~0.3–0.6 s baseline the bounded jitter is a small fraction of the span → a smooth, stable rate.
++    //   • PHASE is closed with a PI loop: each sample re-anchors CONTINUOUSLY (no position jump) and folds the
++    //     phase error into a bounded FREQUENCY nudge (_rateCorr, clamped to ±0.5×rate) — so the rendered clock
++    //     speeds up / slows down slightly to catch up instead of STEPPING. The clamp keeps the effective rate
++    //     strictly positive ⇒ the rendered host-time is monotonic (never a backward render frame).
++    //   • WARMUP: the first ~2 in-order pairs SNAP the anchor exactly (a jump is fine pre-render) so the clock
++    //     locks within ~2 samples (the "stutter in place 1–2 s then flies" startup). A SCALE CHANGE needs no
++    //     special case: the LSQ slope re-converges as the sliding baseline (≤ MaxSpanReal) slides past it, and
++    //     the PI loop absorbs the transient phase error smoothly.
++    //
++    // Shared by ClientHostClockInterpolation (the offline harness drives the whole path through it) and by the
++    // live ClientVehicleInterpolator (which renders at estimateHostNow − window), so the production interpolator
++    // and the tested core run the SAME clock code.
++    internal sealed class HostClockOffsetEstimator
++    {
++        private bool _have;             // ≥1 sample observed (anchor valid)
++        private bool _haveRate;         // ≥2 in-order samples observed (rate valid)
++
++        private double _anchorLocal;    // local (real) clock of the last re-anchor
++        private double _anchorHost;     // host (game) clock estimate AT _anchorLocal (re-anchored CONTINUOUSLY)
++        private double _rate;           // estimated host game-seconds per local real-second (≈ Scale); the
++                                        // FREQUENCY term (LSQ slope over the baseline)
++        private double _rateCorr;       // phase-driven FREQUENCY nudge added to _rate until the next sample —
++                                        // closes accumulated phase error smoothly (PI loop) with NO position jump
++
++        // Sliding baseline of recent IN-ORDER (localArrival, hostSendTime) points, oldest→newest. The rate is
++        // (newestHost − oldestHost)/(newestLocal − oldestLocal) over this window, so jitter averages out.
++        private const int HistCap = 16;
++        private readonly double[] _histLocal = new double[HistCap];
++        private readonly double[] _histHost = new double[HistCap];
++        private int _histCount;
++
++        // Keep the baseline within [MinSpanReal, MaxSpanReal] of real time: long enough to average arrival
++        // jitter, short enough that a scale change re-converges quickly. ~0.066 s send cadence → ~5–9 samples.
++        private const double MinSpanReal = 0.30;
++        private const double MaxSpanReal = 0.80;
++        // PI phase loop: each sample folds the phase error into a bounded FREQUENCY nudge (not a position jump),
++        // so the estimate stays C0-continuous (no backward step / no teleport) and the apparent render speed
++        // stays inside [1−MaxCorrFrac, 1+MaxCorrFrac] × rate. PhaseGain = fraction of the error targeted to be
++        // closed over the next sample interval.
++        private const double PhaseGain = 0.5;
++        private const double MaxCorrFrac = 0.5;   // |_rateCorr| ≤ 0.5×rate ⇒ effective rate ≥ 0.5×rate > 0 ⇒
++                                                  // strictly forward (monotonic) ⇒ never a backward render step
++        // Warmup pairs to SNAP the phase exactly (jump allowed — pre-window, craft not yet smoothly moving) so
++        // the clock converges within ~2 samples (the "stutter in place 1–2 s then flies" startup).
++        private const int WarmupPairs = 2;
++        private const double MinLocalDelta = 1e-6;   // ignore degenerate local deltas (dup / same-frame)
++
++        private int _inOrderPairs;       // count of in-order pairs seen — for warmup phase snap
++
++        // Feed one received sample's host emission time and local arrival time. In-order samples (host time
++        // strictly increasing) drive the rate; out-of-order / duplicate samples only refine the anchor.
++        public void Observe(double hostSendTime, double localArrival)
++        {
++            if (!_have)
++            {
++                _have = true;
++                _anchorLocal = localArrival;
++                _anchorHost = hostSendTime;
++                _rate = 1.0;
++                _histLocal[0] = localArrival;
++                _histHost[0] = hostSendTime;
++                _histCount = 1;
++                _inOrderPairs = 0;
++                return;
++            }
++
++            double newestLocal = _histLocal[_histCount - 1];
++            double newestHost = _histHost[_histCount - 1];
++            bool inOrder = hostSendTime > newestHost && localArrival - newestLocal > MinLocalDelta;
++
++            if (inOrder)
++            {
++                PushHist(localArrival, hostSendTime);
++                PruneHist();
++                _inOrderPairs++;
++
++                // Rate = LEAST-SQUARES slope of host vs local over the sliding baseline. LSQ (not endpoint-to-
++                // endpoint) is robust to per-arrival jitter even when jitter ≈ the send gap (the Scale≈1 case):
++                // every point contributes, so the two noisy endpoints no longer dominate. A real scale change
++                // shifts the slope as the window slides past it (bounded by MaxSpanReal); transient jitter does
++                // NOT (it averages out), so NO spurious restart is needed.
++                //
++                // Until the baseline spans at least MinSpanReal of real time we don't yet have enough leverage
++                // for a stable slope, so we hold the previous rate rather than let one short, bursty window
++                // (e.g. two arrivals 20 ms apart) swing it — that swing is the source of per-frame render jitter.
++                if (_histCount >= 2)
++                {
++                    double span = _histLocal[_histCount - 1] - _histLocal[0];
++                    if (span >= MinSpanReal || !_haveRate)
++                    {
++                        double slope = LeastSquaresSlope();
++                        if (slope > 0.0) { _rate = slope; _haveRate = true; }
++                    }
++                }
++            }
++
++            // OUT-OF-ORDER guard: a sample carrying an OLDER host time that ARRIVES late (hostSendTime ≤ the
++            // newest host time we've seen) is STALE — it must NOT pull the phase backward (that yanks the render
++            // clock back → a backward render step). It already had no effect on the rate (skipped above); skip
++            // the phase correction too. Duplicates (same host time) likewise carry no new phase information.
++            if (!inOrder) return;
++
++            // ── PHASE: PI loop (frequency correction, NOT a position jump) ──────────────────────────────────
++            // Where does the current estimate (rate + the previous corr) think the host clock was at THIS
++            // sample's arrival, vs what the sample actually says?
++            double effRate = _rate + _rateCorr;
++            double predictedHostAtArrival = _anchorHost + effRate * (localArrival - _anchorLocal);
++            double err = hostSendTime - predictedHostAtArrival;   // +behind / −ahead, in host-seconds
++
++            if (_inOrderPairs <= WarmupPairs)
++            {
++                // WARMUP: snap the anchor exactly (a jump here is fine — it's before the craft renders smoothly)
++                // so the clock locks on within ~2 samples. Clear the freq nudge; the LSQ rate carries it.
++                _anchorLocal = localArrival;
++                _anchorHost = hostSendTime;
++                _rateCorr = 0.0;
++            }
++            else
++            {
++                // Re-anchor CONTINUOUSLY (no jump): the new anchorHost == the value the estimate already had at
++                // this local instant. Fold the phase error into a bounded frequency nudge that closes it over
++                // ~the next sample interval, so the rendered clock speeds up / slows down slightly instead of
++                // stepping. Clamped to ±MaxCorrFrac×rate ⇒ the effective rate stays strictly positive ⇒ the
++                // rendered host-time is monotonic (never a backward frame — the source of the old −5 spike).
++                _anchorLocal = localArrival;
++                _anchorHost = predictedHostAtArrival;
++
++                double interval = AverageLocalGap();   // expected real seconds until the next sample
++                double corr = interval > MinLocalDelta ? (err * PhaseGain) / interval : 0.0;
++                double maxCorr = MaxCorrFrac * (_rate > 0.0 ? _rate : 1.0);
++                if (corr > maxCorr) corr = maxCorr; else if (corr < -maxCorr) corr = -maxCorr;
++                _rateCorr = corr;
++            }
++        }
++
++        // Mean real-time gap between consecutive baseline samples (expected interval to the next sample). Used to
++        // convert the phase error (host-seconds) into a frequency nudge. Falls back to a nominal cadence.
++        private double AverageLocalGap()
++        {
++            if (_histCount >= 2)
++            {
++                double span = _histLocal[_histCount - 1] - _histLocal[0];
++                if (span > MinLocalDelta) return span / (_histCount - 1);
++            }
++            return 0.066;   // nominal host flush cadence (real seconds)
++        }
++
++        // Least-squares slope d(host)/d(local) over the history window. Rebased to the oldest point for
++        // numerical conditioning (host times can be large on a long campaign clock). Returns 0 if degenerate.
++        private double LeastSquaresSlope()
++        {
++            double l0 = _histLocal[0], h0 = _histHost[0];
++            double sl = 0, sh = 0, sll = 0, slh = 0;
++            int n = _histCount;
++            for (int i = 0; i < n; i++)
++            {
++                double l = _histLocal[i] - l0;
++                double h = _histHost[i] - h0;
++                sl += l; sh += h; sll += l * l; slh += l * h;
++            }
++            double denom = n * sll - sl * sl;
++            if (denom <= 0.0) return 0.0;
++            return (n * slh - sl * sh) / denom;
++        }
++
++        private void PushHist(double local, double host)
++        {
++            if (_histCount < HistCap)
++            {
++                _histLocal[_histCount] = local;
++                _histHost[_histCount] = host;
++                _histCount++;
++            }
++            else
++            {
++                for (int i = 1; i < HistCap; i++)
++                {
++                    _histLocal[i - 1] = _histLocal[i];
++                    _histHost[i - 1] = _histHost[i];
++                }
++                _histLocal[HistCap - 1] = local;
++                _histHost[HistCap - 1] = host;
++            }
++        }
++
++        // Drop the oldest points while the baseline span exceeds MaxSpanReal, but always keep enough to span at
++        // least MinSpanReal (so the rate denominator stays well-conditioned).
++        private void PruneHist()
++        {
++            while (_histCount > 2)
++            {
++                double newest = _histLocal[_histCount - 1];
++                double spanIfDropOldest = newest - _histLocal[1];
++                if (newest - _histLocal[0] > MaxSpanReal && spanIfDropOldest >= MinSpanReal)
++                {
++                    for (int i = 1; i < _histCount; i++)
++                    {
++                        _histLocal[i - 1] = _histLocal[i];
++                        _histHost[i - 1] = _histHost[i];
++                    }
++                    _histCount--;
++                }
++                else break;
++            }
++        }
++
++        // Estimated host GAME clock NOW for the given local (real) clock now:
++        //   anchorHost + (rate + rateCorr) * (localNow − anchorLocal).
++        // (rate = LSQ frequency, rateCorr = bounded phase-loop nudge.) Before the first observation, returns
++        // localNow unchanged (degenerates to local-time rendering).
++        public double EstimateHostNow(double localNow) =>
++            _have ? _anchorHost + (_rate + _rateCorr) * (localNow - _anchorLocal) : localNow;
++
++        // Estimated host rate (game-seconds per real-second ≈ Scale). 1.0 until the 2nd in-order sample.
++        public double EstimatedRate => _rate;
++
++        public bool HasEstimate => _have;
++        public bool HasRate => _haveRate;
++
++        public void Reset()
++        {
++            _have = false;
++            _haveRate = false;
++            _anchorLocal = 0.0;
++            _anchorHost = 0.0;
++            _rate = 1.0;
++            _rateCorr = 0.0;
++            _histCount = 0;
++            _inOrderPairs = 0;
++        }
++    }
++}

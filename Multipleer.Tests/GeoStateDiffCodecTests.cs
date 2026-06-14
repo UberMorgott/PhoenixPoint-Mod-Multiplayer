@@ -72,6 +72,49 @@ public class GeoStateDiffCodecTests
     }
 
     [Fact]
+    public void HostSendTimeBit_IsStable_AtBit7()
+    {
+        // Wire bit value — never renumber (host-clock render depends on it).
+        Assert.Equal(128, GeoStateMask.HostSendTime);
+    }
+
+    [Fact]
+    public void HostSendTime_RoundTrips_WhenBitSet()
+    {
+        var src = new GeoVehicleStateRecord
+        {
+            FactionGuid = "FAC_NJ_GUID",
+            VehicleID = 9,
+            Seq = 5UL,
+            ChangedMask = GeoStateMask.SurfacePos | GeoStateMask.HostSendTime, // pos + its paired host stamp
+            PosX = 10f, PosY = 20f, PosZ = 30f,
+            HostSendTime = 1234.5 // double (geoscape clock magnitude needs double precision)
+        };
+
+        var r = GeoStateDiffCodec.Decode(GeoStateDiffCodec.Encode(DiffOf(src))).Records[0];
+        Assert.Equal(1234.5, r.HostSendTime);
+        Assert.Equal(10f, r.PosX);
+    }
+
+    [Fact]
+    public void HostSendTime_IsDefault_WhenBitClear()
+    {
+        // Bit not set → field not on the wire → decodes back to 0 (client treats 0 as "absent" → arrival fallback).
+        var src = new GeoVehicleStateRecord
+        {
+            FactionGuid = "FAC_PHX_GUID",
+            VehicleID = 2,
+            Seq = 1UL,
+            ChangedMask = GeoStateMask.SurfacePos, // no HostSendTime bit
+            PosX = 1f, PosY = 2f, PosZ = 3f,
+            HostSendTime = 999.0 // set in-struct but NOT flagged → must not survive the wire
+        };
+
+        var r = GeoStateDiffCodec.Decode(GeoStateDiffCodec.Encode(DiffOf(src))).Records[0];
+        Assert.Equal(0.0, r.HostSendTime);
+    }
+
+    [Fact]
     public void PartialMask_WritesAndReads_OnlySetBits()
     {
         // Only bit0 SurfacePos + bit3 Travelling set: every other field must come back default.

@@ -1,0 +1,477 @@
+diff --git a/src/Harmony/ClientTravelEmitterSuppressPatch.cs b/src/Harmony/ClientTravelEmitterSuppressPatch.cs
+index f9fdf2d..c7cf49b 100644
+--- a/src/Harmony/ClientTravelEmitterSuppressPatch.cs
++++ b/src/Harmony/ClientTravelEmitterSuppressPatch.cs
+@@ -81,11 +81,23 @@ namespace Multipleer.Harmony
+             var engine = NetworkEngine.Instance;
+             if (engine == null || !engine.IsActive) return true; // single player
+             if (engine.IsHost) return true;                      // host emits authoritatively
+-            // Only the Travelling property setter is un-suppressed during a mirror apply (P2). A property setter's
+-            // reflected name is "set_Travelling"; InitiateTravelling/OnArrived never match, so they stay suppressed.
+-            if (EntityReplicationScope.IsApplying && __originalMethod?.Name == "set_Travelling")
++            var name = __originalMethod?.Name;
++
++            // PIVOT Step A (command-replication): the client now REPLAYS StartTravel under CommandRelay.IsApplying,
++            // which spawns its OWN native NavigateRoutine. That routine calls set_Travelling + InitiateTravelling
++            // inline; let BOTH run during the replay so the client's craft animates + the travel-line/anim render
++            // (InitiateTravelling -> Animator + TravelStartedEvent -> GeoFaction.OnTravelStarted -> VehicleTravelStarted,
++            // a UI/notification fan-out only; NO site exploration / mission spawn). OnArrived ("OnArrived") never
++            // matches this carve-out, so it stays UNCONDITIONALLY suppressed below — arrival (site attach, exploration,
++            // mission spawn = ArrivedAtDestinationEvent + GeoFaction.OnVehicleArrived) remains HOST-AUTHORITATIVE.
++            if (CommandRelay.IsApplying && (name == "set_Travelling" || name == "InitiateTravelling"))
++                return true;                                     // StartTravel replay: client drives its own motion
++
++            // Only the Travelling property setter is un-suppressed during a 0x35 mirror apply (P2 travel-line). A
++            // property setter's reflected name is "set_Travelling"; InitiateTravelling/OnArrived never match here.
++            if (EntityReplicationScope.IsApplying && name == "set_Travelling")
+                 return true;                                     // 0x35 mirror: write host's authoritative Travelling
+-            return false;                                        // client: suppress (render-only)
++            return false;                                        // client: suppress (render-only); OnArrived always here
+         }
+     }
+ }
+diff --git a/src/Harmony/StartTravelInterceptPatch.cs b/src/Harmony/StartTravelInterceptPatch.cs
+index 62fb54e..9eac0bc 100644
+--- a/src/Harmony/StartTravelInterceptPatch.cs
++++ b/src/Harmony/StartTravelInterceptPatch.cs
+@@ -5,13 +5,16 @@ using HarmonyLib;
+ using Multipleer.Network;
+ using Multipleer.Network.CommandSync;
+ using Multipleer.Network.MessageLayer;
++using UnityEngine; // DIAG-A1 TEMP (strip after RCA) — Debug.Log for the host->client travel-order trace
+ 
+ namespace Multipleer.Harmony
+ {
+-    // C7 vertical proof: GeoVehicle.StartTravel(List<GeoSite>). Client -> encode + relay to host +
+-    // block local exec. Host (own action) -> execute locally, then postfix broadcasts the result to
+-    // all peers. A relayed/approved action arriving back through CommandRelay.ApplyResult sets the
+-    // re-entrancy guard (IsApplying) so this prefix lets it execute and the postfix does not re-broadcast.
++    // GeoVehicle.StartTravel(List<GeoSite>). Client -> encode + relay to host + block local exec. Host
++    // (own action) -> execute locally, then Postfix broadcasts the result to all peers (the 0x35 state
++    // mirror replicates Travelling/DestinationSites but never starts the client NavigateRoutine, so the
++    // host-origin command broadcast is required for host-clicked craft to actually MOVE on the client).
++    // A relayed/approved action arriving back through CommandRelay.ApplyResult sets the re-entrancy guard
++    // (IsApplying) so this Prefix lets it execute and the Postfix does NOT re-broadcast (HostArbiter already did).
+     [HarmonyPatch]
+     public static class StartTravelInterceptPatch
+     {
+@@ -65,11 +68,64 @@ namespace Multipleer.Harmony
+             return false;
+         }
+ 
+-        // INC-3a: the host-origin StartTravel command-REPLAY Postfix is RETIRED. Host motion now mirrors to
+-        // clients purely as 0x35 GeoStateDiff (Travelling + DestinationSites + per-tick pos/rot/range), so a
+-        // host-moved craft no longer broadcasts a StartTravel command. Only the client->host INPUT relay
+-        // (Prefix above) is kept; the client never replays StartTravel (ClientApplier skips it) and never
+-        // calls StartTravel on a mirrored vehicle.
++        // RESTORED (host-origin command broadcast). The 0x35 GeoStateDiff alone replicates Travelling +
++        // DestinationSites but NEVER calls native StartTravel on the client, so the client's NavigateRoutine
++        // never starts and the craft renders frozen (route-line draws, no motion). This Postfix fans the host's
++        // OWN applied StartTravel out to clients on the SAME 0x31 result channel a client-origin order uses
++        // (engine.BroadcastCampaignActionResult -> client OnHostCampaignActionResult -> ClientApplier.HandleResult
++        // -> CommandExecutor.ApplyStartTravel -> native StartTravel), so the client runs its own NavigateRoutine
++        // off the host-synced clock. ClientApplier re-applies StartTravel again (PIVOT Step A), so this is the
++        // missing host->client edge for host-origin orders only.
++        //
++        // EXACTLY ONCE / NO DOUBLE-FIRE: broadcast happens iff (IsHost && IsActive && !CommandRelay.IsApplying).
++        //   * host clicks its own craft  -> IsHost, !IsApplying -> broadcast (the one case we want).
++        //   * client-relayed order on host (ApplyResult sets IsApplying) -> guarded out; HostArbiter already
++        //     broadcasts that order once after _relay.ApplyResult, so this would otherwise double-send.
++        //   * client applying a host broadcast (!IsHost, and IsApplying) -> guarded out -> no echo loop.
++        //   * single player (engine null / !IsActive) -> guarded out.
++        public static void Postfix(object __instance, object path)
++        {
++            var engine = NetworkEngine.Instance;
++            // DIAG-A1 TEMP (strip after RCA) — boundary (a): Postfix fired. Log WHY it bails on each guard so a
++            // frozen client tells us exactly which condition blocked the host-origin broadcast.
++            if (engine == null || !engine.IsActive || !engine.IsHost)
++            {
++                Debug.Log($"[Multipleer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard1) " +
++                          $"engineNull={engine == null} isActive={(engine != null && engine.IsActive)} isHost={(engine != null && engine.IsHost)}"); // DIAG-A1 TEMP (strip after RCA)
++                return;  // SP + client: never broadcast
++            }
++            if (CommandRelay.IsApplying)
++            {
++                Debug.Log("[Multipleer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard2 CommandRelay.IsApplying=true: client-relayed apply, HostArbiter broadcasts it)"); // DIAG-A1 TEMP (strip after RCA)
++                return;                               // client-relayed apply: HostArbiter already broadcasts -> no double-fire
++            }
++
++            // Host-origin: native StartTravel has already run (Postfix). Build the SAME payload shape a
++            // client-origin order carries — incl. OwnerFactionGuid read from the vehicle Owner the same way
++            // the Prefix does, so a host-origin NON-Phoenix craft resolves on the client (empty -> Phoenix).
++            var owner = AccessTools.Property(__instance.GetType(), "Owner")?.GetValue(__instance);
++            var payload = new StartTravelPayload
++            {
++                VehicleId = GeoBridge.VehicleId(__instance),
++                OwnerFactionGuid = owner != null ? GeoBridge.FactionGuid(owner) : "",
++                SiteIds = ExtractSiteIds(path)
++            };
++            var msg = new CampaignActionMessage
++            {
++                ActionId = Guid.NewGuid(),
++                ActionType = CampaignActionType.StartTravel,
++                TargetId = payload.VehicleId,
++                Payload = CommandCodec.EncodeStartTravel(payload),
++                Timestamp = DateTime.UtcNow.Ticks
++            };
++            // DIAG-A1 TEMP (strip after RCA) — boundary (a): the host-origin order IS being broadcast. veh + site
++            // count + the guard state that let us through, so we know the Postfix reached the wire.
++            Debug.Log($"[Multipleer] DIAG-A1 host-origin StartTravel broadcast veh={payload.VehicleId} " +
++                      $"owner={(string.IsNullOrEmpty(payload.OwnerFactionGuid) ? "EMPTY" : payload.OwnerFactionGuid)} " +
++                      $"sites={(payload.SiteIds != null ? payload.SiteIds.Length : -1)} isHost={engine.IsHost} " +
++                      $"isActive={engine.IsActive} isApplying={CommandRelay.IsApplying}"); // DIAG-A1 TEMP (strip after RCA)
++            engine.BroadcastCampaignActionResult(msg);
++        }
+ 
+         private static string[] ExtractSiteIds(object path)
+         {
+diff --git a/src/Network/CommandSync/ClientApplier.cs b/src/Network/CommandSync/ClientApplier.cs
+index 71ccda6..5147e17 100644
+--- a/src/Network/CommandSync/ClientApplier.cs
++++ b/src/Network/CommandSync/ClientApplier.cs
+@@ -25,17 +25,29 @@ namespace Multipleer.Network.CommandSync
+ 
+         public void HandleResult(CampaignActionMessage action)
+         {
+-            if (_engine.IsHost) return; // host already applied in HostArbiter
++            // DIAG-A1 TEMP (strip after RCA) — boundary (d): client routing. isHost gate decides if we apply.
++            Debug.Log($"[Multipleer] DIAG-A1 HandleResult action={action.ActionType} target={action.TargetId} isHost={_engine.IsHost}"); // DIAG-A1 TEMP (strip after RCA)
++            if (_engine.IsHost)
++            {
++                Debug.Log("[Multipleer] DIAG-A1 HandleResult SKIP (isHost=true: host already applied in HostArbiter)"); // DIAG-A1 TEMP (strip after RCA)
++                return; // host already applied in HostArbiter
++            }
+ 
+-            // INC-3a: RETIRE the host->client StartTravel command-REPLAY. The client no longer replays an
+-            // approved StartTravel (whether host-origin or its own relayed order echoed back) — the 0x35
+-            // GeoStateDiff state mirror drives the client's vehicle motion (Travelling + DestinationSites +
+-            // per-tick pos/rot/range). Replaying StartTravel here would start a client-side NavigateRoutine
+-            // that fights the authoritative mirror. Other action types (e.g. SetTimeState) still replay.
+-            if (action.ActionType == CampaignActionType.StartTravel) return;
++            // PIVOT Step A: RE-ENABLE the host->client StartTravel command-REPLAY. The client now replays an
++            // approved StartTravel (CommandExecutor.ApplyStartTravel) so its OWN native NavigateRoutine drives
++            // the craft's motion off the host-synced Timing clock (deterministic parametric playback:
++            // pos=Slerp(start,end,(Now-startTime)/total)). The old transform-stream (0x35 per-tick pos/rot)
++            // is being retired (see USE_TRANSFORM_STREAM in NetworkEngine) — command replication + the synced
++            // clock are the new motion source. Arrival stays host-authoritative: GeoVehicle.OnArrived remains
++            // suppressed on the client (ClientTravelEmitterSuppressPatch), so the client NavigateRoutine renders
++            // motion + travel-line/anim but never authors site exploration / mission spawn. SetTimeState still
++            // replays too. ApplyStartTravel runs under CommandRelay.IsApplying (set by _relay.ApplyResult).
+ 
+             try
+             {
++                // DIAG-A1 TEMP (strip after RCA) — boundary (d): about to dispatch into CommandRelay.ApplyResult
++                // -> CommandExecutor.Execute -> ApplyStartTravel. If we reach here the client WILL try to apply.
++                Debug.Log($"[Multipleer] DIAG-A1 HandleResult -> _relay.ApplyResult action={action.ActionType}"); // DIAG-A1 TEMP (strip after RCA)
+                 _relay.ApplyResult(action);
+             }
+             catch (Exception ex)
+diff --git a/src/Network/CommandSync/ClientTimeMirror.cs b/src/Network/CommandSync/ClientTimeMirror.cs
+index 8a828f7..8952e87 100644
+--- a/src/Network/CommandSync/ClientTimeMirror.cs
++++ b/src/Network/CommandSync/ClientTimeMirror.cs
+@@ -6,14 +6,76 @@ namespace Multipleer.Network.CommandSync
+     // host via Timing.ProcessInstanceData (TimeBridge.ApplyTimeState) -> displayed Now/Scale/Paused match
+     // host, frame-drift corrected. Host ignores (it owns the clock). ProcessInstanceData fires no events
+     // and reschedules nothing, so no re-intercept and no SetGamePauseState TimeLimit guard.
++    //
++    // PARITY MIRROR (DIAG-A1 fix): the ~0.5s stamp above corrects ABSOLUTE drift but leaves the client's
++    // Scale/Paused free to diverge BETWEEN stamps — the geoscape locally auto-pauses on UI / vehicle
++    // selection, or Scale goes stale. While Timing.Paused is true the TimingScheduler skips the
++    // NavigateRoutine slerp -> the client craft FREEZES, then JUMPS when the next stamp flips Paused.
++    // Cure: cache the host Scale+Paused on every stamp and re-assert them EVERY frame (ParityTick),
++    // overriding any local change so parity holds continuously. Client = pure mirror of host time state.
+     public static class ClientTimeMirror
+     {
++        // Last host-known time state (cached from the most recent 0x34 stamp). _hasState gates the
++        // per-frame parity tick so we never assert a clock value before the first host stamp arrives.
++        private static bool _hasState;
++        private static float _hostScale;
++        private static bool _hostPaused;
++
+         public static void Apply(TimeStatePayload payload)
+         {
+             var engine = NetworkEngine.Instance;
+             if (engine == null || !engine.IsActive || engine.IsHost) return;
++            // Cache the host Scale+Paused for the per-frame parity tick (kept even if the absolute apply
++            // below throws — the parity values are still the freshest host truth we have).
++            _hostScale = payload.Scale;
++            _hostPaused = payload.Paused;
++            _hasState = true;
+             try { TimeBridge.ApplyTimeState(payload); }
+             catch (System.Exception ex) { Debug.LogError($"[Multipleer] ClientTimeMirror apply failed: {ex}"); }
+         }
++
++        // Pure helper (unit-testable): given the cached host state, whether a host stamp has been seen,
++        // and the role flags, decide whether the per-frame parity tick should run at all. Keeps the
++        // gating logic out of the reflection path so it can be asserted without a live game clock.
++        public static bool ShouldRunParity(bool isActive, bool isHost, bool hasState)
++            => isActive && !isHost && hasState;
++
++        // Reset on session teardown so a host/join/leave cycle never re-asserts a stale clock value
++        // onto the next session's geoscape before its first stamp arrives.
++        public static void Reset()
++        {
++            _hasState = false;
++            _hostScale = 0f;
++            _hostPaused = false;
++        }
++
++        // Client per-frame mirror of host Scale/Paused. Hooked from NetworkEngine.Update(). Runs only
++        // on an active client that has received >=1 host stamp; re-asserts the cached host values onto
++        // the live geoscape clock (TimeBridge.SetScaleAndPaused self-guards equality, so a frame with
++        // no divergence is a cheap no-op). Wrapped in CommandRelay's applying scope so it shares the
++        // exact authoritative bypass the host-stamp apply uses (the intercept prefixes return true /
++        // execute under IsApplying), guaranteeing the host-driven write is never treated as a local
++        // client pause/scale edit.
++        public static void ParityTick()
++        {
++            var engine = NetworkEngine.Instance;
++            if (engine == null) return;
++            if (!ShouldRunParity(engine.IsActive, engine.IsHost, _hasState)) return;
++
++            try
++            {
++                bool corrected;
++                float wasScale; bool wasPaused;
++                using (CommandRelay.ApplyScope())
++                    corrected = TimeBridge.SetScaleAndPaused(_hostScale, _hostPaused, out wasScale, out wasPaused);
++
++                if (corrected)
++                {
++                    // DIAG-A1 TEMP — confirms a divergence existed between stamps and parity closed it.
++                    Debug.Log($"[Multipleer] DIAG-A1 time-parity correct: Paused host={_hostPaused} client(was)={wasPaused} Scale host={_hostScale} was={wasScale}");
++                }
++            }
++            catch (System.Exception ex) { Debug.LogError($"[Multipleer] ClientTimeMirror parity tick failed: {ex}"); }
++        }
+     }
+ }
+diff --git a/src/Network/CommandSync/CommandExecutor.cs b/src/Network/CommandSync/CommandExecutor.cs
+index 9547736..fdbdb49 100644
+--- a/src/Network/CommandSync/CommandExecutor.cs
++++ b/src/Network/CommandSync/CommandExecutor.cs
+@@ -67,6 +67,10 @@ namespace Multipleer.Network.CommandSync
+             var listType = typeof(List<>).MakeGenericType(geoSiteType);
+             var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
+             if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
++            // DIAG-A1 TEMP (strip after RCA) — boundary (e): the client is about to call native StartTravel.
++            // resolvedVehicle / site count confirm the payload mapped onto a live craft + route on the client.
++            int sitesResolved = (path is System.Collections.ICollection pc) ? pc.Count : -1;
++            Debug.Log($"[Multipleer] DIAG-A1 apply StartTravel veh={p.VehicleId} resolvedVehicle={(vehicle == null ? "NULL" : "ok")} sitesResolved={sitesResolved} -> invoking native StartTravel"); // DIAG-A1 TEMP (strip after RCA)
+             method.Invoke(vehicle, new object[] { path });
+ 
+             // [DIAGB] TEMPORARY (logging only, no behavior change). Read back the RESOLVED vehicle's identity +
+diff --git a/src/Network/CommandSync/CommandRelay.cs b/src/Network/CommandSync/CommandRelay.cs
+index 52940d2..ef71d06 100644
+--- a/src/Network/CommandSync/CommandRelay.cs
++++ b/src/Network/CommandSync/CommandRelay.cs
+@@ -26,6 +26,23 @@ namespace Multipleer.Network.CommandSync
+         [System.ThreadStatic] private static bool _applying;
+         public static bool IsApplying => _applying;
+ 
++        // Re-entrant authoritative scope for host-driven writes made OUTSIDE the ApplyResult path
++        // (e.g. the client per-frame time-parity tick). Sets the same _applying guard so any intercept
++        // prefix on the touched game method returns true (execute) instead of re-encoding the write as
++        // a fresh client edit. Re-entrancy-safe: restores the prior value, so nesting under ApplyResult
++        // does not prematurely clear the guard. Use with `using (CommandRelay.ApplyScope()) { ... }`.
++        public static ApplyingScope ApplyScope() => new ApplyingScope(true);
++
++        public readonly struct ApplyingScope : System.IDisposable
++        {
++            private readonly bool _prev;
++            // `enter` is always true at the one call site (ApplyScope); the param exists only so this is
++            // a real (non-default) constructor that runs the guard logic — `new ApplyingScope()` (the
++            // implicit default ctor of a struct) would skip it and set nothing.
++            internal ApplyingScope(bool enter) { _prev = _applying; _applying = enter || _applying; }
++            public void Dispose() { _applying = _prev; }
++        }
++
+         private CommandRelay(NetworkEngine engine)
+         {
+             _engine = engine;
+diff --git a/src/Network/CommandSync/GeoBridge.cs b/src/Network/CommandSync/GeoBridge.cs
+index d517a8c..f49eb98 100644
+--- a/src/Network/CommandSync/GeoBridge.cs
++++ b/src/Network/CommandSync/GeoBridge.cs
+@@ -350,28 +350,42 @@ namespace Multipleer.Network.CommandSync
+             }
+ 
+             // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
+-            // INC-A (single-writer mirror): the client runs NO native NavigateRoutine, so the 0x35 mirror is the
+-            // SOLE writer of the transform + icon for EVERY vehicle — ALWAYS write Surface.position/.rotation
+-            // from the latest applied record (no native-travel carve-out, no second driver to fight).
+-            var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
+-            if (surface != null)
++            // PIVOT Step A: with command-replication the client runs its OWN NavigateRoutine off the synced clock,
++            // which positions the craft every frame. The 0x35 per-tick transform stream would FIGHT that native
++            // sim, so the POSITION apply (SurfacePos/SurfaceRot + interpolator push) AND RangeRemaining are gated
++            // off when !USE_TRANSFORM_STREAM. Discrete state (Travelling/CurrentSite/DestinationSites/HitPoints)
++            // above + below STILL applies — only the position fight is removed. Flip USE_TRANSFORM_STREAM=true to
++            // restore the legacy transform-stream mirror.
++            if (Multipleer.Network.NetworkEngine.USE_TRANSFORM_STREAM)
+             {
+-                if ((mask & GeoStateMask.SurfacePos) != 0)
+-                    surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
+-                if ((mask & GeoStateMask.SurfaceRot) != 0)
+-                    surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
+-                // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
+-                // normally driven each frame by NavigateRoutine which the client never runs). Push this applied
+-                // transform sample into the interpolator's per-identity ring buffer; the interpolator's own Tick
+-                // is the SOLE writer that renders the icon at now − InterpDelay by lerp/slerp (INC-C smoothing).
+-                if ((mask & GeoStateMask.SurfacePos) != 0)
+-                    ClientVehicleInterpolator.SetTarget(
+-                        vehicle, (r.FactionGuid ?? "", r.VehicleID),
+-                        new Vector3(r.PosX, r.PosY, r.PosZ),
+-                        new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
++                var surface = AccessTools.Property(vt, "Surface")?.GetValue(vehicle) as Transform;
++                if (surface != null)
++                {
++                    if ((mask & GeoStateMask.SurfacePos) != 0)
++                        surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
++                    if ((mask & GeoStateMask.SurfaceRot) != 0)
++                        surface.rotation = new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW);
++                    // Writing Surface.position alone does NOT move the on-globe ICON (placed by the pivot rotation,
++                    // normally driven each frame by NavigateRoutine which the client never runs). Push this applied
++                    // transform sample into the interpolator's per-identity ring buffer; the interpolator's own Tick
++                    // is the SOLE writer that renders the icon at now − InterpDelay by lerp/slerp (INC-C smoothing).
++                    if ((mask & GeoStateMask.SurfacePos) != 0)
++                        ClientVehicleInterpolator.SetTarget(
++                            vehicle, (r.FactionGuid ?? "", r.VehicleID),
++                            new Vector3(r.PosX, r.PosY, r.PosZ),
++                            new Quaternion(r.RotX, r.RotY, r.RotZ, r.RotW));
++                }
+             }
+ 
+-            // 4) RangeRemaining via new EarthUnits(value) (public setter).
++            // 4) RangeRemaining via new EarthUnits(value) (public setter). DECOUPLED from the position gate
++            // (Defect-2 fix): under the command-replication PIVOT the client runs NO native NavigateRoutine, so
++            // it NEVER decrements/refreshes RangeRemaining on its own. With the apply gated behind
++            // USE_TRANSFORM_STREAM (=false), the client's RangeRemaining drifted to 0 → the native reachability
++            // check (GeoFaction.CalculateRemainingPossibleRange / vehicle.RangeRemaining) returned <0 → every
++            // travel destination showed "too far". RangeRemaining is a low-rate authoritative scalar that does
++            // NOT fight the position sim, so it ALWAYS applies (only SurfacePos/SurfaceRot + the interpolator
++            // SetTarget stay gated). Data still arrives: the differ classifies RangeRemaining as a CONTINUOUS bit
++            // that rides the unreliable flush regardless of USE_TRANSFORM_STREAM (GeoStateSyncBroadcaster).
+             if ((mask & GeoStateMask.RangeRemaining) != 0)
+             {
+                 var eu = MakeEarthUnits(r.RangeRemaining);
+diff --git a/src/Network/CommandSync/TimeBridge.cs b/src/Network/CommandSync/TimeBridge.cs
+index 0a57a2e..135e49e 100644
+--- a/src/Network/CommandSync/TimeBridge.cs
++++ b/src/Network/CommandSync/TimeBridge.cs
+@@ -121,6 +121,37 @@ namespace Multipleer.Network.CommandSync
+                        ?.Invoke(timing, new[] { data });
+         }
+ 
++        // Client per-frame parity: force the live clock's Scale + Paused to the cached host values
++        // WITHOUT touching the StartTime/Now anchors (those stay owned by the ~0.5s absolute-drift
++        // stamp in ApplyTimeState). Pokes Timing.Scale / Timing.Paused directly — these native
++        // property setters are NOT the UIModuleTimeControl.OnPauseTime/SelectTimePreset funnels the
++        // intercept patches hook, so they bypass the client-write block; they self-guard equality
++        // (Timing.cs: `if (value != _scale)` / `if (value != _paused)`) and, on a real change, call
++        // RescheduleUpdateables -> un-freezes the NavigateRoutine the scheduler had been skipping.
++        // Returns true iff a real correction was applied (host value differed from current), so the
++        // caller can emit the DIAG-A1 divergence-closed line. wasScale/wasPaused report the pre-write
++        // client values for that log. No-op (returns false) if no clock yet.
++        public static bool SetScaleAndPaused(float scale, bool paused, out float wasScale, out bool wasPaused)
++        {
++            wasScale = 0f;
++            wasPaused = false;
++            var timing = GetTiming();
++            if (timing == null) return false;
++            var t = timing.GetType();
++            var scaleProp = AccessTools.Property(t, "Scale");
++            var pausedProp = AccessTools.Property(t, "Paused");
++            if (scaleProp == null || pausedProp == null) return false;
++
++            wasScale = scaleProp.GetValue(timing) is float cs ? cs : 0f;
++            wasPaused = pausedProp.GetValue(timing) is bool cp && cp;
++
++            bool corrected = false;
++            // Equality guard: only write on a genuine divergence to avoid flicker / event spam.
++            if (wasScale != scale) { scaleProp.SetValue(timing, scale); corrected = true; }
++            if (wasPaused != paused) { pausedProp.SetValue(timing, paused); corrected = true; }
++            return corrected;
++        }
++
+         // TimeUnit -> ticks via the public TimeSpan getter (no private _time reflection).
+         private static long TicksOf(object timeUnit)
+         {
+diff --git a/src/Network/NetworkEngine.cs b/src/Network/NetworkEngine.cs
+index b7eb71c..fa78dae 100644
+--- a/src/Network/NetworkEngine.cs
++++ b/src/Network/NetworkEngine.cs
+@@ -116,6 +116,10 @@ namespace Multipleer.Network
+             // host/join/leave cycle and place a destroyed icon on the next session.
+             Multipleer.Network.CommandSync.ClientVehicleInterpolator.Reset();
+ 
++            // DIAG-A1 fix: drop the cached host time-state so the per-frame parity tick can't re-assert a
++            // stale Scale/Paused onto the next session's geoscape before its first stamp arrives.
++            Multipleer.Network.CommandSync.ClientTimeMirror.Reset();
++
+             // Singleton persists across host/join/leave cycles (Instance is never nulled),
+             // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
+             OnConnectionFailed = null;
+@@ -300,6 +304,9 @@ namespace Multipleer.Network
+         {
+             var payload = MessageSerializer.SerializeCampaignAction(action);
+             var msg = new NetworkMessage(PacketType.CampaignActionApproved, payload);
++            // DIAG-A1 TEMP (strip after RCA) — boundary (b): host send. Confirms the 0x31 result envelope
++            // actually leaves the host toward peers (after the Postfix/HostArbiter built it).
++            Debug.Log($"[Multipleer] DIAG-A1 broadcast result type={action.ActionType} target={action.TargetId} -> peers"); // DIAG-A1 TEMP (strip after RCA)
+             BroadcastToAll(msg);
+         }
+ 
+@@ -360,17 +367,38 @@ namespace Multipleer.Network
+ 
+         // ─── Update Loop (call every frame) ──────────────────────────────
+ 
++        // PIVOT Step A — geoscape aircraft sync source. When TRUE (legacy) the host streams per-tick vehicle
++        // transform via 0x35 GeoStateDiff and the client renders it via ClientVehicleInterpolator (transform-
++        // stream mirror). When FALSE (new, command-replication) the client REPLAYS StartTravel and runs its OWN
++        // native NavigateRoutine off the host-synced Timing clock; the per-tick POSITION stream + the interpolator
++        // are then DEAD WEIGHT that would fight the native sim, so they are switched off. Flip back to TRUE for a
++        // fast revert to transform-streaming (no code deletion). NOTE: GeoStateSyncBroadcaster.Tick stays running
++        // so the DISCRETE state mirror (CurrentSite / DestinationSites / Travelling / HitPoints) keeps flowing —
++        // only the POSITION fields (SurfacePos/SurfaceRot/RangeRemaining + interpolator) are gated off (see
++        // GeoBridge.ApplyVehicleState / ClientVehicleInterpolator), so arrival/site-occupancy stays host-pushed.
++        public const bool USE_TRANSFORM_STREAM = false;
++
+         public void Update()
+         {
+             Transport?.Update();
+             Session?.Update();
+             SaveTransfer?.Update();
+             Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
+-            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick.
++            // DIAG-A1 fix: client-only per-frame parity mirror of host Scale/Paused. Re-asserts the
++            // cached host time-state EVERY frame so the client clock can't locally auto-pause / go
++            // stale-Scale between the ~0.5s host stamps (which would freeze + then jump the client's
++            // NavigateRoutine craft motion). Host-driven, self-guarded equality; no-op on host / before
++            // the first stamp (gated inside ParityTick via NetworkEngine.IsActive/IsHost + _hasState).
++            Multipleer.Network.CommandSync.ClientTimeMirror.ParityTick();
++            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick. Kept ON so
++            // the DISCRETE state (CurrentSite/DestinationSites/Travelling/HitPoints) still mirrors; the per-tick
++            // POSITION write is gated off inside GeoBridge.ApplyVehicleState when !USE_TRANSFORM_STREAM.
+             Multipleer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
+             // INC-3a render smoothing: CLIENT-only per-frame ease of mirrored vehicle icons between the ~10Hz
+-            // host snapshots (pure render — no extrapolation, no sim). Self-gates to client inside Tick (host skips).
+-            Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
++            // host snapshots (pure render). PIVOT Step A: OFF when command-replication drives motion — the client's
++            // own NavigateRoutine now positions the icon; an interpolator tick would overwrite it. Gated for fast revert.
++            if (USE_TRANSFORM_STREAM)
++                Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
+         }
+ 
+         // ─── Internal Handlers ────────────────────────────────────────────
+@@ -491,6 +519,9 @@ namespace Multipleer.Network
+ 
+                 case PacketType.CampaignActionApproved:
+                     var campResult = MessageSerializer.DeserializeCampaignAction(msg.Payload);
++                    // DIAG-A1 TEMP (strip after RCA) — boundary (c): client received the host result on 0x31.
++                    // hasSubscriber tells us if HandleResult is wired (CommandRelay.Attach); if 0 the edge is dead here.
++                    Debug.Log($"[Multipleer] DIAG-A1 client recv host action result type={campResult.ActionType} target={campResult.TargetId} subscribers={(OnHostCampaignActionResult != null ? OnHostCampaignActionResult.GetInvocationList().Length : 0)}"); // DIAG-A1 TEMP (strip after RCA)
+                     OnHostCampaignActionResult?.Invoke(campResult);
+                     break;
+ 

@@ -34,11 +34,12 @@ namespace Multipleer.Network.CommandSync
         public const int FullMask =
             GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining
             | GeoStateMask.Travelling | GeoStateMask.CurrentSite | GeoStateMask.DestinationSites
-            | GeoStateMask.HitPoints;
+            | GeoStateMask.HitPoints | GeoStateMask.HostSendTime;
 
-        /// <summary>CONTINUOUS channel bits: pos/rot/range — ride the UNRELIABLE stream.</summary>
+        /// <summary>CONTINUOUS channel bits: pos/rot/range (+ HostSendTime, paired with pos) — ride the UNRELIABLE stream.</summary>
         public const int ContinuousMask =
-            GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining;
+            GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining
+            | GeoStateMask.HostSendTime;
 
         /// <summary>DISCRETE channel bits: travelling/currentsite/dest/hp — ride the RELIABLE stream.</summary>
         public const int DiscreteMask =
@@ -108,7 +109,7 @@ namespace Multipleer.Network.CommandSync
             int mask = 0;
 
             if (Differs(cur.PosX, last.PosX) || Differs(cur.PosY, last.PosY) || Differs(cur.PosZ, last.PosZ))
-                mask |= GeoStateMask.SurfacePos;
+                mask |= GeoStateMask.SurfacePos | GeoStateMask.HostSendTime; // HostSendTime always rides with a pos move
 
             if (Differs(cur.RotX, last.RotX) || Differs(cur.RotY, last.RotY)
                 || Differs(cur.RotZ, last.RotZ) || Differs(cur.RotW, last.RotW))

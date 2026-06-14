@@ -81,11 +81,23 @@ namespace Multipleer.Harmony
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true; // single player
             if (engine.IsHost) return true;                      // host emits authoritatively
-            // Only the Travelling property setter is un-suppressed during a mirror apply (P2). A property setter's
-            // reflected name is "set_Travelling"; InitiateTravelling/OnArrived never match, so they stay suppressed.
-            if (EntityReplicationScope.IsApplying && __originalMethod?.Name == "set_Travelling")
+            var name = __originalMethod?.Name;
+
+            // PIVOT Step A (command-replication): the client now REPLAYS StartTravel under CommandRelay.IsApplying,
+            // which spawns its OWN native NavigateRoutine. That routine calls set_Travelling + InitiateTravelling
+            // inline; let BOTH run during the replay so the client's craft animates + the travel-line/anim render
+            // (InitiateTravelling -> Animator + TravelStartedEvent -> GeoFaction.OnTravelStarted -> VehicleTravelStarted,
+            // a UI/notification fan-out only; NO site exploration / mission spawn). OnArrived ("OnArrived") never
+            // matches this carve-out, so it stays UNCONDITIONALLY suppressed below — arrival (site attach, exploration,
+            // mission spawn = ArrivedAtDestinationEvent + GeoFaction.OnVehicleArrived) remains HOST-AUTHORITATIVE.
+            if (CommandRelay.IsApplying && (name == "set_Travelling" || name == "InitiateTravelling"))
+                return true;                                     // StartTravel replay: client drives its own motion
+
+            // Only the Travelling property setter is un-suppressed during a 0x35 mirror apply (P2 travel-line). A
+            // property setter's reflected name is "set_Travelling"; InitiateTravelling/OnArrived never match here.
+            if (EntityReplicationScope.IsApplying && name == "set_Travelling")
                 return true;                                     // 0x35 mirror: write host's authoritative Travelling
-            return false;                                        // client: suppress (render-only)
+            return false;                                        // client: suppress (render-only); OnArrived always here
         }
     }
 }

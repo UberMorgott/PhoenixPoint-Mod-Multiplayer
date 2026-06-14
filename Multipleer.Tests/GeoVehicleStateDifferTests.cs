@@ -10,7 +10,7 @@ public class GeoVehicleStateDifferTests
     private static readonly int FullMask =
         GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining
         | GeoStateMask.Travelling | GeoStateMask.CurrentSite | GeoStateMask.DestinationSites
-        | GeoStateMask.HitPoints;
+        | GeoStateMask.HitPoints | GeoStateMask.HostSendTime;
 
     private static GeoVehicleStateRecord Veh(string guid, int id)
     {
@@ -195,8 +195,10 @@ public class GeoVehicleStateDifferTests
         int cont = GeoVehicleStateDiffer.ContinuousBits(mask);
         int disc = GeoVehicleStateDiffer.DiscreteBits(mask);
 
-        // Continuous = pos|rot|range only.
-        Assert.Equal(GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining, cont);
+        // Continuous = pos|rot|range (+ HostSendTime, which rides the unreliable pos channel).
+        Assert.Equal(
+            GeoStateMask.SurfacePos | GeoStateMask.SurfaceRot | GeoStateMask.RangeRemaining | GeoStateMask.HostSendTime,
+            cont);
         // Discrete = travelling|currentsite|dest|hp only.
         Assert.Equal(
             GeoStateMask.Travelling | GeoStateMask.CurrentSite | GeoStateMask.DestinationSites | GeoStateMask.HitPoints,

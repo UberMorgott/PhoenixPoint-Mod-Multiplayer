@@ -17,6 +17,9 @@ namespace Multipleer.Network.CommandSync
         public const int CurrentSite = 1 << 4;       // bit4 = 16
         public const int DestinationSites = 1 << 5;  // bit5 = 32
         public const int HitPoints = 1 << 6;         // bit6 = 64
+        public const int HostSendTime = 1 << 7;      // bit7 = 128 — host clock (Timing.Now) at sample emission;
+                                                     // rides the CONTINUOUS channel paired with SurfacePos so the
+                                                     // client can render on the host timeline (fixes playback stretch).
     }
 
     // Pure, Unity-free. One vehicle's authoritative state snapshot for the 0x35 GeoStateDiff mirror,
@@ -45,6 +48,15 @@ namespace Multipleer.Network.CommandSync
         public int CurrentSiteId;         // GeoSite.SiteId of CurrentSite; -1 = none
         public int[] DestinationSiteIds;  // ordered GeoSite.SiteId of DestinationSites
         public float HitPoints;           // GeoVehicleInstanceData.HitPoints
+        public double HostSendTime;       // host geoscape clock (GeoLevelController.Timing.Now, seconds) when this
+                                          // sample was emitted; valid only when the HostSendTime mask bit is set.
+                                          // DOUBLE (not float): the geoscape clock reaches ~6.4e10 game-seconds,
+                                          // where a float32 ULP is ~8192 s — far larger than the ~231 s between
+                                          // consecutive samples, so a float stamp collapses all buffered samples to
+                                          // one value → no interpolation possible (the in-game lag/jerk). double
+                                          // preserves sub-second resolution at that magnitude. Client renders the
+                                          // buffered samples on THIS host timeline (not packet arrival time) so the
+                                          // mirrored craft tracks host speed without stretch.
     }
 
     // Pure, Unity-free envelope: a batch of state records for one 0x35 GeoStateDiff broadcast. Many vehicle
@@ -162,6 +174,10 @@ namespace Multipleer.Network.CommandSync
             {
                 bw.Write(r.HitPoints);
             }
+            if ((r.ChangedMask & GeoStateMask.HostSendTime) != 0)
+            {
+                bw.Write(r.HostSendTime);
+            }
         }
 
         private static GeoVehicleStateRecord ReadVehicleBody(BinaryReader br, ulong seq, string factionGuid, int vehicleID, int mask)
@@ -212,6 +228,10 @@ namespace Multipleer.Network.CommandSync
             if ((mask & GeoStateMask.HitPoints) != 0)
             {
                 r.HitPoints = br.ReadSingle();
+            }
+            if ((mask & GeoStateMask.HostSendTime) != 0)
+            {
+                r.HostSendTime = br.ReadDouble(); // 8 bytes — matches bw.Write(double); see field comment (6.4e10 precision)
             }
             return r;
         }

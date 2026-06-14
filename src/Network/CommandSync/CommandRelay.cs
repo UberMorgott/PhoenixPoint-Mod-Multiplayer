@@ -26,6 +26,23 @@ namespace Multipleer.Network.CommandSync
         [System.ThreadStatic] private static bool _applying;
         public static bool IsApplying => _applying;
 
+        // Re-entrant authoritative scope for host-driven writes made OUTSIDE the ApplyResult path
+        // (e.g. the client per-frame time-parity tick). Sets the same _applying guard so any intercept
+        // prefix on the touched game method returns true (execute) instead of re-encoding the write as
+        // a fresh client edit. Re-entrancy-safe: restores the prior value, so nesting under ApplyResult
+        // does not prematurely clear the guard. Use with `using (CommandRelay.ApplyScope()) { ... }`.
+        public static ApplyingScope ApplyScope() => new ApplyingScope(true);
+
+        public readonly struct ApplyingScope : System.IDisposable
+        {
+            private readonly bool _prev;
+            // `enter` is always true at the one call site (ApplyScope); the param exists only so this is
+            // a real (non-default) constructor that runs the guard logic — `new ApplyingScope()` (the
+            // implicit default ctor of a struct) would skip it and set nothing.
+            internal ApplyingScope(bool enter) { _prev = _applying; _applying = enter || _applying; }
+            public void Dispose() { _applying = _prev; }
+        }
+
         private CommandRelay(NetworkEngine engine)
         {
             _engine = engine;

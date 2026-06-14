@@ -67,7 +67,21 @@ namespace Multipleer.Network.CommandSync
             var listType = typeof(List<>).MakeGenericType(geoSiteType);
             var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
             if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
+            // DIAG-A1 TEMP (strip after RCA) — boundary (e): the client is about to call native StartTravel.
+            // resolvedVehicle / site count confirm the payload mapped onto a live craft + route on the client.
+            int sitesResolved = (path is System.Collections.ICollection pc) ? pc.Count : -1;
+            Debug.Log($"[Multipleer] DIAG-A1 apply StartTravel veh={p.VehicleId} resolvedVehicle={(vehicle == null ? "NULL" : "ok")} sitesResolved={sitesResolved} -> invoking native StartTravel"); // DIAG-A1 TEMP (strip after RCA)
             method.Invoke(vehicle, new object[] { path });
+
+            // DIAG-A1 TEMP (strip after RCA) — START-TIME ALIGNMENT proof. The native NavigateRoutine just
+            // captured its progress origin as a LOCAL startTime = client Timing.Now. Compare that to the host's
+            // carried StartGameTime: with the ParityTick clock lockstep the residual should be small + CONSTANT
+            // (= command latency), NOT growing. p.StartGameTime==0 => pre-pivot/client-origin order (no stamp) ->
+            // local-capture fallback. This is the in-game lockstep-offset readout for the redirect/start cases.
+            double clientNow = TimeBridge.GetHostNowSeconds(); // client's own clock NOW (same reader, double)
+            Debug.Log($"[Multipleer] DIAG-A1 start-align veh={p.VehicleId} hostStart={p.StartGameTime:F2} " +
+                      $"clientNow={clientNow:F2} residualSec={(p.StartGameTime > 0 ? clientNow - p.StartGameTime : double.NaN):F2} " +
+                      $"hostStartRange={p.StartRangeRemaining:F0}"); // DIAG-A1 TEMP (strip after RCA)
 
             // [DIAGB] TEMPORARY (logging only, no behavior change). Read back the RESOLVED vehicle's identity +
             // state right after StartTravel so we can confirm (a) whether the craft actually flipped

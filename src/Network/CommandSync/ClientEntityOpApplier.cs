@@ -88,6 +88,8 @@ namespace Multipleer.Network.CommandSync
             // Stop render-interpolating the now-destroyed icon (best-effort fast-path; a guid-mismatched leftover
             // self-drops on the next interpolator Tick when its vehicle ref reads as a destroyed Unity object).
             ClientVehicleInterpolator.Remove((op.OwnerFactionGuid ?? "", op.EntityId));
+            // Drop the DIAG-NAV probe state for this id so a future id reuse starts with a clean delta baseline.
+            GeoBridge.ResetNavProbe((op.OwnerFactionGuid ?? "", op.EntityId));
             Debug.Log($"[Multipleer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
         }
 

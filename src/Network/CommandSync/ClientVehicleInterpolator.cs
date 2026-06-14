@@ -55,20 +55,36 @@ namespace Multipleer.Network.CommandSync
         {
             public object Vehicle;                    // resolved live GeoVehicle ref (refreshed each SetTarget)
 
+            // Per-identity host↔local clock offset estimator. The ring Times are now keyed by the host's
+            // HostSendTime (geoscape clock at sample emission), and we render at (estimatedHostNow − delay) so
+            // the mirrored craft tracks HOST speed (no playback stretch from irregular packet arrival spacing).
+            // Fallback: if a record carries no HostSendTime (0), SetTarget feeds local-arrival as the host time
+            // AND observes (arrival,arrival) → offset 0 → the previous arrival-time behavior (backward-sane).
+            public readonly HostClockOffsetEstimator Offset = new HostClockOffsetEstimator();
+
+            // Scale-aware render window: tracks the observed inter-sample HostSendTime gap so the render delay
+            // adapts to the geoscape time-scale (gap ≈ 0.066 × Scale game-s). The fixed InterpDelaySeconds is the
+            // floor. This is what fixes the high-scale "lags + jerky bursts": a fixed 0.35 game-s delay is far
+            // newer than the newest buffered sample at Scale=3600 (samples ~237 game-s apart) → chronic underrun.
+            public readonly AdaptiveRenderWindow Window = new AdaptiveRenderWindow();
+
             // Parallel ring buffers (no per-frame heap alloc; written in place). Ordered oldest→newest in
-            // [0..Count) after compaction in Tick. We append at Head and keep Count<=RingCapacity.
-            public readonly float[] Times = new float[RingCapacity];
+            // [0..Count) after compaction in Tick. We append at Head and keep Count<=RingCapacity. Times is
+            // DOUBLE: it is keyed by HostSendTime (the geoscape clock, ~6.4e10 game-s) where a float32 ULP
+            // (~8192 s) exceeds the ~231 s between samples — a float key collapsed every buffered sample to one
+            // value → Select returned Direct every frame → the in-game lag/jerk. double keeps the keys distinct.
+            public readonly double[] Times = new double[RingCapacity];  // keyed by HostSendTime (host clock seconds)
             public readonly Vector3[] Pos = new Vector3[RingCapacity];
             public readonly Quaternion[] Rot = new Quaternion[RingCapacity];
             public int Count;                         // number of valid samples
             public int Head;                          // index of the NEXT write slot (circular)
 
             // Scratch ascending views reused each Tick so Select() sees a contiguous oldest→newest array with no
-            // allocation. Sized to RingCapacity once.
-            public readonly float[] OrderedTimes = new float[RingCapacity];
+            // allocation. Sized to RingCapacity once. Times are double (see above).
+            public readonly double[] OrderedTimes = new double[RingCapacity];
             public readonly int[] OrderedIdx = new int[RingCapacity];
 
-            public void Push(float t, Vector3 p, Quaternion r)
+            public void Push(double t, Vector3 p, Quaternion r)
             {
                 Times[Head] = t; Pos[Head] = p; Rot[Head] = r;
                 Head = (Head + 1) % RingCapacity;
@@ -106,17 +122,36 @@ namespace Multipleer.Network.CommandSync
         private static readonly Dictionary<(string, int), int> _diagUnderruns =
             new Dictionary<(string, int), int>();
 
+        // DIAG-INTERP resnap (TEMP, logging only): per-identity ~1/sec throttle for the overwrite-proof trace
+        // below — shows the interpolator's target pos vs the craft's CURRENT pos (what NavigateRoutine just set),
+        // proving interpTarget != routinePos (the re-snap). Cleared in Remove/Reset alongside the other DIAG dicts.
+        private static readonly Dictionary<(string, int), float> _diagResnapNextLogTime =
+            new Dictionary<(string, int), float>();
+
         // Push the latest host-confirmed transform sample for a vehicle into its ring buffer. Called from the
         // 0x35 apply path on every SurfacePos record (first mirror + every push). NO placement happens here —
         // Tick is the sole writer and renders the buffered samples at now − InterpDelay. (INC-A placed raw here;
         // that reintroduced jerk and a second write per frame — removed in INC-C.)
-        public static void SetTarget(object vehicle, (string, int) identity, Vector3 worldPos, Quaternion worldRot)
+        public static void SetTarget(object vehicle, (string, int) identity, Vector3 worldPos, Quaternion worldRot,
+            double hostSendTime)
         {
             if (vehicle == null) return;
 
             var e = GetOrCreate(identity);
             e.Vehicle = vehicle;                              // refresh the ref
-            e.Push(Time.realtimeSinceStartup, worldPos, worldRot);
+
+            double localArrival = Time.realtimeSinceStartup;
+            // Key the ring by HOST time so renderTime (estimatedHostNow − delay) replays host SAMPLING spacing,
+            // not packet ARRIVAL spacing. Missing/old record (hostSendTime <= 0) → fall back to arrival time:
+            // observe (arrival,arrival) so the offset floor is 0 and rendering matches the legacy behavior.
+            // hostSendTime is DOUBLE (geoscape clock ~6.4e10) — a float key here collapsed all samples in-game.
+            bool haveHostTime = hostSendTime > 0.0;
+            double timeKey = haveHostTime ? hostSendTime : localArrival;
+            e.Offset.Observe(timeKey, localArrival);
+            // Feed the host-time gap estimator only with REAL host stamps (the arrival-fallback key is not a
+            // host-clock spacing). At Scale=1 / fallback the window stays at the InterpDelaySeconds floor.
+            if (haveHostTime) e.Window.Observe(hostSendTime);
+            e.Push(timeKey, worldPos, worldRot);
         }
 
         // Per-frame client tick: render every tracked vehicle's icon at renderTime = now − InterpDelaySeconds by
@@ -128,7 +163,18 @@ namespace Multipleer.Network.CommandSync
             if (engine == null || !engine.IsActive || engine.IsHost) return; // client-only
             if (_tracked.Count == 0) return;
 
-            float renderTime = Time.realtimeSinceStartup - InterpDelaySeconds;
+            float localNow = Time.realtimeSinceStartup;
+
+            // RENDER CLOCK = the per-identity SAMPLE-STREAM host-time ESTIMATE (offset + rate), NOT the stamped
+            // geoscape Timing.Now. RCA: the host-slaved Timing.Now is re-anchored only every ~0.5s by host
+            // TimingState stamps and chronically LAGS the host's true now by MORE than the entire ring span, so
+            // every frame snapped to the OLDEST buffered sample (DIAG showed mode=Direct, underruns=0) → stepped
+            // ~1s-cadence jerk + huge lag. The fix: HostClockOffsetEstimator estimates host-now from the received
+            // (HostSendTime, localArrival) stream — phase + a RATE derived from the timestamps (≈ Scale, never
+            // read off the engine) — and advances smoothly EVERY frame at that rate, so renderTime lands between
+            // the two newest-ish samples → Interp every frame at ANY time-scale. (TimeBridge.GetHostNowSeconds is
+            // still used HOST-side to stamp records and by ClientTimeMirror for the clock DISPLAY — just not as
+            // the client RENDER clock.) Per-entry below: renderTime = estimateHostNow(localNow) − adaptiveWindow.
 
             _dead.Clear();
             foreach (var kv in _tracked)
@@ -143,11 +189,24 @@ namespace Multipleer.Network.CommandSync
                 }
                 if (e.Count == 0) continue;
 
+                // Render at renderTime = estimateHostNow(localNow) − W, where W is the SCALE-AWARE adaptive
+                // window (≥ InterpDelaySeconds floor) and estimateHostNow is the per-identity sample-stream clock
+                // estimate (offset + derived rate). The ring Times are host-time keyed, so Select brackets on the
+                // host timeline; the estimate advances smoothly at the host rate every frame so two real samples
+                // bracket renderTime at ANY geoscape time-scale → Interp every frame (the fix for the in-game
+                // stepped jerk + lag). No dependency on the lagging stamped Timing.Now.
+                // All TIME math stays double — renderTime keys the geoscape clock (~6.4e10); a float cast here
+                // would re-introduce the precision collapse the ring fix removes.
+                double window = e.Window.Window(InterpDelaySeconds);
+                double hostNowEst = e.Offset.EstimateHostNow(localNow);
+                double renderTime = hostNowEst - window;
+
                 int n = e.BuildOrdered();
                 var b = ClientInterpolationCore.Select(e.OrderedTimes, n, renderTime);
 
                 Vector3 pos;
                 Quaternion rot;
+                Vector3 travelDir = Vector3.zero; // FIX B: instantaneous motion vector (only known in the Interp case)
                 switch (b.Mode)
                 {
                     case ClientInterpolationCore.SampleMode.Empty:
@@ -158,6 +217,7 @@ namespace Multipleer.Network.CommandSync
                         int i1 = e.OrderedIdx[b.I1];
                         pos = Vector3.Lerp(e.Pos[i0], e.Pos[i1], b.Frac);
                         rot = Quaternion.Slerp(e.Rot[i0], e.Rot[i1], b.Frac);
+                        travelDir = e.Pos[i1] - e.Pos[i0]; // direction the host is moving this bracket
                         break;
                     }
                     default: // Direct / Hold → place the single bracket sample raw (no interpolation, no extrapolation)
@@ -171,18 +231,35 @@ namespace Multipleer.Network.CommandSync
                     }
                 }
 
+                // DIAG-INTERP resnap (TEMP, logging only): BEFORE we write, show the interpolator target pos
+                // about to be placed vs the craft's CURRENT pos read back from the same native primitive that
+                // NavigateRoutine writes (GeoBridge.RecordVehicleState → Surface.position). If these differ, this
+                // Tick is re-snapping the host-owned craft back to a stale buffered sample (the RCA'd collision).
+                // Also reports buffer depth + USE_TRANSFORM_STREAM. Throttled ~1/sec per identity (reuses the
+                // RecordVehicleState reflection primitive used host-side; cheap at 1/sec). Gate line shows that
+                // this Tick is NOT gated for this vehicle (willWrite=true — Tick only self-gates on !IsHost above).
+                MaybeLogResnap(kv.Key, pos, e.Vehicle, e.Count);
+
                 // POSITION: orient the icon pivot tangent to the globe at the interpolated position.
                 GeoBridge.PlaceGlobeIconAt(e.Vehicle, pos);
-                // HEADING (INC-D P3): point the NOSE along travel by reusing native GeoNavComponent heading math
-                // (GetHeadingTowardsTarget + UpdateHeading) toward DestinationSites[0].WorldPosition, set AFTER
-                // placement. The visible nose is Surface.localEulerAngles.z — the streamed Surface.rotation world
-                // quat does NOT encode it (writing it left the client nose "up"), so we no longer use the wire
-                // quaternion for heading. PlaceGlobeIconAt zeroes the pivot Z (GeoActor.cs:76), so this owns the
-                // nose without clashing. No movement routine is run — single-writer mirror intact. (`rot` from the
-                // slerp is now unused for heading; it still rides the first-mirror placement via ProcessInstanceData.)
-                GeoBridge.UpdateVehicleHeadingTowards(e.Vehicle);
+                // HEADING (FIX B): point the NOSE along the INTERPOLATED TRAVEL DIRECTION (the delta between the two
+                // bracket samples) with instant:true, so the client nose mirrors the host's instantaneous motion
+                // vector smoothly — no per-frame slerp fighting the interpolated position (the old wobble). The
+                // streamed Surface world quat does NOT encode the visible nose (Surface.localEulerAngles.z), so it is
+                // unused for heading. PlaceGlobeIconAt zeroes the pivot Z (GeoActor.cs:76), so this owns the nose
+                // without clashing; no movement routine runs — single-writer mirror intact. In Direct/Hold (single
+                // sample, no motion vector) we fall back to the waypoint-aim heading toward DestinationSites[0].
+                if (travelDir.sqrMagnitude > 1e-6f)
+                    GeoBridge.UpdateVehicleHeadingAlong(e.Vehicle, pos, travelDir);
+                else
+                    GeoBridge.UpdateVehicleHeadingTowards(e.Vehicle);
 
-                MaybeLogDiag(kv.Key, e.Count, b.Mode);
+                // DIAG TEMP: confirms in-game that the render clock now brackets samples (mode flips Direct→Interp)
+                // and renderTime sits BETWEEN oldest/newest host-time, at the estimated host rate. Remove with the
+                // rest of the DIAG.
+                MaybeLogDiag(kv.Key, e.Count, b.Mode, renderTime,
+                    n > 0 ? e.OrderedTimes[0] : 0.0, n > 0 ? e.OrderedTimes[n - 1] : 0.0,
+                    window, e.Offset.EstimatedRate);
             }
 
             // Reap dead refs via Remove() so the per-identity DIAG dicts are cleared too (not just _tracked) —
@@ -197,6 +274,7 @@ namespace Multipleer.Network.CommandSync
             _tracked.Remove(identity);
             _diagNextLogTime.Remove(identity);
             _diagUnderruns.Remove(identity);
+            _diagResnapNextLogTime.Remove(identity);
         }
 
         // Clear all tracked vehicles — session reset / teardown (NetworkEngine.Shutdown).
@@ -206,6 +284,7 @@ namespace Multipleer.Network.CommandSync
             _dead.Clear();
             _diagNextLogTime.Clear();
             _diagUnderruns.Clear();
+            _diagResnapNextLogTime.Clear();
         }
 
         private static Entry GetOrCreate((string, int) identity)
@@ -225,15 +304,40 @@ namespace Multipleer.Network.CommandSync
             _diagUnderruns[identity] = c + 1;
         }
 
-        // DIAG/INC-C: rate-limited (~1/sec per identity) buffer-depth + underrun log. Reverted in INC-D.
-        private static void MaybeLogDiag((string, int) identity, int depth, ClientInterpolationCore.SampleMode mode)
+        // DIAG TEMP: rate-limited (~1/sec per identity) render-clock trace. Confirms the render clock estimate
+        // brackets the buffered samples (renderTime between oldest/newest host-time → mode=Interp) and exposes
+        // the derived host rate (estRate ≈ Scale). Remove with the rest of the DIAG.
+        private static void MaybeLogDiag((string, int) identity, int depth, ClientInterpolationCore.SampleMode mode,
+            double renderTime, double oldestHostTime, double newestHostTime, double window, double estRate)
         {
             float now = Time.realtimeSinceStartup;
             _diagNextLogTime.TryGetValue(identity, out var nextLog);
             if (now < nextLog) return;
             _diagNextLogTime[identity] = now + 1f;
             _diagUnderruns.TryGetValue(identity, out var underruns);
-            Debug.Log($"[Multipleer] DIAG/INC-C interp {identity.Item1}#{identity.Item2} depth={depth} mode={mode} underruns={underruns}");
+            Debug.Log($"[Multipleer] DIAG TEMP interp {identity.Item1}#{identity.Item2} depth={depth} mode={mode} " +
+                      $"renderTime={renderTime:F2} oldestHostTime={oldestHostTime:F2} newestHostTime={newestHostTime:F2} " +
+                      $"window={window:F3} estRate={estRate:F1} underruns={underruns}");
+        }
+
+        // DIAG-INTERP (TEMP, logging only): rate-limited (~1/sec per identity) overwrite-proof trace. Reads the
+        // craft's CURRENT pos via GeoBridge.RecordVehicleState (Surface.position — what the host-owned native
+        // NavigateRoutine just set on the client) and compares it to the interpolator target about to be written.
+        // interpTarget != routinePos == the re-snap collision. The gate line records that this Tick is NOT gated
+        // for the vehicle (willWrite=true). Logs only; never changes logic. Remove with the rest of the DIAG.
+        private static void MaybeLogResnap((string, int) identity, Vector3 interpTarget, object vehicle, int depth)
+        {
+            float now = Time.realtimeSinceStartup;
+            _diagResnapNextLogTime.TryGetValue(identity, out var nextLog);
+            if (now < nextLog) return;
+            _diagResnapNextLogTime[identity] = now + 1f;
+
+            var cur = GeoBridge.RecordVehicleState(vehicle); // current Surface.position set by NavigateRoutine
+            Debug.Log($"[Multipleer] DIAG-INTERP gate veh={identity.Item1}#{identity.Item2} willWrite=true");
+            Debug.Log($"[Multipleer] DIAG-INTERP resnap {identity.Item1}#{identity.Item2} " +
+                      $"interpTarget=({interpTarget.x:F1},{interpTarget.y:F1},{interpTarget.z:F1}) " +
+                      $"routinePos=({cur.PosX:F1},{cur.PosY:F1},{cur.PosZ:F1}) " +
+                      $"depth={depth} USE_TRANSFORM_STREAM={NetworkEngine.USE_TRANSFORM_STREAM}");
         }
     }
 }

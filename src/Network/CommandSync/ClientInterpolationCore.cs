@@ -39,7 +39,12 @@ namespace Multipleer.Network.CommandSync
         //   renderTime >= newest → Hold(newest)             (underrun: hold last, never extrapolate)
         //   otherwise         → Interp(i0,i1,frac) where times[i0] <= renderTime < times[i1], adjacent.
         // Equal adjacent timestamps (zero gap) degenerate to frac 0 (place i0) — no divide-by-zero.
-        internal static Bracket Select(float[] times, int count, float renderTime)
+        // times[] / renderTime are DOUBLE: the host-time keys are the geoscape clock (~6.4e10 game-seconds),
+        // where a float32 ULP (~8192 s) exceeds the ~231 s between samples → float keys collapse to one value →
+        // renderTime always <= times[0] → Direct every frame → no interpolation (the in-game lag/jerk). double
+        // keeps the keys distinct so the bracket is real. Frac stays float (positions/lerp are float; [0,1] is
+        // precise in float).
+        internal static Bracket Select(double[] times, int count, double renderTime)
         {
             if (times == null || count <= 0)
                 return new Bracket { Mode = SampleMode.Empty, I0 = 0, I1 = 0, Frac = 0f };
@@ -60,12 +65,12 @@ namespace Multipleer.Network.CommandSync
             // Find adjacent pair with times[i] <= renderTime < times[i+1]. Buffer is tiny (~12) → linear scan.
             for (int i = 0; i < newest; i++)
             {
-                float t0 = times[i];
-                float t1 = times[i + 1];
+                double t0 = times[i];
+                double t1 = times[i + 1];
                 if (renderTime >= t0 && renderTime < t1)
                 {
-                    float span = t1 - t0;
-                    float frac = span > 0f ? (renderTime - t0) / span : 0f;
+                    double span = t1 - t0;
+                    float frac = span > 0.0 ? (float)((renderTime - t0) / span) : 0f;
                     if (frac < 0f) frac = 0f; else if (frac > 1f) frac = 1f;
                     return new Bracket { Mode = SampleMode.Interp, I0 = i, I1 = i + 1, Frac = frac };
                 }

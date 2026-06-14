@@ -116,6 +116,10 @@ namespace Multipleer.Network
             // host/join/leave cycle and place a destroyed icon on the next session.
             Multipleer.Network.CommandSync.ClientVehicleInterpolator.Reset();
 
+            // DIAG-A1 fix: drop the cached host time-state so the per-frame parity tick can't re-assert a
+            // stale Scale/Paused onto the next session's geoscape before its first stamp arrives.
+            Multipleer.Network.CommandSync.ClientTimeMirror.Reset();
+
             // Singleton persists across host/join/leave cycles (Instance is never nulled),
             // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
             OnConnectionFailed = null;
@@ -300,6 +304,9 @@ namespace Multipleer.Network
         {
             var payload = MessageSerializer.SerializeCampaignAction(action);
             var msg = new NetworkMessage(PacketType.CampaignActionApproved, payload);
+            // DIAG-A1 TEMP (strip after RCA) — boundary (b): host send. Confirms the 0x31 result envelope
+            // actually leaves the host toward peers (after the Postfix/HostArbiter built it).
+            Debug.Log($"[Multipleer] DIAG-A1 broadcast result type={action.ActionType} target={action.TargetId} -> peers"); // DIAG-A1 TEMP (strip after RCA)
             BroadcastToAll(msg);
         }
 
@@ -345,11 +352,13 @@ namespace Multipleer.Network
         }
 
         // Host -> all: authoritative all-faction vehicle state diff (0x35 GeoStateDiff). The body is the
-        // pure GeoStateDiffCodec image of a batch envelope (MANY records packed per call). reliable:true
-        // (BroadcastToAll, ordered) carries DISCRETE transitions (Travelling/CurrentSite/DestinationSites/
-        // HitPoints) — arrival/departure must be exact; reliable:false (BroadcastUnreliable, loss-tolerant)
-        // carries the CONTINUOUS pos/rot/range stream — the client seq-guards stale unreliable packets
-        // (newest-wins) so a dropped/reordered one is harmless. Mirrors BroadcastGeoEntityOp/BroadcastTimingState.
+        // pure GeoStateDiffCodec image of a batch envelope (MANY records packed per call). Both channels now
+        // use reliable:true (BroadcastToAll, ordered): DISCRETE transitions (Travelling/CurrentSite/
+        // DestinationSites/HitPoints — arrival/departure must be exact) AND, since FIX A, the CONTINUOUS
+        // pos/rot/range stream (was reliable:false/BroadcastUnreliable, which lost ~76% of samples on the Steam
+        // P2P unreliable channel → interpolation jerk + startup stall). The stream is low-rate (~13Hz × ~6
+        // records) so reliable-ordered is cheap. The client still seq-guards (newest-wins) as belt-and-braces.
+        // Mirrors BroadcastGeoEntityOp/BroadcastTimingState.
         public void BroadcastGeoStateDiff(Multipleer.Network.CommandSync.GeoStateDiff diff, bool reliable)
         {
             var body = Multipleer.Network.CommandSync.GeoStateDiffCodec.Encode(diff);
@@ -360,17 +369,38 @@ namespace Multipleer.Network
 
         // ─── Update Loop (call every frame) ──────────────────────────────
 
+        // PIVOT Step A — geoscape aircraft sync source. When TRUE (legacy) the host streams per-tick vehicle
+        // transform via 0x35 GeoStateDiff and the client renders it via ClientVehicleInterpolator (transform-
+        // stream mirror). When FALSE (new, command-replication) the client REPLAYS StartTravel and runs its OWN
+        // native NavigateRoutine off the host-synced Timing clock; the per-tick POSITION stream + the interpolator
+        // are then DEAD WEIGHT that would fight the native sim, so they are switched off. Flip back to TRUE for a
+        // fast revert to transform-streaming (no code deletion). NOTE: GeoStateSyncBroadcaster.Tick stays running
+        // so the DISCRETE state mirror (CurrentSite / DestinationSites / Travelling / HitPoints) keeps flowing —
+        // only the POSITION fields (SurfacePos/SurfaceRot/RangeRemaining + interpolator) are gated off (see
+        // GeoBridge.ApplyVehicleState / ClientVehicleInterpolator), so arrival/site-occupancy stays host-pushed.
+        public const bool USE_TRANSFORM_STREAM = false;
+
         public void Update()
         {
             Transport?.Update();
             Session?.Update();
             SaveTransfer?.Update();
             Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
-            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick.
+            // DIAG-A1 fix: client-only per-frame parity mirror of host Scale/Paused. Re-asserts the
+            // cached host time-state EVERY frame so the client clock can't locally auto-pause / go
+            // stale-Scale between the ~0.5s host stamps (which would freeze + then jump the client's
+            // NavigateRoutine craft motion). Host-driven, self-guarded equality; no-op on host / before
+            // the first stamp (gated inside ParityTick via NetworkEngine.IsActive/IsHost + _hasState).
+            Multipleer.Network.CommandSync.ClientTimeMirror.ParityTick();
+            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick. Kept ON so
+            // the DISCRETE state (CurrentSite/DestinationSites/Travelling/HitPoints) still mirrors; the per-tick
+            // POSITION write is gated off inside GeoBridge.ApplyVehicleState when !USE_TRANSFORM_STREAM.
             Multipleer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
             // INC-3a render smoothing: CLIENT-only per-frame ease of mirrored vehicle icons between the ~10Hz
-            // host snapshots (pure render — no extrapolation, no sim). Self-gates to client inside Tick (host skips).
-            Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
+            // host snapshots (pure render). PIVOT Step A: OFF when command-replication drives motion — the client's
+            // own NavigateRoutine now positions the icon; an interpolator tick would overwrite it. Gated for fast revert.
+            if (USE_TRANSFORM_STREAM)
+                Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────
@@ -491,6 +521,9 @@ namespace Multipleer.Network
 
                 case PacketType.CampaignActionApproved:
                     var campResult = MessageSerializer.DeserializeCampaignAction(msg.Payload);
+                    // DIAG-A1 TEMP (strip after RCA) — boundary (c): client received the host result on 0x31.
+                    // hasSubscriber tells us if HandleResult is wired (CommandRelay.Attach); if 0 the edge is dead here.
+                    Debug.Log($"[Multipleer] DIAG-A1 client recv host action result type={campResult.ActionType} target={campResult.TargetId} subscribers={(OnHostCampaignActionResult != null ? OnHostCampaignActionResult.GetInvocationList().Length : 0)}"); // DIAG-A1 TEMP (strip after RCA)
                     OnHostCampaignActionResult?.Invoke(campResult);
                     break;
 
