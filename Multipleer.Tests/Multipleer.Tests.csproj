@@ -24,21 +24,6 @@
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
     <!-- DirectTransport is Unity-free (System.Net.Sockets only) → real-loopback connect tests. -->
     <Compile Include="..\src\Transport\DirectTransport.cs"><Link>DirectTransport.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\CommandCodec.cs"><Link>CommandCodec.cs</Link></Compile>
-    <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\PermissionGate.cs"><Link>PermissionGate.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\InterceptRegistry.cs"><Link>InterceptRegistry.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>GeoSimProducerTable.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\GeoEntityOpCodec.cs"><Link>GeoEntityOpCodec.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\EntityReplicationScope.cs"><Link>EntityReplicationScope.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\GeoStateScope.cs"><Link>GeoStateScope.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\GeoStateDiffCodec.cs"><Link>GeoStateDiffCodec.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\GeoVehicleStateDiffer.cs"><Link>GeoVehicleStateDiffer.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\InterpolationMath.cs"><Link>InterpolationMath.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\ClientInterpolationCore.cs"><Link>ClientInterpolationCore.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\HostClockOffsetEstimator.cs"><Link>HostClockOffsetEstimator.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\AdaptiveRenderWindow.cs"><Link>AdaptiveRenderWindow.cs</Link></Compile>
-    <Compile Include="..\src\Network\CommandSync\ClientHostClockInterpolation.cs"><Link>ClientHostClockInterpolation.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
