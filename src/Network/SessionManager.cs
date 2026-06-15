@@ -289,6 +289,11 @@ namespace Multipleer.Network
                 // Ready-state changed → refresh the authoritative roster for all peers.
                 BroadcastPeerList();
 
+                // Re-broadcast the authoritative wallet so a (late) ready client converges. No-op
+                // until the geoscape wallet is bound (BroadcastFullWallet self-guards); versioned, so
+                // already-current peers drop it as stale.
+                _engine.Sync?.BroadcastFullWallet();
+
                 if (_readyClients.Count >= _clients.Count && _clients.Count > 0)
                 {
                     var allReady = new NetworkMessage(PacketType.AllClientsReady);

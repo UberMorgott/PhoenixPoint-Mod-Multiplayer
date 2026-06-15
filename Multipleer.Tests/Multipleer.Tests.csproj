@@ -6,6 +6,12 @@
     <!-- Do NOT auto-glob the mod source tree; link only the pure, Unity-free files. -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
+  <PropertyGroup>
+    <!-- Mirrors Multipleer.csproj: the Sync types (GeoRuntime) bind game types via HarmonyLib
+         AccessTools, so the test build needs 0Harmony + UnityEngine.CoreModule at compile time.
+         Tests only COMPILE against these types; they never invoke the Unity/reflection paths. -->
+    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+  </PropertyGroup>
   <ItemGroup>
     <!-- Test files in THIS project. -->
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
@@ -18,6 +24,8 @@
     <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
     <Compile Include="..\src\Network\MessageLayer\MessageSerializer.cs"><Link>MessageSerializer.cs</Link></Compile>
     <Compile Include="..\src\Network\TimeSync\TimeSyncProtocol.cs"><Link>TimeSyncProtocol.cs</Link></Compile>
+    <Compile Include="..\src\Network\TimeSync\AnchorClock.cs"><Link>AnchorClock.cs</Link></Compile>
+    <Compile Include="..\src\Network\TimeSync\ClockOffsetEstimator.cs"><Link>ClockOffsetEstimator.cs</Link></Compile>
     <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
     <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>
     <Compile Include="..\src\Transport\TransportType.cs"><Link>TransportType.cs</Link></Compile>
@@ -25,6 +33,45 @@
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
     <!-- DirectTransport is Unity-free (System.Net.Sockets only) → real-loopback connect tests. -->
     <Compile Include="..\src\Transport\DirectTransport.cs"><Link>DirectTransport.cs</Link></Compile>
+    <!-- Action-sync engine cores (Tasks 1-5). Pure logic + reflection accessor.
+         GeoRuntime / ClientIdentity reference HarmonyLib + UnityEngine (referenced below). -->
+    <Compile Include="..\src\Network\Sync\SyncApplyScope.cs"><Link>Sync\SyncApplyScope.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncProtocol.cs"><Link>Sync\SyncProtocol.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncedActionIds.cs"><Link>Sync\SyncedActionIds.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SequenceTracker.cs"><Link>Sync\SequenceTracker.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Sync\ISyncedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Sync\PermissionGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Sync\GeoRuntime.cs</Link></Compile>
+    <!-- Action-sync reflection helpers + action classes (Tasks 8-10). Write/Read are pure;
+         Apply/Validate bind game types lazily via AccessTools and are never invoked in tests. -->
+    <Compile Include="..\src\Network\Sync\DefReflection.cs"><Link>Sync\DefReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ResearchReflection.cs"><Link>Sync\ResearchReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ManufactureReflection.cs"><Link>Sync\ManufactureReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\BaseReflection.cs"><Link>Sync\BaseReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\EventReflection.cs"><Link>Sync\EventReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\StartResearchAction.cs"><Link>Sync\Actions\StartResearchAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ResearchCompletedAction.cs"><Link>Sync\Actions\ResearchCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ManufactureCompletedAction.cs"><Link>Sync\Actions\ManufactureCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ConstructFacilityAction.cs"><Link>Sync\Actions\ConstructFacilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\RepairFacilityAction.cs"><Link>Sync\Actions\RepairFacilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\FacilityCompletedAction.cs"><Link>Sync\Actions\FacilityCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\AnswerEventAction.cs"><Link>Sync\Actions\AnswerEventAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Sync\SyncRegistration.cs</Link></Compile>
+    <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
+    <Compile Include="..\src\Network\ClientIdentity.cs"><Link>ClientIdentity.cs</Link></Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->
+    <Reference Include="0Harmony">
+      <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ModSDK)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />

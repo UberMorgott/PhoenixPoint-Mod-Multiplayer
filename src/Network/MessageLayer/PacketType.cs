@@ -49,14 +49,22 @@ namespace Multipleer.Network.MessageLayer
         CampaignStateUpdate = 0x34,
         GeoStateDiff = 0x35,
         GeoEntityOp = 0x36,
-        TimeState = 0x37,    // host->all: authoritative geoscape time {paused, speedIndex, now}
-        TimeRequest = 0x38,  // client->host: time-control request {paused, speedIndex, now}
+        TimeAnchor = 0x37,    // host->all: authoritative anchor {version, tAnchor, gAnchor, paused, speedIndex}
+        TimeRequest = 0x38,   // client->host: time-control request {paused, speedIndex}
+        TimeClockPing = 0x39, // client->host: NTP-style offset ping {pingId, t0}
+        TimeClockPong = 0x3A, // host->client: NTP-style offset pong {pingId, t0, t1}
 
         // Management
         PermissionUpdate = 0x40,
         SoldierAssignment = 0x41,
         PlayerListUpdate = 0x42,
         SetSave = 0x43,
+
+        // ActionSync 0x60-0x6F
+        ActionRequest = 0x60,   // client -> host
+        ActionApply   = 0x61,   // host -> all
+        ActionReject  = 0x62,   // host -> originator
+        WalletSync    = 0x63,   // host -> all
 
         // Chat
         ChatMessage = 0x50,

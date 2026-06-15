@@ -3,110 +3,182 @@ using System;
 namespace Multipleer.Network.TimeSync
 {
     /// <summary>
-    /// Authoritative geoscape time-state carried on the wire.
-    ///   Version    — HOST-monotonic ordering counter (single source = host). Every TimeState the host
-    ///                emits carries the next host version; clients stale-drop on THIS value, never on
-    ///                the per-sender wall-clock header ts (cross-machine clock skew would otherwise
-    ///                permanently starve a slightly-behind peer). Unused (0) on a client TimeRequest.
-    ///   Paused     — host clock paused flag (Base.Core.Timing.Paused).
-    ///   SpeedIndex — UIModuleTimeControl.SelectedPresetTime index (NOT raw Scale — R7: avoids the
-    ///                geo_speed x300 vs UI raw-Scale mismatch; clients hold identical PresetTimes[]).
-    ///   Now        — host geoscape Timing.Now as total-seconds (TimeUnit.TimeSpan.TotalSeconds);
-    ///                used only for the lag-resnap threshold decision, not for normal advance.
+    /// Authoritative geoscape time ANCHOR carried on the wire (host→all, packet 0x37 TimeAnchor).
+    /// The host re-captures this anchor at every pause / play / speed change (and on join / heartbeat).
+    /// The client derives game-time as a pure function of it: <c>g = gAnchor + rate*(serverNow-tAnchor)</c>
+    /// (see <see cref="AnchorClock"/>). The anchor is TIME-INVARIANT between changes — a heartbeat
+    /// re-delivery carries the SAME anchor (a safety re-sync, NOT a correction signal). This is what
+    /// kills the old control-loop oscillation.
+    ///   Version      — HOST-monotonic ordering counter (single source = host). Clients stale-drop on
+    ///                  THIS value (<see cref="ShouldApply"/>), never on the per-sender wall-clock header ts.
+    ///   TAnchorTicks — host real-time at the change instant, as TimeSpan.FromSeconds(hostRT).Ticks
+    ///                  (monotonic Time.realtimeSinceStartupAsDouble, NOT wall-clock; exact int64, no drift).
+    ///   GAnchorTicks — game-time at the change instant = Timing.Now.TimeSpan.Ticks.
+    ///   Paused       — host clock paused flag.
+    ///   SpeedIndex   — UIModuleTimeControl.SelectedPresetTime (0..2); rate = paused ? 0 : PresetTimes[idx].
     /// </summary>
-    public struct TimeStatePayload
+    public struct AnchorPayload
     {
         public long Version;
+        public long TAnchorTicks;
+        public long GAnchorTicks;
         public bool Paused;
         public int SpeedIndex;
-        public double Now;
 
-        public TimeStatePayload(bool paused, int speedIndex, double now)
-            : this(0L, paused, speedIndex, now)
-        {
-        }
-
-        public TimeStatePayload(long version, bool paused, int speedIndex, double now)
+        public AnchorPayload(long version, long tAnchorTicks, long gAnchorTicks, bool paused, int speedIndex)
         {
             Version = version;
+            TAnchorTicks = tAnchorTicks;
+            GAnchorTicks = gAnchorTicks;
             Paused = paused;
             SpeedIndex = speedIndex;
-            Now = now;
+        }
+
+        /// <summary>TimeSpan ticks ↔ seconds helpers (exact int64 carriage of double seconds).</summary>
+        public static long SecondsToTicks(double seconds) => TimeSpan.FromSeconds(seconds).Ticks;
+        public static double TicksToSeconds(long ticks) => TimeSpan.FromTicks(ticks).TotalSeconds;
+    }
+
+    /// <summary>
+    /// Client→host time-control request (packet 0x38 TimeRequest): the user's desired {paused, speedIndex}.
+    /// The host applies last-writer-wins, then captures + broadcasts a fresh <see cref="AnchorPayload"/>.
+    /// No version/timebase fields — it is a pure intent relay.
+    /// </summary>
+    public struct TimeRequestPayload
+    {
+        public bool Paused;
+        public int SpeedIndex;
+
+        public TimeRequestPayload(bool paused, int speedIndex)
+        {
+            Paused = paused;
+            SpeedIndex = speedIndex;
         }
     }
 
     /// <summary>
-    /// Unity-FREE pure decode/decision core for host-authoritative geoscape time sync.
-    /// All Harmony/Unity/native glue lives in <c>TimeSyncManager</c>; this class is unit-testable.
-    /// Wire layout (21 bytes): [0..7]=version(int64 LE) [8]=paused(1) [9..12]=speedIndex(int32 LE)
-    /// [13..20]=now(double LE).
+    /// NTP-style clock-offset exchange (packets 0x39 TimeClockPing client→host, 0x3A TimeClockPong
+    /// host→client). The host echoes the client's <c>T0</c> and stamps its own receive time <c>T1</c>;
+    /// the client completes the 3-stamp at receive (t3) via <see cref="ClockOffsetEstimator"/>.
+    /// All stamps are monotonic real-time seconds (Time.realtimeSinceStartupAsDouble), not wall-clock.
     /// </summary>
-    /// <summary>
-    /// Per-heartbeat client clock-correction decision. Either a continuous soft rate dilation
-    /// (<see cref="ScaleMultiplier"/> applied to the host-commanded raw Scale) or, for a catastrophic
-    /// gap, a one-shot <see cref="HardSnap"/> via Timing.ProcessInstanceData.
-    /// </summary>
-    public struct ClockCorrection
+    public struct ClockPingPayload
     {
-        /// <summary>True → hard-resnap the clock to host.Now (large gap). False → apply dilation.</summary>
-        public bool HardSnap;
-        /// <summary>Multiplier on the host-commanded Scale. >1 client behind (catch up), &lt;1 ahead
-        /// (run slower so host catches up), exactly 1 inside the deadband / on a hard snap.</summary>
-        public double ScaleMultiplier;
+        public int PingId;
+        public double T0;
+
+        public ClockPingPayload(int pingId, double t0) { PingId = pingId; T0 = t0; }
     }
 
+    public struct ClockPongPayload
+    {
+        public int PingId;
+        public double T0; // echoed
+        public double T1; // host localRT at receive
+
+        public ClockPongPayload(int pingId, double t0, double t1) { PingId = pingId; T0 = t0; T1 = t1; }
+    }
+
+    /// <summary>
+    /// Unity-FREE pure decode/decision core for the host-authoritative geoscape anchor clock.
+    /// All Harmony/Unity/native glue lives in <c>TimeSyncManager</c>; this class is unit-testable.
+    /// Anchor wire layout (29 bytes, little-endian):
+    ///   [0..7]=version(int64) [8..15]=tAnchorTicks(int64) [16..23]=gAnchorTicks(int64)
+    ///   [24]=paused(byte) [25..28]=speedIndex(int32).
+    /// </summary>
     public static class TimeSyncProtocol
     {
-        // ── Continuous soft clock-rate correction (standard netcode "time dilation") ──
-        // error = host.Now - client.Now, in geoscape SECONDS.
+        public const int WireSize = 8 + 8 + 8 + 1 + 4; // 29
 
-        /// <summary>No correction while |error| is below this (≈1 in-game sec) — kills micro-jitter so
-        /// the client settles exactly at the host rate instead of dithering around it.</summary>
-        public const double SyncDeadbandSeconds = 1.0;
-
-        /// <summary>|error| at which the dilation saturates to ±<see cref="MaxDilation"/>. Below it the
-        /// dilation ramps linearly with error, so small drift (e.g. 20s) converges in ~1-2s and large
-        /// drift pulls at the capped rate. 30s chosen so a 20s desync glides back into lock quickly.</summary>
-        public const double RampFullScaleErrorSeconds = 30.0;
-
-        /// <summary>Max fractional rate dilation: client Scale ∈ host*[1-MaxDilation .. 1+MaxDilation].
-        /// 0.25 = up to ±25% rate delta — fast enough to close drift, slow enough to stay invisible.</summary>
-        public const double MaxDilation = 0.25;
-
-        /// <summary>Client BEHIND host by more than this → forward hard-snap (acceptable: time only
-        /// jumps forward). 600s = 10 in-game min: well above what dilation handles (≤ a minute or two
-        /// of drift), so only a genuine stall/desync snaps.</summary>
-        public const double ResnapHardForwardSeconds = 600.0;
-
-        /// <summary>Client AHEAD of host by more than this → backward hard-snap (a visible BACKWARD
-        /// time jump — only tolerated when catastrophically large; normal "ahead" drift is corrected by
-        /// running the client slower via dilation). 3600s = 1 in-game hour.</summary>
-        public const double ResnapHardBackwardSeconds = 3600.0;
-
-        public const int WireSize = 8 + 1 + 4 + 8;
-
-        public static byte[] EncodeTimeState(TimeStatePayload p)
+        // ─── Anchor (0x37) encode/decode ──────────────────────────────────
+        public static byte[] EncodeAnchor(AnchorPayload p)
         {
             var buf = new byte[WireSize];
             Array.Copy(BitConverter.GetBytes(p.Version), 0, buf, 0, 8);
-            buf[8] = (byte)(p.Paused ? 1 : 0);
-            Array.Copy(BitConverter.GetBytes(p.SpeedIndex), 0, buf, 9, 4);
-            Array.Copy(BitConverter.GetBytes(p.Now), 0, buf, 13, 8);
+            Array.Copy(BitConverter.GetBytes(p.TAnchorTicks), 0, buf, 8, 8);
+            Array.Copy(BitConverter.GetBytes(p.GAnchorTicks), 0, buf, 16, 8);
+            buf[24] = (byte)(p.Paused ? 1 : 0);
+            Array.Copy(BitConverter.GetBytes(p.SpeedIndex), 0, buf, 25, 4);
             return buf;
         }
 
-        public static bool TryDecodeTimeState(byte[] payload, out TimeStatePayload p)
+        public static bool TryDecodeAnchor(byte[] payload, out AnchorPayload p)
         {
             p = default;
             if (payload == null || payload.Length < WireSize)
                 return false;
             p.Version = BitConverter.ToInt64(payload, 0);
-            p.Paused = payload[8] != 0;
-            p.SpeedIndex = BitConverter.ToInt32(payload, 9);
-            p.Now = BitConverter.ToDouble(payload, 13);
+            p.TAnchorTicks = BitConverter.ToInt64(payload, 8);
+            p.GAnchorTicks = BitConverter.ToInt64(payload, 16);
+            p.Paused = payload[24] != 0;
+            p.SpeedIndex = BitConverter.ToInt32(payload, 25);
             return true;
         }
 
+        // ─── TimeRequest (0x38) encode/decode ─────────────────────────────
+        public const int RequestWireSize = 1 + 4; // 5
+
+        public static byte[] EncodeRequest(TimeRequestPayload p)
+        {
+            var buf = new byte[RequestWireSize];
+            buf[0] = (byte)(p.Paused ? 1 : 0);
+            Array.Copy(BitConverter.GetBytes(p.SpeedIndex), 0, buf, 1, 4);
+            return buf;
+        }
+
+        public static bool TryDecodeRequest(byte[] payload, out TimeRequestPayload p)
+        {
+            p = default;
+            if (payload == null || payload.Length < RequestWireSize)
+                return false;
+            p.Paused = payload[0] != 0;
+            p.SpeedIndex = BitConverter.ToInt32(payload, 1);
+            return true;
+        }
+
+        // ─── ClockPing (0x39) / ClockPong (0x3A) encode/decode ────────────
+        public const int PingWireSize = 4 + 8;       // 12
+        public const int PongWireSize = 4 + 8 + 8;   // 20
+
+        public static byte[] EncodePing(ClockPingPayload p)
+        {
+            var buf = new byte[PingWireSize];
+            Array.Copy(BitConverter.GetBytes(p.PingId), 0, buf, 0, 4);
+            Array.Copy(BitConverter.GetBytes(p.T0), 0, buf, 4, 8);
+            return buf;
+        }
+
+        public static bool TryDecodePing(byte[] payload, out ClockPingPayload p)
+        {
+            p = default;
+            if (payload == null || payload.Length < PingWireSize)
+                return false;
+            p.PingId = BitConverter.ToInt32(payload, 0);
+            p.T0 = BitConverter.ToDouble(payload, 4);
+            return true;
+        }
+
+        public static byte[] EncodePong(ClockPongPayload p)
+        {
+            var buf = new byte[PongWireSize];
+            Array.Copy(BitConverter.GetBytes(p.PingId), 0, buf, 0, 4);
+            Array.Copy(BitConverter.GetBytes(p.T0), 0, buf, 4, 8);
+            Array.Copy(BitConverter.GetBytes(p.T1), 0, buf, 12, 8);
+            return buf;
+        }
+
+        public static bool TryDecodePong(byte[] payload, out ClockPongPayload p)
+        {
+            p = default;
+            if (payload == null || payload.Length < PongWireSize)
+                return false;
+            p.PingId = BitConverter.ToInt32(payload, 0);
+            p.T0 = BitConverter.ToDouble(payload, 4);
+            p.T1 = BitConverter.ToDouble(payload, 12);
+            return true;
+        }
+
+        // ─── Version ordering (generic, reusable seam) ────────────────────
         /// <summary>Next host-monotonic ordering version (single-source counter on the host).</summary>
         public static long NextVersion(long current) => current + 1;
 
@@ -120,27 +192,5 @@ namespace Multipleer.Network.TimeSync
 
         /// <summary>True if version a is strictly newer than version b.</summary>
         public static bool IsNewer(long a, long b) => a > b;
-
-        /// <summary>
-        /// Decide how the client should reconcile its clock to the host this heartbeat.
-        /// <paramref name="errorSeconds"/> = host.Now - client.Now (positive ⇒ client behind).
-        ///   • |error| beyond the (asymmetric) hard thresholds ⇒ HardSnap (mult 1).
-        ///   • |error| inside the deadband ⇒ no-op (mult exactly 1).
-        ///   • otherwise ⇒ soft dilation: mult = 1 + clamp(error/Ramp * MaxDilation, ±MaxDilation),
-        ///     so the client runs faster when behind / slower when ahead and settles to host rate as
-        ///     error → 0. Linear+clamped ⇒ symmetric (mult(e)+mult(-e)==2) and monotone toward 1.
-        /// </summary>
-        public static ClockCorrection ComputeCorrection(double errorSeconds)
-        {
-            if (errorSeconds > ResnapHardForwardSeconds || errorSeconds < -ResnapHardBackwardSeconds)
-                return new ClockCorrection { HardSnap = true, ScaleMultiplier = 1.0 };
-
-            if (Math.Abs(errorSeconds) < SyncDeadbandSeconds)
-                return new ClockCorrection { HardSnap = false, ScaleMultiplier = 1.0 };
-
-            double raw = (errorSeconds / RampFullScaleErrorSeconds) * MaxDilation;
-            double clamped = Math.Max(-MaxDilation, Math.Min(MaxDilation, raw));
-            return new ClockCorrection { HardSnap = false, ScaleMultiplier = 1.0 + clamped };
-        }
     }
 }

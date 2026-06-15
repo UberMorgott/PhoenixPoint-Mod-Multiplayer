@@ -8,48 +8,84 @@ using UnityEngine;
 namespace Multipleer.Network.TimeSync
 {
     /// <summary>
-    /// Unity/native GLUE for host-authoritative geoscape time sync. The pure decode/decision logic
-    /// lives in <see cref="TimeSyncProtocol"/>; this class binds it to the live engine state:
+    /// Unity/native GLUE for the host-authoritative geoscape ANCHOR clock. Pure math lives in
+    /// <see cref="TimeSyncProtocol"/> (wire), <see cref="AnchorClock"/> (derive + visual lerp) and
+    /// <see cref="ClockOffsetEstimator"/> (NTP offset); this class binds them to the live engine:
     ///
-    ///  • HOST  — each frame (driven from <see cref="NetworkEngine.Update"/>) reads the current
-    ///            {Paused, SpeedIndex, Now} of the geoscape clock. On a real change (incl. native
-    ///            auto-pauses, which flip Timing.Paused) it reliably broadcasts an authoritative
-    ///            TimeState; it also emits an unreliable state-heartbeat at ~3 Hz (the watchdog).
-    ///  • CLIENT— applies host TimeState: sets Timing.Scale + Timing.Paused for smooth local advance,
-    ///            mirrors the UI, and hard-resnaps via Timing.ProcessInstanceData only when drift
-    ///            exceeds the threshold. Client time-control INPUT is intercepted by the Harmony
-    ///            patches and relayed to the host as a TimeRequest; host applies last-writer-wins.
+    ///  • HOST   — each frame reads {Paused, SpeedIndex} of the geoscape clock. On a real change (incl.
+    ///             native auto-pauses) it captures a fresh anchor {version, tAnchor=hostRT, gAnchor=Now,
+    ///             paused, speedIndex} and RELIABLY broadcasts it (0x37). A ~3 Hz heartbeat re-delivers
+    ///             the SAME anchor (safety re-sync for late joiners / packet loss — NOT a correction).
+    ///             Answers client clock-pings (0x39→0x3A) with its own receive stamp.
+    ///  • CLIENT — NEVER accumulates its own game-time. Each frame it DERIVES auth = gAnchor +
+    ///             rate*(serverNow-tAnchor), smooths the DISPLAY toward it (~150 ms, forward-monotone,
+    ///             hard-set on a big gap), and overwrites Timing via ProcessInstanceData (no events,
+    ///             bypasses the TimeLimit unpause guard). serverNow = localRT + clockOffset, measured by
+    ///             a periodic ping/pong burst. Client time-control INPUT is intercepted by the Harmony
+    ///             patches and relayed to the host as a TimeRequest; host applies last-writer-wins.
     ///
     /// All native access is reflection-based (mirrors <c>TacticalPatches</c>) so the mod tolerates
     /// game-version / TFTV variance and is inert outside the geoscape.
+    ///
+    /// NOTE (Unity 2019.4): the spec's <c>realtimeSinceStartupAsDouble</c> does NOT exist in this engine
+    /// build (added in Unity 2020.2). We use <c>Time.realtimeSinceStartup</c> (float) widened to double as
+    /// the monotonic per-process <c>localRT</c>; the clock offset reconciles the per-process zero and the
+    /// ~150 ms visual smoothing absorbs float resolution — adequate for the clock-display domain.
     /// </summary>
     public class TimeSyncManager
     {
-        // ~3 Hz authoritative state-heartbeat over the unreliable channel (idempotent + always-current,
-        // so packet loss self-corrects on the next tick). This heartbeat IS the lag watchdog.
+        // ~3 Hz authoritative anchor re-delivery over the unreliable channel (idempotent: SAME anchor
+        // each time, so packet loss self-corrects). This heartbeat IS the lag/late-join watchdog.
         private const float HeartbeatIntervalSeconds = 0.33f;
+
+        // Visual smoothing time-constant (~150 ms) + hard-set threshold (skip lerp across a big gap).
+        private const double VisualTauSeconds = 0.15;
+        private const double SnapThresholdSeconds = 2.0;
+
+        // Clock-offset ping cadence + a large-OS-clock-jump step threshold.
+        private const float OffsetBurstIntervalSeconds = 0.2f;   // join/reconnect burst
+        private const int OffsetBurstCount = 5;
+        private const float OffsetSteadyIntervalSeconds = 3.0f;  // steady-state re-estimation
+        private const double OffsetStepHardSetSeconds = 2.0;
 
         private readonly NetworkEngine _engine;
 
         /// <summary>
         /// Echo-guard: set while the client applies host state (or the host applies a relayed client
         /// request) so the time-control input-intercept patches let our own programmatic writes
-        /// through instead of bouncing them back onto the wire. Mirrors the CommandRelay.IsApplying
-        /// pattern. Static so the Harmony prefixes (which have no instance handle) can read it.
+        /// through. Mirrors CommandRelay.IsApplying. Static so the Harmony prefixes can read it.
         /// </summary>
         public static bool IsApplyingRemote { get; private set; }
 
-        // Client: last applied HOST-stamped TimeState version (stale-drop on the single host clock —
-        // NOT the per-sender header ts, which would skew across machines).
+        // Client: last applied HOST-stamped anchor version (stale-drop on the single host clock).
         private long _clientLastAppliedVersion;
-        // Host: monotonic ordering counter stamped onto every outgoing TimeState (single source).
+        // Host: monotonic ordering counter stamped onto every outgoing anchor (single source).
         private long _hostVersion;
 
-        // Host change-detection cache + heartbeat accumulator.
+        // Host change-detection cache + heartbeat accumulator + last captured anchor.
         private bool _haveCache;
         private bool _cachedPaused;
         private int _cachedSpeedIndex;
         private float _hbAccum;
+        private bool _haveAnchor;
+        private AnchorPayload _lastAnchor;
+
+        // ─── Client derive/offset/display state ──────────────────────────
+        private bool _clientHaveAnchor;
+        private AnchorPayload _clientAnchor;
+        private readonly ClockOffsetEstimator _offset = new ClockOffsetEstimator();
+        private bool _needHardSet;          // hard-set display on the next derive (first anchor / reconnect)
+        private bool _haveDisplay;
+        private double _displayGameSeconds;
+        // Last paused state we pushed into the native time widget's visual (white+blink vs yellow).
+        // Idempotency: only re-arm the widget's dirty flags when it actually changes (no per-frame spam).
+        private bool _uiPausedKnown;
+        private bool _uiPausedShown;
+        // Ping scheduler.
+        private int _nextPingId;
+        private int _burstRemaining;
+        private float _pingAccum;
+        private bool _loggedFallback;     // one-shot guard for the high-RTT offset-fallback warning
 
         // ─── Cached reflection handles (resolved lazily once the types exist) ──
         private static Type _geoLevelType;
@@ -57,8 +93,40 @@ namespace Multipleer.Network.TimeSync
         private static Type _geoscapeViewType;
         private static Type _timeControlType;
         private static Type _timingInstanceDataType;
+        private static Type _timeUnitType;
         private static MethodInfo _currentLevelMethod;
+        private static MethodInfo _fromTimeSpanMethod;
+        private static object _timeUnitZero;
         private static bool _reflectionReady;
+
+        // PERF: the client per-frame path (ClientTick→WriteClock→ScaleForIndex/MirrorSpeedUi) formerly
+        // re-resolved every member AND called UnityEngine.Object.FindObjectOfType TWICE per frame (a
+        // full scene scan). The host never runs this path per frame, so it was a client-only ~2× FPS
+        // tax. We now resolve every handle ONCE and cache the live widget reference + a reusable
+        // TimingInstanceData so the steady-state client frame does zero scene scans and zero allocs.
+        private static PropertyInfo _geoTimingProp;        // GeoLevelController.Timing
+        private static PropertyInfo _timingPausedProp;     // Timing.Paused
+        private static PropertyInfo _timingNowProp;        // Timing.Now
+        private static PropertyInfo _timingScaleProp;      // Timing.Scale
+        private static PropertyInfo _timeUnitTimeSpanProp; // TimeUnit.TimeSpan
+        private static MethodInfo _processInstanceDataMethod; // Timing.ProcessInstanceData(TimingInstanceData)
+        private static FieldInfo _tcSelectedPresetField;   // UIModuleTimeControl.SelectedPresetTime
+        private static FieldInfo _tcPresetTimesField;      // UIModuleTimeControl.PresetTimes
+        private static FieldInfo _tcUpdatePausedField;     // UIModuleTimeControl._updatePausedState
+        private static MethodInfo _tcSelectTimePresetMethod; // UIModuleTimeControl.SelectTimePreset(int)
+        private static FieldInfo _tidPausedField, _tidScaleField, _tidStartTimeField,
+            _tidStartFixedTimeField, _tidOwnNowField, _tidOwnFixedNowField;
+
+        // Cached live geoscape time-control widget (avoids per-frame FindObjectOfType). A destroyed
+        // UnityEngine.Object compares == null, so the helper transparently re-resolves on scene change.
+        private static UnityEngine.Object _timeControlCached;
+        private static float[] _presetTimesCached; // cached off the live widget (re-read on widget change)
+
+        // Reusable per-frame scratch so WriteClock allocates nothing in steady state.
+        private object _tidScratch;                       // single reusable TimingInstanceData
+        private readonly object[] _arg1 = new object[1];  // reusable 1-arg invoke buffer
+        // Client: last speed index we pushed into the widget (gate MirrorSpeedUi on-change, like pause).
+        private int _uiSpeedShown = int.MinValue;
 
         public TimeSyncManager(NetworkEngine engine)
         {
@@ -73,11 +141,50 @@ namespace Multipleer.Network.TimeSync
             _geoscapeViewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
             _timeControlType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleTimeControl");
             _timingInstanceDataType = AccessTools.TypeByName("Base.Core.TimingInstanceData");
+            _timeUnitType = AccessTools.TypeByName("Base.Core.TimeUnit");
             _currentLevelMethod = _gameUtlType != null
                 ? AccessTools.Method(_gameUtlType, "CurrentLevel")
                 : null;
+            if (_timeUnitType != null)
+            {
+                _fromTimeSpanMethod = AccessTools.Method(_timeUnitType, "FromTimeSpan", new[] { typeof(TimeSpan) });
+                _timeUnitZero = AccessTools.Field(_timeUnitType, "Zero")?.GetValue(null);
+                _timeUnitTimeSpanProp = AccessTools.Property(_timeUnitType, "TimeSpan");
+            }
+            if (_geoLevelType != null)
+                _geoTimingProp = AccessTools.Property(_geoLevelType, "Timing");
+            // Base.Core.Timing instance members (resolved off the runtime type via AccessTools).
+            var timingType = AccessTools.TypeByName("Base.Core.Timing");
+            if (timingType != null)
+            {
+                _timingPausedProp = AccessTools.Property(timingType, "Paused");
+                _timingNowProp = AccessTools.Property(timingType, "Now");
+                _timingScaleProp = AccessTools.Property(timingType, "Scale");
+                _processInstanceDataMethod = _timingInstanceDataType != null
+                    ? AccessTools.Method(timingType, "ProcessInstanceData", new[] { _timingInstanceDataType })
+                    : null;
+            }
+            if (_timeControlType != null)
+            {
+                _tcSelectedPresetField = AccessTools.Field(_timeControlType, "SelectedPresetTime");
+                _tcPresetTimesField = AccessTools.Field(_timeControlType, "PresetTimes");
+                _tcUpdatePausedField = AccessTools.Field(_timeControlType, "_updatePausedState");
+                _tcSelectTimePresetMethod = AccessTools.Method(_timeControlType, "SelectTimePreset", new[] { typeof(int) });
+            }
+            if (_timingInstanceDataType != null)
+            {
+                _tidPausedField = AccessTools.Field(_timingInstanceDataType, "Paused");
+                _tidScaleField = AccessTools.Field(_timingInstanceDataType, "Scale");
+                _tidStartTimeField = AccessTools.Field(_timingInstanceDataType, "StartTime");
+                _tidStartFixedTimeField = AccessTools.Field(_timingInstanceDataType, "StartFixedTime");
+                _tidOwnNowField = AccessTools.Field(_timingInstanceDataType, "OwnNow");
+                _tidOwnFixedNowField = AccessTools.Field(_timingInstanceDataType, "OwnFixedNow");
+            }
             _reflectionReady = _geoLevelType != null && _currentLevelMethod != null;
         }
+
+        /// <summary>Monotonic per-process real-time seconds (Unity 2019.4: float widened to double).</summary>
+        private static double LocalRt() => UnityEngine.Time.realtimeSinceStartup;
 
         /// <summary>The live geoscape <c>GeoLevelController</c> instance, or null when not in geoscape.</summary>
         private object GetGeoLevel()
@@ -102,59 +209,90 @@ namespace Multipleer.Network.TimeSync
             if (geo == null) return null;
             try
             {
-                return AccessTools.Property(geo.GetType(), "Timing")?.GetValue(geo, null);
+                return _geoTimingProp?.GetValue(geo, null);
             }
             catch { return null; }
         }
 
+        /// <summary>
+        /// The live geoscape time-control widget, CACHED. PERF: replaces a per-frame
+        /// <c>UnityEngine.Object.FindObjectOfType</c> (full scene scan) — the dominant client-only
+        /// per-frame cost. A destroyed Unity object compares <c>== null</c>, so on a scene change the
+        /// cache is transparently invalidated and re-resolved (one scan), then reused every frame.
+        /// </summary>
         private static UnityEngine.Object FindTimeControl()
-            => _timeControlType != null ? UnityEngine.Object.FindObjectOfType(_timeControlType) : null;
+        {
+            if (_timeControlType == null) return null;
+            if (_timeControlCached != null) return _timeControlCached; // Unity-null check: destroyed → re-find
+            _timeControlCached = UnityEngine.Object.FindObjectOfType(_timeControlType);
+            _presetTimesCached = null; // widget changed → drop the cached preset array
+            return _timeControlCached;
+        }
 
         // ─── State readers ────────────────────────────────────────────────
 
         private static bool GetPaused(object timing)
-            => (bool)AccessTools.Property(timing.GetType(), "Paused").GetValue(timing, null);
+            => (bool)_timingPausedProp.GetValue(timing, null);
 
-        private static double GetNowSeconds(object timing)
+        private static long GetNowTicks(object timing)
         {
-            var now = AccessTools.Property(timing.GetType(), "Now").GetValue(timing, null); // TimeUnit
-            var ts = AccessTools.Property(now.GetType(), "TimeSpan").GetValue(now, null);    // TimeSpan
-            return ((TimeSpan)ts).TotalSeconds;
+            var now = _timingNowProp.GetValue(timing, null);                 // TimeUnit
+            var ts = _timeUnitTimeSpanProp.GetValue(now, null);             // TimeSpan
+            return ((TimeSpan)ts).Ticks;
         }
 
         private static int GetSpeedIndex()
+            => TryGetSpeedIndex(out int idx) ? idx : 1; // sane default for callers that need a value
+
+        /// <summary>
+        /// Read the current SelectedPresetTime. Returns false when the time-control widget is momentarily
+        /// absent (scene transition) so the host change-detect can SKIP that frame instead of defaulting
+        /// to index 1 — which would otherwise fire a spurious anchor when the real speed isn't 1.
+        /// </summary>
+        private static bool TryGetSpeedIndex(out int idx)
         {
+            idx = 1;
             var tc = FindTimeControl();
-            if (tc == null) return 1; // sane default (PresetTimes default index)
-            var field = AccessTools.Field(tc.GetType(), "SelectedPresetTime");
-            return field != null ? (int)field.GetValue(tc) : 1;
+            if (tc == null || _tcSelectedPresetField == null) return false;
+            idx = (int)_tcSelectedPresetField.GetValue(tc);
+            return true;
         }
 
         // ─── Per-frame tick (called from NetworkEngine.Update) ────────────
 
         public void Tick()
         {
-            if (_engine == null || !_engine.IsActive || !_engine.IsHost)
+            if (_engine == null || !_engine.IsActive)
             {
                 _haveCache = false;
                 return;
             }
 
+            if (_engine.IsHost) HostTick();
+            else ClientTick();
+        }
+
+        // ─── HOST: capture anchor on change + heartbeat re-delivery ───────
+
+        private void HostTick()
+        {
             var timing = GetTiming();
             if (timing == null) { _haveCache = false; return; }
 
             bool paused;
             int idx;
-            double now;
+            long gTicks;
             try
             {
+                // Time-control widget momentarily absent (scene transition) → no reading this frame.
+                // Skip change-detect rather than defaulting idx to 1 (would emit a spurious anchor).
+                if (!TryGetSpeedIndex(out idx)) return;
                 paused = GetPaused(timing);
-                idx = GetSpeedIndex();
-                now = GetNowSeconds(timing);
+                gTicks = GetNowTicks(timing);
             }
             catch { return; }
 
-            // Authoritative broadcast on any real change (covers native auto-pauses).
+            // Capture + reliably broadcast a fresh anchor on any real change (covers native auto-pauses).
             bool changed = !_haveCache || paused != _cachedPaused || idx != _cachedSpeedIndex;
             if (changed)
             {
@@ -162,75 +300,226 @@ namespace Multipleer.Network.TimeSync
                 _cachedSpeedIndex = idx;
                 _haveCache = true;
                 _hbAccum = 0f;
-                Broadcast(new TimeStatePayload(paused, idx, now), reliable: true);
+                CaptureAndBroadcastAnchor(paused, idx, gTicks, reliable: true);
                 return;
             }
 
-            // Periodic unreliable state-heartbeat (watchdog).
+            // Periodic unreliable heartbeat: re-deliver the SAME stored anchor (safety re-sync).
             _hbAccum += Time.unscaledDeltaTime;
-            if (_hbAccum >= HeartbeatIntervalSeconds)
+            if (_hbAccum >= HeartbeatIntervalSeconds && _haveAnchor)
             {
                 _hbAccum = 0f;
-                Broadcast(new TimeStatePayload(paused, idx, now), reliable: false);
+                BroadcastAnchor(_lastAnchor, reliable: false);
             }
         }
 
-        private void Broadcast(TimeStatePayload p, bool reliable)
+        /// <summary>
+        /// Host: pin a fresh anchor at THIS instant — gAnchor = current game-time, tAnchor = host real-time
+        /// now — bump the version, store it (for heartbeat re-delivery) and broadcast.
+        /// </summary>
+        private void CaptureAndBroadcastAnchor(bool paused, int speedIndex, long gAnchorTicks, bool reliable)
         {
-            // Stamp the single-source host-monotonic ordering version onto every outgoing TimeState
-            // (reliable change, heartbeat, AND request-echo) so clients order on one clock, never on
-            // the cross-machine header ts.
             _hostVersion = TimeSyncProtocol.NextVersion(_hostVersion);
-            p.Version = _hostVersion;
-            var msg = new NetworkMessage(PacketType.TimeState, TimeSyncProtocol.EncodeTimeState(p));
+            long tAnchorTicks = AnchorPayload.SecondsToTicks(LocalRt());
+            var anchor = new AnchorPayload(_hostVersion, tAnchorTicks, gAnchorTicks, paused, speedIndex);
+            _lastAnchor = anchor;
+            _haveAnchor = true;
+            BroadcastAnchor(anchor, reliable);
+        }
+
+        private void BroadcastAnchor(AnchorPayload anchor, bool reliable)
+        {
+            var msg = new NetworkMessage(PacketType.TimeAnchor, TimeSyncProtocol.EncodeAnchor(anchor));
             if (reliable) _engine.BroadcastToAll(msg);
             else _engine.BroadcastUnreliable(msg);
         }
 
-        // ─── CLIENT: apply authoritative host state ───────────────────────
-
-        public void OnHostStateReceived(byte[] payload, long headerTs)
+        /// <summary>Host: send the current anchor (reliable, targeted) to a freshly-connected peer.</summary>
+        public void OnPeerConnectedHost(ulong peerId)
         {
-            if (_engine == null || _engine.IsHost) return; // host never applies its own state
-            if (!TimeSyncProtocol.TryDecodeTimeState(payload, out var p)) return;
-            // Stale-drop on the HOST-stamped version (single clock), NOT the per-sender header ts.
+            if (_engine == null || !_engine.IsHost) return;
+            // Capture a current anchor if we have a clock but no anchor yet.
+            if (!_haveAnchor)
+            {
+                var timing = GetTiming();
+                if (timing != null)
+                {
+                    try
+                    {
+                        CaptureAndBroadcastAnchor(GetPaused(timing), GetSpeedIndex(), GetNowTicks(timing), reliable: true);
+                    }
+                    catch { /* per-frame change-detect will emit one shortly */ }
+                }
+                return; // the reliable broadcast above already reaches the new peer
+            }
+            _engine.SendToClient(peerId, new NetworkMessage(PacketType.TimeAnchor, TimeSyncProtocol.EncodeAnchor(_lastAnchor)));
+        }
+
+        // ─── HOST: answer a client clock-ping (0x39) → pong (0x3A) ────────
+
+        public void OnClockPingReceived(ulong senderId, byte[] payload)
+        {
+            if (_engine == null || !_engine.IsHost) return;
+            if (!TimeSyncProtocol.TryDecodePing(payload, out var ping)) return;
+            var pong = new ClockPongPayload(ping.PingId, ping.T0, LocalRt());
+            _engine.SendToClient(senderId, new NetworkMessage(PacketType.TimeClockPong, TimeSyncProtocol.EncodePong(pong)));
+        }
+
+        // ─── CLIENT: receive anchor (0x37) ────────────────────────────────
+
+        public void OnAnchorReceived(byte[] payload)
+        {
+            if (_engine == null || _engine.IsHost) return; // host never applies its own anchor
+            if (!TimeSyncProtocol.TryDecodeAnchor(payload, out var p)) return;
             if (!TimeSyncProtocol.ShouldApply(p.Version, _clientLastAppliedVersion)) return;
             _clientLastAppliedVersion = p.Version;
 
+            bool first = !_clientHaveAnchor;
+            _clientAnchor = p;
+            _clientHaveAnchor = true;
+            if (first) _needHardSet = true; // first anchor after (re)join → hard-set display, no lerp from garbage
+        }
+
+        /// <summary>
+        /// Clear ALL client derive state on an in-place reconnect (transport drop+reconnect that does NOT
+        /// tear the manager down via Shutdown→Initialize). Without this the persisted estimator/version/
+        /// burst-gate are reused: no re-burst (RISK-1) and a stale <c>_clientLastAppliedVersion</c> drops
+        /// every post-reconnect anchor → frozen client clock (RISK-2). After the reset the next ping burst
+        /// re-seeds the offset and the first fresh anchor hard-sets the display (spec §8 reconnect).
+        /// No-op on the host (it owns the clock and must keep its monotonic version).
+        /// </summary>
+        public void ResetClientState()
+        {
+            if (_engine != null && _engine.IsHost) return;
+            _offset.Reset();                 // force HasOffset → false (re-arms the ping burst + gates derive)
+            _clientHaveAnchor = false;
+            _clientAnchor = default;
+            _clientLastAppliedVersion = 0;   // accept the next anchor even if the host restarted version→1
+            _needHardSet = true;             // first derive after reconnect hard-sets, no lerp from garbage
+            _haveDisplay = false;
+            _displayGameSeconds = 0.0;
+            _burstRemaining = 0;             // SchedulePings re-arms the burst (HasOffset is now false)
+            _pingAccum = 0f;
+            _loggedFallback = false;
+            _uiPausedKnown = false;          // force the pause/running widget visual to re-sync after reconnect
+            _uiSpeedShown = int.MinValue;    // force the speed-widget index to re-push after reconnect
+        }
+
+        // ─── CLIENT: receive pong (0x3A) → feed the offset estimator ──────
+
+        public void OnClockPongReceived(byte[] payload)
+        {
+            if (_engine == null || _engine.IsHost) return;
+            if (!TimeSyncProtocol.TryDecodePong(payload, out var pong)) return;
+            double t3 = LocalRt();
+            bool accepted = _offset.AddSample(pong.T0, pong.T1, t3);
+            if (!accepted) return;
+
+            // High-RTT fallback engaged (internet link, no sub-cap sample passed) → warn once.
+            if (_offset.UsedFallback && !_loggedFallback)
+            {
+                _loggedFallback = true;
+                Debug.LogWarning("[Multipleer] TimeSync: link RTT above cap — using best-RTT offset fallback");
+            }
+
+            // Large offset step (real OS clock jump) → hard-set the display rather than lerp across it.
+            // Deduped onto the estimator's own step-detect (tracks its last reported offset).
+            if (_offset.IsLargeStep(OffsetStepHardSetSeconds))
+            {
+                _needHardSet = true;
+                Debug.Log("[Multipleer] TimeSync: large clock-offset step → display hard-set");
+            }
+        }
+
+        // ─── CLIENT: per-frame derive + display + clock override ──────────
+
+        private void ClientTick()
+        {
+            // Reset host-side cache when not host.
+            _haveCache = false;
+
+            SchedulePings();
+
+            if (!_clientHaveAnchor || !_offset.HasOffset) return; // gate: need an anchor AND a seeded offset
             var timing = GetTiming();
             if (timing == null) return; // not in geoscape → no-op
+
+            double serverNow = LocalRt() + _offset.Offset;
+            double rate = _clientAnchor.Paused ? 0.0 : ScaleForIndex(_clientAnchor.SpeedIndex, timing);
+            double gAnchorSeconds = AnchorPayload.TicksToSeconds(_clientAnchor.GAnchorTicks);
+            double tAnchorSeconds = AnchorPayload.TicksToSeconds(_clientAnchor.TAnchorTicks);
+            double auth = AnchorClock.Derive(gAnchorSeconds, rate, tAnchorSeconds, serverNow);
+
+            if (_needHardSet || !_haveDisplay)
+            {
+                _displayGameSeconds = auth; // hard-set: no lerp from garbage
+                _haveDisplay = true;
+                _needHardSet = false;
+            }
+            else
+            {
+                double k = AnchorClock.LerpFactor(Time.unscaledDeltaTime, VisualTauSeconds);
+                _displayGameSeconds = AnchorClock.VisualStep(_displayGameSeconds, auth, k, SnapThresholdSeconds, rate);
+            }
+
+            WriteClock(timing, _displayGameSeconds, _clientAnchor.Paused, (float)rate);
+        }
+
+        /// <summary>
+        /// Overwrite the client clock to the displayed game-time via the game's own save/load seam
+        /// (Timing.ProcessInstanceData) — R5: NOT GeoscapeView.SetGamePauseState (TimeLimit guard).
+        /// StartTime = display, OwnNow = 0 ⇒ Now == StartTime == display. ProcessInstanceData fires no
+        /// events / reschedules nothing ⇒ no re-intercept. Scale/Paused are cosmetic (overwritten next
+        /// frame) so the native widget animator/pause graphic reflect host speed.
+        /// </summary>
+        private void WriteClock(object timing, double displayGameSeconds, bool paused, float scale)
+        {
+            EnsureReflection();
+            if (_timingInstanceDataType == null || _fromTimeSpanMethod == null || _timeUnitZero == null
+                || _processInstanceDataMethod == null || _tidStartTimeField == null) return;
 
             IsApplyingRemote = true;
             try
             {
-                double clientNow = GetNowSeconds(timing);
-                var corr = TimeSyncProtocol.ComputeCorrection(p.Now - clientNow);
+                // PERF: reuse ONE TimingInstanceData (the fixed-clock fields below are constant Zero, so a
+                // single persistent instance is sufficient — only StartTime/Paused/Scale vary per frame).
+                if (_tidScratch == null) _tidScratch = Activator.CreateInstance(_timingInstanceDataType);
+                var tid = _tidScratch;
+                object zero = _timeUnitZero;
 
-                if (corr.HardSnap)
+                _arg1[0] = TimeSpan.FromSeconds(displayGameSeconds);
+                object startTime = _fromTimeSpanMethod.Invoke(null, _arg1);
+
+                _tidPausedField.SetValue(tid, paused);
+                _tidScaleField.SetValue(tid, scale);
+                _tidStartTimeField.SetValue(tid, startTime);
+                // INTENTIONAL / verified-inert: the fixed clock (StartFixedTime/OwnFixedNow → FixedNow) is
+                // pinned to Zero. The only FixedNow consumers — TimingScheduler.Update (Fixed phase) and
+                // PhoenixGame fast-physics — read the ROOT game TimeSource.Timing, NOT this geoscape child
+                // Timing we overwrite. So pinning the child's FixedNow=0 each frame is observably inert for
+                // the client (verified vs decompile Timing.cs/TimingScheduler.cs:679). The geoscape clock
+                // display reads Now (= StartTime, OwnNow pinned 0), which we set above.
+                _tidStartFixedTimeField.SetValue(tid, zero);
+                _tidOwnNowField.SetValue(tid, zero);
+                _tidOwnFixedNowField.SetValue(tid, zero);
+
+                _arg1[0] = tid;
+                _processInstanceDataMethod.Invoke(timing, _arg1);
+
+                // Keep the speed widget index in sync (cosmetic), under the echo-guard. ON-CHANGE only:
+                // SelectTimePreset already early-outs internally, but gating here removes the per-frame
+                // reflection/invoke (and widget access) entirely in steady state.
+                if (_uiSpeedShown != _clientAnchor.SpeedIndex)
                 {
-                    // Catastrophic gap → one-shot exact resnap to host.Now (raw field write via
-                    // ProcessInstanceData; fires no events), then commit commanded speed/pause/UI.
-                    ResnapClock(timing, p);
-                    MirrorSpeedUi(p.SpeedIndex);
-                    SetPaused(timing, p.Paused);
-                    SetScale(timing, ScaleForIndex(p.SpeedIndex, timing));
+                    MirrorSpeedUi(_clientAnchor.SpeedIndex);
+                    _uiSpeedShown = _clientAnchor.SpeedIndex;
                 }
-                else
-                {
-                    // Continuous soft correction. ORDER MATTERS: mirror the UI (SelectTimePreset writes
-                    // the UN-dilated PresetTimes[idx] into Timing.Scale + sets the widget index) and the
-                    // pause state FIRST, then overwrite Timing.Scale LAST with the dilated value so the
-                    // raw clock rate carries the correction while the UI widget still shows the
-                    // host-commanded speed index (the dilation is never seen as a user speed change).
-                    MirrorSpeedUi(p.SpeedIndex);
-                    SetPaused(timing, p.Paused);
-                    double hostScale = ScaleForIndex(p.SpeedIndex, timing);
-                    SetScale(timing, (float)(hostScale * corr.ScaleMultiplier));
-                }
+                // Keep the pause/running VISUAL (white+blink vs yellow) in sync with the host anchor.
+                MirrorPauseUi(paused);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] TimeSync apply failed: " + ex.Message);
+                Debug.LogError("[Multipleer] TimeSync client clock write failed: " + ex.Message);
             }
             finally
             {
@@ -238,19 +527,41 @@ namespace Multipleer.Network.TimeSync
             }
         }
 
-        // ─── HOST: apply a relayed client time-control request ────────────
+        // ─── CLIENT: ping scheduler ───────────────────────────────────────
 
-        public void OnClientRequestReceived(byte[] payload, long headerTs)
+        private void SchedulePings()
+        {
+            // Seed a burst the first time we tick as a client (or after a reconnect resets state):
+            // no offset yet and no burst in flight → arm one.
+            if (_burstRemaining == 0 && !_offset.HasOffset)
+                _burstRemaining = OffsetBurstCount;
+
+            _pingAccum += Time.unscaledDeltaTime;
+            float interval = _burstRemaining > 0 ? OffsetBurstIntervalSeconds : OffsetSteadyIntervalSeconds;
+            if (_pingAccum < interval) return;
+            _pingAccum = 0f;
+
+            SendClockPing();
+            if (_burstRemaining > 0) _burstRemaining--;
+        }
+
+        private void SendClockPing()
+        {
+            var ping = new ClockPingPayload(_nextPingId++, LocalRt());
+            _engine.SendToHost(new NetworkMessage(PacketType.TimeClockPing, TimeSyncProtocol.EncodePing(ping)));
+        }
+
+        // ─── HOST: apply a relayed client time-control request (0x38) ─────
+
+        public void OnClientRequestReceived(byte[] payload)
         {
             if (_engine == null || !_engine.IsHost) return;
-            if (!TimeSyncProtocol.TryDecodeTimeState(payload, out var p)) return;
+            if (!TimeSyncProtocol.TryDecodeRequest(payload, out var p)) return;
 
             var timing = GetTiming();
             if (timing == null) return; // host not in geoscape → ignore
 
-            // Last-writer-wins = ARRIVAL ORDER on the host's single thread. NO cross-client ts compare
-            // (sender wall-clock skew could otherwise permanently starve a slightly-behind client).
-            // Each request is simply applied; the most-recently-processed one wins.
+            // Last-writer-wins = ARRIVAL ORDER on the host's single thread. NO cross-client ts compare.
             IsApplyingRemote = true;
             try
             {
@@ -267,15 +578,15 @@ namespace Multipleer.Network.TimeSync
                 IsApplyingRemote = false;
             }
 
-            // Echo the authoritative result back to ALL immediately (incl. originator); the per-frame
-            // change-detect would also catch it, but this makes the round-trip snappy.
+            // Capture + broadcast a fresh anchor at this instant (snappy round-trip; the per-frame
+            // change-detect would also catch it).
             try
             {
                 bool paused = GetPaused(timing);
                 int idx = GetSpeedIndex();
-                double now = GetNowSeconds(timing);
+                long gTicks = GetNowTicks(timing);
                 _cachedPaused = paused; _cachedSpeedIndex = idx; _haveCache = true; _hbAccum = 0f;
-                Broadcast(new TimeStatePayload(paused, idx, now), reliable: true);
+                CaptureAndBroadcastAnchor(paused, idx, gTicks, reliable: true);
             }
             catch { /* heartbeat will recover */ }
         }
@@ -283,61 +594,60 @@ namespace Multipleer.Network.TimeSync
         // ─── Native writers ───────────────────────────────────────────────
 
         private static void SetPaused(object timing, bool paused)
-            => AccessTools.Property(timing.GetType(), "Paused").SetValue(timing, paused, null);
+            => _timingPausedProp.SetValue(timing, paused, null);
 
         private static void SetScale(object timing, float scale)
-            => AccessTools.Property(timing.GetType(), "Scale").SetValue(timing, scale, null);
+            => _timingScaleProp.SetValue(timing, scale, null);
 
         private static void MirrorSpeedUi(int speedIndex)
         {
             var tc = FindTimeControl();
-            if (tc == null) return;
+            if (tc == null || _tcSelectTimePresetMethod == null) return;
             // SelectTimePreset(int): clamps, sets SelectedPresetTime, writes Timing.Scale, updates the
-            // speed widget, and fires OnTimeSpeedChangeRequested (our input-intercept lets it through
-            // under IsApplyingRemote). No-op if the index already matches.
-            var m = AccessTools.Method(tc.GetType(), "SelectTimePreset", new[] { typeof(int) });
-            m?.Invoke(tc, new object[] { speedIndex });
+            // widget, fires OnTimeSpeedChangeRequested (our input-intercept lets it through under
+            // IsApplyingRemote). No-op if the index already matches.
+            _tcSelectTimePresetMethod.Invoke(tc, new object[] { speedIndex });
         }
 
         /// <summary>
-        /// Hard-set the client clock to the host's Now via the game's own save/load seam
-        /// (Timing.ProcessInstanceData) — R5: NOT GeoscapeView.SetGamePauseState (which carries a
-        /// TimeLimit unpause guard). We synthesize a TimingInstanceData with StartTime = host Now and
-        /// OwnNow = 0 so the derived Now == host Now, carrying the authoritative Paused/Scale too.
+        /// Mirror the host pause state into the native time widget's VISUAL indicator (white + blinking
+        /// pause glyph when paused vs yellow when running). RCA: the widget drives that look from its
+        /// Animator params "IsPaused"/"TimeMode", pushed only by UIModuleTimeControl.SetTimerSpeedState(),
+        /// which runs only when the dirty flags _updatePausedState/_updateTimeSpeedState are set — and
+        /// those are armed ONLY by Timing.Paused's setter event (TimingOnPausedEvent). The client never
+        /// touches that setter: it writes the clock via Timing.ProcessInstanceData, which sets the _paused
+        /// FIELD directly and fires NO OnPausedEvent — so the widget never re-evaluates and stays stuck in
+        /// its initial (paused/white) look even while the synced clock advances.
+        ///
+        /// Fix (native-UI-first, NO sim side-effect): ProcessInstanceData has ALREADY written the widget's
+        /// _timing._paused field to the host value this same frame, so we just re-arm the widget's own
+        /// dirty flag (_updatePausedState=true). Its next Update() then calls SetTimerPausedState +
+        /// SetTimerSpeedState, which read _timing.Paused (= the value we wrote) and push the correct
+        /// IsPaused/TimeMode to the Animator. We DO NOT set Timing.Paused via the setter (that would fire
+        /// events / reschedule and is exactly what the anchor design avoids) and we DO NOT advance the
+        /// local sim — the anchor stays the only time driver. Idempotent: re-armed only when the shown
+        /// state actually changes (mirrors the MirrorSpeedUi early-out), so no per-frame flag spam.
         /// </summary>
-        private void ResnapClock(object timing, TimeStatePayload p)
+        private void MirrorPauseUi(bool paused)
         {
-            EnsureReflection();
-            if (_timingInstanceDataType == null) return;
-
-            var tid = Activator.CreateInstance(_timingInstanceDataType);
-            var tidType = _timingInstanceDataType;
-
-            // TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(now)) → exact Now.
-            var timeUnitType = AccessTools.TypeByName("Base.Core.TimeUnit");
-            var fromTimeSpan = AccessTools.Method(timeUnitType, "FromTimeSpan", new[] { typeof(TimeSpan) });
-            object startTime = fromTimeSpan.Invoke(null, new object[] { TimeSpan.FromSeconds(p.Now) });
-            object zero = AccessTools.Field(timeUnitType, "Zero").GetValue(null);
-
-            float scale = ScaleForIndex(p.SpeedIndex, timing);
-
-            AccessTools.Field(tidType, "Paused").SetValue(tid, p.Paused);
-            AccessTools.Field(tidType, "Scale").SetValue(tid, scale);
-            AccessTools.Field(tidType, "StartTime").SetValue(tid, startTime);
-            AccessTools.Field(tidType, "StartFixedTime").SetValue(tid, zero);
-            AccessTools.Field(tidType, "OwnNow").SetValue(tid, zero);
-            AccessTools.Field(tidType, "OwnFixedNow").SetValue(tid, zero);
-
-            AccessTools.Method(timing.GetType(), "ProcessInstanceData", new[] { _timingInstanceDataType })
-                .Invoke(timing, new[] { tid });
+            if (_uiPausedKnown && _uiPausedShown == paused) return; // unchanged → no-op (idempotent)
+            var tc = FindTimeControl();
+            if (tc == null || _tcUpdatePausedField == null) return; // widget momentarily absent — retry next frame
+            // Re-arm the widget's own paused-state dirty flag; its Update() cascades to _updateTimeSpeedState
+            // and re-pushes the Animator params from the already-written _timing._paused. No setter, no event.
+            _tcUpdatePausedField.SetValue(tc, true);
+            _uiPausedKnown = true;
+            _uiPausedShown = paused;
         }
 
         private static float ScaleForIndex(int idx, object timing)
         {
             var tc = FindTimeControl();
-            if (tc != null)
+            if (tc != null && _tcPresetTimesField != null)
             {
-                var presets = AccessTools.Field(tc.GetType(), "PresetTimes")?.GetValue(tc) as float[];
+                // PERF: cache the PresetTimes array off the live widget (FindTimeControl drops the cache
+                // when the widget is replaced). Avoids a per-frame field GetValue + cast.
+                var presets = _presetTimesCached ?? (_presetTimesCached = _tcPresetTimesField.GetValue(tc) as float[]);
                 if (presets != null && presets.Length > 0)
                 {
                     int clamped = Mathf.Clamp(idx, 0, presets.Length - 1);
@@ -345,7 +655,7 @@ namespace Multipleer.Network.TimeSync
                 }
             }
             // Fallback: keep current scale.
-            try { return (float)AccessTools.Property(timing.GetType(), "Scale").GetValue(timing, null); }
+            try { return (float)_timingScaleProp.GetValue(timing, null); }
             catch { return 1f; }
         }
 
@@ -360,13 +670,13 @@ namespace Multipleer.Network.TimeSync
         {
             if (_engine == null || !_engine.IsActive || _engine.IsHost) return false;
 
-            // Permission gate (ControlTime bit). If the client isn't granted time control, swallow the
-            // input (block local) so it can't desync — host stays authoritative.
+            // Permission gate (ControlTime bit). If not granted, swallow the input (block local) so it
+            // can't desync — host stays authoritative.
             if (!PermissionManager.HasCampaignPermission(ClientIdentity.PlayerGuid, CampaignPermission.ControlTime))
                 return true;
 
-            var p = new TimeStatePayload(paused, speedIndex, 0.0);
-            var msg = new NetworkMessage(PacketType.TimeRequest, TimeSyncProtocol.EncodeTimeState(p));
+            var p = new TimeRequestPayload(paused, speedIndex);
+            var msg = new NetworkMessage(PacketType.TimeRequest, TimeSyncProtocol.EncodeRequest(p));
             _engine.SendToHost(msg);
             return true;
         }

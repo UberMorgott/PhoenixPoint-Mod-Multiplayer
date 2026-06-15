@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Multipleer.Network.MessageLayer;
+using Multipleer.Network.Sync;
 using Multipleer.Network.TimeSync;
 using Multipleer.Transport;
 using UnityEngine;
@@ -18,6 +19,14 @@ namespace Multipleer.Network
         public SessionManager Session { get; private set; }
         public SaveTransferCoordinator SaveTransfer { get; private set; }
         public TimeSyncManager TimeSync { get; private set; }
+        public SyncEngine Sync { get; private set; }
+
+        /// <summary>
+        /// True while a networked co-op session is established (transport up + we are host or have a
+        /// host peer). Sync interceptors MUST early-return when this is false so single-player play is
+        /// never intercepted. Read-only, derived — no extra state to maintain.
+        /// </summary>
+        public bool IsActiveSession => IsActive && (IsHost || (Session != null && Session.HostPeerId.HasValue));
 
         // Set true at the START of every intentional teardown (Disconnect/Shutdown). Tearing a
         // CompositeTransport down disconnects its children one-by-one; once the hosting child goes
@@ -52,6 +61,7 @@ namespace Multipleer.Network
             Session = new SessionManager(this);
             SaveTransfer = new SaveTransferCoordinator(this);
             TimeSync = new TimeSyncManager(this);
+            Sync = new SyncEngine(this);
             LocalSteamId = ResolveLocalSteamId();
 
             Transport.OnPacketReceived += OnPacketReceived;
@@ -81,6 +91,7 @@ namespace Multipleer.Network
             Session = new SessionManager(this);
             SaveTransfer = new SaveTransferCoordinator(this);
             TimeSync = new TimeSyncManager(this);
+            Sync = new SyncEngine(this);
             LocalSteamId = ResolveLocalSteamId();
 
             Transport.OnPacketReceived += OnPacketReceived;
@@ -106,6 +117,9 @@ namespace Multipleer.Network
             Session = null;
             SaveTransfer = null;
             TimeSync = null;
+            // Drop the host wallet-event subscription before the engine goes away (session end).
+            WalletWatcher.Detach();
+            Sync = null;
             IsActive = false;
             IsHost = false;
 
@@ -163,6 +177,8 @@ namespace Multipleer.Network
             // Suppress the transport-failed MessageBox: this teardown is user-initiated. Disconnecting
             // a CompositeTransport child-by-child can flip the aggregate State to Failed mid-teardown.
             _intentionalDisconnect = true;
+            // Session ending → drop the host wallet-event subscription (idempotent / no-op on client).
+            WalletWatcher.Detach();
             Transport?.Disconnect();
             IsHost = false;
         }
@@ -263,6 +279,7 @@ namespace Multipleer.Network
             Session?.Update();
             SaveTransfer?.Update();
             TimeSync?.Tick();
+            Sync?.Tick();
         }
 
         // ─── Internal Handlers ────────────────────────────────────────────
@@ -286,6 +303,8 @@ namespace Multipleer.Network
             {
                 Session.AddClient(peerId, endpoint);
                 OnClientConnected?.Invoke(peerId);
+                // Seed the late joiner with the current authoritative time anchor (reliable, targeted).
+                TimeSync?.OnPeerConnectedHost(peerId);
             }
             else
             {
@@ -306,6 +325,13 @@ namespace Multipleer.Network
         {
             Session.RemoveClient(peerId);
             OnClientDisconnected?.Invoke(peerId);
+
+            // Client lost its host peer on an IN-PLACE transport drop (no Shutdown→Initialize, the manager
+            // persists). Clear stale time-sync derive state so the next OnPeerConnected re-seeds the offset
+            // (ping burst) and the next anchor hard-sets the clock (spec §8 reconnect). RISK-1/RISK-2.
+            // No-op on the host (ResetClientState self-guards) — host keeps its monotonic anchor version.
+            if (!IsHost)
+                TimeSync?.ResetClientState();
         }
 
         private void OnPacketReceived(ulong senderSteamId, byte[] data)
@@ -450,15 +476,46 @@ namespace Multipleer.Network
                     SaveTransfer?.OnLoadComplete(msg);
                     break;
 
-                // ─── Geoscape time sync (host-authoritative pause/speed + heartbeat). ─
-                case PacketType.TimeState:
-                    // Host->all authoritative state. Clients apply (host ignores its own).
-                    TimeSync?.OnHostStateReceived(msg.Payload, msg.Timestamp);
+                // ─── Geoscape time sync (host-authoritative anchor clock + offset ping/pong). ─
+                case PacketType.TimeAnchor:
+                    // Host->all authoritative anchor. Clients derive (host ignores its own).
+                    TimeSync?.OnAnchorReceived(msg.Payload);
                     break;
 
                 case PacketType.TimeRequest:
-                    // Client->host time-control request. Host applies last-writer-wins + rebroadcasts.
-                    TimeSync?.OnClientRequestReceived(msg.Payload, msg.Timestamp);
+                    // Client->host time-control request. Host applies last-writer-wins + re-anchors.
+                    TimeSync?.OnClientRequestReceived(msg.Payload);
+                    break;
+
+                case PacketType.TimeClockPing:
+                    // Client->host NTP ping. Host stamps its receive time and pongs back to the sender.
+                    TimeSync?.OnClockPingReceived(msg.SenderSteamId, msg.Payload);
+                    break;
+
+                case PacketType.TimeClockPong:
+                    // Host->client NTP pong. Client completes the 3-stamp and updates its clock offset.
+                    TimeSync?.OnClockPongReceived(msg.Payload);
+                    break;
+
+                // ─── Action-sync engine (discrete-command relay + currency echo). ────
+                case PacketType.ActionRequest:
+                    // Client->host discrete action request. Host validates + sequences + broadcasts apply.
+                    Sync?.OnActionRequest(msg.SenderSteamId, msg.Payload);
+                    break;
+
+                case PacketType.ActionApply:
+                    // Host->all authoritative apply. Clients replay under the re-entrancy guard.
+                    Sync?.OnActionApply(msg.Payload);
+                    break;
+
+                case PacketType.ActionReject:
+                    // Host->originator rejection (permission / validation). v1: log + drop pending.
+                    Sync?.OnActionReject(msg.Payload);
+                    break;
+
+                case PacketType.WalletSync:
+                    // Host->all versioned full-wallet snapshot. Clients apply as signed diffs.
+                    Sync?.OnWalletSync(msg.Payload);
                     break;
 
                 // ─── STUB + TODO: members no longer silently fall through. ───────────

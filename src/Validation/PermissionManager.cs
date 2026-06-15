@@ -17,7 +17,8 @@ namespace Multipleer.Validation
         ManageAircraft      = 1 << 6,   // 0x040
         ControlTime         = 1 << 7,   // 0x080  (geoscape clock)
         ForceEndTurn        = 1 << 8,   // 0x100  (tactical turn-end)
-        FullCommander       = 1 << 9    // 0x200  (moved from 1<<7)
+        FullCommander       = 1 << 9,   // 0x200  (moved from 1<<7)
+        ManageDialogs       = 1 << 10   // 0x400  (geoscape event choices)
     }
 
     public static class PermissionManager
