@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Multipleer.Network.MessageLayer;
+using Multipleer.Network.Sync.State;
 using UnityEngine;
 
 namespace Multipleer.Network.Sync
@@ -27,6 +28,11 @@ namespace Multipleer.Network.Sync
         private uint _nonceCounter;    // client request correlation
         private bool _walletDirty;     // host: wallet changed since last flush
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
+
+        // ─── Generic state-channel echo (StateChannel infra) ───────────────
+        private readonly StateChannelRegistry _channels = new StateChannelRegistry();
+        private readonly Dictionary<byte, ulong> _channelVersion = new Dictionary<byte, ulong>(); // host: per-channel monotonic version
+        private readonly HashSet<byte> _channelDirty = new HashSet<byte>();                        // host: channels changed since last flush
 
         public SyncEngine(NetworkEngine engine)
         {
@@ -78,6 +84,11 @@ namespace Multipleer.Network.Sync
 
             try { using (SyncApplyScope.Enter()) action.Apply(rt); }   // host executes authoritative mutation
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest apply failed: " + ex.Message); }
+
+            // Research has no faction-level cancel event: a client-relayed cancel mutates the queue with no
+            // change-event to mark the channel dirty. Force a research-channel echo so the new authoritative
+            // queue reaches every peer (idempotent reconcile). Start/complete already self-mark via events.
+            if (action.Category == ActionCategory.Research) MarkChannelDirty(2);
 
             ulong seq = ++_hostSequence;
             _tracker.Mark(seq);
@@ -131,6 +142,93 @@ namespace Multipleer.Network.Sync
                 SyncProtocol.EncodeWalletSync(++_walletVersion, slots)));
         }
 
+        // ─── Generic state-channel echo (mechanism C) ────────────────────
+
+        /// <summary>Host: a channel's change-event fired; coalesced flush in <see cref="Tick"/>.</summary>
+        public void MarkChannelDirty(byte channelId) => _channelDirty.Add(channelId);
+
+        /// <summary>Host: snapshot + version-bump + broadcast a single channel. No-op if snapshot unavailable.</summary>
+        private void FlushChannel(IStateChannel channel)
+        {
+            var payload = channel.Snapshot(GeoRuntime.Instance);
+            if (payload == null) return;
+            byte id = channel.ChannelId;
+            _channelVersion.TryGetValue(id, out var v);
+            v++;
+            _channelVersion[id] = v;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.StateSync,
+                SyncProtocol.EncodeStateSync(id, v, payload)));
+        }
+
+        /// <summary>Host: push every channel's current state (geoscape became active / late joiner ready).</summary>
+        public void BroadcastAllChannels()
+        {
+            if (!_engine.IsHost) return;
+            foreach (var ch in _channels.All) FlushChannel(ch);
+        }
+
+        public void OnStateSync(byte[] data)
+        {
+            if (_engine.IsHost) return;   // host is the authority; never applies its own echo
+            if (!SyncProtocol.TryDecodeStateSync(data, out var channelId, out var ver, out var payload)) return;
+            var channel = _channels.Get(channelId);
+            if (channel == null) return;
+            if (!_tracker.ShouldApplyChannel(channelId, ver)) return;   // per-channel last-version drop
+            _tracker.MarkChannel(channelId, ver);
+            try { using (SyncApplyScope.Enter()) channel.Apply(GeoRuntime.Instance, payload); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
+            // Best-effort: rebuild the open UI for this channel's screen.
+            var screen = _channels.ScreenFor(channelId);
+            if (screen.HasValue) GeoUiRefresh.Refresh(GeoRuntime.Instance, screen.Value);
+        }
+
+        /// <summary>Host: drop all channel change-event subscriptions (session end). Idempotent.</summary>
+        public void DetachAllChannels()
+        {
+            foreach (var ch in _channels.All) ch.DetachHost();
+        }
+
+        // ─── Geoscape event display (host->all show/dismiss) ───────────────
+
+        /// <summary>Client: host raised a geoscape event → reconstruct + show the dialog (PauseGame=false).</summary>
+        public void OnEventRaised(byte[] data)
+        {
+            if (_engine.IsHost) return;   // host shows it via its own local sim
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var eventId, out var siteId)) return;
+            if (string.IsNullOrEmpty(eventId)) return;
+            try
+            {
+                var rt = GeoRuntime.Instance;
+                var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId);
+                if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
+        }
+
+        /// <summary>Client: host's answer was applied → close the open geoscape-event dialog.</summary>
+        public void OnEventDismiss(byte[] data)
+        {
+            if (_engine.IsHost) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var eventId)) return;
+            try { State.EventDisplay.Dismiss(GeoRuntime.Instance); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
+        }
+
+        /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers.</summary>
+        public void BroadcastEventRaised(string eventId, int siteId)
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
+                SyncProtocol.EncodeEventRaised(eventId, siteId)));
+        }
+
+        public void BroadcastEventDismiss(string eventId)
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
+                SyncProtocol.EncodeEventDismiss(eventId)));
+        }
+
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────
 
         public void Tick()
@@ -143,6 +241,9 @@ namespace Multipleer.Network.Sync
             // deferred world-load: the wallet only appears frames after EnterLevel→FinishLevel.
             WalletWatcher.Attach(_engine);
 
+            // Host: bind every state channel's change-event the same way (idempotent per channel).
+            foreach (var ch in _channels.All) ch.AttachHost(this);
+
             if (_walletDirty)
             {
                 _walletDirty = false;
@@ -150,6 +251,17 @@ namespace Multipleer.Network.Sync
                 if (slots != null)
                     _engine.BroadcastToAll(new NetworkMessage(PacketType.WalletSync,
                         SyncProtocol.EncodeWalletSync(++_walletVersion, slots)));
+            }
+
+            // Coalesced per-channel flush: snapshot + ++version + broadcast each dirty channel once.
+            if (_channelDirty.Count > 0)
+            {
+                foreach (var id in _channelDirty)
+                {
+                    var ch = _channels.Get(id);
+                    if (ch != null) FlushChannel(ch);
+                }
+                _channelDirty.Clear();
             }
         }
 

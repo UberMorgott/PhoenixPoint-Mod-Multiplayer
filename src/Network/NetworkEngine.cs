@@ -119,6 +119,8 @@ namespace Multipleer.Network
             TimeSync = null;
             // Drop the host wallet-event subscription before the engine goes away (session end).
             WalletWatcher.Detach();
+            // Drop all state-channel change-event subscriptions on the same path.
+            Sync?.DetachAllChannels();
             Sync = null;
             IsActive = false;
             IsHost = false;
@@ -179,6 +181,8 @@ namespace Multipleer.Network
             _intentionalDisconnect = true;
             // Session ending → drop the host wallet-event subscription (idempotent / no-op on client).
             WalletWatcher.Detach();
+            // Same for state-channel subscriptions (idempotent / no-op on client).
+            Sync?.DetachAllChannels();
             Transport?.Disconnect();
             IsHost = false;
         }
@@ -516,6 +520,21 @@ namespace Multipleer.Network
                 case PacketType.WalletSync:
                     // Host->all versioned full-wallet snapshot. Clients apply as signed diffs.
                     Sync?.OnWalletSync(msg.Payload);
+                    break;
+
+                case PacketType.StateSync:
+                    // Host->all per-channel versioned state echo. Clients overwrite + refresh UI.
+                    Sync?.OnStateSync(msg.Payload);
+                    break;
+
+                case PacketType.EventRaised:
+                    // Host->all geoscape event raised. Clients reconstruct + show the dialog (no local pause).
+                    Sync?.OnEventRaised(msg.Payload);
+                    break;
+
+                case PacketType.EventDismiss:
+                    // Host->all answer applied. Clients close their open geoscape-event dialog.
+                    Sync?.OnEventDismiss(msg.Payload);
                     break;
 
                 // ─── STUB + TODO: members no longer silently fall through. ───────────

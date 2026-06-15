@@ -134,5 +134,97 @@ namespace Multipleer.Network.Sync
             }
             catch { return false; }
         }
+
+        // ─── Generic per-channel state echo (StateChannel infra) ───────────
+        // Wire: [channelId:u8][version:u64][len:u16][payload:N]. The channel id selects an
+        // IStateChannel; version is host-monotonic per channel (client drops anything not newer).
+
+        public static byte[] EncodeStateSync(byte channelId, ulong version, byte[] payload)
+        {
+            payload = payload ?? new byte[0];
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(channelId);
+                w.Write(version);
+                w.Write((ushort)payload.Length);
+                w.Write(payload);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeStateSync(byte[] data, out byte channelId, out ulong version, out byte[] payload)
+        {
+            channelId = 0; version = 0; payload = null;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    channelId = r.ReadByte();
+                    version = r.ReadUInt64();
+                    payload = r.ReadBytes(r.ReadUInt16());
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        // ─── Geoscape event display (separate from channels) ───────────────
+        // EventRaised: [eventId:string][siteId:i32] — host tells clients to SHOW a dialog. siteId is
+        // GeoSite.SiteId (-1 = none → client falls back to StartingBase context).
+        // EventDismiss: [eventId:string] — host tells clients to CLOSE their open dialog.
+
+        public static byte[] EncodeEventRaised(string eventId, int siteId)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(eventId ?? "");
+                w.Write(siteId);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeEventRaised(byte[] data, out string eventId, out int siteId)
+        {
+            eventId = null; siteId = -1;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    eventId = r.ReadString();
+                    siteId = r.ReadInt32();
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static byte[] EncodeEventDismiss(string eventId)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(eventId ?? "");
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeEventDismiss(byte[] data, out string eventId)
+        {
+            eventId = null;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    eventId = r.ReadString();
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 }

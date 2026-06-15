@@ -50,6 +50,9 @@ namespace Multipleer.Network.Sync
         private static PropertyInfo _startingBaseProp; // GeoPhoenixFaction.StartingBase
         private static ConstructorInfo _eventCtor;     // GeoscapeEvent(GeoscapeEventData, GeoscapeEventContext)
         private static ConstructorInfo _contextCtor;   // GeoscapeEventContext(GeoSite, GeoFaction)
+        private static FieldInfo _mapField;            // GeoLevelController.Map
+        private static PropertyInfo _allSitesProp;     // GeoMap.AllSites
+        private static FieldInfo _siteIdField;         // GeoSite.SiteId
 
         private static void Ensure()
         {
@@ -76,6 +79,11 @@ namespace Multipleer.Network.Sync
             _eventSystemField = AccessTools.Field(geoLevelType, "EventSystem");
             _eventCtor = AccessTools.Constructor(_eventType, new[] { _eventDataType, _contextType });
             _contextCtor = AccessTools.Constructor(_contextType, new[] { _geoSiteType, _geoFactionType });
+            // Site-by-id resolution for context fidelity (GeoLevelController.Map:97 → GeoMap.AllSites:251 → GeoSite.SiteId:45).
+            _mapField = AccessTools.Field(geoLevelType, "Map");
+            var geoMapType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoMap");
+            if (geoMapType != null) _allSitesProp = AccessTools.Property(geoMapType, "AllSites");
+            _siteIdField = AccessTools.Field(_geoSiteType, "SiteId");
 
             _ready = _completeEvent != null && _eventIdField != null && _eventDataProp != null
                      && _choicesField != null;
@@ -167,6 +175,78 @@ namespace Multipleer.Network.Sync
                     || !_startingBaseProp.DeclaringType.IsInstanceOfType(phoenixFaction))
                     _startingBaseProp = AccessTools.Property(phoenixFaction.GetType(), "StartingBase");
                 return _startingBaseProp?.GetValue(phoenixFaction, null);
+            }
+            catch { return null; }
+        }
+
+        // ─── display side (host extract + client reconstruct) ─────────────
+
+        /// <summary>
+        /// Host: read <c>GeoscapeEvent.Context.Site.SiteId</c> (GeoSite.SiteId, int, -1 = none) off the
+        /// live raised event so clients can rebuild the same context. Returns -1 on any failure.
+        /// </summary>
+        public static int GetSiteId(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return -1;
+            try
+            {
+                Ensure();
+                var ctxField = AccessTools.Field(geoscapeEvent.GetType(), "Context"); // public readonly GeoscapeEventContext (:21)
+                var ctx = ctxField?.GetValue(geoscapeEvent);
+                if (ctx == null) return -1;
+                var siteField = AccessTools.Field(ctx.GetType(), "Site"); // public GeoSite Site (:47)
+                var site = siteField?.GetValue(ctx);
+                if (site == null || _siteIdField == null) return -1;
+                return (int)(_siteIdField.GetValue(site) ?? -1);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSiteId failed: " + ex.Message); return -1; }
+        }
+
+        /// <summary>
+        /// Client: reconstruct a <c>GeoscapeEvent</c> from its def for DISPLAY (no choice applied).
+        /// Context site = the GeoSite whose SiteId matches <paramref name="siteId"/>, else StartingBase.
+        /// Returns null on any failure (caller best-effort no-ops).
+        /// </summary>
+        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || string.IsNullOrEmpty(eventId)) return null;
+
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return null;
+
+                object eventData = ResolveEventData(rt, eventId);
+                if (eventData == null) return null;
+
+                object site = ResolveSiteById(rt, siteId) ?? GetStartingBase(fac);
+                if (site == null || _contextCtor == null || _eventCtor == null) return null;
+
+                object context = _contextCtor.Invoke(new[] { site, fac });
+                return _eventCtor.Invoke(new[] { eventData, context });
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
+        }
+
+        private static object ResolveSiteById(GeoRuntime rt, int siteId)
+        {
+            try
+            {
+                if (siteId < 0 || _mapField == null || _allSitesProp == null || _siteIdField == null) return null;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var map = _mapField.GetValue(geo);
+                if (map == null) return null;
+                var sites = _allSitesProp.GetValue(map, null) as IEnumerable;
+                if (sites == null) return null;
+                foreach (var s in sites)
+                {
+                    if (s == null) continue;
+                    var id = _siteIdField.GetValue(s);
+                    if (id is int i && i == siteId) return s;
+                }
+                return null;
             }
             catch { return null; }
         }

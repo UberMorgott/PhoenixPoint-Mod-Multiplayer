@@ -19,6 +19,7 @@ namespace Multipleer.Network.Sync
             // Research
             SyncedActionRegistry.Register(SyncedActionIds.StartResearch, StartResearchAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.ResearchCompleted, ResearchCompletedAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.CancelResearch, CancelResearchAction.Read);
 
             // Manufacturing
             SyncedActionRegistry.Register(SyncedActionIds.QueueManufacture, QueueManufactureAction.Read);

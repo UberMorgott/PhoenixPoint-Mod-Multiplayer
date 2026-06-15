@@ -52,6 +52,10 @@
     <Compile Include="..\src\Network\Sync\EventReflection.cs"><Link>Sync\EventReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\StartResearchAction.cs"><Link>Sync\Actions\StartResearchAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ResearchCompletedAction.cs"><Link>Sync\Actions\ResearchCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\CancelResearchAction.cs"><Link>Sync\Actions\CancelResearchAction.cs</Link></Compile>
+    <!-- Research state channel codec (pure) + reflection bridge (GeoRuntime/AccessTools only, no SyncEngine). -->
+    <Compile Include="..\src\Network\Sync\State\ResearchSnapshot.cs"><Link>Sync\State\ResearchSnapshot.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\ResearchStateReflection.cs"><Link>Sync\State\ResearchStateReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ManufactureCompletedAction.cs"><Link>Sync\Actions\ManufactureCompletedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ConstructFacilityAction.cs"><Link>Sync\Actions\ConstructFacilityAction.cs</Link></Compile>

@@ -35,6 +35,7 @@ public class SyncActionSerializationTests
         SyncRegistration.RegisterAll();
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.StartResearch));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ResearchCompleted));
+        Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.CancelResearch));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.QueueManufacture));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ManufactureCompleted));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ConstructFacility));
@@ -62,6 +63,17 @@ public class SyncActionSerializationTests
         var a = RoundTrip(new ResearchCompletedAction("PX_LaserTech_ResearchDef"));
         Assert.IsType<ResearchCompletedAction>(a);
         Assert.Equal(SyncedActionIds.ResearchCompleted, a.ActionId);
+    }
+
+    [Fact]
+    public void CancelResearch_RoundTrips()
+    {
+        SyncRegistration.RegisterAll();
+        var a = RoundTrip(new CancelResearchAction("PX_LaserTech_ResearchDef"));
+        Assert.IsType<CancelResearchAction>(a);
+        Assert.Equal(SyncedActionIds.CancelResearch, a.ActionId);
+        Assert.Equal(ActionCategory.Research, a.Category);
+        Assert.Equal(Write(new CancelResearchAction("PX_LaserTech_ResearchDef")), Write(a));
     }
 
     [Fact]

@@ -294,6 +294,10 @@ namespace Multipleer.Network
                 // already-current peers drop it as stale.
                 _engine.Sync?.BroadcastFullWallet();
 
+                // Same convergence for every state channel (inventory, …). Snapshot self-guards until
+                // the geoscape model is live; versioned per channel, so current peers drop stale echoes.
+                _engine.Sync?.BroadcastAllChannels();
+
                 if (_readyClients.Count >= _clients.Count && _clients.Count > 0)
                 {
                     var allReady = new NetworkMessage(PacketType.AllClientsReady);

@@ -65,6 +65,9 @@ namespace Multipleer.Network.MessageLayer
         ActionApply   = 0x61,   // host -> all
         ActionReject  = 0x62,   // host -> originator
         WalletSync    = 0x63,   // host -> all
+        StateSync     = 0x64,   // host -> all: per-channel versioned state echo [channelId][version][payload]
+        EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
+        EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
 
         // Chat
         ChatMessage = 0x50,

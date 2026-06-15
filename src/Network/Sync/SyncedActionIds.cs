@@ -6,6 +6,7 @@ namespace Multipleer.Network.Sync
         // Research 1-9
         public const ushort StartResearch = 1;
         public const ushort ResearchCompleted = 2;
+        public const ushort CancelResearch = 3;
 
         // Manufacturing 10-19
         public const ushort QueueManufacture = 10;
