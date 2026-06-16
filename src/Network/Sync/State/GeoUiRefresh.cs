@@ -23,11 +23,16 @@ namespace Multipleer.Network.Sync.State
     ///     pass each parameter's compiled default (so we replicate the open state's filter/mode defaults).
     ///   • "is open" = the module GameObject is active in hierarchy (UIModuleBehavior toggles its
     ///     GameObject active per UI state, UIModuleBehavior.cs:34-38).
+    ///   • Base layout: <c>GeoscapeModulesData.BaseLayoutModule</c> (public field, :42) →
+    ///     <c>UIModuleBaseLayout : UIModuleBehavior</c> (:27); re-Init =
+    ///     <c>Init(GeoPhoenixBase pxBase, GeoscapeViewContext context, bool forceBaseLayoutRebuild = true)</c>
+    ///     (:281; default true rebuilds the facility grid), reading back the cached <c>PxBase</c> (public
+    ///     getter, :191) + <c>_context</c> (private field, :152).
     /// </summary>
     public static class GeoUiRefresh
     {
-        /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C).</summary>
-        public enum Screen { Manufacturing, Research }
+        /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C); BaseLayout = facility grid.</summary>
+        public enum Screen { Manufacturing, Research, BaseLayout }
 
         private static bool _ready;
         private static FieldInfo _viewField;          // GeoLevelController.View
@@ -38,6 +43,10 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _researchModuleField;  // GeoscapeModulesData.ResearchModule
         private static FieldInfo _researchContextField; // UIModuleResearch._context (private)
         private static MethodInfo _researchInit;        // UIModuleResearch.Init(GeoscapeViewContext)
+        private static FieldInfo _baseLayoutModuleField;  // GeoscapeModulesData.BaseLayoutModule
+        private static FieldInfo _baseLayoutContextField; // UIModuleBaseLayout._context (private)
+        private static PropertyInfo _baseLayoutPxBaseProp; // UIModuleBaseLayout.PxBase (public getter)
+        private static MethodInfo _baseLayoutInit;         // UIModuleBaseLayout.Init(GeoPhoenixBase, GeoscapeViewContext, bool=true)
 
         private static void Ensure(GeoRuntime rt)
         {
@@ -47,6 +56,7 @@ namespace Multipleer.Network.Sync.State
             var modulesType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
             var manufType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleManufacturing");
             var researchType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleResearch");
+            var baseLayoutType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleBaseLayout");
             if (geoType == null || viewType == null || modulesType == null || manufType == null) return;
 
             _viewField = AccessTools.Field(geoType, "View");
@@ -75,6 +85,22 @@ namespace Multipleer.Network.Sync.State
                 }
             }
 
+            // Base-layout facility grid (best-effort; absence must not break Manufacturing/Research refresh).
+            if (baseLayoutType != null)
+            {
+                _baseLayoutModuleField = AccessTools.Field(modulesType, "BaseLayoutModule");
+                _baseLayoutContextField = AccessTools.Field(baseLayoutType, "_context");
+                _baseLayoutPxBaseProp = AccessTools.Property(baseLayoutType, "PxBase");
+                // UIModuleBaseLayout.Init(GeoPhoenixBase pxBase, GeoscapeViewContext context,
+                // bool forceBaseLayoutRebuild = true) — forceBaseLayoutRebuild defaults true → rebuilds the grid.
+                foreach (var m in baseLayoutType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (m.Name != "Init") continue;
+                    _baseLayoutInit = m;
+                    break;
+                }
+            }
+
             _ready = _viewField != null && _modulesField != null && _manufModuleField != null
                      && _manufContextField != null && _manufInit != null;
         }
@@ -90,9 +116,22 @@ namespace Multipleer.Network.Sync.State
                 {
                     case Screen.Manufacturing: RefreshManufacturing(rt); break;
                     case Screen.Research: RefreshResearch(rt); break;
+                    case Screen.BaseLayout: RefreshBaseLayout(rt); break;
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Single fan-out over every "needs-kick" geoscape module (those that rebuild only on Init, not from
+        /// model events): Research + Manufacturing + BaseLayout. Both host and client drive this after a synced
+        /// apply. Add one line here to cover a new needs-kick screen everywhere. Each Refresh no-ops if closed.
+        /// </summary>
+        public static void RefreshNeedsKick(GeoRuntime rt)
+        {
+            Refresh(rt, Screen.Research);
+            Refresh(rt, Screen.Manufacturing);
+            Refresh(rt, Screen.BaseLayout);
         }
 
         private static void RefreshManufacturing(GeoRuntime rt)
@@ -142,6 +181,37 @@ namespace Multipleer.Network.Sync.State
             for (int i = 1; i < ps.Length; i++)
                 args[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
             _researchInit.Invoke(module, args);
+        }
+
+        private static void RefreshBaseLayout(GeoRuntime rt)
+        {
+            if (_baseLayoutModuleField == null || _baseLayoutContextField == null
+                || _baseLayoutPxBaseProp == null || _baseLayoutInit == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return;
+            var module = _baseLayoutModuleField.GetValue(modules);
+            if (module == null) return;
+            if (!IsOpen(module)) return;
+
+            // Read back the cached owner base + context (set on the last open Init); no-op if either is null.
+            var pxBase = _baseLayoutPxBaseProp.GetValue(module, null);
+            if (pxBase == null) return;
+            var context = _baseLayoutContextField.GetValue(module);
+            if (context == null) return; // never opened yet → nothing cached to re-init with
+
+            // Re-invoke Init(pxBase, context, <defaults for the rest>) — forceBaseLayoutRebuild defaults true,
+            // so the facility grid is fully rebuilt from the model (UIModuleBaseLayout.cs:281).
+            var ps = _baseLayoutInit.GetParameters();
+            var args = new object[ps.Length];
+            args[0] = pxBase;
+            args[1] = context;
+            for (int i = 2; i < ps.Length; i++)
+                args[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
+            _baseLayoutInit.Invoke(module, args);
         }
 
         private static bool IsOpen(object module)
