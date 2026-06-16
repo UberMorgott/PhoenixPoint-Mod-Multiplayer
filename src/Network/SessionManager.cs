@@ -417,7 +417,19 @@ namespace Multipleer.Network
             // Learn THIS peer's own host-assigned slot by matching the local persistent identity.
             foreach (var p in peers)
                 if (p.PlayerGuid == ClientIdentity.PlayerGuid)
+                {
                     LocalSlotIndex = p.SlotIndex;
+                    // Seed the client's local PermissionManager from the authoritative roster mask so
+                    // PermissionGate.Check (which reads ClientIdentity.PlayerGuid) reflects what the host
+                    // actually granted. Without this the client's gate is blind — an empty PermissionManager
+                    // denies every category, so no client action is ever forwarded to the host. Re-runs on
+                    // every roster update, so a future live grant/revoke that re-sends the roster re-seeds the
+                    // client automatically. The host remains the sole authority (it re-checks every
+                    // ActionRequest); this client-side gate is UX only. Live mid-game grant/revoke via a
+                    // dedicated PermissionUpdate packet + a host management UI are deferred future work that
+                    // layers on top of this seeding.
+                    PermissionManager.SetPermissionsRaw(p.PlayerGuid, p.Permissions);
+                }
 
             foreach (var p in peers)
             {

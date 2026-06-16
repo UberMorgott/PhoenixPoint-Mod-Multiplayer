@@ -142,6 +142,13 @@ namespace Multipleer.Network.Sync
             }
             try { using (SyncApplyScope.Enter()) action.Apply(GeoRuntime.Instance); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionApply failed: " + ex.Message); }
+            // The open geoscape UI modules rebuild only on (re)Init, so a model mutation from an applied
+            // action (e.g. a host research/manufacture START) is invisible until the player re-enters the
+            // screen — unlike the state-channel echoes, which already re-drive the open module in OnStateSync.
+            // An action carries no screen id, so re-drive the action-driven modules; each call no-ops if that
+            // module isn't open. This makes host->client action applies reactive, matching the remove path.
+            GeoUiRefresh.Refresh(GeoRuntime.Instance, GeoUiRefresh.Screen.Research);
+            GeoUiRefresh.Refresh(GeoRuntime.Instance, GeoUiRefresh.Screen.Manufacturing);
         }
 
         public void OnActionReject(byte[] data)
