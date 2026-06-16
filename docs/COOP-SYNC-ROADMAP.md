@@ -23,12 +23,14 @@ Living roadmap + status tracker for the PhoenixPoint co-op multiplayer sync. NEW
 
 Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read-only, now) -> #1 skeleton -> #2 in-game -> #3 surfaces -> #4 efficiency (held as property of #1/#3) -> #5 reconnect.
 
-### #0 — Engine feasibility recon (READ-ONLY, early, parallel, no code)
+### #0 — Engine feasibility recon (READ-ONLY, early, parallel, no code) — DONE
 
 - How PP serializes/transfers a save mid-game (for #5 reconnect)
 - How each geoscape subsystem exposes mutation entry points + change events (for #3 channels)
 - Pause + aircraft-control hooks
 - Informs the skeleton's interfaces
+
+**#0 Result (2026-06-16):** Verdict: all 4 items FEASIBLE, no hard blockers. SDK open-questions resolved: mid-battle save = vanilla; save/load API = `PhoenixSaveManager.SaveGame` / `SaveManager.LoadGame` (already driven by mod). Residual unknowns (need in-game/runtime, not deeper dig): (a) base-UI uncommitted-edit-buffer on forced yank; (b) R1 client hourly-sim (`GeoLevelController.LevelHourlyUpdateCrt` runs authoritative income/research/recruit RNG locally) must be host-suppressed/host-driven before geoscape-tick surfaces ship; (c) verify decompile-proxy signatures vs installed Assembly-CSharp.dll before each Harmony patch.
 
 ### #1 — CORE / SKELETON (the reusable backbone)
 
@@ -66,7 +68,7 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 
 | Sub-project | Status | Notes |
 |---|---|---|
-| #0 Feasibility recon | NOT STARTED | next action; read-only |
+| #0 Feasibility recon | **DONE** | all 4 items feasible, no hard blockers; see #0 Result block |
 | #1 Core skeleton | NOT STARTED | most pieces exist; needs consolidation + registration ergonomics |
 | #2 Migrate existing + in-game gate | IN PROGRESS | surfaces below already work & deployed; skeleton consolidation pending; in-game verification ongoing |
 | #3 Geoscape surfaces | PARTIAL | DONE: research, manufacture, facility, geoscape-events(answer), wallet, time/anchor-rate. TODO: pause, aircraft control, base-building completeness, equipment, customization, recruitment, quests |
@@ -83,7 +85,6 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
   - Universal UI reactivity (`GeoUiRefresh.RefreshNeedsKick`: Research / Manufacturing / BaseLayout; wallet/events/time self-update)
   - Client->host unblocked via `PermissionManager` seeding in `HandlePeerList`
 - **NEXT ACTIONS:**
-  - (a) Run #0 read-only feasibility recon now
+  - (a) #1 core-skeleton brainstorm -> spec (`docs/superpowers/specs/`) -> writing-plans (now that #0 is done)
   - (b) User continues in-game verification of current research/manufacture/facility/events sync (the #2 gate)
-  - (c) Detailed brainstorm of #1 skeleton -> spec (`docs/superpowers/specs/`) -> writing-plans
 - **Note:** per-sub-project design specs go to `E:\DEV\PhoenixPoint\docs\superpowers\specs\YYYY-MM-DD-<topic>-design.md` when each is brainstormed; this file is the higher-level living tracker

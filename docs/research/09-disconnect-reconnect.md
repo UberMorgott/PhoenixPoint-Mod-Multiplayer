@@ -53,13 +53,12 @@
 - All phase-2 fields (`_reachedPlaying`, `_revealHoldStartedMs`, `_phase2DeadlineMs`, `_revealed`, `_revealAllSent`, `_lastReportedLoadPct`) reset in `OpenBarrier`. Same-machine 2-instance test rig safe: done-set keyed by slotIndex, barrier by `msg.SenderSteamId`, nothing on LocalSteamId.
 - Status: co-op load **CONFIRMED WORKING in-game over DirectIP** end-to-end across `ab4b921`(barrier decouple + reveal) → `602a51b`(loading-Level + native-bar rows) → `1e9f122`(self-hide + names + simultaneous reveal) → `b1dbd00`(reverted easing) → `4976474`(real native-bar fillAmount, easing removed, 20Hz). Only the **native-font nickname label** (native-font label commit, in-game-pending) and **STUN/UDP save transfer** (best-effort, no ACK/retransmit → use DirectIP; deferred) remain unconfirmed. **MultipleerLog** falls back to `multipleer-2.log`..`-5.log` on IOException so the 2nd same-machine instance gets its own log instead of Player.log. Instrumentation: `[Multipleer]` lines at the show predicate, phase-2 pump tick (pct), RosterProgress SEND/RECV, OnReachedPlaying/PerformDeferredLift/AllDone→RevealAll. Exact file:line → [00-current-state](00-current-state.md) §Co-op loading screen.
 
-## Mid-Battle Save Caveat
+## Mid-Battle Save Caveat — RESOLVED
 
 - Reconnect mid-tactical-mission needs a **save while in battle**.
-- The game supports mid-battle save — **but possibly via an experimental mod, not vanilla.**
-  - ⚠️ **VERIFY (SDK):** is mid-battle save **vanilla** or **mod-provided**? → [open questions](../specs/03-open-questions-sdk.md).
-  - If mod-provided → either **depend on that mod** or implement our own tactical snapshot via [04-serialization](04-serialization.md).
-- **v1 fallback if mid-battle save is unavailable/unreliable:** allow reconnect only on the **geoscape**. Drop in battle → host controls the player's soldiers until the mission ends → player rejoins at the next geoscape resync.
+- ~~The game supports mid-battle save — **but possibly via an experimental mod, not vanilla.**~~
+  - **RESOLVED = vanilla.** `TacticalView.QuickSaveGame():1133` → `SaveGameCrt():1141` exists in vanilla decompile; `PPSavegameMetaData.isTacticalSave` bool (`Base.Serialization\PPSavegameMetaData.cs:50`); no tactical-specific SaveType. Mid-battle save is vanilla — no mod dependency needed.
+- ~~v1 fallback~~ no longer needed; tactical reconnect path is viable.
 
 ## Host Disconnect (no migration in v1)
 

@@ -21,10 +21,11 @@
   - If yes → workaround: launch the `.exe` directly (bypass Steam) and/or use a second game-folder copy.
 - Needed for loopback `127.0.0.1` solo testing → [research/05-steam-networking](../research/05-steam-networking.md), [engine/02-transport-layer](../engine/02-transport-layer.md).
 
-## Save System
+## Save System — RESOLVED
 
 - PP save format: already compressed/binary on disk? (decides gzip vs send-as-is.) — partly answered: `.zsav`/`.zjsav` are gzip; see [research/04-serialization](../research/04-serialization.md). Confirm the exact API to invoke.
-- Save/load API to invoke for serialize (host) + load (client).
+- ~~Save/load API to invoke for serialize (host) + load (client).~~
+  - **RESOLVED.** Save = `PhoenixSaveManager.SaveGame(PPSavegameMetaData, ext, ByRef<bool> success, bool showCurtain)` (`PhoenixPoint.Common.Saves\PhoenixSaveManager.cs:191`). Load = `SaveManager.LoadGame(meta)`. Already driven by mod via `SaveLoadInterceptPatch`.
 - Relevant: [research/04-serialization](../research/04-serialization.md), [specs/02-session-lifecycle-and-player-management](02-session-lifecycle-and-player-management.md) §2.
 
 ## Loading Progress Hook
@@ -48,12 +49,11 @@
 - Confirm the base UI has **no uncommitted edit buffer** that a forced "yank-to-briefing" would lose.
 - Relevant: [research/08-geoscape-concurrency](../research/08-geoscape-concurrency.md).
 
-## Mid-Battle Save & Reconnect
+## Mid-Battle Save & Reconnect — RESOLVED
 
 - Reconnect-resync needs a **save while in a tactical mission** → [research/09-disconnect-reconnect](../research/09-disconnect-reconnect.md).
-- The game supports mid-battle save, but **possibly via an experimental mod, not vanilla** — confirm the source.
-  - If mod-provided → depend on that mod, or implement an own tactical snapshot → [research/04-serialization](../research/04-serialization.md).
-  - If unavailable → v1 fallback: reconnect only on the geoscape.
+- ~~The game supports mid-battle save, but **possibly via an experimental mod, not vanilla** — confirm the source.~~
+  - **RESOLVED = vanilla.** `TacticalView.QuickSaveGame():1133` → `SaveGameCrt():1141` exists in vanilla decompile. `PPSavegameMetaData` carries `isTacticalSave` bool (`Base.Serialization\PPSavegameMetaData.cs:50`); no tactical-specific SaveType. Mid-battle save is a vanilla feature.
 - Relevant: [specs/02-session-lifecycle-and-player-management](02-session-lifecycle-and-player-management.md) §2, [research/09-disconnect-reconnect](../research/09-disconnect-reconnect.md).
 
 ## Persistent Config Location
