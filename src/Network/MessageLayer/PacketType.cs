@@ -68,6 +68,7 @@ namespace Multipleer.Network.MessageLayer
         StateSync     = 0x64,   // host -> all: per-channel versioned state echo [channelId][version][payload]
         EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
         EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
+        SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]
 
         // Chat
         ChatMessage = 0x50,

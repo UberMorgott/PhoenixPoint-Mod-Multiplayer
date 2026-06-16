@@ -226,5 +226,41 @@ namespace Multipleer.Network.Sync
             }
             catch { return false; }
         }
+
+        // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
+        // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;
+        // kind (SyncKind) selects request/apply/snapshot/delta. The inner payload is the surface's
+        // own bytes (e.g. an action's Write output) — unchanged from the legacy per-packet format.
+
+        public static byte[] EncodeEnvelope(byte surfaceId, SyncKind kind, byte[] payload)
+        {
+            payload = payload ?? new byte[0];
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(surfaceId);
+                w.Write((byte)kind);
+                w.Write((ushort)payload.Length);
+                w.Write(payload);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeEnvelope(byte[] data, out byte surfaceId, out SyncKind kind, out byte[] payload)
+        {
+            surfaceId = 0; kind = SyncKind.ActionRequest; payload = null;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    surfaceId = r.ReadByte();
+                    kind = (SyncKind)r.ReadByte();
+                    payload = r.ReadBytes(r.ReadUInt16());
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 }
