@@ -45,6 +45,8 @@
          UnityEngine.CoreModule. Needed by SurfaceRegistry (Screen enum). -->
     <Compile Include="..\src\Network\Sync\State\GeoUiRefresh.cs"><Link>Sync\State\GeoUiRefresh.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SurfaceRegistry.cs"><Link>Sync\SurfaceRegistry.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ISyncSink.cs"><Link>Sync\ISyncSink.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SurfaceRouter.cs"><Link>Sync\SurfaceRouter.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SequenceTracker.cs"><Link>Sync\SequenceTracker.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\RequestDedup.cs"><Link>Sync\RequestDedup.cs</Link></Compile>
