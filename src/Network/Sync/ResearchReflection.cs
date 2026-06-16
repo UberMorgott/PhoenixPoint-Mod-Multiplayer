@@ -26,7 +26,7 @@ namespace Multipleer.Network.Sync
         private static MethodInfo _complete;       // Research.CompleteResearch(ResearchElement)
         private static MethodInfo _getById;        // Research.GetResearchById(string)
         private static FieldInfo _researchIdField; // ResearchElement.ResearchID
-        private static PropertyInfo _factionResearchProp; // GeoFaction.Research
+        private static FieldInfo _factionResearchField; // GeoFaction.Research (public FIELD, GeoFaction.cs:79)
 
         private static void Ensure()
         {
@@ -58,10 +58,13 @@ namespace Multipleer.Network.Sync
             if (fac == null) return null;
             try
             {
-                if (_factionResearchProp == null || _factionResearchProp.DeclaringType == null
-                    || !_factionResearchProp.DeclaringType.IsInstanceOfType(fac))
-                    _factionResearchProp = AccessTools.Property(fac.GetType(), "Research");
-                return _factionResearchProp?.GetValue(fac, null);
+                // GeoFaction.Research is a public FIELD (GeoFaction.cs:79), not a property — Property
+                // returned null, so a client-relayed StartResearchAction host-applied as a silent no-op.
+                // Mirror ResearchStateReflection.GetResearch / ItemStorageReflection.GetStorage (Field).
+                if (_factionResearchField == null || _factionResearchField.DeclaringType == null
+                    || !_factionResearchField.DeclaringType.IsInstanceOfType(fac))
+                    _factionResearchField = AccessTools.Field(fac.GetType(), "Research");
+                return _factionResearchField?.GetValue(fac);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.GetFactionResearch failed: " + ex.Message); return null; }
         }

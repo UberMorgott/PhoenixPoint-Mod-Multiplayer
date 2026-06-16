@@ -112,6 +112,16 @@ namespace Multipleer.Network.Sync
             // queue reaches every peer (idempotent reconcile). Start/complete already self-mark via events.
             if (action.Category == ActionCategory.Research) MarkChannelDirty(2);
 
+            // The host applies a client request authoritatively but never replays its own echo, so its own
+            // open geoscape module never rebuilds — a client-initiated research cancel/start stayed visually
+            // stale on the host until it re-entered the screen. GeoUiRefresh was only driven on client-inbound
+            // paths (OnActionApply / OnStateSync, both gated to non-host); native host-initiated cancel
+            // self-refreshes via UIModuleResearch, which is why host->client looked fine. Re-drive the host's
+            // open action-driven modules here, mirroring the client OnActionApply path; each call no-ops if
+            // that module isn't open. (Non-research/manufacturing categories have no GeoUiRefresh screen yet.)
+            GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.Research);
+            GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.Manufacturing);
+
             ulong seq = ++_hostSequence;
             _tracker.Mark(seq);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ActionApply,
