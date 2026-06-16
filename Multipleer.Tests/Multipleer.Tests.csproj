@@ -39,6 +39,7 @@
     <Compile Include="..\src\Network\Sync\SyncProtocol.cs"><Link>Sync\SyncProtocol.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncedActionIds.cs"><Link>Sync\SyncedActionIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncKind.cs"><Link>Sync\SyncKind.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SurfaceIds.cs"><Link>Sync\SurfaceIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SequenceTracker.cs"><Link>Sync\SequenceTracker.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\RequestDedup.cs"><Link>Sync\RequestDedup.cs</Link></Compile>
