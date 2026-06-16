@@ -19,7 +19,7 @@ namespace Multipleer.Network.Sync
     ///   B. Action relay — generic discrete-command bus (<see cref="ISyncedAction"/>): client requests →
     ///      host validates + sequences (last-writer-wins) + broadcasts apply → all clients replay.
     /// </summary>
-    public sealed class SyncEngine
+    public sealed class SyncEngine : ISyncSink
     {
         private readonly NetworkEngine _engine;
         private readonly SequenceTracker _tracker = new SequenceTracker();
@@ -41,10 +41,19 @@ namespace Multipleer.Network.Sync
         private readonly Dictionary<byte, ulong> _channelVersion = new Dictionary<byte, ulong>(); // host: per-channel monotonic version
         private readonly HashSet<byte> _channelDirty = new HashSet<byte>();                        // host: channels changed since last flush
 
+        // ─── Unified surface router (Phase 1 chokepoint) ───────────────────
+        // Additive: lives ALONGSIDE the legacy action path. Dormant until something SENDS a
+        // SyncEnvelope (Task 7 flip); shares the engine's existing _tracker + _seenRequests so the
+        // envelope path's ordering/dedup stays consistent with the still-live legacy path.
+        private readonly SurfaceRegistry _surfaces = new SurfaceRegistry();
+        private readonly SurfaceRouter _router;
+
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
             SyncRegistration.RegisterAll();   // registers every action reader (later batch)
+            SyncRegistration.RegisterSurfaces(_surfaces);
+            _router = new SurfaceRouter(_surfaces, _tracker, _seenRequests);
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -318,6 +327,49 @@ namespace Multipleer.Network.Sync
                 _channelDirty.Clear();
             }
         }
+
+        // ─── Unified envelope inbound + ISyncSink outbound ─────────────────
+        // Additive (Phase 1, Task 6): the SurfaceRouter receive path lives ALONGSIDE the legacy
+        // OnActionRequest/OnActionApply path, which stays primary. Dormant until a SyncEnvelope is
+        // actually sent (the Task-7 flip wires SendActionRequest → SendActionRequestViaEnvelope).
+
+        /// <summary>Inbound: a unified surface envelope arrived. Routes through the single chokepoint.</summary>
+        public void OnSyncEnvelope(ulong senderPeerId, byte[] data) => _router.OnInbound(senderPeerId, data, this);
+
+        /// <summary>Client: send an action as a request envelope (new unified path; not yet wired to interceptors).</summary>
+        public void SendActionRequestViaEnvelope(ISyncedAction a)
+        {
+            if (a == null) return;
+            byte surfaceId = (byte)a.ActionId;   // action surface ids mirror SyncedActionIds (== SurfaceIds)
+            var payload = WriteAction(a);
+            _engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest, payload)));
+        }
+
+        bool ISyncSink.IsHost => _engine.IsHost;
+        GeoRuntime ISyncSink.Runtime => GeoRuntime.Instance;
+        Guid ISyncSink.ResolveActor(ulong peerId) => ResolveActor(peerId);
+
+        void ISyncSink.RejectTo(ulong peerId, byte surfaceId)
+            => _engine.SendToClient(peerId, new NetworkMessage(PacketType.ActionReject,
+                SyncProtocol.EncodeActionReject(0u, 1, "rejected")));
+
+        void ISyncSink.RebroadcastActionApply(byte surfaceId, ulong sequence, byte[] payload)
+            => _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionApply,
+                    SurfaceRouter.EncodeApplyPayload(sequence, payload))));
+
+        void ISyncSink.MarkSurfaceDirty(byte surfaceId)
+        {
+            // Phase 1: mirror the legacy OnActionRequest special-case — research surfaces re-echo
+            // channel 2 (research has no faction-level cancel event to self-mark the channel dirty).
+            if (surfaceId == SurfaceIds.StartResearch || surfaceId == SurfaceIds.CancelResearch
+                || surfaceId == SurfaceIds.ResearchCompleted)
+                MarkChannelDirty(2);
+        }
+
+        /// <summary>After a synced apply, re-drive the open needs-kick geoscape modules (mirrors legacy GeoUiRefresh fan-out).</summary>
+        void ISyncSink.RefreshUi() => GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);
 
         // ─── Helpers ──────────────────────────────────────────────────────
 

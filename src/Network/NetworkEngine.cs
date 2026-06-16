@@ -538,6 +538,12 @@ namespace Multipleer.Network
                     Sync?.OnEventDismiss(msg.Payload);
                     break;
 
+                case PacketType.SyncEnvelope:
+                    // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
+                    // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).
+                    Sync?.OnSyncEnvelope(msg.SenderSteamId, msg.Payload);
+                    break;
+
                 // ─── STUB + TODO: members no longer silently fall through. ───────────
                 case PacketType.TacticalActionBroadcast:
                     // TODO(tactical-sync): apply broadcast on clients (latent: sent but never received-routed).
