@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -235,6 +236,10 @@ namespace Multipleer.Network.Sync
         public static byte[] EncodeEnvelope(byte surfaceId, SyncKind kind, byte[] payload)
         {
             payload = payload ?? new byte[0];
+            // The wire length field is u16; refuse to silently truncate an oversized payload.
+            if (payload.Length > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(payload),
+                    "Envelope payload exceeds the u16 length field (" + payload.Length + " > " + ushort.MaxValue + ").");
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
@@ -249,14 +254,23 @@ namespace Multipleer.Network.Sync
         public static bool TryDecodeEnvelope(byte[] data, out byte surfaceId, out SyncKind kind, out byte[] payload)
         {
             surfaceId = 0; kind = SyncKind.ActionRequest; payload = null;
+            // Require the full 4-byte header [surfaceId:u8][kind:u8][len:u16] before reading anything.
+            if (data == null || data.Length < 4) return false;
             try
             {
                 using (var ms = new MemoryStream(data))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
-                    surfaceId = r.ReadByte();
-                    kind = (SyncKind)r.ReadByte();
-                    payload = r.ReadBytes(r.ReadUInt16());
+                    byte sid = r.ReadByte();
+                    byte kindByte = r.ReadByte();
+                    // Forward-compat: an undefined kind byte is a graceful drop, never a crash.
+                    if (!Enum.IsDefined(typeof(SyncKind), kindByte)) return false;
+                    ushort len = r.ReadUInt16();
+                    // No partial accept: the declared payload length must actually be present.
+                    if (ms.Length - ms.Position < len) return false;
+                    surfaceId = sid;
+                    kind = (SyncKind)kindByte;
+                    payload = r.ReadBytes(len);
                     return true;
                 }
             }
