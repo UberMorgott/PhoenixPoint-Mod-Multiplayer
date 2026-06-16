@@ -83,6 +83,7 @@ namespace Multipleer.Harmony.Sync
         // __instance = the GeoscapeEvent that was just answered.
         public static void Postfix(object __instance)
         {
+            if (SyncApplyScope.IsApplying) return;   // engine-driven replay → don't re-broadcast a dismiss
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
             try

@@ -31,8 +31,10 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // __instance = GeoPhoenixBase; facilityDef = PhoenixFacilityDef; position = Vector2Int; rotation = enum.
-        public static bool Prefix(object __instance, object facilityDef, Vector2Int position, object rotation)
+        // __state carries the host action to broadcast AFTER the original succeeds (Postfix).
+        public static bool Prefix(object __instance, object facilityDef, Vector2Int position, object rotation, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -51,7 +53,8 @@ namespace Multipleer.Harmony.Sync
                 int rot = 0;
                 try { rot = Convert.ToInt32(rotation); } catch { rot = 0; }
                 var action = new ConstructFacilityAction(baseId, defId, position.x, position.y, rot);
-                if (engine.IsHost) { engine.Sync.BroadcastHostAction(action); return true; }
+                // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
+                if (engine.IsHost) { __state = action; return true; }
                 engine.Sync.SendActionRequest(action);
                 return false;
             }
@@ -60,6 +63,14 @@ namespace Multipleer.Harmony.Sync
                 Debug.LogError("[Multipleer] ConstructFacilityPatch failed: " + ex.Message);
                 return true;
             }
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed construct.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ConstructFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -84,8 +95,10 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // __instance = GeoPhoenixBase; facility = GeoPhoenixFacility.
-        public static bool Prefix(object __instance, object facility)
+        // __state carries the host action to broadcast AFTER the original succeeds (Postfix).
+        public static bool Prefix(object __instance, object facility, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -103,7 +116,8 @@ namespace Multipleer.Harmony.Sync
                 Vector2Int pos = BaseReflection.GetGridPosition(facility);
                 if (string.IsNullOrEmpty(baseId)) return true;
                 var action = new RepairFacilityAction(baseId, facId, pos.x, pos.y);
-                if (engine.IsHost) { engine.Sync.BroadcastHostAction(action); return true; }
+                // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
+                if (engine.IsHost) { __state = action; return true; }
                 engine.Sync.SendActionRequest(action);
                 return false;
             }
@@ -112,6 +126,14 @@ namespace Multipleer.Harmony.Sync
                 Debug.LogError("[Multipleer] RepairFacilityPatch failed: " + ex.Message);
                 return true;
             }
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed repair.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] RepairFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -135,8 +157,11 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // __instance = GeoPhoenixFacility being completed.
-        public static bool Prefix(object __instance)
+        // __state carries the completion action snapshotted in Prefix; broadcast in Postfix only if the
+        // original CompleteFacility returns normally (a thrown original skips the Postfix → no false echo).
+        public static bool Prefix(object __instance, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -151,13 +176,21 @@ namespace Multipleer.Harmony.Sync
                 string facId = BaseReflection.GetFacilityId(__instance);
                 Vector2Int pos = BaseReflection.GetGridPosition(__instance);
                 if (!string.IsNullOrEmpty(baseId))
-                    engine.Sync.BroadcastHostAction(new FacilityCompletedAction(baseId, facId, pos.x, pos.y));
+                    __state = new FacilityCompletedAction(baseId, facId, pos.x, pos.y);   // broadcast on success
             }
             catch (Exception ex)
             {
                 Debug.LogError("[Multipleer] CompleteFacilityPatch failed: " + ex.Message);
             }
             return true;
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed completion.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

@@ -7,6 +7,16 @@ namespace Multipleer.Network.Sync.Actions
     /// Host-driven facility completion (construction/repair finished). Wire payload:
     /// <c>string baseId, string facilityId, i32 gridX, i32 gridY</c>. Same identity scheme as
     /// <see cref="RepairFacilityAction"/>: FacilityId primary, grid position fallback.
+    ///
+    /// Deliberately NOT IHostOnlyApply, and NOT reward-suppressed — the client MUST replay this.
+    /// <c>GeoPhoenixFacility.CompleteFacility()</c> (decompile GeoPhoenixFacility.cs:347) is
+    /// <c>_health = 100; SetFacilityFunctioning()</c> → <c>State = Functioning</c>: a PURELY STRUCTURAL
+    /// flip to operational, with NO reward side-effect (no wallet, no item grant, no resource). There is
+    /// NO facility state channel, so nothing else converges the client's facility to "built" — suppressing
+    /// the replay would leave the client's facility stuck under-construction. Since there is nothing to
+    /// double-apply, replaying CompleteFacility on the client is both safe and necessary. (Verified
+    /// reward-free 2026-06-16; if a future game/TFTV change adds a reward to CompleteFacility this must be
+    /// revisited — suppress only the reward part, keep the structural flip.)
     /// </summary>
     public sealed class FacilityCompletedAction : ISyncedAction
     {

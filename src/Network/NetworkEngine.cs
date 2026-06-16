@@ -487,8 +487,9 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.TimeRequest:
-                    // Client->host time-control request. Host applies last-writer-wins + re-anchors.
-                    TimeSync?.OnClientRequestReceived(msg.Payload);
+                    // Client->host time-control request. Host permission-gates (ControlTime) the sender,
+                    // then applies last-writer-wins + re-anchors.
+                    TimeSync?.OnClientRequestReceived(msg.SenderSteamId, msg.Payload);
                     break;
 
                 case PacketType.TimeClockPing:

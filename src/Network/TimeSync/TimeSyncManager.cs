@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multipleer.Network.MessageLayer;
+using Multipleer.Network.Sync;
 using Multipleer.Validation;
 using UnityEngine;
 
@@ -47,6 +48,15 @@ namespace Multipleer.Network.TimeSync
         private const int OffsetBurstCount = 5;
         private const float OffsetSteadyIntervalSeconds = 3.0f;  // steady-state re-estimation
         private const double OffsetStepHardSetSeconds = 2.0;
+
+        // Host game-time scrub/skip detection threshold = max(floor, rate * realSlop). The host's
+        // anchor prediction uses rate*(LocalRt()-tAnchor); LocalRt() (float Time.realtimeSinceStartup)
+        // and the native game-clock integrator can drift a little in REAL-time terms, and that drift is
+        // amplified by the (possibly large) speed rate — so the tolerance scales with rate. A real
+        // native time-skip jumps game-time by minutes→hours, far above either term, while ordinary
+        // per-frame advance + basis slop stays below it → re-anchor only on a genuine jump.
+        private const double ScrubDivergenceFloorSeconds = 5.0; // absolute floor (paused / low rate)
+        private const double ScrubDivergenceRealSlopSeconds = 0.5; // tolerated real-time basis slop, ×rate
 
         private readonly NetworkEngine _engine;
 
@@ -304,6 +314,28 @@ namespace Multipleer.Network.TimeSync
                 return;
             }
 
+            // Game-time SCRUB / native time-skip detection: with {paused,speedIndex} unchanged, a native
+            // jump in Timing.Now (e.g. a scripted time-skip) would never be propagated — the heartbeat
+            // just re-sends the SAME stale anchor, so clients keep extrapolating the OLD game-time. Re-derive
+            // the game-time the stored anchor predicts for the host's current real-time (host offset = 0 ⇒
+            // serverNow == LocalRt) and, if the ACTUAL game-time diverges beyond a small epsilon, re-capture
+            // a fresh anchor so the new gAnchor/tAnchor reflect the skip.
+            if (_haveAnchor)
+            {
+                double rate = _lastAnchor.Paused ? 0.0 : ScaleForIndex(_lastAnchor.SpeedIndex, timing);
+                double predictedG = AnchorClock.Derive(
+                    AnchorPayload.TicksToSeconds(_lastAnchor.GAnchorTicks), rate,
+                    AnchorPayload.TicksToSeconds(_lastAnchor.TAnchorTicks), LocalRt());
+                double actualG = AnchorPayload.TicksToSeconds(gTicks);
+                double threshold = Math.Max(ScrubDivergenceFloorSeconds, rate * ScrubDivergenceRealSlopSeconds);
+                if (Math.Abs(actualG - predictedG) > threshold)
+                {
+                    _hbAccum = 0f;
+                    CaptureAndBroadcastAnchor(paused, idx, gTicks, reliable: true);
+                    return;
+                }
+            }
+
             // Periodic unreliable heartbeat: re-deliver the SAME stored anchor (safety re-sync).
             _hbAccum += Time.unscaledDeltaTime;
             if (_hbAccum >= HeartbeatIntervalSeconds && _haveAnchor)
@@ -553,10 +585,18 @@ namespace Multipleer.Network.TimeSync
 
         // ─── HOST: apply a relayed client time-control request (0x38) ─────
 
-        public void OnClientRequestReceived(byte[] payload)
+        public void OnClientRequestReceived(ulong senderId, byte[] payload)
         {
             if (_engine == null || !_engine.IsHost) return;
             if (!TimeSyncProtocol.TryDecodeRequest(payload, out var p)) return;
+
+            // PERMISSION GATE (host-authoritative): the ControlTime gate existed only client-side at
+            // RelayTimeRequest; a client with the bit revoked (or a malformed/forged packet) could still
+            // drive the host clock. Resolve the sender's player Guid (mirrors SyncEngine.ResolveActor) and
+            // reject unless it holds ControlTime. No mapping / no permission → drop silently (host stays
+            // authoritative; the heartbeat keeps that client's clock correct regardless).
+            Guid sender = ResolveSender(senderId);
+            if (!PermissionGate.CheckFor(sender, ActionCategory.TimeControl)) return;
 
             var timing = GetTiming();
             if (timing == null) return; // host not in geoscape → ignore
@@ -579,17 +619,25 @@ namespace Multipleer.Network.TimeSync
             }
 
             // Capture + broadcast a fresh anchor at this instant (snappy round-trip; the per-frame
-            // change-detect would also catch it).
+            // change-detect would also catch it). Use TryGetSpeedIndex (NOT GetSpeedIndex, which defaults
+            // to 1 on a widget-read miss) so a momentary widget-absence doesn't anchor a wrong speed — the
+            // heartbeat / next-frame change-detect recovers.
             try
             {
+                if (!TryGetSpeedIndex(out int idx)) return;
                 bool paused = GetPaused(timing);
-                int idx = GetSpeedIndex();
                 long gTicks = GetNowTicks(timing);
                 _cachedPaused = paused; _cachedSpeedIndex = idx; _haveCache = true; _hbAccum = 0f;
                 CaptureAndBroadcastAnchor(paused, idx, gTicks, reliable: true);
             }
             catch { /* heartbeat will recover */ }
         }
+
+        /// <summary>Resolve a transport peerId to its persistent player Guid (mirrors SyncEngine.ResolveActor).</summary>
+        private Guid ResolveSender(ulong peerId)
+            => _engine.Session != null && _engine.Session.Clients.TryGetValue(peerId, out var ci)
+                ? ci.PlayerGuid
+                : Guid.Empty;
 
         // ─── Native writers ───────────────────────────────────────────────
 

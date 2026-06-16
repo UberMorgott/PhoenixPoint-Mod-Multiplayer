@@ -73,7 +73,13 @@ namespace Multipleer.Network.Sync.State
         private static string ReadStr(BinaryReader r)
         {
             int len = r.ReadUInt16();
-            return Encoding.UTF8.GetString(r.ReadBytes(len));
+            // BinaryReader.ReadBytes silently returns FEWER bytes at end-of-stream (no throw), so a
+            // truncated payload would decode to garbage rather than being rejected. Verify the full
+            // length was read; otherwise throw → caught by Decode's try/catch → null (rejected).
+            var bytes = r.ReadBytes(len);
+            if (bytes.Length != len)
+                throw new EndOfStreamException("ResearchSnapshot: truncated string (wanted " + len + ", got " + bytes.Length + ")");
+            return Encoding.UTF8.GetString(bytes);
         }
     }
 }

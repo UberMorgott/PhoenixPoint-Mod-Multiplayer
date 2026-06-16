@@ -27,7 +27,21 @@ namespace Multipleer.Network.Sync.State
     ///     (ResearchElement.cs:139) — read AND written directly (no setter method). The game itself
     ///     assigns it directly (Research.cs:823, :1255).
     ///   • resolver: reuse <c>Research.GetResearchById(string)</c> (Research.cs:763).
-    ///   • complete (client apply): <c>Research.CompleteResearch(ResearchElement)</c> (Research.cs:576).
+    ///   • complete (client apply): do NOT call <c>Research.CompleteResearch</c>. Its
+    ///     <c>research.State = Completed</c> assignment runs the <c>ResearchElement.State</c> setter →
+    ///     <c>OnStateChanged(prev,curr)</c> which walks <c>i=prev+1..curr</c> firing
+    ///     Reveal()/Unlock()/<c>Complete()</c> (ResearchElement.cs:417-438). <c>Complete()</c>
+    ///     (ResearchElement.cs:574-586) runs the host-only REWARD side-effects: <c>ApplyRewards()</c> →
+    ///     <c>GiveReward(Faction)</c> + <c>Faction.Wallet.Give(ResearchDef.Resources)</c> +
+    ///     <c>OnCompleted</c>. On the host-authoritative CLIENT those rewards (wallet, unlocks) already
+    ///     arrive via the wallet echo / inventory channel, so re-running them = double-apply + desync.
+    ///     Instead we set the private <c>_state</c> backing field (ResearchElement.cs:133
+    ///     <c>[SerializeMember] private ResearchState _state</c>) DIRECTLY to <c>Completed</c>, which
+    ///     bypasses the entire setter cascade (no rewards, no events, no out-of-order reveals), and set
+    ///     <c>ResearchProgress = ResearchCost</c> + clear <c>IsInProgress</c> so the UI reads "done"
+    ///     (<c>IsCompleted</c>/<c>Progress01</c>, ResearchElement.cs:166/174). Each completed element is
+    ///     driven independently from the snapshot, so dependents reach their own authoritative state from
+    ///     their own snapshot entries — no reliance on prereq-topological cascade ordering.
     ///   • add to queue: <c>Research.AddResearchToQueue(ResearchElement)</c> (Research.cs:370).
     ///   • cancel/remove from queue: <c>Research.Cancel(ResearchElement)</c> (Research.cs:461). This is the
     ///     exact method the UI cancel button calls (UIModuleResearch.cs:435 <c>Research.Cancel(...)</c>) —
@@ -50,10 +64,13 @@ namespace Multipleer.Network.Sync.State
         private static PropertyInfo _queueProp;           // Research.ResearchQueue (List<ResearchElement>)
         private static MethodInfo _getById;               // Research.GetResearchById(string)
         private static MethodInfo _addToQueue;            // Research.AddResearchToQueue(ResearchElement)
-        private static MethodInfo _complete;              // Research.CompleteResearch(ResearchElement)
         private static MethodInfo _cancel;                // Research.Cancel(ResearchElement)
         private static FieldInfo _researchIdField;        // ResearchElement.ResearchID
         private static FieldInfo _progressField;          // ResearchElement.ResearchProgress (float)
+        private static FieldInfo _stateField;             // ResearchElement._state (private ResearchState backing field)
+        private static FieldInfo _inProgressBackingField; // ResearchElement.<IsInProgress>k__BackingField (bool)
+        private static PropertyInfo _researchCostProp;    // ResearchElement.ResearchCost (int => ResearchDef.ResearchCost)
+        private static object _completedStateValue;       // ResearchState.Completed enum value (boxed)
 
         private static void Ensure()
         {
@@ -66,14 +83,23 @@ namespace Multipleer.Network.Sync.State
             _queueProp = AccessTools.Property(_researchType, "ResearchQueue");
             _getById = AccessTools.Method(_researchType, "GetResearchById", new[] { typeof(string) });
             _addToQueue = AccessTools.Method(_researchType, "AddResearchToQueue", new[] { _researchElementType });
-            _complete = AccessTools.Method(_researchType, "CompleteResearch", new[] { _researchElementType });
             _cancel = AccessTools.Method(_researchType, "Cancel", new[] { _researchElementType });
             _researchIdField = AccessTools.Field(_researchElementType, "ResearchID");
             _progressField = AccessTools.Field(_researchElementType, "ResearchProgress");
+            // (1) Reward-free completion: write the private _state backing field directly (bypasses the
+            // ResearchElement.State setter → OnStateChanged → Complete() reward cascade). AccessTools.Field
+            // finds private backing fields; <IsInProgress>k__BackingField is the auto-prop backing field.
+            _stateField = AccessTools.Field(_researchElementType, "_state");
+            _inProgressBackingField = AccessTools.Field(_researchElementType, "<IsInProgress>k__BackingField");
+            _researchCostProp = AccessTools.Property(_researchElementType, "ResearchCost");
+            var researchStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchState");
+            if (researchStateType != null && researchStateType.IsEnum)
+                try { _completedStateValue = Enum.Parse(researchStateType, "Completed"); } catch { _completedStateValue = null; }
 
             _ready = _completedProp != null && _queueProp != null && _getById != null
-                     && _addToQueue != null && _complete != null && _cancel != null
-                     && _researchIdField != null && _progressField != null;
+                     && _addToQueue != null && _cancel != null
+                     && _researchIdField != null && _progressField != null
+                     && _stateField != null && _completedStateValue != null;
         }
 
         /// <summary>The live player-faction <c>Research</c> instance, or null.</summary>
@@ -131,9 +157,11 @@ namespace Multipleer.Network.Sync.State
         /// <summary>
         /// Client: reconcile the live research to EXACTLY match <paramref name="target"/> (idempotent).
         /// Research is monotonic — completed ids that the client hasn't completed are completed (never
-        /// un-completed). The queue is then made to match the snapshot: cancel any queued element absent
-        /// from the snapshot, add any missing element in order, and set each element's progress to the
-        /// snapshot value (direct field write).
+        /// un-completed) via a REWARD-FREE state echo (<see cref="CompleteEchoOnly"/>): the client is a
+        /// pure mirror and must NOT re-run the host reward cascade. The queue is then made to match the
+        /// snapshot: cancel any queued element absent from the snapshot, add any missing element in order,
+        /// and set each element's progress to the snapshot value (direct field write, gated so a requeue
+        /// can never side-effect-complete an item).
         /// </summary>
         public static void Apply(GeoRuntime rt, ResearchSnapshot target)
         {
@@ -145,13 +173,18 @@ namespace Multipleer.Network.Sync.State
                 var research = GetResearch(rt);
                 if (research == null) return;
 
-                // (1) Complete newly-completed research (monotonic).
+                // (1) Complete newly-completed research (monotonic) WITHOUT side-effects. The client is a
+                // pure mirror; rewards (wallet/unlocks) arrive via the wallet echo + inventory channel, so
+                // we must NOT run CompleteResearch's reward cascade. CompleteEchoOnly writes the private
+                // _state backing field directly to Completed (bypassing OnStateChanged). Driving each id
+                // independently from the snapshot also removes any reliance on prereq-topological ordering:
+                // dependents reach their own state from their own snapshot entries.
                 foreach (var id in target.Completed)
                 {
                     var el = Resolve(research, id);
                     if (el == null) continue;
                     if (IsCompleted(el)) continue;
-                    _complete.Invoke(research, new[] { el });
+                    CompleteEchoOnly(el);
                 }
 
                 // (2) Cancel queued elements that are NOT in the snapshot. Snapshot a copy of the live
@@ -180,14 +213,24 @@ namespace Multipleer.Network.Sync.State
                         var el = Resolve(research, id);
                         if (el == null) continue;
                         if (IsCompleted(el)) continue;           // already done → not a queue item
-                        // Set progress BEFORE (re)queue so AddResearchToQueue's instant-complete check
-                        // (Research.cs:393) sees the authoritative value.
-                        try { _progressField.SetValue(el, progress); } catch { /* best-effort */ }
-                        if (!InQueue(research, el))
+                        // (3) GATE the requeue so a queue item the host meant as IN-PROGRESS can NEVER
+                        // instant-complete on the client. AddResearchToQueue (Research.cs:393) calls the
+                        // reward-bearing CompleteResearch whenever ResearchProgress >= ResearchCost. A
+                        // snapshot whose progress >= cost is contradictory (it would be in Completed, not
+                        // the queue) — but rounding / a transient host value could trip it. We therefore
+                        // set a SUB-COST progress before the requeue (so the instant-complete branch is
+                        // never taken), then re-affirm the true snapshot progress AFTER, when no further
+                        // completion check runs. The element is never side-effect-completed during reconcile.
+                        bool wasInQueue = InQueue(research, el);
+                        if (!wasInQueue)
+                        {
+                            float safe = SafeRequeueProgress(el, progress);
+                            try { _progressField.SetValue(el, safe); } catch { /* best-effort */ }
                             _addToQueue.Invoke(research, new[] { el });
+                        }
                         // Re-affirm the authoritative progress AFTER the requeue. BeginResearching()
-                        // (ResearchElement.cs:282) does not reset ResearchProgress, but a direct re-set
-                        // guarantees the snapshot value survives regardless of the requeue path.
+                        // (ResearchElement.cs:282) does not reset ResearchProgress, and no completion check
+                        // runs here, so the true snapshot value lands safely (no reward cascade).
                         try { _progressField.SetValue(el, progress); } catch { /* re-affirm */ }
                     }
                     catch (Exception elEx)
@@ -290,6 +333,59 @@ namespace Multipleer.Network.Sync.State
                 return p != null && (bool)p.GetValue(element, null);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Bring <paramref name="element"/> to <c>Completed</c> as a PURE STATE ECHO — write the private
+        /// <c>_state</c> backing field directly (bypassing the <c>ResearchElement.State</c> setter →
+        /// <c>OnStateChanged</c> → <c>Complete()</c> reward cascade), then mirror the cosmetic completion
+        /// flags the UI reads: <c>ResearchProgress = ResearchCost</c> (Progress01 → 100%) and clear
+        /// <c>IsInProgress</c>. NO rewards, wallet, unlocks, or events fire — those arrive via the wallet
+        /// echo / inventory channel. <see cref="_completedStateValue"/> and <see cref="_stateField"/> are
+        /// guaranteed non-null when <c>_ready</c> (see <see cref="Ensure"/>).
+        /// </summary>
+        private static void CompleteEchoOnly(object element)
+        {
+            try { _stateField.SetValue(element, _completedStateValue); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.CompleteEchoOnly _state write failed: " + ex.Message); }
+
+            // Cosmetic flags the UI reads off a completed element. Best-effort: a missing optional field
+            // must not abort the echo (state is already authoritative).
+            try
+            {
+                int cost = GetResearchCost(element);
+                if (cost > 0) _progressField.SetValue(element, (float)cost);
+            }
+            catch { /* progress is cosmetic for a Completed element */ }
+            try { _inProgressBackingField?.SetValue(element, false); } catch { /* optional */ }
+        }
+
+        /// <summary>Read <c>ResearchElement.ResearchCost</c> (int =&gt; ResearchDef.ResearchCost), or 0.</summary>
+        private static int GetResearchCost(object element)
+        {
+            try
+            {
+                if (_researchCostProp == null) return 0;
+                var v = _researchCostProp.GetValue(element, null);
+                return v is int i ? i : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// Progress to set on <paramref name="element"/> JUST BEFORE <c>AddResearchToQueue</c> so its
+        /// instant-complete branch (Research.cs:393, <c>progress &gt;= cost</c> → reward-bearing
+        /// <c>CompleteResearch</c>) can never fire for an item the host meant as in-progress. Returns the
+        /// requested <paramref name="progress"/> when it is safely below cost; otherwise a value strictly
+        /// below cost (the true value is re-affirmed after the requeue, when no completion check runs).
+        /// </summary>
+        private static float SafeRequeueProgress(object element, float progress)
+        {
+            int cost = GetResearchCost(element);
+            if (cost <= 0) return 0f;                 // unknown/zero cost → start at 0, never instant-complete
+            float ceiling = (float)cost - 0.001f;     // strictly below cost
+            if (ceiling < 0f) ceiling = 0f;
+            return progress < ceiling ? progress : ceiling;
         }
 
         private static bool InQueue(object research, object element)

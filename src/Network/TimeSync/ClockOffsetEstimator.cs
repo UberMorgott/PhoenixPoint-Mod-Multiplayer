@@ -13,8 +13,9 @@ namespace Multipleer.Network.TimeSync
     ///   receive) → client at t3 (client localRT) computes:
     ///     rtt    = t3 - t0
     ///     offset = t1 - (t0 + t3)/2
-    /// Keeps the BEST (lowest-RTT) sample in a sliding window of the last N accepted samples (classic
-    /// "best of N" — minimal one-way asymmetry), rejecting samples with rtt &gt; max (jitter/queuing).
+    /// Reports the MEDIAN offset of the last N accepted samples in a sliding window (robust to a single
+    /// asymmetric/one-way-skewed sample, which a lowest-RTT "best of N" pick would let bias serverNow
+    /// permanently), rejecting samples with rtt &gt; max (jitter/queuing).
     /// </summary>
     public class ClockOffsetEstimator
     {
@@ -113,21 +114,27 @@ namespace Multipleer.Network.TimeSync
             while (_window.Count > _windowSize)
                 _window.Dequeue();
 
-            // Best-of-N: pick the lowest-RTT sample's offset.
-            double bestRtt = double.PositiveInfinity;
-            double bestOffset = 0.0;
-            foreach (var w in _window)
-            {
-                if (w.Rtt < bestRtt)
-                {
-                    bestRtt = w.Rtt;
-                    bestOffset = w.Offset;
-                }
-            }
-
-            _offset = bestOffset;
+            // MEDIAN-of-window of the accepted OFFSETS. Previously this took the single lowest-RTT
+            // sample's offset, so one asymmetric (one-way-skewed) sample with the lowest RTT biased
+            // serverNow for the whole window lifetime. The median is robust to a single such outlier
+            // (it must move past half the window to shift the estimate) while staying cheap and adding
+            // no smoothing lag — the visual lerp already absorbs small steps (spec §7).
+            _offset = MedianOffset();
             _hasOffset = true;
             return true;
+        }
+
+        /// <summary>Median of the accepted-sample offsets currently in the window (even count → mean of the two middle).</summary>
+        private double MedianOffset()
+        {
+            int n = _window.Count;
+            if (n == 0) return _offset;
+            var offsets = new double[n];
+            int i = 0;
+            foreach (var w in _window) offsets[i++] = w.Offset;
+            Array.Sort(offsets);
+            int mid = n / 2;
+            return (n % 2 == 1) ? offsets[mid] : (offsets[mid - 1] + offsets[mid]) / 2.0;
         }
 
         /// <summary>

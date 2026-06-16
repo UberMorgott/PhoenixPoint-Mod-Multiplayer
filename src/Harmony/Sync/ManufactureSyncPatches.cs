@@ -29,8 +29,10 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // item = the ManufacturableItem being queued.
-        public static bool Prefix(object item)
+        // __state carries the host action to broadcast AFTER the original succeeds (Postfix).
+        public static bool Prefix(object item, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -46,7 +48,8 @@ namespace Multipleer.Harmony.Sync
                 string id = ManufactureReflection.GetItemId(item);
                 if (string.IsNullOrEmpty(id)) return true;
                 var action = new QueueManufactureAction(id);
-                if (engine.IsHost) { engine.Sync.BroadcastHostAction(action); return true; }
+                // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
+                if (engine.IsHost) { __state = action; return true; }
                 engine.Sync.SendActionRequest(action);
                 return false;
             }
@@ -55,6 +58,14 @@ namespace Multipleer.Harmony.Sync
                 Debug.LogError("[Multipleer] ManufactureItemPatch failed: " + ex.Message);
                 return true;
             }
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed queue.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureItemPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -82,8 +93,11 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // element = the ManufactureQueueItem being finished.
-        public static bool Prefix(object element)
+        // __state carries the completion action snapshotted in Prefix (the queue index MUST be captured
+        // before the original removes the item) and broadcast in Postfix only if the original succeeds.
+        public static bool Prefix(object element, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -95,13 +109,23 @@ namespace Multipleer.Harmony.Sync
                 string id = ManufactureReflection.GetQueueItemId(element);
                 int idx = ManufactureReflection.GetQueueIndex(GeoRuntime.Instance, element);
                 if (!string.IsNullOrEmpty(id))
-                    engine.Sync.BroadcastHostAction(new ManufactureCompletedAction(id, idx));
+                    __state = new ManufactureCompletedAction(id, idx);   // snapshot pre-removal; broadcast on success
             }
             catch (Exception ex)
             {
                 Debug.LogError("[Multipleer] FinishManufactureItemPatch failed: " + ex.Message);
             }
             return true;
+        }
+
+        // Host-only (via __state) and only on a normal return of the original (Harmony skips Postfix on a
+        // thrown original) → broadcast the confirmed completion so clients never hear a completion that
+        // failed to actually apply on the authority.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] FinishManufactureItemPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

@@ -129,6 +129,17 @@ namespace Multipleer.Network.Sync.State
                 var storage = GetStorage(rt);
                 if (storage == null) return;
 
+                // NOTE — INVARIANT: faction global ItemStorage holds only STATELESS, count-only items.
+                // The wire snapshot carries (guid, count) per def ONLY — it cannot represent per-GeoItem
+                // state (AmmoManager / loaded magazines, charges, malfunction%). So Clear()+rebuild with a
+                // fresh `new GeoItem(def, count)` is correct here: it exactly mirrors the game's own load
+                // path (GeoFaction.LevelStartLoadedGame, GeoFaction.cs:600-601), and a count-ctor GeoItem
+                // has an empty AmmoManager so the faction-storage auto-unload (ItemStorage.cs:48-57) is a
+                // no-op. Stateful per-instance items (a loaded weapon, a partially-used medkit) live on
+                // soldiers / in equipment, NOT in faction storage, and are reconciled by their own
+                // channels — they never round-trip through here, so no per-instance state is destroyed.
+                // Do NOT switch to a diff-against-existing reconcile: there is no per-instance state to
+                // preserve, and the snapshot couldn't carry it anyway.
                 _clearMethod.Invoke(storage, null);
                 foreach (var (guid, count) in target)
                 {

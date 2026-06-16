@@ -40,6 +40,7 @@
     <Compile Include="..\src\Network\Sync\SyncedActionIds.cs"><Link>Sync\SyncedActionIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SequenceTracker.cs"><Link>Sync\SequenceTracker.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\RequestDedup.cs"><Link>Sync\RequestDedup.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Sync\ISyncedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Sync\PermissionGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Sync\GeoRuntime.cs</Link></Compile>

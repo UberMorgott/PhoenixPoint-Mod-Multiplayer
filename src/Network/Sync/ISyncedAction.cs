@@ -28,6 +28,16 @@ namespace Multipleer.Network.Sync
         void Apply(GeoRuntime rt);
     }
 
+    /// <summary>
+    /// Marker for actions whose <see cref="ISyncedAction.Apply"/> must run ONLY on the authoritative host
+    /// and be SUPPRESSED on a client replay. The host applies the outcome exactly once; the client must not
+    /// re-run reward/outcome side-effects (it would diverge from the host) — its synced consequences arrive
+    /// through the dedicated echoes/channels (wallet, inventory, research) instead. Used by event-answer
+    /// outcomes whose effects are not fully channelled. The host call path (OnActionRequest) never checks
+    /// this; only the client replay path (OnActionApply) does.
+    /// </summary>
+    public interface IHostOnlyApply { }
+
     /// <summary>Reconstructs an action from its payload bytes.</summary>
     public delegate ISyncedAction ActionReader(BinaryReader r);
 }

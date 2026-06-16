@@ -32,6 +32,16 @@ namespace Multipleer.Network.Sync
     /// </summary>
     public static class EventReflection
     {
+        /// <summary>Sentinel for an intentional null / "decline" choice (the game keys decline as the null choice).</summary>
+        public const int ChoiceDecline = -1;
+
+        /// <summary>
+        /// Sentinel for a choice we could NOT resolve (null event, missing data/choices, or the choice was
+        /// not found in the list). Distinct from <see cref="ChoiceDecline"/> so a real positive choice that
+        /// fails lookup is never silently replicated as a decline — callers fail OPEN instead of broadcasting.
+        /// </summary>
+        public const int ChoiceLookupFailed = int.MinValue;
+
         private static bool _ready;
         private static Type _eventType;        // GeoscapeEvent
         private static Type _eventDataType;     // GeoscapeEventData
@@ -99,19 +109,26 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetEventId failed: " + ex.Message); return null; }
         }
 
-        /// <summary>Index of <paramref name="choice"/> within the live event's Choices, or -1.</summary>
+        /// <summary>
+        /// Index of <paramref name="choice"/> within the live event's Choices.
+        /// Returns <see cref="ChoiceDecline"/> (-1) for an intentional null/decline choice,
+        /// <see cref="ChoiceLookupFailed"/> when the event/data/choices can't be introspected or the choice
+        /// isn't found. Callers MUST treat the failure sentinel as "abort + fail open", never as a decline.
+        /// </summary>
         public static int GetChoiceIndex(object geoscapeEvent, object choice)
         {
-            if (geoscapeEvent == null) return -1;
-            if (choice == null) return -1; // null choice = "decline / no choice"
+            if (choice == null) return ChoiceDecline;        // intentional decline / no-choice
+            if (geoscapeEvent == null) return ChoiceLookupFailed; // can't introspect a real choice → lookup failed
             try
             {
                 Ensure();
                 var data = _eventDataProp?.GetValue(geoscapeEvent, null);
                 var choices = _choicesField?.GetValue(data) as IList;
-                return choices?.IndexOf(choice) ?? -1;
+                if (choices == null) return ChoiceLookupFailed; // no choice list → can't resolve a real choice
+                int idx = choices.IndexOf(choice);
+                return idx >= 0 ? idx : ChoiceLookupFailed;     // not found ≠ decline
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceIndex failed: " + ex.Message); return -1; }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceIndex failed: " + ex.Message); return ChoiceLookupFailed; }
         }
 
         // ─── apply (Apply side) ───────────────────────────────────────────

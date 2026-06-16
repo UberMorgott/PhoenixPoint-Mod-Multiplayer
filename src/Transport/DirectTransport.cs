@@ -23,6 +23,13 @@ namespace Multipleer.Transport
         private TcpListener _listener;
         private readonly Dictionary<ulong, TcpClient> _clients = new Dictionary<ulong, TcpClient>();
         private readonly Queue<(ulong, byte[])> _incomingQueue = new Queue<(ulong, byte[])>();
+        // Peer connect/disconnect raised on background socket threads (TCP accept thread / per-peer
+        // read thread) are marshalled here and surfaced on the main thread in Update() — mirroring the
+        // _incomingQueue packet drain — because their downstream handlers (NetworkEngine.OnPeerConnected
+        // → TimeSync.OnPeerConnectedHost / OnPeerDisconnected → TimeSync.ResetClientState) touch Unity
+        // APIs and shared clock state that must be touched on the main thread only.
+        private readonly Queue<(bool connected, ulong peerId, string endpoint)> _peerEventQueue
+            = new Queue<(bool, ulong, string)>();
         private readonly object _lock = new object();
         private long _nextPeerId = 1;
         private ulong _hostPeerId;
@@ -283,8 +290,27 @@ namespace Multipleer.Transport
         public void Update()
         {
             // Surface a completed client-connect on the main thread first (success → Connected +
-            // peer; failure/timeout → Failed), then drain received packets.
+            // peer; failure/timeout → Failed), then drain peer connect/disconnect events (before
+            // packets, preserving the "connect precedes packets" ordering the composite relies on),
+            // then drain received packets — all on the main thread.
             SurfacePendingConnect();
+
+            // Drain peer events under the lock into a local list, then raise them WITHOUT the lock so a
+            // handler that calls back into Send/Broadcast can't deadlock and shared transport state isn't
+            // held while arbitrary handler code runs.
+            while (true)
+            {
+                bool connected;
+                ulong peerId;
+                string endpoint;
+                lock (_lock)
+                {
+                    if (_peerEventQueue.Count == 0) break;
+                    (connected, peerId, endpoint) = _peerEventQueue.Dequeue();
+                }
+                if (connected) OnPeerConnected?.Invoke(peerId, endpoint);
+                else OnPeerDisconnected?.Invoke(peerId, endpoint);
+            }
 
             lock (_lock)
             {
@@ -304,9 +330,15 @@ namespace Multipleer.Transport
                 {
                     var client = _listener.AcceptTcpClient();
                     var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
-                    lock (_lock) { _clients[peerId] = client; }
-                    OnPeerConnected?.Invoke(peerId,
-                        client.Client.RemoteEndPoint?.ToString() ?? "unknown");
+                    var endpoint = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+                    // Marshal the connect onto the main thread (drained in Update before packets) so the
+                    // Unity-touching OnPeerConnected handler never runs on this accept thread. The read
+                    // loop only starts here, so no packet can be enqueued before this connect event.
+                    lock (_lock)
+                    {
+                        _clients[peerId] = client;
+                        _peerEventQueue.Enqueue((true, peerId, endpoint));
+                    }
                     StartReadLoop(peerId, client);
                 }
                 catch { break; }
@@ -344,8 +376,14 @@ namespace Multipleer.Transport
                 }
                 catch
                 {
-                    lock (_lock) { _clients.Remove(peerId); }
-                    OnPeerDisconnected?.Invoke(peerId, "connection lost");
+                    // Marshal the disconnect onto the main thread (drained in Update) so the
+                    // OnPeerDisconnected handler — which rewrites shared time-sync clock state via
+                    // TimeSync.ResetClientState — never runs on this background receive thread.
+                    lock (_lock)
+                    {
+                        _clients.Remove(peerId);
+                        _peerEventQueue.Enqueue((false, peerId, "connection lost"));
+                    }
                 }
             }) { IsBackground = true };
             thread.Start();

@@ -88,7 +88,12 @@ namespace Multipleer.Network.Sync.State
                     for (int i = 0; i < n; i++)
                     {
                         int gl = r.ReadUInt16();
-                        string guid = Encoding.UTF8.GetString(r.ReadBytes(gl));
+                        // BinaryReader.ReadBytes silently returns fewer bytes on truncation (no throw);
+                        // verify the full guid length was read, else bail (caught below → null = no-op).
+                        var gbytes = r.ReadBytes(gl);
+                        if (gbytes.Length != gl)
+                            throw new EndOfStreamException("InventoryChannel: truncated guid (wanted " + gl + ", got " + gbytes.Length + ")");
+                        string guid = Encoding.UTF8.GetString(gbytes);
                         int count = r.ReadInt32();
                         list.Add((guid, count));
                     }

@@ -31,8 +31,10 @@ namespace Multipleer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // research = the ResearchElement being queued.
-        public static bool Prefix(object research)
+        // __state carries the host action to broadcast AFTER the original succeeds (Postfix).
+        public static bool Prefix(object research, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -48,7 +50,8 @@ namespace Multipleer.Harmony.Sync
                 string id = ResearchReflection.GetId(research);
                 if (string.IsNullOrEmpty(id)) return true; // can't identify → fail open to vanilla
                 var action = new StartResearchAction(id);
-                if (engine.IsHost) { engine.Sync.BroadcastHostAction(action); return true; }
+                // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
+                if (engine.IsHost) { __state = action; return true; }
                 engine.Sync.SendActionRequest(action);
                 return false;
             }
@@ -57,6 +60,14 @@ namespace Multipleer.Harmony.Sync
                 Debug.LogError("[Multipleer] AddResearchToQueuePatch failed: " + ex.Message);
                 return true;
             }
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed start.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] AddResearchToQueuePatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -81,8 +92,11 @@ namespace Multipleer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        public static bool Prefix(object research)
+        // __state carries the completion action snapshotted in Prefix; broadcast in Postfix only if the
+        // original CompleteResearch returns normally (a thrown original skips the Postfix → no false echo).
+        public static bool Prefix(object research, out ISyncedAction __state)
         {
+            __state = null;
             if (SyncApplyScope.IsApplying) return true; // engine-driven replay → let it complete
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
@@ -93,13 +107,21 @@ namespace Multipleer.Harmony.Sync
             {
                 string id = ResearchReflection.GetId(research);
                 if (!string.IsNullOrEmpty(id))
-                    engine.Sync.BroadcastHostAction(new ResearchCompletedAction(id));
+                    __state = new ResearchCompletedAction(id);   // broadcast on success in Postfix
             }
             catch (Exception ex)
             {
                 Debug.LogError("[Multipleer] CompleteResearchPatch failed: " + ex.Message);
             }
             return true; // host runs the real completion
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed completion.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteResearchPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 

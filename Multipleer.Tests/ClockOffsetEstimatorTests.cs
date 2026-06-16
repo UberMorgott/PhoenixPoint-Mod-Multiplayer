@@ -45,29 +45,39 @@ namespace Multipleer.Tests
             Assert.False(est.HasOffset);
         }
 
-        // ─── Best-of-lowest-RTT in the window ─────────────────────────────
+        // ─── Median-of-window (robust to a single asymmetric outlier) ─────
         [Fact]
-        public void Offset_PicksLowestRttSampleInWindow()
+        public void Offset_IsMedianOfWindow_OddCount()
         {
             var est = new ClockOffsetEstimator(maxRttSeconds: 1.0, windowSize: 8);
-            // High-RTT (but accepted) sample with a skewed offset.
-            est.AddSample(t0: 0.0, t1: 10.0, t3: 0.8);   // rtt 0.8, offset = 10 - 0.4 = 9.6
-            // Lower-RTT sample with the "true" offset 5.0.
-            est.AddSample(t0: 0.0, t1: 5.05, t3: 0.1);   // rtt 0.1, offset = 5.05 - 0.05 = 5.0
-            // Best-of-window must prefer the lowest-rtt sample's offset.
+            est.AddSample(t0: 0.0, t1: 5.05, t3: 0.1);   // offset 5.0
+            est.AddSample(t0: 0.0, t1: 5.10, t3: 0.2);   // offset 5.0  (5.10 - 0.10)
+            // A single skewed (asymmetric one-way-delay) sample — even with a LOW rtt it must NOT
+            // hijack the estimate; the median ignores it as the lone outlier.
+            est.AddSample(t0: 0.0, t1: 10.0, t3: 0.05);  // rtt 0.05 (lowest!), offset = 10 - 0.025 = 9.975
+            // Offsets {5.0, 5.0, 9.975} → median = 5.0 (NOT the lowest-rtt outlier 9.975).
             Assert.Equal(5.0, est.Offset, 9);
+        }
+
+        [Fact]
+        public void Offset_IsMedianOfWindow_EvenCount()
+        {
+            var est = new ClockOffsetEstimator(maxRttSeconds: 10.0, windowSize: 8);
+            est.AddSample(t0: 0.0, t1: 7.0, t3: 0.5);   // offset 6.75
+            est.AddSample(t0: 0.0, t1: 8.0, t3: 0.4);   // offset 7.8
+            // Two-sample median = mean of the two middle = (6.75 + 7.8)/2 = 7.275.
+            Assert.Equal(7.275, est.Offset, 9);
         }
 
         [Fact]
         public void Window_EvictsOldestBeyondWindowSize()
         {
             var est = new ClockOffsetEstimator(maxRttSeconds: 10.0, windowSize: 2);
-            // Sample A: very low rtt, offset 1.0 — will be evicted.
-            est.AddSample(t0: 0.0, t1: 1.0, t3: 0.001);   // rtt 0.001, offset ~1.0 (lowest)
-            est.AddSample(t0: 0.0, t1: 7.0, t3: 0.5);     // rtt 0.5, offset = 7 - 0.25 = 6.75
-            est.AddSample(t0: 0.0, t1: 8.0, t3: 0.4);     // rtt 0.4, offset = 8 - 0.2 = 7.8
-            // Window now holds only the last 2 (the 0.001-rtt sample evicted); best is the 0.4-rtt one.
-            Assert.Equal(7.8, est.Offset, 9);
+            est.AddSample(t0: 0.0, t1: 1.0, t3: 0.001);   // offset ~1.0 — will be evicted
+            est.AddSample(t0: 0.0, t1: 7.0, t3: 0.5);     // offset = 7 - 0.25 = 6.75
+            est.AddSample(t0: 0.0, t1: 8.0, t3: 0.4);     // offset = 8 - 0.2 = 7.8
+            // Window now holds only the last 2 (the 0.001-rtt sample evicted) → median = (6.75+7.8)/2.
+            Assert.Equal(7.275, est.Offset, 9);
         }
 
         // ─── Large-step detection (real OS clock jump) ────────────────────

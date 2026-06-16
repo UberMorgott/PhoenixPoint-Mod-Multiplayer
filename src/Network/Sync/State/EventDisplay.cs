@@ -42,6 +42,7 @@ namespace Multipleer.Network.Sync.State
         private static ConstructorInfo _uiStateCtor;    // UIStateGeoscapeEvent(GeoscapeEvent)
         private static MethodInfo _finishQueriedState;  // GeoscapeView.FinishQueriedState()
         private static Type _eventStateBaseType;        // UIStateBaseGeoscapeEvent<> (open generic)
+        private static FieldInfo _eventIdField;         // GeoscapeEvent.EventID (string, public field :18)
 
         private static void Ensure()
         {
@@ -65,6 +66,7 @@ namespace Multipleer.Network.Sync.State
             _requestCtor = AccessTools.Constructor(requestType, new[] { _requestStateField?.FieldType, typeof(int) });
             _uiStateCtor = AccessTools.Constructor(uiStateType, new[] { eventType });
             _finishQueriedState = AccessTools.Method(viewType, "FinishQueriedState");
+            _eventIdField = AccessTools.Field(eventType, "EventID");   // for id-matched dismiss
 
             _ready = _viewField != null && _switchQueryField != null && _queryStateSwitch != null
                      && _requestCtor != null && _uiStateCtor != null && _finishQueriedState != null;
@@ -99,10 +101,13 @@ namespace Multipleer.Network.Sync.State
         }
 
         /// <summary>
-        /// Client: close the open geoscape-event dialog. Guarded so it only fires when the current
-        /// switch request is a geoscape-event state. No-op on any failure.
+        /// Client: close the open geoscape-event dialog. Guarded so it only fires when the current switch
+        /// request is a geoscape-event state AND (when <paramref name="eventId"/> is supplied and the open
+        /// event's id is readable) that state's event id MATCHES — so a dismiss for one event never closes a
+        /// different dialog the client happens to have open. Falls back to closing the current event dialog
+        /// only when the id can't be read (best-effort). No-op on any failure.
         /// </summary>
-        public static void Dismiss(GeoRuntime rt)
+        public static void Dismiss(GeoRuntime rt, string eventId = null)
         {
             try
             {
@@ -110,27 +115,52 @@ namespace Multipleer.Network.Sync.State
                 if (!_ready) return;
                 var view = GetView(rt);
                 if (view == null) return;
-                if (!IsEventStateCurrent(view)) return;
+                var state = GetCurrentEventState(view);
+                if (state == null) return;   // current state isn't a geoscape-event dialog → nothing to close
+
+                // If we know which event to dismiss and can read the open event's id, only close on a match.
+                if (!string.IsNullOrEmpty(eventId))
+                {
+                    string openId = GetStateEventId(state);
+                    if (!string.IsNullOrEmpty(openId) && !string.Equals(openId, eventId, StringComparison.Ordinal))
+                        return; // a different event is open → don't close the wrong dialog
+                }
                 _finishQueriedState.Invoke(view, null);
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Dismiss best-effort failed: " + ex.Message); }
         }
 
-        // True iff GeoscapeViewSwitchQuery._currentStateSwitchRequest.State is a UIStateBaseGeoscapeEvent<>.
-        private static bool IsEventStateCurrent(object view)
+        // The current GeoscapeViewSwitchQuery._currentStateSwitchRequest.State if it is a
+        // UIStateBaseGeoscapeEvent<>, else null.
+        private static object GetCurrentEventState(object view)
         {
             try
             {
-                if (_switchQueryField == null || _currentRequestField == null || _requestStateField == null) return false;
+                if (_switchQueryField == null || _currentRequestField == null || _requestStateField == null) return null;
                 var query = _switchQueryField.GetValue(view);
-                if (query == null) return false;
+                if (query == null) return null;
                 var req = _currentRequestField.GetValue(query);
-                if (req == null) return false;
+                if (req == null) return null;
                 var state = _requestStateField.GetValue(req);
-                if (state == null) return false;
-                return IsGeoscapeEventState(state.GetType());
+                if (state == null) return null;
+                return IsGeoscapeEventState(state.GetType()) ? state : null;
             }
-            catch { return false; }
+            catch { return null; }
+        }
+
+        // Read the EventID off a UIStateBaseGeoscapeEvent<>.Event (public GeoscapeEvent property :10), or null.
+        private static string GetStateEventId(object eventState)
+        {
+            try
+            {
+                if (eventState == null || _eventIdField == null) return null;
+                // Event is declared on the open generic base; resolve via the concrete instance's type chain.
+                var prop = AccessTools.Property(eventState.GetType(), "Event");
+                var geoEvent = prop?.GetValue(eventState, null);
+                if (geoEvent == null) return null;
+                return _eventIdField.GetValue(geoEvent) as string;
+            }
+            catch { return null; }
         }
 
         private static bool IsGeoscapeEventState(Type t)

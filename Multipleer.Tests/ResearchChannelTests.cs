@@ -64,6 +64,47 @@ public class ResearchChannelTests
     }
 
     [Fact]
+    public void Decode_RejectsTruncatedString_ReturnsNull()
+    {
+        // completedCount=1, idLen=5, but only 2 of the 5 string bytes follow. BinaryReader.ReadBytes
+        // would SILENTLY return the 2 available bytes (no throw) → garbage id. ReadStr now verifies the
+        // returned length == declared len and bails, so Decode returns null (rejected, not garbage).
+        var truncated = new byte[]
+        {
+            0x01, 0x00,             // completedCount = 1
+            0x05, 0x00,             // idLen = 5
+            0x41, 0x42,             // only "AB" (2 bytes) — 3 short
+        };
+        Assert.Null(ResearchSnapshot.Decode(truncated));
+    }
+
+    [Fact]
+    public void Decode_RejectsTruncatedQueueString_ReturnsNull()
+    {
+        // completedCount=0, queueCount=1, then a queue id claiming len=4 with 0 bytes following.
+        var truncated = new byte[]
+        {
+            0x00, 0x00,             // completedCount = 0
+            0x01, 0x00,             // queueCount = 1
+            0x04, 0x00,             // queue idLen = 4
+                                    // (no id bytes, no f32 progress) — truncated
+        };
+        Assert.Null(ResearchSnapshot.Decode(truncated));
+    }
+
+    [Fact]
+    public void Decode_AcceptsWellFormed_NotRejectedByLengthCheck()
+    {
+        // Regression guard: the truncation length-check must NOT reject a valid payload. A real
+        // round-trip of a 1-id snapshot must still decode (id "AB", length 2, exactly 2 bytes present).
+        var snap = new ResearchSnapshot();
+        snap.Completed.Add("AB");
+        var rt = ResearchSnapshot.Decode(ResearchSnapshot.Encode(snap));
+        Assert.NotNull(rt);
+        Assert.Equal(new[] { "AB" }, rt.Completed);
+    }
+
+    [Fact]
     public void Encode_NullSnapshot_ReturnsNull()
     {
         Assert.Null(ResearchSnapshot.Encode(null));

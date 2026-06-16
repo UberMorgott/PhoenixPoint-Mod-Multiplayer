@@ -28,6 +28,13 @@ namespace Multipleer.Network.Sync
         private uint _nonceCounter;    // client request correlation
         private bool _walletDirty;     // host: wallet changed since last flush
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
+        private readonly Queue<uint> _pendingOrder = new Queue<uint>();   // FIFO eviction order for _pending (bounds growth)
+
+        // Host: inbound-request dedup keyed by (peerId, nonce). The reliable transport deliberately sends
+        // every reliable packet TWICE, so each client ActionRequest arrives twice and would otherwise be
+        // applied twice on the authority (double manufacture/answer/construct). Bounded FIFO. See RequestDedup.
+        private const int MaxPending = 512;
+        private readonly RequestDedup _seenRequests = new RequestDedup(512);
 
         // ─── Generic state-channel echo (StateChannel infra) ───────────────
         private readonly StateChannelRegistry _channels = new StateChannelRegistry();
@@ -47,7 +54,15 @@ namespace Multipleer.Network.Sync
         {
             if (a == null) return;
             uint nonce = ++_nonceCounter;
+            // Track for reject-correlation, but bound it: ActionApply carries seq (not nonce), so the
+            // success path never clears _pending — age the oldest out so it can't grow unbounded.
             _pending[nonce] = a;
+            _pendingOrder.Enqueue(nonce);
+            while (_pendingOrder.Count > MaxPending)
+            {
+                var old = _pendingOrder.Dequeue();
+                _pending.Remove(old);
+            }
             var payload = WriteAction(a);
             _engine.SendToHost(new NetworkMessage(PacketType.ActionRequest,
                 SyncProtocol.EncodeActionRequest(a.ActionId, nonce, payload)));
@@ -70,12 +85,19 @@ namespace Multipleer.Network.Sync
         {
             if (!_engine.IsHost) return;
             if (!SyncProtocol.TryDecodeActionRequest(data, out var id, out var nonce, out var payload)) return;
+
+            // Host-side dedup: the reliable transport sends every packet twice, so the same request
+            // arrives twice. Apply each (peerId, nonce) exactly once on the authority; drop the repeat.
+            if (_seenRequests.IsDuplicate(senderPeerId, nonce)) return;
+
             var action = ReadAction(id, payload);
             if (action == null) return;
 
             Guid actor = ResolveActor(senderPeerId);
             var rt = GeoRuntime.Instance;
-            if (!PermissionGate.CheckFor(actor, action.Category) || !action.Validate(rt, actor))
+            // Fail CLOSED for an unmapped / forged peer (or no session): ResolveActor returns Guid.Empty,
+            // and a permissive HasCampaignPermission default must never let an unknown actor through.
+            if (actor == Guid.Empty || !PermissionGate.CheckFor(actor, action.Category) || !action.Validate(rt, actor))
             {
                 _engine.SendToClient(senderPeerId, new NetworkMessage(PacketType.ActionReject,
                     SyncProtocol.EncodeActionReject(nonce, 1, "rejected")));
@@ -100,11 +122,24 @@ namespace Multipleer.Network.Sync
 
         public void OnActionApply(byte[] data)
         {
+            if (_engine.IsHost) return;   // host is the authority; it never replays its own broadcast echo
             if (!SyncProtocol.TryDecodeActionApply(data, out var id, out var seq, out var payload)) return;
             if (!_tracker.ShouldApply(seq)) return;   // last-writer-wins / dedupe
             _tracker.Mark(seq);
             var action = ReadAction(id, payload);
             if (action == null) return;
+            // Host-only-apply actions (e.g. event-answer outcomes): the client must NOT replay the
+            // outcome side-effects — they would double-apply / diverge from the authoritative host. The
+            // host already applied once; synced consequences reconverge via the wallet/inventory/research
+            // echoes. We still consume the sequence above so ordering stays correct.
+            if (action is IHostOnlyApply)
+            {
+                // TODO(multipleer): non-channelled event outcomes (site reveal / mission spawn / faction-
+                // diplomacy flag / direct research unlock) are NOT yet synced to the client — visible gap.
+                Debug.Log("[Multipleer] SyncEngine.OnActionApply: client suppressing host-only-apply action "
+                    + "(id=" + id + "); non-channelled outcomes may be unsynced. TODO(multipleer).");
+                return;
+            }
             try { using (SyncApplyScope.Enter()) action.Apply(GeoRuntime.Instance); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionApply failed: " + ex.Message); }
         }
@@ -210,7 +245,7 @@ namespace Multipleer.Network.Sync
         {
             if (_engine.IsHost) return;
             if (!SyncProtocol.TryDecodeEventDismiss(data, out var eventId)) return;
-            try { State.EventDisplay.Dismiss(GeoRuntime.Instance); }
+            try { State.EventDisplay.Dismiss(GeoRuntime.Instance, eventId); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }
 

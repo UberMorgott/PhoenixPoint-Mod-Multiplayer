@@ -176,5 +176,49 @@ namespace Multipleer.Network.Sync
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.Complete failed: " + ex.Message); }
         }
+
+        /// <summary>
+        /// CLIENT replay of a host-driven completion: remove the finished item from the queue WITHOUT
+        /// granting it. The host already ran the REAL <c>FinishManufactureItem</c> (its progression hit the
+        /// patched original directly), whose side-effects are <c>_queue.Remove(element)</c> +
+        /// <c>OnItemCompleted</c> + <c>RelatedItemDef.OnManufacture(faction)</c> (the GRANT, decompile :483) +
+        /// telemetry (decompile :479). The produced item already converges on the client through the
+        /// authoritative <c>InventoryChannel</c> (Clear + rebuild of <c>ItemStorage</c>), so re-running
+        /// <c>FinishManufactureItem</c> here would DOUBLE-GRANT the item; and <c>Cancel</c> is not an option
+        /// either — it REFUNDS resources via <c>Wallet.Give(ManufacturePrice, Scrap)</c> (decompile :244),
+        /// diverging from the wallet echo. There is NO manufacture-queue state channel, so the client must
+        /// still apply the one non-channelled effect — the structural QUEUE REMOVAL — but with no
+        /// grant/refund/events. We resolve the same target as <see cref="Complete"/> (index primary, def-GUID
+        /// fallback) and remove it directly from the live <c>Queue</c> list (the public <c>Queue</c> property
+        /// returns the backing <c>_queue</c> by reference, decompile :64). Item converges via InventoryChannel.
+        /// </summary>
+        public static void RemoveFromQueueEchoOnly(GeoRuntime rt, string itemDefId, int queueIndex)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return;
+                var manufacture = GetFactionManufacture(rt);
+                var queue = _queueProp?.GetValue(manufacture, null) as IList;
+                if (queue == null || queue.Count == 0) return;
+
+                object target = null;
+                // Prefer the explicit index if it points at a queue item whose def matches.
+                if (queueIndex >= 0 && queueIndex < queue.Count)
+                {
+                    var atIndex = queue[queueIndex];
+                    if (GetQueueItemId(atIndex) == itemDefId) target = atIndex;
+                }
+                // Fallback: first queued item with the matching def GUID.
+                if (target == null)
+                {
+                    foreach (var qi in queue)
+                        if (GetQueueItemId(qi) == itemDefId) { target = qi; break; }
+                }
+                if (target == null) return;
+                queue.Remove(target);   // structural-only: no grant (OnManufacture), no refund (Cancel), no events
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.RemoveFromQueueEchoOnly failed: " + ex.Message); }
+        }
     }
 }
