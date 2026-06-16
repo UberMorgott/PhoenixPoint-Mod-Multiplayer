@@ -95,4 +95,23 @@ public class SurfaceRegistryTests
         Assert.Same(action, reg.Get(1));
         Assert.True(reg.IsRegistered(1)); // either-space registration counts as registered
     }
+
+    [Fact]
+    public void RegisterSurfaces_RegistersEveryActionSurface()
+    {
+        var reg = new SurfaceRegistry();
+        Multipleer.Network.Sync.SyncRegistration.RegisterSurfaces(reg);
+
+        foreach (var id in new byte[]
+        {
+            SurfaceIds.StartResearch, SurfaceIds.ResearchCompleted, SurfaceIds.CancelResearch,
+            SurfaceIds.QueueManufacture, SurfaceIds.ManufactureCompleted,
+            SurfaceIds.ConstructFacility, SurfaceIds.RepairFacility, SurfaceIds.FacilityCompleted,
+            SurfaceIds.AnswerEvent
+        })
+        {
+            Assert.True(reg.IsRegistered(id), "surface not registered: " + id);
+            Assert.True(reg.Get(id).Accepts(SyncKind.ActionRequest));
+        }
+    }
 }
