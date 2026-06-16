@@ -9,8 +9,15 @@ namespace Multipleer.Network.Sync.Actions
     /// cancel must reach the host (the channel echo then reconciles every peer). Wire payload:
     /// <c>string researchId</c> (the <c>ResearchElement.ResearchID</c>).
     /// Host <c>Apply</c> → <c>Research.Cancel(resolve(id))</c>.
+    ///
+    /// IHostOnlyApply: same single-source-of-truth contract as <see cref="StartResearchAction"/>. The cancel
+    /// is the client-&gt;host REQUEST trigger; the host applies it in <c>OnActionRequest</c> (marker not checked
+    /// there) and the resulting queue change reaches every peer through the <c>ResearchChannel</c> echo. Marking
+    /// this IHostOnlyApply stops the client double-applying the cancel via BOTH the action replay AND ch2 (which
+    /// would drive two research rebuilds). Host-local cancel already routes ch2-only; this keeps client-initiated
+    /// cancel consistent — the channel is the sole client truth for cancel too.
     /// </summary>
-    public sealed class CancelResearchAction : ISyncedAction
+    public sealed class CancelResearchAction : ISyncedAction, IHostOnlyApply
     {
         private readonly string _researchId;
 

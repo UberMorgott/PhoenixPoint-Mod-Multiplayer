@@ -12,6 +12,11 @@ using Xunit;
 /// Contract being locked in:
 ///   • ResearchCompletedAction  → IHostOnlyApply: client SUPPRESSES (state via ResearchChannel + resources
 ///                                 via wallet echo fully converge it; replaying CompleteResearch double-grants).
+///   • StartResearchAction      → IHostOnlyApply: ResearchChannel is the single client source of truth for a
+///                                 start; suppressing the action replay (it stays the client->host request
+///                                 trigger) leaves ONE channel-driven refresh, killing the Available-list flicker.
+///   • CancelResearchAction     → IHostOnlyApply: same single-source rule for cancel; the client converges via
+///                                 ch2 only, never double-applying the cancel via both action replay and channel.
 ///   • AnswerEventAction        → IHostOnlyApply (regression guard for the prior event-answer fix).
 ///   • ManufactureCompletedAction → NOT IHostOnlyApply: client MUST run a reward-suppressed reduced apply
 ///                                 (queue removal only; item converges via InventoryChannel). The queue is
@@ -24,6 +29,14 @@ public class HostOnlyApplyMarkerTests
     [Fact]
     public void ResearchCompleted_IsHostOnlyApply()
         => Assert.IsAssignableFrom<IHostOnlyApply>(new ResearchCompletedAction("PX_LaserTech_ResearchDef"));
+
+    [Fact]
+    public void StartResearch_IsHostOnlyApply()
+        => Assert.IsAssignableFrom<IHostOnlyApply>(new StartResearchAction("PX_LaserTech_ResearchDef"));
+
+    [Fact]
+    public void CancelResearch_IsHostOnlyApply()
+        => Assert.IsAssignableFrom<IHostOnlyApply>(new CancelResearchAction("PX_LaserTech_ResearchDef"));
 
     [Fact]
     public void AnswerEvent_IsHostOnlyApply()

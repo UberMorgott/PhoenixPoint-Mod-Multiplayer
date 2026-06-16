@@ -71,6 +71,7 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _inProgressBackingField; // ResearchElement.<IsInProgress>k__BackingField (bool)
         private static PropertyInfo _researchCostProp;    // ResearchElement.ResearchCost (int => ResearchDef.ResearchCost)
         private static object _completedStateValue;       // ResearchState.Completed enum value (boxed)
+        private static object _unlockedStateValue;         // ResearchState.Unlocked enum value (boxed)
 
         private static void Ensure()
         {
@@ -94,12 +95,20 @@ namespace Multipleer.Network.Sync.State
             _researchCostProp = AccessTools.Property(_researchElementType, "ResearchCost");
             var researchStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchState");
             if (researchStateType != null && researchStateType.IsEnum)
+            {
                 try { _completedStateValue = Enum.Parse(researchStateType, "Completed"); } catch { _completedStateValue = null; }
+                // ResearchState { Hidden, Revealed, Unlocked, Completed } (decompile). AddResearchToQueue
+                // (Research.cs:380) THROWS unless State == Unlocked; the snapshot never carries the host
+                // Revealed->Unlocked transition, so the client element can still be Revealed. We force it to
+                // Unlocked via the _state backing field (same bypass as CompleteEchoOnly) before the add.
+                try { _unlockedStateValue = Enum.Parse(researchStateType, "Unlocked"); } catch { _unlockedStateValue = null; }
+            }
 
             _ready = _completedProp != null && _queueProp != null && _getById != null
                      && _addToQueue != null && _cancel != null
                      && _researchIdField != null && _progressField != null
-                     && _stateField != null && _completedStateValue != null;
+                     && _stateField != null && _completedStateValue != null
+                     && _unlockedStateValue != null;
         }
 
         /// <summary>The live player-faction <c>Research</c> instance, or null.</summary>
@@ -219,19 +228,46 @@ namespace Multipleer.Network.Sync.State
                         // snapshot whose progress >= cost is contradictory (it would be in Completed, not
                         // the queue) — but rounding / a transient host value could trip it. We therefore
                         // set a SUB-COST progress before the requeue (so the instant-complete branch is
-                        // never taken), then re-affirm the true snapshot progress AFTER, when no further
-                        // completion check runs. The element is never side-effect-completed during reconcile.
+                        // never taken), then write the true snapshot progress ONLY AFTER a successful add,
+                        // when no further completion check runs. The element is never side-effect-completed
+                        // during reconcile, and a failed add never leaves progress on a non-queued element.
                         bool wasInQueue = InQueue(research, el);
                         if (!wasInQueue)
                         {
+                            // The snapshot carries only (id, progress); it never carries the host
+                            // Revealed->Unlocked transition. AddResearchToQueue (Research.cs:380) THROWS
+                            // unless State == Unlocked, and a swallowed throw would leave progress on a
+                            // NON-QUEUED element → the bug: it then renders in the Available (left) list
+                            // with a partial progress chunk (queue membership, not State, is the
+                            // available/queued discriminator). Force State=Unlocked via the _state backing
+                            // field FIRST (same reflection bypass as CompleteEchoOnly), so the add can't
+                            // throw on a Revealed element.
+                            float original = 0f;
+                            try { original = (float)_progressField.GetValue(el); } catch { original = 0f; }
+                            try { _stateField.SetValue(el, _unlockedStateValue); } catch { /* best-effort */ }
                             float safe = SafeRequeueProgress(el, progress);
                             try { _progressField.SetValue(el, safe); } catch { /* best-effort */ }
-                            _addToQueue.Invoke(research, new[] { el });
+                            try
+                            {
+                                _addToQueue.Invoke(research, new[] { el });
+                            }
+                            catch
+                            {
+                                // Add failed → element is NOT in the queue. Restore its original progress
+                                // so we never leave a stray (sub-cost) value on a non-queued element, then
+                                // rethrow into the per-element catch below for logging.
+                                try { _progressField.SetValue(el, original); } catch { /* best-effort */ }
+                                throw;
+                            }
                         }
-                        // Re-affirm the authoritative progress AFTER the requeue. BeginResearching()
-                        // (ResearchElement.cs:282) does not reset ResearchProgress, and no completion check
-                        // runs here, so the true snapshot value lands safely (no reward cascade).
-                        try { _progressField.SetValue(el, progress); } catch { /* re-affirm */ }
+                        // Affirm the authoritative progress ONLY after the element is confirmed in the queue.
+                        // BeginResearching() (ResearchElement.cs:282) does not reset ResearchProgress, and no
+                        // completion check runs here, so the true snapshot value lands safely (no reward
+                        // cascade). Skip if the add somehow did not land it in the queue.
+                        if (InQueue(research, el))
+                        {
+                            try { _progressField.SetValue(el, progress); } catch { /* affirm */ }
+                        }
                     }
                     catch (Exception elEx)
                     {

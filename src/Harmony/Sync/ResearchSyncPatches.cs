@@ -66,7 +66,17 @@ namespace Multipleer.Harmony.Sync
         public static void Postfix(ISyncedAction __state)
         {
             if (__state == null) return;
-            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            try
+            {
+                var sync = NetworkEngine.Instance?.Sync;
+                sync?.BroadcastHostAction(__state);
+                // A host-local add of a NON-current queue item does not fire OnResearchStarted (StartedResearch
+                // runs only when research == Current), so the faction-event ch2-dirty subscription misses it.
+                // And StartResearchAction is now IHostOnlyApply → the client no longer applies the broadcast,
+                // so the ResearchChannel echo (ch2) is the ONLY path that reaches the client. Mark ch2 dirty so
+                // every host add echoes via the channel regardless of whether it became Current.
+                sync?.MarkChannelDirty(2);
+            }
             catch (Exception ex) { Debug.LogError("[Multipleer] AddResearchToQueuePatch postfix broadcast failed: " + ex.Message); }
         }
     }
