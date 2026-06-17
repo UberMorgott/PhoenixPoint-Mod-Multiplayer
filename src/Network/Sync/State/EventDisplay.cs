@@ -44,6 +44,12 @@ namespace Multipleer.Network.Sync.State
         private static Type _eventStateBaseType;        // UIStateBaseGeoscapeEvent<> (open generic)
         private static FieldInfo _eventIdField;         // GeoscapeEvent.EventID (string, public field :18)
 
+        // The occurrence id of the dialog THIS client currently has open (0 = none). The native UIState carries
+        // no occurrence id, so Show() records it here and Dismiss()/ShowResult() match on it — the authoritative
+        // per-occurrence correlation that the reusable def-name (eventId) could not provide. The def-name is
+        // still read for logging. Only one host-broadcast geoscape-event dialog is ever open at a time (modal).
+        private static ushort _openOccurrenceId;
+
         private static void Ensure()
         {
             if (_ready) return;
@@ -79,8 +85,12 @@ namespace Multipleer.Network.Sync.State
             return _viewField.GetValue(geo);
         }
 
-        /// <summary>Client: queue a geoscape-event dialog (PauseGame=false). No-op on any failure.</summary>
-        public static void Show(GeoRuntime rt, object geoEvent)
+        /// <summary>
+        /// Client: queue a geoscape-event dialog (PauseGame=false) and record its <paramref name="occurrenceId"/>
+        /// as the currently-open dialog so a later <see cref="Dismiss"/>/<see cref="ShowResult"/> closes the right
+        /// occurrence. <paramref name="eventId"/> is the def-name (logging only). No-op on any failure.
+        /// </summary>
+        public static void Show(GeoRuntime rt, object geoEvent, ushort occurrenceId = 0, string eventId = null)
         {
             try
             {
@@ -96,19 +106,24 @@ namespace Multipleer.Network.Sync.State
                 // pause arrives via time-sync; do NOT pause here (avoids a pause-relay loop).
                 _requestPauseField?.SetValue(request, false);
                 _queryStateSwitch.Invoke(query, new[] { request });
+                // Record the now-open occurrence (only when a real id was supplied; a synthetic result page is
+                // pushed with occurrenceId=0 since it is locally dismissed and never host-correlated).
+                if (occurrenceId != 0) _openOccurrenceId = occurrenceId;
+                Debug.Log("[Multipleer] EventDisplay.Show occId=" + occurrenceId + " eventId=" + eventId + " → queued");
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Show best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
-        /// Client: replace the open (locked) choice modal for <paramref name="eventId"/> with the host's
-        /// follow-up RESULT/OUTCOME page, reusing the SAME native push as <see cref="Show"/>. This mirrors the
-        /// native in-place second page of <c>UIModuleSiteEncounters</c> (SetClosingEncounter): we first close
-        /// the open choice dialog (the host already applied the answer) then push the synthetic result event as
-        /// a fresh <c>UIStateGeoscapeEvent</c>. The result event is single-choice with EventID="" → unlocked →
-        /// the client can locally dismiss it with OK. No custom UI; no reward apply (text-only). No-op on failure.
+        /// Client: replace the open (locked) choice modal for occurrence <paramref name="occurrenceId"/> with the
+        /// host's follow-up RESULT/OUTCOME page, reusing the SAME native push as <see cref="Show"/>. This mirrors
+        /// the native in-place second page of <c>UIModuleSiteEncounters</c> (SetClosingEncounter): we first close
+        /// the open choice dialog for that occurrence (the host already applied the answer) then push the synthetic
+        /// result event as a fresh <c>UIStateGeoscapeEvent</c>. The result event is single-choice with EventID=""
+        /// → unlocked → the client can locally dismiss it with OK. No custom UI; no reward apply (text-only).
+        /// <paramref name="eventId"/> is the def-name (logging only). No-op on failure.
         /// </summary>
-        public static void ShowResult(GeoRuntime rt, object resultEvent, string eventId = null)
+        public static void ShowResult(GeoRuntime rt, object resultEvent, ushort occurrenceId = 0, string eventId = null)
         {
             try
             {
@@ -116,25 +131,27 @@ namespace Multipleer.Network.Sync.State
                 if (!_ready || resultEvent == null) return;
                 var view0 = GetView(rt);
                 var state0 = view0 != null ? GetCurrentEventState(view0) : null;
-                Debug.Log("[Multipleer] EventDisplay.ShowResult eventId=" + eventId +
-                          " openIsEventState=" + (state0 != null) + " openEventId=" + GetStateEventId(state0) +
-                          " → Dismiss+Show result page");
-                // Close the open locked choice modal first (host answer applied) so the result page replaces it
-                // in-place rather than stacking on top of a still-open dialog.
-                Dismiss(rt, eventId);
-                Show(rt, resultEvent);
+                Debug.Log("[Multipleer] EventDisplay.ShowResult occId=" + occurrenceId + " eventId=" + eventId +
+                          " openOccId=" + _openOccurrenceId + " openIsEventState=" + (state0 != null) +
+                          " openEventId=" + GetStateEventId(state0) + " → Dismiss+Show result page");
+                // Close the open locked choice modal for THIS occurrence first (host answer applied) so the result
+                // page replaces it in-place rather than stacking on top of a still-open dialog.
+                Dismiss(rt, occurrenceId, eventId);
+                // The synthetic result page is locally dismissible and never host-correlated → push with occId 0.
+                Show(rt, resultEvent, 0, eventId);
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.ShowResult best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
-        /// Client: close the open geoscape-event dialog. Guarded so it only fires when the current switch
-        /// request is a geoscape-event state AND (when <paramref name="eventId"/> is supplied and the open
-        /// event's id is readable) that state's event id MATCHES — so a dismiss for one event never closes a
-        /// different dialog the client happens to have open. Falls back to closing the current event dialog
-        /// only when the id can't be read (best-effort). No-op on any failure.
+        /// Client: close the open geoscape-event dialog for occurrence <paramref name="occurrenceId"/>. Guarded so
+        /// it only fires when the current switch request is a geoscape-event state AND (when a non-zero occurrence
+        /// id is supplied) it MATCHES the occurrence this client recorded as open — so a dismiss for one occurrence
+        /// never closes a different dialog, even when two share the reusable def-name. Falls back to closing the
+        /// current event dialog when no occurrence was recorded (best-effort). <paramref name="eventId"/> is the
+        /// def-name (logging only). No-op on any failure.
         /// </summary>
-        public static void Dismiss(GeoRuntime rt, string eventId = null)
+        public static void Dismiss(GeoRuntime rt, ushort occurrenceId = 0, string eventId = null)
         {
             try
             {
@@ -145,29 +162,28 @@ namespace Multipleer.Network.Sync.State
                 var state = GetCurrentEventState(view);
                 if (state == null)
                 {
-                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
+                    Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
                               " stateMatched=false (current state is NOT a UIStateBaseGeoscapeEvent<> → nothing to close)");
                     return;   // current state isn't a geoscape-event dialog → nothing to close
                 }
 
-                // If we know which event to dismiss and can read the open event's id, only close on a match.
-                if (!string.IsNullOrEmpty(eventId))
+                // Occurrence-id correlation: only close when the recorded open occurrence matches the requested
+                // one. _openOccurrenceId == 0 means we never recorded one (e.g. result page) → fall back to closing
+                // the current dialog. A non-zero mismatch means a DIFFERENT occurrence is open → don't close it.
+                if (occurrenceId != 0 && _openOccurrenceId != 0 && _openOccurrenceId != occurrenceId)
                 {
-                    string openId = GetStateEventId(state);
-                    if (!string.IsNullOrEmpty(openId) && !string.Equals(openId, eventId, StringComparison.Ordinal))
-                    {
-                        Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
-                                  " openEventId=" + openId + " stateMatched=true idMatch=false (different event open → not closing)");
-                        return; // a different event is open → don't close the wrong dialog
-                    }
-                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
-                              " openEventId=" + openId + " stateMatched=true idMatch=true → FinishQueriedState");
+                    Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
+                              " openOccId=" + _openOccurrenceId + " openEventId=" + GetStateEventId(state) +
+                              " stateMatched=true occMatch=false (different occurrence open → not closing)");
+                    return;
                 }
-                else
-                {
-                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=<none> stateMatched=true → FinishQueriedState (close current)");
-                }
+                Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
+                          " openOccId=" + _openOccurrenceId + " openEventId=" + GetStateEventId(state) +
+                          " stateMatched=true occMatch=true → FinishQueriedState");
                 _finishQueriedState.Invoke(view, null);
+                // Clear the recorded open occurrence when we close the one it referred to (or when closing the
+                // current dialog with no recorded occurrence).
+                if (occurrenceId == 0 || _openOccurrenceId == occurrenceId) _openOccurrenceId = 0;
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Dismiss best-effort failed: " + ex.Message); }
         }

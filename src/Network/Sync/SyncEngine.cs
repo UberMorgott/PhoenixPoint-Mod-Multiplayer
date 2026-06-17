@@ -48,6 +48,12 @@ namespace Multipleer.Network.Sync
         private readonly SurfaceRegistry _surfaces = new SurfaceRegistry();
         private readonly SurfaceRouter _router;
 
+        // ─── Client geoscape-event raise/dismiss correlation (occurrence-id keyed) ─────────
+        // Pure, Unity-free ordering brain: keys raise/dismiss on the host-synthesized per-occurrence id so two
+        // occurrences of the same reusable EventID def-name never collide, and a Dismiss that arrives before its
+        // Raise is buffered then resolved straight to the result page (fixes the "EX20" collision/ordering bug).
+        private readonly State.EventCorrelator _eventCorrelator = new State.EventCorrelator();
+
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
@@ -264,34 +270,86 @@ namespace Multipleer.Network.Sync
 
         // ─── Geoscape event display (host->all show/dismiss) ───────────────
 
-        /// <summary>Client: host raised a geoscape event → reconstruct + show the dialog (PauseGame=false).</summary>
+        /// <summary>
+        /// Client: host raised a geoscape event. The raise is correlated by its per-OCCURRENCE id
+        /// (<see cref="State.EventCorrelator"/>): a normal raise builds + shows the dialog; a raise that matches
+        /// a BUFFERED out-of-order dismiss resolves straight to the result page (no orphan choice dialog); a
+        /// buffered close-only dismiss is a no-op (the player never saw a dialog).
+        /// </summary>
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var eventId, out var siteId, out var vehicleId)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
+                var decision = _eventCorrelator.Raised(occId, eventId);
+                Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
+                          " siteId=" + siteId + " vehicleId=" + vehicleId + " decision=" + decision.Kind +
+                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
                 var rt = GeoRuntime.Instance;
-                var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId);
-                Debug.Log("[Multipleer] CLIENT OnEventRaised eventId=" + eventId + " siteId=" + siteId +
-                          " vehicleId=" + vehicleId + " builtEvent=" + (geoEvent != null));
-                if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent);
+                switch (decision.Kind)
+                {
+                    case State.EventCorrelator.ActionKind.ShowDialog:
+                    {
+                        var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId);
+                        if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
+                        break;
+                    }
+                    case State.EventCorrelator.ActionKind.ShowResultPage:
+                        // Out-of-order dismiss already buffered for this occurrence → jump straight to its
+                        // result page. The reward lines were carried on the dismiss and stashed at buffer time.
+                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, TakeBufferedReward(occId));
+                        break;
+                    case State.EventCorrelator.ActionKind.DropNoop:
+                        // A close-only dismiss beat its raise → nothing to display; drop any stashed reward.
+                        DropBufferedReward(occId);
+                        break;
+                }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
         }
 
+        // ─── Out-of-order reward stash (keyed by occurrence id) ─────────────────────────────
+        // When a dismiss arrives BEFORE its raise the reward snapshot must be held until the raise builds the
+        // result page (so the ReferenceEquals-armed render still lands). Bounded by the correlator's own pending
+        // buffer cap (we only stash for buffered dismisses), pruned on resolve/drop.
+        private readonly Dictionary<ushort, RewardDisplaySnapshot> _bufferedRewards = new Dictionary<ushort, RewardDisplaySnapshot>();
+
+        private void StashBufferedReward(ushort occId, RewardDisplaySnapshot reward)
+        {
+            if (reward == null || reward.IsEmpty) { _bufferedRewards.Remove(occId); return; }
+            _bufferedRewards[occId] = reward;
+            // Hard cap mirrors the correlator's pending-dismiss buffer: a stash whose buffered dismiss got
+            // evicted (its raise never came) would otherwise linger. Drop the excess (arbitrary entry) so this
+            // map can never outgrow the bounded correlator state.
+            if (_bufferedRewards.Count > State.EventCorrelator.MaxPendingDismiss)
+            {
+                foreach (var stale in new List<ushort>(_bufferedRewards.Keys))
+                {
+                    if (_bufferedRewards.Count <= State.EventCorrelator.MaxPendingDismiss) break;
+                    if (stale != occId) _bufferedRewards.Remove(stale);
+                }
+            }
+        }
+        private RewardDisplaySnapshot TakeBufferedReward(ushort occId)
+        {
+            if (_bufferedRewards.TryGetValue(occId, out var r)) { _bufferedRewards.Remove(occId); return r; }
+            return null;
+        }
+        private void DropBufferedReward(ushort occId) => _bufferedRewards.Remove(occId);
+
         /// <summary>
-        /// Client: host's answer was applied. When the picked choice produced a follow-up RESULT/OUTCOME page
-        /// (choiceIndex &gt;= 0) the client rebuilds that page natively (text-only, no reward apply) and replaces
-        /// the open modal with it via <see cref="State.EventDisplay.ShowResult"/>; a result-less answer
-        /// (choiceIndex == -1: pure-INFO host-OK / decline) just closes the open dialog. If the result page can't
-        /// be rebuilt, fall back to a plain close so the modal never stays stuck open.
+        /// Client: host's answer was applied. The dismiss is correlated by its per-OCCURRENCE id: when its dialog
+        /// is open it is resolved in place (choiceIndex &gt;= 0 → rebuild + show the RESULT/OUTCOME page;
+        /// choiceIndex == -1 → close-only); when the matching raise hasn't arrived yet the dismiss is BUFFERED
+        /// (reward stashed) and resolved the instant the raise lands. If a result page can't be rebuilt, fall
+        /// back to a plain close so the modal never stays stuck open.
         /// </summary>
         public void OnEventDismiss(byte[] data)
         {
             if (_engine.IsHost) return;
-            if (!SyncProtocol.TryDecodeEventDismiss(data, out var eventId, out var choiceIndex, out var rewardBlob)) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out var rewardBlob)) return;
             try
             {
                 var rt = GeoRuntime.Instance;
@@ -301,59 +359,80 @@ namespace Multipleer.Network.Sync
                 var reward = RewardDisplaySnapshot.Decode(rewardBlob);
                 if (reward == null && rewardBlob != null && rewardBlob.Length > 0)
                     Debug.LogError("[Multipleer] reward decode failed (malformed blob, " + rewardBlob.Length + " bytes) — result card shown without reward lines");
-                if (choiceIndex >= 0)
+
+                var decision = _eventCorrelator.Dismissed(occId, eventId, choiceIndex);
+                Debug.Log("[Multipleer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId +
+                          " choiceIndex=" + choiceIndex + " rewardBytes=" + (rewardBlob?.Length ?? 0) +
+                          " rewardEmpty=" + (reward == null || reward.IsEmpty) + " decision=" + decision.Kind +
+                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
+                switch (decision.Kind)
                 {
-                    var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
-                    Debug.Log("[Multipleer] CLIENT OnEventDismiss eventId=" + eventId + " choiceIndex=" +
-                              choiceIndex + " builtResult=" + (resultEvent != null) +
-                              " rewardBytes=" + (rewardBlob?.Length ?? 0) +
-                              " rewardEmpty=" + (reward == null || reward.IsEmpty) +
-                              " branch=" + (resultEvent != null ? "ShowResult" : "fallback-Dismiss"));
-                    if (resultEvent != null)
-                    {
-                        // Arm the reward render BEFORE showing, keyed to THIS synthetic event instance. The
-                        // native UIModuleSiteEncounters.ShowEncounter Postfix (RewardRenderPatch) consumes it
-                        // deterministically when our page is built — exactly once, onto the correct module, with
-                        // no frame-delay heuristic and no wrong-context risk.
-                        if (reward != null && !reward.IsEmpty)
-                            State.RewardDisplayReflection.SetPending(resultEvent, reward);
-                        else
-                            State.RewardDisplayReflection.ClearPending();
-                        State.EventDisplay.ShowResult(rt, resultEvent, eventId);
-                        return;
-                    }
-                    // Result page couldn't be rebuilt → no page to attach reward lines to; clear any armed slot.
-                    State.RewardDisplayReflection.ClearPending();
+                    case State.EventCorrelator.ActionKind.ShowResultInPlace:
+                        ResolveToResultPage(rt, occId, eventId, choiceIndex, reward);
+                        break;
+                    case State.EventCorrelator.ActionKind.CloseDialog:
+                        State.EventDisplay.Dismiss(rt, occId, eventId);   // close-only
+                        break;
+                    case State.EventCorrelator.ActionKind.BufferDismiss:
+                        // Raise hasn't arrived yet → hold the reward until OnEventRaised resolves this occurrence.
+                        StashBufferedReward(occId, reward);
+                        break;
                 }
-                else
-                {
-                    Debug.Log("[Multipleer] CLIENT OnEventDismiss eventId=" + eventId + " choiceIndex=" +
-                              choiceIndex + " branch=Dismiss (close-only)");
-                }
-                State.EventDisplay.Dismiss(rt, eventId);   // -1, or result rebuild failed → close-only
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }
 
-        /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers.</summary>
-        public void BroadcastEventRaised(string eventId, int siteId, int vehicleId)
+        /// <summary>
+        /// Client: rebuild the chosen choice's RESULT/OUTCOME page and replace the (possibly already-resolved)
+        /// dialog with it, arming the reward render keyed to THIS synthetic event instance right before the show
+        /// so the ReferenceEquals-correlated RewardRenderPatch lands on the correct page exactly once. Falls back
+        /// to a plain close when the page can't be rebuilt. Shared by the in-order (ShowResultInPlace) and the
+        /// buffered-then-raised (ShowResultPage) paths.
+        /// </summary>
+        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward)
+        {
+            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
+            Debug.Log("[Multipleer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
+                      " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
+                      " rewardEmpty=" + (reward == null || reward.IsEmpty) +
+                      " branch=" + (resultEvent != null ? "ShowResult" : "fallback-Dismiss"));
+            if (resultEvent != null)
+            {
+                // Arm the reward render BEFORE showing, keyed to THIS synthetic event instance. The native
+                // UIModuleSiteEncounters.ShowEncounter Postfix (RewardRenderPatch) consumes it by reference
+                // identity when our page is built — exactly once, onto the correct module.
+                if (reward != null && !reward.IsEmpty)
+                    State.RewardDisplayReflection.SetPending(resultEvent, reward);
+                else
+                    State.RewardDisplayReflection.ClearPending();
+                State.EventDisplay.ShowResult(rt, resultEvent, occId, eventId);
+                return;
+            }
+            // Result page couldn't be rebuilt → no page to attach reward lines to; clear any armed slot + close.
+            State.RewardDisplayReflection.ClearPending();
+            State.EventDisplay.Dismiss(rt, occId, eventId);
+        }
+
+        /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers, carrying the occurrence id.</summary>
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(eventId, siteId, vehicleId)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId)));
         }
 
         /// <summary>
-        /// Host: tell clients the answer was applied. <paramref name="choiceIndex"/> is the picked choice's
-        /// index within EventData.Choices (&gt;= 0 → clients rebuild + show its RESULT/OUTCOME page natively;
-        /// -1 → close-only, for a pure-INFO host-OK / decline). The reward STATE itself rides the wallet/
-        /// research/items/diplomacy channels — this carries only the UI index.
+        /// Host: tell clients the answer was applied. <paramref name="occurrenceId"/> matches the raise so clients
+        /// correlate even when two occurrences share a def-id. <paramref name="choiceIndex"/> is the picked
+        /// choice's index within EventData.Choices (&gt;= 0 → clients rebuild + show its RESULT/OUTCOME page
+        /// natively; -1 → close-only, for a pure-INFO host-OK / decline). The reward STATE itself rides the
+        /// wallet/research/items/diplomacy channels — this carries only the UI index + the display blob.
         /// </summary>
-        public void BroadcastEventDismiss(string eventId, int choiceIndex = -1, byte[] rewardBlob = null)
+        public void BroadcastEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1, byte[] rewardBlob = null)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
-                SyncProtocol.EncodeEventDismiss(eventId, choiceIndex, rewardBlob)));
+                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob)));
         }
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────

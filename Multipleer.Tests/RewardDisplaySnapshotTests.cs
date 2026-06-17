@@ -192,8 +192,9 @@ public class RewardDisplaySnapshotTests
     public void EventDismiss_WithReward_RoundTrips()
     {
         var blob = RewardDisplaySnapshot.Encode(Sample());
-        var bytes = SyncProtocol.EncodeEventDismiss("EV_R", 3, blob);
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id, out var choiceIndex, out var rewardBlob));
+        var bytes = SyncProtocol.EncodeEventDismiss(occurrenceId: 21, "EV_R", 3, blob);
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var occ, out var id, out var choiceIndex, out var rewardBlob));
+        Assert.Equal(21, occ);
         Assert.Equal("EV_R", id);
         Assert.Equal(3, choiceIndex);
         var rt = RewardDisplaySnapshot.Decode(rewardBlob);
@@ -203,44 +204,47 @@ public class RewardDisplaySnapshotTests
     }
 
     [Fact]
-    public void EventDismiss_NoRewardOverload_ProducesLegacyTwoFieldBytes()
+    public void EventDismiss_NoRewardOverload_ProducesThreeFieldBytes()
     {
-        // The 2-arg overload must stay BYTE-IDENTICAL to before (no trailing blob) so the pinned
-        // EventDismiss_WireBytes_AreStable + legacy decode tests remain valid.
-        var legacy = SyncProtocol.EncodeEventDismiss("AB", 2);
-        var threeArgNull = SyncProtocol.EncodeEventDismiss("AB", 2, null);
-        var threeArgEmpty = SyncProtocol.EncodeEventDismiss("AB", 2, new byte[0]);
-        var expected = new byte[] { 0x02, 0x41, 0x42, 0x02, 0x00, 0x00, 0x00 };
-        Assert.Equal(expected, legacy);
+        // The no-reward overload must stay BYTE-IDENTICAL to the 3-field (occId, eventId, choiceIndex) layout
+        // (no trailing blob) so the pinned EventDismiss_WireBytes_AreStable + short-payload decode tests hold.
+        var noBlob = SyncProtocol.EncodeEventDismiss(5, "AB", 2);
+        var threeArgNull = SyncProtocol.EncodeEventDismiss(5, "AB", 2, null);
+        var threeArgEmpty = SyncProtocol.EncodeEventDismiss(5, "AB", 2, new byte[0]);
+        var expected = new byte[] { 0x05, 0x00, 0x02, 0x41, 0x42, 0x02, 0x00, 0x00, 0x00 };
+        Assert.Equal(expected, noBlob);
         Assert.Equal(expected, threeArgNull);
         Assert.Equal(expected, threeArgEmpty);
     }
 
     [Fact]
-    public void EventDismiss_LegacyTwoFieldPayload_DecodesEmptyReward()
+    public void EventDismiss_NoRewardPayload_DecodesEmptyReward()
     {
-        // A legacy [eventId][choiceIndex] packet (no reward blob) must decode with an empty (non-null) blob,
-        // so an old host's dismiss still renders a (reward-less) result card.
-        var legacy = SyncProtocol.EncodeEventDismiss("EV_LEGACY", 1);
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(legacy, out var id, out var choiceIndex, out var rewardBlob));
-        Assert.Equal("EV_LEGACY", id);
+        // An [occId][eventId][choiceIndex] packet (no reward blob) must decode with an empty (non-null) blob,
+        // so a reward-less dismiss still renders a (reward-less) result card.
+        var bytes = SyncProtocol.EncodeEventDismiss(6, "EV_NOR", 1);
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var occ, out var id, out var choiceIndex, out var rewardBlob));
+        Assert.Equal(6, occ);
+        Assert.Equal("EV_NOR", id);
         Assert.Equal(1, choiceIndex);
         Assert.NotNull(rewardBlob);
         Assert.Empty(rewardBlob);
     }
 
     [Fact]
-    public void EventDismiss_LegacyOneFieldPayload_DecodesNegativeIndexEmptyReward()
+    public void EventDismiss_NoChoicePayload_DecodesNegativeIndexEmptyReward()
     {
-        // The oldest [eventId]-only packet must still decode: choiceIndex = -1, reward blob empty.
-        byte[] legacy;
+        // An [occId][eventId]-only packet must still decode: choiceIndex = -1, reward blob empty.
+        byte[] shortPayload;
         using (var ms = new MemoryStream())
         using (var w = new BinaryWriter(ms, Encoding.UTF8))
         {
+            w.Write((ushort)6);
             w.Write("EV_OLD");
-            legacy = ms.ToArray();
+            shortPayload = ms.ToArray();
         }
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(legacy, out var id, out var choiceIndex, out var rewardBlob));
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(shortPayload, out var occ, out var id, out var choiceIndex, out var rewardBlob));
+        Assert.Equal(6, occ);
         Assert.Equal("EV_OLD", id);
         Assert.Equal(-1, choiceIndex);
         Assert.NotNull(rewardBlob);
@@ -248,11 +252,12 @@ public class RewardDisplaySnapshotTests
     }
 
     [Fact]
-    public void EventDismiss_TwoOutOverload_StillWorks()
+    public void EventDismiss_ThreeOutOverload_StillWorks()
     {
-        // The legacy 2-out decode overload (eventId, choiceIndex) must keep working alongside the 3-out one.
-        var bytes = SyncProtocol.EncodeEventDismiss("EV_2", 4, RewardDisplaySnapshot.Encode(Sample()));
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id, out var choiceIndex));
+        // The 3-out decode overload (occId, eventId, choiceIndex) must keep working alongside the 4-out one.
+        var bytes = SyncProtocol.EncodeEventDismiss(33, "EV_2", 4, RewardDisplaySnapshot.Encode(Sample()));
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var occ, out var id, out var choiceIndex));
+        Assert.Equal(33, occ);
         Assert.Equal("EV_2", id);
         Assert.Equal(4, choiceIndex);
     }

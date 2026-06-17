@@ -268,7 +268,10 @@ namespace Multipleer.Harmony.Sync
 
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
-                engine.Sync?.BroadcastEventDismiss(eventId);
+                // Same live GeoscapeEvent instance that was raised → retrieve the occurrence id the raise
+                // assigned so the client closes the right occurrence (close-only: choiceIndex defaults to -1).
+                ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);
+                engine.Sync?.BroadcastEventDismiss(occId, eventId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] FinishEncounterHostDismissPatch failed: " + ex.Message); }
         }

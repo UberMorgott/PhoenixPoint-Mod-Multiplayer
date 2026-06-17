@@ -172,26 +172,33 @@ namespace Multipleer.Network.Sync
         }
 
         // ─── Geoscape event display (separate from channels) ───────────────
-        // EventRaised: [eventId:string][siteId:i32][vehicleId:i32] — host tells clients to SHOW a dialog.
-        // siteId is GeoSite.SiteId (-1 = none → client falls back to StartingBase context); vehicleId is
-        // GeoVehicle.VehicleID (-1 = none → client resolves a vehicle at the site, else null context).
-        // The trailing vehicleId is OPTIONAL on the wire: an older 2-field payload decodes with -1, so the
-        // decoder never throws on a short buffer (forward/backward compatible).
-        // EventDismiss: [eventId:string][choiceIndex:i32]([u16 rewardLen][rewardBlob:N]) — host tells clients
-        // the answer was applied. choiceIndex is the index of the picked choice within EventData.Choices:
-        // >= 0 means the choice produced a follow-up RESULT/OUTCOME page (clients rebuild + show it natively);
-        // -1 means close-only (pure-INFO host-OK / decline). BOTH trailing groups are OPTIONAL on the wire:
-        //   • a legacy 1-field [eventId] payload decodes with choiceIndex = -1 (close-only);
-        //   • a legacy 2-field [eventId][choiceIndex] payload decodes with an EMPTY reward blob;
-        // so the decoder never throws on a short buffer (forward/backward compatible). The reward blob is a
-        // RewardDisplaySnapshot (the native ShowReward delta lines) carried so the client mirrors the reward
-        // card; it is appended ONLY when non-empty, keeping the no-reward 2-field wire byte-identical to before.
+        // Both raise and dismiss lead with a host-synthesized per-OCCURRENCE id (u16, see EventOccurrenceIds):
+        // the reusable GeoscapeEvent.EventID def-name collides when two occurrences of the same def fire, so the
+        // occurrence id is the real correlation key (def-name is carried only for the native rebuild + logging).
+        // Both host and client run the SAME build, so the occurrence id is a clean REQUIRED leading field (no
+        // cross-version optionality); the trailing fields below keep their in-build optionality.
+        //
+        // EventRaised: [occId:u16][eventId:string][siteId:i32]([vehicleId:i32]?) — host tells clients to SHOW a
+        // dialog. siteId is GeoSite.SiteId (-1 = none → client falls back to StartingBase context); vehicleId is
+        // GeoVehicle.VehicleID (-1 = none → client resolves a vehicle at the site, else null context). The
+        // trailing vehicleId is OPTIONAL: a 3-field [occId][eventId][siteId] payload decodes with vehicleId = -1
+        // (so the decoder never throws on a short buffer).
+        // EventDismiss: [occId:u16][eventId:string][choiceIndex:i32]?([u16 rewardLen][rewardBlob:N]?) — host
+        // tells clients the answer was applied. choiceIndex is the index of the picked choice within
+        // EventData.Choices: >= 0 means the choice produced a follow-up RESULT/OUTCOME page (clients rebuild +
+        // show it natively); -1 means close-only (pure-INFO host-OK / decline). BOTH trailing groups are OPTIONAL:
+        //   • a 2-field [occId][eventId] payload decodes with choiceIndex = -1 (close-only);
+        //   • a 3-field [occId][eventId][choiceIndex] payload decodes with an EMPTY reward blob;
+        // so the decoder never throws on a short buffer. The reward blob is a RewardDisplaySnapshot (the native
+        // ShowReward delta lines) carried so the client mirrors the reward card; it is appended ONLY when
+        // non-empty, keeping the no-reward 3-field wire byte-stable.
 
-        public static byte[] EncodeEventRaised(string eventId, int siteId, int vehicleId = -1)
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
+                w.Write(occurrenceId);
                 w.Write(eventId ?? "");
                 w.Write(siteId);
                 w.Write(vehicleId);
@@ -199,17 +206,18 @@ namespace Multipleer.Network.Sync
             }
         }
 
-        public static bool TryDecodeEventRaised(byte[] data, out string eventId, out int siteId, out int vehicleId)
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId)
         {
-            eventId = null; siteId = -1; vehicleId = -1;
+            occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1;
             try
             {
                 using (var ms = new MemoryStream(data))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
+                    occurrenceId = r.ReadUInt16();
                     eventId = r.ReadString();
                     siteId = r.ReadInt32();
-                    // Optional trailing field: absent in a legacy 2-field payload → leave vehicleId = -1.
+                    // Optional trailing field: absent in a 3-field payload → leave vehicleId = -1.
                     if (ms.Length - ms.Position >= sizeof(int)) vehicleId = r.ReadInt32();
                     return true;
                 }
@@ -217,17 +225,18 @@ namespace Multipleer.Network.Sync
             catch { return false; }
         }
 
-        public static byte[] EncodeEventDismiss(string eventId, int choiceIndex = -1)
-            => EncodeEventDismiss(eventId, choiceIndex, null);
+        public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1)
+            => EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null);
 
         // Reward-carrying overload: appends [u16 rewardLen][rewardBlob] ONLY when the blob is non-empty, so a
-        // null/empty reward yields the EXACT legacy 2-field bytes (no trailing length) — keeps the pinned wire
-        // stable and old decoders happy. rewardBlob is a RewardDisplaySnapshot-encoded payload.
-        public static byte[] EncodeEventDismiss(string eventId, int choiceIndex, byte[] rewardBlob)
+        // null/empty reward yields the EXACT 3-field bytes (no trailing length) — keeps the no-reward wire
+        // stable. rewardBlob is a RewardDisplaySnapshot-encoded payload.
+        public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex, byte[] rewardBlob)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
+                w.Write(occurrenceId);
                 w.Write(eventId ?? "");
                 w.Write(choiceIndex);
                 if (rewardBlob != null && rewardBlob.Length > 0)
@@ -243,23 +252,24 @@ namespace Multipleer.Network.Sync
             }
         }
 
-        // Legacy 2-out overload (eventId, choiceIndex) — kept for callers/tests that ignore the reward blob.
-        public static bool TryDecodeEventDismiss(byte[] data, out string eventId, out int choiceIndex)
-            => TryDecodeEventDismiss(data, out eventId, out choiceIndex, out _);
+        // 3-out overload (occId, eventId, choiceIndex) — kept for callers/tests that ignore the reward blob.
+        public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex)
+            => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out _);
 
-        public static bool TryDecodeEventDismiss(byte[] data, out string eventId, out int choiceIndex, out byte[] rewardBlob)
+        public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob)
         {
-            eventId = null; choiceIndex = -1; rewardBlob = new byte[0];
+            occurrenceId = 0; eventId = null; choiceIndex = -1; rewardBlob = new byte[0];
             try
             {
                 using (var ms = new MemoryStream(data))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
+                    occurrenceId = r.ReadUInt16();
                     eventId = r.ReadString();
-                    // Optional trailing field: absent in a legacy 1-field payload → leave choiceIndex = -1
-                    // (close-only), so an old host's dismiss still decodes (forward/backward compatible).
+                    // Optional trailing field: absent in a 2-field payload → leave choiceIndex = -1
+                    // (close-only), so a close-only dismiss still decodes on a short buffer.
                     if (ms.Length - ms.Position >= sizeof(int)) choiceIndex = r.ReadInt32();
-                    // Optional trailing reward blob: [u16 len][len bytes]. Absent in a legacy 2-field payload
+                    // Optional trailing reward blob: [u16 len][len bytes]. Absent in a 3-field payload
                     // → leave an empty blob (reward-less result card). Only accept it when the FULL declared
                     // length is present (no partial accept).
                     if (ms.Length - ms.Position >= sizeof(ushort))

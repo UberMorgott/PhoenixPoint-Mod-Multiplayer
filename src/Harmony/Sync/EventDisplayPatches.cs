@@ -82,9 +82,13 @@ namespace Multipleer.Harmony.Sync
                 // client's context has Vehicle == null and an [AircraftName]-token description NREs inside the
                 // native UIModuleSiteEncounters render → prefab-placeholder text + raw sample choice buttons.
                 int vehicleId = EventReflection.GetVehicleId(geoEvent);
-                Debug.Log("[Multipleer] HOST BroadcastEventRaised eventId=" + eventId +
+                // Synthesize a unique per-occurrence id for THIS live GeoscapeEvent instance (no native one
+                // exists). The SAME instance reaches CompleteEventDismissPatch, so GetOrAssign there retrieves
+                // the same id — the wire-level raise↔dismiss correlation key that survives same-def-id collisions.
+                ushort occId = EventOccurrenceIds.Assign(geoEvent);
+                Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId);
-                engine.Sync?.BroadcastEventRaised(eventId, siteId, vehicleId);
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }
@@ -140,10 +144,14 @@ namespace Multipleer.Harmony.Sync
                     }
                 }
                 catch (Exception rex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch reward-snapshot failed: " + rex.Message); }
-                Debug.Log("[Multipleer] HOST BroadcastEventDismiss eventId=" + eventId +
+                // Retrieve the occurrence id the raise assigned to THIS same instance (the live event flows
+                // through both chokepoints). If the host never saw it raised, a fresh unique id is allocated so
+                // the dismiss still carries a distinct key — clients buffer it until a matching raise lands.
+                ushort occId = EventOccurrenceIds.GetOrAssign(__instance);
+                Debug.Log("[Multipleer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
                           " selectedChoiceIndex=" + choiceIndex +
                           " rewardBytes=" + (rewardBlob?.Length ?? 0));
-                engine.Sync?.BroadcastEventDismiss(eventId, choiceIndex, rewardBlob);
+                engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
         }
