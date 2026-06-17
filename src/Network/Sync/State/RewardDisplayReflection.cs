@@ -450,8 +450,11 @@ namespace Multipleer.Network.Sync.State
             if (locBindType != null) _localize = AccessTools.Method(locBindType, "Localize");
             if (namedListType != null)
             {
-                var generic = AccessTools.Method(namedListType, "GetDef", new[] { typeof(string) });
-                if (generic != null && generic.IsGenericMethodDefinition && _viewElementDefType != null)
+                // NamedListDef declares BOTH GetDef(string) and GetDef<T>(string); AccessTools.Method /
+                // Type.GetMethod(name, Type[]) matches both and throws AmbiguousMatchException (which the outer
+                // catch swallowed → zero reward lines). Pick the GENERIC overload unambiguously.
+                var generic = MethodOverloadResolver.FindGenericSingleStringMethod(namedListType, "GetDef");
+                if (generic != null && _viewElementDefType != null)
                     _namedListGetDef = generic.MakeGenericMethod(_viewElementDefType);
             }
             if (_viewElementDefType != null) _viewDisplayName1 = AccessTools.Field(_viewElementDefType, "DisplayName1");

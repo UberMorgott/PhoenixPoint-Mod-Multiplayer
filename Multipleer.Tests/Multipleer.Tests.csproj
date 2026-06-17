@@ -76,6 +76,9 @@
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
+    <!-- Pure, Unity-free reflection-overload disambiguator (fixes the NamedListDef.GetDef ambiguity that
+         silently killed the client RESULT-card reward lines). Linked so it can be unit-tested directly. -->
+    <Compile Include="..\src\Network\Sync\State\MethodOverloadResolver.cs"><Link>Sync\State\MethodOverloadResolver.cs</Link></Compile>
     <!-- Client raise/dismiss correlation + ordering brain (pure, Unity-free): occurrence-id keyed open map +
          out-of-order dismiss buffer. Fixes the same-def-id collision / Dismiss-before-Raise bug. -->
     <Compile Include="..\src\Network\Sync\State\EventCorrelator.cs"><Link>Sync\State\EventCorrelator.cs</Link></Compile>
