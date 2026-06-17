@@ -130,6 +130,45 @@ namespace Multipleer.Network
             OnConnectionFailed = null;
         }
 
+        /// <summary>
+        /// Idempotent FULL teardown of the networked session. Unlike <see cref="Shutdown"/> this also
+        /// NULLS the <see cref="Instance"/> singleton so the next <see cref="Create"/> yields a fresh
+        /// engine (the old engine "was never nulled", which left a stale lobby reopenable forever after
+        /// a return-to-menu — Bug A). Latched onto the native return-to-menu chokepoint
+        /// (PhoenixGame.FinishLevelAndGoToLobby) by FinishLevelAndGoToLobbyTearDownPatch, so EVERY
+        /// path back to the main menu (pause-exit, mission end, game-over, error-yank) funnels here.
+        /// Safe to call when already idle and safe to call twice.
+        /// </summary>
+        public void TearDown()
+        {
+            // Suppress the transport-failed MessageBox: this teardown is intentional, not a real error.
+            _intentionalDisconnect = true;
+
+            // Drop subscriptions BEFORE the transport goes away (no-op / idempotent on a client or when
+            // already detached). Mirrors Disconnect()/Shutdown().
+            WalletWatcher.Detach();
+            Sync?.DetachAllChannels();
+
+            // Tear down transport + all per-session objects (idempotent: each null-guards).
+            Transport?.Shutdown();
+            Transport = null;
+            Session = null;
+            SaveTransfer = null;   // re-created fresh in Initialize() → resets _begun / SessionStarted
+            TimeSync = null;
+            Sync = null;
+
+            IsActive = false;
+            IsHost = false;
+
+            // Clear UI-facing subscriptions so handlers never stack across host/join/leave cycles.
+            OnConnectionFailed = null;
+
+            // The whole point of TearDown (vs Shutdown): drop the singleton so a return-to-menu does
+            // not leave a stale, half-dead engine that ShowNetworkMenu would re-show a dead lobby from.
+            if (Instance == this)
+                Instance = null;
+        }
+
         // ─── Transport Selection ──────────────────────────────────────────
 
         private static ITransport CreateTransport(TransportType type)
