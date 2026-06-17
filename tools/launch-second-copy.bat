@@ -46,8 +46,16 @@ REM  button is hidden (UIModuleMainMenuButtons sets it active = CanUseMods).
 REM  Steam normally injects this via the game's Steam launch options; a
 REM  standalone gbe_fork copy bypasses Steam, so we MUST pass it ourselves.
 REM  (Arg parser strips all '-' then matches "mods", so "-mods" is correct.)
-echo Launching INSTANCE #2 (CLIENT, Goldberg copy)...
-start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -mods -screen-fullscreen 0 -screen-width 1280 -screen-height 720
+REM --- separate Unity Player.log for this 2nd instance ------------------------
+REM  Unity keys its default log dir on company/product (NOT install path), so both
+REM  instances otherwise clobber the SAME %USERPROFILE%\AppData\LocalLow\Snapshot
+REM  Games Inc\Phoenix Point\Player.log. -logFile redirects THIS instance's engine
+REM  log to its own file so the client's traces (incl. [Multipleer] event-sync) are
+REM  not overwritten by the host. (The mod's own multipleer.log already splits via
+REM  the locked-file suffix fallback; this splits the raw engine log too.)
+set "CLIENTLOG=%DEST%\client.log"
+echo Launching INSTANCE #2 (CLIENT, Goldberg copy)...  log: "%CLIENTLOG%"
+start "PhoenixPoint #2 CLIENT" /D "%DEST%" "%EXE%" -mods -logFile "%CLIENTLOG%" -screen-fullscreen 0 -screen-width 1280 -screen-height 720
 
 echo(
 echo Done. Tile this window to the RIGHT half (Win+Right).

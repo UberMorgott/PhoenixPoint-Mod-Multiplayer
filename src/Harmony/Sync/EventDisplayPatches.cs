@@ -82,6 +82,8 @@ namespace Multipleer.Harmony.Sync
                 // client's context has Vehicle == null and an [AircraftName]-token description NREs inside the
                 // native UIModuleSiteEncounters render → prefab-placeholder text + raw sample choice buttons.
                 int vehicleId = EventReflection.GetVehicleId(geoEvent);
+                Debug.Log("[Multipleer] HOST BroadcastEventRaised eventId=" + eventId +
+                          " siteId=" + siteId + " vehicleId=" + vehicleId);
                 engine.Sync?.BroadcastEventRaised(eventId, siteId, vehicleId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
@@ -123,6 +125,8 @@ namespace Multipleer.Harmony.Sync
                 // tells clients to rebuild + show that choice's follow-up RESULT/OUTCOME page natively; a null/
                 // decline choice resolves to -1 → close-only. The reward STATE already syncs via the channels.
                 int choiceIndex = EventReflection.GetSelectedChoiceIndex(__instance);
+                Debug.Log("[Multipleer] HOST BroadcastEventDismiss eventId=" + eventId +
+                          " selectedChoiceIndex=" + choiceIndex);
                 engine.Sync?.BroadcastEventDismiss(eventId, choiceIndex);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }

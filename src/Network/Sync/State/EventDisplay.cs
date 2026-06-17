@@ -114,6 +114,11 @@ namespace Multipleer.Network.Sync.State
             {
                 Ensure();
                 if (!_ready || resultEvent == null) return;
+                var view0 = GetView(rt);
+                var state0 = view0 != null ? GetCurrentEventState(view0) : null;
+                Debug.Log("[Multipleer] EventDisplay.ShowResult eventId=" + eventId +
+                          " openIsEventState=" + (state0 != null) + " openEventId=" + GetStateEventId(state0) +
+                          " → Dismiss+Show result page");
                 // Close the open locked choice modal first (host answer applied) so the result page replaces it
                 // in-place rather than stacking on top of a still-open dialog.
                 Dismiss(rt, eventId);
@@ -138,14 +143,29 @@ namespace Multipleer.Network.Sync.State
                 var view = GetView(rt);
                 if (view == null) return;
                 var state = GetCurrentEventState(view);
-                if (state == null) return;   // current state isn't a geoscape-event dialog → nothing to close
+                if (state == null)
+                {
+                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
+                              " stateMatched=false (current state is NOT a UIStateBaseGeoscapeEvent<> → nothing to close)");
+                    return;   // current state isn't a geoscape-event dialog → nothing to close
+                }
 
                 // If we know which event to dismiss and can read the open event's id, only close on a match.
                 if (!string.IsNullOrEmpty(eventId))
                 {
                     string openId = GetStateEventId(state);
                     if (!string.IsNullOrEmpty(openId) && !string.Equals(openId, eventId, StringComparison.Ordinal))
+                    {
+                        Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
+                                  " openEventId=" + openId + " stateMatched=true idMatch=false (different event open → not closing)");
                         return; // a different event is open → don't close the wrong dialog
+                    }
+                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=" + eventId +
+                              " openEventId=" + openId + " stateMatched=true idMatch=true → FinishQueriedState");
+                }
+                else
+                {
+                    Debug.Log("[Multipleer] EventDisplay.Dismiss requestedEventId=<none> stateMatched=true → FinishQueriedState (close current)");
                 }
                 _finishQueriedState.Invoke(view, null);
             }

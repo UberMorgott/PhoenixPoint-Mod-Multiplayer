@@ -274,6 +274,8 @@ namespace Multipleer.Network.Sync
             {
                 var rt = GeoRuntime.Instance;
                 var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId);
+                Debug.Log("[Multipleer] CLIENT OnEventRaised eventId=" + eventId + " siteId=" + siteId +
+                          " vehicleId=" + vehicleId + " builtEvent=" + (geoEvent != null));
                 if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
@@ -296,7 +298,15 @@ namespace Multipleer.Network.Sync
                 if (choiceIndex >= 0)
                 {
                     var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
+                    Debug.Log("[Multipleer] CLIENT OnEventDismiss eventId=" + eventId + " choiceIndex=" +
+                              choiceIndex + " builtResult=" + (resultEvent != null) +
+                              " branch=" + (resultEvent != null ? "ShowResult" : "fallback-Dismiss"));
                     if (resultEvent != null) { State.EventDisplay.ShowResult(rt, resultEvent, eventId); return; }
+                }
+                else
+                {
+                    Debug.Log("[Multipleer] CLIENT OnEventDismiss eventId=" + eventId + " choiceIndex=" +
+                              choiceIndex + " branch=Dismiss (close-only)");
                 }
                 State.EventDisplay.Dismiss(rt, eventId);   // -1, or result rebuild failed → close-only
             }

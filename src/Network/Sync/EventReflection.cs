@@ -422,11 +422,18 @@ namespace Multipleer.Network.Sync
                 object eventData = ResolveEventData(rt, eventId);
                 if (eventData == null) return null;
 
-                object site = ResolveSiteById(rt, siteId) ?? GetStartingBase(fac);
+                object resolvedSite = ResolveSiteById(rt, siteId);
+                object site = resolvedSite ?? GetStartingBase(fac);
                 if (site == null || _eventCtor == null) return null;
 
                 // Vehicle fallback chain: broadcast id → a vehicle currently at the resolved site → null.
                 object vehicle = ResolveVehicleById(rt, vehicleId) ?? ResolveVehicleAtSite(site);
+
+                Debug.Log("[Multipleer] BuildEvent eventId=" + eventId + " siteId=" + siteId +
+                          " siteResolved=" + (resolvedSite != null) +
+                          " usedStartingBaseFallback=" + (resolvedSite == null) +
+                          " " + DescribeSite(site) +
+                          " vehicleId=" + vehicleId + " vehicleResolved=" + (vehicle != null));
 
                 object context;
                 if (vehicle != null && _contextCtor3 != null)
@@ -443,6 +450,25 @@ namespace Multipleer.Network.Sync
                 return geoEvent;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
+        }
+
+        // Diagnostics-only, fully guarded: a short "owner=… type=…" tag for a resolved GeoSite. Reads
+        // GeoSite.Owner (GeoFaction) + GeoSite.Type (GeoSiteType enum) via reflection wrapped so a value
+        // read that NREs/throws degrades to a placeholder — never affects BuildEvent's control flow.
+        private static string DescribeSite(object site)
+        {
+            if (site == null) return "site=null";
+            try
+            {
+                var ownerProp = AccessTools.Property(site.GetType(), "Owner"); // public GeoFaction Owner (GeoSite.cs:139)
+                var typeProp = AccessTools.Property(site.GetType(), "Type");   // public GeoSiteType Type (GeoSite.cs:151)
+                object owner = null, type = null;
+                try { owner = ownerProp?.GetValue(site, null); } catch { /* deref may NRE on a partial site */ }
+                try { type = typeProp?.GetValue(site, null); } catch { }
+                return "siteOwner=" + (owner == null ? "null" : owner.ToString()) +
+                       " siteType=" + (type == null ? "null" : type.ToString());
+            }
+            catch { return "siteDescribe=err"; }
         }
 
         // ─── RESULT/OUTCOME follow-up page (host index → client text-only render) ──────────
@@ -509,27 +535,34 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure();
-                if (!_ready || string.IsNullOrEmpty(eventId) || choiceIndex < 0) return null;
+                if (!_ready || string.IsNullOrEmpty(eventId) || choiceIndex < 0)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=not-ready/empty-id/neg-index eventId=" + eventId + " choiceIndex=" + choiceIndex + " ready=" + _ready); return null; }
                 if (_eventDataCtor == null || _eventCtor == null || _contextCtor == null
                     || _edDescriptionField == null || _choicesField == null || _tvGeneralField == null
                     || _localizedTextCtor2 == null || _textVariationType == null || _choiceType2 == null
-                    || _choiceTextField == null) return null;
+                    || _choiceTextField == null)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=missing-reflection-member eventId=" + eventId); return null; }
 
                 var fac = rt?.PhoenixFaction();
-                if (fac == null) return null;
+                if (fac == null)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=faction-null eventId=" + eventId); return null; }
 
                 object srcData = ResolveEventData(rt, eventId);
-                if (srcData == null) return null;
+                if (srcData == null)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=def-not-found eventId=" + eventId); return null; }
 
                 var srcChoices = _choicesField.GetValue(srcData) as IList;
-                if (srcChoices == null || choiceIndex >= srcChoices.Count) return null;
+                if (srcChoices == null || choiceIndex >= srcChoices.Count)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choiceIndex-out-of-range eventId=" + eventId + " choiceIndex=" + choiceIndex + " choiceCount=" + (srcChoices == null ? -1 : srcChoices.Count)); return null; }
                 object choice = srcChoices[choiceIndex];
-                if (choice == null) return null;
+                if (choice == null)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choice-null eventId=" + eventId + " choiceIndex=" + choiceIndex); return null; }
 
                 // Build a StartingBase context (no siteId on the dismiss wire). Outcome text usually needs only
                 // faction/site tokens; a vehicle-token outcome degrades gracefully (GetText try/catch → raw text).
                 object site = GetStartingBase(fac);
-                if (site == null) return null;
+                if (site == null)
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=startingbase-null eventId=" + eventId); return null; }
                 object context = _contextCtor.Invoke(new[] { site, fac });
 
                 // text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), tokens replaced.
@@ -564,6 +597,7 @@ namespace Multipleer.Network.Sync
                 object geoEvent = _eventCtor.Invoke(new[] { data, context });
                 // Stamp a Completed record so the local OK dismiss does not NRE / force-complete (same as BuildEvent).
                 AttachCompletedRecord(geoEvent);
+                Debug.Log("[Multipleer] BuildResultEvent ok eventId=" + eventId + " choiceIndex=" + choiceIndex);
                 return geoEvent;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildResultEvent failed: " + ex.Message); return null; }
