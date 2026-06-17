@@ -56,5 +56,35 @@ namespace Multipleer.Tests
             c.UpdateLobby(0, true, true);            // client left this frame
             Assert.False(c.CommitStart());           // press-time re-validation rejects it (H2)
         }
+
+        // ─── Downstream-failure reopen (no stuck-locked lobby) ──────────────
+        [Fact]
+        public void CancelStart_AfterCommit_UnlocksAndReopens()
+        {
+            // CommitStart locks the lobby + enters Starting BEFORE HostStartSession runs. If the start
+            // fails downstream, CancelStart must reopen the lobby fully — unlocked, HostLobby, and with
+            // the (still-satisfied) gate open again so the host can immediately retry.
+            var c = HostLobbyWith(clients: 1, ready: true, save: true);
+            Assert.True(c.CommitStart());
+            Assert.True(c.IsLocked);
+            Assert.Equal(LobbyState.Starting, c.State);
+
+            c.CancelStart();
+
+            Assert.False(c.IsLocked);
+            Assert.Equal(LobbyState.HostLobby, c.State);
+            Assert.True(c.CanStart);                 // gate facts preserved → reopen is immediately startable
+        }
+
+        [Fact]
+        public void CancelStart_WhenNotStarting_IsNoOp()
+        {
+            // Not in Starting (plain HostLobby, never committed) → CancelStart is a harmless no-op.
+            var c = HostLobbyWith(clients: 1, ready: true, save: true);
+            Assert.Equal(LobbyState.HostLobby, c.State);
+            c.CancelStart();
+            Assert.Equal(LobbyState.HostLobby, c.State);
+            Assert.False(c.IsLocked);
+        }
     }
 }

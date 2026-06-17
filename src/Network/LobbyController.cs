@@ -98,6 +98,20 @@ namespace Multipleer.Network
         }
 
         /// <summary>
+        /// Reversible counterpart to <see cref="CommitStart"/>: a start that was committed (lobby locked,
+        /// State=Starting) failed DOWNSTREAM (e.g. the save-transfer coordinator could not get the game
+        /// or timing), so reopen the lobby — UNLOCK and return to HostLobby — instead of leaving it
+        /// permanently dead-locked. Safe/idempotent when not in Starting (no-op). The cached lobby facts
+        /// are preserved, so if the gate was satisfied at commit it is satisfied again on reopen.
+        /// </summary>
+        public void CancelStart()
+        {
+            if (State != LobbyState.Starting) return;
+            IsLocked = false;
+            State = LobbyState.HostLobby;
+        }
+
+        /// <summary>
         /// The host swapped the chosen save: clients readied for a specific session, so their Ready
         /// must be cleared. Returns true so the caller can drive the actual roster reset; locally
         /// it also drops the cached ready fact so <see cref="CanStart"/> closes until re-readied.

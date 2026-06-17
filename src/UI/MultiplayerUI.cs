@@ -155,6 +155,26 @@ namespace Multipleer.UI
             }
         }
 
+        // Reverse of DropCurtainEarly: lift the native curtain back up. Used only when a committed start
+        // FAILED downstream (no scene load happens, so the native Loaded→Playing lift never fires) and
+        // we must restore the lobby to its pre-press visible state. Best-effort + dynamic, like the drop.
+        private void LiftCurtainEarly()
+        {
+            try
+            {
+                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                if (t == null) return;
+                var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                if (ctrl == null) return;
+                var m = HarmonyLib.AccessTools.Method(t, "LiftCurtain", new System.Type[0]);
+                m?.Invoke(ctrl, null);
+            }
+            catch (System.Exception e)
+            {
+                UnityEngine.Debug.LogWarning("[Multipleer] Early curtain lift failed: " + e.Message);
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         //  Main entry — called from button click
         // ═══════════════════════════════════════════════════════════════════
@@ -250,7 +270,28 @@ namespace Multipleer.UI
             {
                 DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
                 ShowLoadOverlay();
-                engine.SaveTransfer?.HostStartSession(_pendingChosenSave);
+                bool started = engine.SaveTransfer?.HostStartSession(_pendingChosenSave) ?? false;
+                if (started) return;
+
+                // The gate passed and we LOCKED the lobby, but the start failed downstream (no game /
+                // no timing). Reopen instead of leaving the lobby permanently dead-locked: unlock the
+                // FSM, undo the visible commit side effects (overlay + early curtain drop), re-show the
+                // lobby, and warn. The cached facts are intact, so the gate is satisfied again on reopen.
+                _lobbyController.CancelStart();
+                HideLoadOverlay();
+                LiftCurtainEarly();
+                var failBox = GameUtl.GetMessageBox();
+                if (failBox != null)
+                {
+                    _lobby?.HideForNativeScreen();
+                    failBox.ShowSimplePrompt("Failed to start session. Please try again.",
+                        MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                        delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                }
+                else
+                {
+                    _lobby?.Show();
+                }
                 return;
             }
 

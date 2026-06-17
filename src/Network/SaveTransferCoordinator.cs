@@ -193,18 +193,24 @@ namespace Multipleer.Network
         //  HOST: start the session — serialize + send the save, open the barrier
         // ══════════════════════════════════════════════════════════════════
 
-        public void HostStartSession(SavegameMetaData chosen)
+        /// <summary>
+        /// Begin the host→clients session start. Returns true iff the start is now IN FLIGHT
+        /// (serialize+send coroutine launched); returns false on every abort path (non-host, no save,
+        /// start gate closed, or a downstream game/timing failure) so the caller can reopen a lobby it
+        /// already locked via LobbyController.CommitStart() — never leaving it permanently dead-locked.
+        /// </summary>
+        public bool HostStartSession(SavegameMetaData chosen)
         {
             if (!_engine.IsHost)
             {
                 Debug.LogWarning("[Multipleer] HostStartSession called on a non-host peer; ignored.");
-                return;
+                return false;
             }
 
             if (chosen == null)
             {
                 Debug.LogError("[Multipleer] HostStartSession called with no chosen save; aborting.");
-                return;
+                return false;
             }
 
             // Defense-in-depth (Bug B): the lobby start gate must also hold HERE, not only in the
@@ -217,7 +223,7 @@ namespace Multipleer.Network
             {
                 Debug.LogWarning("[Multipleer] HostStartSession blocked: start gate closed " +
                     $"(clients={clientCount}, allReady={AllClientsReadyRoster(roster)}); ignoring start.");
-                return;
+                return false;
             }
 
             Debug.Log($"[Multipleer] HostStartSession: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
@@ -236,15 +242,16 @@ namespace Multipleer.Network
 
             PhoenixGame game;
             PhoenixSaveManager saveManager;
-            if (!TryGetGame(out game, out saveManager)) return;
+            if (!TryGetGame(out game, out saveManager)) return false;
 
             // The chosen save is supplied by the lobby save-picker (PhoenixSaveManager.GetSaves()),
             // selected AFTER the lobby Play press — never auto-selected here (lobby-first invariant).
             var timing = GetTiming();
-            if (timing == null) return;
+            if (timing == null) return false;
 
             _transferId = Guid.NewGuid();
             timing.Start(HostSerializeAndSendCrt(game, chosen));
+            return true;
         }
 
         // Start-gate helper mirroring MultiplayerUI.AllConnectedClientsReady: >=1 client AND every
