@@ -244,7 +244,9 @@ namespace Multipleer.Network.Sync.State
                     return snap;
                 }
             }
-            // Pure/Unity-free: swallow malformed payloads and return null (callers treat null as "no-op").
+            // Malformed payload → reject (null). The codec stays PURE/Unity-free (it is linked into the unit
+            // tests, which don't ship UnityEngine), so the visibility log lives at the Unity-bound caller
+            // (SyncEngine.OnEventDismiss logs when a NON-empty blob fails to decode) — same [Multipleer] style.
             catch (Exception) { return null; }
         }
 

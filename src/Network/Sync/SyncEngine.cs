@@ -48,14 +48,6 @@ namespace Multipleer.Network.Sync
         private readonly SurfaceRegistry _surfaces = new SurfaceRegistry();
         private readonly SurfaceRouter _router;
 
-        // ─── Client: deferred reward-card render ───────────────────────────
-        // ShowResult queues the native UIStateGeoscapeEvent push; the module's ShowEncounter (which clears the
-        // reward-text container) runs on a LATER view update. So we stash the decoded reward snapshot and replay
-        // its lines through the module's native AddRewardText a few frames later, once the result page rendered.
-        private RewardDisplaySnapshot _pendingReward;
-        private int _pendingRewardFrames;
-        private const int RewardRenderDelayFrames = 2;   // enough for QueryStateSwitch → EnterState → ShowEncounter
-
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
@@ -303,8 +295,12 @@ namespace Multipleer.Network.Sync
             try
             {
                 var rt = GeoRuntime.Instance;
-                // Decode the reward delta-line snapshot (empty blob → empty snapshot → no-op render).
+                // Decode the reward delta-line snapshot (empty blob → empty snapshot → no-op render). A NON-empty
+                // blob that fails to decode (null) is a corrupt/version-mismatched reward — log it (the codec is
+                // pure/Unity-free, so this boundary is where the malformed-blob visibility log belongs).
                 var reward = RewardDisplaySnapshot.Decode(rewardBlob);
+                if (reward == null && rewardBlob != null && rewardBlob.Length > 0)
+                    Debug.LogError("[Multipleer] reward decode failed (malformed blob, " + rewardBlob.Length + " bytes) — result card shown without reward lines");
                 if (choiceIndex >= 0)
                 {
                     var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
@@ -315,12 +311,19 @@ namespace Multipleer.Network.Sync
                               " branch=" + (resultEvent != null ? "ShowResult" : "fallback-Dismiss"));
                     if (resultEvent != null)
                     {
+                        // Arm the reward render BEFORE showing, keyed to THIS synthetic event instance. The
+                        // native UIModuleSiteEncounters.ShowEncounter Postfix (RewardRenderPatch) consumes it
+                        // deterministically when our page is built — exactly once, onto the correct module, with
+                        // no frame-delay heuristic and no wrong-context risk.
+                        if (reward != null && !reward.IsEmpty)
+                            State.RewardDisplayReflection.SetPending(resultEvent, reward);
+                        else
+                            State.RewardDisplayReflection.ClearPending();
                         State.EventDisplay.ShowResult(rt, resultEvent, eventId);
-                        // Defer the reward-line render until after the result page's ShowEncounter lands
-                        // (it clears the reward-text container). Replayed in Tick() a couple frames later.
-                        if (reward != null && !reward.IsEmpty) ScheduleRewardRender(reward);
                         return;
                     }
+                    // Result page couldn't be rebuilt → no page to attach reward lines to; clear any armed slot.
+                    State.RewardDisplayReflection.ClearPending();
                 }
                 else
                 {
@@ -330,24 +333,6 @@ namespace Multipleer.Network.Sync
                 State.EventDisplay.Dismiss(rt, eventId);   // -1, or result rebuild failed → close-only
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
-        }
-
-        /// <summary>Client: queue the reward snapshot to render a few frames after the result page is shown.</summary>
-        private void ScheduleRewardRender(RewardDisplaySnapshot reward)
-        {
-            _pendingReward = reward;
-            _pendingRewardFrames = RewardRenderDelayFrames;
-        }
-
-        /// <summary>Client: once the delay elapses, replay the reward lines through the native AddRewardText.</summary>
-        private void FlushPendingRewardRender()
-        {
-            if (_pendingReward == null) return;
-            if (_pendingRewardFrames > 0) { _pendingRewardFrames--; return; }
-            var reward = _pendingReward;
-            _pendingReward = null;
-            try { State.RewardDisplayReflection.Render(GeoRuntime.Instance, reward); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] FlushPendingRewardRender failed: " + ex.Message); }
         }
 
         /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers.</summary>
@@ -376,12 +361,7 @@ namespace Multipleer.Network.Sync
         public void Tick()
         {
             if (_engine == null || !_engine.IsActive) return;
-
-            // Client: flush any deferred reward-card render. ShowResult queues the native state push, so the
-            // module's ShowEncounter (which CLEARS the reward-text container) runs on a LATER view update —
-            // appending the reward lines must therefore wait until after that render lands. We defer by a fixed
-            // number of frames, then replay the lines through the module's native AddRewardText. Best-effort.
-            if (!_engine.IsHost) { FlushPendingRewardRender(); return; }
+            if (!_engine.IsHost) return;
 
             // Host: bind the wallet watcher once the geoscape (and its wallet) is live. Attach is
             // idempotent — it early-returns until the wallet exists, then once it is bound. Mirrors the

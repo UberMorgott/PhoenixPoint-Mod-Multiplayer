@@ -62,10 +62,8 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _siteIdField;                                       // GeoSite.SiteId
 
         // ─── client render ───
+        // The module instance is handed in by the ShowEncounter Postfix (__instance); no live-fetch needed.
         private static bool _clientReady;
-        private static FieldInfo _viewField;          // GeoLevelController.View
-        private static FieldInfo _modulesField;       // GeoscapeView.GeoscapeModules
-        private static FieldInfo _siteEncModuleField; // GeoscapeModulesData.SiteEncountersModule
         private static MethodInfo _addRewardText;     // UIModuleSiteEncounters.AddRewardText(string)
         private static PropertyInfo _posPattern, _negPattern;
         private static FieldInfo _resourcesListField; // ResourcesList (NamedListDef)
@@ -422,19 +420,13 @@ namespace Multipleer.Network.Sync.State
         private static void EnsureClient(GeoRuntime rt)
         {
             if (_clientReady) return;
-            var geoType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
-            var viewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
-            var modulesType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
             var moduleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
             var locBindType = AccessTools.TypeByName("Base.UI.LocalizedTextBind");
             var namedListType = AccessTools.TypeByName("Base.Defs.NamedListDef");
             _viewElementDefType = AccessTools.TypeByName("PhoenixPoint.Common.UI.ViewElementDef");
             var itemDefType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Items.ItemDef");
-            if (geoType == null || viewType == null || modulesType == null || moduleType == null) return;
+            if (moduleType == null) return;
 
-            _viewField = AccessTools.Field(geoType, "View");
-            _modulesField = AccessTools.Field(viewType, "GeoscapeModules");
-            _siteEncModuleField = AccessTools.Field(modulesType, "SiteEncountersModule");
             _addRewardText = AccessTools.Method(moduleType, "AddRewardText", new[] { typeof(string) });
             _posPattern = AccessTools.Property(moduleType, "PositiveRewardTextPattern");
             _negPattern = AccessTools.Property(moduleType, "NegativeRewardTextPattern");
@@ -465,24 +457,62 @@ namespace Multipleer.Network.Sync.State
             if (_viewElementDefType != null) _viewDisplayName1 = AccessTools.Field(_viewElementDefType, "DisplayName1");
             if (itemDefType != null) _itemDefGetDisplay = AccessTools.Method(itemDefType, "GetDisplayName");
 
-            _clientReady = _viewField != null && _modulesField != null && _siteEncModuleField != null
-                           && _addRewardText != null && _localize != null;
+            // The module is handed in by the deterministic ShowEncounter Postfix (RewardRenderPatch), so the
+            // live-module-fetch fields are NOT required for readiness — only the renderer's own members are.
+            _clientReady = _addRewardText != null && _localize != null;
+        }
+
+        // ─── deterministic one-shot pending slot (armed by SyncEngine, consumed by the ShowEncounter hook) ───
+        // The synthetic result GeoscapeEvent is correlated by REFERENCE IDENTITY (its EventID is "" so it can't
+        // be matched by id). A single slot: arming overwrites any stale prior (last dismiss wins); a stale
+        // reference can never match a different event's ShowEncounter, so a lingering slot is harmless.
+        private static readonly object _pendingLock = new object();
+        private static object _pendingEvent;                 // the exact synthetic GeoscapeEvent instance
+        private static RewardDisplaySnapshot _pendingReward;  // its reward lines
+
+        /// <summary>Client: arm the reward render for a specific synthetic result event instance (one-shot).</summary>
+        public static void SetPending(object syntheticEvent, RewardDisplaySnapshot reward)
+        {
+            if (syntheticEvent == null || reward == null || reward.IsEmpty) return;
+            lock (_pendingLock) { _pendingEvent = syntheticEvent; _pendingReward = reward; }
         }
 
         /// <summary>
-        /// CLIENT: render the reward delta lines through the live module's native <c>AddRewardText</c> — the
-        /// SAME renderer the host used (no <c>Apply</c>, no state mutation, no hand-drawn UI). Each line is a
-        /// best-effort: an unresolved entity DROPS that line (one debug log) and the rest still render.
+        /// Client (ShowEncounter Postfix): if <paramref name="shownEvent"/> IS our armed synthetic result event
+        /// (reference identity), consume + clear the slot and return its reward. Returns null (no-op) for the
+        /// original choice dialog or any unrelated event — so the render only ever lands on our page, exactly once.
         /// </summary>
-        public static void Render(GeoRuntime rt, RewardDisplaySnapshot snap)
+        public static RewardDisplaySnapshot TryConsume(object shownEvent)
         {
-            if (snap == null || snap.IsEmpty) return;
+            if (shownEvent == null) return null;
+            lock (_pendingLock)
+            {
+                if (!ReferenceEquals(shownEvent, _pendingEvent)) return null;
+                var reward = _pendingReward;
+                _pendingEvent = null; _pendingReward = null;   // one-shot
+                return reward;
+            }
+        }
+
+        /// <summary>Client: drop any armed-but-unconsumed reward (e.g. a new event raised first). Idempotent.</summary>
+        public static void ClearPending()
+        {
+            lock (_pendingLock) { _pendingEvent = null; _pendingReward = null; }
+        }
+
+        /// <summary>
+        /// CLIENT: render the reward delta lines onto <paramref name="module"/> (the freshly-built
+        /// <c>UIModuleSiteEncounters</c> handed in by the ShowEncounter Postfix) through its native
+        /// <c>AddRewardText</c> — the SAME renderer the host used (no <c>Apply</c>, no state mutation, no
+        /// hand-drawn UI). Each line is best-effort: an unresolved entity DROPS that line and the rest render.
+        /// </summary>
+        public static void Render(GeoRuntime rt, object module, RewardDisplaySnapshot snap)
+        {
+            if (snap == null || snap.IsEmpty || module == null) return;
             try
             {
                 EnsureClient(rt);
                 if (!_clientReady) { Debug.Log("[Multipleer] RewardDisplayRender SKIP (reflection not ready)"); return; }
-                var module = GetModule(rt);
-                if (module == null) { Debug.Log("[Multipleer] RewardDisplayRender SKIP (no SiteEncounters module)"); return; }
 
                 string pos = _posPattern?.GetValue(module, null) as string ?? "{0}";
                 string neg = _negPattern?.GetValue(module, null) as string ?? "{0}";
@@ -572,21 +602,6 @@ namespace Multipleer.Network.Sync.State
                 Debug.Log("[Multipleer] RewardDisplayRender drew " + lines + " reward line(s) via native AddRewardText");
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] RewardDisplayReflection.Render failed: " + ex.Message); }
-        }
-
-        private static object GetModule(GeoRuntime rt)
-        {
-            try
-            {
-                var geo = rt?.GeoLevel();
-                if (geo == null) return null;
-                var view = _viewField.GetValue(geo);
-                if (view == null) return null;
-                var modules = _modulesField.GetValue(view);
-                if (modules == null) return null;
-                return _siteEncModuleField.GetValue(modules);
-            }
-            catch { return null; }
         }
 
         private static bool Add(object module, string text)
