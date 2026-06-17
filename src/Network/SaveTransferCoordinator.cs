@@ -254,19 +254,17 @@ namespace Multipleer.Network
             return true;
         }
 
-        // Start-gate helper mirroring MultiplayerUI.AllConnectedClientsReady: >=1 client AND every
-        // NON-host roster entry ready. Host self-entry (IsHost=true) is ignored (it is the starter).
+        // Start-gate helper: project the roster to non-host ready flags and delegate to the ONE shared
+        // rule (LobbyController.AllClientsReady) — >=1 NON-host peer AND every non-host peer ready. The
+        // host self-entry is the starter, not a ready-gated player, so it is excluded. Single source of
+        // truth shared with the lobby VISUAL + press-time guard so no copy can drift.
         private static bool AllClientsReadyRoster(List<PeerListEntry> roster)
         {
             if (roster == null) return false;
-            int clients = 0;
+            var nonHostReady = new List<bool>();
             foreach (var p in roster)
-            {
-                if (p.IsHost) continue;
-                clients++;
-                if (!p.Ready) return false;
-            }
-            return clients >= 1;
+                if (!p.IsHost) nonHostReady.Add(p.Ready);
+            return LobbyController.AllClientsReady(nonHostReady);
         }
 
         // Coroutine: read the save to bytes, then chunk+send, then prepare host entry + open barrier.

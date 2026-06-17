@@ -933,12 +933,16 @@ namespace Multipleer.UI
             _localReady = me != null && me.Ready;
             UpdateReadyButtonLabel();
 
-            // Play button: host only, enabled when host is ready AND every remote client is ready.
+            // Play button: host only, enabled ONLY when the FULL start gate is open. The visual reads
+            // the SAME controller gate the press path uses (LobbyController.CanStart, via the single
+            // MultiplayerUI projection) — clients>=1 && all clients ready && save chosen && HostLobby &&
+            // !locked. So the button greys for host-alone, any client un-ready, NO save chosen, and once
+            // the lobby locks on start, exactly matching OnLobbyPlay (no second, drifting rule = Bug B).
             // Cloned native buttons self-manage their disabled visuals from Button.interactable
             // (UIInteractableColorController/Animator on the prefab), so gate via interactable.
             if (_playButton != null)
             {
-                var playable = engine.IsHost && AllReady(roster);
+                var playable = engine.IsHost && (MultiplayerUI.Instance?.EvaluateStartGate() ?? false);
 
                 var activeNow = engine.IsHost ? 1 : 0;
                 if (_playButton.gameObject.activeSelf != engine.IsHost)
@@ -997,20 +1001,6 @@ namespace Multipleer.UI
         {
             if (_readyButtonLabel == null) return;
             _readyButtonLabel.text = _localReady ? "✓ READY" : "READY";
-        }
-
-        // All-ready start gate (lobby-computed): IGNORE the host self-entry (the host is the starter,
-        // not a ready-gated player) and require at least one NON-host peer, all ready. Delegates to
-        // LobbyController.AllClientsReady so the Play-button visual uses the EXACT same rule the
-        // press-time guards (OnLobbyPlay / HostStartSession) use — visual and gate can never disagree
-        // (the old "host self-entry Ready=HostReady ⇒ AllReady true while alone" lit Play solo = Bug B).
-        private static bool AllReady(List<PeerListEntry> roster)
-        {
-            if (roster == null) return false;
-            var nonHostReady = new List<bool>();
-            foreach (var p in roster)
-                if (!p.IsHost) nonHostReady.Add(p.Ready);
-            return LobbyController.AllClientsReady(nonHostReady);
         }
 
         // Rebuild/refresh the player rows from the unified lobby roster (host self-entry + clients).

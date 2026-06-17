@@ -233,7 +233,8 @@ namespace Multipleer.UI
             if (engine?.Session == null) return;
 
             // Host has NO Ready toggle (it is the starter, not a ready-gated player — spec §5). Only a
-            // CLIENT readies/unreadies; the host's own start gate is AllConnectedClientsReady + save.
+            // CLIENT readies/unreadies; the host's own start gate is LobbyController.CanStart (all
+            // non-host peers ready + save chosen), projected via RefreshGateFacts.
             if (engine.IsHost) return;
 
             // Client → host ClientReady (foundation keys by sender; host broadcasts the updated roster).
@@ -256,15 +257,12 @@ namespace Multipleer.UI
             if (engine == null || !engine.IsHost) return;
 
             // Press-time re-validation of the SAME start gate (defense-in-depth vs the stale-frame
-            // race, Bug B H2): never trust the Play button's lit visual alone. Push the live facts
-            // into the FSM, then attempt CommitStart — which only succeeds when >=1 client is
-            // connected, ALL connected clients are ready, and a save is chosen, and which LOCKS the
-            // lobby on success so no mid-start ready flip can race in.
-            var roster = engine.Session?.GetLobbyRoster();
-            int clientCount = engine.Session?.ClientCount ?? 0;
-            bool allClientsReady = AllConnectedClientsReady(roster);
-            bool saveChosen = _pendingChosenSave != null;
-            _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
+            // race, Bug B H2): never trust the Play button's lit visual alone. Project the live roster
+            // facts into the FSM through the SINGLE shared projection point (RefreshGateFacts — the
+            // exact same one the Play-button VISUAL uses), then attempt CommitStart — which only
+            // succeeds when >=1 client is connected, ALL connected clients are ready, and a save is
+            // chosen, and which LOCKS the lobby on success so no mid-start ready flip can race in.
+            RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen);
 
             if (_lobbyController.CommitStart())
             {
@@ -295,8 +293,8 @@ namespace Multipleer.UI
                 return;
             }
 
-            // Gate closed at press time. Tell the host exactly what is missing, then restore the
-            // lobby fully interactive (reuse the proven HideForNativeScreen → prompt → Show pattern).
+            // Gate closed at press time. Tell the host exactly what is missing, reading the SAME
+            // projected facts (no parallel rule) so the message can never contradict the gate.
             string why = !saveChosen ? "Choose a save before starting."
                 : clientCount < 1 ? "Wait for a player to join before starting."
                 : "All players must be ready before starting.";
@@ -310,19 +308,40 @@ namespace Multipleer.UI
             }
         }
 
-        // True iff there is >=1 connected client AND every NON-host roster entry is ready. The host
-        // self-entry (IsHost=true) is ignored — the host is the starter, not a ready-gated player.
-        private static bool AllConnectedClientsReady(List<PeerListEntry> roster)
+        // ─── Start-gate projection (THE single source of truth feed) ────────────────────────────
+        // Project the authoritative lobby roster down to the primitive gate facts and push them into
+        // the LobbyController FSM. This is the ONE place the non-host/all-ready rule is applied (via
+        // LobbyController.AllClientsReady) — both the Play-button VISUAL (EvaluateStartGate) and the
+        // press-time guard (OnLobbyPlay) call through here, so they can never derive a different gate.
+        //   • clientCount      = connected NON-host peers (host self-entry excluded).
+        //   • allClientsReady  = LobbyController.AllClientsReady over the non-host ready flags.
+        //   • saveChosen       = a save has been picked for this session (_pendingChosenSave).
+        // UpdateLobby ignores updates while the FSM is locked, so this is safe to call every frame.
+        private void RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen)
         {
-            if (roster == null) return false;
-            int clients = 0;
-            foreach (var p in roster)
-            {
-                if (p.IsHost) continue;
-                clients++;
-                if (!p.Ready) return false;
-            }
-            return clients >= 1;
+            var engine = NetworkEngine.Instance;
+            var roster = engine?.Session?.GetLobbyRoster();
+
+            var nonHostReady = new List<bool>();
+            if (roster != null)
+                foreach (var p in roster)
+                    if (!p.IsHost) nonHostReady.Add(p.Ready);
+
+            clientCount = nonHostReady.Count;
+            allClientsReady = LobbyController.AllClientsReady(nonHostReady);
+            saveChosen = _pendingChosenSave != null;
+
+            _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
+        }
+
+        // Refresh the FSM from the live roster, then return the FULL start gate (clients>=1 && all
+        // clients ready && save chosen && HostLobby && !locked). The Play-button VISUAL calls this so
+        // its enabled state matches the press-time gate on EVERY dimension — including save-chosen and
+        // the post-commit lock — not just the all-ready dimension.
+        public bool EvaluateStartGate()
+        {
+            RefreshGateFacts(out _, out _, out _);
+            return _lobbyController.CanStart;
         }
 
         // ─── Smart-Join (footer Join…) ─────────────────────────────────────
