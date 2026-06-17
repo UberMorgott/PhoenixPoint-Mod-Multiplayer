@@ -53,6 +53,14 @@ namespace Multipleer.Harmony.Sync
                 return e != null && e.IsActiveSession && !e.IsHost;
             }
         }
+
+        /// <summary>
+        /// Should a client OK click on this dialog close LOCALLY (vs swallow-and-wait for the host's dismiss)?
+        /// TRUE only for the client's OWN synthetic result/info page (the sole dialog with an EMPTY EventID,
+        /// <see cref="EventReflection.IsSyntheticResultPage"/>). Every REAL host event has a non-empty EventID →
+        /// FALSE → swallow (the host drives its dismiss).
+        /// </summary>
+        public static bool ShouldLocalClose(string eventId) => EventReflection.IsSyntheticResultPage(eventId);
     }
 
     /// <summary>
@@ -130,18 +138,25 @@ namespace Multipleer.Harmony.Sync
                 if (_pagingField != null && (bool)(_pagingField.GetValue(__instance) ?? false)) return true;
 
                 object geoEvent = _geoEventField?.GetValue(__instance);
-                // Swallow-and-wait ONLY for genuine multi-choice CHOICE dialogs (Choices.Count >= 2, or an
-                // unreadable/ambiguous count which IsClientChoiceLocked fails-safe to CHOICE): those are
-                // host-authoritative — the client modal is inert and closes on the host's dismiss broadcast.
-                if (EventReflection.GetChoiceCount(geoEvent) >= 2 || EventReflection.IsClientChoiceLocked(geoEvent))
-                    return false; // CHOICE (or ambiguous): inert — no relay, no local close, no NRE
-
-                // Single-choice (Choices.Count <= 1) has NO real host decision — the host auto-completed the
-                // outcome at trigger time (GeoscapeEventSystem.OnEventTriggered:659). So the OK must dismiss
-                // LOCALLY on the client (pure UI hide, no outcome, no host call), even when the choice carries
-                // outcome text (info/result popups SDI_07 / VoidOmen_6) and for the synthetic single-OK RESULT
-                // page the client itself pushed (it is locally dismissable). No swallow, no stuck modal.
-                _finishEncounter?.Invoke(__instance, null);
+                // Discriminate by EventID, NOT by choice count: a real single-choice host event and the client's
+                // synthetic result page BOTH have Choices.Count == 1, so a count gate can't tell them apart (it
+                // would local-close real host events, disconnecting them from the host). The synthetic result/info
+                // page is the ONLY client-owned dialog and is built with EventID == "" (never re-broadcast /
+                // re-keyed — EventReflection.BuildResultEvent:591). So:
+                string eventId = EventReflection.GetEventId(geoEvent);
+                if (EventDialogClientGuard.ShouldLocalClose(eventId))
+                {
+                    // Synthetic CLIENT-owned result/info page (EventID == "") → close LOCALLY (the player OKs it).
+                    Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (synthetic result page, EventID==\"\")");
+                    _finishEncounter?.Invoke(__instance, null);
+                    return false;
+                }
+                // ALL real host events (non-empty EventID), single- OR multi-choice → swallow-and-wait. The host's
+                // CompleteEventDismissPatch always broadcasts a result-bearing dismiss (single-choice auto-completes
+                // at trigger), so the client modal is closed/replaced via OnEventDismiss → ShowResultInPlace /
+                // CloseDialog — host-authoritative, never stranded.
+                Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=false swallow eventId=" + eventId +
+                          " (real host event → wait for host dismiss)");
                 return false;
             }
             catch (Exception ex)

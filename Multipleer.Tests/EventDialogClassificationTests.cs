@@ -45,4 +45,18 @@ public class EventDialogClassificationTests
     [Fact]
     public void RecordStateCompleted_MatchesVerifiedEnumValue()
         => Assert.Equal(3, EventReflection.RecordStateCompleted); // GeoscapeEventRecordState.Completed = 3
+
+    // ─── client OK-click local-close discriminator (synthetic result page vs real host event) ────────
+    // The client local-closes ONLY its own synthetic result/info page (EventID == ""); a real single- OR
+    // multi-choice host event (non-empty EventID) is swallowed and waits for the host's dismiss. This is the
+    // pure predicate behind EncounterChoiceClientPatch (the reflection-bound prefix itself is not unit-testable).
+
+    [Theory]
+    [InlineData("", true)]        // synthetic result/info page → local close
+    [InlineData(null, true)]      // null id (best-effort read failure) treated as synthetic → local close
+    [InlineData("EX103", false)]  // real single-choice host event → swallow (host drives dismiss)
+    [InlineData("SDI_07", false)] // real single-choice info event → swallow (the regression case)
+    [InlineData("PROG_EV_42", false)] // real multi-choice host event → swallow
+    public void IsSyntheticResultPage_OnlyEmptyEventId(string eventId, bool expectedSynthetic)
+        => Assert.Equal(expectedSynthetic, EventReflection.IsSyntheticResultPage(eventId));
 }

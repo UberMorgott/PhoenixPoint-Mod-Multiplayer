@@ -209,6 +209,15 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetEventId failed: " + ex.Message); return null; }
         }
 
+        /// <summary>
+        /// Pure predicate: is <paramref name="eventId"/> the EventID of the client's OWN synthetic result/info
+        /// page? The synthetic page is the SOLE dialog built with an EMPTY EventID (<see cref="BuildResultEvent"/>
+        /// sets it to "" so it is never re-broadcast / re-keyed). Every REAL host event has a non-empty EventID.
+        /// Used by the client OK-click prefix to decide local-close (synthetic) vs swallow-and-wait (real host).
+        /// Unit-testable (no game types).
+        /// </summary>
+        public static bool IsSyntheticResultPage(string eventId) => string.IsNullOrEmpty(eventId);
+
         // ─── two-class (INFO / CHOICE) dialog classification ──────────────
 
         /// <summary>
