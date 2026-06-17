@@ -18,6 +18,7 @@ namespace Multipleer.Network.Sync.State
             Register(new ResearchChannel());
             Register(new UnlockChannel());      // #3 — research-unlock availability (facilities/manufacture/augmentations)
             Register(new DiplomacyChannel());   // #4 — faction diplomacy / reputation (value-only mirror)
+            Register(new GeoSiteChannel());     // #5 — GeoSite identity mirror (Owner/Type/State/name/EncounterID), Case A
         }
 
         private void Register(IStateChannel channel)
@@ -37,10 +38,12 @@ namespace Multipleer.Network.Sync.State
             {
                 case 1: return GeoUiRefresh.Screen.Manufacturing; // inventory feeds the manufacturing screen
                 case 2: return GeoUiRefresh.Screen.Research;       // research channel feeds the research screen
-                // ch3 (unlock) + ch4 (diplomacy) have NO single screen: an unlock surfaces in BOTH the
-                // manufacturing list AND the base-layout facility picker, and diplomacy has no commonly-open
-                // module. SyncEngine.OnStateSync drives the full RefreshNeedsKick fan-out for channel ids ≥ 3
-                // instead of a single targeted Refresh, so ScreenFor returns null for them.
+                // ch3 (unlock) + ch4 (diplomacy) + ch5 (GeoSite identity) have NO single screen: an unlock
+                // surfaces in BOTH the manufacturing list AND the base-layout facility picker, diplomacy has
+                // no commonly-open module, and the geoscape map is not a single UI module (the event modal
+                // reads the refreshed site lazily on next open). SyncEngine.OnStateSync drives the full
+                // RefreshNeedsKick fan-out for channel ids ≥ 3 instead of a single targeted Refresh, so
+                // ScreenFor returns null for them.
                 default: return null;
             }
         }

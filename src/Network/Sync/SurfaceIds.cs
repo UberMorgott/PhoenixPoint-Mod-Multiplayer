@@ -25,5 +25,6 @@ namespace Multipleer.Network.Sync
         public const byte ResearchChannel = 2;
         public const byte UnlockChannel = 3;       // research-unlock availability (facilities/manufacture/augmentations)
         public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
+        public const byte GeoSiteChannel = 5;       // GeoSite identity mirror (Owner/Type/State/name/EncounterID) — Case A
     }
 }
