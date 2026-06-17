@@ -3,6 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.Network.Sync;
+using Multipleer.Network.Sync.State;
 using UnityEngine;
 
 namespace Multipleer.Harmony.Sync
@@ -88,9 +89,22 @@ namespace Multipleer.Harmony.Sync
                 // instance), so the dismiss may allocate the id first and this raise REUSES it — keeping the
                 // wire-level raise↔dismiss correlation key identical regardless of which fired first.
                 ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);
+                // Snapshot the event's GeoSite identity (Owner/Type/State/name/encounter) so a client MISSING
+                // this site degrades to graceful siteless text instead of the StartingBase "Точка Феникс". Only
+                // built when the event has a real site (siteId >= 0); siteless events carry no identity.
+                GeoSiteState? identity = null;
+                if (siteId >= 0)
+                {
+                    try
+                    {
+                        object liveSite = EventReflection.GetSite(geoEvent);
+                        identity = Multipleer.Network.Sync.State.GeoSiteReflection.BuildIdentity(GeoRuntime.Instance, liveSite);
+                    }
+                    catch (Exception iex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch identity-snapshot failed: " + iex.Message); }
+                }
                 Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
-                          " siteId=" + siteId + " vehicleId=" + vehicleId);
-                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId);
+                          " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue);
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }

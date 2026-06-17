@@ -434,6 +434,23 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSiteId failed: " + ex.Message); return -1; }
         }
 
+        /// <summary>Host: the live <c>GeoSite</c> off <c>GeoscapeEvent.Context.Site</c>, or null. Used to snapshot
+        /// the raise-time site identity for the absent-site client fallback.</summary>
+        public static object GetSite(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return null;
+            try
+            {
+                Ensure();
+                var ctxField = AccessTools.Field(geoscapeEvent.GetType(), "Context");
+                var ctx = ctxField?.GetValue(geoscapeEvent);
+                if (ctx == null) return null;
+                var siteField = AccessTools.Field(ctx.GetType(), "Site");
+                return siteField?.GetValue(ctx);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSite failed: " + ex.Message); return null; }
+        }
+
         /// <summary>
         /// Host: read <c>GeoscapeEvent.Context.Vehicle.VehicleID</c> (GeoVehicle.VehicleID, int, -1 = none) off
         /// the live raised event so clients can rebuild the SAME 3-arg context. A site-visited event carries the

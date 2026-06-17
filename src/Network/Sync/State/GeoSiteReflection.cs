@@ -190,6 +190,24 @@ namespace Multipleer.Network.Sync.State
             return list;
         }
 
+        /// <summary>
+        /// Host: build the IDENTITY snapshot (Owner/Type/State/SiteName-locKey/EncounterID) for a LIVE GeoSite,
+        /// or null if it can't be read. Used by the event-raise broadcast to carry an absent-site fallback.
+        /// </summary>
+        public static GeoSiteState? BuildIdentity(GeoRuntime rt, object site)
+        {
+            try
+            {
+                if (site == null) return null;
+                int siteId = GetSiteId(site);
+                if (siteId < 0) return null;
+                var list = SnapshotDirty(rt, new[] { siteId });
+                if (list != null && list.Count > 0) return list[0];
+                return null;
+            }
+            catch { return null; }
+        }
+
         private static GeoSiteState ReadSite(object site, int siteId)
         {
             // Owner → Def guid (best-effort).
