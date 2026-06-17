@@ -6,18 +6,30 @@ using System.Text;
 namespace Multipleer.Network.Sync.State
 {
     /// <summary>
-    /// Decoded research snapshot: completed research ids + the ordered queue of (id, progress). This is
-    /// the pure data + wire codec for the research state channel (#2) — kept free of any
-    /// <c>IStateChannel</c>/<c>SyncEngine</c> dependency so it is directly unit-testable.
+    /// Decoded research snapshot: completed research ids + the ordered queue of (id, progress) + the set
+    /// of non-completed, non-queued elements the host has Revealed/Unlocked (each with its authoritative
+    /// <c>ResearchState</c> byte). This is the pure data + wire codec for the research state channel (#2) —
+    /// kept free of any <c>IStateChannel</c>/<c>SyncEngine</c> dependency so it is directly unit-testable.
     ///
     /// Wire payload (inside StateSync):
     ///   [u16 completedCount]{[u16 idLen][id utf8]}*
     ///   [u16 queueCount]{[u16 idLen][id utf8][f32 progress]}*
+    ///   [u16 stateCount]{[u16 idLen][id utf8][u8 state]}*        ← OPTIONAL trailing block (v2)
+    ///
+    /// The third (state) block is TRAILING + length-tolerant: a v1 payload (no block) is read as zero
+    /// states (the decoder only reads the block when bytes remain), and a v1 decoder reading a v2 payload
+    /// harmlessly ignores the trailing bytes. <c>state</c> mirrors <c>ResearchState</c>
+    /// (Hidden=0, Revealed=1, Unlocked=2, Completed=3); only Revealed/Unlocked are carried here (completed
+    /// elements live in <see cref="Completed"/>, queued elements in <see cref="Queue"/>). This lets the
+    /// client mirror the host's Available (left) list reactively: Revealed shows without the "research now"
+    /// affordance, Unlocked shows with it.
     /// </summary>
     public sealed class ResearchSnapshot
     {
         public readonly List<string> Completed = new List<string>();
         public readonly List<(string id, float progress)> Queue = new List<(string, float)>();
+        // Non-completed, non-queued elements the host has Revealed/Unlocked, with the authoritative state byte.
+        public readonly List<(string id, byte state)> States = new List<(string, byte)>();
 
         public static byte[] Encode(ResearchSnapshot snap)
         {
@@ -32,6 +44,13 @@ namespace Multipleer.Network.Sync.State
                 {
                     WriteStr(w, id);
                     w.Write(progress);
+                }
+                // v2 trailing block. Always written (empty → just a u16 zero) so the wire is stable.
+                w.Write((ushort)snap.States.Count);
+                foreach (var (id, state) in snap.States)
+                {
+                    WriteStr(w, id);
+                    w.Write(state);
                 }
                 return ms.ToArray();
             }
@@ -54,6 +73,20 @@ namespace Multipleer.Network.Sync.State
                         string id = ReadStr(r);
                         float progress = r.ReadSingle();
                         snap.Queue.Add((id, progress));
+                    }
+                    // v2 trailing block — read ONLY if bytes remain, so a v1 payload (no block) decodes as
+                    // zero states rather than throwing. A partial/garbled trailing block still throws via
+                    // ReadStr's length check → whole payload rejected (null), preserving the all-or-nothing
+                    // contract callers rely on.
+                    if (ms.Position < ms.Length)
+                    {
+                        int nsBytes = r.ReadUInt16();
+                        for (int i = 0; i < nsBytes; i++)
+                        {
+                            string id = ReadStr(r);
+                            byte state = r.ReadByte();
+                            snap.States.Add((id, state));
+                        }
                     }
                     return snap;
                 }

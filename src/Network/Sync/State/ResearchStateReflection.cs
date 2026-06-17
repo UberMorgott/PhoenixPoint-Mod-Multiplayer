@@ -62,6 +62,7 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _factionResearchField;   // GeoFaction.Research (public field, GeoFaction.cs:79)
         private static PropertyInfo _completedProp;       // Research.Completed (IEnumerable<ResearchElement>)
         private static PropertyInfo _queueProp;           // Research.ResearchQueue (List<ResearchElement>)
+        private static PropertyInfo _visibleProp;         // Research.Visible (IEnumerable<ResearchElement>): (IsUnlocked||IsRevealed)&&!IsCurrentlyResearched
         private static MethodInfo _getById;               // Research.GetResearchById(string)
         private static MethodInfo _addToQueue;            // Research.AddResearchToQueue(ResearchElement)
         private static MethodInfo _cancel;                // Research.Cancel(ResearchElement)
@@ -76,6 +77,8 @@ namespace Multipleer.Network.Sync.State
         private static PropertyInfo _researchCostProp;    // ResearchElement.ResearchCost (int => ResearchDef.ResearchCost)
         private static object _completedStateValue;       // ResearchState.Completed enum value (boxed)
         private static object _unlockedStateValue;         // ResearchState.Unlocked enum value (boxed)
+        private static object _revealedStateValue;         // ResearchState.Revealed enum value (boxed)
+        private static Type _researchStateType;            // PhoenixPoint...Research.ResearchState (enum), for byte<->enum
 
         private static void Ensure()
         {
@@ -86,6 +89,11 @@ namespace Multipleer.Network.Sync.State
 
             _completedProp = AccessTools.Property(_researchType, "Completed");
             _queueProp = AccessTools.Property(_researchType, "ResearchQueue");
+            // Research.Visible (Research.cs:95): (IsUnlocked||IsRevealed)&&!IsCurrentlyResearched — the EXACT
+            // set the game's own Available (left) list iterates. Reused to snapshot the host's revealed/
+            // unlocked, non-queued elements so the client mirrors that list. NOT in the _ready gate (FIX#2 is
+            // additive; a future rename must never regress the core start/cancel/converge path).
+            _visibleProp = AccessTools.Property(_researchType, "Visible");
             _getById = AccessTools.Method(_researchType, "GetResearchById", new[] { typeof(string) });
             _addToQueue = AccessTools.Method(_researchType, "AddResearchToQueue", new[] { _researchElementType });
             _cancel = AccessTools.Method(_researchType, "Cancel", new[] { _researchElementType });
@@ -104,15 +112,18 @@ namespace Multipleer.Network.Sync.State
             _stateField = AccessTools.Field(_researchElementType, "_state");
             _inProgressBackingField = AccessTools.Field(_researchElementType, "<IsInProgress>k__BackingField");
             _researchCostProp = AccessTools.Property(_researchElementType, "ResearchCost");
-            var researchStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchState");
-            if (researchStateType != null && researchStateType.IsEnum)
+            _researchStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchState");
+            if (_researchStateType != null && _researchStateType.IsEnum)
             {
-                try { _completedStateValue = Enum.Parse(researchStateType, "Completed"); } catch { _completedStateValue = null; }
+                try { _completedStateValue = Enum.Parse(_researchStateType, "Completed"); } catch { _completedStateValue = null; }
                 // ResearchState { Hidden, Revealed, Unlocked, Completed } (decompile). AddResearchToQueue
                 // (Research.cs:380) THROWS unless State == Unlocked; the snapshot never carries the host
                 // Revealed->Unlocked transition, so the client element can still be Revealed. We force it to
                 // Unlocked via the _state backing field (same bypass as CompleteEchoOnly) before the add.
-                try { _unlockedStateValue = Enum.Parse(researchStateType, "Unlocked"); } catch { _unlockedStateValue = null; }
+                try { _unlockedStateValue = Enum.Parse(_researchStateType, "Unlocked"); } catch { _unlockedStateValue = null; }
+                // Revealed value: needed to mirror the host's Revealed-but-not-yet-Unlocked elements onto the
+                // client (FIX#2 state block). Not gated by _ready — best-effort additive mirror.
+                try { _revealedStateValue = Enum.Parse(_researchStateType, "Revealed"); } catch { _revealedStateValue = null; }
             }
 
             _ready = _completedProp != null && _queueProp != null && _getById != null
@@ -168,6 +179,29 @@ namespace Multipleer.Network.Sync.State
                         try { progress = (float)_progressField.GetValue(el); } catch { progress = 0f; }
                         snap.Queue.Add((id, progress));
                     }
+
+                // FIX#2: snapshot the host's Available (left-list) set — the non-completed, non-queued
+                // elements the host has Revealed/Unlocked — each with its authoritative ResearchState byte,
+                // so the client mirrors that list reactively (a reveal/unlock of OTHER research from a
+                // completion now reaches the client). Research.Visible is the game's own predicate for that
+                // exact set: (IsUnlocked||IsRevealed)&&!IsCurrentlyResearched (Research.cs:95). Best-effort:
+                // if Visible is unavailable, the queue/completed sync is unaffected (additive).
+                if (_visibleProp != null)
+                {
+                    try
+                    {
+                        if (_visibleProp.GetValue(research, null) is IEnumerable visible)
+                            foreach (var el in visible)
+                            {
+                                string id = _researchIdField.GetValue(el) as string;
+                                if (string.IsNullOrEmpty(id)) continue;
+                                byte state;
+                                try { state = (byte)Convert.ToInt32(_stateField.GetValue(el)); } catch { continue; }
+                                snap.States.Add((id, state));
+                            }
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Snapshot Visible failed (skipped): " + ex.Message); }
+                }
 
                 return snap;
             }
@@ -307,6 +341,17 @@ namespace Multipleer.Network.Sync.State
                 // order. Idempotent: an already-correctly-positioned element re-inserts at its own index, a
                 // no-op. Best-effort + null-checked so a missing InsertAtPosition never regresses convergence.
                 EnforceQueueOrder(research, target);
+
+                // (5) FIX#2: MIRROR the host's Available-list state. For each element the host reports as
+                // Revealed/Unlocked AND non-queued (target.States, built from Research.Visible), drive the
+                // client element's _state to the host value DIRECTLY (bypassing the State setter → no reveal/
+                // unlock event cascade, no reward). This makes a reveal/unlock of OTHER research from a host
+                // completion appear in the client's Available (left) list reactively, and makes the marker
+                // AUTHORITATIVE (host-driven) — Unlocked shows the "research now" affordance, Revealed does
+                // not. Disjoint from step (3) by construction: Visible excludes queued elements, so a States
+                // entry is never also a Queue entry. Guards: skip completed (monotonic — never downgrade a
+                // client Completed) and skip queued (those get their state from the add path). Best-effort.
+                MirrorStates(research, target);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Apply failed: " + ex.Message); }
         }
@@ -334,6 +379,43 @@ namespace Multipleer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.EnforceQueueOrder failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// FIX#2 (client): mirror the host's Available-list element states. For each <c>(id, stateByte)</c>
+        /// in <paramref name="target"/>.States — the host's Revealed/Unlocked, non-queued elements — set the
+        /// matching client element's private <c>_state</c> backing field to the host value (bypassing the
+        /// <c>State</c> setter → no Reveal()/Unlock() event cascade, no rewards: the client is a pure mirror).
+        /// Skips elements the client already has Completed (research is monotonic — never downgrade) and
+        /// elements currently in the queue (their state is driven by the add path). Only Revealed/Unlocked
+        /// values are honored (defensive); an unknown byte is ignored. Best-effort + per-element guarded so a
+        /// single bad entry never aborts the rest. No-op if the Revealed/Unlocked enum values are unavailable.
+        /// </summary>
+        private static void MirrorStates(object research, ResearchSnapshot target)
+        {
+            if (target == null || target.States.Count == 0) return;
+            if (_revealedStateValue == null && _unlockedStateValue == null) return;
+            byte revealedByte = 1, unlockedByte = 2; // ResearchState.Revealed=1, Unlocked=2 (decompile-verified)
+            foreach (var (id, stateByte) in target.States)
+            {
+                try
+                {
+                    // Only Revealed/Unlocked are mirrored. Completed lives in target.Completed (handled in step
+                    // (1)); Hidden is the default and is never sent. An unexpected byte → skip.
+                    object stateValue;
+                    if (stateByte == unlockedByte) stateValue = _unlockedStateValue;
+                    else if (stateByte == revealedByte) stateValue = _revealedStateValue;
+                    else continue;
+                    if (stateValue == null) continue;
+
+                    var el = Resolve(research, id);
+                    if (el == null) continue;
+                    if (IsCompleted(el)) continue;             // monotonic: never downgrade a completed element
+                    if (InQueue(research, el)) continue;       // queued elements get their state from the add path
+                    _stateField.SetValue(el, stateValue);
+                }
+                catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.MirrorStates '" + id + "' failed (skipped): " + ex.Message); }
+            }
         }
 
         /// <summary>Host apply for the client cancel intent: <c>Research.Cancel(resolve(id))</c>.</summary>
@@ -422,6 +504,7 @@ namespace Multipleer.Network.Sync.State
 
         public static void Unsubscribe(object token)
         {
+            if (token is HourlyTickToken h) { UnsubscribeHourly(h); return; }
             if (!(token is FactionEventToken t) || t.Faction == null) return;
             try
             {
@@ -429,6 +512,50 @@ namespace Multipleer.Network.Sync.State
                 if (t.DoneEvt != null && t.DoneHandler != null) t.DoneEvt.RemoveEventHandler(t.Faction, t.DoneHandler);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Unsubscribe failed: " + ex.Message); }
+        }
+
+        // ─── host hourly-tick subscription (research progress heartbeat, FIX#1) ───
+
+        /// <summary>
+        /// FIX#1: subscribe a no-arg callback to <c>GeoLevelController.HourTicked</c>
+        /// (<c>public event Action&lt;int&gt;</c>, GeoLevelController.cs:340), fired once per in-game hour at
+        /// the END of <c>LevelHourlyUpdateCrt</c> — AFTER <c>faction.UpdateResearch()</c> accrues that hour's
+        /// research progress (GeoLevelController.cs:808, tick at :832). Re-marking ch2 dirty here re-sends the
+        /// ordered queue snapshot (which already carries per-element progress) every in-game hour, so the
+        /// client progress bar tracks the host at the host's own update granularity (no client-local sim — the
+        /// time-sync clock overwrite suppresses it; snapshot Apply OVERWRITES progress, never accumulates).
+        /// The event type is the concrete <c>Action&lt;int&gt;</c>, so we bind a typed handler directly (no
+        /// DynamicMethod needed). Returns an opaque token for <see cref="Unsubscribe"/>, or null.
+        /// </summary>
+        public static object SubscribeHourlyTick(GeoRuntime rt, Action onChanged)
+        {
+            if (onChanged == null) return null;
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var evt = geo.GetType().GetEvent("HourTicked", BindingFlags.Public | BindingFlags.Instance);
+                if (evt == null) return null;
+                // HourTicked is Action<int>; ignore the elapsed-hours arg and just re-snapshot.
+                Action<int> handler = _ => onChanged();
+                evt.AddEventHandler(geo, handler);
+                return new HourlyTickToken { Level = geo, Evt = evt, Handler = handler };
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.SubscribeHourlyTick failed: " + ex.Message); return null; }
+        }
+
+        private static void UnsubscribeHourly(HourlyTickToken t)
+        {
+            if (t == null || t.Level == null || t.Evt == null || t.Handler == null) return;
+            try { t.Evt.RemoveEventHandler(t.Level, t.Handler); }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.UnsubscribeHourly failed: " + ex.Message); }
+        }
+
+        private sealed class HourlyTickToken
+        {
+            public object Level;
+            public EventInfo Evt;
+            public Delegate Handler;
         }
 
         private sealed class FactionEventToken
