@@ -41,6 +41,32 @@ namespace Multipleer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
+        /// <summary>
+        /// CLIENT guarantee (load-bearing): block any client-LOCAL geoscape-event dialog. The client's
+        /// geoscape sim still ticks (the time-sync clock overwrite drives <c>LevelHourlyUpdateCrt</c>),
+        /// so the client's own <c>GeoscapeEventSystem</c> can still raise events locally and pop a dialog
+        /// that DIFFERS from the host's. Clients must only ever show events the HOST broadcasts
+        /// (<c>SyncEngine.OnEventRaised</c> → <c>EventDisplay.Show</c>, which builds the
+        /// <c>UIStateGeoscapeEvent</c> directly via <c>QueryStateSwitch</c> and does NOT route through
+        /// <c>OnGeoscapeEventRaised</c> — VERIFIED EventDisplay.cs:82-101 / SyncEngine.cs:268-280), so
+        /// skipping the native body here never blocks a host-broadcast dialog. Belt to #1's suspenders
+        /// (<c>EventSuppressClientGeoscapePatch</c> sets <c>SuppressEvents=true</c> at source): this prefix
+        /// survives even if that flag is reset by a full-state reload before the re-assert runs. Returns
+        /// false (skip native) only on a CLIENT in an active co-op session; the HOST is untouched.
+        /// </summary>
+        public static bool Prefix()
+        {
+            try
+            {
+                if (SyncApplyScope.IsApplying) return true;   // engine-driven client reconstruction → never block
+                var engine = NetworkEngine.Instance;
+                if (engine != null && engine.IsActiveSession && !engine.IsHost)
+                    return false;                             // client: no local dialog ever
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch.Prefix failed: " + ex.Message); }
+            return true;                                       // host (and any failure): native runs
+        }
+
         // geoEvent = the raised GeoscapeEvent (the patched method's sole arg).
         public static void Postfix(object geoEvent)
         {
