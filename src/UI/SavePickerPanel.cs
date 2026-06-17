@@ -30,17 +30,18 @@ namespace Multipleer.UI
     public class SavePickerPanel
     {
         private GameObject _canvasGo;     // SINGLE visibility lever (active = picker shown)
+        private CanvasScaler _scaler;     // kept so the aspect-adaptive match can be re-applied live
         private GameObject _panel;        // centered modal panel
         private RectTransform _content;   // scroll content (rows parented here)
         private readonly List<GameObject> _rows = new List<GameObject>();
         private Action<SavegameMetaData> _onPick;
 
-        // Cap displayed rows; most-recent first.
+        // Cap displayed rows; most-recent first. Sizes are theme-scaled so the picker grows with UiScale.
         private const int MaxRows = 10;
-        private const float RowHeight = 84f;          // native-style row (preview + 3 text lines)
-        private const float PreviewWidth = 140f;      // fixed preview box width
-        private const float PreviewHeight = 72f;      // fixed preview box height (16:9-ish, < RowHeight)
-        private const int ClonedButtonFontCap = 18;
+        private static float RowHeight => LobbyTheme.ScaledSaveRowHeight;     // native-style row (preview + 3 text lines)
+        private static float PreviewWidth => LobbyTheme.Scale(140);           // fixed preview box width
+        private static float PreviewHeight => LobbyTheme.Scale(72);           // fixed preview box height (16:9-ish, < RowHeight)
+        private static int ClonedButtonFontCap => LobbyTheme.ScaledClonedButtonFontCap;
 
         public bool IsVisible => _canvasGo != null && _canvasGo.activeSelf;
 
@@ -69,11 +70,11 @@ namespace Multipleer.UI
             canvas.overrideSorting = true;
             canvas.sortingOrder = 6000;
 
-            var scaler = _canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
+            // Responsive: native aspect-adaptive scaler (match WIDTH ≤16:9 / HEIGHT >16:9) replaces the
+            // old fixed match=0.5 so the picker scales cleanly across aspect ratios. Re-applied live in
+            // Show()/Populate via RefreshScaler (resolution can change at runtime).
+            _scaler = _canvasGo.AddComponent<CanvasScaler>();
+            LobbyTheme.ConfigureScaler(_scaler);
 
             // Own GraphicRaycaster so the backdrop + CANCEL + save rows receive clicks above the
             // lobby's raycaster underneath.
@@ -114,29 +115,32 @@ namespace Multipleer.UI
                 prt.anchorMin = new Vector2(0.5f, 0.5f);
                 prt.anchorMax = new Vector2(0.5f, 0.5f);
                 prt.pivot = new Vector2(0.5f, 0.5f);
-                prt.sizeDelta = new Vector2(700, 600);
+                // Modal panel size scales with UiScale so the bigger rows/fonts fit comfortably.
+                prt.sizeDelta = new Vector2(LobbyTheme.Scale(700), LobbyTheme.Scale(600));
                 prt.anchoredPosition = Vector2.zero;
                 prt.localScale = Vector3.one;
 
+                // Themed modal frame: native sliced sprite (or PanelFill flat) + themed border Outline.
                 var pimg = _panel.AddComponent<Image>();
-                pimg.color = new Color(0.04f, 0.05f, 0.07f, 0.98f);
                 var poutline = _panel.AddComponent<Outline>();
-                poutline.effectColor = new Color(0.30f, 0.55f, 0.75f, 0.9f);
-                poutline.effectDistance = new Vector2(2f, 2f);
+                LobbyTheme.ApplyPanelSkin(pimg, poutline, LobbyTheme.PanelFill, LobbyTheme.PanelBorder);
 
+                var pad = LobbyTheme.ScaledPadding;
                 var pvlg = _panel.AddComponent<VerticalLayoutGroup>();
-                pvlg.padding = new RectOffset(16, 16, 16, 16);
-                pvlg.spacing = 12;
+                pvlg.padding = new RectOffset(pad, pad, pad, pad);
+                pvlg.spacing = pad - pad / 4;
                 pvlg.childControlWidth = true;
                 pvlg.childControlHeight = true;
                 pvlg.childForceExpandWidth = true;
                 pvlg.childForceExpandHeight = false;
                 pvlg.childAlignment = TextAnchor.UpperCenter;
 
+                var titleH = LobbyTheme.ScaledHeaderFontSize + pad;
                 var title = UiToolkit.CreateText(_panel, "Title", Vector2.zero,
-                    new Vector2(600, 36), "CHOOSE A SAVE TO HOST", 20,
+                    new Vector2(600, titleH), "CHOOSE A SAVE TO HOST", LobbyTheme.ScaledHeaderFontSize,
                     TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
-                var tle = LE(title.gameObject); tle.minHeight = 36; tle.flexibleHeight = 0;
+                title.color = LobbyTheme.Accent;
+                var tle = LE(title.gameObject); tle.minHeight = titleH; tle.flexibleHeight = 0;
 
                 // Scroll host fills the panel (flexibleHeight 1). Plain RectTransform — NOT a layout
                 // group — so the scroll content's ContentSizeFitter is conflict-free (§E-1). A
@@ -172,16 +176,17 @@ namespace Multipleer.UI
                 }
 
                 // Cancel button (bottom) — native clone, fallback to from-code button. Full-width bar.
+                var cancelH = LobbyTheme.Scale(44);
                 var cancel = NativeWidgetFactory.CloneMenuButton(_panel.transform, "CancelBtn", "CANCEL", Hide);
                 if (cancel != null)
                 {
-                    AddCloneCancelLayoutElement(cancel.transform, _panel.transform, 44f);
+                    AddCloneCancelLayoutElement(cancel.transform, _panel.transform, cancelH);
                 }
                 else
                 {
                     var btn = UiToolkit.CreateButton(_panel, "CancelBtn", "CANCEL",
-                        Vector2.zero, new Vector2(160, 44), new Vector2(0.5f, 0.5f), Hide);
-                    var cle = LE(btn.gameObject); cle.minHeight = 44; cle.preferredHeight = 44; cle.flexibleHeight = 0;
+                        Vector2.zero, new Vector2(LobbyTheme.Scale(160), cancelH), new Vector2(0.5f, 0.5f), Hide);
+                    var cle = LE(btn.gameObject); cle.minHeight = cancelH; cle.preferredHeight = cancelH; cle.flexibleHeight = 0;
                 }
             }
             finally
@@ -198,6 +203,8 @@ namespace Multipleer.UI
             if (_canvasGo == null) return;
             _onPick = onPick;
             _canvasGo.SetActive(true);
+            // Re-apply the aspect-adaptive match for the current resolution before showing.
+            if (_scaler != null) _scaler.matchWidthOrHeight = LobbyTheme.CurrentMatch;
             Populate();
         }
 
@@ -222,7 +229,7 @@ namespace Multipleer.UI
                 empty.transform.SetParent(_content.transform, false);
                 empty.AddComponent<RectTransform>();
                 var lbl = UiToolkit.CreateText(empty, "EmptyLabel", Vector2.zero,
-                    new Vector2(560, RowHeight), "No saves found.", 14,
+                    new Vector2(560, RowHeight), "No saves found.", LobbyTheme.ScaledBodyFontSize,
                     TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
                 var ele = LE(empty); ele.minHeight = RowHeight; ele.flexibleWidth = 1;
                 _rows.Add(empty);
@@ -303,7 +310,7 @@ namespace Multipleer.UI
             row.AddComponent<RectTransform>();
 
             var bg = row.AddComponent<Image>();
-            bg.color = new Color(0.14f, 0.17f, 0.23f, 1f);   // raycastTarget defaults true on Image
+            bg.color = LobbyTheme.CardBackground;   // raycastTarget defaults true on Image
 
             var btn = row.AddComponent<Button>();
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
@@ -388,43 +395,48 @@ namespace Multipleer.UI
             vlg.childForceExpandHeight = false;
             vlg.childAlignment = TextAnchor.MiddleLeft;
 
+            // Theme-scaled line heights (name + date + difficulty stacked in the row).
+            var nameH = LobbyTheme.ScaledRowFontSize + 6;
+            var subH = LobbyTheme.ScaledSubFontSize + 4;
+
             // Give the column its OWN explicit min/preferred height so the row HLG (childControlHeight,
             // not force-expand) can never collapse it to 0 even if the inner VLG's reported preferred
             // height fails to propagate on the first pass — it always claims the full text-stack height.
+            var colH = nameH + subH * 2;
             var cle = LE(col);
             cle.flexibleWidth = 1; cle.minWidth = 0;
-            cle.minHeight = 60; cle.preferredHeight = 60; cle.flexibleHeight = 0;
+            cle.minHeight = colH; cle.preferredHeight = colH; cle.flexibleHeight = 0;
 
-            // Line 1: display name, bold, single line, truncated. Explicit white so it can never render
-            // dark-on-dark (CreateText already defaults to white; pinned here against future drift).
+            // Line 1: display name, bold, single line, truncated. Explicit body color so it can never
+            // render dark-on-dark (CreateText already defaults to it; pinned here against future drift).
             var nameText = UiToolkit.CreateText(col, "Name", Vector2.zero,
-                new Vector2(380, 24), SaveDisplayName(meta), 18,
+                new Vector2(380, nameH), SaveDisplayName(meta), LobbyTheme.ScaledRowFontSize,
                 TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
-            nameText.color = Color.white;
+            nameText.color = LobbyTheme.BodyText;
             nameText.fontStyle = FontStyle.Bold;
             nameText.horizontalOverflow = HorizontalWrapMode.Wrap;
             nameText.verticalOverflow = VerticalWrapMode.Truncate;
-            var nle = LE(nameText.gameObject); nle.minHeight = 24; nle.preferredHeight = 24;
+            var nle = LE(nameText.gameObject); nle.minHeight = nameH; nle.preferredHeight = nameH;
             nle.flexibleWidth = 1; nle.minWidth = 0; nle.flexibleHeight = 0;
 
             // Line 2: realtime save date (native RealtimeDateField = SaveCreated.DisplayDateTime).
             var dateText = UiToolkit.CreateText(col, "Date", Vector2.zero,
-                new Vector2(380, 18), SaveDate(meta), 13,
+                new Vector2(380, subH), SaveDate(meta), LobbyTheme.ScaledSubFontSize,
                 TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
-            dateText.color = new Color(0.78f, 0.82f, 0.88f, 1f);
+            dateText.color = LobbyTheme.SubText;
             var dle = LE(dateText.gameObject);
-            dle.minHeight = 18; dle.preferredHeight = 18; dle.flexibleHeight = 0; dle.flexibleWidth = 1; dle.minWidth = 0;
+            dle.minHeight = subH; dle.preferredHeight = subH; dle.flexibleHeight = 0; dle.flexibleWidth = 1; dle.minWidth = 0;
 
             // Line 3: difficulty (native DifficultyLoc = DifficultyDef.Name) — only when present.
             var diff = SaveDifficulty(meta);
             if (!string.IsNullOrEmpty(diff))
             {
                 var diffText = UiToolkit.CreateText(col, "Difficulty", Vector2.zero,
-                    new Vector2(380, 18), diff, 13,
+                    new Vector2(380, subH), diff, LobbyTheme.ScaledSubFontSize,
                     TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
-                diffText.color = new Color(0.62f, 0.70f, 0.80f, 1f);
+                diffText.color = LobbyTheme.SubText;
                 var fle = LE(diffText.gameObject);
-                fle.minHeight = 18; fle.preferredHeight = 18; fle.flexibleHeight = 0; fle.flexibleWidth = 1; fle.minWidth = 0;
+                fle.minHeight = subH; fle.preferredHeight = subH; fle.flexibleHeight = 0; fle.flexibleWidth = 1; fle.minWidth = 0;
             }
         }
 

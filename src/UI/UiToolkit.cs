@@ -33,8 +33,10 @@ namespace Multipleer.UI
         public static Font DefaultFont => NativeWidgetFactory.MenuFont ?? FallbackFont;
 
         // Anchored text. anchor = anchorMin/Max pivot point inside the parent (e.g. (0.5,1) = top-center).
+        // fontSize is the EFFECTIVE on-screen px (callers pass LobbyTheme.Scaled* values). A negative /
+        // zero size falls back to the theme body size so a forgotten size still scales with the skin.
         public static Text CreateText(GameObject parent, string name, Vector2 pos, Vector2 size,
-            string content, int fontSize = 12, TextAnchor align = TextAnchor.MiddleLeft,
+            string content, int fontSize = 0, TextAnchor align = TextAnchor.MiddleLeft,
             Vector2? anchor = null)
         {
             var go = new GameObject(name);
@@ -48,9 +50,9 @@ namespace Multipleer.UI
             rect.anchoredPosition = pos;
 
             var text = go.AddComponent<Text>();
-            text.font = DefaultFont;
-            text.fontSize = fontSize;
-            text.color = Color.white;
+            text.font = LobbyTheme.Font;
+            text.fontSize = fontSize > 0 ? fontSize : LobbyTheme.ScaledBodyFontSize;
+            text.color = LobbyTheme.BodyText;
             text.alignment = align;
             text.horizontalOverflow = HorizontalWrapMode.Overflow;
             text.verticalOverflow = VerticalWrapMode.Overflow;
@@ -71,7 +73,7 @@ namespace Multipleer.UI
             rect.anchoredPosition = pos;
 
             var img = go.AddComponent<Image>();
-            img.color = new Color(0.18f, 0.22f, 0.30f, 1f);
+            img.color = LobbyTheme.CardBackground;
 
             var btn = go.AddComponent<Button>();
             var nav = btn.navigation;
@@ -80,9 +82,9 @@ namespace Multipleer.UI
             if (onClick != null)
                 btn.onClick.AddListener((UnityAction)(() => onClick()));
 
-            var txt = CreateText(go, "Label", Vector2.zero, size, label, 13,
+            var txt = CreateText(go, "Label", Vector2.zero, size, label, LobbyTheme.ScaledButtonFontSize,
                 TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
-            txt.color = Color.white;
+            txt.color = LobbyTheme.BodyText;
 
             return btn;
         }
@@ -101,11 +103,11 @@ namespace Multipleer.UI
             rect.anchoredPosition = pos;
 
             var bg = go.AddComponent<Image>();
-            bg.color = new Color(0.12f, 0.14f, 0.18f, 1f);
+            bg.color = LobbyTheme.InputBackground;
 
             var textComp = CreateText(go, "Text", new Vector2(8, 0),
-                new Vector2(size.x - 16, size.y), initial ?? "", 13, TextAnchor.MiddleLeft,
-                new Vector2(0f, 0.5f));
+                new Vector2(size.x - 16, size.y), initial ?? "", LobbyTheme.ScaledRowFontSize,
+                TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
             textComp.supportRichText = false;
 
             var input = go.AddComponent<InputField>();

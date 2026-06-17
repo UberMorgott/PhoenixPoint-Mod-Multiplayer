@@ -25,6 +25,7 @@ namespace Multipleer.UI
         // and the Leave button fell offscreen); it gets a dedicated ScreenSpaceOverlay canvas with a
         // 1920×1080 ScaleWithScreenSize scaler so the absolute-px layout below is deterministic.
         private Canvas _lobbyCanvas;
+        private CanvasScaler _scaler;   // kept so Refresh() can re-apply the aspect-adaptive match live
 
         private GameObject _root;
         private Text _roleText;
@@ -80,9 +81,8 @@ namespace Multipleer.UI
         private GameObject _rosterArea;
         private readonly List<RosterRow> _rows = new List<RosterRow>();
 
-        // Layout constants for the roster area. RowHeight now feeds LayoutElement.minHeight; the old
-        // RosterTop / RowWidth pixel constants are gone (layout groups own position/width).
-        private const float RowHeight = 30f;
+        // Roster row height feeds LayoutElement.minHeight; theme-scaled so rows grow with UiScale.
+        private static float RowHeight => LobbyTheme.ScaledRowHeight;
 
         private class RosterRow
         {
@@ -142,11 +142,12 @@ namespace Multipleer.UI
             _lobbyCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _lobbyCanvas.sortingOrder = 4000;
 
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
+            // Responsive: native aspect-adaptive scaler (ScaleWithScreenSize @1920×1080, match WIDTH
+            // ≤16:9 / HEIGHT >16:9) replaces the old fixed match=0.5 so the page reflows cleanly across
+            // 16:9 / 16:10 / 21:9 / 4:3. The match is recomputed live in Refresh() as the resolution
+            // can change at runtime (windowed resize / monitor swap).
+            _scaler = canvasGo.AddComponent<CanvasScaler>();
+            LobbyTheme.ConfigureScaler(_scaler);
 
             canvasGo.AddComponent<GraphicRaycaster>();
 
@@ -185,20 +186,25 @@ namespace Multipleer.UI
             // the full width while childForceExpandHeight=false lets MainRow's flexibleHeight absorb
             // all the leftover vertical space.
             var rootVlg = _root.AddComponent<VerticalLayoutGroup>();
-            rootVlg.padding = new RectOffset(48, 48, 24, 24);
-            rootVlg.spacing = 16;
+            var pad = LobbyTheme.ScaledPadding;
+            rootVlg.padding = new RectOffset(pad * 3, pad * 3, pad + pad / 2, pad + pad / 2);
+            rootVlg.spacing = pad;
             rootVlg.childControlWidth = true;
             rootVlg.childControlHeight = true;
             rootVlg.childForceExpandWidth = true;
             rootVlg.childForceExpandHeight = false;
             rootVlg.childAlignment = TextAnchor.UpperCenter;
 
-            // NO full-screen fill. The lobby is laid OVER the game's main-menu background art (the
-            // rendered 3D backdrop) as a clean separate "page": the menu's own chrome (buttons,
-            // logo, version label) is hidden on Show() so the art reads as the page background, and
-            // each zone gets its OWN framed panel for text contrast. A blanket dark Image here would
-            // blackout the art — exactly what the redesign removes. The root keeps its full-screen
-            // RectTransform purely for child layout/anchoring.
+            // FULL-SCREEN PAGE (restyle Option A): a themed page background behind all zones so the
+            // lobby reads as a dedicated PAGE, not a floating panel over the menu art. A dim navy
+            // PageBackdrop fill + a native sliced sprite frame (via ApplyPanelSkin) anchored stretch
+            // (the root already fills the 1920×1080 reference rect). The menu chrome is hidden on
+            // Show() so this page owns the whole screen. The Image is added on _root, created before
+            // its child zones, so it sits BEHIND them; the VerticalLayoutGroup ignores the root's own
+            // Image (it only lays out CHILD rects), so this is layout-safe.
+            var pageBg = _root.AddComponent<Image>();
+            var pageFrame = _root.AddComponent<Outline>();
+            LobbyTheme.ApplyPanelSkin(pageBg, pageFrame, LobbyTheme.PageBackdrop, LobbyTheme.HeaderBorder);
 
             // try/finally guarantees the lobby is left fully hidden even if a zone-build sub-step
             // throws. A throw here is swallowed upstream (OnMenuReady try/catch), so without this the
@@ -234,8 +240,11 @@ namespace Multipleer.UI
             bar.AddComponent<RectTransform>();
             AddFramedPanel(bar);
 
+            var titleH = LobbyTheme.ScaledHeaderFontSize + LobbyTheme.ScaledPadding;
+            var subH = LobbyTheme.ScaledSubFontSize + LobbyTheme.ScaledPadding / 2;
+
             var le = LE(bar);
-            le.minHeight = 78;
+            le.minHeight = titleH + subH + LobbyTheme.ScaledPadding;
             le.flexibleHeight = 0;
 
             var vlg = bar.AddComponent<VerticalLayoutGroup>();
@@ -247,14 +256,16 @@ namespace Multipleer.UI
             vlg.childForceExpandHeight = false;
 
             var title = UiToolkit.CreateText(bar, "Title", Vector2.zero,
-                new Vector2(540, 44), "CO-OP LOBBY", 32, TextAnchor.MiddleCenter,
-                new Vector2(0.5f, 1f));
-            LE(title.gameObject).minHeight = 44;
+                new Vector2(540, titleH), "CO-OP LOBBY", LobbyTheme.ScaledHeaderFontSize,
+                TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
+            title.color = LobbyTheme.Accent;   // amber page title (accent highlight)
+            LE(title.gameObject).minHeight = titleH;
 
             _roleText = UiToolkit.CreateText(bar, "Subtitle", Vector2.zero,
-                new Vector2(540, 24), "your lobby", 16, TextAnchor.MiddleCenter,
-                new Vector2(0.5f, 1f));
-            LE(_roleText.gameObject).minHeight = 24;
+                new Vector2(540, subH), "your lobby", LobbyTheme.ScaledSubFontSize,
+                TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
+            _roleText.color = LobbyTheme.SubText;
+            LE(_roleText.gameObject).minHeight = subH;
         }
 
         // MAIN ROW: three equal-height cards (ConnectColumn / ChatColumn / PlayersColumn) sharing the
@@ -270,7 +281,7 @@ namespace Multipleer.UI
             LE(mainRow).flexibleHeight = 1;
 
             var hlg = mainRow.AddComponent<HorizontalLayoutGroup>();
-            hlg.spacing = 24;
+            hlg.spacing = LobbyTheme.ScaledPadding + LobbyTheme.ScaledPadding / 2;
             hlg.padding = new RectOffset(0, 0, 0, 0);
             hlg.childControlWidth = true;
             hlg.childControlHeight = true;
@@ -292,33 +303,40 @@ namespace Multipleer.UI
 
             LE(rail).flexibleWidth = 1;
 
+            var pad = LobbyTheme.ScaledPadding;
             var vlg = rail.AddComponent<VerticalLayoutGroup>();
-            vlg.padding = new RectOffset(12, 12, 12, 12);
-            vlg.spacing = 8;
+            vlg.padding = new RectOffset(pad, pad, pad, pad);
+            vlg.spacing = pad / 2;
             vlg.childControlWidth = true;
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
             vlg.childAlignment = TextAnchor.UpperLeft;
 
+            var labelH = LobbyTheme.ScaledSubFontSize + pad / 2;
+            var hdrH = LobbyTheme.ScaledBodyFontSize + pad / 2;
+
             var hdr = UiToolkit.CreateText(rail, "ConnectHdr", Vector2.zero,
-                new Vector2(260, 28), "CONNECT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            LE(hdr.gameObject).minHeight = 28;
+                new Vector2(260, hdrH), "CONNECT", LobbyTheme.ScaledBodyFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            hdr.color = LobbyTheme.Accent;
+            LE(hdr.gameObject).minHeight = hdrH;
 
             var stunLabel = UiToolkit.CreateText(rail, "StunLabel", Vector2.zero,
-                new Vector2(260, 20), "STUN code (click to copy):", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            LE(stunLabel.gameObject).minHeight = 20;
+                new Vector2(260, labelH), "STUN code (click to copy):", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            stunLabel.color = LobbyTheme.SubText;
+            LE(stunLabel.gameObject).minHeight = labelH;
 
             _railStunValue = MakeCopyableValue(rail, "StunValue", () => _owner.GetRailStunCode());
-            LE(_railStunValue.transform.parent.gameObject).minHeight = 32;
+            LE(_railStunValue.transform.parent.gameObject).minHeight = LobbyTheme.ScaledRowHeight;
 
             var saveLabel = UiToolkit.CreateText(rail, "SaveLabel", Vector2.zero,
-                new Vector2(260, 20), "Save to load:", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            LE(saveLabel.gameObject).minHeight = 20;
+                new Vector2(260, labelH), "Save to load:", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            saveLabel.color = LobbyTheme.SubText;
+            LE(saveLabel.gameObject).minHeight = labelH;
 
             _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", Vector2.zero,
-                new Vector2(248, 40), "(none)", 14, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            LE(_railSaveValue.gameObject).minHeight = 40;
+                new Vector2(248, labelH * 2), "(none)", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            LE(_railSaveValue.gameObject).minHeight = labelH * 2;
 
             _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "ChooseSaveBtn",
                 "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
@@ -327,9 +345,9 @@ namespace Multipleer.UI
             else
             {
                 _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
-                    Vector2.zero, new Vector2(220, 36), new Vector2(0f, 1f),
+                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
                     () => _owner.OnLobbyChooseSave());
-                LE(_chooseSaveBtn.gameObject).preferredHeight = 38;
+                LE(_chooseSaveBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
 
             _inviteBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "InviteBtn",
@@ -339,9 +357,9 @@ namespace Multipleer.UI
             else
             {
                 _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
-                    Vector2.zero, new Vector2(220, 36), new Vector2(0f, 1f),
+                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
                     () => _owner.InvitePlayers());
-                LE(_inviteBtn.gameObject).preferredHeight = 38;
+                LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
         }
 
@@ -350,14 +368,16 @@ namespace Multipleer.UI
         // button rect is owned by the parent layout group (caller sets the LayoutElement.minHeight).
         private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
-            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, new Vector2(240, 32),
+            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero,
+                new Vector2(240, LobbyTheme.ScaledRowHeight),
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
             var label = btn.GetComponentInChildren<Text>();
             if (label != null)
             {
                 label.alignment = TextAnchor.MiddleLeft;
-                label.fontSize = 24;
+                label.fontSize = LobbyTheme.ScaledRowFontSize;
                 label.fontStyle = FontStyle.Bold;
+                label.color = LobbyTheme.Accent;
             }
             return label;
         }
@@ -372,17 +392,20 @@ namespace Multipleer.UI
 
             LE(chat).flexibleWidth = 2;   // center widest (1:2:1)
 
+            var pad = LobbyTheme.ScaledPadding;
             var vlg = chat.AddComponent<VerticalLayoutGroup>();
-            vlg.padding = new RectOffset(12, 12, 12, 12);
-            vlg.spacing = 8;
+            vlg.padding = new RectOffset(pad, pad, pad, pad);
+            vlg.spacing = pad / 2;
             vlg.childControlWidth = true;
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
 
+            var hdrH = LobbyTheme.ScaledBodyFontSize + pad / 2;
             var hdr = UiToolkit.CreateText(chat, "ChatHdr", Vector2.zero,
-                new Vector2(300, 28), "CHAT", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            var hle = LE(hdr.gameObject); hle.minHeight = 28; hle.flexibleHeight = 0;
+                new Vector2(300, hdrH), "CHAT", LobbyTheme.ScaledBodyFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            hdr.color = LobbyTheme.Accent;
+            var hle = LE(hdr.gameObject); hle.minHeight = hdrH; hle.flexibleHeight = 0;
 
             // Scroll host: fills the middle of the column (flexibleHeight 1). Plain RectTransform — NOT
             // a layout group — so the scroller content's ContentSizeFitter is conflict-free (§E-1).
@@ -414,9 +437,10 @@ namespace Multipleer.UI
             var inputRow = new GameObject("ChatInputRow");
             inputRow.transform.SetParent(chat.transform, false);
             inputRow.AddComponent<RectTransform>();
-            var irle = LE(inputRow); irle.minHeight = 30; irle.flexibleHeight = 0;
+            var inputH = LobbyTheme.ScaledRowHeight;
+            var irle = LE(inputRow); irle.minHeight = inputH; irle.flexibleHeight = 0;
             var irhlg = inputRow.AddComponent<HorizontalLayoutGroup>();
-            irhlg.spacing = 8;
+            irhlg.spacing = pad / 2;
             irhlg.childControlWidth = true;
             irhlg.childControlHeight = true;
             irhlg.childForceExpandWidth = false;
@@ -428,14 +452,15 @@ namespace Multipleer.UI
             // which on the host echoes locally (sender sees their own line) and on a client relays to
             // the host who broadcasts it back — so the sender always sees their message.
             _chatInput = UiToolkit.CreateInputField(inputRow, "ChatInput", "",
-                Vector2.zero, new Vector2(220, 26), new Vector2(0f, 0f),
+                Vector2.zero, new Vector2(220, inputH), new Vector2(0f, 0f),
                 _ => SendCurrentChatInput());
             LE(_chatInput.gameObject).flexibleWidth = 1;
 
+            var sendW = LobbyTheme.Scale(90);
             var send = UiToolkit.CreateButton(inputRow, "ChatSend", "SEND",
-                Vector2.zero, new Vector2(70, 26), new Vector2(0f, 0f),
+                Vector2.zero, new Vector2(sendW, inputH), new Vector2(0f, 0f),
                 SendCurrentChatInput);
-            var sndle = LE(send.gameObject); sndle.preferredWidth = 70; sndle.flexibleWidth = 0;
+            var sndle = LE(send.gameObject); sndle.preferredWidth = sendW; sndle.flexibleWidth = 0;
         }
 
         // Single chat-send entry point shared by the SEND button and the Enter key. Reads the current
@@ -461,17 +486,20 @@ namespace Multipleer.UI
 
             LE(players).flexibleWidth = 1;
 
+            var pad = LobbyTheme.ScaledPadding;
             var vlg = players.AddComponent<VerticalLayoutGroup>();
-            vlg.padding = new RectOffset(12, 12, 12, 12);
-            vlg.spacing = 8;
+            vlg.padding = new RectOffset(pad, pad, pad, pad);
+            vlg.spacing = pad / 2;
             vlg.childControlWidth = true;
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
 
+            var hdrH = LobbyTheme.ScaledBodyFontSize + pad / 2;
             _connectText = UiToolkit.CreateText(players, "PlayersHdr", Vector2.zero,
-                new Vector2(300, 28), "PLAYERS (0)", 20, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            var hle = LE(_connectText.gameObject); hle.minHeight = 28; hle.flexibleHeight = 0;
+                new Vector2(300, hdrH), "PLAYERS (0)", LobbyTheme.ScaledBodyFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            _connectText.color = LobbyTheme.Accent;
+            var hle = LE(_connectText.gameObject); hle.minHeight = hdrH; hle.flexibleHeight = 0;
 
             // Scroll host fills the column (flexibleHeight 1); plain rect, NOT a layout group.
             var scrollHost = new GameObject("RosterScrollHost");
@@ -502,10 +530,10 @@ namespace Multipleer.UI
             var footer = new GameObject("Footer");
             footer.transform.SetParent(_root.transform, false);
             footer.AddComponent<RectTransform>();
-            var fle = LE(footer); fle.minHeight = 48; fle.flexibleHeight = 0;
+            var fle = LE(footer); fle.minHeight = FooterButtonSize.y; fle.flexibleHeight = 0;
 
             var hlg = footer.AddComponent<HorizontalLayoutGroup>();
-            hlg.spacing = 12;
+            hlg.spacing = LobbyTheme.ScaledPadding / 2;
             hlg.childControlWidth = true;
             hlg.childControlHeight = true;
             hlg.childForceExpandWidth = false;
@@ -520,9 +548,9 @@ namespace Multipleer.UI
             else
             {
                 _leaveButton = UiToolkit.CreateButton(footer, "LeaveBtn", "LEAVE",
-                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
                     () => _owner.OnLobbyLeave());
-                LE(_leaveButton.gameObject).preferredWidth = 150;
+                LE(_leaveButton.gameObject).preferredWidth = FooterButtonSize.x;
             }
 
             // Flexible spacer pushes the remaining buttons to the right edge.
@@ -539,9 +567,9 @@ namespace Multipleer.UI
             else
             {
                 _joinButton = UiToolkit.CreateButton(footer, "JoinBtn", "JOIN…",
-                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
                     () => _owner.OnLobbyJoinPrompt());
-                LE(_joinButton.gameObject).preferredWidth = 150;
+                LE(_joinButton.gameObject).preferredWidth = FooterButtonSize.x;
             }
 
             // Ready: a plain cloned MENU BUTTON acting as a toggle — same widget family as
@@ -560,18 +588,18 @@ namespace Multipleer.UI
                     UpdateReadyButtonLabel();
                 });
             if (_readyButton != null)
-                AddCloneLayoutElement(_readyButton, footer.transform, 150, FooterButtonSize.y);
+                AddCloneLayoutElement(_readyButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
             else
             {
                 _readyButton = UiToolkit.CreateButton(footer, "ReadyBtn", "READY",
-                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
                     () =>
                     {
                         _localReady = !_localReady;
                         _owner.OnLobbyToggleReady();
                         UpdateReadyButtonLabel();
                     });
-                LE(_readyButton.gameObject).preferredWidth = 150;
+                LE(_readyButton.gameObject).preferredWidth = FooterButtonSize.x;
             }
             _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
             UpdateReadyButtonLabel();
@@ -613,46 +641,37 @@ namespace Multipleer.UI
             else
             {
                 _playButton = UiToolkit.CreateButton(footer, "PlayBtn", "PLAY ▸",
-                    Vector2.zero, new Vector2(150, 40), new Vector2(0f, 0f),
+                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
                     () => _owner.OnLobbyPlay());
-                LE(_playButton.gameObject).preferredWidth = 150;
+                LE(_playButton.gameObject).preferredWidth = FooterButtonSize.x;
             }
         }
 
-        // Default framed-panel colours: a light SEMI-opaque dark backing (so arbitrary background
-        // art behind the panel stays faintly visible while text keeps contrast) + a lighter 1-2px
-        // border outline. Tuned per the redesign brief.
-        private static readonly Color PanelFill = new Color(0.06f, 0.07f, 0.10f, 0.62f);
-        private static readonly Color PanelBorder = new Color(0.5f, 0.55f, 0.65f, 0.9f);
-
-        // FRAMED PANEL: a semi-opaque dark backing Image on the zone root + a border Outline, so the
-        // zone reads as a discrete bordered card over the menu background art (NOT a full-screen
-        // blackout). The Image is added on the zone root, which is created/parented before its child
-        // widgets, so it sits behind them. The Outline (uGUI effect) draws a duplicated border around
-        // the Image graphic — a cheap 1-2px frame with no extra GameObject.
+        // FRAMED PANEL: a themed card backing Image on the zone root (native sliced sprite frame via
+        // LobbyTheme.ApplyPanelSkin when one is captured, else a flat CardBackground fill) + a themed
+        // Outline border, so each zone reads as a discrete framed card on the page. The Image is added
+        // on the zone root (created before its child widgets) so it sits behind them; the Outline is a
+        // cheap themed frame with no extra GameObject.
         private static void AddFramedPanel(GameObject zone, Color fill, Color border)
         {
             var img = zone.AddComponent<Image>();
-            img.color = fill;
-
             var outline = zone.AddComponent<Outline>();
-            outline.effectColor = border;
-            outline.effectDistance = new Vector2(2f, 2f);
+            LobbyTheme.ApplyPanelSkin(img, outline, fill, border);
         }
 
-        // Default-coloured overload used by every zone.
+        // Default-coloured overload used by every zone (themed card fill + card border).
         private static void AddFramedPanel(GameObject zone)
         {
-            AddFramedPanel(zone, PanelFill, PanelBorder);
+            AddFramedPanel(zone, LobbyTheme.CardBackground, LobbyTheme.CardBorder);
         }
 
-        // Cloned-button sizing. The native TemplateMenuButton clone is sized/scaled for the full-width
-        // main-menu column, so dropped unmodified into a lobby zone it overflows badly. We constrain
-        // every cloned button to a fixed rect that fits its zone and cap its label font so the text
-        // stays inside that rect.
-        private static readonly Vector2 RailButtonSize = new Vector2(216, 38);   // left rail inner width
-        private static readonly Vector2 FooterButtonSize = new Vector2(150, 40); // footer corner button
-        private const int ClonedButtonFontCap = 18;
+        // Cloned-button sizing (theme-scaled). The native TemplateMenuButton clone is sized for the
+        // full-width main-menu column, so dropped unmodified into a lobby zone it overflows; we
+        // constrain every clone to a rect that fits its zone (growing with UiScale) and cap its label
+        // font so the text stays inside that rect.
+        private static Vector2 RailButtonSize => new Vector2(LobbyTheme.Scale(220), LobbyTheme.Scale(40));
+        private static Vector2 FooterButtonSize => new Vector2(LobbyTheme.Scale(160), LobbyTheme.Scale(44));
+        private static int ClonedButtonFontCap => LobbyTheme.ScaledClonedButtonFontCap;
 
         // Get-or-add a LayoutElement on a GameObject (caller sets the size fields). Centralises the
         // null-coalescing pattern used throughout the layout-driven build.
@@ -824,6 +843,10 @@ namespace Multipleer.UI
             // canvas GO is actually on screen.
             if (!IsVisible) return;
 
+            // Keep the aspect-adaptive scaler match live: the screen aspect can change at runtime
+            // (windowed resize, monitor swap), so re-apply the native rule each frame the lobby is up.
+            if (_scaler != null) _scaler.matchWidthOrHeight = LobbyTheme.CurrentMatch;
+
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive)
             {
@@ -906,11 +929,12 @@ namespace Multipleer.UI
             // the ContentSizeFitter sizes the content — no manual anchoredPosition Y math.
             while (_chatRows.Count < lines.Count)
             {
+                var rowH = LobbyTheme.ScaledRowFontSize + 4;
                 var t = UiToolkit.CreateText(_chatContent.gameObject, $"ChatRow{_chatRows.Count}",
-                    Vector2.zero, new Vector2(0, 18), "", 12,
+                    Vector2.zero, new Vector2(0, rowH), "", LobbyTheme.ScaledRowFontSize,
                     TextAnchor.UpperLeft, new Vector2(0f, 1f));
                 var le = LE(t.gameObject);
-                le.minHeight = 18;
+                le.minHeight = rowH;
                 le.flexibleWidth = 1;
                 _chatRows.Add(t);
             }
@@ -1125,7 +1149,7 @@ namespace Multipleer.UI
             le.flexibleWidth = 1;
 
             var label = UiToolkit.CreateText(go, "Label", new Vector2(10, 0),
-                new Vector2(0, RowHeight), "", 15, TextAnchor.MiddleLeft,
+                new Vector2(0, RowHeight), "", LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft,
                 new Vector2(0f, 0.5f));
 
             // Add the Image BEFORE the Button so the Button has a Graphic to raycast against
