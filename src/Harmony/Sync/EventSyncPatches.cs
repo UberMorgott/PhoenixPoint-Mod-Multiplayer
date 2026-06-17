@@ -73,7 +73,17 @@ namespace Multipleer.Harmony.Sync
         public static void Postfix(ISyncedAction __state)
         {
             if (__state == null) return;
-            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            try
+            {
+                NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state);
+                // TASK1 — instant event-driven research reveal (host-LOCAL answer path): the host's event
+                // choice can REVEAL research (FIX#2 ch2 carries Research.Visible), but an event answer fires
+                // no research event to self-mark ch2, so the reveal otherwise waited for the next in-game
+                // HourTicked (frozen while the event UI pauses the clock). Mark ch2 dirty so the reveal ships
+                // on the next real-time Tick flush. Host-only (__state is set in Prefix only when IsHost);
+                // idempotent reconcile. The client-relayed answer path is covered in SyncEngine.OnActionRequest.
+                NetworkEngine.Instance?.Sync?.MarkChannelDirty(2);
+            }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventPatch postfix broadcast failed: " + ex.Message); }
         }
     }

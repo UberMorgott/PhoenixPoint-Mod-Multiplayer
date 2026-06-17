@@ -119,7 +119,13 @@ namespace Multipleer.Network.Sync
             // Research has no faction-level cancel event: a client-relayed cancel mutates the queue with no
             // change-event to mark the channel dirty. Force a research-channel echo so the new authoritative
             // queue reaches every peer (idempotent reconcile). Start/complete already self-mark via events.
-            if (action.Category == ActionCategory.Research) MarkChannelDirty(2);
+            // TASK1 — instant event-driven research reveal: a geoscape EVENT answer (ActionCategory.Dialogs)
+            // can REVEAL research (FIX#2 ch2 carries Research.Visible), but the answer fires no research
+            // event, so the reveal otherwise waited for the next in-game HourTicked (frozen while paused).
+            // Marking ch2 dirty here for a client-relayed Dialogs answer ships the reveal immediately (Tick
+            // flushes in real time). Host-LOCAL answers are covered by CompleteEventPatch.Postfix. Idempotent.
+            if (action.Category == ActionCategory.Research || action.Category == ActionCategory.Dialogs)
+                MarkChannelDirty(2);
 
             // The host applies a client request authoritatively but never replays its own echo, so its own
             // open geoscape module never rebuilds — a client-initiated research cancel/start stayed visually
@@ -240,9 +246,14 @@ namespace Multipleer.Network.Sync
             _tracker.MarkChannel(channelId, ver);
             try { using (SyncApplyScope.Enter()) channel.Apply(GeoRuntime.Instance, payload); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
-            // Best-effort: rebuild the open UI for this channel's screen.
+            // Best-effort: rebuild the open UI for this channel's screen. Channels 1/2 map to a single
+            // screen (targeted Refresh). The unlock (3) + diplomacy (4) channels span multiple modules (an
+            // unlock shows in BOTH the manufacturing list AND the base-layout facility picker; diplomacy has
+            // no commonly-open module), so drive the full needs-kick fan-out for ids ≥ 3 — each Refresh
+            // no-ops if that module is closed, so a redundant kick is harmless.
             var screen = _channels.ScreenFor(channelId);
             if (screen.HasValue) GeoUiRefresh.Refresh(GeoRuntime.Instance, screen.Value);
+            else if (channelId >= 3) GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);
         }
 
         /// <summary>Host: drop all channel change-event subscriptions (session end). Idempotent.</summary>

@@ -23,5 +23,7 @@ namespace Multipleer.Network.Sync
         // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
         public const byte InventoryChannel = 1;   // distinct id-space from actions (kind disambiguates)
         public const byte ResearchChannel = 2;
+        public const byte UnlockChannel = 3;       // research-unlock availability (facilities/manufacture/augmentations)
+        public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
     }
 }
