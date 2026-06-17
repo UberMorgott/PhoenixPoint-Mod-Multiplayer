@@ -54,6 +54,10 @@ namespace Multipleer.Network.Sync
         // Raise is buffered then resolved straight to the result page (fixes the "EX20" collision/ordering bug).
         private readonly State.EventCorrelator _eventCorrelator = new State.EventCorrelator();
 
+        // Host-side first-claim-wins arbiter for geoscape-event choices (pure; see ChoiceArbiter). The first
+        // ChoiceClaim per occId is resolved authoritatively (CompleteEvent + outcome broadcast); later ignored.
+        private readonly State.ChoiceArbiter _choiceArbiter = new State.ChoiceArbiter();
+
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
@@ -279,7 +283,7 @@ namespace Multipleer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
@@ -292,7 +296,8 @@ namespace Multipleer.Network.Sync
                 {
                     case State.EventCorrelator.ActionKind.ShowDialog:
                     {
-                        var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId);
+                        var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId,
+                            hasIdentity ? (GeoSiteState?)identity : null);
                         if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
                         break;
                     }
@@ -413,12 +418,13 @@ namespace Multipleer.Network.Sync
             State.EventDisplay.Dismiss(rt, occId, eventId);
         }
 
-        /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers, carrying the occurrence id.</summary>
-        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId)
+        /// <summary>Host: broadcast a show event-dialog packet to all peers, carrying the occurrence id and an
+        /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase).</summary>
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity)));
         }
 
         /// <summary>
@@ -435,6 +441,47 @@ namespace Multipleer.Network.Sync
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
+        }
+
+        /// <summary>
+        /// CLIENT: a player clicked choice <paramref name="choiceIndex"/> on the open event modal for
+        /// occurrence <paramref name="occurrenceId"/>. Route the claim to the host arbiter (first-click-wins);
+        /// the modal stays OPEN until the host's OUTCOME (EventDismiss) lands. No local outcome apply.
+        /// </summary>
+        public void SendChoiceClaim(ushort occurrenceId, int choiceIndex)
+        {
+            if (_engine.IsHost) return;          // the host resolves its own clicks directly (OnChoiceClaim local path)
+            if (occurrenceId == 0) return;        // null sentinel → never a valid claim
+            _engine.SendToHost(new NetworkMessage(PacketType.ChoiceClaim,
+                SyncProtocol.EncodeChoiceClaim(occurrenceId, choiceIndex)));
+            Debug.Log("[Multipleer] CLIENT SendChoiceClaim occId=" + occurrenceId + " choiceIndex=" + choiceIndex);
+        }
+
+        /// <summary>
+        /// HOST: a ChoiceClaim arrived (from a client, or routed locally for the host's own click). Accept the
+        /// FIRST claim per occurrence (ChoiceArbiter) → look up the live event by occurrence id and run the
+        /// authoritative <c>CompleteEvent</c>; its <c>CompleteEventDismissPatch.Postfix</c> broadcasts the
+        /// OUTCOME (EventDismiss) that BOTH instances render. Later claims for a resolved occurrence are dropped.
+        /// </summary>
+        public void OnChoiceClaim(ulong senderPeerId, byte[] data)
+        {
+            if (!_engine.IsHost) return;
+            if (!SyncProtocol.TryDecodeChoiceClaim(data, out var occId, out var choiceIndex)) return;
+            if (!_choiceArbiter.Claim(occId))
+            {
+                Debug.Log("[Multipleer] HOST OnChoiceClaim occId=" + occId + " choiceIndex=" + choiceIndex + " → IGNORED (already resolved)");
+                return;
+            }
+            Debug.Log("[Multipleer] HOST OnChoiceClaim occId=" + occId + " choiceIndex=" + choiceIndex + " → ACCEPTED (first claim, resolving)");
+            try
+            {
+                // Run the authoritative CompleteEvent OUTSIDE SyncApplyScope: CompleteEventDismissPatch.Postfix
+                // broadcasts the OUTCOME and early-returns under SyncApplyScope.IsApplying — so wrapping it here
+                // would suppress the very broadcast both instances need. The arbiter already guarantees a single
+                // resolve per occId, so there is no re-entrancy to guard against.
+                EventReflection.CompleteEventByOccurrence(GeoRuntime.Instance, occId, choiceIndex);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnChoiceClaim resolve failed: " + ex.Message); }
         }
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────
