@@ -132,5 +132,20 @@ namespace Multipleer.Network
             _allClientsReady = false;
             _saveChosen = false;
         }
+
+        /// <summary>
+        /// Shared start-gate roster rule: true iff there is at least one NON-host peer and EVERY
+        /// non-host peer is ready. The host self-entry is the starter, not a ready-gated player, so
+        /// it is excluded (this is what makes a host-ALONE roster correctly return false — the old
+        /// LobbyPanel.AllReady returned true for the single host self-entry, which lit Play while
+        /// alone = Bug B). Used by the lobby view AND the press-time guards so visual == gate.
+        /// </summary>
+        public static bool AllClientsReady(System.Collections.Generic.IReadOnlyList<bool> nonHostReadyFlags)
+        {
+            if (nonHostReadyFlags == null || nonHostReadyFlags.Count == 0) return false;
+            foreach (var ready in nonHostReadyFlags)
+                if (!ready) return false;
+            return true;
+        }
     }
 }

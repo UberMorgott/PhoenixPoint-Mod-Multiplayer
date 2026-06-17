@@ -999,13 +999,18 @@ namespace Multipleer.UI
             _readyButtonLabel.text = _localReady ? "✓ READY" : "READY";
         }
 
-        // All-ready gate (lobby-computed): every roster entry (host self-entry + all clients) ready.
+        // All-ready start gate (lobby-computed): IGNORE the host self-entry (the host is the starter,
+        // not a ready-gated player) and require at least one NON-host peer, all ready. Delegates to
+        // LobbyController.AllClientsReady so the Play-button visual uses the EXACT same rule the
+        // press-time guards (OnLobbyPlay / HostStartSession) use — visual and gate can never disagree
+        // (the old "host self-entry Ready=HostReady ⇒ AllReady true while alone" lit Play solo = Bug B).
         private static bool AllReady(List<PeerListEntry> roster)
         {
-            if (roster == null || roster.Count == 0) return false;
+            if (roster == null) return false;
+            var nonHostReady = new List<bool>();
             foreach (var p in roster)
-                if (!p.Ready) return false;
-            return true;
+                if (!p.IsHost) nonHostReady.Add(p.Ready);
+            return LobbyController.AllClientsReady(nonHostReady);
         }
 
         // Rebuild/refresh the player rows from the unified lobby roster (host self-entry + clients).
