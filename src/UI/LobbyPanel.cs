@@ -547,10 +547,11 @@ namespace Multipleer.UI
             // Ready: a plain cloned MENU BUTTON acting as a toggle — same widget family as
             // Leave/Join/Play, which render cleanly in a LayoutElement slot. (The old approach cloned a
             // GameOptionViewController option-row whose internal layout + "NEEDS TEXT" placeholder leaked
-            // OUTSIDE its wrapper; the menu button has no such stray children.) The button is interactable
-            // for everyone — OnLobbyToggleReady drives both the host (HostReady) and client (ClientReady)
-            // paths — so it is NOT host-gated. Authoritative ready state arrives via the roster and is
-            // re-synced into _localReady + the label in RefreshControls.
+            // OUTSIDE its wrapper; the menu button has no such stray children.) The button is CLIENT-ONLY —
+            // OnLobbyToggleReady is a no-op for the host (the host is the starter, it has no Ready), so the
+            // button is host-gated OFF (mirror of _playButton/_chooseSaveBtn, inverted). Authoritative
+            // client ready state arrives via the roster and is re-synced into _localReady + the label in
+            // RefreshControls. Created here, then frame-gated by host-state in RefreshControls.
             _readyButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "ReadyBtn", "READY",
                 () =>
                 {
@@ -574,6 +575,17 @@ namespace Multipleer.UI
             }
             _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
             UpdateReadyButtonLabel();
+
+            // Client-only: hide the Ready button for the host at creation (it is meaningless for the
+            // starter, and OnLobbyToggleReady no-ops for the host). Mirrors the host-only visibility of
+            // _chooseSaveBtn/_playButton, inverted. RefreshControls keeps this in sync each frame.
+            var engine = NetworkEngine.Instance;
+            if (_readyButton != null)
+            {
+                var clientShow = engine == null || !engine.IsHost;
+                if (_readyButton.gameObject.activeSelf != clientShow)
+                    _readyButton.gameObject.SetActive(clientShow);
+            }
 
             // Play (host).
             _playButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "PlayBtn", "PLAY ▸",
@@ -927,11 +939,24 @@ namespace Multipleer.UI
                 if (isMe) { me = p; break; }
             }
 
-            // Ready state: re-sync the local flag from authoritative roster state (me.Ready) and relabel
-            // the button. This overrides any optimistic click flip with the truth (e.g. after a
-            // reconnect or if the host's view differs), without re-invoking OnLobbyToggleReady.
-            _localReady = me != null && me.Ready;
-            UpdateReadyButtonLabel();
+            // Ready button: CLIENT-ONLY. Keep it host-gated OFF each frame (mirror of _playButton's
+            // host-gate, inverted). On the host we must NOT re-show it and must NOT re-sync _localReady /
+            // relabel it — the host's roster row is always Ready=false (HostReady), so re-syncing would
+            // flip the optimistic click back and make the button flicker. The host has no Ready.
+            if (_readyButton != null)
+            {
+                var clientShow = !engine.IsHost;
+                if (_readyButton.gameObject.activeSelf != clientShow)
+                    _readyButton.gameObject.SetActive(clientShow);
+            }
+            if (!engine.IsHost)
+            {
+                // Client path: re-sync the local flag from authoritative roster state (me.Ready) and
+                // relabel the button. This overrides any optimistic click flip with the truth (e.g. after
+                // a reconnect or if the host's view differs), without re-invoking OnLobbyToggleReady.
+                _localReady = me != null && me.Ready;
+                UpdateReadyButtonLabel();
+            }
 
             // Play button: host only, enabled ONLY when the FULL start gate is open. The visual reads
             // the SAME controller gate the press path uses (LobbyController.CanStart, via the single
@@ -1037,8 +1062,12 @@ namespace Multipleer.UI
                 if (isMe) tags += " (you)";
 
                 // During an active save transfer, show download progress instead of ready status.
-                var status = p.Ready ? "READY" : "not ready";
-                var color = p.Ready ? new Color(0.5f, 0.9f, 0.5f) : Color.white;
+                // The host has no Ready state (it is the starter; HostReady is always false), so show
+                // "host" for the host's own row instead of a misleading "not ready" indicator.
+                var status = p.IsHost ? "host" : (p.Ready ? "READY" : "not ready");
+                var color = p.IsHost
+                    ? Color.white
+                    : (p.Ready ? new Color(0.5f, 0.9f, 0.5f) : Color.white);
 
                 var st = engine.SaveTransfer;
                 if (st != null && st.TransferActive)
