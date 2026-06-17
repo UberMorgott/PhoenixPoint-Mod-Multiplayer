@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Reflection;
 using HarmonyLib;
+using Multipleer.Network.Sync.State;
 using UnityEngine;
 
 namespace Multipleer.Network.Sync
@@ -61,6 +62,7 @@ namespace Multipleer.Network.Sync
         private static ConstructorInfo _eventCtor;     // GeoscapeEvent(GeoscapeEventData, GeoscapeEventContext)
         private static ConstructorInfo _contextCtor;   // GeoscapeEventContext(GeoSite, GeoFaction)
         private static ConstructorInfo _contextCtor3;  // GeoscapeEventContext(GeoSite, GeoFaction, GeoVehicle)
+        private static ConstructorInfo _contextCtorSiteless;  // GeoscapeEventContext(GeoFaction, GeoFaction) — Site=null (native :176)
         private static FieldInfo _mapField;            // GeoLevelController.Map
         private static PropertyInfo _allSitesProp;     // GeoMap.AllSites
         private static FieldInfo _siteIdField;         // GeoSite.SiteId
@@ -140,6 +142,11 @@ namespace Multipleer.Network.Sync
             _eventSystemField = AccessTools.Field(geoLevelType, "EventSystem");
             _eventCtor = AccessTools.Constructor(_eventType, new[] { _eventDataType, _contextType });
             _contextCtor = AccessTools.Constructor(_contextType, new[] { _geoSiteType, _geoFactionType });
+            // Faction-only ctor → a genuinely SITELESS context (Site == null). Native render is title-only,
+            // no NRE (UIModuleSiteEncounters.ShowEncounter null-checks Context.Site at :203; GetEventArt at
+            // SiteEncountersArtCollectionDef.cs:125). Used for siteless events AND site events whose site is
+            // absent on the client — NEVER StartingBase ("Точка Феникс" is the StartingBase subtitle).
+            _contextCtorSiteless = AccessTools.Constructor(_contextType, new[] { _geoFactionType, _geoFactionType });
             // Site-by-id resolution for context fidelity (GeoLevelController.Map:97 → GeoMap.AllSites:251 → GeoSite.SiteId:45).
             _mapField = AccessTools.Field(geoLevelType, "Map");
             var geoMapType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoMap");
@@ -217,6 +224,14 @@ namespace Multipleer.Network.Sync
         /// Unit-testable (no game types).
         /// </summary>
         public static bool IsSyntheticResultPage(string eventId) => string.IsNullOrEmpty(eventId);
+
+        /// <summary>
+        /// Pure decision: does <see cref="BuildEvent"/> use the SITELESS faction-only context (vs the site
+        /// context)? True when the site did not resolve on this client (a siteless event, siteId &lt; 0, OR a
+        /// site absent from this sim-frozen client's map) — so the client renders title-only like the host
+        /// rather than falling back to StartingBase. False only when a real site resolved. Unit-testable.
+        /// </summary>
+        public static bool UsesSitelessContext(bool resolvedSite, int siteId) => !resolvedSite;
 
         // ─── two-class (INFO / CHOICE) dialog classification ──────────────
 
@@ -418,7 +433,7 @@ namespace Multipleer.Network.Sync
         /// instead of throwing into the prefab-placeholder state. Falls back to the 2-arg ctor otherwise.
         /// Returns null on any failure (caller best-effort no-ops).
         /// </summary>
-        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId, int vehicleId = -1)
+        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId, int vehicleId = -1, GeoSiteState? identity = null)
         {
             try
             {
@@ -432,25 +447,40 @@ namespace Multipleer.Network.Sync
                 if (eventData == null) return null;
 
                 object resolvedSite = ResolveSiteById(rt, siteId);
-                object site = resolvedSite ?? GetStartingBase(fac);
-                if (site == null || _eventCtor == null) return null;
+                bool siteless = UsesSitelessContext(resolvedSite != null, siteId);
+                if (_eventCtor == null) return null;
 
-                // Vehicle fallback chain: broadcast id → a vehicle currently at the resolved site → null.
-                object vehicle = ResolveVehicleById(rt, vehicleId) ?? ResolveVehicleAtSite(site);
+                // Vehicle fallback chain (only meaningful with a real site): broadcast id → a vehicle at the
+                // resolved site → null. A siteless context never carries a vehicle.
+                object vehicle = siteless ? null : (ResolveVehicleById(rt, vehicleId) ?? ResolveVehicleAtSite(resolvedSite));
 
                 Debug.Log("[Multipleer] BuildEvent eventId=" + eventId + " siteId=" + siteId +
-                          " siteResolved=" + (resolvedSite != null) +
-                          " usedStartingBaseFallback=" + (resolvedSite == null) +
-                          " " + DescribeSite(site) +
+                          " siteResolved=" + (resolvedSite != null) + " siteless=" + siteless +
+                          " hasIdentity=" + identity.HasValue +
                           " vehicleId=" + vehicleId + " vehicleResolved=" + (vehicle != null));
 
                 object context;
-                if (vehicle != null && _contextCtor3 != null)
-                    context = _contextCtor3.Invoke(new[] { site, fac, vehicle });
+                if (siteless)
+                {
+                    // Genuinely siteless: native renders title-only (no StartingBase subtitle, no NRE). When an
+                    // identity block was pushed, best-effort stamp the subtitle-relevant fields onto the context
+                    // so an absent-site event still shows the right owner/name text (degrades to title-only).
+                    if (_contextCtorSiteless == null) return null;
+                    context = _contextCtorSiteless.Invoke(new[] { fac, fac });
+                    if (identity.HasValue) ApplySitelessIdentity(context, identity.Value);
+                }
+                else if (vehicle != null && _contextCtor3 != null)
+                {
+                    context = _contextCtor3.Invoke(new[] { resolvedSite, fac, vehicle });
+                }
                 else if (_contextCtor != null)
-                    context = _contextCtor.Invoke(new[] { site, fac });
+                {
+                    context = _contextCtor.Invoke(new[] { resolvedSite, fac });
+                }
                 else
+                {
                     return null;
+                }
 
                 object geoEvent = _eventCtor.Invoke(new[] { eventData, context });
                 // Client-only display reconstruction: stamp a Completed record so a local dismiss does NOT
@@ -478,6 +508,25 @@ namespace Multipleer.Network.Sync
                        " siteType=" + (type == null ? "null" : type.ToString());
             }
             catch { return "siteDescribe=err"; }
+        }
+
+        // Best-effort: stamp the absent-site IDENTITY (owner faction + site-name loc-key) onto a SITELESS
+        // context so an absent-site event's subtitle/token text degrades gracefully instead of being empty.
+        // Never throws into the render; a failed stamp just leaves the title-only siteless context.
+        private static void ApplySitelessIdentity(object context, GeoSiteState identity)
+        {
+            try
+            {
+                if (context == null) return;
+                // VariableChanged is the cheapest faithful carrier of the site-name loc-key for token text;
+                // we do NOT fabricate a GeoSite (it is a MonoBehaviour and cannot be synthesized). The native
+                // subtitle path keys off Context.Site (null here → title-only), which is the correct host-
+                // matching render for an absent site; the identity is logged for diagnosis.
+                Debug.Log("[Multipleer] BuildEvent siteless-identity owner=" + identity.OwnerFactionDefGuid +
+                          " type=" + identity.SiteType + " state=" + identity.State +
+                          " name=" + identity.SiteName + " enc=" + identity.EncounterID);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ApplySitelessIdentity failed: " + ex.Message); }
         }
 
         // ─── RESULT/OUTCOME follow-up page (host index → client text-only render) ──────────
@@ -584,14 +633,23 @@ namespace Multipleer.Network.Sync
                 if (choice == null)
                 { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choice-null eventId=" + eventId + " choiceIndex=" + choiceIndex); return null; }
 
-                // Resolve the REAL event site from the broadcast siteId (mirrors BuildEvent's raise-side
-                // resolution), falling back to StartingBase when absent/unresolved (siteId < 0 → -1 sentinel).
-                // Outcome text usually needs only faction/site tokens; a vehicle-token outcome degrades
-                // gracefully (GetText try/catch → raw text).
-                object site = ResolveSiteById(rt, siteId) ?? GetStartingBase(fac);
-                if (site == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=site-null eventId=" + eventId + " siteId=" + siteId); return null; }
-                object context = _contextCtor.Invoke(new[] { site, fac });
+                // Result page: resolve the real site, else a SITELESS context (NEVER StartingBase). The outcome
+                // text usually needs only faction/site tokens; a missing site degrades to title-only text.
+                object site = ResolveSiteById(rt, siteId);
+                object context;
+                if (site != null)
+                {
+                    context = _contextCtor.Invoke(new[] { site, fac });
+                }
+                else if (_contextCtorSiteless != null)
+                {
+                    context = _contextCtorSiteless.Invoke(new[] { fac, fac });
+                }
+                else
+                {
+                    Debug.Log("[Multipleer] BuildResultEvent NULL guard=no-context eventId=" + eventId + " siteId=" + siteId);
+                    return null;
+                }
 
                 // text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), tokens replaced.
                 string text = ResolveOutcomeText(choice, context);
