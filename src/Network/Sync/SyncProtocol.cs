@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using Multipleer.Network.Sync.State;
 
 namespace Multipleer.Network.Sync
 {
@@ -196,7 +197,18 @@ namespace Multipleer.Network.Sync
         // it is appended ONLY when >= 0 (the no-site wire stays byte-stable). When a siteId follows a missing
         // reward, the u16 rewardLen is still written as 0 so the trailing siteId is unambiguous to the decoder.
 
+        // EventRaised now optionally carries a trailing site-IDENTITY block for an absent-site event:
+        // [occId:u16][eventId:string][siteId:i32][vehicleId:i32]([hasIdentity:u8=1][GeoSiteState])?. The
+        // identity is a GeoSiteState (reused from the GeoSite channel): SiteId / ownerGuid / type / state /
+        // siteName-locKey / encounterID. The flag byte + block are appended ONLY when an identity is present,
+        // so the NO-identity wire is byte-IDENTICAL to the legacy 4-field raise (keeps EventRaised_WireBytes
+        // pinned). A LEGACY 4-field payload (no trailing byte) decodes hasIdentity=false — the optional reads
+        // guard on remaining length, never throw.
+
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null);
+
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -205,13 +217,25 @@ namespace Multipleer.Network.Sync
                 w.Write(eventId ?? "");
                 w.Write(siteId);
                 w.Write(vehicleId);
+                // Append the flag byte + block ONLY when an identity is present; the no-identity wire stays
+                // byte-identical to the legacy raise (decode treats "no trailing byte" == "flag 0" == no identity).
+                if (identity.HasValue)
+                {
+                    w.Write((byte)1);
+                    WriteSiteIdentity(w, identity.Value);
+                }
                 return ms.ToArray();
             }
         }
 
+        // 4-out shim: existing callers/tests that ignore the identity block.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId)
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out _, out _);
+
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity)
         {
-            occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1;
+            occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1; hasIdentity = false;
+            identity = default(GeoSiteState);
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -222,10 +246,58 @@ namespace Multipleer.Network.Sync
                     siteId = r.ReadInt32();
                     // Optional trailing field: absent in a 3-field payload → leave vehicleId = -1.
                     if (ms.Length - ms.Position >= sizeof(int)) vehicleId = r.ReadInt32();
+                    // Optional identity flag byte: absent in a LEGACY 4-field payload → no identity.
+                    if (ms.Length - ms.Position >= sizeof(byte))
+                    {
+                        byte flag = r.ReadByte();
+                        if (flag == 1)
+                        {
+                            identity = ReadSiteIdentity(r);
+                            hasIdentity = true;
+                        }
+                    }
                     return true;
                 }
             }
             catch { return false; }
+        }
+
+        // One GeoSiteState record on the wire (same field order as GeoSiteSnapshot's per-site block).
+        private static void WriteSiteIdentity(BinaryWriter w, GeoSiteState s)
+        {
+            w.Write(s.SiteId);
+            WriteWireStr(w, s.OwnerFactionDefGuid);
+            w.Write(s.SiteType);
+            w.Write(s.State);
+            WriteWireStr(w, s.SiteName);
+            WriteWireStr(w, s.EncounterID);
+        }
+
+        private static GeoSiteState ReadSiteIdentity(BinaryReader r)
+        {
+            int siteId = r.ReadInt32();
+            string owner = ReadWireStr(r);
+            byte type = r.ReadByte();
+            byte state = r.ReadByte();
+            string name = ReadWireStr(r);
+            string enc = ReadWireStr(r);
+            return new GeoSiteState(siteId, owner, type, state, name, enc);
+        }
+
+        private static void WriteWireStr(BinaryWriter w, string s)
+        {
+            var b = Encoding.UTF8.GetBytes(s ?? "");
+            w.Write((ushort)b.Length);
+            w.Write(b);
+        }
+
+        private static string ReadWireStr(BinaryReader r)
+        {
+            int len = r.ReadUInt16();
+            var bytes = r.ReadBytes(len);
+            if (bytes.Length != len)
+                throw new EndOfStreamException("EventRaised identity: truncated string (wanted " + len + ", got " + bytes.Length + ")");
+            return Encoding.UTF8.GetString(bytes);
         }
 
         public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1)
