@@ -235,41 +235,4 @@ namespace Multipleer.Harmony
             }
         }
     }
-
-    /// <summary>
-    /// Bug A fix (pair) — rebuild the lobby panels on the freshly-wired main-menu Canvas. After a
-    /// scene round-trip the old menu Canvas is destroyed, so the cached lobby/save-picker panels are
-    /// bound to dead transforms. UIStateMainMenu.EnterState() re-enters the main-menu state (native
-    /// re-init); we postfix it to drop MultiplayerUI's _panelsBuilt latch so the very next
-    /// InjectNetworkButtonPatch.Postfix → OnMenuReady rebuilds the panels on the live Canvas. Pairs with
-    /// the TearDown patch above so the next NETWORK GAME click hosts a clean lobby.
-    /// </summary>
-    [HarmonyPatch]
-    public static class MainMenuRebuildLobbyPatch
-    {
-        private static MethodBase _targetMethod;
-
-        public static bool Prepare()
-        {
-            var t = AccessTools.TypeByName("PhoenixPoint.Home.View.ViewStates.UIStateMainMenu");
-            if (t == null) return false;
-            _targetMethod = AccessTools.Method(t, "EnterState");
-            return _targetMethod != null;
-        }
-
-        public static MethodBase TargetMethod() => _targetMethod;
-
-        [HarmonyPostfix]
-        public static void Postfix()
-        {
-            try
-            {
-                MultiplayerUI.Instance?.RebuildLobbyPanels();
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Multipleer] main-menu lobby rebuild failed: {e.Message}");
-            }
-        }
-    }
 }
