@@ -351,6 +351,39 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.CompleteEvent failed: " + ex.Message); }
         }
 
+        /// <summary>
+        /// HOST: resolve a choice CLAIM against the LIVE GeoscapeEvent keyed to <paramref name="occurrenceId"/>
+        /// (via EventOccurrenceIds) and run the authoritative native CompleteEvent. Mutates the real event so
+        /// CompleteEventDismissPatch.Postfix broadcasts the real reward/occId. <paramref name="choiceIndex"/>
+        /// &lt; 0 selects the null/decline choice. No-op (logged) if the occurrence is unknown/collected — the
+        /// host falls back to the FinishEncounter close path; the client is never left stuck.
+        /// </summary>
+        public static void CompleteEventByOccurrence(GeoRuntime rt, ushort occurrenceId, int choiceIndex)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return;
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return;
+                if (!Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var geoEvent) || geoEvent == null)
+                {
+                    Debug.Log("[Multipleer] CompleteEventByOccurrence occId=" + occurrenceId + " → live event not found (claim dropped)");
+                    return;
+                }
+                // Resolve the choice by index off the live event's own EventData.Choices (null when index < 0).
+                object choice = null;
+                if (choiceIndex >= 0)
+                {
+                    var data = _eventDataProp?.GetValue(geoEvent, null);
+                    var choices = _choicesField?.GetValue(data) as IList;
+                    if (choices != null && choiceIndex < choices.Count) choice = choices[choiceIndex];
+                }
+                _completeEvent.Invoke(geoEvent, new[] { choice, fac });
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.CompleteEventByOccurrence failed: " + ex.Message); }
+        }
+
         private static object ResolveEventData(GeoRuntime rt, string eventId)
         {
             try

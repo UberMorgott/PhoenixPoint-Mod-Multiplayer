@@ -45,6 +45,13 @@ namespace Multipleer.Harmony.Sync
         private static readonly HashSet<ushort> _dismissed = new HashSet<ushort>();
         private static readonly Queue<ushort> _dismissedOrder = new Queue<ushort>();
 
+        // Reverse lookup occId → live event (WeakReference so it never roots the GeoscapeEvent). Bounded FIFO so
+        // it can't leak across a session; an evicted/collected entry simply returns false (host falls back to a
+        // close-only resolution, never stuck). Only the HOST populates this (it owns id assignment).
+        private const int MaxReverseTracked = 256;
+        private static readonly Dictionary<ushort, System.WeakReference> _byId = new Dictionary<ushort, System.WeakReference>();
+        private static readonly Queue<ushort> _byIdOrder = new Queue<ushort>();
+
         /// <summary>
         /// Return the occurrence id mapped to <paramref name="geoEvent"/>, allocating a fresh monotonic one the
         /// first time the instance is seen and REUSING it on every later call (order-independent: raise-first or
@@ -59,6 +66,10 @@ namespace Multipleer.Harmony.Sync
                     return existing;
                 ushort id = Next();
                 _ids.Add(geoEvent, id);
+                _byId[id] = new System.WeakReference(geoEvent);
+                _byIdOrder.Enqueue(id);
+                while (_byIdOrder.Count > MaxReverseTracked)
+                    _byId.Remove(_byIdOrder.Dequeue());
                 return id;
             }
         }
@@ -85,10 +96,30 @@ namespace Multipleer.Harmony.Sync
             lock (_lock) { return _dismissed.Contains(occurrenceId); }
         }
 
+        /// <summary>
+        /// Host: the live event keyed to <paramref name="occurrenceId"/>, or null if unknown/collected. Used by
+        /// the choice arbiter to resolve a claim against the REAL authoritative GeoscapeEvent instance.
+        /// </summary>
+        public static bool TryGetEvent(ushort occurrenceId, out object geoEvent)
+        {
+            geoEvent = null;
+            if (occurrenceId == 0) return false;
+            lock (_lock)
+            {
+                if (_byId.TryGetValue(occurrenceId, out var wr) && wr != null)
+                {
+                    var target = wr.Target;
+                    if (target != null) { geoEvent = target; return true; }
+                    _byId.Remove(occurrenceId);   // collected → drop
+                }
+                return false;
+            }
+        }
+
         /// <summary>Test/teardown hook: reset the counter + dismissed tracking (the CWT self-empties as events GC).</summary>
         public static void ResetForTests()
         {
-            lock (_lock) { _counter = 0; _dismissed.Clear(); _dismissedOrder.Clear(); }
+            lock (_lock) { _counter = 0; _dismissed.Clear(); _dismissedOrder.Clear(); _byId.Clear(); _byIdOrder.Clear(); }
         }
 
         // Monotonic next id. Skips 0 so 0 stays the "null/none" sentinel used on a null event; wraps

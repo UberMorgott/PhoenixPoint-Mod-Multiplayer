@@ -112,4 +112,31 @@ public class EventOccurrenceIdsTests
         EventOccurrenceIds.MarkDismissed(0);                  // no-op for the null sentinel
         Assert.False(EventOccurrenceIds.WasDismissed(0));
     }
+
+    // ─── Reverse lookup occId → live event (host arbiter resolves a claim against the LIVE instance) ───
+
+    [Fact]
+    public void TryGetEvent_ReturnsAssignedInstance()
+    {
+        EventOccurrenceIds.ResetForTests();
+        var ev = new object();   // stand-in for a live GeoscapeEvent (the table is type-agnostic)
+        ushort id = EventOccurrenceIds.GetOrAssign(ev);
+        Assert.True(EventOccurrenceIds.TryGetEvent(id, out var got));
+        Assert.Same(ev, got);
+    }
+
+    [Fact]
+    public void TryGetEvent_UnknownId_ReturnsFalse()
+    {
+        EventOccurrenceIds.ResetForTests();
+        Assert.False(EventOccurrenceIds.TryGetEvent(4242, out var got));
+        Assert.Null(got);
+    }
+
+    [Fact]
+    public void TryGetEvent_Zero_ReturnsFalse()
+    {
+        EventOccurrenceIds.ResetForTests();
+        Assert.False(EventOccurrenceIds.TryGetEvent(0, out _));
+    }
 }
