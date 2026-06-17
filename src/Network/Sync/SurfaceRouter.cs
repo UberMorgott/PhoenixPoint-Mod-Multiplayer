@@ -28,10 +28,25 @@ namespace Multipleer.Network.Sync
             _dedup = dedup;
         }
 
+        /// <summary>
+        /// Tactical replication fast-path hook (Increment 1, additive). Tactical surfaces (host→ALL one-way
+        /// snapshot pushes, e.g. <c>tac.deploy</c>) ride the SAME 0x67 envelope inbound chokepoint but must
+        /// NOT pass through the action relay's shared <see cref="SequenceTracker"/> (a request-free host push
+        /// has no correct shared seq, and forcing one would poison geoscape action ordering). When armed by
+        /// tactical init, this delegate is consulted FIRST: it returns true if it consumed the surface (so
+        /// the router stops). NULL by default → completely inert for the geoscape/event sync. Signature:
+        /// <c>(surfaceId, payload) -&gt; handled?</c>.
+        /// </summary>
+        public static System.Func<byte, byte[], bool> TacticalInbound;
+
         /// <summary>Decode + route one inbound envelope. Never throws (forward-compat: drop).</summary>
         public void OnInbound(ulong senderPeerId, byte[] data, ISyncSink sink)
         {
             if (!SyncProtocol.TryDecodeEnvelope(data, out var surfaceId, out var kind, out var payload)) return;
+            // Tactical fast-path: a tactical surface bypasses the action relay entirely (tracker-free,
+            // idempotent host→all push). Inert unless tactical init armed the hook.
+            var tac = TacticalInbound;
+            if (tac != null && tac(surfaceId, payload)) return;
             var entry = _surfaces.Get(surfaceId);
             if (entry == null || !entry.Accepts(kind)) return;   // unknown surface or wrong kind → drop
 

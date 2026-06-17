@@ -40,6 +40,11 @@ namespace Multipleer
 
             _ui = ModGO.AddComponent<MultiplayerUI>();
             Logger.LogInfo("[Multipleer] UI initialized");
+
+            // Tactical deploy-sync (Increment 1): arm the SurfaceRouter tactical fast-path so a client can
+            // receive host tac.deploy snapshots over the 0x67 envelope rail. Null-guarded + inert until a
+            // tactical mission deploys; the deploy/suppress Harmony patches auto-register via PatchAll above.
+            Multipleer.Sync.Tactical.TacticalDeploySync.ArmInboundHook();
         }
 
         public override void OnModDisabled()
