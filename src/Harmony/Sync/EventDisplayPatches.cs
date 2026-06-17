@@ -82,10 +82,12 @@ namespace Multipleer.Harmony.Sync
                 // client's context has Vehicle == null and an [AircraftName]-token description NREs inside the
                 // native UIModuleSiteEncounters render → prefab-placeholder text + raw sample choice buttons.
                 int vehicleId = EventReflection.GetVehicleId(geoEvent);
-                // Synthesize a unique per-occurrence id for THIS live GeoscapeEvent instance (no native one
-                // exists). The SAME instance reaches CompleteEventDismissPatch, so GetOrAssign there retrieves
-                // the same id — the wire-level raise↔dismiss correlation key that survives same-def-id collisions.
-                ushort occId = EventOccurrenceIds.Assign(geoEvent);
+                // Per-occurrence id for THIS live GeoscapeEvent instance (no native one exists). GetOrAssign is
+                // order-independent: for a single-choice event the host CompleteEvent's (dismiss broadcast) at
+                // trigger time BEFORE this raise runs (GeoscapeEventSystem.OnEventTriggered:659→661, same
+                // instance), so the dismiss may allocate the id first and this raise REUSES it — keeping the
+                // wire-level raise↔dismiss correlation key identical regardless of which fired first.
+                ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);
                 Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId);
                 engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId);
@@ -144,10 +146,12 @@ namespace Multipleer.Harmony.Sync
                     }
                 }
                 catch (Exception rex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch reward-snapshot failed: " + rex.Message); }
-                // Retrieve the occurrence id the raise assigned to THIS same instance (the live event flows
-                // through both chokepoints). If the host never saw it raised, a fresh unique id is allocated so
-                // the dismiss still carries a distinct key — clients buffer it until a matching raise lands.
+                // Occurrence id for THIS instance (order-independent GetOrAssign). For a single-choice event this
+                // dismiss fires at trigger time BEFORE the raise, so it may allocate the id first; the raise then
+                // reuses it. This is the AUTHORITATIVE dismiss (carries the real picked index + reward), so mark
+                // the occurrence dismissed → the FinishEncounter fallback won't send a second bare close for it.
                 ushort occId = EventOccurrenceIds.GetOrAssign(__instance);
+                EventOccurrenceIds.MarkDismissed(occId);
                 Debug.Log("[Multipleer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
                           " selectedChoiceIndex=" + choiceIndex +
                           " rewardBytes=" + (rewardBlob?.Length ?? 0));

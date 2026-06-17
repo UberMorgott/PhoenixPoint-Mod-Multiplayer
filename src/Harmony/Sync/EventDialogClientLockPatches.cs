@@ -130,18 +130,17 @@ namespace Multipleer.Harmony.Sync
                 if (_pagingField != null && (bool)(_pagingField.GetValue(__instance) ?? false)) return true;
 
                 object geoEvent = _geoEventField?.GetValue(__instance);
-                if (EventReflection.IsClientChoiceLocked(geoEvent))
+                // Swallow-and-wait ONLY for genuine multi-choice CHOICE dialogs (Choices.Count >= 2, or an
+                // unreadable/ambiguous count which IsClientChoiceLocked fails-safe to CHOICE): those are
+                // host-authoritative — the client modal is inert and closes on the host's dismiss broadcast.
+                if (EventReflection.GetChoiceCount(geoEvent) >= 2 || EventReflection.IsClientChoiceLocked(geoEvent))
                     return false; // CHOICE (or ambiguous): inert — no relay, no local close, no NRE
 
-                // Single-choice (INFO-class by count) BUT the clicked choice PRODUCES a follow-up RESULT/OUTCOME
-                // page (non-empty Outcome.OutcomeText, mirrors native OnChoiceSelected:586 → SetClosingEncounter).
-                // That page is host-authoritative — leave the modal open and wait for the host's dismiss
-                // broadcast (which rebuilds + shows the result natively). Treat it like CHOICE: swallow, no close.
-                if (EventReflection.ChoiceHasOutcomeText(__0))
-                    return false;
-
-                // Pure-INFO (no outcome page): dismiss locally with no outcome and no host call (host already
-                // applied at trigger). This stays a local-only close.
+                // Single-choice (Choices.Count <= 1) has NO real host decision — the host auto-completed the
+                // outcome at trigger time (GeoscapeEventSystem.OnEventTriggered:659). So the OK must dismiss
+                // LOCALLY on the client (pure UI hide, no outcome, no host call), even when the choice carries
+                // outcome text (info/result popups SDI_07 / VoidOmen_6) and for the synthetic single-OK RESULT
+                // page the client itself pushed (it is locally dismissable). No swallow, no stuck modal.
                 _finishEncounter?.Invoke(__instance, null);
                 return false;
             }
@@ -229,11 +228,13 @@ namespace Multipleer.Harmony.Sync
     }
 
     /// <summary>
-    /// Host nicety: an INFO event's host-OK calls only <c>FinishEncounter</c> (the outcome was already applied
-    /// at trigger, so no <c>CompleteEvent</c> → no <c>CompleteEventDismissPatch</c> → no dismiss broadcast).
-    /// Without this, a lagging INFO modal still open on a client would not close when the host dismisses.
-    /// Broadcast a dismiss here, HOST-ONLY and INFO-ONLY, so it never double-fires with the CHOICE path
-    /// (CHOICE host-pick dismisses via CompleteEvent → CompleteEventDismissPatch).
+    /// Host FALLBACK close-only dismiss: when the host clicks OK on its own modal and that occurrence has NOT
+    /// already had an authoritative dismiss broadcast (<c>CompleteEventDismissPatch</c>), tell clients to close.
+    /// In practice single-choice events auto-complete at trigger (<c>GeoscapeEventSystem.OnEventTriggered</c>)
+    /// so their result-bearing dismiss already went out and this is SKIPPED via
+    /// <see cref="EventOccurrenceIds.WasDismissed"/> — preventing a SECOND, bare close-only dismiss that would
+    /// re-trigger a client <c>CloseDialog</c> (double-dismiss) on top of the result page. This remains only as a
+    /// safety net for any single-choice occurrence that reached FinishEncounter without a prior dismiss.
     /// </summary>
     [HarmonyPatch]
     public static class FinishEncounterHostDismissPatch
@@ -263,14 +264,24 @@ namespace Multipleer.Harmony.Sync
 
                 object geoEvent = _geoEventField?.GetValue(__instance);
                 if (geoEvent == null) return;
-                // INFO only: CHOICE host-picks already broadcast a dismiss via CompleteEventDismissPatch.
+                // CHOICE (Choices >= 2) host-picks already broadcast a result-bearing dismiss via
+                // CompleteEventDismissPatch — never duplicate here.
                 if (EventReflection.GetChoiceCount(geoEvent) >= 2) return;
 
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
-                // Same live GeoscapeEvent instance that was raised → retrieve the occurrence id the raise
-                // assigned so the client closes the right occurrence (close-only: choiceIndex defaults to -1).
+                // Same live GeoscapeEvent instance → its occurrence id. If an authoritative dismiss already went
+                // out for it (the usual single-choice auto-complete-at-trigger case), do NOT send a second bare
+                // close — that would re-trigger CloseDialog on the client and close the result page (Bug A).
                 ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);
+                if (EventOccurrenceIds.WasDismissed(occId))
+                {
+                    Debug.Log("[Multipleer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
+                              " skip=alreadyDismissed (result-bearing dismiss already broadcast → no double-dismiss)");
+                    return;
+                }
+                Debug.Log("[Multipleer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
+                          " → BroadcastEventDismiss (fallback close-only)");
                 engine.Sync?.BroadcastEventDismiss(occId, eventId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] FinishEncounterHostDismissPatch failed: " + ex.Message); }
