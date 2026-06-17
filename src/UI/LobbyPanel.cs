@@ -60,6 +60,11 @@ namespace Multipleer.UI
         private Text _railSaveValue;
         private Button _chooseSaveBtn;
         private Button _inviteBtn;
+        // Connect-rail SHARE + SAVE section roots (host-only): gated on/off per frame like _chooseSaveBtn.
+        // The JOIN section (and its button) stay always-visible. Section roots own the header + body so
+        // hiding the whole section (header + separator + controls) is a single SetActive.
+        private GameObject _shareSection;
+        private GameObject _saveSection;
 
         // Chat zone. Version diff drives a cheap re-render; we track the subscribed session so we
         // re-bind (and drop the old handler) when the session instance is re-created on Join.
@@ -74,12 +79,17 @@ namespace Multipleer.UI
         private readonly List<Text> _chatRows = new List<Text>();
         private InputField _chatInput;
 
-        // Footer buttons.
+        // JOIN button — lives in the connect rail's always-visible "JOIN A GAME" section (moved out of
+        // the footer). Wired to OnLobbyJoinPrompt (unchanged native join path).
         private Button _joinButton;
 
         // Roster rows (player list). Pooled: one row GameObject per slot, reused across refreshes.
         private GameObject _rosterArea;
         private readonly List<RosterRow> _rows = new List<RosterRow>();
+        // Pool index of the row currently rendering the LOCAL player ("you"), refreshed each frame in
+        // RefreshRoster. The rename pencil's onClick re-checks against this so a pooled row reused for
+        // another peer never renames the wrong one. -1 = local row not currently shown.
+        private int _myRowIndex = -1;
 
         // Roster row height feeds LayoutElement.minHeight; theme-scaled so rows grow with UiScale.
         private static float RowHeight => LobbyTheme.ScaledRowHeight;
@@ -87,9 +97,9 @@ namespace Multipleer.UI
         private class RosterRow
         {
             public GameObject Go;
-            public Text Label;
-            public Button Button;        // own-row click → rename
-            public bool RenameWired;
+            public Text NameLabel;     // fixed-width name column (left)
+            public Text StatusLabel;   // themed status column (right of spacer)
+            public Button RenameBtn;   // far-right pencil; shown/interactable only on the local row
         }
 
         // SINGLE visibility lever = the lobby's own overlay Canvas GameObject. While that GO is
@@ -294,6 +304,11 @@ namespace Multipleer.UI
         }
 
         // LEFT COLUMN "Connect": STUN code (click-to-copy), Save block, Choose Save / Invite buttons.
+        // LEFT COLUMN "Connect": three labeled sections stacked top-to-bottom, each a themed header +
+        // thin separator + its controls. SHARE (host-only: STUN code to copy + Invite-via-Steam),
+        // SAVE (host-only: chosen save value + Choose Save…), JOIN (always: Join a game…). Host-only
+        // sections are gated on/off per frame in Refresh (mirror of the old _chooseSaveBtn gate); JOIN
+        // is moved here out of the footer so the footer keeps only Leave / Ready / Play.
         private void BuildConnectRail(GameObject parent)
         {
             var rail = new GameObject("ConnectColumn");
@@ -306,7 +321,7 @@ namespace Multipleer.UI
             var pad = LobbyTheme.ScaledPadding;
             var vlg = rail.AddComponent<VerticalLayoutGroup>();
             vlg.padding = new RectOffset(pad, pad, pad, pad);
-            vlg.spacing = pad / 2;
+            vlg.spacing = pad;
             vlg.childControlWidth = true;
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
@@ -314,53 +329,103 @@ namespace Multipleer.UI
             vlg.childAlignment = TextAnchor.UpperLeft;
 
             var labelH = LobbyTheme.ScaledSubFontSize + pad / 2;
-            var hdrH = LobbyTheme.ScaledBodyFontSize + pad / 2;
 
-            var hdr = UiToolkit.CreateText(rail, "ConnectHdr", Vector2.zero,
-                new Vector2(260, hdrH), "CONNECT", LobbyTheme.ScaledBodyFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            hdr.color = LobbyTheme.Accent;
-            LE(hdr.gameObject).minHeight = hdrH;
+            // ── SECTION "SHARE" (host-only): how others connect to you ──────────
+            _shareSection = AddRailSection(rail, "SHARE");
 
-            var stunLabel = UiToolkit.CreateText(rail, "StunLabel", Vector2.zero,
-                new Vector2(260, labelH), "STUN code (click to copy):", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            var stunLabel = UiToolkit.CreateText(_shareSection, "StunLabel", Vector2.zero,
+                new Vector2(260, labelH), "Players join you with (click to copy):",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
             stunLabel.color = LobbyTheme.SubText;
             LE(stunLabel.gameObject).minHeight = labelH;
 
-            _railStunValue = MakeCopyableValue(rail, "StunValue", () => _owner.GetRailStunCode());
+            _railStunValue = MakeCopyableValue(_shareSection, "StunValue", () => _owner.GetRailStunCode());
             LE(_railStunValue.transform.parent.gameObject).minHeight = LobbyTheme.ScaledRowHeight;
 
-            var saveLabel = UiToolkit.CreateText(rail, "SaveLabel", Vector2.zero,
-                new Vector2(260, labelH), "Save to load:", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            saveLabel.color = LobbyTheme.SubText;
-            LE(saveLabel.gameObject).minHeight = labelH;
+            _inviteBtn = NativeWidgetFactory.CloneMenuButton(_shareSection.transform, "InviteBtn",
+                "INVITE VIA STEAM", () => _owner.InvitePlayers());
+            if (_inviteBtn != null)
+                AddCloneLayoutElement(_inviteBtn, _shareSection.transform, RailButtonSize.x, RailButtonSize.y);
+            else
+            {
+                _inviteBtn = UiToolkit.CreateButton(_shareSection, "InviteBtn", "INVITE VIA STEAM",
+                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
+                    () => _owner.InvitePlayers());
+                LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
+            }
 
-            _railSaveValue = UiToolkit.CreateText(rail, "SaveValue", Vector2.zero,
+            // ── SECTION "SAVE" (host-only): the campaign save to load ───────────
+            _saveSection = AddRailSection(rail, "SESSION SAVE");
+
+            _railSaveValue = UiToolkit.CreateText(_saveSection, "SaveValue", Vector2.zero,
                 new Vector2(248, labelH * 2), "(none)", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
             LE(_railSaveValue.gameObject).minHeight = labelH * 2;
 
-            _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "ChooseSaveBtn",
+            _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(_saveSection.transform, "ChooseSaveBtn",
                 "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
             if (_chooseSaveBtn != null)
-                AddCloneLayoutElement(_chooseSaveBtn, rail.transform, RailButtonSize.x, RailButtonSize.y);
+                AddCloneLayoutElement(_chooseSaveBtn, _saveSection.transform, RailButtonSize.x, RailButtonSize.y);
             else
             {
-                _chooseSaveBtn = UiToolkit.CreateButton(rail, "ChooseSaveBtn", "CHOOSE SAVE…",
+                _chooseSaveBtn = UiToolkit.CreateButton(_saveSection, "ChooseSaveBtn", "CHOOSE SAVE…",
                     Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
                     () => _owner.OnLobbyChooseSave());
                 LE(_chooseSaveBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
 
-            _inviteBtn = NativeWidgetFactory.CloneMenuButton(rail.transform, "InviteBtn",
-                "INVITE VIA STEAM", () => _owner.InvitePlayers());
-            if (_inviteBtn != null)
-                AddCloneLayoutElement(_inviteBtn, rail.transform, RailButtonSize.x, RailButtonSize.y);
+            // ── SECTION "JOIN" (always): join someone else's game ───────────────
+            var joinSection = AddRailSection(rail, "JOIN A GAME");
+
+            _joinButton = NativeWidgetFactory.CloneMenuButton(joinSection.transform, "JoinBtn",
+                "JOIN A GAME…", () => _owner.OnLobbyJoinPrompt());
+            if (_joinButton != null)
+                AddCloneLayoutElement(_joinButton, joinSection.transform, RailButtonSize.x, RailButtonSize.y);
             else
             {
-                _inviteBtn = UiToolkit.CreateButton(rail, "InviteBtn", "INVITE VIA STEAM",
+                _joinButton = UiToolkit.CreateButton(joinSection, "JoinBtn", "JOIN A GAME…",
                     Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.InvitePlayers());
-                LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
+                    () => _owner.OnLobbyJoinPrompt());
+                LE(_joinButton.gameObject).preferredHeight = RailButtonSize.y;
             }
+        }
+
+        // Build a rail SECTION: a child GameObject (its own top-aligned VLG) holding an amber section
+        // header + a thin themed separator line; controls are then added to the returned GameObject by
+        // the caller. Returning the section root lets the caller SetActive the WHOLE section (header +
+        // separator + controls) in one call for host-gating.
+        private GameObject AddRailSection(GameObject rail, string title)
+        {
+            var pad = LobbyTheme.ScaledPadding;
+
+            var section = new GameObject($"Section_{title}");
+            section.transform.SetParent(rail.transform, false);
+            section.AddComponent<RectTransform>();
+            var svlg = section.AddComponent<VerticalLayoutGroup>();
+            svlg.padding = new RectOffset(0, 0, 0, 0);
+            svlg.spacing = pad / 2;
+            svlg.childControlWidth = true;
+            svlg.childControlHeight = true;
+            svlg.childForceExpandWidth = true;
+            svlg.childForceExpandHeight = false;
+            svlg.childAlignment = TextAnchor.UpperLeft;
+
+            var hdrH = LobbyTheme.ScaledSectionHeaderFontSize + pad / 2;
+            var hdr = UiToolkit.CreateText(section, "Hdr", Vector2.zero,
+                new Vector2(260, hdrH), title, LobbyTheme.ScaledSectionHeaderFontSize,
+                TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            hdr.color = LobbyTheme.Accent;
+            hdr.fontStyle = FontStyle.Bold;
+            var hle = LE(hdr.gameObject); hle.minHeight = hdrH; hle.flexibleHeight = 0;
+
+            // Thin separator line under the header (a themed flat Image at fixed height).
+            var sep = new GameObject("Separator");
+            sep.transform.SetParent(section.transform, false);
+            sep.AddComponent<RectTransform>();
+            var sepImg = sep.AddComponent<Image>();
+            sepImg.color = LobbyTheme.Separator;
+            var sepLe = LE(sep); sepLe.minHeight = LobbyTheme.ScaledSeparatorThickness; sepLe.flexibleHeight = 0;
+
+            return section;
         }
 
         // Click-to-copy value text: a button whose label is the live value; click copies it.
@@ -521,10 +586,9 @@ namespace Multipleer.UI
             ConfigureScrollContent(rosterRect, padding: 0);
         }
 
-        // FOOTER: Leave / Join… / Ready / Play (host).
-        // FOOTER: Leave (left) … Join / Ready / Play (right), pushed apart by a flexible Spacer. Fixed
-        // height (LE.minHeight 48, flexibleHeight 0); buttons laid out by a HorizontalLayoutGroup so
-        // there is zero fractional-X math.
+        // FOOTER: Leave (left) … Ready (client) / Play (host) (right), pushed apart by a flexible
+        // Spacer. Fixed height (LE.minHeight, flexibleHeight 0); buttons laid out by a
+        // HorizontalLayoutGroup so there is zero fractional-X math. (JOIN moved to the connect rail.)
         private void BuildFooter()
         {
             var footer = new GameObject("Footer");
@@ -553,24 +617,13 @@ namespace Multipleer.UI
                 LE(_leaveButton.gameObject).preferredWidth = FooterButtonSize.x;
             }
 
-            // Flexible spacer pushes the remaining buttons to the right edge.
+            // Flexible spacer pushes the remaining buttons to the right edge. (JOIN moved out of the
+            // footer into the connect rail's "JOIN A GAME" section; the footer now carries only
+            // Leave (left) … Ready / Play (right).)
             var spacer = new GameObject("Spacer");
             spacer.transform.SetParent(footer.transform, false);
             spacer.AddComponent<RectTransform>();
             LE(spacer).flexibleWidth = 1;
-
-            // Join.
-            _joinButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "JoinBtn", "JOIN…",
-                () => _owner.OnLobbyJoinPrompt());
-            if (_joinButton != null)
-                AddCloneLayoutElement(_joinButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
-            else
-            {
-                _joinButton = UiToolkit.CreateButton(footer, "JoinBtn", "JOIN…",
-                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
-                    () => _owner.OnLobbyJoinPrompt());
-                LE(_joinButton.gameObject).preferredWidth = FooterButtonSize.x;
-            }
 
             // Ready: a plain cloned MENU BUTTON acting as a toggle — same widget family as
             // Leave/Join/Play, which render cleanly in a LayoutElement slot. (The old approach cloned a
@@ -883,9 +936,13 @@ namespace Multipleer.UI
                 _railSaveValue.text = string.IsNullOrEmpty(n) ? "(none)"
                     : (string.IsNullOrEmpty(m) ? n : $"{n}\n{m}");
             }
-            // Host-only rail controls.
-            if (_chooseSaveBtn != null && _chooseSaveBtn.gameObject.activeSelf != engine.IsHost)
-                _chooseSaveBtn.gameObject.SetActive(engine.IsHost);
+            // Host-only rail sections (SHARE + SAVE): visible only to the host (clients only see JOIN).
+            // Gating the whole section root hides its header + separator + controls together; mirrors
+            // the old per-button gate. JOIN's section stays always-visible.
+            if (_shareSection != null && _shareSection.activeSelf != engine.IsHost)
+                _shareSection.SetActive(engine.IsHost);
+            if (_saveSection != null && _saveSection.activeSelf != engine.IsHost)
+                _saveSection.SetActive(engine.IsHost);
 
             // CHAT: re-render only when the log changed.
             if (_chat.Version != _chatRenderedVersion)
@@ -1058,9 +1115,19 @@ namespace Multipleer.UI
             var roster = engine.Session?.GetLobbyRoster() ?? new List<PeerListEntry>();
             var localGuid = ClientIdentity.PlayerGuid;
 
+            // (B) ORDER for display: HOST first, then the LOCAL player ("you"), then everyone else in
+            // their existing wire order. Render-only reorder — SessionManager / the wire order is left
+            // untouched. The local match uses the SAME isMe test as the rename gate (host→IsHost,
+            // client→PlayerGuid). When you ARE the host, host==you, so this collapses to host-then-others.
+            roster = OrderForDisplay(roster, engine, localGuid);
+
             // Grow the row pool to match.
             while (_rows.Count < roster.Count)
                 _rows.Add(CreateRow(_rows.Count));
+
+            // Track which pool slot now renders the local player so the rename pencil can re-check
+            // ownership on click (reset first; set when we find the local row below).
+            _myRowIndex = -1;
 
             for (var i = 0; i < _rows.Count; i++)
             {
@@ -1080,19 +1147,21 @@ namespace Multipleer.UI
 
                 // "you" = host's own row (IsHost) on the host; the GUID-matching row on a client.
                 var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
+                if (isMe) _myRowIndex = i;
 
-                var tags = "";
-                if (p.IsHost) tags += " (host)";
-                if (isMe) tags += " (you)";
+                // NAME column: nickname / "Host" / "Player {id}", with a subtle " (you)" only on the
+                // local row (host tag lives in the STATUS column as the amber "host" label).
+                row.NameLabel.text = isMe ? $"{name} (you)" : name;
+                row.NameLabel.color = LobbyTheme.BodyText;
 
-                // During an active save transfer, show download progress instead of ready status.
-                // The host has no Ready state (it is the starter; HostReady is always false), so show
-                // "host" for the host's own row instead of a misleading "not ready" indicator.
+                // STATUS column: host has no Ready (it is the starter; HostReady is always false), so the
+                // host row reads "host" in amber. Clients read green "READY" / dim "not ready".
                 var status = p.IsHost ? "host" : (p.Ready ? "READY" : "not ready");
                 var color = p.IsHost
-                    ? Color.white
-                    : (p.Ready ? new Color(0.5f, 0.9f, 0.5f) : Color.white);
+                    ? LobbyTheme.Accent
+                    : (p.Ready ? LobbyTheme.ReadyText : LobbyTheme.MutedText);
 
+                // During an active save transfer, show download progress instead of ready status.
                 var st = engine.SaveTransfer;
                 if (st != null && st.TransferActive)
                 {
@@ -1104,13 +1173,49 @@ namespace Multipleer.UI
                     }
                 }
 
-                var renameHint = isMe ? "   ✎ (click row to rename)" : "";
-                row.Label.text = $"{name}{tags}    -    {status}{renameHint}";
-                row.Label.color = color;
-                WireRenameClick(row, isMe);
+                row.StatusLabel.text = status;
+                row.StatusLabel.color = color;
+
+                // RENAME pencil: shown + interactable ONLY on the local player's own row (the onClick
+                // also re-checks _myRowIndex, so a pooled row can never rename the wrong peer).
+                if (row.RenameBtn != null)
+                {
+                    if (row.RenameBtn.gameObject.activeSelf != isMe)
+                        row.RenameBtn.gameObject.SetActive(isMe);
+                    row.RenameBtn.interactable = isMe;
+                }
             }
 
             return roster;
+        }
+
+        // Render-only reorder: HOST first, then the LOCAL player ("you"), then the rest in their original
+        // order. Builds a NEW list (the source list from GetLobbyRoster is a fresh copy, but we don't
+        // mutate it to keep this side-effect free). isMe matches the rename/own-row gate exactly.
+        private static List<PeerListEntry> OrderForDisplay(List<PeerListEntry> roster, NetworkEngine engine, System.Guid localGuid)
+        {
+            if (roster == null || roster.Count <= 1) return roster ?? new List<PeerListEntry>();
+
+            var ordered = new List<PeerListEntry>(roster.Count);
+            PeerListEntry host = null;
+            PeerListEntry me = null;
+
+            foreach (var p in roster)
+                if (p.IsHost) { host = p; break; }
+
+            foreach (var p in roster)
+            {
+                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
+                if (isMe) { me = p; break; }
+            }
+
+            if (host != null) ordered.Add(host);
+            if (me != null && !ReferenceEquals(me, host)) ordered.Add(me);
+            foreach (var p in roster)
+                if (!ReferenceEquals(p, host) && !ReferenceEquals(p, me))
+                    ordered.Add(p);
+
+            return ordered;
         }
 
         // Returns a progress/loading string for a roster row during an active transfer, or null to
@@ -1137,62 +1242,79 @@ namespace Multipleer.UI
             return null;
         }
 
+        // Build ONE structured roster row: a fixed-width HLG container holding, left→right,
+        // (1) a fixed-width NAME label, (2) a flexible spacer, (3) a fixed-width themed STATUS label,
+        // (4) a far-right square rename PENCIL button (shown/interactable only on the local row).
+        // The row container fills the roster column (flexibleWidth 1) so every row is identical width;
+        // the inner fixed widths keep the name column and the status/pencil cluster aligned across rows.
+        // Build ONE structured roster row: a fixed-width HLG container holding, left→right,
+        // (1) a fixed-width NAME label, (2) a flexible spacer, (3) a fixed-width themed STATUS label,
+        // (4) a far-right square rename PENCIL button (shown/interactable only on the local row).
+        // The row container fills the roster column (flexibleWidth 1) so every row is identical width;
+        // the inner fixed widths keep the name column and the status/pencil cluster aligned across rows.
         private RosterRow CreateRow(int index)
         {
             var go = new GameObject($"Row{index}");
             go.transform.SetParent(_rosterArea.transform, false);
             go.AddComponent<RectTransform>();
             // The RosterContent VerticalLayoutGroup positions/sizes the row; LE feeds its min height and
-            // lets it span the column width.
+            // lets it span the full column width (uniform row width across the pool).
             var le = LE(go);
             le.minHeight = RowHeight;
             le.flexibleWidth = 1;
 
-            var label = UiToolkit.CreateText(go, "Label", new Vector2(10, 0),
-                new Vector2(0, RowHeight), "", LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft,
-                new Vector2(0f, 0.5f));
+            var pad = LobbyTheme.ScaledPadding;
+            var hlg = go.AddComponent<HorizontalLayoutGroup>();
+            hlg.spacing = pad / 2;
+            hlg.padding = new RectOffset(pad / 2, pad / 2, 0, 0);
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+            hlg.childForceExpandWidth = false;
+            hlg.childForceExpandHeight = true;
+            hlg.childAlignment = TextAnchor.MiddleLeft;
 
-            // Add the Image BEFORE the Button so the Button has a Graphic to raycast against
-            // (Unity requires a Graphic on the same/child object). The transparent Image is the
-            // hit target for the own-row rename click.
-            var img = go.AddComponent<Image>();
-            img.color = new Color(0, 0, 0, 0); // transparent hit area
-            var btn = go.AddComponent<Button>();
-            var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
+            // (1) NAME — left-aligned, fixed width so all rows align.
+            var nameLabel = UiToolkit.CreateText(go, "Name", Vector2.zero,
+                new Vector2(LobbyTheme.ScaledRosterNameWidth, RowHeight), "",
+                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+            var nle = LE(nameLabel.gameObject);
+            nle.preferredWidth = LobbyTheme.ScaledRosterNameWidth;
+            nle.flexibleWidth = 0;
 
-            return new RosterRow { Go = go, Label = label, Button = btn };
-        }
+            // (2) flexible spacer pushes status + pencil to the right edge.
+            var spacer = new GameObject("Spacer");
+            spacer.transform.SetParent(go.transform, false);
+            spacer.AddComponent<RectTransform>();
+            LE(spacer).flexibleWidth = 1;
 
-        // Wire the own-row click to the native rename prompt exactly once per row; the listener
-        // checks live ownership so a pooled row reused for another peer never renames the wrong one.
-        private void WireRenameClick(RosterRow row, bool isMe)
-        {
-            if (row.Button == null) return;
-            if (!row.RenameWired)
+            // (3) STATUS — fixed-ish width, right-aligned, themed color set per-frame in RefreshRoster.
+            var statusLabel = UiToolkit.CreateText(go, "Status", Vector2.zero,
+                new Vector2(LobbyTheme.ScaledRosterStatusWidth, RowHeight), "",
+                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleRight, new Vector2(1f, 0.5f));
+            var sle = LE(statusLabel.gameObject);
+            sle.preferredWidth = LobbyTheme.ScaledRosterStatusWidth;
+            sle.flexibleWidth = 0;
+
+            // (4) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
+            // live ownership (this pool slot must currently render the local player, tracked in
+            // _myRowIndex) so a pooled row reused for another peer can never rename the wrong one; the
+            // button is also hidden/disabled for non-local rows each frame in RefreshRoster. Reuse the
+            // EXACT existing rename path (OnLobbyRenamePrompt → native prompt → SendRename), untouched.
+            var icon = LobbyTheme.ScaledIconButtonSize;
+            var renameBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "RenameBtn", "✎",
+                () => { if (index == _myRowIndex) _owner.OnLobbyRenamePrompt(); });
+            if (renameBtn != null)
+                AddCloneLayoutElement(renameBtn, go.transform, icon, icon);
+            else
             {
-                row.Button.onClick.AddListener((UnityEngine.Events.UnityAction)(() =>
-                {
-                    if (row == FindMyRow()) _owner.OnLobbyRenamePrompt();
-                }));
-                row.RenameWired = true;
+                renameBtn = UiToolkit.CreateButton(go, "RenameBtn", "✎",
+                    Vector2.zero, new Vector2(icon, icon), new Vector2(1f, 0.5f),
+                    () => { if (index == _myRowIndex) _owner.OnLobbyRenamePrompt(); });
+                var rle = LE(renameBtn.gameObject);
+                rle.preferredWidth = icon; rle.preferredHeight = icon; rle.flexibleWidth = 0;
             }
-            row.Button.interactable = isMe;
-        }
 
-        // Returns the pooled row currently rendering the local player's roster entry, or null.
-        private RosterRow FindMyRow()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine?.Session == null) return null;
-            var roster = engine.Session.GetLobbyRoster();
-            var localGuid = ClientIdentity.PlayerGuid;
-            for (int i = 0; i < roster.Count && i < _rows.Count; i++)
-            {
-                var p = roster[i];
-                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
-                if (isMe) return _rows[i];
-            }
-            return null;
+            return new RosterRow { Go = go, NameLabel = nameLabel, StatusLabel = statusLabel, RenameBtn = renameBtn };
         }
     }
 }

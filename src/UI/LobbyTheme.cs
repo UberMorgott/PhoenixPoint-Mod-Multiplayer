@@ -40,6 +40,13 @@ namespace Multipleer.UI
         public const int BorderThicknessBase = 2;   // Outline frame thickness
         public const int ClonedButtonFontCapBase = 22;   // cap on cloned native menu-button labels
 
+        // Structured roster row (A) + sectioned rail (C) base sizes.
+        public const int RosterNameWidthBase = 150;     // fixed name-column width so all rows align
+        public const int RosterStatusWidthBase = 96;    // fixed status-column width (right side, before pencil)
+        public const int IconButtonSizeBase = 34;       // square mini-button (rename pencil)
+        public const int SectionHeaderFontSizeBase = 17; // rail section header ("SHARE"/"SAVE"/"JOIN")
+        public const int SeparatorThicknessBase = 2;     // thin section-divider line height
+
         // ─── Scaled effective sizes (base × UiScale) ────────────────────────
         public static int ScaledHeaderFontSize => Scale(HeaderFontSizeBase);
         public static int ScaledBodyFontSize => Scale(BodyFontSizeBase);
@@ -51,6 +58,12 @@ namespace Multipleer.UI
         public static int ScaledPadding => Scale(PaddingBase);
         public static int ScaledBorderThickness => Mathf.Max(1, Scale(BorderThicknessBase));
         public static int ScaledClonedButtonFontCap => Scale(ClonedButtonFontCapBase);
+
+        public static int ScaledRosterNameWidth => Scale(RosterNameWidthBase);
+        public static int ScaledRosterStatusWidth => Scale(RosterStatusWidthBase);
+        public static int ScaledIconButtonSize => Scale(IconButtonSizeBase);
+        public static int ScaledSectionHeaderFontSize => Scale(SectionHeaderFontSizeBase);
+        public static int ScaledSeparatorThickness => Mathf.Max(1, Scale(SeparatorThicknessBase));
 
         /// <summary>base × UiScale, rounded to an int (min 1). The one place sizing is computed.</summary>
         public static int Scale(int baseValue) => Mathf.Max(1, Mathf.RoundToInt(baseValue * UiScale));
@@ -69,6 +82,9 @@ namespace Multipleer.UI
         private static Color _bodyText = Color.white;                       // primary text
         private static Color _subText = new Color(0.75f, 0.80f, 0.90f, 1f); // secondary text
         private static Color _pageBackdrop = new Color(0f, 0f, 0f, 0.95f);  // full-screen page base
+        private static readonly Color _readyText = new Color(0.50f, 0.90f, 0.50f, 1f);  // status READY = green
+        private static readonly Color _mutedText = new Color(0.55f, 0.60f, 0.68f, 1f);  // status "not ready" = dim
+        private static readonly Color _separator = new Color(0.20f, 0.27f, 0.38f, 0.85f); // thin section divider
 
         // ─── Public palette accessors (ensure capture first) ────────────────
         public static Color HeaderBackground { get { EnsureCaptured(); return _headerBg; } }
@@ -82,6 +98,11 @@ namespace Multipleer.UI
         public static Color BodyText { get { EnsureCaptured(); return _bodyText; } }
         public static Color SubText { get { EnsureCaptured(); return _subText; } }
         public static Color PageBackdrop { get { EnsureCaptured(); return _pageBackdrop; } }
+        // Status semantics (roster rows): READY = green, "not ready" = dim/muted, host = Accent (amber).
+        public static Color ReadyText => _readyText;
+        public static Color MutedText => _mutedText;
+        // Thin divider line between rail sections.
+        public static Color Separator => _separator;
 
         /// <summary>The captured native menu font (Purista Semibold), or Arial fallback.</summary>
         public static Font Font => NativeWidgetFactory.MenuFont ?? UiToolkit.DefaultFont;
