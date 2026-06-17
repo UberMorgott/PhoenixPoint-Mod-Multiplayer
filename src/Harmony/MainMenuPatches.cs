@@ -198,4 +198,78 @@ namespace Multipleer.Harmony
             return true;
         }
     }
+
+    /// <summary>
+    /// Bug A fix — clean teardown on EVERY native return-to-menu path. PhoenixGame.FinishLevelAndGoToLobby
+    /// is the single native chokepoint funnelling pause-menu exit, game-summary exit, game-over/end,
+    /// user-switch reset, and the "something went wrong" error-yank back to the main menu. We postfix it
+    /// and call NetworkEngine.TearDown() (idempotent), which clears IsActive, nulls the Instance singleton,
+    /// detaches WalletWatcher/Sync, and tears down the transport — so the next NETWORK GAME click hosts a
+    /// fresh lobby with no process restart. Inert when no session is active (TearDown is a safe no-op).
+    /// </summary>
+    [HarmonyPatch]
+    public static class FinishLevelAndGoToLobbyTearDownPatch
+    {
+        private static MethodBase _targetMethod;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Common.Game.PhoenixGame");
+            if (t == null) return false;
+            _targetMethod = AccessTools.Method(t, "FinishLevelAndGoToLobby");
+            return _targetMethod != null;
+        }
+
+        public static MethodBase TargetMethod() => _targetMethod;
+
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            try
+            {
+                Multipleer.Network.NetworkEngine.Instance?.TearDown();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Multipleer] FinishLevelAndGoToLobby teardown failed: {e.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bug A fix (pair) — rebuild the lobby panels on the freshly-wired main-menu Canvas. After a
+    /// scene round-trip the old menu Canvas is destroyed, so the cached lobby/save-picker panels are
+    /// bound to dead transforms. UIStateMainMenu.EnterState() re-enters the main-menu state (native
+    /// re-init); we postfix it to drop MultiplayerUI's _panelsBuilt latch so the very next
+    /// InjectNetworkButtonPatch.Postfix → OnMenuReady rebuilds the panels on the live Canvas. Pairs with
+    /// the TearDown patch above so the next NETWORK GAME click hosts a clean lobby.
+    /// </summary>
+    [HarmonyPatch]
+    public static class MainMenuRebuildLobbyPatch
+    {
+        private static MethodBase _targetMethod;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Home.View.ViewStates.UIStateMainMenu");
+            if (t == null) return false;
+            _targetMethod = AccessTools.Method(t, "EnterState");
+            return _targetMethod != null;
+        }
+
+        public static MethodBase TargetMethod() => _targetMethod;
+
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            try
+            {
+                MultiplayerUI.Instance?.RebuildLobbyPanels();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Multipleer] main-menu lobby rebuild failed: {e.Message}");
+            }
+        }
+    }
 }

@@ -85,6 +85,16 @@ namespace Multipleer.UI
             _panelsBuilt = true;
         }
 
+        // Called from MainMenuRebuildLobbyPatch.Postfix when the native main-menu state re-enters
+        // (UIStateMainMenu.EnterState) after a return-to-menu. The previous menu Canvas was destroyed
+        // on the scene round-trip, so the cached panels are bound to dead transforms; drop the
+        // _panelsBuilt latch so the next InjectNetworkButtonPatch.Postfix → OnMenuReady rebuilds them
+        // on the fresh Canvas. Safe to call when nothing was built yet (latch already false).
+        public void RebuildLobbyPanels()
+        {
+            _panelsBuilt = false;
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         //  Minimal overlay Canvas for the in-game status bar
         // ═══════════════════════════════════════════════════════════════════
