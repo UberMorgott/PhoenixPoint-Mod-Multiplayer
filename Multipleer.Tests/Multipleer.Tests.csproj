@@ -73,6 +73,9 @@
     <Compile Include="..\src\Network\Sync\State\UnlockSnapshot.cs"><Link>Sync\State\UnlockSnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\DiplomacySnapshot.cs"><Link>Sync\State\DiplomacySnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\GeoSiteSnapshot.cs"><Link>Sync\State\GeoSiteSnapshot.cs</Link></Compile>
+    <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
+         (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ManufactureCompletedAction.cs"><Link>Sync\Actions\ManufactureCompletedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ConstructFacilityAction.cs"><Link>Sync\Actions\ConstructFacilityAction.cs</Link></Compile>

@@ -495,6 +495,23 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// Host: the resolved <c>GeoscapeEvent.ChoiceReward</c> (a <c>GeoFactionReward</c>, public getter /
+        /// private setter, set inside CompleteEvent:101). Non-null only AFTER an answer was applied (the dismiss
+        /// postfix runs at that point). Used to snapshot the reward DISPLAY lines for the client result card.
+        /// Returns null on a decline / pre-apply / introspection failure (caller → reward-less card).
+        /// </summary>
+        public static object GetChoiceReward(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return null;
+            try
+            {
+                var prop = AccessTools.Property(geoscapeEvent.GetType(), "ChoiceReward"); // public get
+                return prop?.GetValue(geoscapeEvent, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceReward failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
         /// True iff <paramref name="choice"/> produces a follow-up RESULT/OUTCOME page, i.e. its
         /// <c>Outcome.OutcomeText.General.LocalizationKey</c> is non-empty — the same text the native
         /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> renders (and the inverse of the empty-key test in

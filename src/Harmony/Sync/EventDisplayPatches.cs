@@ -125,9 +125,25 @@ namespace Multipleer.Harmony.Sync
                 // tells clients to rebuild + show that choice's follow-up RESULT/OUTCOME page natively; a null/
                 // decline choice resolves to -1 → close-only. The reward STATE already syncs via the channels.
                 int choiceIndex = EventReflection.GetSelectedChoiceIndex(__instance);
+                // Snapshot the reward DISPLAY lines (resources / diplomacy / items / units / revealed sites /
+                // soldier dmg+tired / skillpoints / …) the native ShowReward draws, so the client mirrors the
+                // delta lines on its result card. Read-only — does NOT re-apply (host already applied).
+                byte[] rewardBlob = null;
+                try
+                {
+                    var reward = EventReflection.GetChoiceReward(__instance);
+                    if (reward != null)
+                    {
+                        var snap = Multipleer.Network.Sync.State.RewardDisplayReflection.BuildFromReward(reward);
+                        if (snap != null && !snap.IsEmpty)
+                            rewardBlob = Multipleer.Network.Sync.State.RewardDisplaySnapshot.Encode(snap);
+                    }
+                }
+                catch (Exception rex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch reward-snapshot failed: " + rex.Message); }
                 Debug.Log("[Multipleer] HOST BroadcastEventDismiss eventId=" + eventId +
-                          " selectedChoiceIndex=" + choiceIndex);
-                engine.Sync?.BroadcastEventDismiss(eventId, choiceIndex);
+                          " selectedChoiceIndex=" + choiceIndex +
+                          " rewardBytes=" + (rewardBlob?.Length ?? 0));
+                engine.Sync?.BroadcastEventDismiss(eventId, choiceIndex, rewardBlob);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
         }
