@@ -50,6 +50,9 @@ namespace Multipleer.Network.Sync.State
         // still read for logging. Only one host-broadcast geoscape-event dialog is ever open at a time (modal).
         private static ushort _openOccurrenceId;
 
+        /// <summary>The occurrence id of the dialog this client currently has open (0 = none / synthetic page).</summary>
+        public static ushort OpenOccurrenceId => _openOccurrenceId;
+
         private static void Ensure()
         {
             if (_ready) return;
