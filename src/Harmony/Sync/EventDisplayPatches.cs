@@ -119,7 +119,11 @@ namespace Multipleer.Harmony.Sync
             try
             {
                 string eventId = EventReflection.GetEventId(__instance);
-                engine.Sync?.BroadcastEventDismiss(eventId);
+                // The picked choice's index (off GeoscapeEvent.SelectedChoice, set inside CompleteEvent). >= 0
+                // tells clients to rebuild + show that choice's follow-up RESULT/OUTCOME page natively; a null/
+                // decline choice resolves to -1 → close-only. The reward STATE already syncs via the channels.
+                int choiceIndex = EventReflection.GetSelectedChoiceIndex(__instance);
+                engine.Sync?.BroadcastEventDismiss(eventId, choiceIndex);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
         }

@@ -83,16 +83,59 @@ public class EventSyncProtocolTests
     [Fact]
     public void EventDismiss_RoundTrips()
     {
-        var bytes = SyncProtocol.EncodeEventDismiss("PROG_EV_42");
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id));
+        var bytes = SyncProtocol.EncodeEventDismiss("PROG_EV_42", 3);
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id, out var choiceIndex));
         Assert.Equal("PROG_EV_42", id);
+        Assert.Equal(3, choiceIndex);
     }
 
     [Fact]
     public void EventDismiss_NullId_EncodesEmpty()
     {
         var bytes = SyncProtocol.EncodeEventDismiss(null);
-        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id));
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id, out var choiceIndex));
         Assert.Equal("", id);
+        Assert.Equal(-1, choiceIndex);   // default close-only
+    }
+
+    [Fact]
+    public void EventDismiss_DefaultChoiceIndex_IsNegativeOne()
+    {
+        // The choiceIndex arg defaults to -1 (close-only) for the pure-INFO host-OK / decline path.
+        var bytes = SyncProtocol.EncodeEventDismiss("EV_CLOSE");
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(bytes, out var id, out var choiceIndex));
+        Assert.Equal("EV_CLOSE", id);
+        Assert.Equal(-1, choiceIndex);
+    }
+
+    [Fact]
+    public void EventDismiss_LegacyOneFieldPayload_DecodesChoiceIndexNegativeOne()
+    {
+        // Forward/backward compat: a legacy [eventId] payload (no choiceIndex) must still decode,
+        // leaving choiceIndex = -1 (close-only) so an old host's dismiss never throws / stays unstuck.
+        byte[] legacy;
+        using (var ms = new MemoryStream())
+        using (var w = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            w.Write("EV_LEGACY");   // eventId only — no trailing choiceIndex
+            legacy = ms.ToArray();
+        }
+        Assert.True(SyncProtocol.TryDecodeEventDismiss(legacy, out var id, out var choiceIndex));
+        Assert.Equal("EV_LEGACY", id);
+        Assert.Equal(-1, choiceIndex);
+    }
+
+    [Fact]
+    public void EventDismiss_WireBytes_AreStable()
+    {
+        // Pin the exact on-wire layout: [len:7bit][utf8 eventId][choiceIndex:i32 LE].
+        // "AB" = 0x02 length prefix + 0x41 0x42; choiceIndex 2 = 02 00 00 00.
+        var bytes = SyncProtocol.EncodeEventDismiss("AB", 2);
+        var expected = new byte[]
+        {
+            0x02, 0x41, 0x42,        // "AB"
+            0x02, 0x00, 0x00, 0x00,  // choiceIndex = 2
+        };
+        Assert.Equal(expected, bytes);
     }
 }

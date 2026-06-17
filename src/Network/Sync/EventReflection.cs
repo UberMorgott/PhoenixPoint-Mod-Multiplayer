@@ -65,6 +65,34 @@ namespace Multipleer.Network.Sync
         private static PropertyInfo _allSitesProp;     // GeoMap.AllSites
         private static FieldInfo _siteIdField;         // GeoSite.SiteId
 
+        // Synthetic RESULT/OUTCOME page (client follow-up display, mirrors UIModuleSiteEncounters.SetClosingEncounter
+        // text half ONLY — never the ShowReward/GeoFactionReward.Apply state mutation). Verified 2026-06-17:
+        //   • GeoscapeEvent.Context (public readonly GeoscapeEventContext, :21), .EventData (get/private set, :30).
+        //   • GeoscapeEventData.{EventID,Flavour,Leader} (string :37/39/41), .Description (List<EventTextVariation> :51),
+        //     .Choices (List<GeoEventChoice> :54).
+        //   • EventTextVariation.General (LocalizedTextBind :12), .GetText(GeoscapeEventContext) (:20).
+        //   • GeoEventChoice.{Text,Outcome} (LocalizedTextBind :12 / GeoEventChoiceOutcome :18).
+        //   • GeoEventChoiceOutcome.OutcomeText (EventTextVariation :25).
+        //   • GeoscapeEventContext.ReplaceEventTokens(string) (:225).
+        private static FieldInfo _ctxField;            // GeoscapeEvent.Context
+        private static PropertyInfo _eventDataSetProp; // GeoscapeEvent.EventData (for synthetic data swap, has private set)
+        private static FieldInfo _edEventIdField;      // GeoscapeEventData.EventID
+        private static FieldInfo _edFlavourField;      // GeoscapeEventData.Flavour
+        private static FieldInfo _edLeaderField;       // GeoscapeEventData.Leader
+        private static FieldInfo _edDescriptionField;  // GeoscapeEventData.Description (List<EventTextVariation>)
+        private static Type _textVariationType;        // EventTextVariation
+        private static FieldInfo _tvGeneralField;      // EventTextVariation.General (LocalizedTextBind)
+        private static MethodInfo _tvGetTextMethod;    // EventTextVariation.GetText(GeoscapeEventContext)
+        private static Type _localizedTextType;        // Base.UI.LocalizedTextBind
+        private static ConstructorInfo _localizedTextCtor2; // LocalizedTextBind(string, bool doNotLocalize)
+        private static FieldInfo _localizedKeyField;   // LocalizedTextBind.LocalizationKey (for empty-check)
+        private static Type _choiceType2;              // GeoEventChoice (for synthetic OK button)
+        private static FieldInfo _choiceTextField;     // GeoEventChoice.Text (LocalizedTextBind)
+        private static FieldInfo _choiceOutcomeField;  // GeoEventChoice.Outcome (GeoEventChoiceOutcome)
+        private static FieldInfo _outcomeTextField;    // GeoEventChoiceOutcome.OutcomeText (EventTextVariation)
+        private static MethodInfo _replaceTokensMethod; // GeoscapeEventContext.ReplaceEventTokens(string)
+        private static ConstructorInfo _eventDataCtor;  // GeoscapeEventData() default ctor
+
         // Vehicle context (the [AircraftName] token derefs Context.Vehicle.Name → NRE when Vehicle == null).
         private static Type _geoVehicleType;           // GeoVehicle
         private static FieldInfo _vehicleIdField;      // GeoVehicle.VehicleID (public int, serialized; -1 = none)
@@ -139,6 +167,33 @@ namespace Multipleer.Network.Sync
             _recordType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEventRecord");
             if (_recordType != null) _recordStateField = AccessTools.Field(_recordType, "_state");
             _recordProp = AccessTools.Property(_eventType, "Record");
+
+            // Synthetic RESULT/OUTCOME page support (client follow-up display, text half of SetClosingEncounter).
+            _ctxField = AccessTools.Field(_eventType, "Context");
+            _eventDataSetProp = AccessTools.Property(_eventType, "EventData"); // private set → SetValue via reflection
+            _edEventIdField = AccessTools.Field(_eventDataType, "EventID");
+            _edFlavourField = AccessTools.Field(_eventDataType, "Flavour");
+            _edLeaderField = AccessTools.Field(_eventDataType, "Leader");
+            _edDescriptionField = AccessTools.Field(_eventDataType, "Description");
+            _eventDataCtor = AccessTools.Constructor(_eventDataType, Type.EmptyTypes);
+            _textVariationType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.EventTextVariation");
+            if (_textVariationType != null)
+            {
+                _tvGeneralField = AccessTools.Field(_textVariationType, "General");
+                _tvGetTextMethod = AccessTools.Method(_textVariationType, "GetText", new[] { _contextType });
+            }
+            _localizedTextType = AccessTools.TypeByName("Base.UI.LocalizedTextBind");
+            if (_localizedTextType != null)
+            {
+                _localizedTextCtor2 = AccessTools.Constructor(_localizedTextType, new[] { typeof(string), typeof(bool) });
+                _localizedKeyField = AccessTools.Field(_localizedTextType, "LocalizationKey");
+            }
+            _choiceType2 = choiceType;
+            _choiceTextField = AccessTools.Field(choiceType, "Text");
+            _choiceOutcomeField = AccessTools.Field(choiceType, "Outcome");
+            var outcomeType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoEventChoiceOutcome");
+            if (outcomeType != null) _outcomeTextField = AccessTools.Field(outcomeType, "OutcomeText");
+            _replaceTokensMethod = AccessTools.Method(_contextType, "ReplaceEventTokens", new[] { typeof(string) });
 
             _ready = _completeEvent != null && _eventIdField != null && _eventDataProp != null
                      && _choicesField != null;
@@ -388,6 +443,170 @@ namespace Multipleer.Network.Sync
                 return geoEvent;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
+        }
+
+        // ─── RESULT/OUTCOME follow-up page (host index → client text-only render) ──────────
+
+        /// <summary>
+        /// Host: index of <c>GeoscapeEvent.SelectedChoice</c> (GeoscapeEvent.cs:34, set inside CompleteEvent:96)
+        /// within <c>EventData.Choices</c>. Returns &gt;= 0 for a real picked choice, or -1 for a null/decline
+        /// choice or any introspection failure (callers treat -1 as close-only). Used by the host's dismiss
+        /// broadcast to tell clients which choice's outcome page to rebuild.
+        /// </summary>
+        public static int GetSelectedChoiceIndex(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return -1;
+            try
+            {
+                Ensure();
+                var selProp = AccessTools.Property(geoscapeEvent.GetType(), "SelectedChoice"); // public get
+                var choice = selProp?.GetValue(geoscapeEvent, null);
+                if (choice == null) return -1;
+                int idx = GetChoiceIndex(geoscapeEvent, choice);
+                return idx >= 0 ? idx : -1;   // decline / lookup-failed → close-only
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSelectedChoiceIndex failed: " + ex.Message); return -1; }
+        }
+
+        /// <summary>
+        /// True iff <paramref name="choice"/> produces a follow-up RESULT/OUTCOME page, i.e. its
+        /// <c>Outcome.OutcomeText.General.LocalizationKey</c> is non-empty — the same text the native
+        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> renders (and the inverse of the empty-key test in
+        /// <c>IsSingleChoiceEncounter</c>, :262). Used by the client lock so a single-choice click that WILL
+        /// open an outcome page stays open (host-authoritative), while a pure-info choice dismisses locally.
+        /// Returns false on null / unreadable (safe: a missing outcome page → local dismiss).
+        /// </summary>
+        public static bool ChoiceHasOutcomeText(object choice)
+        {
+            if (choice == null) return false;
+            try
+            {
+                Ensure();
+                var outcome = _choiceOutcomeField?.GetValue(choice);
+                if (outcome == null) return false;
+                var outcomeText = _outcomeTextField?.GetValue(outcome);
+                if (outcomeText == null) return false;
+                var general = _tvGeneralField?.GetValue(outcomeText);
+                if (general == null) return false;
+                var key = _localizedKeyField?.GetValue(general) as string;
+                return !string.IsNullOrEmpty(key);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ChoiceHasOutcomeText failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
+        /// Client: build a synthetic closing <c>GeoscapeEvent{EventID=""}</c> carrying ONLY the chosen choice's
+        /// outcome text + a single OK button — mirroring the TEXT half of
+        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:326-358). It deliberately does NOT touch
+        /// <c>ChoiceReward</c> / <c>ShowReward</c> / <c>GeoFactionReward.Apply</c>: the reward STATE already
+        /// converged via the wallet/research/items/diplomacy channels, and re-applying here would double-mutate.
+        /// The synthetic event has EventID=""/no real Outcome (single choice) → <c>IsClientChoiceLocked==false</c>
+        /// → the client can locally dismiss the result page with OK. Returns null on any failure (caller no-ops →
+        /// the modal closes via the normal dismiss instead).
+        /// </summary>
+        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || string.IsNullOrEmpty(eventId) || choiceIndex < 0) return null;
+                if (_eventDataCtor == null || _eventCtor == null || _contextCtor == null
+                    || _edDescriptionField == null || _choicesField == null || _tvGeneralField == null
+                    || _localizedTextCtor2 == null || _textVariationType == null || _choiceType2 == null
+                    || _choiceTextField == null) return null;
+
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return null;
+
+                object srcData = ResolveEventData(rt, eventId);
+                if (srcData == null) return null;
+
+                var srcChoices = _choicesField.GetValue(srcData) as IList;
+                if (srcChoices == null || choiceIndex >= srcChoices.Count) return null;
+                object choice = srcChoices[choiceIndex];
+                if (choice == null) return null;
+
+                // Build a StartingBase context (no siteId on the dismiss wire). Outcome text usually needs only
+                // faction/site tokens; a vehicle-token outcome degrades gracefully (GetText try/catch → raw text).
+                object site = GetStartingBase(fac);
+                if (site == null) return null;
+                object context = _contextCtor.Invoke(new[] { site, fac });
+
+                // text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), tokens replaced.
+                string text = ResolveOutcomeText(choice, context);
+                if (text == null) text = "";
+                string text2 = ReplaceTokens(context, text);
+
+                // Synthetic closing data: EventID="" (so it is never re-broadcast / re-keyed), one OK button.
+                object data = _eventDataCtor.Invoke(null);
+                _edEventIdField?.SetValue(data, "");
+                if (_edFlavourField != null) _edFlavourField.SetValue(data, GetEventDataString(srcData, _edFlavourField));
+                if (_edLeaderField != null) _edLeaderField.SetValue(data, GetEventDataString(srcData, _edLeaderField));
+
+                // Description = [ EventTextVariation{ General = LocalizedTextBind(text2, doNotLocalize:true) } ].
+                object general = _localizedTextCtor2.Invoke(new object[] { text2, true });
+                object variation = Activator.CreateInstance(_textVariationType);
+                _tvGeneralField.SetValue(variation, general);
+                var descList = MakeTypedList(_textVariationType);
+                descList.Add(variation);
+                _edDescriptionField.SetValue(data, descList);
+
+                // Choices = [ GeoEventChoice{ Text = choice.Text (the clicked button label) or a literal "OK" } ].
+                object okText = _choiceTextField.GetValue(choice);
+                if (okText == null || string.IsNullOrEmpty(_localizedKeyField?.GetValue(okText) as string))
+                    okText = _localizedTextCtor2.Invoke(new object[] { "OK", true });
+                object okChoice = Activator.CreateInstance(_choiceType2);
+                _choiceTextField.SetValue(okChoice, okText);
+                var choiceList = MakeTypedList(_choiceType2);
+                choiceList.Add(okChoice);
+                _choicesField.SetValue(data, choiceList);
+
+                object geoEvent = _eventCtor.Invoke(new[] { data, context });
+                // Stamp a Completed record so the local OK dismiss does not NRE / force-complete (same as BuildEvent).
+                AttachCompletedRecord(geoEvent);
+                return geoEvent;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildResultEvent failed: " + ex.Message); return null; }
+        }
+
+        private static string ResolveOutcomeText(object choice, object context)
+        {
+            try
+            {
+                var outcome = _choiceOutcomeField?.GetValue(choice);
+                if (outcome == null) return "";
+                var outcomeText = _outcomeTextField?.GetValue(outcome);
+                if (outcomeText == null) return "";
+                if (_tvGetTextMethod != null)
+                    return _tvGetTextMethod.Invoke(outcomeText, new[] { context }) as string ?? "";
+                // Fallback: General.Localize() via reflection if GetText is unavailable.
+                var general = _tvGeneralField?.GetValue(outcomeText);
+                return general?.ToString() ?? "";
+            }
+            catch { return ""; }
+        }
+
+        private static string ReplaceTokens(object context, string text)
+        {
+            try
+            {
+                if (_replaceTokensMethod != null && context != null)
+                    return _replaceTokensMethod.Invoke(context, new object[] { text }) as string ?? text;
+            }
+            catch { /* token replace is best-effort */ }
+            return text;
+        }
+
+        private static string GetEventDataString(object eventData, FieldInfo field)
+        {
+            try { return field?.GetValue(eventData) as string; } catch { return null; }
+        }
+
+        /// <summary>Create a concrete <c>List&lt;elementType&gt;</c> (the game's Description/Choices field types).</summary>
+        private static IList MakeTypedList(Type elementType)
+        {
+            var listType = typeof(System.Collections.Generic.List<>).MakeGenericType(elementType);
+            return (IList)Activator.CreateInstance(listType);
         }
 
         /// <summary>Client: GeoVehicle whose VehicleID matches <paramref name="vehicleId"/> via GeoMap.Vehicles, else null.</summary>

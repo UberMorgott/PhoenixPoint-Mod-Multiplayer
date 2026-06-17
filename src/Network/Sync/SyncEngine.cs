@@ -279,12 +279,27 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
         }
 
-        /// <summary>Client: host's answer was applied → close the open geoscape-event dialog.</summary>
+        /// <summary>
+        /// Client: host's answer was applied. When the picked choice produced a follow-up RESULT/OUTCOME page
+        /// (choiceIndex &gt;= 0) the client rebuilds that page natively (text-only, no reward apply) and replaces
+        /// the open modal with it via <see cref="State.EventDisplay.ShowResult"/>; a result-less answer
+        /// (choiceIndex == -1: pure-INFO host-OK / decline) just closes the open dialog. If the result page can't
+        /// be rebuilt, fall back to a plain close so the modal never stays stuck open.
+        /// </summary>
         public void OnEventDismiss(byte[] data)
         {
             if (_engine.IsHost) return;
-            if (!SyncProtocol.TryDecodeEventDismiss(data, out var eventId)) return;
-            try { State.EventDisplay.Dismiss(GeoRuntime.Instance, eventId); }
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var eventId, out var choiceIndex)) return;
+            try
+            {
+                var rt = GeoRuntime.Instance;
+                if (choiceIndex >= 0)
+                {
+                    var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
+                    if (resultEvent != null) { State.EventDisplay.ShowResult(rt, resultEvent, eventId); return; }
+                }
+                State.EventDisplay.Dismiss(rt, eventId);   // -1, or result rebuild failed → close-only
+            }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }
 
@@ -296,11 +311,17 @@ namespace Multipleer.Network.Sync
                 SyncProtocol.EncodeEventRaised(eventId, siteId, vehicleId)));
         }
 
-        public void BroadcastEventDismiss(string eventId)
+        /// <summary>
+        /// Host: tell clients the answer was applied. <paramref name="choiceIndex"/> is the picked choice's
+        /// index within EventData.Choices (&gt;= 0 → clients rebuild + show its RESULT/OUTCOME page natively;
+        /// -1 → close-only, for a pure-INFO host-OK / decline). The reward STATE itself rides the wallet/
+        /// research/items/diplomacy channels — this carries only the UI index.
+        /// </summary>
+        public void BroadcastEventDismiss(string eventId, int choiceIndex = -1)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
-                SyncProtocol.EncodeEventDismiss(eventId)));
+                SyncProtocol.EncodeEventDismiss(eventId, choiceIndex)));
         }
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────

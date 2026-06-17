@@ -101,6 +101,28 @@ namespace Multipleer.Network.Sync.State
         }
 
         /// <summary>
+        /// Client: replace the open (locked) choice modal for <paramref name="eventId"/> with the host's
+        /// follow-up RESULT/OUTCOME page, reusing the SAME native push as <see cref="Show"/>. This mirrors the
+        /// native in-place second page of <c>UIModuleSiteEncounters</c> (SetClosingEncounter): we first close
+        /// the open choice dialog (the host already applied the answer) then push the synthetic result event as
+        /// a fresh <c>UIStateGeoscapeEvent</c>. The result event is single-choice with EventID="" → unlocked →
+        /// the client can locally dismiss it with OK. No custom UI; no reward apply (text-only). No-op on failure.
+        /// </summary>
+        public static void ShowResult(GeoRuntime rt, object resultEvent, string eventId = null)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || resultEvent == null) return;
+                // Close the open locked choice modal first (host answer applied) so the result page replaces it
+                // in-place rather than stacking on top of a still-open dialog.
+                Dismiss(rt, eventId);
+                Show(rt, resultEvent);
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.ShowResult best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>
         /// Client: close the open geoscape-event dialog. Guarded so it only fires when the current switch
         /// request is a geoscape-event state AND (when <paramref name="eventId"/> is supplied and the open
         /// event's id is readable) that state's event id MATCHES — so a dismiss for one event never closes a

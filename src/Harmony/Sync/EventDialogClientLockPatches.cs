@@ -118,8 +118,8 @@ namespace Multipleer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        // __instance = UIModuleSiteEncounters.
-        public static bool Prefix(object __instance)
+        // __instance = UIModuleSiteEncounters; __0 = the clicked GeoEventChoice (OnChoiceSelected's arg).
+        public static bool Prefix(object __instance, object __0)
         {
             try
             {
@@ -133,7 +133,15 @@ namespace Multipleer.Harmony.Sync
                 if (EventReflection.IsClientChoiceLocked(geoEvent))
                     return false; // CHOICE (or ambiguous): inert — no relay, no local close, no NRE
 
-                // INFO: dismiss locally with no outcome and no host call (host already applied at trigger).
+                // Single-choice (INFO-class by count) BUT the clicked choice PRODUCES a follow-up RESULT/OUTCOME
+                // page (non-empty Outcome.OutcomeText, mirrors native OnChoiceSelected:586 → SetClosingEncounter).
+                // That page is host-authoritative — leave the modal open and wait for the host's dismiss
+                // broadcast (which rebuilds + shows the result natively). Treat it like CHOICE: swallow, no close.
+                if (EventReflection.ChoiceHasOutcomeText(__0))
+                    return false;
+
+                // Pure-INFO (no outcome page): dismiss locally with no outcome and no host call (host already
+                // applied at trigger). This stays a local-only close.
                 _finishEncounter?.Invoke(__instance, null);
                 return false;
             }

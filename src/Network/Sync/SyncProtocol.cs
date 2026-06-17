@@ -177,7 +177,12 @@ namespace Multipleer.Network.Sync
         // GeoVehicle.VehicleID (-1 = none → client resolves a vehicle at the site, else null context).
         // The trailing vehicleId is OPTIONAL on the wire: an older 2-field payload decodes with -1, so the
         // decoder never throws on a short buffer (forward/backward compatible).
-        // EventDismiss: [eventId:string] — host tells clients to CLOSE their open dialog.
+        // EventDismiss: [eventId:string][choiceIndex:i32] — host tells clients the answer was applied.
+        // choiceIndex is the index of the picked choice within EventData.Choices: >= 0 means the choice
+        // produced a follow-up RESULT/OUTCOME page (clients rebuild + show it natively, text-only);
+        // -1 means close-only (pure-INFO host-OK / decline). The trailing choiceIndex is OPTIONAL on the
+        // wire: a legacy 1-field [eventId] payload decodes with choiceIndex = -1 (close-only), so the
+        // decoder never throws on a short buffer (forward/backward compatible) — same idiom as EventRaised.
 
         public static byte[] EncodeEventRaised(string eventId, int siteId, int vehicleId = -1)
         {
@@ -209,25 +214,29 @@ namespace Multipleer.Network.Sync
             catch { return false; }
         }
 
-        public static byte[] EncodeEventDismiss(string eventId)
+        public static byte[] EncodeEventDismiss(string eventId, int choiceIndex = -1)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
                 w.Write(eventId ?? "");
+                w.Write(choiceIndex);
                 return ms.ToArray();
             }
         }
 
-        public static bool TryDecodeEventDismiss(byte[] data, out string eventId)
+        public static bool TryDecodeEventDismiss(byte[] data, out string eventId, out int choiceIndex)
         {
-            eventId = null;
+            eventId = null; choiceIndex = -1;
             try
             {
                 using (var ms = new MemoryStream(data))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
                     eventId = r.ReadString();
+                    // Optional trailing field: absent in a legacy 1-field payload → leave choiceIndex = -1
+                    // (close-only), so an old host's dismiss still decodes (forward/backward compatible).
+                    if (ms.Length - ms.Position >= sizeof(int)) choiceIndex = r.ReadInt32();
                     return true;
                 }
             }
