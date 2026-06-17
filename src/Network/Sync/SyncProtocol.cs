@@ -183,15 +183,18 @@ namespace Multipleer.Network.Sync
         // GeoVehicle.VehicleID (-1 = none → client resolves a vehicle at the site, else null context). The
         // trailing vehicleId is OPTIONAL: a 3-field [occId][eventId][siteId] payload decodes with vehicleId = -1
         // (so the decoder never throws on a short buffer).
-        // EventDismiss: [occId:u16][eventId:string][choiceIndex:i32]?([u16 rewardLen][rewardBlob:N]?) — host
-        // tells clients the answer was applied. choiceIndex is the index of the picked choice within
+        // EventDismiss: [occId:u16][eventId:string][choiceIndex:i32]?([u16 rewardLen][rewardBlob:N]?)([siteId:i32]?)
+        // — host tells clients the answer was applied. choiceIndex is the index of the picked choice within
         // EventData.Choices: >= 0 means the choice produced a follow-up RESULT/OUTCOME page (clients rebuild +
-        // show it natively); -1 means close-only (pure-INFO host-OK / decline). BOTH trailing groups are OPTIONAL:
+        // show it natively); -1 means close-only (pure-INFO host-OK / decline). ALL trailing groups are OPTIONAL:
         //   • a 2-field [occId][eventId] payload decodes with choiceIndex = -1 (close-only);
-        //   • a 3-field [occId][eventId][choiceIndex] payload decodes with an EMPTY reward blob;
+        //   • a 3-field [occId][eventId][choiceIndex] payload decodes with an EMPTY reward blob and siteId = -1;
         // so the decoder never throws on a short buffer. The reward blob is a RewardDisplaySnapshot (the native
         // ShowReward delta lines) carried so the client mirrors the reward card; it is appended ONLY when
-        // non-empty, keeping the no-reward 3-field wire byte-stable.
+        // non-empty, keeping the no-reward 3-field wire byte-stable. siteId is GeoSite.SiteId (-1 = none → the
+        // client result card falls back to StartingBase) — the SAME id the raise resolves (EventRaised's siteId);
+        // it is appended ONLY when >= 0 (the no-site wire stays byte-stable). When a siteId follows a missing
+        // reward, the u16 rewardLen is still written as 0 so the trailing siteId is unambiguous to the decoder.
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
         {
@@ -228,37 +231,55 @@ namespace Multipleer.Network.Sync
         public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1)
             => EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null);
 
-        // Reward-carrying overload: appends [u16 rewardLen][rewardBlob] ONLY when the blob is non-empty, so a
-        // null/empty reward yields the EXACT 3-field bytes (no trailing length) — keeps the no-reward wire
-        // stable. rewardBlob is a RewardDisplaySnapshot-encoded payload.
-        public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex, byte[] rewardBlob)
+        // Reward+site overload: appends [u16 rewardLen][rewardBlob] ONLY when the blob is non-empty and
+        // [i32 siteId] ONLY when siteId >= 0, so a null/empty reward with no site yields the EXACT 3-field bytes
+        // (no trailing length) — keeps the no-reward/no-site wire stable. When a siteId follows a MISSING reward,
+        // the u16 rewardLen is still written as 0 so the trailing siteId is unambiguous on decode. rewardBlob is
+        // a RewardDisplaySnapshot-encoded payload; siteId is GeoSite.SiteId (-1 = none, the SAME id the raise uses).
+        public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex, byte[] rewardBlob, int siteId = -1)
         {
+            bool hasReward = rewardBlob != null && rewardBlob.Length > 0;
+            bool hasSite = siteId >= 0;
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
                 w.Write(occurrenceId);
                 w.Write(eventId ?? "");
                 w.Write(choiceIndex);
-                if (rewardBlob != null && rewardBlob.Length > 0)
+                // Write the reward-length field when there is a reward OR a trailing siteId (so the siteId is
+                // never mistaken for a reward length on decode); length is 0 when no reward is present.
+                if (hasReward || hasSite)
                 {
-                    // The wire length field is u16; refuse to silently truncate an oversized reward blob.
-                    if (rewardBlob.Length > ushort.MaxValue)
-                        throw new ArgumentOutOfRangeException(nameof(rewardBlob),
-                            "Reward blob exceeds the u16 length field (" + rewardBlob.Length + " > " + ushort.MaxValue + ").");
-                    w.Write((ushort)rewardBlob.Length);
-                    w.Write(rewardBlob);
+                    if (hasReward)
+                    {
+                        // The wire length field is u16; refuse to silently truncate an oversized reward blob.
+                        if (rewardBlob.Length > ushort.MaxValue)
+                            throw new ArgumentOutOfRangeException(nameof(rewardBlob),
+                                "Reward blob exceeds the u16 length field (" + rewardBlob.Length + " > " + ushort.MaxValue + ").");
+                        w.Write((ushort)rewardBlob.Length);
+                        w.Write(rewardBlob);
+                    }
+                    else
+                    {
+                        w.Write((ushort)0);   // no reward, but a siteId follows → empty-length marker
+                    }
                 }
+                if (hasSite) w.Write(siteId);
                 return ms.ToArray();
             }
         }
 
-        // 3-out overload (occId, eventId, choiceIndex) — kept for callers/tests that ignore the reward blob.
+        // 3-out overload (occId, eventId, choiceIndex) — kept for callers/tests that ignore the reward blob + site.
         public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex)
-            => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out _);
+            => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out _, out _);
 
+        // 4-out overload (… rewardBlob) — kept for callers/tests that ignore the trailing siteId.
         public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob)
+            => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out rewardBlob, out _);
+
+        public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob, out int siteId)
         {
-            occurrenceId = 0; eventId = null; choiceIndex = -1; rewardBlob = new byte[0];
+            occurrenceId = 0; eventId = null; choiceIndex = -1; rewardBlob = new byte[0]; siteId = -1;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -271,12 +292,16 @@ namespace Multipleer.Network.Sync
                     if (ms.Length - ms.Position >= sizeof(int)) choiceIndex = r.ReadInt32();
                     // Optional trailing reward blob: [u16 len][len bytes]. Absent in a 3-field payload
                     // → leave an empty blob (reward-less result card). Only accept it when the FULL declared
-                    // length is present (no partial accept).
+                    // length is present (no partial accept). A len of 0 (empty-length marker that precedes a
+                    // trailing siteId) consumes the u16 only, leaving the siteId for the read below.
                     if (ms.Length - ms.Position >= sizeof(ushort))
                     {
                         int len = r.ReadUInt16();
                         if (len > 0 && ms.Length - ms.Position >= len) rewardBlob = r.ReadBytes(len);
                     }
+                    // Optional trailing siteId: absent in an old payload → leave siteId = -1 (no site → the
+                    // result card falls back to StartingBase). Mirrors EventRaised's trailing-optional fields.
+                    if (ms.Length - ms.Position >= sizeof(int)) siteId = r.ReadInt32();
                     return true;
                 }
             }

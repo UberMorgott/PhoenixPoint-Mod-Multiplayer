@@ -152,10 +152,13 @@ namespace Multipleer.Harmony.Sync
                 // the occurrence dismissed → the FinishEncounter fallback won't send a second bare close for it.
                 ushort occId = EventOccurrenceIds.GetOrAssign(__instance);
                 EventOccurrenceIds.MarkDismissed(occId);
+                // The live event's real site id (GeoSite.SiteId, -1 = none) — the SAME site the raise resolved.
+                // Stamped on the dismiss wire so the client result card shows the real site, not StartingBase.
+                int siteId = EventReflection.GetSiteId(__instance);
                 Debug.Log("[Multipleer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
-                          " selectedChoiceIndex=" + choiceIndex +
+                          " selectedChoiceIndex=" + choiceIndex + " siteId=" + siteId +
                           " rewardBytes=" + (rewardBlob?.Length ?? 0));
-                engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob);
+                engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob, siteId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
         }

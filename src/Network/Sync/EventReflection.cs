@@ -556,7 +556,7 @@ namespace Multipleer.Network.Sync
         /// → the client can locally dismiss the result page with OK. Returns null on any failure (caller no-ops →
         /// the modal closes via the normal dismiss instead).
         /// </summary>
-        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex)
+        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1)
         {
             try
             {
@@ -584,11 +584,13 @@ namespace Multipleer.Network.Sync
                 if (choice == null)
                 { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choice-null eventId=" + eventId + " choiceIndex=" + choiceIndex); return null; }
 
-                // Build a StartingBase context (no siteId on the dismiss wire). Outcome text usually needs only
-                // faction/site tokens; a vehicle-token outcome degrades gracefully (GetText try/catch → raw text).
-                object site = GetStartingBase(fac);
+                // Resolve the REAL event site from the broadcast siteId (mirrors BuildEvent's raise-side
+                // resolution), falling back to StartingBase when absent/unresolved (siteId < 0 → -1 sentinel).
+                // Outcome text usually needs only faction/site tokens; a vehicle-token outcome degrades
+                // gracefully (GetText try/catch → raw text).
+                object site = ResolveSiteById(rt, siteId) ?? GetStartingBase(fac);
                 if (site == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=startingbase-null eventId=" + eventId); return null; }
+                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=site-null eventId=" + eventId + " siteId=" + siteId); return null; }
                 object context = _contextCtor.Invoke(new[] { site, fac });
 
                 // text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), tokens replaced.

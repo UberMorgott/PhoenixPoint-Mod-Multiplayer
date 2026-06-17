@@ -299,7 +299,7 @@ namespace Multipleer.Network.Sync
                     case State.EventCorrelator.ActionKind.ShowResultPage:
                         // Out-of-order dismiss already buffered for this occurrence → jump straight to its
                         // result page. The reward lines were carried on the dismiss and stashed at buffer time.
-                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, TakeBufferedReward(occId));
+                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, TakeBufferedReward(occId), siteId);
                         break;
                     case State.EventCorrelator.ActionKind.DropNoop:
                         // A close-only dismiss beat its raise → nothing to display; drop any stashed reward.
@@ -349,7 +349,7 @@ namespace Multipleer.Network.Sync
         public void OnEventDismiss(byte[] data)
         {
             if (_engine.IsHost) return;
-            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out var rewardBlob)) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out var rewardBlob, out var siteId)) return;
             try
             {
                 var rt = GeoRuntime.Instance;
@@ -368,7 +368,7 @@ namespace Multipleer.Network.Sync
                 switch (decision.Kind)
                 {
                     case State.EventCorrelator.ActionKind.ShowResultInPlace:
-                        ResolveToResultPage(rt, occId, eventId, choiceIndex, reward);
+                        ResolveToResultPage(rt, occId, eventId, choiceIndex, reward, siteId);
                         break;
                     case State.EventCorrelator.ActionKind.CloseDialog:
                         State.EventDisplay.Dismiss(rt, occId, eventId);   // close-only
@@ -389,9 +389,9 @@ namespace Multipleer.Network.Sync
         /// to a plain close when the page can't be rebuilt. Shared by the in-order (ShowResultInPlace) and the
         /// buffered-then-raised (ShowResultPage) paths.
         /// </summary>
-        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward)
+        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1)
         {
-            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex);
+            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId);
             Debug.Log("[Multipleer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
                       " rewardEmpty=" + (reward == null || reward.IsEmpty) +
@@ -427,12 +427,14 @@ namespace Multipleer.Network.Sync
         /// choice's index within EventData.Choices (&gt;= 0 → clients rebuild + show its RESULT/OUTCOME page
         /// natively; -1 → close-only, for a pure-INFO host-OK / decline). The reward STATE itself rides the
         /// wallet/research/items/diplomacy channels — this carries only the UI index + the display blob.
+        /// <paramref name="siteId"/> is the event's GeoSite.SiteId (-1 = none) so the client result card resolves
+        /// the REAL event site instead of falling back to StartingBase.
         /// </summary>
-        public void BroadcastEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1, byte[] rewardBlob = null)
+        public void BroadcastEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1, byte[] rewardBlob = null, int siteId = -1)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
-                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob)));
+                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
         }
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────
