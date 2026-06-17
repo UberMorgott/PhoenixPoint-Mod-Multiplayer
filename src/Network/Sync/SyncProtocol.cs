@@ -172,24 +172,28 @@ namespace Multipleer.Network.Sync
         }
 
         // ─── Geoscape event display (separate from channels) ───────────────
-        // EventRaised: [eventId:string][siteId:i32] — host tells clients to SHOW a dialog. siteId is
-        // GeoSite.SiteId (-1 = none → client falls back to StartingBase context).
+        // EventRaised: [eventId:string][siteId:i32][vehicleId:i32] — host tells clients to SHOW a dialog.
+        // siteId is GeoSite.SiteId (-1 = none → client falls back to StartingBase context); vehicleId is
+        // GeoVehicle.VehicleID (-1 = none → client resolves a vehicle at the site, else null context).
+        // The trailing vehicleId is OPTIONAL on the wire: an older 2-field payload decodes with -1, so the
+        // decoder never throws on a short buffer (forward/backward compatible).
         // EventDismiss: [eventId:string] — host tells clients to CLOSE their open dialog.
 
-        public static byte[] EncodeEventRaised(string eventId, int siteId)
+        public static byte[] EncodeEventRaised(string eventId, int siteId, int vehicleId = -1)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
                 w.Write(eventId ?? "");
                 w.Write(siteId);
+                w.Write(vehicleId);
                 return ms.ToArray();
             }
         }
 
-        public static bool TryDecodeEventRaised(byte[] data, out string eventId, out int siteId)
+        public static bool TryDecodeEventRaised(byte[] data, out string eventId, out int siteId, out int vehicleId)
         {
-            eventId = null; siteId = -1;
+            eventId = null; siteId = -1; vehicleId = -1;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -197,6 +201,8 @@ namespace Multipleer.Network.Sync
                 {
                     eventId = r.ReadString();
                     siteId = r.ReadInt32();
+                    // Optional trailing field: absent in a legacy 2-field payload → leave vehicleId = -1.
+                    if (ms.Length - ms.Position >= sizeof(int)) vehicleId = r.ReadInt32();
                     return true;
                 }
             }

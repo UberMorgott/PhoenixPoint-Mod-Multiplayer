@@ -268,12 +268,12 @@ namespace Multipleer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var eventId, out var siteId)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var eventId, out var siteId, out var vehicleId)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
                 var rt = GeoRuntime.Instance;
-                var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId);
+                var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId);
                 if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
@@ -289,11 +289,11 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>Host: broadcast a show/dismiss event-dialog packet to all peers.</summary>
-        public void BroadcastEventRaised(string eventId, int siteId)
+        public void BroadcastEventRaised(string eventId, int siteId, int vehicleId)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(eventId, siteId)));
+                SyncProtocol.EncodeEventRaised(eventId, siteId, vehicleId)));
         }
 
         public void BroadcastEventDismiss(string eventId)

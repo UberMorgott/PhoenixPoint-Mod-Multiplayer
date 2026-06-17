@@ -78,7 +78,11 @@ namespace Multipleer.Harmony.Sync
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
                 int siteId = EventReflection.GetSiteId(geoEvent);
-                engine.Sync?.BroadcastEventRaised(eventId, siteId);
+                // Carry the visiting vehicle id so the client rebuilds the SAME 3-arg context. Without it the
+                // client's context has Vehicle == null and an [AircraftName]-token description NREs inside the
+                // native UIModuleSiteEncounters render → prefab-placeholder text + raw sample choice buttons.
+                int vehicleId = EventReflection.GetVehicleId(geoEvent);
+                engine.Sync?.BroadcastEventRaised(eventId, siteId, vehicleId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }

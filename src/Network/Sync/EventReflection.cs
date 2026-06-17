@@ -60,9 +60,16 @@ namespace Multipleer.Network.Sync
         private static PropertyInfo _startingBaseProp; // GeoPhoenixFaction.StartingBase
         private static ConstructorInfo _eventCtor;     // GeoscapeEvent(GeoscapeEventData, GeoscapeEventContext)
         private static ConstructorInfo _contextCtor;   // GeoscapeEventContext(GeoSite, GeoFaction)
+        private static ConstructorInfo _contextCtor3;  // GeoscapeEventContext(GeoSite, GeoFaction, GeoVehicle)
         private static FieldInfo _mapField;            // GeoLevelController.Map
         private static PropertyInfo _allSitesProp;     // GeoMap.AllSites
         private static FieldInfo _siteIdField;         // GeoSite.SiteId
+
+        // Vehicle context (the [AircraftName] token derefs Context.Vehicle.Name → NRE when Vehicle == null).
+        private static Type _geoVehicleType;           // GeoVehicle
+        private static FieldInfo _vehicleIdField;      // GeoVehicle.VehicleID (public int, serialized; -1 = none)
+        private static PropertyInfo _mapVehiclesProp;  // GeoMap.Vehicles (IList<GeoVehicle>)
+        private static PropertyInfo _siteVehiclesProp; // GeoSite.Vehicles (IEnumerable<GeoVehicle> at this site)
 
         // Synthetic-record support (client INFO local-dismiss fix). The client's reconstructed event has
         // Record == null; UIStateGeoscapeEvent.ExitState (UIStateGeoscapeEvent.cs:61) reads
@@ -110,6 +117,21 @@ namespace Multipleer.Network.Sync
             var geoMapType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoMap");
             if (geoMapType != null) _allSitesProp = AccessTools.Property(geoMapType, "AllSites");
             _siteIdField = AccessTools.Field(_geoSiteType, "SiteId");
+
+            // Vehicle context: the host raises a site-visited event with the 3-arg ctor
+            // GeoscapeEventContext(GeoSite, GeoFaction, GeoVehicle) (GeoscapeEventSystem.Faction_VehicleVisitedSite:417,
+            // GeoscapeEventContext.cs:146). Clients must rebuild the same 3-arg context so the [AircraftName] token
+            // (Context.Vehicle.Name, GeoscapeEventContext.cs:32) doesn't NRE inside the native render. Resolve the
+            // GeoVehicle by GeoVehicle.VehicleID (public int :51, serialized) via GeoMap.Vehicles (IList :257) or
+            // GeoSite.Vehicles (vehicles currently at the site, :239).
+            _geoVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicle");
+            if (_geoVehicleType != null)
+            {
+                _vehicleIdField = AccessTools.Field(_geoVehicleType, "VehicleID");
+                _contextCtor3 = AccessTools.Constructor(_contextType, new[] { _geoSiteType, _geoFactionType, _geoVehicleType });
+                _siteVehiclesProp = AccessTools.Property(_geoSiteType, "Vehicles");
+                if (geoMapType != null) _mapVehiclesProp = AccessTools.Property(geoMapType, "Vehicles");
+            }
 
             // Synthetic-record (client INFO local-dismiss): GeoscapeEvent.Record { get; set; } (GeoscapeEvent.cs:42)
             // backed by GeoscapeEventRecord._state (GeoscapeEventRecord.cs:20). We never invoke its ctor (needs a
@@ -301,11 +323,38 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// Host: read <c>GeoscapeEvent.Context.Vehicle.VehicleID</c> (GeoVehicle.VehicleID, int, -1 = none) off
+        /// the live raised event so clients can rebuild the SAME 3-arg context. A site-visited event carries the
+        /// visiting vehicle (GeoscapeEventSystem.cs:417); without it the client's [AircraftName] token NREs.
+        /// Returns -1 on any failure / no vehicle (most event types).
+        /// </summary>
+        public static int GetVehicleId(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return -1;
+            try
+            {
+                Ensure();
+                var ctxField = AccessTools.Field(geoscapeEvent.GetType(), "Context"); // public readonly GeoscapeEventContext (:21)
+                var ctx = ctxField?.GetValue(geoscapeEvent);
+                if (ctx == null) return -1;
+                var vehField = AccessTools.Field(ctx.GetType(), "Vehicle"); // public GeoVehicle Vehicle (:53)
+                var vehicle = vehField?.GetValue(ctx);
+                if (vehicle == null || _vehicleIdField == null) return -1;
+                return (int)(_vehicleIdField.GetValue(vehicle) ?? -1);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetVehicleId failed: " + ex.Message); return -1; }
+        }
+
+        /// <summary>
         /// Client: reconstruct a <c>GeoscapeEvent</c> from its def for DISPLAY (no choice applied).
         /// Context site = the GeoSite whose SiteId matches <paramref name="siteId"/>, else StartingBase.
+        /// When a vehicle resolves (broadcast <paramref name="vehicleId"/> → a vehicle at the site → null) the
+        /// 3-arg <c>GeoscapeEventContext(site, faction, vehicle)</c> ctor is used so the [AircraftName] token
+        /// (and any other Vehicle deref) has a real vehicle and the native render fills real text + choices
+        /// instead of throwing into the prefab-placeholder state. Falls back to the 2-arg ctor otherwise.
         /// Returns null on any failure (caller best-effort no-ops).
         /// </summary>
-        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId)
+        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId, int vehicleId = -1)
         {
             try
             {
@@ -319,9 +368,19 @@ namespace Multipleer.Network.Sync
                 if (eventData == null) return null;
 
                 object site = ResolveSiteById(rt, siteId) ?? GetStartingBase(fac);
-                if (site == null || _contextCtor == null || _eventCtor == null) return null;
+                if (site == null || _eventCtor == null) return null;
 
-                object context = _contextCtor.Invoke(new[] { site, fac });
+                // Vehicle fallback chain: broadcast id → a vehicle currently at the resolved site → null.
+                object vehicle = ResolveVehicleById(rt, vehicleId) ?? ResolveVehicleAtSite(site);
+
+                object context;
+                if (vehicle != null && _contextCtor3 != null)
+                    context = _contextCtor3.Invoke(new[] { site, fac, vehicle });
+                else if (_contextCtor != null)
+                    context = _contextCtor.Invoke(new[] { site, fac });
+                else
+                    return null;
+
                 object geoEvent = _eventCtor.Invoke(new[] { eventData, context });
                 // Client-only display reconstruction: stamp a Completed record so a local dismiss does NOT
                 // hit UIStateGeoscapeEvent.ExitState's null-Record NRE / force-complete (INFO local-hide fix).
@@ -329,6 +388,44 @@ namespace Multipleer.Network.Sync
                 return geoEvent;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>Client: GeoVehicle whose VehicleID matches <paramref name="vehicleId"/> via GeoMap.Vehicles, else null.</summary>
+        private static object ResolveVehicleById(GeoRuntime rt, int vehicleId)
+        {
+            try
+            {
+                if (vehicleId < 0 || _mapField == null || _mapVehiclesProp == null || _vehicleIdField == null) return null;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var map = _mapField.GetValue(geo);
+                if (map == null) return null;
+                var vehicles = _mapVehiclesProp.GetValue(map, null) as IEnumerable;
+                if (vehicles == null) return null;
+                foreach (var v in vehicles)
+                {
+                    if (v == null) continue;
+                    var id = _vehicleIdField.GetValue(v);
+                    if (id is int i && i == vehicleId) return v;
+                }
+                return null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Client fallback: the first GeoVehicle currently at <paramref name="site"/> (GeoSite.Vehicles), else null.</summary>
+        private static object ResolveVehicleAtSite(object site)
+        {
+            try
+            {
+                if (site == null || _siteVehiclesProp == null) return null;
+                var vehicles = _siteVehiclesProp.GetValue(site, null) as IEnumerable;
+                if (vehicles == null) return null;
+                foreach (var v in vehicles)
+                    if (v != null) return v;
+                return null;
+            }
+            catch { return null; }
         }
 
         private static object ResolveSiteById(GeoRuntime rt, int siteId)
