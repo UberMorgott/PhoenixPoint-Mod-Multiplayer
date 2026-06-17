@@ -67,6 +67,11 @@ namespace Multipleer.Network
         private byte[] _rxBuffer;
         private long _rxReceived;
         private int _lastReportedDownloadPct = -1;
+        // The id of the transfer the client has already FINISHED (SaveDone processed). A late chunk of
+        // that transfer arriving AFTER a new F2 transfer began must be ignored — otherwise it would
+        // re-enter the first-chunk branch (its id != the new _rxTransferId) and reset _begun/buffers
+        // mid-new-download. Set on completion in OnSaveDone; checked at the top of OnSaveChunk.
+        private Guid _completedTransferId;
         // Coverage tracking so reassembly is idempotent to duplicate / out-of-order chunks.
         // StunTransport duplicates every reliable packet (StunTransport.cs:130), so a chunk can
         // arrive more than once; copying into _rxBuffer is already idempotent, but a running byte
@@ -226,7 +231,58 @@ namespace Multipleer.Network
                 return false;
             }
 
-            Debug.Log($"[Multipleer] HostStartSession: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
+            return LaunchTransfer(chosen);
+        }
+
+        /// <summary>
+        /// F2 mid-session host load: re-run the EXACT same chunked transfer + 2-phase barrier as the
+        /// lobby start, but gated by the IN-GAME guard instead of the lobby ready-gate (mid-session
+        /// there is no lobby "Ready" state — clients follow the host-authoritative load unconditionally).
+        /// The guard (host / active session / already-started / >=1 client / no transfer in flight) is
+        /// re-validated here as defense-in-depth; the transfer machinery itself is reused VERBATIM.
+        /// </summary>
+        public bool HostStartSessionInGame(SavegameMetaData chosen)
+        {
+            if (!_engine.IsHost)
+            {
+                Debug.LogWarning("[Multipleer] HostStartSessionInGame called on a non-host peer; ignored.");
+                return false;
+            }
+
+            if (chosen == null)
+            {
+                Debug.LogError("[Multipleer] HostStartSessionInGame called with no chosen save; aborting.");
+                return false;
+            }
+
+            bool gateOpen = SessionLifecycle.HostLoadGuard(
+                isHost: _engine.IsHost,
+                isActiveSession: _engine.IsActiveSession,
+                sessionStarted: SessionStarted,
+                connectedClientCount: _engine.Session?.ClientCount ?? 0,
+                transferActive: TransferActive);
+            if (!gateOpen)
+            {
+                Debug.LogWarning("[Multipleer] HostStartSessionInGame blocked: in-game load guard closed " +
+                    $"(clients={_engine.Session?.ClientCount ?? 0}, started={SessionStarted}, " +
+                    $"transferActive={TransferActive}); ignoring load.");
+                return false;
+            }
+
+            // A mid-session re-transfer reuses the SAME barrier/reveal state machine — clear the prior
+            // run's terminal flags so the second transfer's OpenBarrier/Begin/reveal run clean.
+            _begun = false;
+            _loadCompleteSent = false;
+            _revealAllSent = false;
+            return LaunchTransfer(chosen);
+        }
+
+        // Shared launch tail for both the lobby start and the mid-session load: warn on the best-effort
+        // Stun path, resolve game + timing, then kick the serialize+send+barrier coroutine. Callers own
+        // the guard (lobby ready-gate vs in-game guard); this is guard-free.
+        private bool LaunchTransfer(SavegameMetaData chosen)
+        {
+            Debug.Log($"[Multipleer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
 
             // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
             // DirectIP (length-prefixed TCP). The Stun/WAN path sends raw UDP with no sequencing/ACK/
@@ -244,8 +300,6 @@ namespace Multipleer.Network
             PhoenixSaveManager saveManager;
             if (!TryGetGame(out game, out saveManager)) return false;
 
-            // The chosen save is supplied by the lobby save-picker (PhoenixSaveManager.GetSaves()),
-            // selected AFTER the lobby Play press — never auto-selected here (lobby-first invariant).
             var timing = GetTiming();
             if (timing == null) return false;
 
@@ -358,6 +412,16 @@ namespace Multipleer.Network
             if (_engine.IsHost) return;
             var chunk = MessageSerializer.DeserializeSaveChunk(msg.Payload);
 
+            // Stale-chunk guard (F2): a late chunk of a transfer we ALREADY finished must never
+            // re-start reassembly. Without this, an old-transfer chunk arriving after a new F2 transfer
+            // began (its id != the active _rxTransferId) would re-enter the first-chunk branch below and
+            // wipe _begun/buffers mid-new-download. _completedTransferId is the last finished id.
+            if (_completedTransferId != Guid.Empty && chunk.TransferId == _completedTransferId)
+            {
+                Debug.Log($"[Multipleer] OnSaveChunk: ignoring stale chunk from completed transfer {chunk.TransferId}.");
+                return;
+            }
+
             // First chunk of a transfer (re)initialises the reassembly buffer.
             if (_rxBuffer == null || _rxTransferId != chunk.TransferId)
             {
@@ -366,6 +430,16 @@ namespace Multipleer.Network
                 _rxBuffer = new byte[chunk.TotalBytes];
                 _rxReceived = 0;
                 _lastReportedDownloadPct = -1;
+                // F2 mid-session reload: a NEW transfer id while we are already in-game means the host
+                // is loading a different save and pulling us into it. Clear the prior run's terminal
+                // barrier/reveal flags so EnterLevel (gated by _begun) and the reveal run again for the
+                // new save — otherwise the client would download + prepare it but never enter the level.
+                _begun = false;
+                _loadCompleteSent = false;
+                _reachedPlaying = false;
+                _revealed = false;
+                _revealAllSent = false;
+                _pendingResult = null;
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
@@ -435,6 +509,9 @@ namespace Multipleer.Network
 
             var blob = _rxBuffer;
             var loadExt = string.IsNullOrEmpty(ext) ? SerializationComponent.DefaultExtension : ext;
+            // Mark this transfer FINISHED so any late chunk of it (arriving after a subsequent F2
+            // transfer starts) is rejected by the stale-chunk guard in OnSaveChunk.
+            _completedTransferId = transferId;
             ResetRx();
 
             var timing = GetTiming();

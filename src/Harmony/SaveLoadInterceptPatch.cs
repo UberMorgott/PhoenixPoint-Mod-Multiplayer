@@ -49,15 +49,37 @@ namespace Multipleer.Harmony
         private static bool _armed;
         private static Action<SavegameMetaData> _onPicked;
         private static SavegameMetaData _pickedMeta;
+        // F2: deliver the picked meta to the callback DIRECTLY inside the OnLoadGamePressed prefix,
+        // instead of waiting for the UIStateHomeLoadGame.ExitState postfix. That postfix is HOME-screen
+        // only and never fires from the IN-GAME pause-menu Load submenu (UIModulePauseScreen.
+        // LoadGameModule), so a mid-session host load would otherwise capture the meta but never run.
+        // The lobby/home flow leaves this FALSE → delivery stays on the proven ExitState path (which
+        // also re-shows the lobby); the in-game F2 path arms with this TRUE for prefix delivery.
+        private static bool _deliverInPrefix;
 
         public static bool IsArmed => _armed;
 
-        /// <summary>Arm co-op pick mode: the next native save load is captured, not executed.</summary>
+        /// <summary>Arm co-op pick mode: the next native save load is captured, not executed.
+        /// Delivery runs on the home-screen UIStateHomeLoadGame.ExitState postfix (lobby flow).</summary>
         public static void Arm(Action<SavegameMetaData> onPicked)
         {
             _armed = true;
             _pickedMeta = null;
             _onPicked = onPicked;
+            _deliverInPrefix = false;
+        }
+
+        /// <summary>
+        /// F2: arm co-op pick mode for the IN-GAME pause-menu Load submenu. Identical capture, but the
+        /// picked meta is delivered to <paramref name="onPicked"/> straight from the OnLoadGamePressed
+        /// prefix (the home-only ExitState postfix never fires in-game). Self-disarms on delivery.
+        /// </summary>
+        public static void ArmInPrefix(Action<SavegameMetaData> onPicked)
+        {
+            _armed = true;
+            _pickedMeta = null;
+            _onPicked = onPicked;
+            _deliverInPrefix = true;
         }
 
         /// <summary>Disarm and forget any captured meta + callback.</summary>
@@ -66,6 +88,7 @@ namespace Multipleer.Harmony
             _armed = false;
             _pickedMeta = null;
             _onPicked = null;
+            _deliverInPrefix = false;
         }
 
         /// <summary>
@@ -146,11 +169,23 @@ namespace Multipleer.Harmony
                 _pickedMeta = ppSaveGameChosen;
 
                 // Close the native Load screen the same way its own close button does
-                // (UIModuleSaveGame.CloseModule:145 → Close == SwitchToPreviousState). That triggers
-                // UIStateHomeLoadGame.ExitState, where our Postfix re-shows the lobby + delivers the
-                // captured meta. Use reflection: CloseModule is private.
+                // (UIModuleSaveGame.CloseModule:145 → Close == SwitchToPreviousState). On the home flow
+                // that triggers UIStateHomeLoadGame.ExitState, where our Postfix re-shows the lobby +
+                // delivers the captured meta. In-game it invokes the pause screen's own OnExitEvent
+                // (hides the Load submenu, re-shows the pause panel). Use reflection: CloseModule is private.
                 var close = AccessTools.Method(typeof(UIModuleSaveGame), "CloseModule");
                 close?.Invoke(__instance, null);
+
+                // F2 (in-game): the home-only ExitState postfix will NOT fire here, so deliver the
+                // captured meta to the armed callback NOW and self-disarm. The lobby/home flow leaves
+                // _deliverInPrefix=false → delivery stays on the ExitState postfix (unchanged).
+                if (_deliverInPrefix)
+                {
+                    var meta = _pickedMeta;
+                    var cb = _onPicked;
+                    Disarm();
+                    if (meta != null) cb?.Invoke(meta);
+                }
             }
             catch (Exception e)
             {
@@ -158,6 +193,25 @@ namespace Multipleer.Harmony
             }
 
             return false; // skip SaveManager.LoadGame — we only wanted the metadata
+        }
+
+        // ── Postfix: UIModuleSaveGame closed → cancel-disarm for the IN-GAME (prefix) arm ───────
+        // F2 fix: if the host opens the pause-menu Load submenu and CANCELS without picking,
+        // OnLoadGamePressed never fires, so an in-game (prefix-delivery) arm would otherwise leak and
+        // intercept the NEXT unrelated save-slot click. CloseModule runs on every close — including
+        // cancel — so disarm here when armed-in-prefix AND no meta was captured. On the PICK path the
+        // prefix sets _pickedMeta BEFORE it calls CloseModule, so _pickedMeta != null here → we do NOT
+        // disarm (the prefix's own delivery block disarms after invoking the callback). The home/lobby
+        // arm (_deliverInPrefix == false) is untouched — its delivery + disarm stay on ExitState.
+        [HarmonyPatch(typeof(UIModuleSaveGame), "CloseModule")]
+        [HarmonyPostfix]
+        public static void CloseModule_Postfix()
+        {
+            if (_armed && _deliverInPrefix && _pickedMeta == null)
+            {
+                Disarm();
+                Debug.Log("[Multipleer] F2: in-game load submenu cancelled — intercept disarmed.");
+            }
         }
 
         // ── Postfix: native Load screen closed (pick OR cancel) → back to the lobby ─────────────
@@ -182,6 +236,45 @@ namespace Multipleer.Harmony
             catch (Exception e)
             {
                 Debug.LogError("[Multipleer] LoadScreen exit handling failed: " + e.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// F2 — host loads ANY save MID-SESSION (tactical OR geoscape) → all clients reload into it.
+    ///
+    /// The host opens the native in-game pause menu and clicks LOAD themselves. That routes through
+    /// <c>UIModulePauseScreen.OnLoadPressed()</c> → <c>LoadGameModule.InitLoadMode(...)</c>
+    /// (UIModulePauseScreen.cs:158-164). We postfix OnLoadPressed and — only when the live engine is
+    /// the host in an active, already-started session with ≥1 client and no transfer in flight — ARM
+    /// the existing save-pick intercept in PREFIX-delivery mode. The host's next save-slot click is
+    /// then captured by <see cref="SaveLoadInterceptPatch.OnLoadGamePressed_Prefix"/> (skips the local
+    /// SaveManager.LoadGame) and the picked meta is routed to <see cref="MultiplayerUI.OnInGameLoadPicked"/>,
+    /// which re-runs the proven <c>SaveTransferCoordinator.HostStartSession(meta)</c> chunked transfer +
+    /// 2-phase barrier so every client reloads into the chosen save.
+    ///
+    /// We do NOT call OpenNativeLoadScreen (home-only) — the host opens the pause Load screen natively;
+    /// we only intercept the pick. If the guard fails (not host, lobby, alone, or a transfer is already
+    /// running) we DISARM, so the host's load behaves as a normal single-player load (no interception).
+    /// </summary>
+    [HarmonyPatch(typeof(UIModulePauseScreen), "OnLoadPressed")]
+    public static class InGameLoadArmPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            try
+            {
+                if (MultiplayerUI.Instance != null && MultiplayerUI.Instance.TryArmInGameHostLoad())
+                    return;
+
+                // Guard closed (not host / lobby / alone / transfer running): make sure no stale arm
+                // leaks into this single-player-style load.
+                SaveLoadInterceptPatch.Disarm();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] InGameLoadArm postfix failed: " + e.Message);
             }
         }
     }

@@ -115,8 +115,25 @@ namespace Multipleer.Network
                 foreach (var clientId in toRemove)
                 {
                     Debug.LogWarning($"[Multipleer] Client {clientId} timed out");
+                    // F1: a heartbeat timeout removes the client directly (it never reaches the
+                    // transport OnPeerDisconnected path), so post the "-- X left --" line HERE to keep
+                    // the drop notice uniform with crash/graceful-leave. Capture the name before purge.
+                    var timedOutNick = TryGetClientName(clientId, out var n) ? n : SessionLifecycle.UnknownPlayer;
                     RemoveClient(clientId);
+                    SystemChat(SessionLifecycle.FormatPeerEvent(connected: false, timedOutNick));
                 }
+            }
+            // F3 (client side): host HEARTBEAT TIMEOUT. A wedged/half-open host socket may never send
+            // FIN/RST, so OnPeerDisconnected (trigger b) never fires and the client would be stranded.
+            // If we have not heard from the host within the timeout, route into the SAME host-leave
+            // handler (its one-shot latch dedups against a graceful HostDisconnected packet / real drop,
+            // and is also a no-op after the handler already ran). Reuses the existing heartbeat constants.
+            else if (HostPeerId.HasValue && !HostLeaveHandler.AlreadyHandled
+                     && _lastHeartbeat.TryGetValue(HostPeerId.Value, out var hostLast)
+                     && now - hostLast > HeartbeatTimeoutMs)
+            {
+                Debug.LogWarning("[Multipleer] Host heartbeat timed out — treating as host-leave.");
+                HostLeaveHandler.TriggerHostLeft();
             }
         }
 
@@ -150,6 +167,35 @@ namespace Multipleer.Network
             // Roster changed → host re-broadcasts the authoritative peer list.
             if (existed && _engine.IsHost)
                 BroadcastPeerList();
+        }
+
+        /// <summary>
+        /// Resolve a connected peer's display name by its transport id. Used by the disconnect
+        /// notifier (F1) to capture the real player name BEFORE <see cref="RemoveClient"/> purges the
+        /// <c>_clients</c> map, so the toast/chat shows the name and not a raw id. Returns false (and
+        /// a null name) for an unknown id — e.g. a transport drop arriving AFTER a graceful leave
+        /// already removed the peer, which lets the caller suppress a duplicate notice.
+        /// </summary>
+        public bool TryGetClientName(ulong steamId, out string name)
+        {
+            if (_clients.TryGetValue(steamId, out var client) && !string.IsNullOrEmpty(client.PlayerName))
+            {
+                name = client.PlayerName;
+                return true;
+            }
+            name = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Host-only (F3 graceful path): tell every client the session is ending so they drop to the
+        /// main menu, BEFORE the host tears the transport down. Idempotent at the call site (the
+        /// teardown chokepoint fires once); a no-op on a client or when no transport is up.
+        /// </summary>
+        public void SendHostDisconnected()
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.HostDisconnected));
         }
 
         public IEnumerable<ulong> GetConnectedClients()

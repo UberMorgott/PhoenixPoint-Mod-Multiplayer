@@ -654,6 +654,63 @@ namespace Multipleer.UI
             if (chosen != null) onPicked?.Invoke(chosen);
         }
 
+        // ─── F2: host loads ANY save mid-session (tactical OR geoscape) ─────
+        // Called from InGameLoadArmPatch (postfix on UIModulePauseScreen.OnLoadPressed). Arms the save
+        // intercept in PREFIX-delivery mode IFF the live engine is the host in an active, already-started
+        // session (in-game, not lobby) with >=1 connected client and NO transfer already in flight.
+        // Returns true iff armed. On false the caller disarms so the host's load runs as normal.
+        public bool TryArmInGameHostLoad()
+        {
+            var engine = NetworkEngine.Instance;
+            var coord = engine?.SaveTransfer;
+            bool ok = SessionLifecycle.HostLoadGuard(
+                isHost: engine?.IsHost ?? false,
+                isActiveSession: engine?.IsActiveSession ?? false,
+                sessionStarted: coord?.SessionStarted ?? false,
+                connectedClientCount: engine?.Session?.ClientCount ?? 0,
+                transferActive: coord?.TransferActive ?? false);
+            if (!ok) return false;
+
+            SaveLoadInterceptPatch.ArmInPrefix(OnInGameLoadPicked);
+            Debug.Log("[Multipleer] F2: armed in-game host load intercept (pause-menu Load).");
+            return true;
+        }
+
+        // The picked save from the in-game pause-menu Load (delivered straight from the intercept
+        // prefix). Re-run the EXISTING chunked transfer + 2-phase barrier so every client reloads into
+        // it. The host is mid-game (tactical or geoscape); SaveTransferCoordinator's ClientLoadCrt /
+        // PrepareEntryFromBlobCrt tears down the current level via the native FinishLevel path on BEGIN,
+        // so this is a host-authoritative InGame->InGame transition — clients follow unconditionally.
+        public void OnInGameLoadPicked(SavegameMetaData chosen)
+        {
+            var engine = NetworkEngine.Instance;
+            if (chosen == null || engine == null || !engine.IsHost) return;
+
+            // Re-validate the guard at delivery time (defense-in-depth: state may have changed between
+            // arming on OnLoadPressed and the host actually clicking a slot).
+            var coord = engine.SaveTransfer;
+            bool ok = SessionLifecycle.HostLoadGuard(
+                isHost: engine.IsHost,
+                isActiveSession: engine.IsActiveSession,
+                sessionStarted: coord?.SessionStarted ?? false,
+                connectedClientCount: engine.Session?.ClientCount ?? 0,
+                transferActive: coord?.TransferActive ?? false);
+            if (!ok)
+            {
+                Debug.LogWarning("[Multipleer] F2: in-game load guard closed at delivery; ignoring pick.");
+                return;
+            }
+
+            // Show the co-op load overlay (same as the lobby Play start) so the host sees the transfer.
+            ShowLoadOverlay();
+            bool started = coord.HostStartSessionInGame(chosen);
+            if (!started)
+            {
+                HideLoadOverlay();
+                Debug.LogWarning("[Multipleer] F2: HostStartSessionInGame did not start (see prior log).");
+            }
+        }
+
         // The save the host chose in the rail (consumed by PLAY); null until a pick is made.
         public SavegameMetaData PendingChosenSave => _pendingChosenSave;
         private SavegameMetaData _pendingChosenSave;

@@ -41,6 +41,11 @@ namespace Multipleer.Network
         public event Action OnHostStarted;
         public event Action<ulong> OnClientConnected;
         public event Action<ulong> OnClientDisconnected;
+        // F1: same drop event, but carrying the resolved player NAME captured BEFORE RemoveClient
+        // purges the roster, plus whether the peer was still known (false for a transport drop that
+        // arrives after a graceful leave already removed it → subscriber suppresses a duplicate
+        // notice). Additive alongside OnClientDisconnected so existing id-only subscribers are intact.
+        public event Action<ulong, string, bool> OnClientDisconnectedNamed;
         public event Action<string> OnConnectionFailed;
         public event Action<ulong, TacticalActionMessage> OnTacticalActionRequest;
         public event Action<TacticalActionMessage> OnHostTacticalActionResult;
@@ -71,6 +76,11 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            // F1: wire the disconnect/connect notifier once per (re)init. Re-attach is safe — it
+            // detaches any prior engine first, so handlers never stack across host/join/leave cycles.
+            SessionNotifier.AttachTo(this);
+            // F3: wire the host-leave handler (client drops to menu on host quit/crash); re-arms its latch.
+            HostLeaveHandler.AttachTo(this);
             Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
@@ -101,6 +111,10 @@ namespace Multipleer.Network
 
             Transport.Initialize();
             IsActive = true;
+            // F1: wire the disconnect/connect notifier once per (re)init (host composite-transport path).
+            SessionNotifier.AttachTo(this);
+            // F3: wire the host-leave handler (inert on the host; arms for the client crash/quit path).
+            HostLeaveHandler.AttachTo(this);
             Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
@@ -112,6 +126,9 @@ namespace Multipleer.Network
 
             // Suppress the transport-failed MessageBox: this teardown is user-initiated.
             _intentionalDisconnect = true;
+            // F1/F3: drop the lifecycle subscriptions before the engine objects go away.
+            SessionNotifier.Detach();
+            HostLeaveHandler.Detach();
             Transport?.Shutdown();
             Transport = null;
             Session = null;
@@ -148,6 +165,8 @@ namespace Multipleer.Network
             // already detached). Mirrors Disconnect()/Shutdown().
             WalletWatcher.Detach();
             Sync?.DetachAllChannels();
+            SessionNotifier.Detach();  // F1: drop connect/disconnect notifier subscription on full teardown.
+            HostLeaveHandler.Detach(); // F3: drop host-leave subscriptions on full teardown.
 
             // Tear down transport + all per-session objects (idempotent: each null-guards).
             Transport?.Shutdown();
@@ -366,8 +385,17 @@ namespace Multipleer.Network
 
         private void OnPeerDisconnected(ulong peerId, string endpoint)
         {
+            // Capture the player NAME (+ whether the peer is still known) BEFORE RemoveClient purges
+            // the roster, so F1 can show the real name on a crash/timeout drop. A transport drop that
+            // arrives AFTER a graceful leave already removed the peer reports wasKnown=false, letting
+            // SessionNotifier suppress a duplicate "-- X left --" (HandleLeave posted that one).
+            string droppedName = null;
+            var wasKnown = Session != null && Session.TryGetClientName(peerId, out droppedName);
+            if (!wasKnown) droppedName = null;
+
             Session.RemoveClient(peerId);
             OnClientDisconnected?.Invoke(peerId);
+            OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown);
 
             // Client lost its host peer on an IN-PLACE transport drop (no Shutdown→Initialize, the manager
             // persists). Clear stale time-sync derive state so the next OnPeerConnected re-seeds the offset
@@ -575,12 +603,6 @@ namespace Multipleer.Network
                 case PacketType.EventDismiss:
                     // Host->all answer applied. Clients close their open geoscape-event dialog.
                     Sync?.OnEventDismiss(msg.Payload);
-                    break;
-
-                case PacketType.ChoiceClaim:
-                    // Client->host geoscape event choice claim. Host arbitrates (first claim per occId wins),
-                    // runs the authoritative CompleteEvent + broadcasts the outcome; later claims are ignored.
-                    Sync?.OnChoiceClaim(msg.SenderSteamId, msg.Payload);
                     break;
 
                 case PacketType.SyncEnvelope:

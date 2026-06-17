@@ -227,7 +227,15 @@ namespace Multipleer.Harmony
         {
             try
             {
-                Multipleer.Network.NetworkEngine.Instance?.TearDown();
+                // F3 (graceful host leave): if WE are the host returning to the menu (pause-exit,
+                // quit-to-menu, game-over), tell every client the session is ending BEFORE we tear the
+                // transport down, so each client drops to its own Main Menu (HostLeaveHandler). Sent
+                // here — the single native return-to-menu chokepoint — so EVERY host exit path covers it.
+                var engine = Multipleer.Network.NetworkEngine.Instance;
+                if (engine != null && engine.IsHost && engine.IsActive)
+                    engine.Session?.SendHostDisconnected();
+
+                engine?.TearDown();
             }
             catch (Exception e)
             {
