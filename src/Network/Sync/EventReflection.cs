@@ -64,6 +64,22 @@ namespace Multipleer.Network.Sync
         private static PropertyInfo _allSitesProp;     // GeoMap.AllSites
         private static FieldInfo _siteIdField;         // GeoSite.SiteId
 
+        // Synthetic-record support (client INFO local-dismiss fix). The client's reconstructed event has
+        // Record == null; UIStateGeoscapeEvent.ExitState (UIStateGeoscapeEvent.cs:61) reads
+        // base.Event.Record.State and force-CompleteEvents when State==Triggered → on the client that both
+        // NREs (null Record) and would apply a spurious local outcome. We attach a record already in the
+        // Completed state so the guard is false (no force-complete, no NRE) and the dialog just closes.
+        private static Type _recordType;               // GeoscapeEventRecord
+        private static FieldInfo _recordStateField;    // GeoscapeEventRecord._state (GeoscapeEventRecordState)
+        private static PropertyInfo _recordProp;        // GeoscapeEvent.Record { get; set; }
+
+        /// <summary>
+        /// GeoscapeEventRecordState.Completed (GeoscapeEventRecordState.cs:8). Verified int value 3. Used to
+        /// stamp the synthetic record so <c>UIStateGeoscapeEvent.ExitState</c>'s
+        /// <c>Record.State == Triggered</c> guard is false on a client local-dismiss.
+        /// </summary>
+        public const int RecordStateCompleted = 3;
+
         private static void Ensure()
         {
             if (_ready) return;
@@ -95,6 +111,13 @@ namespace Multipleer.Network.Sync
             if (geoMapType != null) _allSitesProp = AccessTools.Property(geoMapType, "AllSites");
             _siteIdField = AccessTools.Field(_geoSiteType, "SiteId");
 
+            // Synthetic-record (client INFO local-dismiss): GeoscapeEvent.Record { get; set; } (GeoscapeEvent.cs:42)
+            // backed by GeoscapeEventRecord._state (GeoscapeEventRecord.cs:20). We never invoke its ctor (needs a
+            // live TimeUnit) — an uninitialized instance with _state stamped Completed is all ExitState reads.
+            _recordType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEventRecord");
+            if (_recordType != null) _recordStateField = AccessTools.Field(_recordType, "_state");
+            _recordProp = AccessTools.Property(_eventType, "Record");
+
             _ready = _completeEvent != null && _eventIdField != null && _eventDataProp != null
                      && _choicesField != null;
         }
@@ -107,6 +130,64 @@ namespace Multipleer.Network.Sync
             if (geoscapeEvent == null) return null;
             try { Ensure(); return _eventIdField?.GetValue(geoscapeEvent) as string; }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetEventId failed: " + ex.Message); return null; }
+        }
+
+        // ─── two-class (INFO / CHOICE) dialog classification ──────────────
+
+        /// <summary>
+        /// Pure classifier mirroring the game's own <c>GeoscapeEventData.HasSingleChoice =&gt; Choices.Count &lt;= 1</c>
+        /// (GeoscapeEventData.cs:65): an event with &gt;= 2 choices is a real CHOICE event; &lt;= 1 is INFO.
+        /// </summary>
+        public static bool IsChoiceEvent(int choicesCount) => choicesCount >= 2;
+
+        /// <summary>
+        /// Read <c>GeoscapeEvent.EventData.Choices.Count</c> off a live event. Returns -1 if it can't be read
+        /// (null event / missing data / introspection failure) — callers MUST treat -1 as "ambiguous → lock as
+        /// CHOICE", never as INFO, so a client never locally branches an outcome on an unreadable event.
+        /// </summary>
+        public static int GetChoiceCount(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return -1;
+            try
+            {
+                Ensure();
+                var data = _eventDataProp?.GetValue(geoscapeEvent, null);
+                var choices = _choicesField?.GetValue(data) as IList;
+                return choices?.Count ?? -1;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceCount failed: " + ex.Message); return -1; }
+        }
+
+        /// <summary>
+        /// Client-lock predicate for the open event: true = CHOICE (lock the modal, buttons inert, no local
+        /// close), false = INFO (each player dismisses locally, no outcome). Safe default = locked: an
+        /// unreadable choice count (-1) returns true so the client never locally resolves an ambiguous event.
+        /// </summary>
+        public static bool IsClientChoiceLocked(object geoscapeEvent)
+        {
+            int count = GetChoiceCount(geoscapeEvent);
+            if (count < 0) return true;            // ambiguous → treat as CHOICE (locked)
+            return IsChoiceEvent(count);
+        }
+
+        /// <summary>
+        /// Stamp a synthetic Completed <c>GeoscapeEventRecord</c> onto a (client-reconstructed) event so
+        /// <c>UIStateGeoscapeEvent.ExitState</c>'s <c>Record.State == Triggered</c> force-complete guard is false
+        /// on a local dismiss (no NRE on a null Record, no spurious local outcome). Best-effort no-op on failure.
+        /// </summary>
+        public static void AttachCompletedRecord(object geoscapeEvent)
+        {
+            try
+            {
+                Ensure();
+                if (geoscapeEvent == null || _recordType == null || _recordStateField == null || _recordProp == null) return;
+                if (_recordProp.GetValue(geoscapeEvent, null) != null) return; // already has a record → leave it
+                // Uninitialized instance (skip the TimeUnit-taking ctor) with _state = Completed.
+                object record = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(_recordType);
+                _recordStateField.SetValue(record, RecordStateCompleted);
+                _recordProp.SetValue(geoscapeEvent, record, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.AttachCompletedRecord failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -241,7 +322,11 @@ namespace Multipleer.Network.Sync
                 if (site == null || _contextCtor == null || _eventCtor == null) return null;
 
                 object context = _contextCtor.Invoke(new[] { site, fac });
-                return _eventCtor.Invoke(new[] { eventData, context });
+                object geoEvent = _eventCtor.Invoke(new[] { eventData, context });
+                // Client-only display reconstruction: stamp a Completed record so a local dismiss does NOT
+                // hit UIStateGeoscapeEvent.ExitState's null-Record NRE / force-complete (INFO local-hide fix).
+                AttachCompletedRecord(geoEvent);
+                return geoEvent;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
         }

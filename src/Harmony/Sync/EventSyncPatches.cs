@@ -9,11 +9,17 @@ using UnityEngine;
 namespace Multipleer.Harmony.Sync
 {
     /// <summary>
-    /// Relay interceptor for geoscape event choices:
+    /// Host-side broadcast interceptor for geoscape event choices:
     /// <c>GeoscapeEvent.CompleteEvent(GeoEventChoice choice, GeoFaction faction)</c> (GeoscapeEvent.cs:86).
-    /// The event UI force-pauses the (synced) clock; the host's choice is authoritative. Client picks →
-    /// relay + block local; host pick → broadcast + run. If both pick simultaneously, the later
-    /// host-sequenced answer wins; the earlier UI simply closes on apply.
+    /// The host's choice is authoritative; on a host pick this broadcasts the confirmed answer (Postfix) and
+    /// marks the research channel dirty for an instant reveal.
+    ///
+    /// CLIENT relay is now DEAD/DORMANT: under the two-class dialog model
+    /// (<see cref="EventDialogClientGuard"/>) the client never reaches <c>CompleteEvent</c> — its choice
+    /// buttons are inert for CHOICE events and INFO dismiss is a pure local hide (no outcome), and
+    /// <c>UIModuleSiteEncounters.SelectChoice</c> is short-circuited on the client. The non-host branch below
+    /// therefore never executes in practice; it is kept ONLY as a fail-safe that BLOCKS a local client
+    /// CompleteEvent (returns false) and does NOT relay an answer. The host path is untouched.
     /// </summary>
     [HarmonyPatch]
     public static class CompleteEventPatch
@@ -55,10 +61,11 @@ namespace Multipleer.Harmony.Sync
                 // Could not resolve a real (non-null) choice → do NOT broadcast a bogus decline (-1).
                 // Fail OPEN to local vanilla handling instead of replicating the wrong outcome.
                 if (choiceIndex == EventReflection.ChoiceLookupFailed) return true;
-                var action = new AnswerEventAction(eventId, choiceIndex);
                 // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
-                if (engine.IsHost) { __state = action; return true; }
-                engine.Sync.SendActionRequest(action);
+                if (engine.IsHost) { __state = new AnswerEventAction(eventId, choiceIndex); return true; }
+                // Client: DEAD path under the two-class model — never reached (client choice buttons are inert
+                // / INFO is a pure local hide / SelectChoice is short-circuited). Kept only as a fail-safe:
+                // block any stray local CompleteEvent and do NOT relay an answer (host owns every outcome).
                 return false;
             }
             catch (Exception ex)
