@@ -207,6 +207,19 @@ namespace Multipleer.Network
                 return;
             }
 
+            // Defense-in-depth (Bug B): the lobby start gate must also hold HERE, not only in the
+            // caller — no path may start a session while the host is alone or any client is un-ready.
+            // We re-derive the gate from the authoritative roster (host self-entry excluded).
+            var roster = _engine.Session?.GetLobbyRoster();
+            int clientCount = _engine.Session?.ClientCount ?? 0;
+            bool gateOpen = clientCount >= 1 && AllClientsReadyRoster(roster);
+            if (!gateOpen)
+            {
+                Debug.LogWarning("[Multipleer] HostStartSession blocked: start gate closed " +
+                    $"(clients={clientCount}, allReady={AllClientsReadyRoster(roster)}); ignoring start.");
+                return;
+            }
+
             Debug.Log($"[Multipleer] HostStartSession: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
 
             // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
@@ -232,6 +245,21 @@ namespace Multipleer.Network
 
             _transferId = Guid.NewGuid();
             timing.Start(HostSerializeAndSendCrt(game, chosen));
+        }
+
+        // Start-gate helper mirroring MultiplayerUI.AllConnectedClientsReady: >=1 client AND every
+        // NON-host roster entry ready. Host self-entry (IsHost=true) is ignored (it is the starter).
+        private static bool AllClientsReadyRoster(List<PeerListEntry> roster)
+        {
+            if (roster == null) return false;
+            int clients = 0;
+            foreach (var p in roster)
+            {
+                if (p.IsHost) continue;
+                clients++;
+                if (!p.Ready) return false;
+            }
+            return clients >= 1;
         }
 
         // Coroutine: read the save to bytes, then chunk+send, then prepare host entry + open barrier.

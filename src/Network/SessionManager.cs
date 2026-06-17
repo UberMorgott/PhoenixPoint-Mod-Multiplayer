@@ -312,6 +312,17 @@ namespace Multipleer.Network
             }
         }
 
+        // Host-only: clear every connected client's Ready flag and re-broadcast the authoritative
+        // roster. Called when the host swaps the chosen save (clients readied for a specific session).
+        public void ResetAllClientsReady()
+        {
+            if (!_engine.IsHost) return;
+            _readyClients.Clear();
+            foreach (var c in _clients.Values)
+                c.IsReady = false;
+            BroadcastPeerList();
+        }
+
         public void HandleReadyState(NetworkMessage msg)
         {
             if (msg.Type == PacketType.ClientReady && _engine.IsHost)

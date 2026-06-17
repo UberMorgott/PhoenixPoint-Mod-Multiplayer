@@ -4,6 +4,7 @@ using Base.Serialization;
 using Base.UI.MessageBox;
 using Multipleer.Harmony;
 using Multipleer.Network;
+using Multipleer.Network.MessageLayer;
 using Multipleer.Transport;
 using Multipleer.Util;
 using UnityEngine;
@@ -33,6 +34,12 @@ namespace Multipleer.UI
         private LobbyPanel _lobby;
         private SavePickerPanel _savePicker;
         private bool _panelsBuilt;
+
+        // The lobby lifecycle FSM + start gate (single source of truth; pure logic). The UI reads its
+        // State/CanStart and drives transitions (BeginHost/CommitStart/Reset); it never lets the
+        // Play-button visual be the sole start guard (that was Bug B).
+        private readonly LobbyController _lobbyController = new LobbyController();
+        public LobbyController Lobby => _lobbyController;
 
         // ─── Client-join connecting state ───────────────────────────────────
         // True from the moment a CLIENT smart-join is kicked off (OnLobbyJoin) until that attempt
@@ -184,6 +191,8 @@ namespace Multipleer.UI
             NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
+            _lobbyController.Reset();      // fresh lobby (idempotent; clears any stale lock)
+            _lobbyController.BeginHost();
             ShowInGameBar();
             _lobby?.Show();
         }
@@ -203,17 +212,12 @@ namespace Multipleer.UI
             var engine = NetworkEngine.Instance;
             if (engine?.Session == null) return;
 
-            if (engine.IsHost)
-            {
-                // Host toggles its own ready state locally, then re-broadcasts the roster.
-                engine.Session.HostReady = !engine.Session.HostReady;
-                engine.Session.BroadcastPeerList();
-            }
-            else
-            {
-                // Client → host ClientReady (foundation keys by sender; host broadcasts updated roster).
-                engine.Session.SetClientReady(engine.LocalSteamId);
-            }
+            // Host has NO Ready toggle (it is the starter, not a ready-gated player — spec §5). Only a
+            // CLIENT readies/unreadies; the host's own start gate is AllConnectedClientsReady + save.
+            if (engine.IsHost) return;
+
+            // Client → host ClientReady (foundation keys by sender; host broadcasts the updated roster).
+            engine.Session.SetClientReady(engine.LocalSteamId);
         }
 
         // Nickname edit committed in the lobby panel.
@@ -231,27 +235,53 @@ namespace Multipleer.UI
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsHost) return;
 
-            if (_pendingChosenSave != null)
+            // Press-time re-validation of the SAME start gate (defense-in-depth vs the stale-frame
+            // race, Bug B H2): never trust the Play button's lit visual alone. Push the live facts
+            // into the FSM, then attempt CommitStart — which only succeeds when >=1 client is
+            // connected, ALL connected clients are ready, and a save is chosen, and which LOCKS the
+            // lobby on success so no mid-start ready flip can race in.
+            var roster = engine.Session?.GetLobbyRoster();
+            int clientCount = engine.Session?.ClientCount ?? 0;
+            bool allClientsReady = AllConnectedClientsReady(roster);
+            bool saveChosen = _pendingChosenSave != null;
+            _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
+
+            if (_lobbyController.CommitStart())
             {
                 DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
                 ShowLoadOverlay();
                 engine.SaveTransfer?.HostStartSession(_pendingChosenSave);
                 return;
             }
-            // No save chosen yet. Do NOT start the session (HostStartSession with a null save) and do
-            // NOT open the SavePicker as a half-built fallback — that produced a broken, undismissable
-            // window over the lobby. Instead warn the host (vanilla native prompt) to pick a save via
-            // the rail's "Choose save" button first. Reuse the proven HideForNativeScreen → prompt →
-            // Show pattern (same as OnConnectionFailed / OnLobbyJoinPrompt) so the lobby is restored
-            // fully interactive on dismiss and never gets stuck hidden.
+
+            // Gate closed at press time. Tell the host exactly what is missing, then restore the
+            // lobby fully interactive (reuse the proven HideForNativeScreen → prompt → Show pattern).
+            string why = !saveChosen ? "Choose a save before starting."
+                : clientCount < 1 ? "Wait for a player to join before starting."
+                : "All players must be ready before starting.";
             var mb = GameUtl.GetMessageBox();
             if (mb != null)
             {
                 _lobby?.HideForNativeScreen();
-                mb.ShowSimplePrompt("Choose a save before starting.",
+                mb.ShowSimplePrompt(why,
                     MessageBoxIcon.Warning, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
             }
+        }
+
+        // True iff there is >=1 connected client AND every NON-host roster entry is ready. The host
+        // self-entry (IsHost=true) is ignored — the host is the starter, not a ready-gated player.
+        private static bool AllConnectedClientsReady(List<PeerListEntry> roster)
+        {
+            if (roster == null) return false;
+            int clients = 0;
+            foreach (var p in roster)
+            {
+                if (p.IsHost) continue;
+                clients++;
+                if (!p.Ready) return false;
+            }
+            return clients >= 1;
         }
 
         // ─── Smart-Join (footer Join…) ─────────────────────────────────────
@@ -516,6 +546,11 @@ namespace Multipleer.UI
             {
                 if (chosen == null) return;
                 _pendingChosenSave = chosen;
+                // Clients readied for a specific session; a new save invalidates that. Drop the FSM's
+                // cached ready fact and clear the authoritative roster ready bits so the gate re-closes
+                // until everyone re-readies.
+                _lobbyController.SaveChangedShouldResetReady();
+                NetworkEngine.Instance?.Session?.ResetAllClientsReady();
                 var name = SaveDisplayName(chosen);
                 var meta = SaveDisplayMeta(chosen);
                 NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
@@ -694,6 +729,7 @@ namespace Multipleer.UI
             _connectingBox = null;
             NetworkEngine.Instance?.Disconnect();
             NetworkEngine.Instance?.Shutdown();
+            _lobbyController.Reset();
             _inGameBar?.SetActive(false);
             _lobby?.Hide();
         }
@@ -702,6 +738,7 @@ namespace Multipleer.UI
         {
             NetworkEngine.Instance?.Disconnect();
             NetworkEngine.Instance?.Shutdown();
+            _lobbyController.Reset();
             _inGameBar.SetActive(false);
             _lobby?.Hide();
         }
