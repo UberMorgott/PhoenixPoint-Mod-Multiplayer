@@ -1,12 +1,12 @@
 using System;
-using System.Linq;
 using System.Reflection;
 using Base.Serialization;
+using Base.UI;
 using HarmonyLib;
 using Multipleer.UI;
-using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Common.View.ViewModules;
-using PhoenixPoint.Home.View.ViewModules;
+using PhoenixPoint.Home.View;
+using PhoenixPoint.Home.View.ViewStates;
 using UnityEngine;
 
 namespace Multipleer.Harmony
@@ -69,26 +69,59 @@ namespace Multipleer.Harmony
         }
 
         /// <summary>
-        /// Open the game's native Load screen by firing the live main-menu LoadGameButton's
-        /// PointerClicked event (the exact handler the player triggers, UIStateMainMenu.cs:46-47).
-        /// Returns false if the menu module/button could not be found (caller falls back).
+        /// Open the game's native Load screen by driving the home-screen state stack straight to
+        /// UIStateHomeLoadGame — exactly what UIStateMainMenu.OnLoadGameButtonClicked does
+        /// (SwitchToState(new UIStateHomeLoadGame(), PushOnTop), UIStateMainMenu.cs:134-137).
+        ///
+        /// WHY NOT the LoadGameButton.PointerClicked event: that handler is (un)subscribed per
+        /// UIStateMainMenu Enter/Exit (UIStateMainMenu.cs:47/72). Pushing the load state on top runs
+        /// MainMenu.ExitState (StateStack.SwitchToState:79), which REMOVES the subscription; by the
+        /// 2nd Choose-Save click the cached button's PointerClicked is stale/null, so firing it was
+        /// silently a no-op (and the lobby then fell to the wrong custom window). Pushing the state
+        /// directly is subscription-independent and works on EVERY click. The pick is still captured
+        /// by our Prefix on UIModuleSaveGame.OnLoadGamePressed regardless of how the screen opened.
+        ///
+        /// Returns false if the live HomeScreenView / its state stack could not be reached (caller
+        /// surfaces a warning — there is NO custom-window fallback).
         /// </summary>
         public static bool OpenNativeLoadScreen()
         {
             try
             {
-                // The live UIModuleMainMenuButtons (even if some children are inactive). Its
-                // LoadGameButton is a PhoenixGeneralButton whose PointerClicked is subscribed by the
-                // current UIStateMainMenu to OnLoadGameButtonClicked.
-                var module = Resources.FindObjectsOfTypeAll<UIModuleMainMenuButtons>()
-                    .FirstOrDefault(m => m != null && m.LoadGameButton != null);
-                if (module == null) return false;
+                // _statesStack is private (StateStack<HomeScreenViewContext>); reach it by reflection.
+                var stackField = AccessTools.Field(typeof(HomeScreenView), "_statesStack");
+                if (stackField == null)
+                {
+                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: HomeScreenView._statesStack field not found.");
+                    return false;
+                }
 
-                PhoenixGeneralButton loadBtn = module.LoadGameButton;
-                if (loadBtn == null || loadBtn.PointerClicked == null) return false;
+                // Find the LIVE home-screen view — the one whose state stack is already initialized
+                // (FindObjectsOfTypeAll can also surface uninitialized template instances; pick the
+                // one with a non-null _statesStack).
+                object stack = null;
+                foreach (var v in Resources.FindObjectsOfTypeAll<HomeScreenView>())
+                {
+                    if (v == null) continue;
+                    var s = stackField.GetValue(v);
+                    if (s != null) { stack = s; break; }
+                }
+                if (stack == null)
+                {
+                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: no live HomeScreenView with an initialized state stack.");
+                    return false;
+                }
 
-                // Fire the same delegate a real click fires (PhoenixGeneralButton.OnPointerClick:353).
-                loadBtn.PointerClicked.Invoke();
+                // Push UIStateHomeLoadGame on top exactly like UIStateMainMenu.OnLoadGameButtonClicked.
+                var switchToState = AccessTools.Method(stack.GetType(), "SwitchToState");
+                if (switchToState == null)
+                {
+                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: StateStack.SwitchToState not found.");
+                    return false;
+                }
+
+                var loadState = new UIStateHomeLoadGame();
+                switchToState.Invoke(stack, new object[] { loadState, StateStackAction.PushOnTop });
                 return true;
             }
             catch (Exception e)
@@ -130,7 +163,7 @@ namespace Multipleer.Harmony
         // ── Postfix: native Load screen closed (pick OR cancel) → back to the lobby ─────────────
         // UIStateHomeLoadGame.ExitState runs on every close (UIStateHomeLoadGame.cs:30). If armed,
         // re-show the lobby; if a meta was captured, deliver it to the lobby's chosen-save handler.
-        [HarmonyPatch(typeof(PhoenixPoint.Home.View.ViewStates.UIStateHomeLoadGame), "ExitState")]
+        [HarmonyPatch(typeof(UIStateHomeLoadGame), "ExitState")]
         [HarmonyPostfix]
         public static void LoadScreenExitState_Postfix()
         {

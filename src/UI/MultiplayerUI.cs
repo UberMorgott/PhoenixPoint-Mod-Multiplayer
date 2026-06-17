@@ -32,7 +32,6 @@ namespace Multipleer.UI
 
         // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
-        private SavePickerPanel _savePicker;
         private bool _panelsBuilt;
 
         // The lobby lifecycle FSM + start gate (single source of truth; pure logic). The UI reads its
@@ -69,7 +68,6 @@ namespace Multipleer.UI
 
             // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
-            _savePicker = new SavePickerPanel();
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -83,12 +81,6 @@ namespace Multipleer.UI
         {
             if (_panelsBuilt || menuCanvas == null) return;
             _lobby.Build(menuCanvas);
-            // Picker builds its OWN ROOT canvas under the mod's ModGO transform (this MonoBehaviour),
-            // mirroring the bar/lobby canvases — a root canvas honours its CanvasScaler and its
-            // overrideSorting wins, so the picker is a correctly-sized modal on top, not a nested
-            // canvas crammed behind the lobby. It clones its native widgets via Resources, so it no
-            // longer needs the menu canvas.
-            _savePicker.Build(transform);
             _panelsBuilt = true;
         }
 
@@ -593,8 +585,9 @@ namespace Multipleer.UI
         // Host rail "Choose save…": open the game's OWN native Load screen and INTERCEPT the pick so
         // it hands back the chosen SavegameMetaData WITHOUT loading the campaign (see
         // Harmony/SaveLoadInterceptPatch). We stopped hand-building the row list (it kept rendering
-        // empty); the native screen is the game's verified save UI. Falls back to the from-code picker
-        // only if the native Load button can't be reached.
+        // empty); the native screen is the game's verified save UI. ALWAYS use the native screen —
+        // there is no custom fallback (a second click used to silently fall to the wrong custom
+        // window once the cached native button went stale).
         public void OnLobbyChooseSave()
         {
             var engine = NetworkEngine.Instance;
@@ -604,28 +597,51 @@ namespace Multipleer.UI
             System.Action<SavegameMetaData> onPicked = chosen =>
             {
                 if (chosen == null) return;
+
+                // Reset every client's Ready ONLY on a GENUINE save change. Clients readied for a
+                // specific session, so swapping to a DIFFERENT save invalidates that — but the first
+                // pick (no prior session) and re-picking the SAME save must NOT drop anyone's ready,
+                // or the gate's all-ready bit keeps collapsing and PLAY never lights.
+                var previousChosen = _pendingChosenSave;
                 _pendingChosenSave = chosen;
-                // Clients readied for a specific session; a new save invalidates that. Drop the FSM's
-                // cached ready fact and clear the authoritative roster ready bits so the gate re-closes
-                // until everyone re-readies.
-                _lobbyController.SaveChangedShouldResetReady();
-                NetworkEngine.Instance?.Session?.ResetAllClientsReady();
+                bool genuineChange = previousChosen != null && !SameSave(previousChosen, chosen);
+                if (genuineChange)
+                {
+                    // Drop the FSM's cached ready fact and clear the authoritative roster ready bits
+                    // so the gate re-closes until everyone re-readies for the new save.
+                    _lobbyController.SaveChangedShouldResetReady();
+                    NetworkEngine.Instance?.Session?.ResetAllClientsReady();
+                }
+
                 var name = SaveDisplayName(chosen);
                 var meta = SaveDisplayMeta(chosen);
                 NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
             };
 
             // Arm the intercept, hide our overlay so the native screen shows through, then open it by
-            // firing the live LoadGameButton. If the native open fails, disarm + fall back to the
-            // legacy from-code picker so the host is never stuck.
+            // driving the home-screen state stack straight to UIStateHomeLoadGame (robust on EVERY
+            // click — see SaveLoadInterceptPatch.OpenNativeLoadScreen). If the native open genuinely
+            // fails we disarm and re-show the lobby (NO custom fallback window): the host can retry.
             SaveLoadInterceptPatch.Arm(onPicked);
             _lobby?.HideForNativeScreen();
             if (!SaveLoadInterceptPatch.OpenNativeLoadScreen())
             {
                 SaveLoadInterceptPatch.Disarm();
                 _lobby?.Show();
-                _savePicker?.Show(onPicked);
+                Debug.LogWarning("[Multipleer] Could not open the native Load screen for Choose-Save; try again.");
             }
+        }
+
+        // Two picked saves are the SAME selection iff they reference the same on-disk save. Prefer the
+        // filesystem Path (unique, set when the meta is loaded); fall back to display name + creation
+        // time if Path is unset on either side.
+        private static bool SameSave(SavegameMetaData a, SavegameMetaData b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+            if (!string.IsNullOrEmpty(a.Path) && !string.IsNullOrEmpty(b.Path))
+                return string.Equals(a.Path, b.Path, System.StringComparison.OrdinalIgnoreCase);
+            return SaveDisplayName(a) == SaveDisplayName(b) && SaveDisplayMeta(a) == SaveDisplayMeta(b);
         }
 
         // Called from SaveLoadInterceptPatch when the native Load screen closes (after a pick OR a
