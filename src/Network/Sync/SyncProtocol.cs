@@ -380,6 +380,42 @@ namespace Multipleer.Network.Sync
             catch { return false; }
         }
 
+        // ─── Geoscape event CHOICE CLAIM (client -> host, first-click-wins) ─
+        // A client click captures the chosen choice index and routes it to the host arbiter. Wire:
+        // [occId:u16][choiceIndex:i32]. occId is the host-synthesized per-occurrence id carried on the raise;
+        // choiceIndex is the index into EventData.Choices (-1 = null/decline). The host accepts the FIRST
+        // claim per occId (ChoiceArbiter), runs the authoritative CompleteEvent, and broadcasts the OUTCOME
+        // via the existing EventDismiss; later claims for a resolved occId are ignored.
+
+        public static byte[] EncodeChoiceClaim(ushort occurrenceId, int choiceIndex)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(occurrenceId);
+                w.Write(choiceIndex);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeChoiceClaim(byte[] data, out ushort occurrenceId, out int choiceIndex)
+        {
+            occurrenceId = 0; choiceIndex = -1;
+            // Require the full fixed [occId:u16][choiceIndex:i32] = 6 bytes; a short buffer is a clean drop.
+            if (data == null || data.Length < sizeof(ushort) + sizeof(int)) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    occurrenceId = r.ReadUInt16();
+                    choiceIndex = r.ReadInt32();
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
         // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
         // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;
         // kind (SyncKind) selects request/apply/snapshot/delta. The inner payload is the surface's
