@@ -577,6 +577,15 @@ namespace Multipleer.Network
                     Sync?.OnEventDismiss(msg.Payload);
                     break;
 
+                case PacketType.ChoiceClaim:
+                    // Client->host geoscape event choice claim. Host arbitrates (first claim per occId wins),
+                    // runs the authoritative CompleteEvent + broadcasts the outcome; later claims are ignored.
+                    // NOTE: handler SyncEngine.OnChoiceClaim is added in Task 6 — uncomment then. Until it
+                    // exists this case is a no-op fall-through (claim is dropped, never throws), keeping the
+                    // build green; the enum value (0x68) is live so the type is registered and routable.
+                    // Sync?.OnChoiceClaim(msg.SenderSteamId, msg.Payload);
+                    break;
+
                 case PacketType.SyncEnvelope:
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).
