@@ -36,6 +36,7 @@ namespace Multipleer.Harmony
         // GeoVehicle = PhoenixPoint.Geoscape.Entities.GeoVehicle (resolved reflectively, never referenced).
         public static MethodBase TargetMethod()
         {
+            if (_tftvType == null) return null; // defensive: TFTV absent -> no target (mirrors house pattern)
             var geoVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicle");
             if (geoVehicleType == null) return null;
             return AccessTools.Method(_tftvType, "AdjustAircraftSpeed",
