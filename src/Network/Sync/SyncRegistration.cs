@@ -21,6 +21,7 @@ namespace Multipleer.Network.Sync
             SyncedActionRegistry.Register(SyncedActionIds.StartResearch, StartResearchAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.ResearchCompleted, ResearchCompletedAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.CancelResearch, CancelResearchAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.ReorderResearch, ReorderResearchAction.Read);
 
             // Manufacturing
             SyncedActionRegistry.Register(SyncedActionIds.QueueManufacture, QueueManufactureAction.Read);
@@ -46,6 +47,7 @@ namespace Multipleer.Network.Sync
             reg.RegisterAction(SurfaceIds.StartResearch, StartResearchAction.Read, GeoUiRefresh.Screen.Research);
             reg.RegisterAction(SurfaceIds.ResearchCompleted, ResearchCompletedAction.Read, GeoUiRefresh.Screen.Research);
             reg.RegisterAction(SurfaceIds.CancelResearch, CancelResearchAction.Read, GeoUiRefresh.Screen.Research);
+            reg.RegisterAction(SurfaceIds.ReorderResearch, ReorderResearchAction.Read, GeoUiRefresh.Screen.Research);
 
             // Manufacturing → Manufacturing screen
             reg.RegisterAction(SurfaceIds.QueueManufacture, QueueManufactureAction.Read, GeoUiRefresh.Screen.Manufacturing);

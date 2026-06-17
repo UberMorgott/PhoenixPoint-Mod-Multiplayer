@@ -193,4 +193,92 @@ namespace Multipleer.Harmony.Sync
             }
         }
     }
+
+    /// <summary>
+    /// Shared relay logic for the three research queue-REORDER ops (move to-top / up / down). The client
+    /// is frozen, so its local move must reach the host; the host runs the real move AND marks the research
+    /// channel dirty so the next Tick echoes the new authoritative queue ORDER (the snapshot carries queue
+    /// order; the client reconcile enforces it). Mirrors <see cref="CancelResearchPatch"/> exactly — the
+    /// only difference is the <see cref="ResearchReorderKind"/> the client relays. Engine-driven apply
+    /// (SyncApplyScope) and single-player pass straight through.
+    /// </summary>
+    internal static class ResearchReorderRelay
+    {
+        // research = the ResearchElement being moved. Returns true to let the native move run, false to suppress.
+        public static bool Relay(object research, ResearchReorderKind kind, string patchName)
+        {
+            if (SyncApplyScope.IsApplying) return true;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;
+
+            if (!PermissionGate.Check(ActionCategory.Research))
+            {
+                PermissionGate.Notify(ActionCategory.Research);
+                return false;
+            }
+
+            try
+            {
+                string id = ResearchStateReflection.GetId(research);
+                if (engine.IsHost)
+                {
+                    // Host runs the real reorder; mark the channel dirty so the next Tick echoes the new
+                    // authoritative queue order (there is no faction-level reorder event to do it for us —
+                    // Research.OnQueueReordered is an instance Action, not a faction-level event we subscribe).
+                    engine.Sync?.MarkChannelDirty(2);
+                    return true;
+                }
+                if (string.IsNullOrEmpty(id)) return false; // client can't identify → still suppress (frozen)
+                engine.Sync.SendActionRequest(new ReorderResearchAction(id, kind));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer] " + patchName + " failed: " + ex.Message);
+                return true;
+            }
+        }
+
+        // Resolve a single Research reorder method by name (all take one ResearchElement param).
+        public static MethodBase ResolveMethod(string methodName)
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.Research");
+            var elem = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchElement");
+            if (t == null || elem == null) return null;
+            return AccessTools.Method(t, methodName, new[] { elem });
+        }
+    }
+
+    /// <summary>Relay interceptor for MOVE-TO-TOP: <c>Research.PutInFromOfQueue(ResearchElement)</c> (Research.cs:414).</summary>
+    [HarmonyPatch]
+    public static class PutInFromOfQueuePatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare() { _target = ResearchReorderRelay.ResolveMethod("PutInFromOfQueue"); return _target != null; }
+        public static MethodBase TargetMethod() => _target;
+        public static bool Prefix(object element)
+            => ResearchReorderRelay.Relay(element, ResearchReorderKind.ToTop, "PutInFromOfQueuePatch");
+    }
+
+    /// <summary>Relay interceptor for MOVE-UP: <c>Research.PutUpInQueue(ResearchElement)</c> (Research.cs:424).</summary>
+    [HarmonyPatch]
+    public static class PutUpInQueuePatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare() { _target = ResearchReorderRelay.ResolveMethod("PutUpInQueue"); return _target != null; }
+        public static MethodBase TargetMethod() => _target;
+        public static bool Prefix(object element)
+            => ResearchReorderRelay.Relay(element, ResearchReorderKind.Up, "PutUpInQueuePatch");
+    }
+
+    /// <summary>Relay interceptor for MOVE-DOWN: <c>Research.PutDownInQueue(ResearchElement)</c> (Research.cs:435).</summary>
+    [HarmonyPatch]
+    public static class PutDownInQueuePatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare() { _target = ResearchReorderRelay.ResolveMethod("PutDownInQueue"); return _target != null; }
+        public static MethodBase TargetMethod() => _target;
+        public static bool Prefix(object element)
+            => ResearchReorderRelay.Relay(element, ResearchReorderKind.Down, "PutDownInQueuePatch");
+    }
 }

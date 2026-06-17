@@ -65,6 +65,10 @@ namespace Multipleer.Network.Sync.State
         private static MethodInfo _getById;               // Research.GetResearchById(string)
         private static MethodInfo _addToQueue;            // Research.AddResearchToQueue(ResearchElement)
         private static MethodInfo _cancel;                // Research.Cancel(ResearchElement)
+        private static MethodInfo _putToTop;              // Research.PutInFromOfQueue(ResearchElement)
+        private static MethodInfo _putUp;                 // Research.PutUpInQueue(ResearchElement)
+        private static MethodInfo _putDown;               // Research.PutDownInQueue(ResearchElement)
+        private static MethodInfo _insertAt;              // Research.InsertAtPosition(ResearchElement, int)
         private static FieldInfo _researchIdField;        // ResearchElement.ResearchID
         private static FieldInfo _progressField;          // ResearchElement.ResearchProgress (float)
         private static FieldInfo _stateField;             // ResearchElement._state (private ResearchState backing field)
@@ -85,6 +89,13 @@ namespace Multipleer.Network.Sync.State
             _getById = AccessTools.Method(_researchType, "GetResearchById", new[] { typeof(string) });
             _addToQueue = AccessTools.Method(_researchType, "AddResearchToQueue", new[] { _researchElementType });
             _cancel = AccessTools.Method(_researchType, "Cancel", new[] { _researchElementType });
+            // Queue-REORDER ops (Research.cs:414/424/435/446). Bound but NOT part of the _ready gate so a
+            // future rename of a reorder method can never regress the start/cancel/converge path; each
+            // consumer (Reorder / EnforceQueueOrder) null-checks its own method.
+            _putToTop = AccessTools.Method(_researchType, "PutInFromOfQueue", new[] { _researchElementType });
+            _putUp = AccessTools.Method(_researchType, "PutUpInQueue", new[] { _researchElementType });
+            _putDown = AccessTools.Method(_researchType, "PutDownInQueue", new[] { _researchElementType });
+            _insertAt = AccessTools.Method(_researchType, "InsertAtPosition", new[] { _researchElementType, typeof(int) });
             _researchIdField = AccessTools.Field(_researchElementType, "ResearchID");
             _progressField = AccessTools.Field(_researchElementType, "ResearchProgress");
             // (1) Reward-free completion: write the private _state backing field directly (bypasses the
@@ -244,6 +255,15 @@ namespace Multipleer.Network.Sync.State
                             // throw on a Revealed element.
                             float original = 0f;
                             try { original = (float)_progressField.GetValue(el); } catch { original = 0f; }
+                            // Capture the ORIGINAL state too: if the add throws we must restore it. Forcing
+                            // State=Unlocked and leaving it on a NON-QUEUED element makes the element render
+                            // in the Available (left) list with the active "can research now" affordance
+                            // (ResearchListItem IsUnlocked branch) even though CanResearch() is false — a
+                            // visually-misleading marker the host never showed (the false-marker bug). Only a
+                            // queued element is excluded from the Available list, so an Unlocked element that
+                            // failed to queue MUST be rolled back to its host-authoritative state.
+                            object originalState = null;
+                            try { originalState = _stateField.GetValue(el); } catch { originalState = null; }
                             try { _stateField.SetValue(el, _unlockedStateValue); } catch { /* best-effort */ }
                             float safe = SafeRequeueProgress(el, progress);
                             try { _progressField.SetValue(el, safe); } catch { /* best-effort */ }
@@ -253,10 +273,12 @@ namespace Multipleer.Network.Sync.State
                             }
                             catch
                             {
-                                // Add failed → element is NOT in the queue. Restore its original progress
-                                // so we never leave a stray (sub-cost) value on a non-queued element, then
-                                // rethrow into the per-element catch below for logging.
+                                // Add failed → element is NOT in the queue. Restore BOTH its original progress
+                                // AND its original state so we never leave a stray (sub-cost) value or a stray
+                                // Unlocked (false marker) on a non-queued element, then rethrow into the
+                                // per-element catch below for logging.
                                 try { _progressField.SetValue(el, original); } catch { /* best-effort */ }
+                                if (originalState != null) { try { _stateField.SetValue(el, originalState); } catch { /* best-effort */ } }
                                 throw;
                             }
                         }
@@ -274,8 +296,44 @@ namespace Multipleer.Network.Sync.State
                         Debug.LogError("[Multipleer] ResearchStateReflection.Apply requeue '" + id + "' failed (skipped): " + elEx.Message);
                     }
                 }
+
+                // (4) ENFORCE the snapshot queue ORDER. A pure REORDER (host moved a queued item up/down/
+                // to-top with no add/cancel) changes only the order: every element is already present in the
+                // client queue, so steps (2)/(3) above leave it untouched and the client order stays stale.
+                // The snapshot's Queue list IS ordered (it iterates the live ResearchQueue, index 0 ==
+                // Current), so drive each snapshot entry to its target index via Research.InsertAtPosition
+                // (Research.cs:446 — Remove + Insert(Clamp(pos)), the same primitive the native reorder uses).
+                // Placing each element in turn at its target index deterministically rebuilds the full target
+                // order. Idempotent: an already-correctly-positioned element re-inserts at its own index, a
+                // no-op. Best-effort + null-checked so a missing InsertAtPosition never regresses convergence.
+                EnforceQueueOrder(research, target);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Apply failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Reorder the live queue to match <paramref name="target"/>'s ordered queue exactly, using
+        /// <c>Research.InsertAtPosition(element, index)</c>. Only elements present in BOTH the snapshot and
+        /// the live queue are positioned (add/cancel already reconciled membership in <see cref="Apply"/>),
+        /// so this never adds or removes — it only moves. No-op if <c>InsertAtPosition</c> is unavailable.
+        /// </summary>
+        private static void EnforceQueueOrder(object research, ResearchSnapshot target)
+        {
+            if (_insertAt == null || target == null) return;
+            try
+            {
+                int idx = 0;
+                foreach (var (id, _) in target.Queue)
+                {
+                    var el = Resolve(research, id);
+                    if (el == null) continue;
+                    if (!InQueue(research, el)) continue;       // membership is reconciled elsewhere; only move present items
+                    try { _insertAt.Invoke(research, new object[] { el, idx }); }
+                    catch (Exception elEx) { Debug.LogError("[Multipleer] ResearchStateReflection.EnforceQueueOrder '" + id + "' failed (skipped): " + elEx.Message); }
+                    idx++;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.EnforceQueueOrder failed: " + ex.Message); }
         }
 
         /// <summary>Host apply for the client cancel intent: <c>Research.Cancel(resolve(id))</c>.</summary>
@@ -291,6 +349,37 @@ namespace Multipleer.Network.Sync.State
                 _cancel.Invoke(research, new[] { el });
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Cancel failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Host apply for the client REORDER intent: replay the exact native relative move
+        /// (<c>PutInFromOfQueue</c> / <c>PutUpInQueue</c> / <c>PutDownInQueue</c>) on the authoritative
+        /// queue. The host and client queues are kept identical by ch2, so a relative move yields the same
+        /// result on both; the new order then echoes to every peer via the research channel (which carries
+        /// the ordered queue and whose client reconcile enforces that order). No-op if the matching native
+        /// method is unavailable (best-effort, like the rest of this bridge).
+        /// </summary>
+        public static void Reorder(GeoRuntime rt, string researchId, Actions.ResearchReorderKind kind)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return;
+                var research = GetResearch(rt);
+                var el = Resolve(research, researchId);
+                if (el == null) return;
+                MethodInfo m;
+                switch (kind)
+                {
+                    case Actions.ResearchReorderKind.ToTop: m = _putToTop; break;
+                    case Actions.ResearchReorderKind.Up: m = _putUp; break;
+                    case Actions.ResearchReorderKind.Down: m = _putDown; break;
+                    default: m = null; break;
+                }
+                if (m == null) return;
+                m.Invoke(research, new[] { el });
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Reorder failed: " + ex.Message); }
         }
 
         /// <summary>Read <c>ResearchElement.ResearchID</c> off a live element (interceptor side).</summary>

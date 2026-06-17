@@ -36,6 +36,7 @@ public class SyncActionSerializationTests
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.StartResearch));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ResearchCompleted));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.CancelResearch));
+        Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ReorderResearch));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.QueueManufacture));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ManufactureCompleted));
         Assert.True(SyncedActionRegistry.IsRegistered(SyncedActionIds.ConstructFacility));

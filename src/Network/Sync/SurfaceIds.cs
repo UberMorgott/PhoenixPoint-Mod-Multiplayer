@@ -12,6 +12,7 @@ namespace Multipleer.Network.Sync
         public const byte StartResearch = 1;
         public const byte ResearchCompleted = 2;
         public const byte CancelResearch = 3;
+        public const byte ReorderResearch = 4;
         public const byte QueueManufacture = 10;
         public const byte ManufactureCompleted = 11;
         public const byte ConstructFacility = 20;

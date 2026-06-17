@@ -364,7 +364,7 @@ namespace Multipleer.Network.Sync
             // Phase 1: mirror the legacy OnActionRequest special-case — research surfaces re-echo
             // channel 2 (research has no faction-level cancel event to self-mark the channel dirty).
             if (surfaceId == SurfaceIds.StartResearch || surfaceId == SurfaceIds.CancelResearch
-                || surfaceId == SurfaceIds.ResearchCompleted)
+                || surfaceId == SurfaceIds.ResearchCompleted || surfaceId == SurfaceIds.ReorderResearch)
                 MarkChannelDirty(2);
         }
 

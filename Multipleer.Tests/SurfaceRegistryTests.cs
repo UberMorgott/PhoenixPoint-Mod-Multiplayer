@@ -105,6 +105,7 @@ public class SurfaceRegistryTests
         foreach (var id in new byte[]
         {
             SurfaceIds.StartResearch, SurfaceIds.ResearchCompleted, SurfaceIds.CancelResearch,
+            SurfaceIds.ReorderResearch,
             SurfaceIds.QueueManufacture, SurfaceIds.ManufactureCompleted,
             SurfaceIds.ConstructFacility, SurfaceIds.RepairFacility, SurfaceIds.FacilityCompleted,
             SurfaceIds.AnswerEvent
