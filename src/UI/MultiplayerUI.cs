@@ -108,11 +108,10 @@ namespace Multipleer.UI
             _barCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _barCanvas.sortingOrder = 5000;
 
+            // Responsive: native aspect-adaptive scaler (match WIDTH <=16:9 / HEIGHT >16:9), replacing
+            // the old fixed match=0.5, so the status bar scales consistently with the lobby/picker.
             var scaler = go.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
+            LobbyTheme.ConfigureScaler(scaler);
 
             _barRoot = go.transform;
             return _barRoot;
@@ -824,14 +823,16 @@ namespace Multipleer.UI
             var rect = bar.AddComponent<RectTransform>();
             rect.anchorMin = new Vector2(0, 0);
             rect.anchorMax = new Vector2(1, 0);
-            rect.sizeDelta = new Vector2(0, 28);
+            // Bar height scales with the theme so the bigger status font fits.
+            var barH = LobbyTheme.ScaledRowFontSize + LobbyTheme.ScaledPadding / 2;
+            rect.sizeDelta = new Vector2(0, barH);
             rect.anchoredPosition = new Vector2(0, 0);
 
             var bg = bar.AddComponent<Image>();
-            bg.color = new Color(0, 0, 0, 0.7f);
+            bg.color = LobbyTheme.PageBackdrop;   // themed dark navy backing (was black@0.7)
 
             _barStatusText = CreateText(bar, "Status",
-                new Vector2(10, 2), new Vector2(500, 24),
+                new Vector2(10, 2), new Vector2(500, barH),
                 "Not connected");
 
             _inGameBar = bar;
@@ -903,9 +904,9 @@ namespace Multipleer.UI
             rect.sizeDelta = size;
 
             var text = go.AddComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            text.fontSize = 12;
-            text.color = Color.white;
+            text.font = LobbyTheme.Font;                       // native menu font (was Arial)
+            text.fontSize = LobbyTheme.ScaledRowFontSize;      // themed, scales with UiScale (was 12)
+            text.color = LobbyTheme.BodyText;
             text.alignment = TextAnchor.MiddleLeft;
             text.text = content;
             return text;
