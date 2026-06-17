@@ -808,7 +808,9 @@ namespace Multipleer.UI
 
         public void ShowInGameBar()
         {
-            _inGameBar.SetActive(true);
+            // Status bar removed (user feedback: useless + half-hidden at screen bottom).
+            // No-op so the in-game bar never appears. The GameObject is still built once at startup
+            // (kept inactive) so the existing _inGameBar.SetActive(false) call sites stay valid.
         }
 
         public void HideInGameBar()

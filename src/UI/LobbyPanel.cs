@@ -97,9 +97,9 @@ namespace Multipleer.UI
         private class RosterRow
         {
             public GameObject Go;
-            public Text NameLabel;     // fixed-width name column (left)
-            public Text StatusLabel;   // themed status column (right of spacer)
-            public Button RenameBtn;   // far-right pencil; shown/interactable only on the local row
+            public Text ReadyLabel;    // col 1: far-left fixed-width ready check ("✓" when ready, else blank)
+            public Text NameLabel;     // col 2: bare nickname, left-aligned, fills remaining width
+            public Button RenameBtn;   // col 3: far-right pencil; shown/interactable only on the local row
         }
 
         // SINGLE visibility lever = the lobby's own overlay Canvas GameObject. While that GO is
@@ -1149,32 +1149,29 @@ namespace Multipleer.UI
                 var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
                 if (isMe) _myRowIndex = i;
 
-                // NAME column: nickname / "Host" / "Player {id}", with a subtle " (you)" only on the
-                // local row (host tag lives in the STATUS column as the amber "host" label).
-                row.NameLabel.text = isMe ? $"{name} (you)" : name;
+                // COL 2 — NICKNAME only (no "(you)" tag, no role text). The local row is identified by
+                // its rename pencil, so no extra marker is needed.
+                row.NameLabel.text = name;
                 row.NameLabel.color = LobbyTheme.BodyText;
 
-                // STATUS column: host has no Ready (it is the starter; HostReady is always false), so the
-                // host row reads "host" in amber. Clients read green "READY" / dim "not ready".
-                var status = p.IsHost ? "host" : (p.Ready ? "READY" : "not ready");
-                var color = p.IsHost
-                    ? LobbyTheme.Accent
-                    : (p.Ready ? LobbyTheme.ReadyText : LobbyTheme.MutedText);
+                // COL 1 — READY CHECK: green "✓" when a client is ready, blank otherwise. The host has no
+                // ready state (it starts the game; HostReady is always false) → always blank.
+                var ready = !p.IsHost && p.Ready;
+                row.ReadyLabel.text = ready ? "✓" : "";
+                row.ReadyLabel.color = LobbyTheme.ReadyText;
 
-                // During an active save transfer, show download progress instead of ready status.
+                // During an active save transfer, tint the check blue as a subtle download cue (the
+                // green-✓-when-ready remains the primary signal).
                 var st = engine.SaveTransfer;
                 if (st != null && st.TransferActive)
                 {
                     var progress = ProgressFor(engine, st, p, isMe);
                     if (progress != null)
                     {
-                        status = progress;
-                        color = new Color(0.7f, 0.8f, 1f);
+                        row.ReadyLabel.text = "✓";
+                        row.ReadyLabel.color = new Color(0.7f, 0.8f, 1f);
                     }
                 }
-
-                row.StatusLabel.text = status;
-                row.StatusLabel.color = color;
 
                 // RENAME pencil: shown + interactable ONLY on the local player's own row (the onClick
                 // also re-checks _myRowIndex, so a pooled row can never rename the wrong peer).
@@ -1273,34 +1270,31 @@ namespace Multipleer.UI
             hlg.childForceExpandHeight = true;
             hlg.childAlignment = TextAnchor.MiddleLeft;
 
-            // (1) NAME — left-aligned, fixed width so all rows align.
+            var icon = LobbyTheme.ScaledIconButtonSize;
+
+            // (1) READY CHECK — far-left fixed-width column. Shows a green "✓" when the player is ready,
+            // blank otherwise (host has no ready state → blank). Text + color set per-frame in RefreshRoster.
+            var readyLabel = UiToolkit.CreateText(go, "Ready", Vector2.zero,
+                new Vector2(icon, RowHeight), "",
+                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
+            var rdle = LE(readyLabel.gameObject);
+            rdle.preferredWidth = icon;
+            rdle.flexibleWidth = 0;
+
+            // (2) NICKNAME — bare player name, left-aligned, fills the remaining width so the pencil sits
+            // hard against the right edge. Color is the themed body color (set per-frame in RefreshRoster).
             var nameLabel = UiToolkit.CreateText(go, "Name", Vector2.zero,
                 new Vector2(LobbyTheme.ScaledRosterNameWidth, RowHeight), "",
                 LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
             var nle = LE(nameLabel.gameObject);
             nle.preferredWidth = LobbyTheme.ScaledRosterNameWidth;
-            nle.flexibleWidth = 0;
+            nle.flexibleWidth = 1;
 
-            // (2) flexible spacer pushes status + pencil to the right edge.
-            var spacer = new GameObject("Spacer");
-            spacer.transform.SetParent(go.transform, false);
-            spacer.AddComponent<RectTransform>();
-            LE(spacer).flexibleWidth = 1;
-
-            // (3) STATUS — fixed-ish width, right-aligned, themed color set per-frame in RefreshRoster.
-            var statusLabel = UiToolkit.CreateText(go, "Status", Vector2.zero,
-                new Vector2(LobbyTheme.ScaledRosterStatusWidth, RowHeight), "",
-                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleRight, new Vector2(1f, 0.5f));
-            var sle = LE(statusLabel.gameObject);
-            sle.preferredWidth = LobbyTheme.ScaledRosterStatusWidth;
-            sle.flexibleWidth = 0;
-
-            // (4) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
+            // (3) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
             // live ownership (this pool slot must currently render the local player, tracked in
             // _myRowIndex) so a pooled row reused for another peer can never rename the wrong one; the
             // button is also hidden/disabled for non-local rows each frame in RefreshRoster. Reuse the
             // EXACT existing rename path (OnLobbyRenamePrompt → native prompt → SendRename), untouched.
-            var icon = LobbyTheme.ScaledIconButtonSize;
             var renameBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "RenameBtn", "✎",
                 () => { if (index == _myRowIndex) _owner.OnLobbyRenamePrompt(); });
             if (renameBtn != null)
@@ -1314,7 +1308,7 @@ namespace Multipleer.UI
                 rle.preferredWidth = icon; rle.preferredHeight = icon; rle.flexibleWidth = 0;
             }
 
-            return new RosterRow { Go = go, NameLabel = nameLabel, StatusLabel = statusLabel, RenameBtn = renameBtn };
+            return new RosterRow { Go = go, ReadyLabel = readyLabel, NameLabel = nameLabel, RenameBtn = renameBtn };
         }
     }
 }
