@@ -82,6 +82,8 @@
     <!-- Client raise/dismiss correlation + ordering brain (pure, Unity-free): occurrence-id keyed open map +
          out-of-order dismiss buffer. Fixes the same-def-id collision / Dismiss-before-Raise bug. -->
     <Compile Include="..\src\Network\Sync\State\EventCorrelator.cs"><Link>Sync\State\EventCorrelator.cs</Link></Compile>
+    <!-- Host-side first-claim-wins choice arbiter (pure, Unity-free). -->
+    <Compile Include="..\src\Network\Sync\State\ChoiceArbiter.cs"><Link>Sync\State\ChoiceArbiter.cs</Link></Compile>
     <!-- Host-side monotonic per-occurrence id authority (pure, Unity-free: ConditionalWeakTable + counter). -->
     <Compile Include="..\src\Harmony\Sync\EventOccurrenceIds.cs"><Link>Harmony\Sync\EventOccurrenceIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>
