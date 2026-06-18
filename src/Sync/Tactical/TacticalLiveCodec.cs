@@ -18,6 +18,7 @@ namespace Multipleer.Sync.Tactical
     ///
     /// Frames:
     ///   tac.intent.move      [netId:i32][x:f32][y:f32][z:f32][nonce:u32]                  (client→host)
+    ///   tac.move.start       [seq:u32][netId:i32][x:f32][y:f32][z:f32]                    (host→all)
     ///   tac.move             [seq:u32][netId:i32][x:f32][y:f32][z:f32][stopReason:i32]    (host→all)
     ///   tac.intent.endturn   [nonce:u32]                                                  (client→host)
     ///   tac.turn             [seq:u32][currentFactionIndex:i32][turnNumber:i32][factionDefGuid:string]
@@ -57,6 +58,48 @@ namespace Multipleer.Sync.Tactical
                     float x = r.ReadSingle(); float y = r.ReadSingle(); float z = r.ReadSingle();
                     uint nonce = r.ReadUInt32();
                     intent = new MoveIntent(netId, x, y, z, nonce);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        // ─── tac.move.start (host→all) ────────────────────────────────────
+        // Broadcast at the MOMENT the host BEGINS a move (its own click or a relayed client intent), so the
+        // client mirror animates CONCURRENTLY with the host instead of waiting for the END outcome. Mirrors
+        // the EncodeMove layout MINUS stopReason (the destination is the requested cell, not the landed one).
+        public struct MoveStart
+        {
+            public uint Seq;
+            public int NetId;
+            public float X, Y, Z;
+            public MoveStart(uint seq, int netId, float x, float y, float z)
+            { Seq = seq; NetId = netId; X = x; Y = y; Z = z; }
+        }
+
+        public static byte[] EncodeMoveStart(uint seq, int netId, float x, float y, float z)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq); w.Write(netId); w.Write(x); w.Write(y); w.Write(z);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeMoveStart(byte[] data, out MoveStart start)
+        {
+            start = default(MoveStart);
+            if (data == null || data.Length < 4 + 4 + 4 + 4 + 4) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    int netId = r.ReadInt32();
+                    float x = r.ReadSingle(); float y = r.ReadSingle(); float z = r.ReadSingle();
+                    start = new MoveStart(seq, netId, x, y, z);
                     return true;
                 }
             }

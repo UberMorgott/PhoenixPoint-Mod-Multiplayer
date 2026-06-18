@@ -36,6 +36,7 @@ namespace Multipleer.Sync.Tactical
         public const ushort TacMove = 0x83;          // 131: host→all     "actor netId landed at pos" (outcome, carries seq)
         public const ushort TacIntentEndTurn = 0x84; // 132: client→host  "end the current turn"      (intent, carries nonce)
         public const ushort TacTurn = 0x85;          // 133: host→all     "current faction advanced"  (outcome, carries seq)
+        public const ushort TacMoveStart = 0x86;     // 134: host→all     "actor netId begins move to pos" (start, carries own seq) — client animates CONCURRENTLY with host; tac.move (0x83) END reconciles the exact final cell
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape

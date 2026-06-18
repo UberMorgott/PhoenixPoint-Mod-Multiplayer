@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
+using Base.Core;
 using HarmonyLib;
 using Multipleer.Network;
 using UnityEngine;
@@ -38,6 +40,10 @@ namespace Multipleer.Sync.Tactical
     {
         private static uint _nonceCounter;
         private static uint NextNonce() => unchecked(++_nonceCounter);
+
+        // CLIENT: a tac.turn that arrived before the live TLC existed (hydrate race). Stashed here and drained
+        // at hydrate-completion (ClientEnterInitialTurn). Self-ignores if stale (ShouldApply + monotonic seq).
+        private static TacticalLiveCodec.TurnOutcome? _pendingTurn;
 
         // ─── CLIENT: relay end-turn intent (called from the repointed RequestEndTurnPatch) ─────────
         /// <summary>CLIENT (mirroring): send <c>tac.intent.endturn</c> to the host. Returns true so the
@@ -122,11 +128,36 @@ namespace Multipleer.Sync.Tactical
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacTurn, t.Seq)) return;
 
             object tlc = TacticalDeploySync.LiveTlc ?? ResolveTlc();
-            if (tlc == null) { Debug.LogError("[Multipleer][tac] tac.turn: no live TacticalLevelController"); return; }
+            if (tlc == null)
+            {
+                // No live TLC yet (hydrate racing the host's tac.turn): STASH the decoded turn so the
+                // hydrate-completion drain (ClientEnterInitialTurn) can re-apply it. ShouldApply + monotonic
+                // seq make a stale stash self-ignore. Do NOT Mark here (apply not yet performed).
+                _pendingTurn = t;
+                Debug.Log("[Multipleer][tac] tac.turn: no live TacticalLevelController — buffered seq=" + t.Seq + " idx=" + t.CurrentFactionIndex);
+                return;
+            }
 
             try
             {
-                // 1) Point the TLC at the host's current faction (private _currentFactionIndex).
+                // 1a) Exit the OUTGOING player turn on every handoff: if the faction we are leaving is still
+                //     IsPlayingTurn, set its _endTurnRequested=true so the native player PlayTurnCrt loop
+                //     (TacticalFaction.cs:479) breaks, runs end-turn side-effects, and clears IsPlayingTurn.
+                //     Without this the client's own PlayTurnCrt stays running → "already running" dead-end on
+                //     return to the player turn.
+                bool prevEnded = false;
+                try
+                {
+                    object outgoing = GetProp(tlc, "CurrentFaction");
+                    if (outgoing != null && ToBool(GetProp(outgoing, "IsPlayingTurn")))
+                    {
+                        Traverse.Create(outgoing).Field("_endTurnRequested").SetValue(true);
+                        prevEnded = true;
+                    }
+                }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.turn: outgoing end-turn failed: " + ex); }
+
+                // 1b) Point the TLC at the host's current faction (private _currentFactionIndex).
                 var idxTrav = Traverse.Create(tlc).Field("_currentFactionIndex");
                 idxTrav.SetValue(t.CurrentFactionIndex);
 
@@ -136,6 +167,8 @@ namespace Multipleer.Sync.Tactical
                 // 2) Re-stamp the authoritative TurnNumber (public setter) — corrects any local drift and the
                 //    +1 PlayTurnCrt will apply when we start it (we re-stamp AFTER the start below for player).
                 bool isPlayer = ToBool(GetProp(current, "IsControlledByPlayer"));
+                bool viewDown = false;
+                string branch = isPlayer ? "player" : "enemy";
 
                 if (isPlayer)
                 {
@@ -158,16 +191,28 @@ namespace Multipleer.Sync.Tactical
                         SetTurnNumber(current, t.TurnNumber);
                         Debug.Log("[Multipleer][tac] CLIENT entered PLAYER turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber);
                     }
+                    // UI-LOCK FIX: drive the view into the new-turn HUD state explicitly (race-independent),
+                    // because the NewTurnEvent we raise can fire BEFORE TacticalView subscribes to it.
+                    EnsureClientTurnHud(current);
                 }
                 else
                 {
-                    // 3b) AI/enemy faction → stay frozen spectator. Just stamp the turn number; enemy actions
-                    //     arrive via tac.move / tac.damage. Do NOT start PlayTurnCrt (would touch view/AI state).
+                    // 3b) AI/enemy faction → stay frozen spectator. Stamp the turn number; enemy actions arrive
+                    //     via tac.move / tac.damage. Do NOT start PlayTurnCrt (would touch view/AI state).
                     SetTurnNumber(current, t.TurnNumber);
+                    // DRIVE THE VIEW DOWN: the client's NextTurnCrt is suppressed so native
+                    // NewTurnEvent/FactionEndedTurnEvent never fire — the mirror is the ONLY thing that can
+                    // dismiss the player HUD. Mirror native TacticalView.OnViewerFactionEndedTurn
+                    // (TacticalView.cs:1248-1252): switch _statesStack to a fresh UIStateInitial() via
+                    // ClearStackAndPush. Reuses the readiness-guard + deferred retry so it survives a
+                    // not-yet-ready view.
+                    viewDown = EnsureClientViewDown(current);
                     Debug.Log("[Multipleer][tac] CLIENT mirrored ENEMY/AI turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (frozen spectator)");
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacTurn, t.Seq);
+                Debug.Log("[Multipleer][tac] CLIENT turn handoff: prevEnded=" + prevEnded + " idx=" + t.CurrentFactionIndex +
+                          " branch=" + branch + " viewDown=" + viewDown);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnTurn failed: " + ex); }
         }
@@ -189,8 +234,222 @@ namespace Multipleer.Sync.Tactical
                 StartPlayTurn(current);
                 SetTurnNumber(current, turnNumber);   // undo PlayTurnCrt's internal +1
                 Debug.Log("[Multipleer][tac] CLIENT entered INITIAL player turn (turn " + turnNumber + ")");
+                // UI-LOCK FIX: the initial turn entry fires at the END of deploy-hydrate, typically BEFORE
+                // TacticalView's UIStateInitView callback has subscribed OnNewTurn → the raised NewTurnEvent
+                // is dropped and no action HUD appears. Drive the view into the new-turn state explicitly.
+                EnsureClientTurnHud(current);
             }
             else Debug.Log("[Multipleer][tac] CLIENT initial turn is AI/enemy → frozen spectator");
+
+            // DRAIN a tac.turn that raced ahead of this hydrate and was buffered. ShouldApply + monotonic seq
+            // make a stale stash self-ignore (ClientOnTurn re-runs ShouldApply). Re-encode from the stash and
+            // re-run the full ClientOnTurn body (now that LiveTlc is set).
+            DrainPendingTurn();
+        }
+
+        /// <summary>CLIENT: re-apply a buffered tac.turn (stashed when no live TLC existed) once hydrate is
+        /// done. Re-runs <see cref="ClientOnTurn"/> via a fresh encode of the stash; the seq guard inside
+        /// drops it if a newer turn was already applied.</summary>
+        private static void DrainPendingTurn()
+        {
+            if (_pendingTurn == null) return;
+            var p = _pendingTurn.Value;
+            _pendingTurn = null;
+            try
+            {
+                byte[] payload = TacticalLiveCodec.EncodeTurn(p.Seq, p.CurrentFactionIndex, p.TurnNumber, p.FactionDefGuid);
+                Debug.Log("[Multipleer][tac] CLIENT draining buffered tac.turn seq=" + p.Seq + " idx=" + p.CurrentFactionIndex);
+                ClientOnTurn(payload);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] DrainPendingTurn failed: " + ex); }
+        }
+
+        // ─── CLIENT UI-LOCK FIX: force the action HUD up regardless of the raced NewTurnEvent ─────────
+
+        // Fail-safe budget for the deferred view-readiness wait (~600 frames ≈ 10 s @ 60 fps): the
+        // TacticalView's UIStateInitView callback (which builds _statesStack + subscribes OnNewTurn) normally
+        // completes within a few frames of the scene going Playing.
+        private const int ViewReadyMaxFrames = 600;
+
+        /// <summary>
+        /// CLIENT belt-and-suspenders: bring up the player action HUD for <paramref name="faction"/> WITHOUT
+        /// relying on the NewTurnEvent we raise in <see cref="MakeTurnStartAction"/> (that event is dropped if
+        /// it fires before <c>TacticalView</c> subscribes OnNewTurn inside its <c>UIStateInitView</c> completion
+        /// callback — TacticalView.cs:1091-1100, the exact race that left the client with no action buttons).
+        ///
+        /// The HUD needs (a) the client faction = the view's ViewerFaction (TacticalFaction.IsViewerFaction,
+        /// set via the PUBLIC <c>TacticalView.SetViewerTacticalFaction</c>, TacticalView.cs:457) AND (b) the
+        /// view in <c>UIStateInitial(initForNewTurn:true)</c> (entered by the PRIVATE
+        /// <c>TacticalView.OnNewTurn(prev,next)</c>, TacticalView.cs:1256-1260). We reach the live view via
+        /// <c>TacticalLevelController.View</c> (TacticalView.cs:1296). OnNewTurn requires the view's private
+        /// <c>_statesStack</c> to exist — it is created ONLY inside that UIStateInitView callback — so if the
+        /// view/stack isn't ready yet we DEFER onto the level Timing and retry (same coroutine pattern as the
+        /// rest of this file), exactly mirroring the engine's own <c>OnNewTurn(null, CurrentFaction)</c> call.
+        /// </summary>
+        private static void EnsureClientTurnHud(object faction)
+        {
+            try
+            {
+                if (TryDriveClientTurnHud(faction)) return;
+                // View / _statesStack not ready → defer onto Timing and poll until it is (bounded).
+                object tlc = GetProp(faction, "TacticalLevel");
+                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return; }
+                object timing = ResolveTiming(faction, tlc);
+                if (timing == null || !InvokeStart(timing, timing.GetType(), DriveTurnHudCrt(faction)))
+                    Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: could not defer HUD drive onto Timing (view may stay locked)");
+                else
+                    Debug.Log("[Multipleer][tac] EnsureClientTurnHud: view not ready → deferred HUD drive onto Timing");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud failed: " + ex); }
+        }
+
+        /// <summary>Deferred poll: each frame, retry the HUD drive until it succeeds (view + _statesStack ready)
+        /// or the fail-safe budget elapses. <c>IEnumerator&lt;NextUpdate&gt;</c> so it binds the native
+        /// <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> overload.</summary>
+        private static IEnumerator<NextUpdate> DriveTurnHudCrt(object faction)
+        {
+            int frames = 0;
+            while (frames < ViewReadyMaxFrames)
+            {
+                bool done = false;
+                try { done = TryDriveClientTurnHud(faction); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DriveTurnHudCrt: drive failed: " + ex); }
+                if (done) yield break;
+                frames++;
+                yield return NextUpdate.NextFrame;
+            }
+            Debug.LogError("[Multipleer][tac] DriveTurnHudCrt: gave up after " + frames + " frames — view never became ready");
+        }
+
+        /// <summary>Single attempt to drive the view: returns false (caller should defer/retry) if the live
+        /// <c>TacticalView</c> or its <c>_statesStack</c> isn't constructed yet. On success: set the viewer
+        /// faction (public) + switch to <c>UIStateInitial(initForNewTurn:true)</c> by invoking the private
+        /// <c>OnNewTurn(null, faction)</c> — the same call the engine makes during view init.</summary>
+        private static bool TryDriveClientTurnHud(object faction)
+        {
+            object tlc = GetProp(faction, "TacticalLevel");
+            object view = tlc != null ? GetProp(tlc, "View") : null;
+            if (view == null) return false;   // view not constructed yet → defer
+            // _statesStack (private) is created only inside UIStateInitView's completion callback; until then
+            // OnNewTurn would NRE. Treat a null stack as "view not ready".
+            object statesStack = Traverse.Create(view).Field("_statesStack").GetValue();
+            if (statesStack == null) return false;
+
+            // (a) Make the client faction the viewer faction (PUBLIC setter).
+            try
+            {
+                var setViewer = AccessTools.Method(view.GetType(), "SetViewerTacticalFaction");
+                if (setViewer != null) setViewer.Invoke(view, new[] { faction });
+                else Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction not found");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction failed: " + ex); }
+
+            // (b) Enter UIStateInitial(initForNewTurn:true) via the PRIVATE OnNewTurn(prev=null, next=faction) —
+            //     the exact path the engine uses (TacticalView.cs:1100). Reflection (private), 2 args.
+            bool hudEntered = false;
+            try
+            {
+                var onNewTurn = AccessTools.Method(view.GetType(), "OnNewTurn");
+                if (onNewTurn != null) { onNewTurn.Invoke(view, new[] { null, faction }); hudEntered = true; }
+                else Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: OnNewTurn not found");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: OnNewTurn failed: " + ex); }
+
+            object viewerNow = GetProp(view, "ViewerFaction");
+            Debug.Log("[Multipleer][tac] CLIENT drove turn HUD: viewerFaction set=" + ReferenceEquals(viewerNow, faction) +
+                      " UIStateInitial(initForNewTurn) entered=" + hudEntered);
+            return true;
+        }
+
+        // ─── CLIENT VIEW-DOWN (enemy/non-player handoff): mirror OnViewerFactionEndedTurn ───────────
+
+        /// <summary>CLIENT belt-and-suspenders for an enemy/non-player faction handoff: dismiss the player
+        /// action HUD by switching the view's state stack to a fresh <c>UIStateInitial()</c>, exactly mirroring
+        /// native <c>TacticalView.OnViewerFactionEndedTurn</c> (TacticalView.cs:1248-1252). The client's
+        /// NextTurnCrt is suppressed so the engine never raises FactionEndedTurnEvent → this mirror is the only
+        /// thing that can drive the view down. Reuses the same view-readiness guard + Timing-deferred retry as
+        /// <see cref="EnsureClientTurnHud"/> so it survives a not-yet-ready view. Returns true if the switch was
+        /// applied synchronously; false → it was deferred onto Timing (or could not be deferred).</summary>
+        private static bool EnsureClientViewDown(object faction)
+        {
+            try
+            {
+                if (TryDriveClientViewDown(faction)) return true;
+                object tlc = GetProp(faction, "TacticalLevel");
+                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientViewDown: no TacticalLevel on faction"); return false; }
+                object timing = ResolveTiming(faction, tlc);
+                if (timing == null || !InvokeStart(timing, timing.GetType(), DriveViewDownCrt(faction)))
+                    Debug.LogError("[Multipleer][tac] EnsureClientViewDown: could not defer view-down onto Timing (HUD may stay up)");
+                else
+                    Debug.Log("[Multipleer][tac] EnsureClientViewDown: view not ready → deferred view-down onto Timing");
+                return false;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientViewDown failed: " + ex); return false; }
+        }
+
+        /// <summary>Deferred poll for the enemy-turn view-down (same pattern as <see cref="DriveTurnHudCrt"/>).</summary>
+        private static IEnumerator<NextUpdate> DriveViewDownCrt(object faction)
+        {
+            int frames = 0;
+            while (frames < ViewReadyMaxFrames)
+            {
+                bool done = false;
+                try { done = TryDriveClientViewDown(faction); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DriveViewDownCrt: drive failed: " + ex); }
+                if (done) yield break;
+                frames++;
+                yield return NextUpdate.NextFrame;
+            }
+            Debug.LogError("[Multipleer][tac] DriveViewDownCrt: gave up after " + frames + " frames — view never became ready");
+        }
+
+        /// <summary>Single attempt to drive the view DOWN: <c>_statesStack.SwitchToState(new UIStateInitial(),
+        /// StateStackAction.ClearStackAndPush)</c> on the live <c>TacticalLevelController.View</c>. Returns false
+        /// (caller should defer/retry) if the view or its <c>_statesStack</c> isn't constructed yet.</summary>
+        private static bool TryDriveClientViewDown(object faction)
+        {
+            object tlc = GetProp(faction, "TacticalLevel");
+            object view = tlc != null ? GetProp(tlc, "View") : null;
+            if (view == null) return false;   // view not constructed yet → defer
+            object statesStack = Traverse.Create(view).Field("_statesStack").GetValue();
+            if (statesStack == null) return false;
+
+            bool switched = false;
+            try
+            {
+                // new UIStateInitial(initForNewTurn:false) — internal tactical view-state, default ctor.
+                var initialType = AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateInitial");
+                var actionType = AccessTools.TypeByName("Base.UI.StateStackAction");
+                if (initialType == null || actionType == null)
+                { Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: UIStateInitial/StateStackAction type not found"); return true; }
+                // UIStateInitial is INTERNAL (class + ctor) → bind non-public. ctor(bool initForNewTurn=false).
+                object initialState = Activator.CreateInstance(
+                    initialType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new object[] { false }, null);
+                object clearAndPush = Enum.Parse(actionType, "ClearStackAndPush");
+                // StateStack<TContext>.SwitchToState(IState<TContext> state, StateStackAction stackAction).
+                var switchTo = AccessTools.Method(statesStack.GetType(), "SwitchToState");
+                if (switchTo != null) { switchTo.Invoke(statesStack, new[] { initialState, clearAndPush }); switched = true; }
+                else Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: SwitchToState not found");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: SwitchToState failed: " + ex); }
+
+            Debug.Log("[Multipleer][tac] CLIENT drove view DOWN: UIStateInitial entered=" + switched);
+            return true;
+        }
+
+        /// <summary>Resolve a <c>Base.Core.Timing</c> for the deferred HUD drive: the faction's own Timing, else
+        /// the level's Timing, else the ambient <c>Timing.Current</c>.</summary>
+        private static object ResolveTiming(object faction, object tlc)
+        {
+            object timing = GetProp(faction, "Timing") ?? (tlc != null ? GetProp(tlc, "Timing") : null);
+            if (timing == null)
+            {
+                var timingType = AccessTools.TypeByName("Base.Core.Timing");
+                var currentProp = timingType != null ? AccessTools.Property(timingType, "Current") : null;
+                try { timing = currentProp?.GetValue(null, null); } catch { timing = null; }
+            }
+            return timing;
         }
 
         // ─── Engine helpers ────────────────────────────────────────────────────────────────────────

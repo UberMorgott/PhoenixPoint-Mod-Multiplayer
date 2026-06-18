@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
+using Base.Core;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.Network.MessageLayer;
@@ -34,6 +36,24 @@ namespace Multipleer.Sync.Tactical
         private static uint _nonceCounter;
         private static uint NextNonce() => unchecked(++_nonceCounter);
 
+        // Animate the mirror only when it is more than ~one grid cell from the host's final pos; closer than
+        // this and the path would be degenerate (0/1 node) → animate would OOR in ExecutePoints, so teleport.
+        // PP tactical grid cell ≈ 1 world unit (no public cell-size const surfaced); 1.0f is the safe gate.
+        private const float MoveAnimateMinDist = 1.0f;
+
+        // Fail-safe budget for the deferred move reconcile (~600 frames ≈ 10 s @ 60 fps).
+        private const int ReconcileMaxFrames = 600;
+
+        // Reusable mirror navigation settings: NO authoritative side effects (no AP spend, no overwatch, no
+        // perception-range update), snap to the grid on finish. Built lazily off the native NavigationSettings
+        // type so the field names stay bound to the real engine type.
+        private static object _mirrorNavSettings;
+
+        // CLIENT: the requested dst the START broadcast set the mirror navigating toward, keyed by netId. The
+        // END outcome (ClientOnMove) reads it to tell a NORMAL completion (finalPos ≈ startDst → wait-then-snap)
+        // from an EARLY INTERRUPT (finalPos far from startDst → cancel-nav + immediate snap). Cleared on apply.
+        private static readonly Dictionary<int, Vector3> _clientStartDst = new Dictionary<int, Vector3>();
+
         // ─── CLIENT: intercept the local move, send intent, suppress ──────────────────────────────
         /// <summary>
         /// CLIENT (mirroring) prefix on <c>MoveAbility.Activate</c>: capture {netId, PositionToApply}, send
@@ -52,6 +72,12 @@ namespace Multipleer.Sync.Tactical
                           " mirrorArmed=" + TacticalDeploySync.IsClientMirroring + " netId=<n/a>" +
                           " posToApply=(" + diagPos.x.ToString("0.0") + "," + diagPos.y.ToString("0.0") + "," + diagPos.z.ToString("0.0") + ")" +
                           " action=PASS");
+                // HOST START broadcast: this prefix is the SINGLE choke point for the host beginning a move —
+                // both the host's own click AND HostOnMoveIntent's programmatic Activate.Invoke run THROUGH the
+                // patched MoveAbility.Activate, so they both trip this prefix exactly once. Broadcast the COMMAND
+                // (dst) now, BEFORE the native move runs, so every client mirror animates CONCURRENTLY with the
+                // host instead of waiting for the END outcome. Fail-open: any failure here never blocks the move.
+                HostBroadcastMoveStart(moveAbility, parameter);
                 return true;   // host / single-player / non-mirror
             }
             var engine = NetworkEngine.Instance;
@@ -189,10 +215,99 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastMoveOutcome failed: " + ex); }
         }
 
-        // ─── CLIENT: apply the host move outcome (mirror) ─────────────────────────────────────────
-        /// <summary>CLIENT inbound: drive the actor to the host's FINAL pos. Animated via
-        /// <c>TacticalNav.Navigate(pos)</c>; falls back to the teleport <c>SetPosition(pos)</c>. Idempotent
-        /// via the per-surface seq guard (last-writer-wins).</summary>
+        // ─── HOST: a move is STARTING → broadcast the COMMAND (dst) so clients animate concurrently ──
+        /// <summary>HOST: at the moment the host BEGINS a move (own click OR a relayed client intent, both via
+        /// the patched <c>MoveAbility.Activate</c>), read {netId, requested dst (PositionToApply)} and broadcast
+        /// <c>tac.move.start</c> to all peers. Clients run the ANIMATED navigate immediately so the mirror moves
+        /// CONCURRENTLY with the host. The END outcome (<see cref="HostBroadcastMoveOutcome"/>) still reconciles
+        /// the EXACT final cell, so this is never worse than today. Fail-open: any failure is logged + swallowed
+        /// so the native host move always proceeds.</summary>
+        public static void HostBroadcastMoveStart(object moveAbility, object parameter)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || !engine.IsHost) return;
+                object actor = GetProp(moveAbility, "TacticalActorBase");
+                if (actor == null) return;
+                int netId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (netId < 0) return;
+                if (!TryGetPositionToApply(parameter, out Vector3 dst)) return;
+
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMoveStart);
+                byte[] payload = TacticalLiveCodec.EncodeMoveStart(seq, netId, dst.x, dst.y, dst.z);
+                BroadcastToAll(engine, TacticalSurfaceIds.TacMoveStart, payload);
+                Debug.Log("[Multipleer][tac] HOST broadcast tac.move.start seq=" + seq + " netId=" + netId +
+                          " dst=(" + dst.x.ToString("0.0") + "," + dst.y.ToString("0.0") + "," + dst.z.ToString("0.0") + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastMoveStart failed: " + ex); }
+        }
+
+        // ─── CLIENT: a move is STARTING → animate the mirror CONCURRENTLY ──────────────────────────
+        /// <summary>CLIENT inbound (<c>tac.move.start</c>): resolve the actor and run the ANIMATED navigate
+        /// toward the requested dst so the mirror moves at the SAME time as the host (concurrency fix). NO
+        /// authoritative side effects (mirror nav settings: no AP spend, no overwatch). The END outcome
+        /// (<c>tac.move</c>) then reconciles to the EXACT final cell. Degenerate sub-cell move → teleport.
+        /// Own monotonic seq (last-writer-wins) independent of tac.move.</summary>
+        public static void ClientOnMoveStart(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeMoveStart(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.move.start decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMoveStart, s.Seq)) return;
+
+            object actor = TacticalDeploySync.ResolveLiveActor(s.NetId);
+            if (actor == null) { Debug.LogError("[Multipleer][tac] tac.move.start: no actor for netId " + s.NetId); return; }
+
+            var dst = new Vector3(s.X, s.Y, s.Z);
+            // Record the requested dst so the END outcome can distinguish a normal completion from an interrupt.
+            _clientStartDst[s.NetId] = dst;
+            string branch;
+            Vector3 cur = GetPos(actor);
+            object nav = GetProp(actor, "TacticalNav");
+            if (nav != null && Vector3.Distance(cur, dst) > MoveAnimateMinDist)
+            {
+                bool started = TryAnimatedNavigate(nav, dst);
+                if (started)
+                {
+                    branch = "animated-start";
+                    TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMoveStart, s.Seq);
+                }
+                else
+                {
+                    // Navigate threw / unavailable → leave the actor for the END outcome to reconcile (still
+                    // correct cell, just no concurrent animation). Do NOT teleport here: a teleport on START
+                    // would make the actor pop to the REQUESTED cell, which can differ from the final cell on an
+                    // early interrupt — let the authoritative END outcome place it.
+                    branch = "start-navfail";
+                    TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMoveStart, s.Seq);
+                }
+            }
+            else
+            {
+                // Degenerate / sub-cell move → no concurrent animation needed; END outcome reconciles it.
+                branch = "start-degenerate";
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMoveStart, s.Seq);
+            }
+            Debug.Log("[Multipleer][tac][DIAG] CLIENTSTART dst=(" +
+                      s.X.ToString("0.0") + "," + s.Y.ToString("0.0") + "," + s.Z.ToString("0.0") + ")" +
+                      " branch=" + branch + " netId=" + s.NetId);
+            Debug.Log("[Multipleer][tac] CLIENT applied tac.move.start seq=" + s.Seq + " netId=" + s.NetId + " branch=" + branch);
+        }
+
+        // ─── CLIENT: apply the host move OUTCOME → RECONCILE only (concurrency redesign) ────────────
+        /// <summary>CLIENT inbound (<c>tac.move</c>, the END outcome): the concurrent animation was ALREADY
+        /// started by <see cref="ClientOnMoveStart"/>, so this handler MUST NOT initiate a fresh Navigate (that
+        /// would double-animate). It RECONCILES the mirror to the host's authoritative FINAL cell:
+        ///   • NORMAL completion (finalPos ≈ the START dst the mirror is heading toward) → wait until the nav
+        ///     stops, then <c>SetPosition(finalPos)</c> (the existing deferred reconcile; exact cell).
+        ///   • EARLY INTERRUPT (finalPos far from the START dst — e.g. overwatch stopped the host short) →
+        ///     <c>CancelNavigation()</c> + immediate <c>SetPosition(finalPos)</c> so the mirror snaps back to
+        ///     where the host actually landed instead of overshooting to the requested cell.
+        ///   • No START recorded (start lost / no-op) → behaves as NORMAL (wait-then-snap if navigating, else
+        ///     immediate snap), so the END outcome remains the correctness backstop.
+        /// Never worse than today: the final cell is always the exact host cell. Idempotent via the per-surface
+        /// seq guard (last-writer-wins).</summary>
         public static void ClientOnMove(byte[] payload)
         {
             var engine = NetworkEngine.Instance;
@@ -203,24 +318,50 @@ namespace Multipleer.Sync.Tactical
             object actor = TacticalDeploySync.ResolveLiveActor(m.NetId);
             if (actor == null) { Debug.LogError("[Multipleer][tac] tac.move: no actor for netId " + m.NetId); return; }
 
-            var dst = new Vector3(m.X, m.Y, m.Z);
-            // Navigate(pos) is best-effort ANIMATION only — it can silently no-op on an invalid/blocked
-            // client path. The host's streamed landed pos is AUTHORITATIVE, so we ALWAYS finish with
-            // SetPosition(dst) to guarantee the client actor ends at exactly the host's pos (no divergence).
-            bool navOk = TryAnimatedNavigate(actor, dst);     // optional animation; result captured for DIAG only
-            bool placed = TrySetPosition(actor, dst);         // authoritative final placement
-            // [DIAG] CLIENT APPLY: requested dst, nav + setpos outcomes, and the actor's pos after placement.
-            Vector3 posAfter = GetPos(actor);
-            Debug.Log("[Multipleer][tac][DIAG] CLIENTAPPLY dst=(" +
-                      m.X.ToString("0.0") + "," + m.Y.ToString("0.0") + "," + m.Z.ToString("0.0") + ")" +
-                      " netId=" + m.NetId + " navOk=" + navOk + " setPosOk=" + placed +
-                      " actorPosAfter=(" + posAfter.x.ToString("0.0") + "," + posAfter.y.ToString("0.0") + "," + posAfter.z.ToString("0.0") + ")");
-            if (placed)
+            var finalPos = new Vector3(m.X, m.Y, m.Z);
+            object nav = GetProp(actor, "TacticalNav");
+            bool navigating = nav != null && ToBool(GetProp(nav, "IsNavigating"));
+
+            // Was finalPos significantly different from where the START set the mirror heading? → early interrupt.
+            bool hadStart = _clientStartDst.TryGetValue(m.NetId, out Vector3 startDst);
+            bool interrupt = hadStart && Vector3.Distance(startDst, finalPos) > MoveAnimateMinDist;
+            _clientStartDst.Remove(m.NetId);
+
+            string branch;
+            if (interrupt)
             {
-                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT applied tac.move seq=" + m.Seq + " netId=" + m.NetId);
+                // Host stopped short of the requested cell → cancel the (now-wrong) concurrent nav, snap to the
+                // authoritative final cell immediately. CancelNavigation() is the public override (no AP/overwatch
+                // side effects on the mirror; it only resolves StopReason + halts the path).
+                if (navigating) TryCancelNavigation(nav);
+                bool placed = TrySetPosition(actor, finalPos);
+                branch = placed ? "reconcile-interrupt" : "reconcile-interrupt-failed";
+                if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
+                else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
             }
-            else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
+            else if (navigating)
+            {
+                // Normal move still animating from START → defer the snap until the nav stops, landing on the
+                // EXACT host cell (the existing wait-IsNavigating-then-SetPosition reconcile coroutine).
+                branch = "reconcile";
+                ScheduleReconcile(actor, nav, finalPos, m.NetId);
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
+            }
+            else
+            {
+                // Not navigating (START no-op/degenerate, or already arrived) → snap immediately (exact cell).
+                bool placed = TrySetPosition(actor, finalPos);
+                branch = placed ? "reconcile-snap" : "reconcile-snap-failed";
+                if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
+                else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
+            }
+            // [DIAG] CLIENT APPLY: final cell, chosen reconcile branch, and the actor's pos right after dispatch.
+            Vector3 posAfter = GetPos(actor);
+            Debug.Log("[Multipleer][tac][DIAG] CLIENTAPPLY finalPos=(" +
+                      m.X.ToString("0.0") + "," + m.Y.ToString("0.0") + "," + m.Z.ToString("0.0") + ")" +
+                      " branch=" + branch + " netId=" + m.NetId + " navigating=" + navigating + " interrupt=" + interrupt +
+                      " actorPosAfter=(" + posAfter.x.ToString("0.0") + "," + posAfter.y.ToString("0.0") + "," + posAfter.z.ToString("0.0") + ")");
+            Debug.Log("[Multipleer][tac] CLIENT applied tac.move seq=" + m.Seq + " netId=" + m.NetId + " branch=" + branch);
         }
 
         // ─── Engine reflection helpers ────────────────────────────────────────────────────────────
@@ -302,21 +443,6 @@ namespace Multipleer.Sync.Tactical
             return false;
         }
 
-        private static bool TryAnimatedNavigate(object actor, Vector3 dst)
-        {
-            try
-            {
-                object nav = GetProp(actor, "TacticalNav");
-                if (nav == null) return false;
-                // public override void Navigate(Vector3 dst) — 1-arg animated overload.
-                var navigate = AccessTools.Method(nav.GetType(), "Navigate", new[] { typeof(Vector3) });
-                if (navigate == null) return false;
-                navigate.Invoke(nav, new object[] { dst });
-                return true;
-            }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryAnimatedNavigate failed: " + ex); return false; }
-        }
-
         private static bool TrySetPosition(object actor, Vector3 dst)
         {
             try
@@ -329,6 +455,152 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] TrySetPosition failed: " + ex); return false; }
         }
+
+        /// <summary>Cancel an in-flight mirror navigation: <c>TacticalNavigationComponent.CancelNavigation()</c>
+        /// (public override, no params — TacticalNavigationComponent.cs:1357; sets StopReason then halts the
+        /// path). Used to abort a concurrent START animation when the host's END outcome reveals an early
+        /// interrupt (final cell ≠ requested cell). Returns false on a throw / missing method.</summary>
+        private static bool TryCancelNavigation(object nav)
+        {
+            try
+            {
+                if (nav == null) return false;
+                var cancel = AccessTools.Method(nav.GetType(), "CancelNavigation", Type.EmptyTypes);
+                if (cancel == null) { Debug.LogError("[Multipleer][tac] CancelNavigation() not found"); return false; }
+                cancel.Invoke(nav, null);
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryCancelNavigation failed: " + ex); return false; }
+        }
+
+        // ─── CLIENT animated-mirror helpers (FIX B) ────────────────────────────────────────────────
+
+        /// <summary>Lazily build the reusable mirror <c>NavigationSettings</c>: <c>CostsAPToActor=false</c>
+        /// (skips the AP spend in ExecutePoints — TacticalNavigationComponent.cs:~1087), <c>TriggerOverwatch
+        /// =false</c> (skips overwatch), <c>UpdateNavigationPerceptionRange=false</c>, <c>SnapToGridOnFinish
+        /// =true</c>. Field names grounded against NavigationSettings.cs:10-40.</summary>
+        private static object GetMirrorNavSettings()
+        {
+            if (_mirrorNavSettings != null) return _mirrorNavSettings;
+            try
+            {
+                var nsType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.NavigationSettings");
+                if (nsType == null) { Debug.LogError("[Multipleer][tac] NavigationSettings type not found"); return null; }
+                object s = Activator.CreateInstance(nsType);
+                SetField(nsType, s, "CostsAPToActor", false);
+                SetField(nsType, s, "TriggerOverwatch", false);
+                SetField(nsType, s, "UpdateNavigationPerceptionRange", false);
+                SetField(nsType, s, "SnapToGridOnFinish", true);
+                _mirrorNavSettings = s;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetMirrorNavSettings failed: " + ex); }
+            return _mirrorNavSettings;
+        }
+
+        private static void SetField(Type type, object obj, string name, object value)
+        {
+            var f = AccessTools.Field(type, name);
+            if (f != null) f.SetValue(obj, value);
+            else Debug.LogError("[Multipleer][tac] NavigationSettings field not found: " + name);
+        }
+
+        /// <summary>Start the animated mirror move: <c>TacticalNavigationComponent.Navigate(Vector3,
+        /// NavigationSettings)</c> (TacticalNavigationComponent.cs:1182). Returns false on a throw / missing
+        /// overload so the caller can fall back to a teleport (removes the degenerate-path OOR class).</summary>
+        private static bool TryAnimatedNavigate(object nav, Vector3 dst)
+        {
+            try
+            {
+                object settings = GetMirrorNavSettings();
+                var nsType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.NavigationSettings");
+                if (settings == null || nsType == null) return false;
+                var navigate = AccessTools.Method(nav.GetType(), "Navigate", new[] { typeof(Vector3), nsType });
+                if (navigate == null) { Debug.LogError("[Multipleer][tac] Navigate(Vector3,NavigationSettings) not found"); return false; }
+                navigate.Invoke(nav, new[] { (object)dst, settings });
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryAnimatedNavigate failed: " + ex); return false; }
+        }
+
+        /// <summary>Schedule a deferred reconcile: wait until the actor's nav <c>IsNavigating==false</c>, then
+        /// <c>SetPosition(dst)</c> so the mirror lands on the EXACT host cell (never worse than a teleport).
+        /// Driven on the actor's Timing via the same Timing.Start pattern used elsewhere.</summary>
+        private static void ScheduleReconcile(object actor, object nav, Vector3 dst, int netId)
+        {
+            try
+            {
+                object timing = GetProp(actor, "Timing");
+                if (timing == null)
+                {
+                    object tlc = TacticalDeploySync.LiveTlc;
+                    timing = tlc != null ? GetProp(tlc, "Timing") : null;
+                }
+                if (timing == null || !InvokeStart(timing, timing.GetType(), ReconcileMoveCrt(actor, nav, dst, netId)))
+                {
+                    // Could not defer → reconcile immediately (still correct cell, just not animated-to-stop).
+                    TrySetPosition(actor, dst);
+                    Debug.LogError("[Multipleer][tac] tac.move: reconcile could not be deferred — snapped immediately netId=" + netId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] ScheduleReconcile failed: " + ex);
+                TrySetPosition(actor, dst);
+            }
+        }
+
+        private static IEnumerator<NextUpdate> ReconcileMoveCrt(object actor, object nav, Vector3 dst, int netId)
+        {
+            int frames = 0;
+            while (frames < ReconcileMaxFrames)
+            {
+                bool navigating = false;
+                try { navigating = ToBool(GetProp(nav, "IsNavigating")); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileMoveCrt: IsNavigating read failed: " + ex); }
+                if (!navigating) break;
+                frames++;
+                yield return NextUpdate.NextFrame;
+            }
+            try
+            {
+                TrySetPosition(actor, dst);
+                Vector3 after = GetPos(actor);
+                Debug.Log("[Multipleer][tac] tac.move RECONCILE netId=" + netId + " frames=" + frames +
+                          " finalPos=(" + after.x.ToString("0.0") + "," + after.y.ToString("0.0") + "," + after.z.ToString("0.0") + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileMoveCrt snap failed: " + ex); }
+        }
+
+        /// <summary>Find and invoke <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> (first param the
+        /// coroutine, remaining params optional → filled with Type.Missing). Mirrors TacticalTurnSync's helper.</summary>
+        private static bool InvokeStart(object timingInstance, Type timingType, object crt)
+        {
+            try
+            {
+                MethodInfo best = null;
+                foreach (var mth in timingType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (mth.Name != "Start") continue;
+                    var pars = mth.GetParameters();
+                    if (pars.Length < 1) continue;
+                    if (!typeof(IEnumerator).IsAssignableFrom(pars[0].ParameterType)) continue;
+                    bool restOptional = true;
+                    for (int i = 1; i < pars.Length; i++) if (!pars[i].IsOptional) { restOptional = false; break; }
+                    if (!restOptional) continue;
+                    if (best == null || pars.Length < best.GetParameters().Length) best = mth;
+                }
+                if (best == null) return false;
+                var bp = best.GetParameters();
+                var args = new object[bp.Length];
+                args[0] = crt;
+                for (int i = 1; i < bp.Length; i++) args[i] = Type.Missing;
+                best.Invoke(timingInstance, args);
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeStart failed: " + ex); return false; }
+        }
+
+        private static bool ToBool(object o) => o is bool b && b;
 
         private static int ReadStopReason(object actor)
         {

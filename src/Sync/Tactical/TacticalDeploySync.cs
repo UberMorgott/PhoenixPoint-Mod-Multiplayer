@@ -59,6 +59,12 @@ namespace Multipleer.Sync.Tactical
         // Client: the pending deploy we received but haven't hydrated yet (waiting for scene Playing).
         private static TacticalDeployCodec.DeployPayload _pendingClientDeploy;
         private static int _hydratedSiteId = int.MinValue;
+        // Client: true when the level being hydrated was ALREADY built by the client's own native tactical
+        // load (the "hydrate existing, no relaunch" arrival path). On that path the native load already ran
+        // ProcessInstanceData on a fresh level, so re-running it here would collide (KnownActors.AddRange is
+        // add-only) and double-apply faction effects → we SKIP the snapshot ProcessInstanceData. False on the
+        // legacy launch-then-hydrate path (fresh level ⇒ ProcessInstanceData is required). (RCA 2026-06-18.)
+        private static bool _hydrateLevelAlreadyLoaded;
 
         // The live NetId registry for the current mission (both sides). Rebuilt per deploy.
         public static TacticalActorRegistry Registry { get; private set; } = new TacticalActorRegistry();
@@ -120,6 +126,10 @@ namespace Multipleer.Sync.Tactical
         private static Type _byRefType;        // Base.Utils.ByRef<>
         private static Type _timeSliceType;    // Base.Utils.TimeSlice
         private static bool _reflectionReady;
+        // The engine's ONE configured Serializer (Context = SerializationComponent + InitCustomTypes +
+        // ValidateSerializedObject). Resolved lazily, cached for the session.
+        private static MethodInfo _gameComponentSerComp;  // GameUtl.GameComponent<SerializationComponent>()
+        private static PropertyInfo _serCompSerializerProp;// SerializationComponent.Serializer getter
 
         private static void EnsureReflection()
         {
@@ -378,12 +388,26 @@ namespace Multipleer.Sync.Tactical
             var decision = TacticalDeployArrivalGate.Decide(liveTlc != null);
             if (decision == TacticalDeployArrivalGate.Decision.HydrateExisting)
             {
-                Debug.Log("[Multipleer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch)");
+                // The live level was already built by the client's OWN native tactical load (it loaded the
+                // transferred tactical save → BeforePlaying→PrepareLevel→ProcessInstanceData ran on a FRESH
+                // faction set, populating Vision.KnownActors / effects / turn / AI from the SAME shared host
+                // state). Re-running ProcessInstanceData on this already-populated level is BOTH redundant
+                // and fatal: TacticalFactionVision.ProcessInstanceData does KnownActors.AddRange (add-only ⇒
+                // "An item with the same key has already been added"), and TacticalFaction would double-apply
+                // FactionEffects. So on THIS path we skip the snapshot ProcessInstanceData and only rebuild
+                // the NetId registry + reconcile + arm mirror (the deploy snapshot's actual job — the actor
+                // set/positions ride the registry + tac.move rail, NOT ProcessInstanceData). (RCA 2026-06-18.)
+                _hydrateLevelAlreadyLoaded = true;
+                Debug.Log("[Multipleer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch, skip redundant ProcessInstanceData)");
                 try { ClientOnLevelReady(liveTlc); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
             }
             else
             {
+                // Legacy path: the client has NO live tactical level → it must launch fresh, and the snapshot
+                // ProcessInstanceData IS required (it restores faction-level state onto that fresh level,
+                // exactly like the game's own save-load at TacticalLevelController BeforePlaying:550).
+                _hydrateLevelAlreadyLoaded = false;
                 try { ClientLaunchMission(p); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientLaunchMission failed: " + ex); }
             }
@@ -518,17 +542,33 @@ namespace Multipleer.Sync.Tactical
             var p = _pendingClientDeploy;
             try
             {
-                // 1) Restore the full battle from the host snapshot (deserialize → ProcessInstanceData).
-                object snapshotObj = DeserializeGraph(p.SnapshotBytes, _tacLevelInstType);
-                if (snapshotObj == null)
+                // 1) Restore the full battle from the host snapshot (deserialize → ProcessInstanceData) — but
+                //    ONLY when this is a FRESH level (legacy launch-then-hydrate path). When the client is
+                //    hydrating an already-live level (the real co-op flow), the client's own native tactical
+                //    load already ran ProcessInstanceData on a fresh faction set from the SAME shared host
+                //    state, so re-running it here throws (TacticalFactionVision.ProcessInstanceData →
+                //    KnownActors.AddRange is add-only ⇒ duplicate-key ArgumentException) and would double-apply
+                //    FactionEffects. The deploy snapshot's actual contribution — the NetId actor table +
+                //    positions — is applied below via the registry + reconcile (+ the live tac.move rail), NOT
+                //    via ProcessInstanceData. (RCA 2026-06-18: matches the game's own load pattern, which runs
+                //    ProcessInstanceData exactly once on a freshly-created level — TacticalLevelController:550.)
+                if (_hydrateLevelAlreadyLoaded)
                 {
-                    Debug.LogError("[Multipleer][tac] ClientHydrateNow: snapshot deserialize failed");
-                    return;
+                    Debug.Log("[Multipleer][tac] ClientHydrateNow: level already natively loaded → skipping redundant snapshot ProcessInstanceData (registry rebuild only)");
                 }
-                // ProcessInstanceData is private → AccessTools method invoke.
-                var process = AccessTools.Method(_tlcType, "ProcessInstanceData", new[] { _tacLevelInstType });
-                if (process == null) { Debug.LogError("[Multipleer][tac] ClientHydrateNow: ProcessInstanceData not found"); return; }
-                process.Invoke(tacticalLevelController, new[] { snapshotObj });
+                else
+                {
+                    object snapshotObj = DeserializeGraph(p.SnapshotBytes, _tacLevelInstType);
+                    if (snapshotObj == null)
+                    {
+                        Debug.LogError("[Multipleer][tac] ClientHydrateNow: snapshot deserialize failed");
+                        return;
+                    }
+                    // ProcessInstanceData is private → AccessTools method invoke.
+                    var process = AccessTools.Method(_tlcType, "ProcessInstanceData", new[] { _tacLevelInstType });
+                    if (process == null) { Debug.LogError("[Multipleer][tac] ClientHydrateNow: ProcessInstanceData not found"); return; }
+                    process.Invoke(tacticalLevelController, new[] { snapshotObj });
+                }
 
                 // 2) Rebuild the NetId dict: match the host actor table onto our restored actors.
                 Registry = new TacticalActorRegistry();
@@ -575,6 +615,7 @@ namespace Multipleer.Sync.Tactical
         {
             _mirrorArmed = false;
             _pendingClientDeploy = null;
+            _hydrateLevelAlreadyLoaded = false;
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;
@@ -645,6 +686,11 @@ namespace Multipleer.Sync.Tactical
                 try { TacticalMoveSync.HostOnMoveIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.move failed: " + ex); }
                 return true;
             }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacMoveStart)
+            {
+                try { TacticalMoveSync.ClientOnMoveStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.move.start failed: " + ex); }
+                return true;
+            }
             if (surfaceId == (byte)TacticalSurfaceIds.TacMove)
             {
                 try { TacticalMoveSync.ClientOnMove(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.move failed: " + ex); }
@@ -707,6 +753,93 @@ namespace Multipleer.Sync.Tactical
         // 2026-06-17): new Serializer(object context); Write(IEnumerable<object>, string ".b",
         // ByRef<byte[]> dest, TimeSlice) :562; Read(ByRef<IEnumerable<object>>, TimeSlice, string ".b",
         // byte[] src, string section=null) :700. ByRef<T>.Value field; new TimeSlice(float seconds).
+        //
+        // CONTRACT (verified Serializer.cs decompile, ref caller NamedValueStore.cs:149/185):
+        //   • ext ".b" → BinReadStream/BinWriteStream; Write ext MUST equal Read ext (both ".b"). ✓
+        //   • section: the 4-arg Write wraps the graph in ONE section named SerializationID.ContentsKey.Name
+        //     ("Contents", Serializer.cs:593). Read(byte[]) with section==null defaults to that same
+        //     "Contents" key (Serializer.cs:680-683) — so passing null is CORRECT (matches the ref caller,
+        //     which also omits section ⇒ null). ✓
+        //   • ByRef<IEnumerable<object>>.Value is the right accessor — the ref caller reads
+        //     objects.Value?.FirstOrDefault() (NamedValueStore.cs:150). ✓
+        //   THE ACTUAL BUG (RCA 2026-06-18, mirrored vs NavConsoleCommands.cs:32/58 — the real Write-then-
+        //   Read-back twin): the Serializer INSTANCE, not the args. Every working caller round-trips through
+        //   GameUtl.GameComponent<SerializationComponent>().Serializer (Context = SerializationComponent,
+        //   built new Serializer(this) @ SerializationComponent.cs:81). Our `new Serializer(null)` had a NULL
+        //   Context, so reading any Def ref ran BaseDef.ResolveOrCreateBaseDef →
+        //   serObj.Serializer.GetContext<SerializationComponent>().Repo (BaseDef.cs:124) → null.Repo → NRE
+        //   inside the Read coroutine → silent abort → ByRef.Value==null (the empty graph the probe saw).
+        //   FIX: both Write and Read now use ResolveGameSerializer() (the shared configured instance).
+
+        // Reentrancy guard so the host self-roundtrip self-test (which calls DeserializeGraph) cannot
+        // re-trigger another self-test. DeserializeGraph never calls SerializeGraph, so there is no real
+        // recursion; this flag only suppresses the redundant probe log during the self-test read.
+        private static bool _inSelfRoundtrip;
+
+        // Cheap FNV-1a-style checksum (length-mixed) for end-to-end byte-identity confirmation. No LINQ.
+        private static string BytesHash(byte[] b)
+        {
+            if (b == null) return "null";
+            uint h = 2166136261u;
+            for (int i = 0; i < b.Length; i++) { h ^= b[i]; h *= 16777619u; }
+            return "len=" + b.Length + " fnv=" + h.ToString("x8");
+        }
+
+        private static string GraphTypeNames(object[] graph)
+        {
+            if (graph == null) return "null";
+            var names = new List<string>(graph.Length);
+            for (int i = 0; i < graph.Length; i++) names.Add(graph[i]?.GetType().Name ?? "null");
+            return string.Join(",", names.ToArray());
+        }
+
+        /// <summary>
+        /// Resolve the engine's ONE configured <c>Serializer</c> instance — the SAME object every working
+        /// game caller round-trips through (<c>NavConsoleCommands</c>, <c>SerializationCommands</c>,
+        /// <c>NamedValueStore</c> all use <c>GameUtl.GameComponent&lt;SerializationComponent&gt;().Serializer</c>;
+        /// NavConsoleCommands.cs:32/58 is the exact Write-then-Read-back twin of our path). It is built with
+        /// <c>new Serializer(this)</c> (SerializationComponent.cs:81) — Context = the SerializationComponent —
+        /// then primed with <c>InitCustomTypes</c> + <c>ValidateSerializedObject</c>.
+        ///
+        /// ROOT CAUSE this replaces: our former <c>new Serializer(null)</c> had a NULL Context. Reading any
+        /// Def reference runs <c>BaseDef.ResolveOrCreateBaseDef</c> ([SerializeCustomCreate]), which does
+        /// <c>serObj.Serializer.GetContext&lt;SerializationComponent&gt;().Repo</c> (BaseDef.cs:124). With a
+        /// null Context that returns null → NRE inside the Read coroutine → the read aborts and
+        /// <c>objects.Value</c> stays null ⇒ the empty graph the probe saw (no outer exception because the
+        /// driving coroutine swallows it). Def-laden graphs (TacLevelInstanceData/TacticalGameParams) hit it
+        /// immediately. The byte[] Write/Read overloads are unchanged — only the Serializer INSTANCE changes.
+        /// Returns null if the SerializationComponent isn't reachable yet (caller logs + skips).
+        /// </summary>
+        private static object ResolveGameSerializer()
+        {
+            try
+            {
+                if (_gameComponentSerComp == null)
+                {
+                    var serCompType = AccessTools.TypeByName("Base.Serialization.SerializationComponent");
+                    var gameUtlType = AccessTools.TypeByName("Base.Core.GameUtl");
+                    if (serCompType == null || gameUtlType == null)
+                    {
+                        Debug.LogError("[Multipleer][tac] ResolveGameSerializer: SerializationComponent/GameUtl type not found");
+                        return null;
+                    }
+                    var gc = AccessTools.Method(gameUtlType, "GameComponent");
+                    _gameComponentSerComp = gc != null ? gc.MakeGenericMethod(serCompType) : null;
+                    _serCompSerializerProp = AccessTools.Property(serCompType, "Serializer");
+                }
+                if (_gameComponentSerComp == null || _serCompSerializerProp == null)
+                {
+                    Debug.LogError("[Multipleer][tac] ResolveGameSerializer: GameComponent<>/Serializer accessor not found");
+                    return null;
+                }
+                object serComp = _gameComponentSerComp.Invoke(null, null);
+                object serializer = serComp != null ? _serCompSerializerProp.GetValue(serComp, null) : null;
+                if (serializer == null)
+                    Debug.LogError("[Multipleer][tac] ResolveGameSerializer: SerializationComponent/Serializer is null (not initialized yet?)");
+                return serializer;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveGameSerializer failed: " + ex); return null; }
+        }
 
         private static byte[] SerializeGraph(object[] graph)
         {
@@ -714,7 +847,14 @@ namespace Multipleer.Sync.Tactical
             if (_serializerType == null || _byRefType == null || _timeSliceType == null) return null;
             try
             {
-                object serializer = Activator.CreateInstance(_serializerType, new object[] { (object)null });
+                // PROBE: host input graph (element count + concrete type names).
+                Debug.Log("[Multipleer][tac] Write input graph count=" + (graph?.Length ?? -1) +
+                          " types=[" + GraphTypeNames(graph) + "]");
+                // Use the engine's configured Serializer (Context = SerializationComponent) — see
+                // ResolveGameSerializer. A `new Serializer(null)` writes Def refs that the paired Read can
+                // never reconstruct (null Context → NRE in BaseDef.ResolveOrCreateBaseDef → empty graph).
+                object serializer = ResolveGameSerializer();
+                if (serializer == null) { Debug.LogError("[Multipleer][tac] SerializeGraph: no game Serializer — skipping"); return null; }
                 // ByRef<byte[]> dest. Base.Utils.ByRef<T> has a SINGLE ctor `ByRef(T value = default)` —
                 // an optional param, NO parameterless ctor — so Activator.CreateInstance(Type) (no args)
                 // throws MissingMethodException (RCA 2026-06-18 — this aborted the whole host deploy). Pass
@@ -730,11 +870,42 @@ namespace Multipleer.Sync.Tactical
                 if (write == null) { Debug.LogError("[Multipleer][tac] Serializer.Write(byte[]) overload not found"); return null; }
 
                 IEnumerable<object> objects = graph;
-                var en = (IEnumerator)write.Invoke(serializer, new object[] { objects, ".b", dest, slice });
-                Pump(en);
+                // Drive the native serializer coroutine via the engine's own synchronous runner
+                // (Base.Core.Timing.RunUntilComplete) — it spins up a Timing + TimingScheduler so the
+                // serializer's nested `yield return Timing.Current.Call(...)` work actually executes.
+                // A bare while(MoveNext()) had no active scheduler ⇒ Timing.Current threw / nested work
+                // never ran ⇒ dest stayed null (RCA 2026-06-18). Serializer.Write returns
+                // IEnumerator<NextUpdate>, matching RunUntilComplete's param (verified ReportIssueData.cs:33).
+                var coroutine = (IEnumerator<NextUpdate>)write.Invoke(serializer, new object[] { objects, ".b", dest, slice });
+                Timing.RunUntilComplete(coroutine);
 
                 var valueField = byRefBytes.GetField("Value");
-                return valueField?.GetValue(dest) as byte[];
+                byte[] outBytes = valueField?.GetValue(dest) as byte[];
+
+                // PROBE: output length + checksum (host-sent bytes, compare to client-received bytesHash).
+                Debug.Log("[Multipleer][tac] Write output destLen=" + (outBytes?.Length ?? -1) +
+                          " bytesHash " + BytesHash(outBytes));
+
+                // PROBE: in-process host self-roundtrip. Read our OWN bytes right back. If this returns a
+                // non-empty graph the Read contract is sound and the empty-on-client is an env/type problem;
+                // if it returns null the contract itself is broken. Guarded so it runs once (not inside the
+                // self-test's own DeserializeGraph — which never calls back into SerializeGraph anyway).
+                if (outBytes != null && !_inSelfRoundtrip)
+                {
+                    _inSelfRoundtrip = true;
+                    try
+                    {
+                        Type elemType = (graph != null && graph.Length > 0 && graph[0] != null) ? graph[0].GetType() : null;
+                        object self = DeserializeGraph(outBytes, elemType);
+                        Debug.Log("[Multipleer][tac] HOST self-roundtrip result=" +
+                                  (self == null ? "NULL" : self.GetType().Name) + " expectedType=" +
+                                  (elemType?.Name ?? "any"));
+                    }
+                    catch (Exception sx) { Debug.LogError("[Multipleer][tac] HOST self-roundtrip threw: " + sx); }
+                    finally { _inSelfRoundtrip = false; }
+                }
+
+                return outBytes;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] SerializeGraph failed: " + ex); return null; }
         }
@@ -746,7 +917,15 @@ namespace Multipleer.Sync.Tactical
             if (bytes == null || bytes.Length == 0) return null;
             try
             {
-                object serializer = Activator.CreateInstance(_serializerType, new object[] { (object)null });
+                // PROBE: checksum of the bytes handed to Read (client-received OR host self-test input).
+                // Compare to the host "Write output bytesHash" to confirm byte-identity end-to-end.
+                Debug.Log("[Multipleer][tac] Read input bytesHash " + BytesHash(bytes) +
+                          " expectedType=" + (expectedType?.Name ?? "any"));
+                // MUST be the same engine-configured Serializer the host wrote with (Context =
+                // SerializationComponent). A null-Context Serializer NREs in BaseDef.ResolveOrCreateBaseDef
+                // while reconstructing any Def ref → silent abort → empty graph. See ResolveGameSerializer.
+                object serializer = ResolveGameSerializer();
+                if (serializer == null) { Debug.LogError("[Multipleer][tac] DeserializeGraph: no game Serializer — returning null"); return null; }
                 // ByRef<IEnumerable<object>> outRef — same single-optional-ctor trap as SerializeGraph's
                 // ByRef<byte[]>: pass the arg explicitly (default == null), else Activator.CreateInstance
                 // throws MissingMethodException. (Would have blown up on the CLIENT right after the host
@@ -760,33 +939,27 @@ namespace Multipleer.Sync.Tactical
                     new[] { byRefEnum, _timeSliceType, typeof(string), typeof(byte[]), typeof(string) });
                 if (read == null) { Debug.LogError("[Multipleer][tac] Serializer.Read(byte[]) overload not found"); return null; }
 
-                var en = (IEnumerator)read.Invoke(serializer, new object[] { outRef, slice, ".b", bytes, null });
-                Pump(en);
+                // Same engine-synchronous driver as the host Write path (see SerializeGraph): the native
+                // Read coroutine yields nested Timing.Current.Call(...) work that needs a live scheduler.
+                var coroutine = (IEnumerator<NextUpdate>)read.Invoke(serializer, new object[] { outRef, slice, ".b", bytes, null });
+                Timing.RunUntilComplete(coroutine);
 
                 var valueField = byRefEnum.GetField("Value");
                 var result = valueField?.GetValue(outRef) as IEnumerable<object>;
+
+                // PROBE (moved BEFORE the null-guard so it ALWAYS fires): distinguish empty-graph (Value==null)
+                // from a typed-but-mismatched graph. Materialize once when non-null; reuse below.
+                List<object> graphList = result == null ? null : new List<object>(result);
+                Debug.Log("[Multipleer][tac] Read graph " +
+                          (result == null ? "NULL (ByRef.Value==null → empty graph)"
+                                          : ("count=" + graphList.Count + " types=[" +
+                                             string.Join(",", graphList.ConvertAll(o => o?.GetType().Name).ToArray()) + "]")));
                 if (result == null) return null;
-                foreach (var o in result)
+                foreach (var o in graphList)
                     if (o != null && (expectedType == null || expectedType.IsInstanceOfType(o))) return o;
                 return null;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] DeserializeGraph failed: " + ex); return null; }
-        }
-
-        // Drive a NextUpdate coroutine to completion. With a 1-hour TimeSlice it should finish in one pump,
-        // but loop defensively (bounded) in case the serializer yields.
-        private static void Pump(IEnumerator en)
-        {
-            if (en == null) return;
-            int guard = 0;
-            while (en.MoveNext())
-            {
-                if (++guard > 1_000_000)
-                {
-                    Debug.LogError("[Multipleer][tac] Serializer pump exceeded guard — aborting");
-                    break;
-                }
-            }
         }
 
         // ─── Actor enumeration + identity helpers ──────────────────────────
