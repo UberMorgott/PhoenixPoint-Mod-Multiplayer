@@ -152,9 +152,17 @@ namespace Multipleer.Sync.Tactical
 
         // ─── HOST: capture + broadcast (called from DeployLaunchPatches level-ready postfix) ──
 
+        // Host: guard so the deferred capture coroutine is started at most once per mission/site.
+        private static int _captureScheduledSiteId = int.MinValue;
+
         /// <summary>
-        /// HOST: the tactical level reached Playing. Capture the deploy snapshot and broadcast it. Idempotent
-        /// per mission (only the first Playing transition for a given site broadcasts). No-op off-host / off-session.
+        /// HOST: the tactical level reached Playing. Do NOT capture synchronously — the Playing postfix runs
+        /// BEFORE the scheduled <c>OnLevelStart</c> coroutine has finished initializing the level, so an
+        /// immediate <c>RecordInstanceData</c> NREs on a half-built level (FactionVision null-faction actors,
+        /// then <c>TacAchievementTracker._level</c>), aborting the deploy. Instead, DEFER: start a coroutine on
+        /// the level's Timing that waits (via <see cref="TacticalDeployReadinessGate"/>) until the level is
+        /// genuinely turn-0 ready (<c>HasAnyTurnStarted</c>), then capture + broadcast cleanly. Idempotent per
+        /// mission. No-op off-host / off-session. (RCA 2026-06-18, 2-instance log decode.)
         /// </summary>
         public static void HostOnLevelReady(object tacticalLevelController)
         {
@@ -163,6 +171,142 @@ namespace Multipleer.Sync.Tactical
             if (tacticalLevelController == null) return;
             EnsureReflection();
             if (!_reflectionReady) { Debug.LogError("[Multipleer][tac] HostOnLevelReady: reflection not ready"); return; }
+
+            try
+            {
+                int siteId = _launchingSiteId >= 0 ? _launchingSiteId : ResolveMissionSiteId(tacticalLevelController);
+                if (siteId == _lastBroadcastSiteId) return;        // already broadcast this mission
+                if (siteId == _captureScheduledSiteId) return;     // capture already scheduled for this mission
+                _captureScheduledSiteId = siteId;
+
+                // Defer the capture onto the level's Timing until the level is turn-0 ready (gate-driven).
+                if (!StartDeferredCapture(tacticalLevelController))
+                {
+                    // Could not start a coroutine (no Timing) → fall back to an immediate best-effort capture.
+                    Debug.LogError("[Multipleer][tac] HostOnLevelReady: could not schedule deferred capture — capturing immediately (may be early)");
+                    HostCaptureAndBroadcast(tacticalLevelController);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] HostOnLevelReady failed: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// HOST: start a game coroutine on the tactical level's Timing that polls
+        /// <see cref="TacticalDeployReadinessGate"/> each frame and fires the capture once the level is ready
+        /// (or a bounded fail-safe timeout elapses). Returns false if no Timing could be resolved.
+        /// </summary>
+        private static bool StartDeferredCapture(object tacticalLevelController)
+        {
+            object timing = GetProp(tacticalLevelController, "Timing");
+            if (timing == null)
+            {
+                var timingType = AccessTools.TypeByName("Base.Core.Timing");
+                var currentProp = timingType != null ? AccessTools.Property(timingType, "Current") : null;
+                timing = currentProp?.GetValue(null, null);
+            }
+            if (timing == null) return false;
+
+            var crt = DeferredCaptureCrt(tacticalLevelController);
+            return InvokeTimingStart(timing, crt);
+        }
+
+        // ~600 frames ≈ 10 s @ 60 fps: a generous fail-safe budget — turn 0 normally starts within a frame
+        // or two of Playing, so the ready path fires almost immediately; the budget only guards a pathological
+        // mission that never flips HasAnyTurnStarted.
+        private const int CaptureReadyMaxFrames = 600;
+
+        /// <summary>HOST capture coroutine: each frame, ask the readiness gate whether to wait, capture, or
+        /// fail-safe-capture. Reads <c>TacticalLevelController.HasAnyTurnStarted</c> (set true at turn-0 entry,
+        /// after OnLevelStart fully ran ⇒ level fully initialized).</summary>
+        private static IEnumerator DeferredCaptureCrt(object tacticalLevelController)
+        {
+            int frames = 0;
+            while (true)
+            {
+                bool ready = false;
+                try { ready = ToBool(GetProp(tacticalLevelController, "HasAnyTurnStarted")); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DeferredCaptureCrt: read HasAnyTurnStarted failed: " + ex); }
+
+                var decision = TacticalDeployReadinessGate.Decide(ready, frames, CaptureReadyMaxFrames);
+                if (decision == TacticalDeployReadinessGate.Decision.CaptureReady ||
+                    decision == TacticalDeployReadinessGate.Decision.CaptureTimeout)
+                {
+                    if (decision == TacticalDeployReadinessGate.Decision.CaptureTimeout)
+                        Debug.LogError("[Multipleer][tac] DeferredCaptureCrt: readiness gate timed out after " +
+                                       frames + " frames — capturing anyway (fail-safe)");
+                    else
+                        Debug.Log("[Multipleer][tac] DeferredCaptureCrt: level ready after " + frames +
+                                  " frame(s) → capturing deploy");
+                    HostCaptureAndBroadcast(tacticalLevelController);
+                    yield break;
+                }
+
+                frames++;
+                yield return TimingNextFrameValue();
+            }
+        }
+
+        /// <summary>The native <c>NextUpdate.NextFrame</c> value a tactical coroutine yields between frames.
+        /// Resolved by reflection (the mod has no compile-time game binding here); null falls back to a plain
+        /// yield, which the game's Timing still advances one frame.</summary>
+        private static object TimingNextFrameValue()
+        {
+            try
+            {
+                var nu = AccessTools.TypeByName("Base.Core.NextUpdate");
+                var f = nu != null ? AccessTools.Field(nu, "NextFrame") : null;
+                if (f != null) return f.GetValue(null);
+                var p = nu != null ? AccessTools.Property(nu, "NextFrame") : null;
+                if (p != null) return p.GetValue(null, null);
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Invoke the simplest <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …optional)</c> overload
+        /// (mirrors TacticalTurnSync.InvokeStart): first param is the coroutine, all trailing params optional.</summary>
+        private static bool InvokeTimingStart(object timing, IEnumerator crt)
+        {
+            try
+            {
+                MethodInfo best = null;
+                foreach (var m in timing.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (m.Name != "Start") continue;
+                    var pars = m.GetParameters();
+                    if (pars.Length < 1) continue;
+                    if (!typeof(IEnumerator).IsAssignableFrom(pars[0].ParameterType)) continue;
+                    bool restOptional = true;
+                    for (int i = 1; i < pars.Length; i++) if (!pars[i].IsOptional) { restOptional = false; break; }
+                    if (!restOptional) continue;
+                    if (best == null || pars.Length < best.GetParameters().Length) best = m;
+                }
+                if (best == null) { Debug.LogError("[Multipleer][tac] InvokeTimingStart: no Start overload found"); return false; }
+                var bp = best.GetParameters();
+                var args = new object[bp.Length];
+                args[0] = crt;
+                for (int i = 1; i < bp.Length; i++) args[i] = Type.Missing;
+                best.Invoke(timing, args);
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeTimingStart failed: " + ex); return false; }
+        }
+
+        /// <summary>
+        /// HOST: capture the deploy snapshot from a fully-initialized tactical level and broadcast it. Idempotent
+        /// per mission (only the first capture for a given site broadcasts). Called from the deferred
+        /// readiness coroutine once the level is turn-0 ready.
+        /// </summary>
+        private static void HostCaptureAndBroadcast(object tacticalLevelController)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (tacticalLevelController == null) return;
+            EnsureReflection();
+            if (!_reflectionReady) { Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: reflection not ready"); return; }
 
             try
             {
@@ -176,7 +320,7 @@ namespace Multipleer.Sync.Tactical
                 object snapshot = Invoke(tacticalLevelController, "RecordInstanceData"); // public TacLevelInstanceData
                 if (gameParams == null || snapshot == null)
                 {
-                    Debug.LogError("[Multipleer][tac] HostOnLevelReady: null gameParams/snapshot — skipping deploy");
+                    Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: null gameParams/snapshot — skipping deploy");
                     return;
                 }
 
@@ -184,7 +328,7 @@ namespace Multipleer.Sync.Tactical
                 byte[] snapBytes = SerializeGraph(new[] { snapshot });
                 if (gpBytes == null || snapBytes == null)
                 {
-                    Debug.LogError("[Multipleer][tac] HostOnLevelReady: native serialize failed — skipping deploy");
+                    Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: native serialize failed — skipping deploy");
                     return;
                 }
 
@@ -210,7 +354,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] HostOnLevelReady failed: " + ex);
+                Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast failed: " + ex);
             }
         }
 
@@ -367,6 +511,7 @@ namespace Multipleer.Sync.Tactical
             _mirrorArmed = false;
             _pendingClientDeploy = null;
             _lastBroadcastSiteId = int.MinValue;
+            _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;
             _chunkReassembler = new ChunkReassembler();   // drop any half-received chunk set
             Registry = new TacticalActorRegistry();
