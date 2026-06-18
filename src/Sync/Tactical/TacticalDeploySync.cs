@@ -444,10 +444,71 @@ namespace Multipleer.Sync.Tactical
         }
 
         /// <summary>
-        /// CLIENT: our tactical level reached Playing. If we have a pending host deploy, restore its snapshot
-        /// (<c>ProcessInstanceData</c>), rebuild the NetId dict from the host actor table, and arm mirror mode.
+        /// CLIENT: our tactical level reached Playing (or a late deploy arrived into the already-live level).
+        /// Drive the hydrate, but NOT inline: the native <c>Serializer.Read</c> coroutine reads
+        /// <c>Timing.Current</c>, which throws unless the caller is inside a running <c>IUpdateable</c> tick
+        /// (Timing.cs:41-44). Driven straight from the network inbound callback (round-6 break:
+        /// "Timing.Current should be called from inside a running IUpdateable" → mirror never armed), it
+        /// threw. So we DEFER the whole hydrate body onto the level's <c>Timing</c> as a coroutine — exactly
+        /// the way the host serialize is pumped inside its deferred-capture coroutine — so the serializer
+        /// runs inside a running IUpdateable. If no Timing resolves, fall back to an inline best-effort
+        /// hydrate (mirrors the host's <see cref="StartDeferredCapture"/> immediate fallback).
         /// </summary>
         public static void ClientOnLevelReady(object tacticalLevelController)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (_pendingClientDeploy == null || tacticalLevelController == null) return;
+            EnsureReflection();
+
+            object timing = ResolveTiming(tacticalLevelController);
+            var decision = TacticalHydrateSchedulingGate.Decide(timing != null);
+            if (decision == TacticalHydrateSchedulingGate.Decision.DeferOnTiming)
+            {
+                Debug.Log("[Multipleer][tac] CLIENT hydrate → deferring onto level Timing (serializer needs a running IUpdateable)");
+                if (InvokeTimingStart(timing, ClientHydrateCrt(tacticalLevelController))) return;
+                Debug.LogError("[Multipleer][tac] CLIENT hydrate: Timing.Start failed — hydrating inline (may throw on serializer)");
+            }
+            else
+            {
+                Debug.LogError("[Multipleer][tac] CLIENT hydrate: no Timing resolvable — hydrating inline (may throw on serializer)");
+            }
+            ClientHydrateNow(tacticalLevelController);
+        }
+
+        /// <summary>Resolve a <c>Base.Core.Timing</c> to start the client hydrate coroutine on: prefer the live
+        /// tactical level's own Timing, else the ambient <c>Timing.Current</c>. Mirrors
+        /// <see cref="StartDeferredCapture"/>'s timing resolution.</summary>
+        private static object ResolveTiming(object tacticalLevelController)
+        {
+            object timing = GetProp(tacticalLevelController, "Timing");
+            if (timing == null)
+            {
+                var timingType = AccessTools.TypeByName("Base.Core.Timing");
+                var currentProp = timingType != null ? AccessTools.Property(timingType, "Current") : null;
+                try { timing = currentProp?.GetValue(null, null); } catch { timing = null; }
+            }
+            return timing;
+        }
+
+        /// <summary>CLIENT hydrate coroutine: runs the hydrate body inside a running IUpdateable (so the native
+        /// serializer's <c>Timing.Current</c> read resolves). MUST be <c>IEnumerator&lt;NextUpdate&gt;</c> (not a
+        /// bare IEnumerator) so the emitted state machine binds to the native
+        /// <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> overload — see the host
+        /// <see cref="DeferredCaptureCrt"/> note. The work runs on the first pump (no inter-frame wait), then
+        /// the coroutine ends.</summary>
+        private static IEnumerator<NextUpdate> ClientHydrateCrt(object tacticalLevelController)
+        {
+            ClientHydrateNow(tacticalLevelController);
+            yield break;
+        }
+
+        /// <summary>
+        /// CLIENT: restore the pending host snapshot (<c>ProcessInstanceData</c>), rebuild the NetId dict from
+        /// the host actor table, and arm mirror mode. MUST run inside a running IUpdateable (the native
+        /// serializer reads <c>Timing.Current</c>) — see <see cref="ClientOnLevelReady"/>.
+        /// </summary>
+        private static void ClientHydrateNow(object tacticalLevelController)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
@@ -461,12 +522,12 @@ namespace Multipleer.Sync.Tactical
                 object snapshotObj = DeserializeGraph(p.SnapshotBytes, _tacLevelInstType);
                 if (snapshotObj == null)
                 {
-                    Debug.LogError("[Multipleer][tac] ClientOnLevelReady: snapshot deserialize failed");
+                    Debug.LogError("[Multipleer][tac] ClientHydrateNow: snapshot deserialize failed");
                     return;
                 }
                 // ProcessInstanceData is private → AccessTools method invoke.
                 var process = AccessTools.Method(_tlcType, "ProcessInstanceData", new[] { _tacLevelInstType });
-                if (process == null) { Debug.LogError("[Multipleer][tac] ClientOnLevelReady: ProcessInstanceData not found"); return; }
+                if (process == null) { Debug.LogError("[Multipleer][tac] ClientHydrateNow: ProcessInstanceData not found"); return; }
                 process.Invoke(tacticalLevelController, new[] { snapshotObj });
 
                 // 2) Rebuild the NetId dict: match the host actor table onto our restored actors.
@@ -505,7 +566,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientOnLevelReady failed: " + ex);
+                Debug.LogError("[Multipleer][tac] ClientHydrateNow failed: " + ex);
             }
         }
 

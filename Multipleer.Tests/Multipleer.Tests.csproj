@@ -123,6 +123,10 @@
          in a live tactical level (the real co-op load-barrier flow), hydrate it directly instead of
          running ClientLaunchMission (which assumes the geoscape). RCA round-5 2026-06-18. -->
     <Compile Include="..\src\Sync\Tactical\TacticalDeployArrivalGate.cs"><Link>Sync\Tactical\TacticalDeployArrivalGate.cs</Link></Compile>
+    <!-- Client deploy-hydrate SCHEDULING gate (pure): the native Serializer.Read reads Timing.Current,
+         which throws unless inside a running IUpdateable — so defer the client hydrate onto the level's
+         Timing as a coroutine (like the host capture), inline only as a no-Timing fallback. RCA round-6. -->
+    <Compile Include="..\src\Sync\Tactical\TacticalHydrateSchedulingGate.cs"><Link>Sync\Tactical\TacticalHydrateSchedulingGate.cs</Link></Compile>
     <!-- Tactical replication Inc-2/4: pure, Unity-free live MOVE/TURN wire codecs + seq/dedup guards.
          The engine glue (TacticalMoveSync / TacticalTurnSync / Harmony patches) binds game types and is
          NOT linked. -->
