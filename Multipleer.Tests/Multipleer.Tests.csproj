@@ -107,6 +107,9 @@
     <!-- Tactical deploy null-faction guard: pure, Unity-free decision behind NullFactionEnterPlayPatch
          (suppress the native OnActorEnteredPlay throw for a faction-less deploy intruder in a synced session). -->
     <Compile Include="..\src\Harmony\Tactical\NullFactionEnterPlayGate.cs"><Link>Harmony\Tactical\NullFactionEnterPlayGate.cs</Link></Compile>
+    <!-- Host deploy-snapshot null-faction guard: pure decision behind NullFactionKnownActorsScrubPatch
+         (scrub phantom null-faction KnownActors before TacticalFactionVision.RecordInstanceData throws). -->
+    <Compile Include="..\src\Harmony\Tactical\NullFactionKnownActorsScrubGate.cs"><Link>Harmony\Tactical\NullFactionKnownActorsScrubGate.cs</Link></Compile>
     <!-- Tactical replication Inc-1: pure, Unity-free NetId registry + tac.deploy wire codec (T1/T2).
          The registry operates on the IActorRef abstraction (no UnityEngine); the codec is BinaryWriter/
          Reader only. The live TacticalActorBase adapter + engine glue (TacticalDeploySync, Harmony
