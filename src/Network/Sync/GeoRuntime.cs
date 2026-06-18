@@ -39,6 +39,16 @@ namespace Multipleer.Network.Sync
             _ready = _geoLevelType != null && _currentLevel != null;
         }
 
+        /// <summary>The current <c>Level</c> (a Component) from <c>GameUtl.CurrentLevel()</c>, or null.
+        /// Untyped — callers GetComponent the level-controller type they want (geoscape vs tactical).</summary>
+        public object CurrentLevel()
+        {
+            EnsureReflection();
+            if (_currentLevel == null) return null;
+            try { return _currentLevel.Invoke(null, null); }
+            catch { return null; }
+        }
+
         /// <summary>The live <c>GeoLevelController</c>, or null if not in geoscape / mid-load.</summary>
         public object GeoLevel()
         {

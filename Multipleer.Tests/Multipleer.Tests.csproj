@@ -119,6 +119,10 @@
     <!-- Host deploy-capture READINESS gate (pure): defer the snapshot until the level is turn-0 ready
          (HasAnyTurnStarted) so RecordInstanceData doesn't NRE on a half-built level. RCA 2026-06-18. -->
     <Compile Include="..\src\Sync\Tactical\TacticalDeployReadinessGate.cs"><Link>Sync\Tactical\TacticalDeployReadinessGate.cs</Link></Compile>
+    <!-- Client deploy-ARRIVAL gate (pure): when a late chunked deploy arrives and the client is already
+         in a live tactical level (the real co-op load-barrier flow), hydrate it directly instead of
+         running ClientLaunchMission (which assumes the geoscape). RCA round-5 2026-06-18. -->
+    <Compile Include="..\src\Sync\Tactical\TacticalDeployArrivalGate.cs"><Link>Sync\Tactical\TacticalDeployArrivalGate.cs</Link></Compile>
     <!-- Tactical replication Inc-2/4: pure, Unity-free live MOVE/TURN wire codecs + seq/dedup guards.
          The engine glue (TacticalMoveSync / TacticalTurnSync / Harmony patches) binds game types and is
          NOT linked. -->

@@ -368,8 +368,25 @@ namespace Multipleer.Sync.Tactical
                       " gpBytes=" + p.GameParamsBytes.Length + " snapBytes=" + p.SnapshotBytes.Length +
                       " actors=" + p.ActorTable.Count);
 
-            try { ClientLaunchMission(p); }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientLaunchMission failed: " + ex); }
+            // ARRIVAL GATE (RCA round-5): the client normally enters its tactical level through the co-op
+            // load barrier (curtain Loaded→Playing) BEFORE this chunked deploy finishes reassembling. In
+            // that real flow ClientOnLevelReady already fired-and-skipped (its _pendingClientDeploy was
+            // still null), and there is NO geoscape left to launch from (ClientLaunchMission would hit
+            // "no GeoLevelController"). So if a tactical level is already live, hydrate IT directly;
+            // otherwise fall back to the legacy deploy-driven geoscape launch.
+            object liveTlc = LiveTacticalLevelController();
+            var decision = TacticalDeployArrivalGate.Decide(liveTlc != null);
+            if (decision == TacticalDeployArrivalGate.Decision.HydrateExisting)
+            {
+                Debug.Log("[Multipleer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch)");
+                try { ClientOnLevelReady(liveTlc); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
+            }
+            else
+            {
+                try { ClientLaunchMission(p); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientLaunchMission failed: " + ex); }
+            }
         }
 
         /// <summary>
@@ -936,6 +953,24 @@ namespace Multipleer.Sync.Tactical
         {
             // Reuse GeoRuntime's resolution (GameUtl.CurrentLevel → GeoLevelController component).
             return Network.Sync.GeoRuntime.Instance.GeoLevel();
+        }
+
+        /// <summary>The live <c>TacticalLevelController</c> if the current level is a tactical level, else
+        /// null. Mirrors <c>GeoRuntime.GeoLevel()</c>: <c>GameUtl.CurrentLevel()</c> → GetComponent of the
+        /// tactical-level type. Used by the deploy ARRIVAL gate to detect the real co-op flow, where the
+        /// client is already in its tactical level when the host's chunked deploy reassembles.</summary>
+        private static object LiveTacticalLevelController()
+        {
+            EnsureReflection();
+            if (_tlcType == null) return null;
+            try
+            {
+                var level = Network.Sync.GeoRuntime.Instance.CurrentLevel();
+                if (level is UnityEngine.Component comp)
+                    return comp.GetComponent(_tlcType);   // null if current level isn't tactical
+                return null;
+            }
+            catch { return null; }
         }
 
         private static object GetProp(object obj, string name)
