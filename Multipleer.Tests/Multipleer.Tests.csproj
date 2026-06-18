@@ -104,6 +104,9 @@
     <Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>CommandSync\GeoSimProducerTable.cs</Link></Compile>
     <!-- Inc1 Task C: pure, Unity-free gate decision for the client-only TFTV aircraft-maintenance freeze. -->
     <Compile Include="..\src\Harmony\ClientTftvAircraftFreezeGate.cs"><Link>Harmony\ClientTftvAircraftFreezeGate.cs</Link></Compile>
+    <!-- Tactical deploy null-faction guard: pure, Unity-free decision behind NullFactionEnterPlayPatch
+         (suppress the native OnActorEnteredPlay throw for a faction-less deploy intruder in a synced session). -->
+    <Compile Include="..\src\Harmony\Tactical\NullFactionEnterPlayGate.cs"><Link>Harmony\Tactical\NullFactionEnterPlayGate.cs</Link></Compile>
     <!-- Tactical replication Inc-1: pure, Unity-free NetId registry + tac.deploy wire codec (T1/T2).
          The registry operates on the IActorRef abstraction (no UnityEngine); the codec is BinaryWriter/
          Reader only. The live TacticalActorBase adapter + engine glue (TacticalDeploySync, Harmony
