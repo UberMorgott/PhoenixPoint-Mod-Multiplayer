@@ -637,9 +637,13 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 object serializer = Activator.CreateInstance(_serializerType, new object[] { (object)null });
-                // ByRef<byte[]> dest
+                // ByRef<byte[]> dest. Base.Utils.ByRef<T> has a SINGLE ctor `ByRef(T value = default)` —
+                // an optional param, NO parameterless ctor — so Activator.CreateInstance(Type) (no args)
+                // throws MissingMethodException (RCA 2026-06-18 — this aborted the whole host deploy). Pass
+                // the argument explicitly (default(byte[]) == null), mirroring the engine's own
+                // `new ByRef<bool>(value:false)` (Serializer.cs:566).
                 Type byRefBytes = _byRefType.MakeGenericType(typeof(byte[]));
-                object dest = Activator.CreateInstance(byRefBytes);
+                object dest = Activator.CreateInstance(byRefBytes, new object[] { null });
                 // TimeSlice slice = new TimeSlice(large) → effectively unbounded single pump.
                 object slice = Activator.CreateInstance(_timeSliceType, new object[] { 3600f });
 
@@ -665,8 +669,12 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 object serializer = Activator.CreateInstance(_serializerType, new object[] { (object)null });
+                // ByRef<IEnumerable<object>> outRef — same single-optional-ctor trap as SerializeGraph's
+                // ByRef<byte[]>: pass the arg explicitly (default == null), else Activator.CreateInstance
+                // throws MissingMethodException. (Would have blown up on the CLIENT right after the host
+                // serialize bug was cleared.)
                 Type byRefEnum = _byRefType.MakeGenericType(typeof(IEnumerable<object>));
-                object outRef = Activator.CreateInstance(byRefEnum);
+                object outRef = Activator.CreateInstance(byRefEnum, new object[] { null });
                 object slice = Activator.CreateInstance(_timeSliceType, new object[] { 3600f });
 
                 // Read(ByRef<IEnumerable<object>> objects, TimeSlice slice, string formatExt, byte[] srcData, string section=null)
