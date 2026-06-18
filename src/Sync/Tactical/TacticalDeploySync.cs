@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using Base.Core;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.Network.MessageLayer;
@@ -220,8 +221,11 @@ namespace Multipleer.Sync.Tactical
 
         /// <summary>HOST capture coroutine: each frame, ask the readiness gate whether to wait, capture, or
         /// fail-safe-capture. Reads <c>TacticalLevelController.HasAnyTurnStarted</c> (set true at turn-0 entry,
-        /// after OnLevelStart fully ran ⇒ level fully initialized).</summary>
-        private static IEnumerator DeferredCaptureCrt(object tacticalLevelController)
+        /// after OnLevelStart fully ran ⇒ level fully initialized). MUST return <c>IEnumerator&lt;NextUpdate&gt;</c>
+        /// (not a bare <c>IEnumerator</c>) so the compiler-emitted state machine implements the generic
+        /// interface the native <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> overload binds to —
+        /// a non-generic iterator throws an ArgumentException at the reflective invoke.</summary>
+        private static IEnumerator<NextUpdate> DeferredCaptureCrt(object tacticalLevelController)
         {
             int frames = 0;
             while (true)
@@ -245,25 +249,8 @@ namespace Multipleer.Sync.Tactical
                 }
 
                 frames++;
-                yield return TimingNextFrameValue();
+                yield return NextUpdate.NextFrame;
             }
-        }
-
-        /// <summary>The native <c>NextUpdate.NextFrame</c> value a tactical coroutine yields between frames.
-        /// Resolved by reflection (the mod has no compile-time game binding here); null falls back to a plain
-        /// yield, which the game's Timing still advances one frame.</summary>
-        private static object TimingNextFrameValue()
-        {
-            try
-            {
-                var nu = AccessTools.TypeByName("Base.Core.NextUpdate");
-                var f = nu != null ? AccessTools.Field(nu, "NextFrame") : null;
-                if (f != null) return f.GetValue(null);
-                var p = nu != null ? AccessTools.Property(nu, "NextFrame") : null;
-                if (p != null) return p.GetValue(null, null);
-            }
-            catch { }
-            return null;
         }
 
         /// <summary>Invoke the simplest <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …optional)</c> overload
