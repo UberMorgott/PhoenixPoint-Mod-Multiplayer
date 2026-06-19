@@ -693,6 +693,160 @@ namespace Multipleer.Sync.Tactical
             }
             catch { return false; }
         }
+
+        // ─── tac.actorstate (host→all, Inc T1 — generic per-actor STATE-DELTA spine) ───────────────────
+        // A batch of CHANGED-actor records (the host ships only actors whose signature drifted this flush).
+        // Each per-actor record is EXTENSIBLE via a u16 fieldMask: a field's bytes are present ONLY when its
+        // bit is set, so later increments fold in position/facing/health/armor/selected-equip/overwatch-cone
+        // WITHOUT a wire break (an old decoder reading a record with an unknown bit set would misalign — so the
+        // mask is read strictly in bit order and unknown bits beyond the ones we encode are never set by us;
+        // the decoder consumes exactly the fields for the bits it knows, in ascending bit order). T1 encodes
+        // only AP / WP / STATUSES. All values are ABSOLUTE (re-applying a record is a no-op → idempotent).
+        //   [seq:u32][count:i32]  then per actor:
+        //     [netId:i32][fieldMask:u16]
+        //     (if AP)       [ap:f32]
+        //     (if WP)       [wp:f32]
+        //     (if STATUSES) [statusCount:i32]  then per status: [defGuid:string][sourceNetId:i32][value:f32]
+
+        /// <summary>fieldMask bit assignments. T1 encodes AP|WP|STATUSES; the rest are RESERVED for later
+        /// increments (encode/decode them in ascending bit order when added).</summary>
+        public const ushort ActorFieldAp        = 0x0001;
+        public const ushort ActorFieldWp        = 0x0002;
+        public const ushort ActorFieldStatuses  = 0x0004;
+        // Reserved (NOT encoded in T1) — fold in ascending bit order:
+        public const ushort ActorFieldPos       = 0x0008;   // 3×f32 position
+        public const ushort ActorFieldFacing    = 0x0010;   // 3×f32 forward
+        public const ushort ActorFieldHealth    = 0x0020;   // f32 absolute health (backstop)
+        public const ushort ActorFieldArmor     = 0x0040;   // f32 absolute armor (backstop)
+        public const ushort ActorFieldEquip     = 0x0080;   // i32 selected-equip index
+        public const ushort ActorFieldOverwatch = 0x0100;   // bool + 8×f32 cone
+
+        /// <summary>One synced status on the wire (T1): def guid + source-actor netId (-1 = none) + value.</summary>
+        public struct ActorStatus
+        {
+            public string DefGuid;
+            public int SourceNetId;
+            public float Value;
+            public ActorStatus(string defGuid, int sourceNetId, float value)
+            { DefGuid = defGuid ?? ""; SourceNetId = sourceNetId; Value = value; }
+        }
+
+        /// <summary>One per-actor state record. Only the fields whose <see cref="FieldMask"/> bit is set are
+        /// valid on the wire (and were read from the host actor).</summary>
+        public sealed class ActorStateRecord
+        {
+            public int NetId;
+            public ushort FieldMask;
+            public float Ap;
+            public float Wp;
+            public List<ActorStatus> Statuses = new List<ActorStatus>();
+
+            public bool HasAp => (FieldMask & ActorFieldAp) != 0;
+            public bool HasWp => (FieldMask & ActorFieldWp) != 0;
+            public bool HasStatuses => (FieldMask & ActorFieldStatuses) != 0;
+        }
+
+        public sealed class ActorStateBatch
+        {
+            public uint Seq;
+            public List<ActorStateRecord> Actors = new List<ActorStateRecord>();
+            public ActorStateBatch() { }
+            public ActorStateBatch(uint seq, List<ActorStateRecord> actors)
+            { Seq = seq; Actors = actors ?? new List<ActorStateRecord>(); }
+        }
+
+        /// <summary>Hard caps so a corrupt count can never allocate wildly.</summary>
+        public const int ActorStateMaxActors = 4096;
+        public const int ActorStateMaxStatusesPerActor = 1024;
+
+        public static byte[] EncodeActorState(ActorStateBatch batch)
+        {
+            batch = batch ?? new ActorStateBatch();
+            var actors = batch.Actors ?? new List<ActorStateRecord>();
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(batch.Seq);
+                w.Write(actors.Count);
+                foreach (var a in actors)
+                {
+                    w.Write(a.NetId);
+                    w.Write(a.FieldMask);
+                    if ((a.FieldMask & ActorFieldAp) != 0) w.Write(a.Ap);
+                    if ((a.FieldMask & ActorFieldWp) != 0) w.Write(a.Wp);
+                    if ((a.FieldMask & ActorFieldStatuses) != 0)
+                    {
+                        var statuses = a.Statuses ?? new List<ActorStatus>();
+                        w.Write(statuses.Count);
+                        foreach (var s in statuses)
+                        {
+                            w.Write(s.DefGuid ?? "");
+                            w.Write(s.SourceNetId);
+                            w.Write(s.Value);
+                        }
+                    }
+                }
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeActorState(byte[] data, out ActorStateBatch batch)
+        {
+            batch = null;
+            // Minimum: seq(u32) + count(i32) = 8 bytes.
+            if (data == null || data.Length < 8) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    int count = r.ReadInt32();
+                    if (count < 0 || count > ActorStateMaxActors) return false;
+
+                    var result = new ActorStateBatch { Seq = seq, Actors = new List<ActorStateRecord>(count) };
+                    for (int i = 0; i < count; i++)
+                    {
+                        // Per-actor fixed prefix: netId(i32) + fieldMask(u16) = 6 bytes.
+                        if (ms.Length - ms.Position < 6) return false;
+                        var rec = new ActorStateRecord
+                        {
+                            NetId = r.ReadInt32(),
+                            FieldMask = r.ReadUInt16(),
+                        };
+                        if ((rec.FieldMask & ActorFieldAp) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            rec.Ap = r.ReadSingle();
+                        }
+                        if ((rec.FieldMask & ActorFieldWp) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            rec.Wp = r.ReadSingle();
+                        }
+                        if ((rec.FieldMask & ActorFieldStatuses) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            int sc = r.ReadInt32();
+                            if (sc < 0 || sc > ActorStateMaxStatusesPerActor) return false;
+                            for (int j = 0; j < sc; j++)
+                            {
+                                // string is length-prefixed (guarded by the reader); then i32 + f32 = 8 bytes.
+                                string guid = r.ReadString();
+                                if (ms.Length - ms.Position < 8) return false;
+                                int src = r.ReadInt32();
+                                float val = r.ReadSingle();
+                                rec.Statuses.Add(new ActorStatus(guid, src, val));
+                            }
+                        }
+                        result.Actors.Add(rec);
+                    }
+                    batch = result;
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 
     /// <summary>

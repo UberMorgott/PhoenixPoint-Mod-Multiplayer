@@ -80,6 +80,19 @@ namespace Multipleer.Sync.Tactical
         // client-side OverwatchStatus never double reaction-fires). Self-contained tactical seq (last-writer-wins).
         public const ushort TacIntentOverwatch = 0x8C;   // 140: client→host  "actor netId arms overwatch watching cone" (intent, carries nonce + cone)
         public const ushort TacOverwatchState = 0x8D;    // 141: host→all     "actor netId overwatch armed(with cone)/cleared" (state, carries seq)
+
+        // ─── Inc T1: GENERIC per-actor STATE-DELTA spine (state-spine design §9) ────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The REUSABLE spine: a per-actor
+        // STATE-DELTA (host→all) that mirrors mutable actor fields so any field/stat/status syncs by default.
+        // T1 payload = AP/WP + the generic STATUS SET (buffs/debuffs/stances/disables). EXTENSIBLE: each
+        // per-actor record carries a u16 fieldMask, so later increments fold in position/facing/health/armor/
+        // selected-equip/overwatch-cone bits WITHOUT a wire break. Host computes a per-actor signature each
+        // flush tick and broadcasts ONLY changed actors (idle actor = 0 bytes); client applies ABSOLUTE values
+        // under a re-entrancy flag. Runs ALONGSIDE the existing per-action surfaces (additive convergence layer
+        // — the AP/WP + targeted statuses it carries have no existing owner, so no conflict). Self-contained
+        // tactical seq (last-writer-wins) like the other live surfaces. 0x8E is RESERVED for the future generic
+        // ability-INTENT (state-spine §3) — do NOT reuse it here.
+        public const ushort TacActorState = 0x8F;        // 143: host→all     "per-actor AP/WP + status-set delta" (state, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape

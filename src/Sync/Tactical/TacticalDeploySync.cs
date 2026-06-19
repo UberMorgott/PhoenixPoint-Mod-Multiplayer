@@ -350,6 +350,10 @@ namespace Multipleer.Sync.Tactical
                 // an initial snapshot so the client is seeded with vision from turn 0 (before any change fires).
                 TacticalVisionSync.HostResetBroadcastGuard();
                 TacticalVisionSync.HostBroadcastVision();
+                // Inc T1: start the generic per-actor STATE-DELTA flush heartbeat on the level Timing (AP/WP +
+                // statuses → all peers). Self-terminates at mission exit (it watches LiveTlc). Additive — runs
+                // ALONGSIDE the existing per-action surfaces as a redundant convergence layer.
+                TacticalActorStateSync.HostStartFlush(tacticalLevelController);
                 Debug.Log("[Multipleer][tac] HOST broadcast tac.deploy site=" + siteId +
                           " gpBytes=" + gpBytes.Length + " snapBytes=" + snapBytes.Length +
                           " actors=" + table.Count);
@@ -628,7 +632,8 @@ namespace Multipleer.Sync.Tactical
             _chunkReassembler = new ChunkReassembler();   // drop any half-received chunk set
             Registry = new TacticalActorRegistry();
             TacticalVisionSync.HostResetBroadcastGuard();   // Inc Vision: clear the per-mission chattiness guard
-            LiveTlc = null;
+            TacticalActorStateSync.HostResetFlushGuard();   // Inc T1: clear the per-actor state-delta signatures
+            LiveTlc = null;                                  // Inc T1: the flush coroutine watches this → self-stops
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();
         }
@@ -758,6 +763,15 @@ namespace Multipleer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacOverwatchState)
             {
                 try { TacticalOverwatchSync.HandleOverwatchState(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.overwatch.state failed: " + ex); }
+                return true;
+            }
+
+            // ─── LIVE generic per-actor STATE-DELTA spine (Inc T1) ────────────────────────────────
+            // Host→all state delta (AP/WP + status set). Client-only apply; the handler is IsHost-gated
+            // internally, so a stray envelope on the host is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacActorState)
+            {
+                try { TacticalActorStateSync.HandleActorState(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.actorstate failed: " + ex); }
                 return true;
             }
             return false;
