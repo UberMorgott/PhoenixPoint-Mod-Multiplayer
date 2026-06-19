@@ -119,6 +119,31 @@ namespace Multipleer.Sync.Tactical
                 object cone = BuildCone(intent.TipX, intent.TipY, intent.TipZ, intent.Height, intent.Radius, intent.FwdX, intent.FwdY, intent.FwdZ);
                 if (cone == null) { Debug.LogError("[Multipleer][tac] overwatch intent: could not build cone"); return; }
 
+                // RE-ANCHOR the cone Tip to the HOST actor's own authoritative eye point. The client built the
+                // cone in CLIENT space (Cone.Tip = the CLIENT actor's TacticalActor.VisionPoint — same as the
+                // native OverwatchAbility.cs:67 / GetAbilityTargetCone), so applying it verbatim on the host can
+                // leave Tip translated relative to where the host's authoritative enemies actually move →
+                // TacticalLevelController.ExecuteOverwatch (TLC.cs:1388) Contains(target.Pos||VisionPoint) is
+                // false for every mover → the watcher never reaction-fires and the cone just expires. Overwrite
+                // Tip with the HOST actor's VisionPoint (TacticalActorBase.cs:172, the host's own eye point),
+                // KEEPING the client's Forward/Height/Radius (aim direction + shape). Re-anchoring the host's own
+                // soldier's cone to its own eye point is correct by definition — harmless if positions are
+                // already synced (delta ≈ 0). The DIAG below reports the gap so the in-game test can CONFIRM the
+                // cause (large delta → this fix repairs it; ~0 → the real gate is LOS/weapon at TLC.cs:1394).
+                Vector3 intentTip = new Vector3(intent.TipX, intent.TipY, intent.TipZ);
+                object hostVisionBoxed = GetProp(actor, "VisionPoint");
+                if (hostVisionBoxed is Vector3 hostVision)
+                {
+                    SetField(ConeType, ref cone, "Tip", hostVision);
+                    float delta = (hostVision - intentTip).magnitude;
+                    Debug.Log("[Multipleer][tac] overwatch arm: intent.Tip=(" +
+                              intentTip.x.ToString("0.00") + "," + intentTip.y.ToString("0.00") + "," + intentTip.z.ToString("0.00") +
+                              ") hostVisionPoint=(" +
+                              hostVision.x.ToString("0.00") + "," + hostVision.y.ToString("0.00") + "," + hostVision.z.ToString("0.00") +
+                              ") delta=" + delta.ToString("0.000"));
+                }
+                else Debug.LogError("[Multipleer][tac] overwatch arm: could not read host actor VisionPoint — arming with client-space Tip (cone may miss)");
+
                 object target = BuildOverwatchTarget(cone);
                 if (target == null) { Debug.LogError("[Multipleer][tac] overwatch intent: could not build TacticalAbilityTarget"); return; }
 
