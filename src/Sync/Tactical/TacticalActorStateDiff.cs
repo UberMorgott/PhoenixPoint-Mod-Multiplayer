@@ -137,6 +137,40 @@ namespace Multipleer.Sync.Tactical
             return true;
         }
 
+        // ─── Feature D: actor-level absolute HEALTH mirror decision (DEATH-SAFE) ──────────────────────────
+
+        /// <summary>HP-equality tolerance so a sub-epsilon float jitter never re-applies the actor HP (and never
+        /// re-fires the native Health StatChangeEvent → UI churn). Shares the bodypart epsilon — whole-HP game.</summary>
+        public const float HealthEpsilon = BodyPartHpEpsilon;
+
+        /// <summary>The death threshold the engine uses for the actor Health stat: <c>TacticalActorBase.</c>
+        /// <c>OnHealthChange</c> calls <c>Die()</c> iff a <c>StatChangeType.Value</c> change crosses
+        /// <c>prevValue &gt;= 1E-05</c> → <c>Value &lt; 1E-05</c>. So setting HP to ANY value &gt;= this is
+        /// death-safe; setting to &lt; this (i.e. ~0) would trigger death. We mirror only strictly-positive HP.</summary>
+        public const float HealthDeathThreshold = 1e-05f;
+
+        /// <summary>The PURE death-safe actor-HP mirror decision. Given the client mirror's current HP and the
+        /// host's incoming absolute HP, decide whether to SET it (and to what value):
+        ///   • incoming &lt;= 0 (≤ <see cref="HealthDeathThreshold"/>) → DO NOT apply. DEATH is owned by
+        ///     tac.damage (0x88); setting HP through ~0 here would fire the engine's OnHealthChange → Die() and
+        ///     double-trigger death/effects. <paramref name="apply"/>=false.
+        ///   • incoming &gt; 0 but equal to the current within <see cref="HealthEpsilon"/> → no-op (already
+        ///     converged; avoid re-firing StatChangeEvent). <paramref name="apply"/>=false.
+        ///   • incoming &gt; 0 and drifted from current → APPLY the incoming value (heal or drift correction).
+        ///     Setting a strictly-positive HP can NEVER cross to &lt; threshold, so it is death-safe.
+        /// <paramref name="valueToSet"/> is the clamped value to write (only meaningful when apply=true; it is
+        /// the raw incoming HP, which is already &gt; 0). Default-safe: any non-positive incoming → skip.</summary>
+        public static bool ShouldApplyHealthMirror(float currentClientHp, float incomingHp, out float valueToSet)
+        {
+            valueToSet = currentClientHp;
+            // DEATH-SAFE: a non-positive incoming HP is NEVER applied via this path (tac.damage owns death).
+            if (incomingHp <= HealthDeathThreshold) return false;
+            // Already converged (within epsilon) → no-op, do not re-fire the stat-change event.
+            if (System.Math.Abs(currentClientHp - incomingHp) <= HealthEpsilon) return false;
+            valueToSet = incomingHp;
+            return true;
+        }
+
         // ─── Feature B PART 1: per-bodypart-HP RECONCILE diff (limb-disable mirror) ───────────────────────
 
         /// <summary>One bodypart HP entry: the slot name (stable host↔client key) + the part's absolute HP.</summary>

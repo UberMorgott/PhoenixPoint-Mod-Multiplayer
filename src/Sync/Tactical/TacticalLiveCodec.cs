@@ -716,7 +716,12 @@ namespace Multipleer.Sync.Tactical
         // Reserved (NOT encoded in T1) — fold in ascending bit order:
         public const ushort ActorFieldPos       = 0x0008;   // 3×f32 position
         public const ushort ActorFieldFacing    = 0x0010;   // 3×f32 forward
-        public const ushort ActorFieldHealth    = 0x0020;   // f32 absolute health (backstop)
+        // Feature D: actor-level absolute HEALTH (HP) mirror. Carries the host's CURRENT HP (float) so a
+        // host-side HEAL or any non-damage HP drift converges on the client (HP DECREASES already replicate
+        // via tac.damage 0x88; DEATH stays owned by tac.damage — the client apply is DEATH-SAFE, see
+        // TacticalActorStateSync). Max HP is set at deploy (Health.SetMax(Toughness)) and not carried.
+        // Encoded in ascending bit order AFTER statuses (0x0004) and BEFORE bodypart-HP (0x0200).
+        public const ushort ActorFieldHealth    = 0x0020;   // f32 absolute current health
         public const ushort ActorFieldArmor     = 0x0040;   // f32 absolute armor (backstop)
         public const ushort ActorFieldEquip     = 0x0080;   // i32 selected-equip index
         public const ushort ActorFieldOverwatch = 0x0100;   // bool + 8×f32 cone
@@ -757,12 +762,14 @@ namespace Multipleer.Sync.Tactical
             public ushort FieldMask;
             public float Ap;
             public float Wp;
+            public float Health;   // Feature D: absolute current HP (valid only when HasHealth)
             public List<ActorStatus> Statuses = new List<ActorStatus>();
             public List<BodyPartHp> BodyParts = new List<BodyPartHp>();
 
             public bool HasAp => (FieldMask & ActorFieldAp) != 0;
             public bool HasWp => (FieldMask & ActorFieldWp) != 0;
             public bool HasStatuses => (FieldMask & ActorFieldStatuses) != 0;
+            public bool HasHealth => (FieldMask & ActorFieldHealth) != 0;
             public bool HasBodyParts => (FieldMask & ActorFieldBodyPartHp) != 0;
         }
 
@@ -806,6 +813,9 @@ namespace Multipleer.Sync.Tactical
                             w.Write(s.Value);
                         }
                     }
+                    // HEALTH (0x0020) — Feature D. Encoded AFTER statuses (0x0004), BEFORE bodypart-HP (0x0200),
+                    // i.e. ascending bit order. Absolute current HP (float).
+                    if ((a.FieldMask & ActorFieldHealth) != 0) w.Write(a.Health);
                     // BODYPARTHP is the highest bit we emit → encoded LAST (ascending bit order).
                     if ((a.FieldMask & ActorFieldBodyPartHp) != 0)
                     {
@@ -870,6 +880,13 @@ namespace Multipleer.Sync.Tactical
                                 float val = r.ReadSingle();
                                 rec.Statuses.Add(new ActorStatus(guid, src, val));
                             }
+                        }
+                        // HEALTH (0x0020) — Feature D. Decoded AFTER statuses, BEFORE bodypart-HP (ascending
+                        // bit order), only if its bit is set.
+                        if ((rec.FieldMask & ActorFieldHealth) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            rec.Health = r.ReadSingle();
                         }
                         // BODYPARTHP decoded LAST (ascending bit order), only if its bit is set.
                         if ((rec.FieldMask & ActorFieldBodyPartHp) != 0)

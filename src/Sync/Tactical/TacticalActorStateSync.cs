@@ -157,19 +157,26 @@ namespace Multipleer.Sync.Tactical
                 if (actor == null) continue;
                 liveNetIds.Add(netId);
 
-                if (!ReadActorState(actor, out float ap, out float wp, out var statuses, out var bodyParts))
+                if (!ReadActorState(actor, out float ap, out float wp, out float health, out var statuses, out var bodyParts))
                     continue;   // not a stats-bearing actor (turret/vehicle/destructible) → skip
 
-                // Signature includes AP/WP + the mirrored status set + the bodypart-HP set, so a status icon
-                // change OR a limb-HP change re-broadcasts (idle actor = 0 bytes via the unchanged-sig skip).
-                string sig = SyncStatuses
+                // Signature includes AP/WP + HEALTH + the mirrored status set + the bodypart-HP set, so a HEAL,
+                // a status icon change OR a limb-HP change re-broadcasts (idle actor = 0 bytes via the
+                // unchanged-sig skip). Health rides AP/WP (not gated by SyncStatuses) → always in the signature.
+                string healthSig = "$hp=" + health.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                string sig = (SyncStatuses
                     ? TacticalActorStateDiff.Signature(ap, wp, statuses) + BodyPartSig(bodyParts)
-                    : TacticalActorStateDiff.Signature(ap, wp, null);
+                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig;
                 if (_lastSig.TryGetValue(netId, out var prev) && prev == sig)
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
 
                 ushort mask = (ushort)(TacticalLiveCodec.ActorFieldAp | TacticalLiveCodec.ActorFieldWp);
+                // Feature D: ship the actor-level HEALTH bit ONLY when HP > 0. Death (HP <= 0) is owned by
+                // tac.damage (0x88); the client apply is death-safe anyway (ShouldApplyHealthMirror skips <= 0),
+                // but not setting the bit at all keeps a dead/dying actor's delta clean.
+                bool shipHealth = health > TacticalActorStateDiff.HealthDeathThreshold;
+                if (shipHealth) mask |= TacticalLiveCodec.ActorFieldHealth;
                 if (SyncStatuses)
                 {
                     mask |= TacticalLiveCodec.ActorFieldStatuses;
@@ -181,6 +188,7 @@ namespace Multipleer.Sync.Tactical
                     FieldMask = mask,
                     Ap = ap,
                     Wp = wp,
+                    Health = health,
                 };
                 if (SyncStatuses)
                 {
@@ -221,7 +229,7 @@ namespace Multipleer.Sync.Tactical
             { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0;
             try
             {
                 _applyingRemote = true;
@@ -245,6 +253,13 @@ namespace Multipleer.Sync.Tactical
                         {
                             bp += ApplyBodyPartHp(actor, rec.BodyParts);
                         }
+                        // Feature D: actor-level absolute HEALTH (heal / drift correction), DEATH-SAFE. The host
+                        // only ships the bit when HP > 0, but ShouldApplyHealthMirror double-guards: a non-positive
+                        // value is NEVER set (death owned by tac.damage), and an unchanged value is a no-op.
+                        if (rec.HasHealth)
+                        {
+                            if (ApplyHealthMirror(actor, rec.Health)) hp++;
+                        }
                         if (rec.HasAp || rec.HasWp)
                         {
                             if (SetApWpAbsolute(actor, rec)) apwp++;
@@ -254,25 +269,27 @@ namespace Multipleer.Sync.Tactical
                 finally { _applyingRemote = false; }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
-                              " limbHp=" + bp);
+                              " limbHp=" + bp + " hp=" + hp);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
 
         // ─── HOST read helpers (AP/WP + filtered status set) ────────────────────────────────────────────
 
-        /// <summary>Read {AP, WP, filtered status set} for an actor. Returns FALSE when the actor has no
-        /// CharacterStats (turret/vehicle/destructible) — the caller must NOT then ship 0/0 as authoritative.
-        /// Statuses are filtered by <see cref="TacticalActorStateDiff.IsSyncableStatusType"/> (excludes
-        /// Overwatch + DoT family). Source→netId via the registry (-1 when the source isn't a resolvable actor).</summary>
-        private static bool ReadActorState(object actor, out float ap, out float wp,
+        /// <summary>Read {AP, WP, current HEALTH, filtered status set, bodypart HP} for an actor. Returns FALSE
+        /// when the actor has no CharacterStats (turret/vehicle/destructible) — the caller must NOT then ship
+        /// 0/0 as authoritative. Statuses are filtered by <see cref="TacticalActorStateDiff.ShouldMirrorStatus"/>
+        /// (visible-on-healthbar, non-surface-owned). Source→netId via the registry (-1 when unresolvable).
+        /// <paramref name="health"/> is the actor's CURRENT HP (Feature D); the host only ships it when > 0
+        /// (see HostFlushOnce) — death is owned by tac.damage, never this delta.</summary>
+        private static bool ReadActorState(object actor, out float ap, out float wp, out float health,
             out List<TacticalActorStateDiff.StatusRec> statuses,
             out List<TacticalActorStateDiff.BodyPartHpRec> bodyParts)
         {
-            ap = 0f; wp = 0f;
+            ap = 0f; wp = 0f; health = 0f;
             statuses = new List<TacticalActorStateDiff.StatusRec>();
             bodyParts = new List<TacticalActorStateDiff.BodyPartHpRec>();
 
@@ -284,7 +301,12 @@ namespace Multipleer.Sync.Tactical
             ap = StatValue(apStat);
             wp = StatValue(wpStat);
 
-            // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP.
+            // Feature D: actor-level CURRENT HP (CharacterStats.Health, a StatusStat read via the same
+            // op_Implicit float as AP/WP). Best-effort: 0 when unreadable (a 0/no-Health actor is then NOT
+            // health-mirrored — HostFlushOnce only sets the Health bit when health > 0).
+            health = StatValue(GetProp(stats, "Health"));
+
+            // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP/HEALTH.
             if (!SyncStatuses) return true;
 
             // Statuses: enumerate StatusComponent.Statuses, mirror those whose healthbar visibility != Hidden
@@ -466,6 +488,27 @@ namespace Multipleer.Sync.Tactical
             if (rec.HasAp) { SetStat(GetField(stats, "ActionPoints"), rec.Ap); any = true; }
             if (rec.HasWp) { SetStat(GetField(stats, "WillPoints"), rec.Wp); any = true; }
             return any;
+        }
+
+        /// <summary>Feature D — apply the host-absolute actor HP to the client mirror, DEATH-SAFE. Reads the
+        /// client's current <c>CharacterStats.Health</c>, asks the pure
+        /// <see cref="TacticalActorStateDiff.ShouldApplyHealthMirror"/> whether/what to set, then writes via
+        /// <see cref="SetStat"/> (<c>BaseStat.Set(float,true)</c> → fires <c>StatChangeType.Value</c> → the
+        /// healthbar updates). DEATH PROOF: the engine's <c>TacticalActorBase.OnHealthChange</c> calls
+        /// <c>Die()</c> ONLY when a Value change crosses <c>prevValue &gt;= 1E-05 → Value &lt; 1E-05</c>;
+        /// <see cref="TacticalActorStateDiff.ShouldApplyHealthMirror"/> only ever returns a value
+        /// <c>&gt; 1E-05</c>, so the set can never cross to death — and a non-positive host HP is dropped here
+        /// (death stays owned by tac.damage 0x88). Returns true when a value was actually written.</summary>
+        private static bool ApplyHealthMirror(object actor, float incomingHp)
+        {
+            object stats = GetProp(actor, "CharacterStats");
+            if (stats == null) return false;
+            object healthStat = GetProp(stats, "Health");
+            if (healthStat == null) return false;
+            float current = StatValue(healthStat);
+            if (!TacticalActorStateDiff.ShouldApplyHealthMirror(current, incomingHp, out float toSet)) return false;
+            SetStat(healthStat, toSet);   // Set(float,true) → StatChangeType.Value → healthbar; toSet>0 → no Die()
+            return true;
         }
 
         /// <summary>Reconcile the actor's MIRRORED status set to the incoming set: ApplyStatus the genuinely-

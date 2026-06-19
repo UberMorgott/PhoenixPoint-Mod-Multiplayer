@@ -268,4 +268,61 @@ public class TacticalActorStateDiffTests
         var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(Cur(), new[] { B("", 100f), B(null, 5f) });
         Assert.Empty(toApply);
     }
+
+    // ─── Feature D: death-safe actor-HP mirror decision ───────────────────────────────────────────────
+
+    [Fact]
+    public void HealthMirror_IncomingPositive_Drifted_AppliesIncoming()
+    {
+        // Host healed the actor 50 → 80; the client at 50 must SET 80 (heal converges).
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(50f, 80f, out float v);
+        Assert.True(apply);
+        Assert.Equal(80f, v);
+    }
+
+    [Fact]
+    public void HealthMirror_IncomingDownButPositive_AppliesIncoming()
+    {
+        // Drift correction downward but still ALIVE (>0) → applied (it can never cross to <threshold).
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(80f, 30f, out float v);
+        Assert.True(apply);
+        Assert.Equal(30f, v);
+    }
+
+    [Fact]
+    public void HealthMirror_IncomingZero_Skips_DeathOwnedByDamage()
+    {
+        // Incoming <= 0 → DO NOT apply (death owned by tac.damage; setting through 0 would fire Die()).
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(40f, 0f, out _);
+        Assert.False(apply);
+    }
+
+    [Fact]
+    public void HealthMirror_IncomingNegative_Skips()
+    {
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(40f, -5f, out _);
+        Assert.False(apply);
+    }
+
+    [Fact]
+    public void HealthMirror_IncomingBelowDeathThreshold_Skips()
+    {
+        // A tiny sub-threshold positive (≤ 1E-05) is treated as death → skip (death-safe).
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(40f, 1e-06f, out _);
+        Assert.False(apply);
+    }
+
+    [Fact]
+    public void HealthMirror_EqualWithinEpsilon_NoOp()
+    {
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(100f, 100f, out _);
+        Assert.False(apply);
+    }
+
+    [Fact]
+    public void HealthMirror_SubEpsilonJitter_NoOp()
+    {
+        bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(100f, 100.001f, out _);
+        Assert.False(apply);
+    }
 }
