@@ -130,10 +130,14 @@ public class SyncActionSerializationTests
     public void AnswerEvent_RoundTrips()
     {
         SyncRegistration.RegisterAll();
-        var a = RoundTrip(new AnswerEventAction("PROG_PX0_Intro_Event", 2));
+        // Wire = [occId:u16][eventId:string][choiceIndex:i32]: occId now rides the action wire (replacing the
+        // bespoke ChoiceClaim transport) so the host resolves the LIVE event by occurrence id.
+        var a = (AnswerEventAction)RoundTrip(new AnswerEventAction(4242, "PROG_PX0_Intro_Event", 2));
         Assert.IsType<AnswerEventAction>(a);
         Assert.Equal(ActionCategory.Dialogs, a.Category);
-        Assert.Equal(Write(new AnswerEventAction("PROG_PX0_Intro_Event", 2)), Write(a));
+        Assert.Equal((ushort)4242, a.OccurrenceId);
+        Assert.Equal(2, a.ChoiceIndex);
+        Assert.Equal(Write(new AnswerEventAction(4242, "PROG_PX0_Intro_Event", 2)), Write(a));
     }
 
     [Fact]
@@ -141,9 +145,27 @@ public class SyncActionSerializationTests
     {
         SyncRegistration.RegisterAll();
         // -1 = the null "decline" choice.
-        var a = RoundTrip(new AnswerEventAction("PROG_PX0_Intro_Event", -1));
+        var a = (AnswerEventAction)RoundTrip(new AnswerEventAction(7, "PROG_PX0_Intro_Event", -1));
+        Assert.Equal((ushort)7, a.OccurrenceId);
+        Assert.Equal(-1, a.ChoiceIndex);
         Assert.Equal(
-            Write(new AnswerEventAction("PROG_PX0_Intro_Event", -1)),
+            Write(new AnswerEventAction(7, "PROG_PX0_Intro_Event", -1)),
             Write(a));
+    }
+
+    [Fact]
+    public void AnswerEvent_WireBytes_AreStable()
+    {
+        SyncRegistration.RegisterAll();
+        // Pin the exact on-wire layout: [occId:u16 LE][len:7bit][utf8 eventId][choiceIndex:i32 LE].
+        // occId 5 = 05 00; "AB" = 0x02 length prefix + 0x41 0x42; choiceIndex 2 = 02 00 00 00.
+        var bytes = Write(new AnswerEventAction(5, "AB", 2));
+        var expected = new byte[]
+        {
+            0x05, 0x00,              // occurrenceId = 5
+            0x02, 0x41, 0x42,        // "AB"
+            0x02, 0x00, 0x00, 0x00,  // choiceIndex = 2
+        };
+        Assert.Equal(expected, bytes);
     }
 }

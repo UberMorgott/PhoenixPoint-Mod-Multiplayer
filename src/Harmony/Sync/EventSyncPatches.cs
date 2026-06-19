@@ -47,11 +47,10 @@ namespace Multipleer.Harmony.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
 
-            if (!PermissionGate.Check(ActionCategory.Dialogs))
-            {
-                PermissionGate.Notify(ActionCategory.Dialogs);
-                return false;
-            }
+            // PERMISSION (user directive): event choices are NOT permission-gated for now — everyone may click,
+            // last-write-wins (permission system deferred; PermissionGate code kept for re-enable). The prior
+            // PermissionGate.Check(Dialogs) gate here could block + return false, freezing a non-permitted player's
+            // click. Removed; Validate + native IsCompleted self-guard still protect correctness.
 
             try
             {
@@ -62,7 +61,11 @@ namespace Multipleer.Harmony.Sync
                 // Fail OPEN to local vanilla handling instead of replicating the wrong outcome.
                 if (choiceIndex == EventReflection.ChoiceLookupFailed) return true;
                 // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
-                if (engine.IsHost) { __state = new AnswerEventAction(eventId, choiceIndex); return true; }
+                // occId rides the action wire now (AnswerEventAction(occId, eventId, choiceIndex)); read it off
+                // THIS live instance (order-independent GetOrAssign). The client suppresses this echo
+                // (IHostOnlyApply) — its real result arrives via the EventDismiss broadcast — so the occId here
+                // only needs to keep the action well-formed.
+                if (engine.IsHost) { __state = new AnswerEventAction(EventOccurrenceIds.GetOrAssign(__instance), eventId, choiceIndex); return true; }
                 // Client: DEAD path under the two-class model — never reached (client choice buttons are inert
                 // / INFO is a pure local hide / SelectChoice is short-circuited). Kept only as a fail-safe:
                 // block any stray local CompleteEvent and do NOT relay an answer (host owns every outcome).

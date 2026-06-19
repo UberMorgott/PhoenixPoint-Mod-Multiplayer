@@ -19,9 +19,44 @@ Living roadmap + status tracker for the PhoenixPoint co-op multiplayer sync. NEW
 - **Host-migration** (any-peer-becomes-host) — explicitly dropped: most complex, deemed not worth it; host stays host
 - **Network obfuscation / VPN / anti-DPI / hole-punching** beyond the existing transport — player's network stack
 
+## ARCHITECTURE DECISION (2026-06-17): Full Host→Client Geoscape State Replication
+
+**Verdict: FEASIBLE — adopted as the new spine.** Design doc: `docs/superpowers/specs/2026-06-17-multipleer-full-geoscape-replication-feasibility.md`.
+
+### Root cause that forced it
+- Client geoscape sim is fully LIVE and rolls its own state independently (e.g. `GeoSite.EncounterID` via `Random.Range` in `PhoenixFaction_OnSiteFirstTimeVisited`), so events/research/manufacture/trade/storage all diverge
+- Per-domain band-aids (ResearchChannel/wallet/inventory/diplomacy/unlock channels + event-display suppression) are baseline-to-RETIRE, not the target
+
+### Backbone: native per-entity in-place apply
+- `GeoSite.ProcessInstanceData` — restores `EncounterID`+`RandomSeed`
+- `Timing.ProcessInstanceData` — writes `_paused/_scale/StartTime/OwnNow`, fires ZERO events
+- `GeoVehicle.ProcessInstanceData` — in-place vehicle restore (path/site/hitpoints/weapons)
+- `GeoFaction.InstanceData` setter — wallet/storage/research/manufacture/diplomacy/unlocks restore
+- Full `GeoLevelInstanceData` snapshot = join/reconnect ONLY (heavy level-load via `LevelCrt`); in-play = per-entity diffs + 2-5Hz clock anchor; idle = ~0 bytes
+- Save-transfer (32KB chunks via `SaveTransferCoordinator`) already ships
+
+### Prior wipe context
+- Tag `pre-wipe-full-2026-06-15`, wipe commit `55a4694` — was a client vehicle RENDER bug (custom ~15Hz transform stream + `ClientVehicleInterpolator` ring-buffer speed-mismatch), NOT a data-replication failure
+- Data-replication machinery (diff codec, broadcaster, per-entity applier, sim-freeze, producer table, entity-op) was SOUND and is REVIVABLE
+- DO NOT revive: the 15Hz transform stream / `ClientVehicleInterpolator`; replicate travel as a discrete `StartTravel{path,startTime}` (native slaved-clock render via `NavigateRoutine`)
+- TFTV `AircraftReworkMaintenance` (hourly re-Navigate + x2 speed at `:384`/`:377`/`:405`) must be frozen on the client (narrow Harmony guard, defensive per `theturned-tftv-compat-required` pattern)
+
+### Increment plan (each in-game-gated, commit to inner `main`, tests-green)
+- **Inc 1 — Client sim-freeze + snapshot-on-join:** revive `GeoSimProducerTable` (13-producer set headed by `GeoLevelController.LevelHourlyUpdateCrt`) + `ClientGeoSimSuppressPatch` + travel-emitter suppression + freeze TFTV maintenance → kills the EncounterID divergence
+- **Inc 2 — Discrete authoritative deltas:** `0x36 GeoEntityOp` (create/destroy); travel = `StartTravel{path,startTime}` discrete reliable; geoscape events fire host-only → `EventSystemInstanceData`/reveal delta; reuse `SurfaceRouter` chokepoint
+- **Inc 3 — Generic per-entity InstanceData-diff:** revive `GeoStateDiffCodec`/`GeoVehicleStateDiffer`; client applies via native per-entity `ProcessInstanceData` + `GeoFaction.InstanceData` + Marketplace blob; light moving-vehicle drift-correction ~1-2Hz (NO 15Hz stream, NO custom interpolation)
+- **Inc 4 — Retire redundant per-domain channels:** surface-by-surface, replace ResearchChannel/wallet/inventory/diplomacy/unlock/event-suppression with generic GeoFaction diff; each retire in-game-gated
+- **Inc 5 — CRC divergence detection + reconnect:** rolling CRC32 over serialized `RecordInstanceData` → low-freq resync; reconnect = host snapshot → returning player only → buffered-delta catch-up (others unaffected); reuse `SaveTransferCoordinator.Crc32`
+
+### Permissions fit (unchanged)
+- Client input → host `PermissionGate` → host apply → host replicate, via the existing `SurfaceRouter` chokepoint (commit `8068c89`)
+- Full replication strengthens permissions: client sim frozen → denied input never reaches host-apply → client mirror stays correct
+
+---
+
 ## Roadmap (decomposed sub-projects)
 
-Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read-only, now) -> #1 skeleton -> #2 in-game -> #3 surfaces -> #4 efficiency (held as property of #1/#3) -> #5 reconnect.
+Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read-only, now) -> #1 skeleton -> #2 in-game -> #3 surfaces (NOW REFRAMED: full-replication increments Inc1-Inc5 replace per-surface piecemeal) -> #4 efficiency (held as property of #1/#3) -> #5 reconnect (folded into Inc5).
 
 ### #0 — Engine feasibility recon (READ-ONLY, early, parallel, no code) — DONE
 
@@ -62,37 +97,41 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 
 - Research / manufacture / facility / events / wallet / time already work — route through the skeleton, verify in-game
 
-### #3 — Geoscape surface completeness (each a thin increment on the skeleton)
+### #3 — Geoscape surface completeness — REFRAMED as full-replication increments
 
-- Pause
-- Aircraft/ship control (geoscape commands, NOT the old wiped real-time interpolation)
-- Base building (finish)
-- Crafting
-- Soldier equipment
-- Customization
-- Recruitment
-- Quests/events
+> **2026-06-17:** per-surface piecemeal replaced by Inc1-Inc5 (see ARCHITECTURE DECISION above). The per-domain channels below are the interim baseline to RETIRE (Inc4), not extend.
+
+- **Interim baseline (working, deployed):** research (ResearchChannel ch2), manufacture, facility, geoscape-events (answer), wallet echo, time-sync (anchor-rate clock)
+- **Full-replication replaces:** pause (subsumed by sim-freeze Inc1), aircraft control (discrete StartTravel Inc2), equipment/customization/recruitment (GeoFaction InstanceData-diff Inc3), quests/events (host-only fire + EventSystemInstanceData Inc2/Inc3)
+- Base-building completeness carries forward as a discrete `ISyncedAction` surface
 
 ### #4 — 10-player efficiency
 
 - Deltas not constant full snapshots; host->N fan-out; snapshot only on join/reconnect
-- Woven into #1/#3 + a load test
+- Woven into #1/#3 + Inc3 diff model (idle = ~0 bytes; discrete travel = ZERO continuous bytes)
+- Load test deferred until Inc3 lands
 
-### #5 — Reconnect / hot-join (required, but NOT first)
+### #5 — Reconnect / hot-join — FOLDED into Inc5
 
 - Host snapshots (save) -> sends ONLY to the returning player -> they load + apply a buffered delta from the snapshot moment -> back in; others unaffected
-- Depends on #0 findings
+- Rolling CRC32 divergence detection (`SaveTransferCoordinator.Crc32`) + reconnect in one increment (Inc5)
+- Depends on #0 findings + Inc1-Inc3 stable
 
 ## STATUS
 
 | Sub-project | Status | Notes |
 |---|---|---|
+| **ARCHITECTURE** | **DECIDED 2026-06-17** | Full host→client geoscape state replication adopted as spine; per-domain channels = interim baseline to retire; see ARCHITECTURE DECISION section |
 | #0 Feasibility recon | **DONE** | all 4 items feasible, no hard blockers; see #0 Result block |
 | #1 Core skeleton | **IN PROGRESS — Phase 1 code-complete (Tasks 1-6), Task 7 pending in-game gate** | spec+plan written; 6/7 tasks merged to inner main; 215 tests green; in-game UNVERIFIED (additive, behavior-unchanged) |
 | #2 Migrate existing + in-game gate | IN PROGRESS | surfaces below already work & deployed; skeleton consolidation pending; in-game verification ongoing |
-| #3 Geoscape surfaces | PARTIAL | DONE: research, manufacture, facility, geoscape-events(answer), wallet, time/anchor-rate. TODO: pause, aircraft control, base-building completeness, equipment, customization, recruitment, quests |
-| #4 10-player efficiency | NOT STARTED | property of #1/#3 |
-| #5 Reconnect/hot-join | NOT STARTED | after #0 |
+| #3 Geoscape surfaces | **REFRAMED → Inc1-Inc5** | interim baseline DONE: research, manufacture, facility, geoscape-events(answer), wallet, time/anchor-rate. Full-replication increments replace per-surface piecemeal |
+| Inc1 sim-freeze | NOT STARTED | 13-producer freeze + TFTV maintenance guard + snapshot-on-join |
+| Inc2 discrete deltas | NOT STARTED | entity-op + travel + events via SurfaceRouter |
+| Inc3 InstanceData-diff | NOT STARTED | generic per-entity diff; retire per-domain channels starts here |
+| Inc4 retire channels | NOT STARTED | surface-by-surface; each in-game-gated |
+| Inc5 CRC + reconnect | NOT STARTED | divergence detection + reconnect (folds old #5) |
+| #4 10-player efficiency | NOT STARTED | property of #1/Inc3 |
 | OUT | — | host-migration, network obfuscation — excluded by decision |
 
 ## CURRENT POSITION (update each session)
@@ -109,4 +148,6 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
   2. **IN-GAME GATE #1:** host+client DirectIP, confirm research/manufacture/facility/events sync unchanged (skeleton is additive/dormant — expect zero behavior delta)
   3. On GATE #1 pass -> execute **Task 7** from plan (`docs/superpowers/plans/2026-06-17-multipleer-core-skeleton.md`): flip `SendActionRequest`->envelope + DELETE legacy `OnActionRequest`/`OnActionApply`/route cases
   4. **IN-GAME GATE #2** = Phase-1 acceptance (envelope path end-to-end host+client)
+  5. On GATE #2 pass -> begin **Inc1** (client sim-freeze + TFTV maintenance guard + snapshot-on-join verification) — the first full-replication increment
+- **Architecture spine (2026-06-17):** full host→client geoscape state replication; per-domain channels = interim baseline → retire at Inc4. Design doc: `docs/superpowers/specs/2026-06-17-multipleer-full-geoscape-replication-feasibility.md`
 - **Note:** per-sub-project design specs go to `E:\DEV\PhoenixPoint\docs\superpowers\specs\YYYY-MM-DD-<topic>-design.md` when each is brainstormed; this file is the higher-level living tracker

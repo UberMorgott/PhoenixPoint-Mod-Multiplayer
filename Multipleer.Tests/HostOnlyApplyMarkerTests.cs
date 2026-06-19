@@ -40,13 +40,26 @@ public class HostOnlyApplyMarkerTests
 
     [Fact]
     public void AnswerEvent_IsHostOnlyApply()
-        => Assert.IsAssignableFrom<IHostOnlyApply>(new AnswerEventAction("PROG_PX0_Intro_Event", 0));
+        => Assert.IsAssignableFrom<IHostOnlyApply>(new AnswerEventAction(1, "PROG_PX0_Intro_Event", 0));
+
+    [Fact]
+    public void AnswerEvent_IsResolvesOutsideScope()
+        // The host's authoritative CompleteEvent must run OUTSIDE SyncApplyScope so its
+        // CompleteEventDismissPatch.Postfix (which early-returns under SyncApplyScope.IsApplying) still
+        // broadcasts the EventDismiss the clients render. The generic OnActionRequest honors this marker.
+        => Assert.IsAssignableFrom<IResolvesOutsideScope>(new AnswerEventAction(1, "PROG_PX0_Intro_Event", 0));
+
+    [Fact]
+    public void ResearchCompleted_IsNotResolvesOutsideScope()
+        // Regression guard: only event-answer resolution opts out of SyncApplyScope; the channelled
+        // research/manufacture/facility actions stay inside the scope (interceptor pass-through).
+        => Assert.IsNotAssignableFrom<IResolvesOutsideScope>(new ResearchCompletedAction("PX_LaserTech_ResearchDef"));
 
     [Fact]
     public void ManufactureCompleted_IsNotHostOnlyApply()
-        => Assert.False(new ManufactureCompletedAction("itemguid", 3) is IHostOnlyApply);
+        => Assert.IsNotAssignableFrom<IHostOnlyApply>(new ManufactureCompletedAction("itemguid", 3));
 
     [Fact]
     public void FacilityCompleted_IsNotHostOnlyApply()
-        => Assert.False(new FacilityCompletedAction("12", "4001", 5, 6) is IHostOnlyApply);
+        => Assert.IsNotAssignableFrom<IHostOnlyApply>(new FacilityCompletedAction("12", "4001", 5, 6));
 }

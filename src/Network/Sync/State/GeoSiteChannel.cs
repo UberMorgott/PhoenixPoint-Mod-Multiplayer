@@ -56,11 +56,15 @@ namespace Multipleer.Network.Sync.State
             foreach (var dto in snap.Sites)
             {
                 var site = GeoSiteReflection.ResolveSiteById(rt, dto.SiteId);
-                if (site == null)
+                // Case B (in-play site absent on this sim-frozen client): spawn an INERT mirror so a geoscape-
+                // event card resolves a real site (correct backdrop/subtitle) instead of the StartingBase
+                // default. The channel always carries a full identity DTO, so hasIdentity=true here. The same
+                // tested ShouldSpawnMirror predicate the client raise handler uses drives the decision;
+                // SpawnMirrorSite is idempotent (re-apply / a now-present site is a no-op) and applies the
+                // identity itself. Case A (site present) keeps the existing ApplyIdentity refresh.
+                if (EventReflection.ShouldSpawnMirror(hasIdentity: true, siteResolved: site != null))
                 {
-                    // Case B (genuinely-new site) is deferred: vanilla never creates sites in-play, so a
-                    // missing id is unexpected — log + skip, never create.
-                    Debug.Log("[Multipleer] GeoSiteChannel: site " + dto.SiteId + " absent (Case B deferred, skipped)");
+                    GeoSiteReflection.SpawnMirrorSite(rt, dto);
                     continue;
                 }
                 GeoSiteReflection.ApplyIdentity(rt, site, dto);

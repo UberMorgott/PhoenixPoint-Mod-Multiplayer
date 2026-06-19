@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Multipleer.Network.MessageLayer;
+using Multipleer.Network.Sync.Actions;
 using Multipleer.Network.Sync.State;
 using UnityEngine;
 
@@ -54,9 +55,10 @@ namespace Multipleer.Network.Sync
         // Raise is buffered then resolved straight to the result page (fixes the "EX20" collision/ordering bug).
         private readonly State.EventCorrelator _eventCorrelator = new State.EventCorrelator();
 
-        // Host-side first-claim-wins arbiter for geoscape-event choices (pure; see ChoiceArbiter). The first
-        // ChoiceClaim per occId is resolved authoritatively (CompleteEvent + outcome broadcast); later ignored.
-        private readonly State.ChoiceArbiter _choiceArbiter = new State.ChoiceArbiter();
+        // NOTE: the first-click-wins ChoiceArbiter is intentionally NOT wired here for now (user directive:
+        // event choices are un-gated, last-write-wins; the native CompleteEvent self-guards on IsCompleted so a
+        // double-resolve is a safe no-op). The ChoiceArbiter class is kept (and unit-tested) for when the
+        // permission/turn system is re-enabled. Re-add the field + claim gate then.
 
         public SyncEngine(NetworkEngine engine)
         {
@@ -114,17 +116,48 @@ namespace Multipleer.Network.Sync
 
             Guid actor = ResolveActor(senderPeerId);
             var rt = GeoRuntime.Instance;
-            // Fail CLOSED for an unmapped / forged peer (or no session): ResolveActor returns Guid.Empty,
-            // and a permissive HasCampaignPermission default must never let an unknown actor through.
-            if (actor == Guid.Empty || !PermissionGate.CheckFor(actor, action.Category) || !action.Validate(rt, actor))
+            var answer = action as AnswerEventAction;
+            // Fail CLOSED for an unmapped / forged peer (or no session): ResolveActor returns Guid.Empty.
+            // PERMISSION (user directive): event choices (ActionCategory.Dialogs) are NOT permission-gated for now —
+            // everyone may click, last-write-wins (the permission system is deferred, its code kept for later). All
+            // OTHER categories still go through PermissionGate.CheckFor. Validate still applies to every action.
+            bool permitted = action.Category == ActionCategory.Dialogs   // event answers un-gated (AnswerEventAction is Dialogs)
+                             || PermissionGate.CheckFor(actor, action.Category);
+            if (actor == Guid.Empty || !permitted || !action.Validate(rt, actor))
             {
                 _engine.SendToClient(senderPeerId, new NetworkMessage(PacketType.ActionReject,
                     SyncProtocol.EncodeActionReject(nonce, 1, "rejected")));
                 return;
             }
 
-            try { using (SyncApplyScope.Enter()) action.Apply(rt); }   // host executes authoritative mutation
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest apply failed: " + ex.Message); }
+            // A REMOTE client answered a geoscape event (no arbiter lock — last-write-wins; the native CompleteEvent
+            // self-guards on IsCompleted so a repeat is a safe no-op). Prefer driving the host's OWN open native
+            // modal through the exact native click path (TryHostNativeResolve) → the host shows the native
+            // result/reward page + OK-closes + auto-broadcasts the dismiss, identical to a host click. If the host
+            // isn't showing that event (TryHostNativeResolve == false), fall back to the model-only reflected resolve
+            // (action.Apply → CompleteEventByOccurrence) so authoritative state still converges + the dismiss
+            // broadcasts to clients (host just won't render a result page in that edge case). Both run OUTSIDE
+            // SyncApplyScope so CompleteEventDismissPatch.Postfix (early-returns under IsApplying) fires its broadcast.
+            if (answer != null)
+            {
+                try
+                {
+                    if (!EventReflection.TryHostNativeResolve(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
+                        action.Apply(rt);   // fallback: model-only reflected resolve (IResolvesOutsideScope → no scope)
+                }
+                catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest answer resolve failed: " + ex.Message); }
+            }
+            else
+            {
+                try
+                {
+                    // IResolvesOutsideScope actions run OUTSIDE SyncApplyScope; every other action runs INSIDE so its
+                    // interceptors pass through (engine-driven replay).
+                    if (action is IResolvesOutsideScope) action.Apply(rt);
+                    else using (SyncApplyScope.Enter()) action.Apply(rt);   // host executes authoritative mutation
+                }
+                catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest apply failed: " + ex.Message); }
+            }
 
             // Research has no faction-level cancel event: a client-relayed cancel mutates the queue with no
             // change-event to mark the channel dirty. Force a research-channel echo so the new authoritative
@@ -283,11 +316,11 @@ namespace Multipleer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
-                var decision = _eventCorrelator.Raised(occId, eventId);
+                var decision = _eventCorrelator.Raised(occId, eventId, singleChoice);
                 Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " decision=" + decision.Kind +
                           " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
@@ -296,6 +329,18 @@ namespace Multipleer.Network.Sync
                 {
                     case State.EventCorrelator.ActionKind.ShowDialog:
                     {
+                        // Single-choice mirror: the host auto-completed at trigger so a result-bearing dismiss was
+                        // BUFFERED (reward stashed) before this raise. We now mirror the host's native flavor modal
+                        // instead of a result card, so release the stashed reward (the reward STATE already synced
+                        // via the channels; there is no result page to render the delta lines onto). Harmless no-op
+                        // for a normal in-order raise (nothing was ever stashed for it).
+                        DropBufferedReward(occId);
+                        // Case B: an in-play site this sim-frozen client never created is ABSENT. Spawn an inert
+                        // mirror site from the carried identity BEFORE building the event so BuildEvent's own
+                        // site resolution finds it and renders the correct backdrop/subtitle (not StartingBase).
+                        if (hasIdentity && EventReflection.ShouldSpawnMirror(
+                                hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
+                            State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
                         var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId,
                             hasIdentity ? (GeoSiteState?)identity : null);
                         if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
@@ -420,11 +465,11 @@ namespace Multipleer.Network.Sync
 
         /// <summary>Host: broadcast a show event-dialog packet to all peers, carrying the occurrence id and an
         /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase).</summary>
-        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null)
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice)));
         }
 
         /// <summary>
@@ -443,46 +488,10 @@ namespace Multipleer.Network.Sync
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
         }
 
-        /// <summary>
-        /// CLIENT: a player clicked choice <paramref name="choiceIndex"/> on the open event modal for
-        /// occurrence <paramref name="occurrenceId"/>. Route the claim to the host arbiter (first-click-wins);
-        /// the modal stays OPEN until the host's OUTCOME (EventDismiss) lands. No local outcome apply.
-        /// </summary>
-        public void SendChoiceClaim(ushort occurrenceId, int choiceIndex)
-        {
-            if (_engine.IsHost) return;          // the host resolves its own clicks directly (OnChoiceClaim local path)
-            if (occurrenceId == 0) return;        // null sentinel → never a valid claim
-            _engine.SendToHost(new NetworkMessage(PacketType.ChoiceClaim,
-                SyncProtocol.EncodeChoiceClaim(occurrenceId, choiceIndex)));
-            Debug.Log("[Multipleer] CLIENT SendChoiceClaim occId=" + occurrenceId + " choiceIndex=" + choiceIndex);
-        }
-
-        /// <summary>
-        /// HOST: a ChoiceClaim arrived (from a client, or routed locally for the host's own click). Accept the
-        /// FIRST claim per occurrence (ChoiceArbiter) → look up the live event by occurrence id and run the
-        /// authoritative <c>CompleteEvent</c>; its <c>CompleteEventDismissPatch.Postfix</c> broadcasts the
-        /// OUTCOME (EventDismiss) that BOTH instances render. Later claims for a resolved occurrence are dropped.
-        /// </summary>
-        public void OnChoiceClaim(ulong senderPeerId, byte[] data)
-        {
-            if (!_engine.IsHost) return;
-            if (!SyncProtocol.TryDecodeChoiceClaim(data, out var occId, out var choiceIndex)) return;
-            if (!_choiceArbiter.Claim(occId))
-            {
-                Debug.Log("[Multipleer] HOST OnChoiceClaim occId=" + occId + " choiceIndex=" + choiceIndex + " → IGNORED (already resolved)");
-                return;
-            }
-            Debug.Log("[Multipleer] HOST OnChoiceClaim occId=" + occId + " choiceIndex=" + choiceIndex + " → ACCEPTED (first claim, resolving)");
-            try
-            {
-                // Run the authoritative CompleteEvent OUTSIDE SyncApplyScope: CompleteEventDismissPatch.Postfix
-                // broadcasts the OUTCOME and early-returns under SyncApplyScope.IsApplying — so wrapping it here
-                // would suppress the very broadcast both instances need. The arbiter already guarantees a single
-                // resolve per occId, so there is no re-entrancy to guard against.
-                EventReflection.CompleteEventByOccurrence(GeoRuntime.Instance, occId, choiceIndex);
-            }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnChoiceClaim resolve failed: " + ex.Message); }
-        }
+        // (Removed TryClaimLocalAnswer: the host's own event-choice click is now PURE NATIVE — the click patch lets
+        // the native UIModuleSiteEncounters.OnChoiceSelected run untouched, which renders the host's result/reward
+        // page and broadcasts the dismiss. No arbiter gate (user directive: last-write-wins). Re-add when the
+        // permission/turn system is re-enabled.)
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────
 

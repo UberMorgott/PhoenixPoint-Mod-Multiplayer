@@ -3,10 +3,12 @@ using System.Collections.Generic;
 namespace Multipleer.Network.Sync.State
 {
     /// <summary>
-    /// HOST-side first-claim-wins arbitration for geoscape-event choices. Both players' dialogs are unlocked;
-    /// either can click a choice, which sends a <c>ChoiceClaim(occId, choiceIndex)</c> to the host. The host
-    /// accepts the FIRST claim per occurrence id (runs the authoritative <c>CompleteEvent</c> + broadcasts the
-    /// outcome) and IGNORES every later claim for that occurrence — so a near-simultaneous double-click from
+    /// HOST-side first-claim-wins arbitration for geoscape-event choices. NOTE: currently NOT wired into the live
+    /// event-choice path (user directive: choices are un-gated, last-write-wins; the native CompleteEvent self-guards
+    /// on IsCompleted so a double-resolve is a safe no-op). This class + its tests are KEPT for when the
+    /// permission/turn system is re-enabled. When wired, the host accepts the FIRST claim per occurrence id (runs the
+    /// authoritative <c>CompleteEvent</c> + broadcasts the outcome) and IGNORES every later claim — so a
+    /// near-simultaneous double-click from
     /// both instances converges on a single roll/apply. The client never applies an outcome itself.
     ///
     /// Pure C# (no Unity/Harmony types) → unit-testable. The resolved set is FIFO-bounded so it can never leak

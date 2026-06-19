@@ -56,7 +56,8 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _arDamagedSoldiers, _arTiredSoldiers, _arAllDamage, _arAllTired, _arSkillPoints;
         private static FieldInfo _arChangeHavenPop, _arDamageZones, _arMaxDiplo, _arSpawnedHavens, _arNewBase;
         private static FieldInfo _dipParty, _dipTarget, _dipValue;                   // RewardDiplomacyChange
-        private static PropertyInfo _resType, _resRounded;                           // ResourceUnit
+        private static FieldInfo _resType;                                           // ResourceUnit.Type (public FIELD, not a property)
+        private static PropertyInfo _resRounded;                                     // ResourceUnit.RoundedValue (read-only property)
         private static PropertyInfo _itemsItems;                                     // ItemStorage.Items (IReadOnlyDictionary)
         private static Type _havenLeaderType, _geoFactionType;
         private static FieldInfo _siteIdField;                                       // GeoSite.SiteId
@@ -118,7 +119,10 @@ namespace Multipleer.Network.Sync.State
             }
             if (resUnitType != null)
             {
-                _resType = AccessTools.Property(resUnitType, "Type");
+                // ResourceUnit.Type is a public FIELD (ResourceUnit.cs:12), NOT a property — AccessTools.Property
+                // returned null here, silently zeroing every resource line on the client result card (BUG-B; same
+                // class as commit 1205066). RoundedValue IS a read-only property (:17).
+                _resType = AccessTools.Field(resUnitType, "Type");
                 _resRounded = AccessTools.Property(resUnitType, "RoundedValue");
             }
             if (storageType != null) _itemsItems = AccessTools.Property(storageType, "Items");
@@ -182,12 +186,20 @@ namespace Multipleer.Network.Sync.State
         {
             try
             {
-                if (!(resourcePack is IEnumerable units) || _resType == null || _resRounded == null) return;
+                if (!(resourcePack is IEnumerable units)) return;
+                if (_resType == null || _resRounded == null)
+                {
+                    // Promoted from a silent return (BUG-B): a missing reflection bind here zeroes ALL reward
+                    // resource lines on the client, so make it loud instead of invisible.
+                    Debug.LogWarning("[Multipleer] reward.Resources SKIPPED: ResourceUnit reflection unbound (_resType="
+                                     + (_resType != null) + " _resRounded=" + (_resRounded != null) + ")");
+                    return;
+                }
                 foreach (var u in units)
                 {
                     int rounded = ToInt(_resRounded.GetValue(u, null));
                     if (rounded == 0) continue; // native skips zero (ResourcePack.IsEmpty semantics)
-                    int type = Convert.ToInt32(_resType.GetValue(u, null));
+                    int type = Convert.ToInt32(_resType.GetValue(u));   // field get (ResourceUnit.Type is a field)
                     snap.Resources.Add(new RewardResourceLine(type, rounded));
                 }
             }
@@ -530,6 +542,9 @@ namespace Multipleer.Network.Sync.State
                         text = FormatKey(module, _kLeaderDiplo, d.TargetKey, valTxt);
                     else if (d.PartyKind == 0) // faction party → 3-arg key (partyName, targetName, valTxt)
                         text = FormatKey(module, _kFactionDiplo, d.PartyKey, d.TargetKey, valTxt);
+                    else // unknown PartyKind → don't drop it silently (visibility for an unmapped diplomacy line)
+                        Debug.LogWarning("[Multipleer] reward.Diplomacy line with unmapped PartyKind=" + d.PartyKind
+                                         + " (target=" + d.TargetKey + " value=" + d.Value + ") — not rendered");
                     if (Add(module, text)) lines++;
                 }
 

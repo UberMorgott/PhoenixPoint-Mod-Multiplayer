@@ -40,6 +40,24 @@ namespace Multipleer.Network
                 && connectedClientCount >= 1
                 && !transferActive;
         }
+
+        /// <summary>
+        /// Lobby save-pick gate. True iff a host with an ACTIVE co-op lobby whose session has NOT
+        /// started chose a save from ANY native Load screen: that pick must become the lobby's chosen
+        /// save (broadcast as a label only — NO campaign load), NOT trigger a real load. This is the
+        /// DURABLE replacement for gating the intercept on the fragile static <c>_armed</c> flag (which
+        /// could be false at click time because the lobby re-makes native menu buttons clickable, so the
+        /// host can reach the native Load screen un-armed and the old guard let the load run).
+        ///
+        /// Deliberately EXCLUDES the mid-session F2 host load (<paramref name="sessionStarted"/> == true):
+        /// that path is host-authoritative and SHOULD load immediately (re-running the chunked transfer;
+        /// see <see cref="HostLoadGuard"/>). Also excludes non-host peers and single-player
+        /// (<paramref name="lobbyActive"/> == false) so vanilla load is never captured.
+        /// </summary>
+        public static bool ShouldCaptureAsLobbyPick(bool isHost, bool lobbyActive, bool sessionStarted)
+        {
+            return isHost && lobbyActive && !sessionStarted;
+        }
     }
 
     /// <summary>

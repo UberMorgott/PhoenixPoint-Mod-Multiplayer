@@ -72,6 +72,11 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _factionsField;     // GeoLevelController.Factions (IEnumerable<GeoFaction>)
         private static Type _siteTypeEnum;           // GeoSiteType (for byte<->enum)
         private static Type _siteStateEnum;          // GeoSiteState (for byte<->enum)
+        // ─── Case-B inert mirror-site spawn (client) ───
+        private static Type _geoSiteType;            // PhoenixPoint.Geoscape.Entities.GeoSite (MakeGenericMethod + AllSites.Add)
+        private static MethodInfo _spawnActorGeoSite; // ActorSpawner.SpawnActor<GeoSite>(BaseDef, ActorInstanceData, bool) closed generic
+        private static PropertyInfo _siteMappingInstanceProp; // GeoSiteTypeMappingDef.Instance (static)
+        private static MethodInfo _getSiteTemplateMethod;     // GeoSiteTypeMappingDef.GetSiteTemplate(GeoSiteType) → ComponentSetDef
 
         // The 6 aggregate site events on GeoMap, by name. SiteAdded/SiteRemoved are bound for symmetry
         // (Case A only updates existing sites; an add/remove still re-snapshots so an in-play identity flip
@@ -98,6 +103,7 @@ namespace Multipleer.Network.Sync.State
 
             var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
             if (geoSiteType == null) return;
+            _geoSiteType = geoSiteType;
             _siteIdField = AccessTools.Field(geoSiteType, "SiteId");
             _ownerBackingField = AccessTools.Field(geoSiteType, "_owner");
             _ownerProp = AccessTools.Property(geoSiteType, "Owner");
@@ -113,6 +119,32 @@ namespace Multipleer.Network.Sync.State
 
             _siteTypeEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.GeoSiteType");
             _siteStateEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.GeoSiteState");
+
+            // Case-B inert mirror-site spawn members (client). Best-effort and DELIBERATELY OUTSIDE the _ready
+            // gate below: a miss here only disables Case-B spawn (the event degrades to siteless render), it
+            // must never break Case-A identity mirroring. ActorSpawner.SpawnActor<T>(BaseDef, ActorInstanceData,
+            // bool callEnterPlayOnActor) (Base.Entities/ActorSpawner.cs:12) is the generic spawn; we close it to
+            // GeoSite and pass callEnterPlayOnActor:false so DoEnterPlay/RegisterSite/producer-coroutines never
+            // fire (pure inert mirror). GeoSiteTypeMappingDef.Instance.GetSiteTemplate(GeoSiteType) → ComponentSetDef
+            // (GeoSiteTypeMappingDef.cs:21/33) resolves the prefab template for the spawn.
+            var actorSpawnerType = AccessTools.TypeByName("Base.Entities.ActorSpawner");
+            if (actorSpawnerType != null)
+            {
+                var spawnActorOpen = actorSpawnerType.GetMethod("SpawnActor",
+                    BindingFlags.Public | BindingFlags.Static);
+                if (spawnActorOpen != null && spawnActorOpen.IsGenericMethodDefinition)
+                {
+                    try { _spawnActorGeoSite = spawnActorOpen.MakeGenericMethod(_geoSiteType); }
+                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection: SpawnActor<GeoSite> bind failed (Case-B spawn disabled): " + ex.Message); }
+                }
+            }
+            var siteMappingDefType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoSiteTypeMappingDef");
+            if (siteMappingDefType != null)
+            {
+                _siteMappingInstanceProp = AccessTools.Property(siteMappingDefType, "Instance");
+                if (_siteTypeEnum != null)
+                    _getSiteTemplateMethod = AccessTools.Method(siteMappingDefType, "GetSiteTemplate", new[] { _siteTypeEnum });
+            }
 
             // GeoFaction.Def — resolved off a live faction (mirrors DiplomacyReflection). Best-effort.
             if (_factionsField != null && _factionsField.GetValue(geo) is IEnumerable facs)
@@ -310,6 +342,90 @@ namespace Multipleer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// CLIENT (Case B): instantiate an INERT mirror <c>GeoSite</c> for an in-play site the sim-frozen client
+        /// never created, so <see cref="ResolveSiteById"/> finds it and a geoscape-event card renders the correct
+        /// backdrop/subtitle instead of the StartingBase ("Точка Феникс") default. Host-authoritative: the client
+        /// only ever spawns the site the host described in <paramref name="identity"/>.
+        ///
+        /// IDEMPOTENT: returns the existing site (no double-add) if the id already resolves. The prefab template
+        /// comes from <c>GeoSiteTypeMappingDef.Instance.GetSiteTemplate((GeoSiteType)identity.SiteType)</c>; a
+        /// null template logs + returns null (caller falls back to siteless render — NEVER throws). The actor is
+        /// spawned with <c>ActorSpawner.SpawnActor&lt;GeoSite&gt;(template, instanceData:null,
+        /// callEnterPlayOnActor:false)</c> — callEnterPlayOnActor:false is CRITICAL: it skips
+        /// <c>DoEnterPlay</c> → no producer coroutines, no <c>GeoMap.RegisterSite</c>, no sim-wake. The site is
+        /// stamped with its <c>SiteId</c>, registered into <c>GeoMap.AllSites</c> DIRECTLY (bypassing
+        /// RegisterSite — pure mirror, the same no-cascade discipline as the rest of this bridge), and its
+        /// identity (Owner/Type/State/Name/EncounterID) is applied via <see cref="ApplyIdentity"/>. The whole body
+        /// is wrapped so a reflection miss degrades to null (siteless render), never crashes the event UI.
+        /// </summary>
+        public static object SpawnMirrorSite(GeoRuntime rt, GeoSiteState identity)
+        {
+            try
+            {
+                Ensure(rt);
+                if (!_ready) return null;
+
+                // Idempotent: never double-add a site that already exists on this client.
+                var existing = ResolveSiteById(rt, identity.SiteId);
+                if (existing != null) return existing;
+
+                if (_spawnActorGeoSite == null || _siteMappingInstanceProp == null
+                    || _getSiteTemplateMethod == null || _siteTypeEnum == null
+                    || _siteIdField == null || _allSitesProp == null)
+                {
+                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: spawn members unresolved (Case-B skipped, siteless fallback)");
+                    return null;
+                }
+
+                // Resolve the prefab template for this site type (raw enum value → GeoSiteType).
+                object siteTypeEnum = Enum.ToObject(_siteTypeEnum, identity.SiteType);
+                object mappingInstance = _siteMappingInstanceProp.GetValue(null, null);
+                if (mappingInstance == null)
+                {
+                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: GeoSiteTypeMappingDef.Instance null (Case-B skipped)");
+                    return null;
+                }
+                object template = _getSiteTemplateMethod.Invoke(mappingInstance, new[] { siteTypeEnum });
+                if (template == null)
+                {
+                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: no site template for type " + identity.SiteType + " (Case-B skipped, siteless fallback)");
+                    return null;
+                }
+
+                // INERT spawn: callEnterPlayOnActor:false → no DoEnterPlay / RegisterSite / producer coroutines.
+                object site = _spawnActorGeoSite.Invoke(null, new object[] { template, null, false });
+                if (site == null)
+                {
+                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: SpawnActor<GeoSite> returned null (Case-B skipped)");
+                    return null;
+                }
+
+                // Stamp the site id (resolve-by-id key) BEFORE registration.
+                try { _siteIdField.SetValue(site, identity.SiteId); }
+                catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: stamp SiteId failed: " + ex.Message); }
+
+                // Register WITHOUT cascade: add directly to GeoMap.AllSites (bypasses RegisterSite — pure mirror).
+                try
+                {
+                    var map = GetMap(rt);
+                    if (map != null && _allSitesProp.GetValue(map, null) is IList allSites)
+                        allSites.Add(site);
+                    else
+                        Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: GeoMap.AllSites not an IList (Case-B site not registered)");
+                }
+                catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: AllSites.Add failed: " + ex.Message); }
+
+                // Stamp Owner/Type/State/Name/EncounterID onto the fresh mirror (reuses the Case-A writer).
+                ApplyIdentity(rt, site, identity);
+
+                Debug.Log("[Multipleer] GeoSiteReflection.SpawnMirrorSite: spawned inert mirror site " + identity.SiteId +
+                          " type=" + identity.SiteType + " owner=" + identity.OwnerFactionDefGuid + " name=" + identity.SiteName);
+                return site;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite failed: " + ex.Message); return null; }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>

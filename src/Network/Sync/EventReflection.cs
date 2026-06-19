@@ -58,6 +58,19 @@ namespace Multipleer.Network.Sync
         private static FieldInfo _defDataField;     // GeoscapeEventDef.GeoscapeEventData
         private static MethodInfo _getEventById;    // GeoscapeEventSystem.GetEventByID(string, bool)
         private static FieldInfo _eventSystemField; // GeoLevelController.EventSystem
+
+        // Native OK-label (result page dismiss button) reflection chain: GeoLevelController.View →
+        // GeoscapeView.GeoscapeModules → GeoscapeModulesData.SiteEncountersModule → UIModuleSiteEncounters.OKTextKey
+        // (LocalizedTextBind) → LocalizationKey (read via the existing _localizedKeyField). Best-effort: any missing
+        // link → literal "OK" fallback (ChooseResultOkLabelKey).
+        private static FieldInfo _glViewField;          // GeoLevelController.View
+        private static FieldInfo _gvModulesField;        // GeoscapeView.GeoscapeModules
+        private static FieldInfo _gmSiteEncModuleField;  // GeoscapeModulesData.SiteEncountersModule
+        private static FieldInfo _encOkTextKeyField;     // UIModuleSiteEncounters.OKTextKey (LocalizedTextBind)
+        private static FieldInfo _encGeoEventField;      // UIModuleSiteEncounters._geoEvent (live GeoscapeEvent shown)
+        private static FieldInfo _encPagingField;        // UIModuleSiteEncounters._pagingEvent (paging text flag)
+        private static MethodInfo _encOnChoiceSelected;  // UIModuleSiteEncounters.OnChoiceSelected(GeoEventChoice) (private)
+        private static PropertyInfo _isCompletedProp;    // GeoscapeEvent.IsCompleted
         private static PropertyInfo _startingBaseProp; // GeoPhoenixFaction.StartingBase
         private static ConstructorInfo _eventCtor;     // GeoscapeEvent(GeoscapeEventData, GeoscapeEventContext)
         private static ConstructorInfo _contextCtor;   // GeoscapeEventContext(GeoSite, GeoFaction)
@@ -202,6 +215,24 @@ namespace Multipleer.Network.Sync
             if (outcomeType != null) _outcomeTextField = AccessTools.Field(outcomeType, "OutcomeText");
             _replaceTokensMethod = AccessTools.Method(_contextType, "ReplaceEventTokens", new[] { typeof(string) });
 
+            // Native OK-label chain (best-effort; NOT part of _ready — a missing link just falls back to "OK").
+            _glViewField = AccessTools.Field(geoLevelType, "View");
+            var geoscapeViewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+            if (geoscapeViewType != null) _gvModulesField = AccessTools.Field(geoscapeViewType, "GeoscapeModules");
+            var geoModulesDataType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeModulesData");
+            if (geoModulesDataType != null) _gmSiteEncModuleField = AccessTools.Field(geoModulesDataType, "SiteEncountersModule");
+            var siteEncModuleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
+            if (siteEncModuleType != null)
+            {
+                _encOkTextKeyField = AccessTools.Field(siteEncModuleType, "OKTextKey");
+                // Host native-resolve chain (best-effort; NOT part of _ready). Drives the host's OWN open modal
+                // through the exact native click path so the host renders the native result/reward page.
+                _encGeoEventField = AccessTools.Field(siteEncModuleType, "_geoEvent");        // live GeoscapeEvent shown
+                _encPagingField = AccessTools.Field(siteEncModuleType, "_pagingEvent");       // true while paging text
+                _encOnChoiceSelected = AccessTools.Method(siteEncModuleType, "OnChoiceSelected", new[] { choiceType }); // private native click handler
+            }
+            _isCompletedProp = AccessTools.Property(_eventType, "IsCompleted");   // GeoscapeEvent.IsCompleted (:36)
+
             _ready = _completeEvent != null && _eventIdField != null && _eventDataProp != null
                      && _choicesField != null;
         }
@@ -232,6 +263,18 @@ namespace Multipleer.Network.Sync
         /// rather than falling back to StartingBase. False only when a real site resolved. Unit-testable.
         /// </summary>
         public static bool UsesSitelessContext(bool resolvedSite, int siteId) => !resolvedSite;
+
+        /// <summary>
+        /// Pure decision: should the client spawn an INERT mirror <c>GeoSite</c> (Case B) before building the
+        /// event? True iff the host carried a site IDENTITY (<paramref name="hasIdentity"/>) AND the real site
+        /// did NOT resolve on this sim-frozen client (<paramref name="siteResolved"/> == false) — i.e. an
+        /// in-play site the client never created. Spawning it makes <see cref="GeoSiteReflection.ResolveSiteById"/>
+        /// find a real site so the native render takes the site branch (correct backdrop + subtitle) instead of
+        /// the StartingBase ("Точка Феникс") default. False when there is no identity to spawn from, or the site
+        /// already exists (idempotent). This is the SINGLE tested decision both the client raise handler and the
+        /// GeoSite channel use. Unit-testable (no game types).
+        /// </summary>
+        public static bool ShouldSpawnMirror(bool hasIdentity, bool siteResolved) => hasIdentity && !siteResolved;
 
         // ─── two-class (INFO / CHOICE) dialog classification ──────────────
 
@@ -349,6 +392,71 @@ namespace Multipleer.Network.Sync
                 _completeEvent.Invoke(geoEvent, new[] { choice, fac });
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.CompleteEvent failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// HOST: when a REMOTE client answered an event the host is currently SHOWING, drive the host's OWN open
+        /// <c>UIModuleSiteEncounters</c> through the EXACT native click path (<c>OnChoiceSelected(choice)</c>) so
+        /// the host renders the native result/reward page + auto-broadcasts the dismiss — identical to a host click.
+        /// Returns TRUE if it natively drove the resolution; FALSE if the host isn't showing that event (caller
+        /// then falls back to the model-only <see cref="CompleteEventByOccurrence"/>). Last-write-wins safe: a
+        /// repeat on an already-<c>IsCompleted</c> event is a no-op (returns true; native CompleteEvent self-guards).
+        /// Verified against the decompile 2026-06-18: OnChoiceSelected:548 (private), _geoEvent:153, _pagingEvent,
+        /// module reachable via GeoLevelController.View→GeoscapeView.GeoscapeModules→SiteEncountersModule.
+        /// </summary>
+        public static bool TryHostNativeResolve(GeoRuntime rt, ushort occurrenceId, string eventId, int choiceIndex)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || _encGeoEventField == null || _encOnChoiceSelected == null
+                    || _glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null)
+                    return false;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return false;
+                var view = _glViewField.GetValue(geo);
+                var modules = view != null ? _gvModulesField.GetValue(view) : null;
+                var module = modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
+                if (module == null) return false;
+
+                var liveEvent = _encGeoEventField.GetValue(module);
+                if (liveEvent == null) return false;   // host modal not showing an event → fall back
+
+                // Must be THIS occurrence: prefer exact instance identity via the occId reverse-lookup, else match
+                // the def-name. A mismatch means the host is on a different/closed event → fall back (model-only).
+                bool isThisOccurrence;
+                if (Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
+                    isThisOccurrence = ReferenceEquals(byId, liveEvent);
+                else
+                    isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
+                if (!isThisOccurrence) return false;
+
+                // Already resolved (a prior click won the last-write race) → native no-op; treat as handled.
+                if (_isCompletedProp != null && _isCompletedProp.GetValue(liveEvent, null) is bool done && done)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → already IsCompleted (no-op)");
+                    return true;
+                }
+                // Still paging multi-page description text → OnChoiceSelected would only advance a page, not select.
+                // Fall back to model-only so state converges; the host stays on its (paging) modal.
+                if (_encPagingField != null && _encPagingField.GetValue(module) is bool paging && paging)
+                    return false;
+
+                // Pick the GeoEventChoice at the client's index off the LIVE event's own Choices.
+                var data = _eventDataProp?.GetValue(liveEvent, null);
+                var choices = _choicesField?.GetValue(data) as IList;
+                if (choices == null || choiceIndex < 0 || choiceIndex >= choices.Count) return false;   // invalid index → fall back
+                object choice = choices[choiceIndex];
+                if (choice == null) return false;
+
+                // Drive the EXACT native click handler (handles SelectChoice→CompleteEvent→SetClosingEncounter
+                // result+rewards→broadcast). Same entry a real host button click hits.
+                _encOnChoiceSelected.Invoke(module, new[] { choice });
+                Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
+                          + " choiceIndex=" + choiceIndex + " → drove native OnChoiceSelected (host result page + broadcast)");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.TryHostNativeResolve failed: " + ex.Message); return false; }
         }
 
         /// <summary>
@@ -655,6 +763,41 @@ namespace Multipleer.Network.Sync
         /// → the client can locally dismiss the result page with OK. Returns null on any failure (caller no-ops →
         /// the modal closes via the normal dismiss instead).
         /// </summary>
+        /// <summary>
+        /// PURE: pick the synthetic result page's single dismiss-button label key. Mirrors native
+        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:347-350): use the native <c>OKTextKey</c> when its
+        /// LocalizationKey is non-empty, else the literal "OK". The chosen choice's own Text is NEVER an input —
+        /// labelling the dismiss button with choice.Text reproduced the clicked choice button (the in-game R7
+        /// "duplicated choice button, no OK" symptom). Unit-tested (no Unity types).
+        /// </summary>
+        public static string ChooseResultOkLabelKey(string nativeOkKey)
+            => string.IsNullOrEmpty(nativeOkKey) ? "OK" : nativeOkKey;
+
+        /// <summary>
+        /// Read the live module's native OK-button LocalizationKey (GeoLevelController.View → GeoscapeView.
+        /// GeoscapeModules → SiteEncountersModule → OKTextKey.LocalizationKey), or null if any link is missing.
+        /// Lets the synthetic result page reuse the SAME localized dismiss label the native result page uses.
+        /// </summary>
+        private static string GetNativeOkLabelKey(GeoRuntime rt)
+        {
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo == null || _glViewField == null || _gvModulesField == null
+                    || _gmSiteEncModuleField == null || _encOkTextKeyField == null || _localizedKeyField == null) return null;
+                var view = _glViewField.GetValue(geo);
+                if (view == null) return null;
+                var modules = _gvModulesField.GetValue(view);
+                if (modules == null) return null;
+                var module = _gmSiteEncModuleField.GetValue(modules);
+                if (module == null) return null;
+                var okBind = _encOkTextKeyField.GetValue(module);
+                if (okBind == null) return null;
+                return _localizedKeyField.GetValue(okBind) as string;
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
+        }
+
         public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1)
         {
             try
@@ -720,10 +863,15 @@ namespace Multipleer.Network.Sync
                 descList.Add(variation);
                 _edDescriptionField.SetValue(data, descList);
 
-                // Choices = [ GeoEventChoice{ Text = choice.Text (the clicked button label) or a literal "OK" } ].
-                object okText = _choiceTextField.GetValue(choice);
-                if (okText == null || string.IsNullOrEmpty(_localizedKeyField?.GetValue(okText) as string))
-                    okText = _localizedTextCtor2.Invoke(new object[] { "OK", true });
+                // Choices = [ GeoEventChoice{ Text = native OKTextKey (localized) | literal "OK" } ]. Mirrors native
+                // SetClosingEncounter (:347-350): the dismiss button uses the module's serialized OKTextKey, NEVER the
+                // chosen choice's Text (labelling it with choice.Text reproduced the clicked button → the in-game R7
+                // "duplicated choice button, no OK" symptom). Prefer the live native key (engine localizes it →
+                // matches the native button exactly); if unreadable, fall back to the literal "OK" (doNotLocalize).
+                string nativeOkKey = GetNativeOkLabelKey(rt);
+                string okKey = ChooseResultOkLabelKey(nativeOkKey);
+                bool okIsLiteral = string.IsNullOrEmpty(nativeOkKey);   // fallback "OK" is a literal, not a loc key
+                object okText = _localizedTextCtor2.Invoke(new object[] { okKey, okIsLiteral });
                 object okChoice = Activator.CreateInstance(_choiceType2);
                 _choiceTextField.SetValue(okChoice, okText);
                 var choiceList = MakeTypedList(_choiceType2);

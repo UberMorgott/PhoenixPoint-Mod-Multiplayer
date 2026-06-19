@@ -56,6 +56,41 @@ public class EventCorrelatorTests
     }
 
     [Fact]
+    public void OutOfOrder_SingleChoiceDismissBeforeRaise_MirrorsModalNotResultPage()
+    {
+        var c = new EventCorrelator();
+
+        // Single-choice geoscape event: the host auto-completes the lone choice at trigger and broadcasts the
+        // result-bearing Dismiss(occ=5, choice=0) BEFORE the Raise. The CLIENT must MIRROR the host's native
+        // flavor modal (ShowDialog) — NOT jump to a synthetic result page, which is a different dialog STAGE
+        // than the host is still showing.
+        var dismissed = c.Dismissed(5, "EX20", choiceIndex: 0);
+        Assert.Equal(Kind.BufferDismiss, dismissed.Kind);
+        Assert.Equal(1, c.PendingCount);
+
+        var raised = c.Raised(5, "EX20", singleChoice: true);
+        Assert.Equal(Kind.ShowDialog, raised.Kind);        // mirror the host's native modal, not the result page
+        Assert.Equal(0, c.PendingCount);                   // buffer drained
+        Assert.Equal(1, c.OpenCount);                      // tracked as open → closes locally on the player's OK
+    }
+
+    [Fact]
+    public void OutOfOrder_MultiChoiceDismissBeforeRaise_StillResolvesToResultPage()
+    {
+        var c = new EventCorrelator();
+
+        // Regression guard: a MULTI-choice buffered dismiss (singleChoice == false) must STILL resolve straight
+        // to the result page (unchanged) — only single-choice events mirror the host modal.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(5, "EX20", choiceIndex: 0).Kind);
+
+        var raised = c.Raised(5, "EX20", singleChoice: false);
+        Assert.Equal(Kind.ShowResultPage, raised.Kind);
+        Assert.Equal(0, raised.ChoiceIndex);
+        Assert.Equal(0, c.PendingCount);
+        Assert.Equal(0, c.OpenCount);                      // resolved → not left open (unchanged)
+    }
+
+    [Fact]
     public void OutOfOrder_CloseOnlyDismissBeforeRaise_DropsNoop()
     {
         var c = new EventCorrelator();

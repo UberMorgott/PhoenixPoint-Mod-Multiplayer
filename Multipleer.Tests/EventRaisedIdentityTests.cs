@@ -58,6 +58,55 @@ public class EventRaisedIdentityTests
     }
 
     [Fact]
+    public void EventRaised_SingleChoiceFlag_RoundTrips()
+    {
+        // The trailing flag bitmask carries singleChoice (HasSingleChoice, Choices.Count<=1) alongside identity.
+        // singleChoice=true with NO identity → flag byte 0x02, no identity block.
+        var bytes = SyncProtocol.EncodeEventRaised(11, "EV_SINGLE", 5, 6, identity: null, singleChoice: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out var occ, out var ev, out var siteId, out var veh, out var hasId, out _, out var single));
+        Assert.Equal(11, occ);
+        Assert.Equal("EV_SINGLE", ev);
+        Assert.False(hasId);
+        Assert.True(single);
+    }
+
+    [Fact]
+    public void EventRaised_SingleChoiceAndIdentity_RoundTripTogether()
+    {
+        var id = new GeoSiteState(7, "G", siteType: 1, state: 0, siteName: "K", encounterID: "E");
+        var bytes = SyncProtocol.EncodeEventRaised(12, "EV_BOTH", 7, 8, identity: id, singleChoice: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out var hasId, out var got, out var single));
+        Assert.True(hasId);
+        Assert.Equal(id, got);
+        Assert.True(single);
+    }
+
+    [Fact]
+    public void EventRaised_NoFlags_DecodesSingleChoiceFalse_AndStaysByteStable()
+    {
+        // No identity + multi-choice (singleChoice=false) → no flag byte at all → byte-identical to legacy wire.
+        var with = SyncProtocol.EncodeEventRaised(13, "EV_NF", 1, 2, identity: null, singleChoice: false);
+        var legacy = SyncProtocol.EncodeEventRaised(13, "EV_NF", 1, 2);
+        Assert.Equal(legacy, with);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(with, out _, out _, out _, out _, out var hasId, out _, out var single));
+        Assert.False(hasId);
+        Assert.False(single);
+    }
+
+    [Fact]
+    public void EventRaised_LegacyIdentityByte_DecodesSingleChoiceFalse()
+    {
+        // An OLD identity payload wrote flag byte == 1 (identity only). The bitmask decode must read
+        // hasIdentity=true, singleChoice=false (bit1 unset) — back-compat with peers on the old flag format.
+        var id = new GeoSiteState(3, "G2", siteType: 2, state: 1, siteName: "K2", encounterID: "E2");
+        var bytes = SyncProtocol.EncodeEventRaised(14, "EV_OLDID", 3, 4, identity: id);   // identity-only, no singleChoice
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out var hasId, out var got, out var single));
+        Assert.True(hasId);
+        Assert.Equal(id, got);
+        Assert.False(single);
+    }
+
+    [Fact]
     public void EventRaised_ThreeArg_StillRoundTripsViaLegacyOverload()
     {
         // The legacy 4-out decode overload must still work (callers/tests that ignore the identity block).

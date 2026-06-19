@@ -594,29 +594,7 @@ namespace Multipleer.UI
             if (engine == null || !engine.IsHost) return;
 
             // The handler that records + broadcasts the chosen save (identical to the old picker path).
-            System.Action<SavegameMetaData> onPicked = chosen =>
-            {
-                if (chosen == null) return;
-
-                // Reset every client's Ready ONLY on a GENUINE save change. Clients readied for a
-                // specific session, so swapping to a DIFFERENT save invalidates that — but the first
-                // pick (no prior session) and re-picking the SAME save must NOT drop anyone's ready,
-                // or the gate's all-ready bit keeps collapsing and PLAY never lights.
-                var previousChosen = _pendingChosenSave;
-                _pendingChosenSave = chosen;
-                bool genuineChange = previousChosen != null && !SameSave(previousChosen, chosen);
-                if (genuineChange)
-                {
-                    // Drop the FSM's cached ready fact and clear the authoritative roster ready bits
-                    // so the gate re-closes until everyone re-readies for the new save.
-                    _lobbyController.SaveChangedShouldResetReady();
-                    NetworkEngine.Instance?.Session?.ResetAllClientsReady();
-                }
-
-                var name = SaveDisplayName(chosen);
-                var meta = SaveDisplayMeta(chosen);
-                NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
-            };
+            System.Action<SavegameMetaData> onPicked = CaptureLobbySavePick;
 
             // Arm the intercept, hide our overlay so the native screen shows through, then open it by
             // driving the home-screen state stack straight to UIStateHomeLoadGame (robust on EVERY
@@ -652,6 +630,54 @@ namespace Multipleer.UI
         {
             _lobby?.Show();
             if (chosen != null) onPicked?.Invoke(chosen);
+        }
+
+        /// <summary>
+        /// Record + broadcast the host's chosen lobby save (label only — NO campaign load). This is the
+        /// single source of truth for "host picked a save in the lobby": OnLobbyChooseSave's armed path
+        /// hands its onPicked straight to this, AND the durable un-armed lobby gate
+        /// (<see cref="OnLobbyLoadPickCaptured"/>) calls it too, so the chosen-save behaviour is identical
+        /// regardless of whether the static intercept flag happened to be armed at click time.
+        /// </summary>
+        public void CaptureLobbySavePick(SavegameMetaData chosen)
+        {
+            if (chosen == null) return;
+
+            // Reset every client's Ready ONLY on a GENUINE save change. Clients readied for a
+            // specific session, so swapping to a DIFFERENT save invalidates that — but the first
+            // pick (no prior session) and re-picking the SAME save must NOT drop anyone's ready,
+            // or the gate's all-ready bit keeps collapsing and PLAY never lights.
+            var previousChosen = _pendingChosenSave;
+            _pendingChosenSave = chosen;
+            bool genuineChange = previousChosen != null && !SameSave(previousChosen, chosen);
+            if (genuineChange)
+            {
+                // Drop the FSM's cached ready fact and clear the authoritative roster ready bits
+                // so the gate re-closes until everyone re-readies for the new save.
+                _lobbyController.SaveChangedShouldResetReady();
+                NetworkEngine.Instance?.Session?.ResetAllClientsReady();
+            }
+
+            var name = SaveDisplayName(chosen);
+            var meta = SaveDisplayMeta(chosen);
+            NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
+        }
+
+        /// <summary>
+        /// DURABLE lobby save-pick capture. Called from the OnLoadGamePressed prefix when
+        /// <see cref="SessionLifecycle.ShouldCaptureAsLobbyPick"/> is true (host in an active lobby whose
+        /// session has NOT started) — REGARDLESS of the intercept's <c>_armed</c> flag. The host can reach
+        /// a native Load screen un-armed (the lobby re-makes native menu buttons clickable), and the old
+        /// flag-only guard then let the real load run. This records the pick as the lobby's chosen save and
+        /// re-shows the lobby; the campaign load happens ONLY via host PLAY → CommitStart → HostStartSession.
+        /// Self-contained: works even when _armed==false / no onPicked callback is set.
+        /// </summary>
+        public void OnLobbyLoadPickCaptured(SavegameMetaData chosen)
+        {
+            CaptureLobbySavePick(chosen);
+            // Re-show the lobby (re-hides the native chrome restored when the Load screen opened). The
+            // prefix already closed the native Load screen via CloseModule, so we must not be left on it.
+            _lobby?.Show();
         }
 
         // ─── F2: host loads ANY save mid-session (tactical OR geoscape) ─────

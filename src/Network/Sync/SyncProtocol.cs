@@ -205,10 +205,21 @@ namespace Multipleer.Network.Sync
         // pinned). A LEGACY 4-field payload (no trailing byte) decodes hasIdentity=false — the optional reads
         // guard on remaining length, never throw.
 
+        // Trailing flag byte is a BITMASK so optional fields can be added without a new field/length:
+        //   bit0 (0x01) = an identity block follows; bit1 (0x02) = singleChoice (HasSingleChoice, Choices.Count<=1).
+        // A LEGACY raise with no trailing byte decodes flag 0 → hasIdentity=false, singleChoice=false (the old
+        // multi-choice default). The flag byte is emitted ONLY when at least one bit is set, so a plain
+        // multi-choice no-identity raise stays byte-IDENTICAL to the legacy 4-field wire (keeps the wire pin).
+        private const byte RaiseFlagIdentity = 0x01;
+        private const byte RaiseFlagSingleChoice = 0x02;
+
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
-            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null);
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null, false);
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity)
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, false);
+
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -217,25 +228,32 @@ namespace Multipleer.Network.Sync
                 w.Write(eventId ?? "");
                 w.Write(siteId);
                 w.Write(vehicleId);
-                // Append the flag byte + block ONLY when an identity is present; the no-identity wire stays
-                // byte-identical to the legacy raise (decode treats "no trailing byte" == "flag 0" == no identity).
-                if (identity.HasValue)
+                // Build the bitmask; emit the flag byte (+ optional identity block) ONLY when any bit is set so a
+                // plain multi-choice no-identity raise stays byte-identical to the legacy wire.
+                byte flag = 0;
+                if (identity.HasValue) flag |= RaiseFlagIdentity;
+                if (singleChoice) flag |= RaiseFlagSingleChoice;
+                if (flag != 0)
                 {
-                    w.Write((byte)1);
-                    WriteSiteIdentity(w, identity.Value);
+                    w.Write(flag);
+                    if (identity.HasValue) WriteSiteIdentity(w, identity.Value);   // block follows the flag iff bit0 set
                 }
                 return ms.ToArray();
             }
         }
 
-        // 4-out shim: existing callers/tests that ignore the identity block.
+        // 4-out shim: existing callers/tests that ignore the identity block + singleChoice.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId)
-            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out _, out _);
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out _, out _, out _);
 
+        // 6-out shim: callers/tests that read the identity but ignore singleChoice.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity)
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out _);
+
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice)
         {
             occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1; hasIdentity = false;
-            identity = default(GeoSiteState);
+            identity = default(GeoSiteState); singleChoice = false;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -246,11 +264,12 @@ namespace Multipleer.Network.Sync
                     siteId = r.ReadInt32();
                     // Optional trailing field: absent in a 3-field payload → leave vehicleId = -1.
                     if (ms.Length - ms.Position >= sizeof(int)) vehicleId = r.ReadInt32();
-                    // Optional identity flag byte: absent in a LEGACY 4-field payload → no identity.
+                    // Optional trailing flag bitmask byte: absent in a LEGACY 4-field payload → flag 0.
                     if (ms.Length - ms.Position >= sizeof(byte))
                     {
                         byte flag = r.ReadByte();
-                        if (flag == 1)
+                        singleChoice = (flag & RaiseFlagSingleChoice) != 0;
+                        if ((flag & RaiseFlagIdentity) != 0)
                         {
                             identity = ReadSiteIdentity(r);
                             hasIdentity = true;
@@ -380,41 +399,10 @@ namespace Multipleer.Network.Sync
             catch { return false; }
         }
 
-        // ─── Geoscape event CHOICE CLAIM (client -> host, first-click-wins) ─
-        // A client click captures the chosen choice index and routes it to the host arbiter. Wire:
-        // [occId:u16][choiceIndex:i32]. occId is the host-synthesized per-occurrence id carried on the raise;
-        // choiceIndex is the index into EventData.Choices (-1 = null/decline). The host accepts the FIRST
-        // claim per occId (ChoiceArbiter), runs the authoritative CompleteEvent, and broadcasts the OUTCOME
-        // via the existing EventDismiss; later claims for a resolved occId are ignored.
-
-        public static byte[] EncodeChoiceClaim(ushort occurrenceId, int choiceIndex)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(occurrenceId);
-                w.Write(choiceIndex);
-                return ms.ToArray();
-            }
-        }
-
-        public static bool TryDecodeChoiceClaim(byte[] data, out ushort occurrenceId, out int choiceIndex)
-        {
-            occurrenceId = 0; choiceIndex = -1;
-            // Require the full fixed [occId:u16][choiceIndex:i32] = 6 bytes; a short buffer is a clean drop.
-            if (data == null || data.Length < sizeof(ushort) + sizeof(int)) return false;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    occurrenceId = r.ReadUInt16();
-                    choiceIndex = r.ReadInt32();
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
+        // The bespoke geoscape event CHOICE CLAIM codec (client->host [occId:u16][choiceIndex:i32]) was retired:
+        // event-choice resolution now rides AnswerEventAction over the research-style ActionRequest/ActionApply
+        // relay (occId on the action wire). The host resolves a client's answer by driving its OWN native modal
+        // (EventReflection.TryHostNativeResolve), falling back to the model-only CompleteEventByOccurrence.
 
         // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
         // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;

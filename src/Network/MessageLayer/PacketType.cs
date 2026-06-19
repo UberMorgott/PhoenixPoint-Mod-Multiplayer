@@ -69,7 +69,8 @@ namespace Multipleer.Network.MessageLayer
         EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
         EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
         SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]
-        ChoiceClaim   = 0x68,   // client -> host: claim a geoscape event choice [occId:u16][choiceIndex:i32]
+        // 0x68 retired (was ChoiceClaim): geoscape event-choice resolution now rides AnswerEventAction over the
+        // research-style ActionRequest/ActionApply relay (occId on the action wire). Do NOT reuse this id.
 
         // Chat
         ChatMessage = 0x50,

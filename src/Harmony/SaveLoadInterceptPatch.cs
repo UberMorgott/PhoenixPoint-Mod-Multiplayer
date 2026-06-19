@@ -3,6 +3,7 @@ using System.Reflection;
 using Base.Serialization;
 using Base.UI;
 using HarmonyLib;
+using Multipleer.Network;
 using Multipleer.UI;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Home.View;
@@ -162,6 +163,44 @@ namespace Multipleer.Harmony
         [HarmonyPrefix]
         public static bool OnLoadGamePressed_Prefix(UIModuleSaveGame __instance, PPSavegameMetaData ppSaveGameChosen)
         {
+            // DURABLE lobby gate (independent of the fragile static _armed flag). A host with an ACTIVE
+            // co-op lobby whose session has NOT started must NEVER trigger a native campaign load: the
+            // host can reach a native Load screen un-armed (the lobby re-makes native menu buttons
+            // clickable), and gating only on _armed then let the real load run. Re-gate on DURABLE
+            // session state instead: capture the pick as the lobby's chosen save + return to the lobby,
+            // skipping the load. The mid-session F2 path (sessionStarted==true) is EXCLUDED by the
+            // predicate and still loads immediately; single-player (no active session) is also excluded.
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                bool lobbyActive = engine?.IsActiveSession ?? false;
+                bool sessionStarted = engine?.SaveTransfer?.SessionStarted ?? false;
+                if (SessionLifecycle.ShouldCaptureAsLobbyPick(engine?.IsHost ?? false, lobbyActive, sessionStarted))
+                {
+                    var picked = ppSaveGameChosen as SavegameMetaData;
+
+                    // Close the native Load screen the same way its own close button does (CloseModule is
+                    // private → reflection), so the host is NOT left stuck on the load screen.
+                    var closeModule = AccessTools.Method(typeof(UIModuleSaveGame), "CloseModule");
+                    closeModule?.Invoke(__instance, null);
+
+                    // Disarm FIRST so the home-screen ExitState postfix (which early-returns when !_armed)
+                    // can NOT also deliver — this durable path is the single delivery, armed or not.
+                    Disarm();
+
+                    // Self-contained route to the chosen-save path (works even when _armed==false /
+                    // _onPicked==null): records + broadcasts the lobby save (label only, NO load) and
+                    // re-shows the lobby. The campaign load happens ONLY via host PLAY → CommitStart.
+                    if (picked != null) MultiplayerUI.Instance?.OnLobbyLoadPickCaptured(picked);
+
+                    return false; // skip SaveManager.LoadGame
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] lobby-pick gate failed: " + e.Message);
+            }
+
             if (!_armed) return true; // normal single-player load
 
             try

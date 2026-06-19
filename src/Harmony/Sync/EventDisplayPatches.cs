@@ -102,9 +102,17 @@ namespace Multipleer.Harmony.Sync
                     }
                     catch (Exception iex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch identity-snapshot failed: " + iex.Message); }
                 }
+                // HasSingleChoice (Choices.Count <= 1, mirrors GeoscapeEventData.HasSingleChoice): such an event is
+                // auto-completed by the host at trigger, so its result-bearing dismiss precedes this raise. Stamp it
+                // on the wire so the client MIRRORS the host's native flavor modal instead of jumping to a synthetic
+                // result page (a different dialog STAGE than the host shows). Unreadable count (-1) → multi (false),
+                // matching the lock-side fail-safe (an ambiguous event is treated as a locked CHOICE, not single).
+                int choiceCount = EventReflection.GetChoiceCount(geoEvent);
+                bool singleChoice = choiceCount >= 0 && choiceCount <= 1;
                 Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
-                          " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue);
-                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity);
+                          " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue +
+                          " singleChoice=" + singleChoice);
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }

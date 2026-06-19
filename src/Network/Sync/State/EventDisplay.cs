@@ -191,6 +191,11 @@ namespace Multipleer.Network.Sync.State
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Dismiss best-effort failed: " + ex.Message); }
         }
 
+        // (Removed CloseHostEventModal: the host never needs a force-close-to-"show" path. Host-WIN lets native
+        // render+close its result page; host-resolves-remote-claim renders the synthetic result page via
+        // SyncEngine.ResolveToResultPage (and its OK click closes natively via ShouldLocalClose). Both the host's
+        // own losing click and the synthetic result-page OK dismiss are handled by the native FinishEncounter path.)
+
         // The current GeoscapeViewSwitchQuery._currentStateSwitchRequest.State if it is a
         // UIStateBaseGeoscapeEvent<>, else null.
         private static object GetCurrentEventState(object view)

@@ -38,6 +38,18 @@ namespace Multipleer.Network.Sync
     /// </summary>
     public interface IHostOnlyApply { }
 
+    /// <summary>
+    /// Marker for actions whose host-side <see cref="ISyncedAction.Apply"/> must run OUTSIDE
+    /// <see cref="SyncApplyScope"/>. The generic host inbound path (<c>SyncEngine.OnActionRequest</c>) wraps a
+    /// normal Apply in <c>SyncApplyScope.Enter()</c> so the action's own interceptors pass through. But a
+    /// geoscape-event answer resolves the LIVE event via the native <c>GeoscapeEvent.CompleteEvent</c>, whose
+    /// <c>CompleteEventDismissPatch.Postfix</c> early-returns under <c>SyncApplyScope.IsApplying</c> — so running
+    /// it inside the scope would SUPPRESS the EventDismiss broadcast the clients need to render the result.
+    /// Honoring this marker, the host applies such an action outside the scope so that postfix fires. The client
+    /// replay path is unaffected (these actions are also <see cref="IHostOnlyApply"/> → suppressed on clients).
+    /// </summary>
+    public interface IResolvesOutsideScope { }
+
     /// <summary>Reconstructs an action from its payload bytes.</summary>
     public delegate ISyncedAction ActionReader(BinaryReader r);
 }

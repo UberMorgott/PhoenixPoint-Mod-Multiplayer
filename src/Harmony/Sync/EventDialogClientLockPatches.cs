@@ -97,19 +97,22 @@ namespace Multipleer.Harmony.Sync
     }
 
     /// <summary>
-    /// Choice-button handler interceptor (first-click-wins, host-arbitrated). Active for BOTH sides in a co-op
-    /// session (single-player → native):
-    ///   • while paging (<c>_pagingEvent</c>) → let native advance the description text (no outcome/close).
-    ///   • synthetic result/info page (EventID=="") → native local close (the player OKs it).
-    ///   • single-choice / info real host event → auto-completed on the host at trigger; the OK click is a pure
-    ///     dismiss. HOST → native <c>FinishEncounter</c> (<c>FinishEncounterHostDismissPatch</c> closes the
-    ///     client); CLIENT → swallow-and-wait for the host's already-broadcast dismiss. Never re-completed.
-    ///   • real MULTI-choice host event (Choices &gt;= 2) → first-click-wins: capture the chosen choiceIndex and
-    ///     funnel through the arbiter. CLIENT → <c>SyncEngine.SendChoiceClaim</c> to the host; HOST local click →
-    ///     <c>SyncEngine.OnChoiceClaim</c> (so the host click is ALSO arbitrated). Modal stays OPEN; the arbiter
-    ///     winner runs the authoritative <c>CompleteEvent</c> whose <c>CompleteEventDismissPatch</c> broadcasts
-    ///     the outcome both instances render. Native body never runs locally (no client CompleteEvent / null
-    ///     ChoiceReward NRE); a client claim that already resolved an occurrence makes the host's later click a no-op.
+    /// Choice-button handler interceptor (last-write-wins, NO arbiter / NO permission gate — user directive).
+    ///   • HOST = PURE NATIVE: the host's click (paging, choice, OR the OK on its result page) runs the untouched
+    ///     native OnChoiceSelected → SelectChoice → CompleteEvent → SetClosingEncounter (result + rewards) → OK →
+    ///     FinishEncounter → FinishQueriedState (close). CompleteEventPatch/CompleteEventDismissPatch.Postfix
+    ///     broadcast the EventDismiss to clients on the native CompleteEvent. We intercept NOTHING on the host (the
+    ///     old arbiter lock swallowed a "lost" host OK → frozen modal: ISSUE 2/3 — removed).
+    ///   • CLIENT, while paging (<c>_pagingEvent</c>) → let native advance description text (no outcome/close).
+    ///   • CLIENT synthetic result/info page (EventID=="") → native local close (the player OKs it).
+    ///   • CLIENT real MULTI-choice host event (Choices &gt;= 2) → swallow the native body (return false, no client
+    ///     CompleteEvent / null ChoiceReward NRE) and <c>SyncEngine.SendActionRequest(AnswerEventAction(occId,
+    ///     eventId, choiceIndex))</c>; the modal stays OPEN until the host's EventDismiss lands → OnEventDismiss
+    ///     rebuilds the synthetic result page (ShowResultInPlace). On the host, that relayed answer drives the host's
+    ///     OWN native modal (<c>EventReflection.TryHostNativeResolve</c>) → native host result page + broadcast.
+    ///   • CLIENT single-choice / info real host event → auto-completed on the host at trigger; swallow-and-wait for
+    ///     the host's already-broadcast dismiss. Never re-completed.
+    /// Last-write-wins is safe: native CompleteEvent self-guards on IsCompleted, so a repeat is a no-op.
     /// </summary>
     [HarmonyPatch]
     public static class EncounterChoiceClientPatch
@@ -142,29 +145,13 @@ namespace Multipleer.Harmony.Sync
                 bool inSession = engine != null && engine.IsActiveSession;
                 bool isHost = inSession && engine.IsHost;
                 if (!inSession) return true;   // single-player: native
-                if (isHost)
-                {
-                    // HOST local click: route a genuine MULTI-choice (Choices >= 2) click through the SAME
-                    // first-click-wins arbiter as client claims, so a client claim that already resolved this
-                    // occurrence wins and the host's later click is a no-op (no double CompleteEvent). The arbiter
-                    // accept path runs the authoritative resolve → CompleteEventDismissPatch broadcasts the outcome.
-                    if (_pagingField != null && (bool)(_pagingField.GetValue(__instance) ?? false)) return true; // paging → native text advance
-                    object hostEvent = _geoEventField?.GetValue(__instance);
-                    string hostEventId = EventReflection.GetEventId(hostEvent);
-                    if (EventDialogClientGuard.ShouldLocalClose(hostEventId)) return true; // synthetic page → native local close
-                    // Single-choice / info events are AUTO-completed on the host at trigger; their OK click is a
-                    // pure dismiss (_geoEvent.IsCompleted already true → native CompleteEvent throws). Routing them
-                    // through the arbiter would mean a second CompleteEvent (throws → no broadcast → stuck modal),
-                    // so let the OK click run NATIVE (FinishEncounter); FinishEncounterHostDismissPatch closes the
-                    // client. Only a real multi-choice needs arbitration. Unreadable (-1) → native (safe).
-                    if (EventReflection.GetChoiceCount(hostEvent) < 2) return true;
-                    ushort hostOcc = Multipleer.Harmony.Sync.EventOccurrenceIds.GetOrAssign(hostEvent);
-                    int hostIndex = EventReflection.GetChoiceIndex(hostEvent, __0);
-                    if (hostIndex == EventReflection.ChoiceLookupFailed) hostIndex = -1;
-                    Debug.Log("[Multipleer] EncounterChoiceClientPatch HOST-click occId=" + hostOcc + " choiceIndex=" + hostIndex + " → OnChoiceClaim (local arbitrate)");
-                    engine.Sync?.OnChoiceClaim(0UL, SyncProtocol.EncodeChoiceClaim(hostOcc, hostIndex));
-                    return false;   // never run native here; OnChoiceClaim ran the authoritative CompleteEvent if it won
-                }
+                // HOST = PURE NATIVE. The host's own click (choice OR the OK on its result page OR paging) runs the
+                // untouched native OnChoiceSelected → SelectChoice → CompleteEvent → SetClosingEncounter (result +
+                // rewards) → OK → FinishEncounter → FinishQueriedState (close). CompleteEventPatch/
+                // CompleteEventDismissPatch.Postfix already broadcast the EventDismiss to clients on the native
+                // CompleteEvent. We intercept NOTHING on the host (no arbiter lock, no permission gate, no swallow) —
+                // that lock was what froze the host (lost claim → swallowed OK → modal never closed: ISSUE 2/3).
+                if (isHost) return true;
                 // else: CLIENT — fall through to the client claim path below.
 
                 // While paging multi-page descriptions the native handler only advances text (no outcome,
@@ -186,11 +173,13 @@ namespace Multipleer.Harmony.Sync
                     return false;
                 }
                 // Real host event (non-empty EventID). A genuine MULTI-choice (Choices >= 2) client click is now
-                // a CHOICE CLAIM (first-click-wins): capture the chosen index off the live event, send the claim
-                // to the host arbiter, and keep the modal OPEN (return false → native body never runs → no local
-                // CompleteEvent / null-ChoiceReward NRE). The host resolves the first claim and broadcasts the
-                // OUTCOME, which closes/replaces this modal via OnEventDismiss → ShowResultInPlace / CloseDialog.
-                if (EventReflection.GetChoiceCount(geoEvent) >= 2)
+                // an ANSWER REQUEST over the research-style action relay (first-click-wins): capture the chosen
+                // index off the live event, send an AnswerEventAction(occId, eventId, choiceIndex) to the host,
+                // and keep the modal OPEN (return false → native body never runs → no local CompleteEvent /
+                // null-ChoiceReward NRE). The host arbitrates the first claim and broadcasts the OUTCOME, which
+                // closes/replaces this modal via OnEventDismiss → ShowResultInPlace / CloseDialog.
+                int choiceCount = EventReflection.GetChoiceCount(geoEvent);
+                if (choiceCount >= 2)
                 {
                     int claimIndex = EventReflection.GetChoiceIndex(geoEvent, __0);
                     // GetChoiceIndex returns ChoiceDecline (-1) for a null/decline choice and ChoiceLookupFailed
@@ -199,15 +188,27 @@ namespace Multipleer.Harmony.Sync
                     if (claimIndex == EventReflection.ChoiceLookupFailed) claimIndex = -1;
                     ushort occId = Multipleer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
                     Debug.Log("[Multipleer] EncounterChoiceClientPatch CLAIM eventId=" + eventId +
-                              " occId=" + occId + " choiceIndex=" + claimIndex + " → SendChoiceClaim (modal stays open)");
-                    NetworkEngine.Instance?.Sync?.SendChoiceClaim(occId, claimIndex);
+                              " occId=" + occId + " choiceIndex=" + claimIndex + " → SendActionRequest(AnswerEventAction) (modal stays open)");
+                    NetworkEngine.Instance?.Sync?.SendActionRequest(
+                        new Multipleer.Network.Sync.Actions.AnswerEventAction(occId, eventId, claimIndex));
                     return false;
                 }
-                // Single-choice / info real host event (or unreadable): the host auto-completed it at trigger and
-                // already broadcast its result-bearing dismiss. Swallow-and-wait (modal stays open until the host
-                // dismiss lands via OnEventDismiss → ShowResultInPlace / CloseDialog) — never claim, never apply.
+                // Confirmed SINGLE-choice real host event (Choices.Count == 1): the host auto-completed it at trigger
+                // and ALREADY broadcast its result-bearing dismiss (consumed when the raise landed → the client now
+                // mirrors the host's native flavor modal, EventCorrelator ShowDialog). The host's own modal closes
+                // LOCALLY on its OK (FinishEncounter; its second dismiss is suppressed by WasDismissed) — so NO host
+                // dismiss will ever arrive to close THIS modal. Mirror the host: close LOCALLY on the player's OK.
+                // The outcome/reward is already applied via the state channels; this is a pure UI hide, no host call.
+                if (choiceCount == 1)
+                {
+                    Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");
+                    _finishEncounter?.Invoke(__instance, null);
+                    return false;
+                }
+                // Unreadable / zero-choice (ambiguous) real host event: fail SAFE — swallow-and-wait for a host
+                // dismiss rather than locally closing an event we couldn't classify (unchanged behavior).
                 Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=false swallow eventId=" + eventId +
-                          " (single-choice/info host event → wait for host dismiss)");
+                          " choiceCount=" + choiceCount + " (ambiguous host event → wait for host dismiss)");
                 return false;
             }
             catch (Exception ex)

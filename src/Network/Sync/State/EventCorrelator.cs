@@ -98,16 +98,36 @@ namespace Multipleer.Network.Sync.State
         /// Correlate a host raise for <paramref name="occurrenceId"/>. If a buffered out-of-order dismiss
         /// matches, resolve it directly (skip leaving an orphan choice dialog); otherwise show the dialog and
         /// record the open occurrence.
+        ///
+        /// <paramref name="singleChoice"/> mirrors <c>GeoscapeEventData.HasSingleChoice</c> (Choices.Count &lt;= 1):
+        /// a single-choice event is AUTO-COMPLETED by the host at trigger time, so its result-bearing dismiss
+        /// arrives BEFORE this raise. For that case the client must MIRROR the host's native flavor modal
+        /// (<see cref="ActionKind.ShowDialog"/>) — the host shows the same single-button modal until the human
+        /// OKs it — instead of jumping to a synthetic result page (a different dialog STAGE than the host shows).
+        /// The outcome/reward is applied independently via the state channels, so showing the modal vs the result
+        /// page changes ONLY the display. A MULTI-choice buffered dismiss (<paramref name="singleChoice"/> == false)
+        /// is unchanged: it resolves straight to the result page.
         /// </summary>
-        public Decision Raised(ushort occurrenceId, string eventId)
+        public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false)
         {
             if (_pending.TryGetValue(occurrenceId, out var buffered))
             {
                 // The dismiss for this occurrence already arrived (out of order). Resolve it now.
                 RemovePending(occurrenceId);
                 if (buffered.ChoiceIndex >= 0)
-                    // The picked choice produced a result/outcome page → jump straight to it.
+                {
+                    // Single-choice auto-completed event: MIRROR the host's native modal (it still shows the
+                    // single-button flavor modal until the human OKs it) instead of the synthetic result page.
+                    // Track it open so the player's local OK can close it (no host dismiss will follow — the
+                    // authoritative dismiss was already consumed at trigger time).
+                    if (singleChoice)
+                    {
+                        _open[occurrenceId] = eventId ?? buffered.EventId;
+                        return new Decision(ActionKind.ShowDialog, occurrenceId, eventId ?? buffered.EventId, -1);
+                    }
+                    // Multi-choice: the picked choice produced a result/outcome page → jump straight to it.
                     return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
+                }
                 // Close-only dismiss that beat its raise: the player never saw the dialog → nothing to show.
                 return new Decision(ActionKind.DropNoop, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
             }
