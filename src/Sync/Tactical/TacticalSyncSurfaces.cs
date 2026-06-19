@@ -66,6 +66,20 @@ namespace Multipleer.Sync.Tactical
         // wins) like tac.move / tac.turn / tac.vision.
         public const ushort TacIntentEquip = 0x8A;   // 138: client→host  "actor netId selects equipment@slot" (intent, carries nonce)
         public const ushort TacEquip = 0x8B;         // 139: host→all     "actor netId now has equipment@slot selected" (outcome, carries seq)
+
+        // ─── Inc Overwatch: host-authoritative OVERWATCH-ARM replication ────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. In co-op a client putting a
+        // soldier on overwatch ran ONLY locally — the HOST (the authority that runs enemy turns) never armed
+        // that soldier, so the host never triggered the reaction fire, and the watch cone never showed on peers.
+        // Mirrors the move/shoot/equip model: a CLIENT arming overwatch is suppressed and sends a
+        // tac.intent.overwatch (carries the flattened watch CONE — built client-side, the host can't re-derive
+        // it); the HOST rebuilds the cone, re-invokes OverwatchAbility.Activate so it is authoritatively armed
+        // (→ it triggers reaction fire on enemy moves; the reaction DAMAGE already replicates via tac.damage),
+        // then broadcasts tac.overwatch.state on every SetCone (arm AND clear/consume) so every peer mirrors the
+        // cone cosmetically (the client mirror is INERT — client enemy-moves carry TriggerOverwatch=false, so a
+        // client-side OverwatchStatus never double reaction-fires). Self-contained tactical seq (last-writer-wins).
+        public const ushort TacIntentOverwatch = 0x8C;   // 140: client→host  "actor netId arms overwatch watching cone" (intent, carries nonce + cone)
+        public const ushort TacOverwatchState = 0x8D;    // 141: host→all     "actor netId overwatch armed(with cone)/cleared" (state, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape

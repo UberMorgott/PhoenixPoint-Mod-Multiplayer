@@ -746,6 +746,20 @@ namespace Multipleer.Sync.Tactical
                 try { TacticalEquipSync.HandleEquip(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.equip failed: " + ex); }
                 return true;
             }
+
+            // ─── LIVE overwatch-arm rail (Inc Overwatch) ──────────────────────────────────────────
+            // Intent (client→host) lands on the host; state (host→all) lands on clients. Each handler is
+            // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacIntentOverwatch)
+            {
+                try { TacticalOverwatchSync.HostOnArmIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.overwatch failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacOverwatchState)
+            {
+                try { TacticalOverwatchSync.HandleOverwatchState(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.overwatch.state failed: " + ex); }
+                return true;
+            }
             return false;
         }
 
