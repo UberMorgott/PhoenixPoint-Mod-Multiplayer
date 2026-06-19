@@ -706,6 +706,18 @@ namespace Multipleer.Sync.Tactical
                 try { TacticalTurnSync.ClientOnTurn(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.turn failed: " + ex); }
                 return true;
             }
+
+            // ─── LIVE combat/damage rail (Inc 3a) ─────────────────────────────────────────────────
+            if (surfaceId == (byte)TacticalSurfaceIds.TacIntentAbility)
+            {
+                try { TacticalCombatSync.HostOnAbilityIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.ability failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacDamage)
+            {
+                try { TacticalCombatSync.HandleDamage(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.damage failed: " + ex); }
+                return true;
+            }
             return false;
         }
 

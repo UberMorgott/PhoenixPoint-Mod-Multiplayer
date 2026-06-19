@@ -1,0 +1,583 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using Multipleer.Network;
+using Multipleer.Network.MessageLayer;
+using Multipleer.Network.Sync;
+using UnityEngine;
+
+namespace Multipleer.Sync.Tactical
+{
+    /// <summary>
+    /// LIVE host-authoritative COMBAT/DAMAGE replication (spec §3, Inc 3a). Mirrors
+    /// <see cref="TacticalMoveSync"/>'s shape (intent→host→outcome→all):
+    ///   • CLIENT shoot intent: a mirroring client's <c>ShootAbility.Activate</c> is suppressed; instead it
+    ///     sends a <c>tac.intent.ability</c> {shooterNetId, abilityDefGuid, targetNetId/targetPos, nonce} to
+    ///     the host. The client's local roll chain is ALSO suppressed by the existing <c>FireWeaponPatch</c>,
+    ///     so the client never rolls damage — it applies ONLY the host's broadcast result.
+    ///   • HOST intent handler: resolve shooter+ability+target, re-invoke the real shot on the host sim.
+    ///     The host's authoritative <c>FireWeaponAtTargetCrt</c> rolls → projectile → ApplyDamage as normal.
+    ///   • HOST ApplyDamage broadcast: a postfix on <c>TacticalActorBase.ApplyDamage(DamageResult)</c> (the
+    ///     funnel ALL damage flows through — shots, melee, overwatch, AI, death cascade) flattens the FINAL
+    ///     applied <c>DamageResult</c> and broadcasts <c>tac.damage</c> to all peers.
+    ///   • CLIENT damage apply: rebuild the <c>DamageResult</c> (defs resolved by guid via
+    ///     <see cref="DefReflection"/>; live actor refs via the registry) and call <c>ApplyDamage</c> on the
+    ///     target mirror, guarded by a re-entrancy flag so the client's own ApplyDamage postfix never
+    ///     re-broadcasts. The shooter's spent AP/WP are set to the host-carried values.
+    ///
+    /// All game types are reached by name via <see cref="AccessTools"/> (this layer is the only reflection
+    /// boundary). The PURE wire codec is <see cref="TacticalLiveCodec"/> (unit-tested).
+    /// </summary>
+    public static class TacticalCombatSync
+    {
+        private static uint _nonceCounter;
+        private static uint NextNonce() => unchecked(++_nonceCounter);
+
+        // Re-entrancy guard: true only while the CLIENT is applying a host-received DamageResult, so the
+        // ApplyDamage postfix (OnHostApplyDamage) does NOT re-broadcast it. It is also IsHost-gated, but the
+        // flag is defense-in-depth (and keeps the host's own apply-of-a-relayed-result clean).
+        [ThreadStatic] private static bool _applyingRemote;
+
+        // ─── CLIENT: intercept the local shot, send intent, suppress ──────────────────────────────
+        /// <summary>
+        /// CLIENT (mirroring) entry from <c>ShootAbilityActivatePatch</c>: capture {shooterNetId,
+        /// abilityDefGuid, target} and send <c>tac.intent.ability</c> to the host. Returns false to SUPPRESS
+        /// the local shot (the host runs the authoritative shot + broadcasts damage). Returns true (let the
+        /// shot run) when this is NOT a mirroring client or the shooter/ability can't be read (fail-open on
+        /// the host path; a mirroring client still suppresses on read-failure — it must never roll locally).
+        /// </summary>
+        public static bool ClientInterceptShoot(object shootAbility, object parameter)
+        {
+            if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player / non-mirror
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return true;
+
+            try
+            {
+                object actor = GetProp(shootAbility, "TacticalActorBase");
+                if (actor == null)
+                {
+                    Debug.LogError("[Multipleer][tac] shoot intent: no shooter actor — suppressing local shot");
+                    return false;
+                }
+                int shooterNetId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (shooterNetId < 0)
+                {
+                    Debug.LogError("[Multipleer][tac] shoot intent: unknown shooter netId — suppressing local shot");
+                    return false;
+                }
+
+                string abilityGuid = DefReflection.GetGuid(GetProp(shootAbility, "Def"));
+                if (string.IsNullOrEmpty(abilityGuid))
+                {
+                    Debug.LogError("[Multipleer][tac] shoot intent: no ability def guid — suppressing local shot");
+                    return false;
+                }
+
+                ReadTarget(parameter, out int targetNetId, out Vector3 targetPos);
+
+                byte[] payload = TacticalLiveCodec.EncodeIntentAbility(
+                    shooterNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, NextNonce());
+                TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentAbility, payload);
+                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.ability shooter=" + shooterNetId +
+                          " ability=" + abilityGuid + " targetNetId=" + targetNetId +
+                          " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
+                return false;   // suppress local shot
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] ClientInterceptShoot failed: " + ex);
+                return false;   // a mirroring client must not roll a local shot even on error
+            }
+        }
+
+        // ─── HOST: a client shoot intent arrived → run the real shot ──────────────────────────────
+        /// <summary>HOST inbound (<c>tac.intent.ability</c>): resolve shooter→ability(by guid)→target, then
+        /// invoke the real shot on the host sim. The host's authoritative roll chain fires
+        /// (FireWeaponAtTargetCrt → ApplyDamage), and each ApplyDamage broadcasts a tac.damage. No-op
+        /// off-host / off-session.</summary>
+        public static void HostOnAbilityIntent(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeIntentAbility(payload, out var intent)) { Debug.LogError("[Multipleer][tac] shoot intent decode failed"); return; }
+            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentAbility, intent.Nonce)) return;
+
+            object shooter = TacticalDeploySync.ResolveLiveActor(intent.ShooterNetId);
+            Debug.Log("[Multipleer][tac][DIAG] HOSTINTENT decoded shooter=" + intent.ShooterNetId +
+                      " ability=" + intent.AbilityDefGuid + " targetNetId=" + intent.TargetNetId +
+                      " shooterResolved=" + (shooter != null));
+            if (shooter == null) { Debug.LogError("[Multipleer][tac] shoot intent: no shooter for netId " + intent.ShooterNetId); return; }
+
+            try
+            {
+                object ability = ResolveAbilityByGuid(shooter, intent.AbilityDefGuid);
+                if (ability == null) { Debug.LogError("[Multipleer][tac] shoot intent: shooter has no ability with guid " + intent.AbilityDefGuid); return; }
+
+                object target = BuildShootTarget(intent);
+                if (target == null) { Debug.LogError("[Multipleer][tac] shoot intent: could not build target"); return; }
+
+                // public override void Activate(object parameter) — runs the real shot. The host is NOT
+                // mirroring, so ClientInterceptShoot passes through; the roll → ApplyDamage funnel then
+                // broadcasts tac.damage per hit.
+                var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
+                if (activate == null) { Debug.LogError("[Multipleer][tac] shoot intent: Activate(object) not found"); return; }
+                activate.Invoke(ability, new[] { target });
+                Debug.Log("[Multipleer][tac] HOST executed shot for shooter " + intent.ShooterNetId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnAbilityIntent exec failed: " + ex); }
+        }
+
+        // ─── HOST: ApplyDamage funneled → broadcast the FINAL applied DamageResult ─────────────────
+        /// <summary>HOST postfix on <c>TacticalActorBase.ApplyDamage(DamageResult)</c>: flatten the FINAL
+        /// applied result + broadcast <c>tac.damage</c> to all peers. Gated: only on the host, only in a live
+        /// session, and NOT while the host is itself applying a relayed result (<see cref="_applyingRemote"/>).
+        /// Postfix so it captures the result AFTER the engine finalized it.</summary>
+        public static void OnHostApplyDamage(object target, object damageResultBoxed)
+        {
+            if (_applyingRemote) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;   // defensive: host is never mirroring
+            if (target == null || damageResultBoxed == null) return;
+
+            try
+            {
+                int targetNetId = TacticalDeploySync.NetIdForLiveActor(target);
+                if (targetNetId < 0) return;   // an unregistered actor (e.g. transient destructible) — skip
+
+                var p = FlattenDamage(damageResultBoxed);
+                if (p == null) return;
+                p.TargetNetId = targetNetId;
+
+                // Resolve the damage source actor (the engine's own helper) → netId. Sentinel -1 if null.
+                object sourceActor = ResolveSourceActor(GetField(damageResultBoxed, "Source"));
+                p.SourceNetId = sourceActor != null ? TacticalDeploySync.NetIdForLiveActor(sourceActor) : TacticalLiveCodec.TargetNetIdNone;
+
+                // If the source is a shooter actor WITH readable CharacterStats (only TacticalActor has them —
+                // NOT a turret/vehicle/destructible/environmental source), carry its post-shot AP/WP so the
+                // client mirror sets them exactly (the client never ran the cost path). A stat-less source
+                // reads 0/0, which is INDISTINGUISHABLE from "real 0 AP" — broadcasting that would let the
+                // client ZERO the actor's real AP/WP. So gate the carry on a SUCCESSFUL stat read: if the
+                // source has no CharacterStats, send ShooterNetId = -1 and the client skips the AP/WP set.
+                if (sourceActor != null && ReadApWp(sourceActor, out float ap, out float wp))
+                {
+                    p.ShooterNetId = p.SourceNetId;
+                    p.ShooterApAfter = ap;
+                    p.ShooterWpAfter = wp;
+                }
+                else p.ShooterNetId = TacticalLiveCodec.TargetNetIdNone;
+
+                p.Seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacDamage);
+                byte[] payload = TacticalLiveCodec.EncodeDamage(p);
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacDamage, payload);
+                Debug.Log("[Multipleer][tac] HOST broadcast tac.damage seq=" + p.Seq + " targetNetId=" + targetNetId +
+                          " sourceNetId=" + p.SourceNetId + " HealthDamage=" + p.HealthDamage.ToString("0.0") +
+                          " statuses=" + p.Statuses.Count + " effects=" + p.EffectGuids.Count);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] OnHostApplyDamage failed: " + ex); }
+        }
+
+        // ─── CLIENT: apply the host damage outcome ─────────────────────────────────────────────────
+        /// <summary>CLIENT inbound (<c>tac.damage</c>): rebuild the <c>DamageResult</c> (defs by guid, live
+        /// refs via registry) and apply it to the target mirror. Guarded by the per-surface seq + the
+        /// re-entrancy flag (so the client's own ApplyDamage postfix doesn't re-broadcast). Then set the
+        /// shooter's AP/WP to the host-carried values. No-op off-client / off-session.</summary>
+        public static void HandleDamage(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeDamage(payload, out var p)) { Debug.LogError("[Multipleer][tac] tac.damage decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacDamage, p.Seq)) return;
+
+            object target = TacticalDeploySync.ResolveLiveActor(p.TargetNetId);
+            if (target == null) { Debug.LogError("[Multipleer][tac] tac.damage: no actor for targetNetId " + p.TargetNetId); return; }
+
+            try
+            {
+                object source = p.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(p.SourceNetId) : null;
+                object damageResult = RebuildDamage(p, source);
+                if (damageResult == null) { Debug.LogError("[Multipleer][tac] tac.damage: could not rebuild DamageResult"); return; }
+
+                var apply = AccessTools.Method(target.GetType(), "ApplyDamage", new[] { _damageResultType });
+                if (apply == null) { Debug.LogError("[Multipleer][tac] tac.damage: ApplyDamage(DamageResult) not found"); return; }
+
+                _applyingRemote = true;
+                try { apply.Invoke(target, new[] { damageResult }); }
+                finally { _applyingRemote = false; }
+
+                // Set the shooter's spent AP/WP to the host's post-shot values (the client never ran costs).
+                if (p.ShooterNetId >= 0)
+                {
+                    object shooter = TacticalDeploySync.ResolveLiveActor(p.ShooterNetId);
+                    if (shooter != null) SetApWp(shooter, p.ShooterApAfter, p.ShooterWpAfter);
+                }
+
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacDamage, p.Seq);
+                Debug.Log("[Multipleer][tac] CLIENT applied tac.damage seq=" + p.Seq + " targetNetId=" + p.TargetNetId +
+                          " HealthDamage=" + p.HealthDamage.ToString("0.0"));
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleDamage failed: " + ex); }
+        }
+
+        // ─── Flatten / rebuild DamageResult ────────────────────────────────────────────────────────
+
+        // DamageResult is a struct (PhoenixPoint.Tactical.Entities.DamageResult). Cached for reflection.
+        private static Type _damageResultType;
+        private static Type DamageResultType => _damageResultType ?? (_damageResultType =
+            AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.DamageResult"));
+
+        /// <summary>Read a boxed <c>DamageResult</c>'s numeric + def fields into a wire payload (no live refs
+        /// except defs-by-guid + statuses/statmods, all resolved to guids). TargetNetId/SourceNetId/AP/WP are
+        /// filled by the caller.</summary>
+        private static TacticalLiveCodec.DamagePayload FlattenDamage(object dr)
+        {
+            try
+            {
+                var p = new TacticalLiveCodec.DamagePayload
+                {
+                    HealthDamage = (float)GetField(dr, "HealthDamage"),
+                    ArmorDamage = (float)GetField(dr, "ArmorDamage"),
+                    ArmorMitigatedDamage = (float)GetField(dr, "ArmorMitigatedDamage"),
+                    StunValue = (float)GetField(dr, "StunValue"),
+                    HealValue = (float)GetField(dr, "HealValue"),
+                    ForceHurt = (bool)(GetField(dr, "forceHurt") ?? false),
+                    DamageTypeDefGuid = DefReflection.GetGuid(GetField(dr, "DamageTypeDef")) ?? "",
+                };
+                Vector3 impactForce = ToVec3(GetField(dr, "ImpactForce"));
+                Vector3 damageOrigin = ToVec3(GetField(dr, "DamageOrigin"));
+                p.IfX = impactForce.x; p.IfY = impactForce.y; p.IfZ = impactForce.z;
+                p.DoX = damageOrigin.x; p.DoY = damageOrigin.y; p.DoZ = damageOrigin.z;
+
+                // ApplyStatuses: List<StatusApplication> { StatusDef, object StatusSource, object StatusTarget, float Value }.
+                if (GetField(dr, "ApplyStatuses") is IEnumerable statuses)
+                    foreach (var s in statuses)
+                    {
+                        if (s == null) continue;
+                        string guid = DefReflection.GetGuid(GetField(s, "StatusDef"));
+                        if (string.IsNullOrEmpty(guid)) continue;
+                        object srcActor = ResolveSourceActor(GetField(s, "StatusSource"));
+                        int srcNet = srcActor != null ? TacticalDeploySync.NetIdForLiveActor(srcActor) : TacticalLiveCodec.TargetNetIdNone;
+                        p.Statuses.Add(new TacticalLiveCodec.DamageStatus
+                        { DefGuid = guid, Value = (float)(GetField(s, "Value") ?? 0f), SourceNetId = srcNet });
+                    }
+
+                // ActorEffects: List<EffectDef>.
+                if (GetField(dr, "ActorEffects") is IEnumerable effects)
+                    foreach (var e in effects)
+                    {
+                        string guid = DefReflection.GetGuid(e);
+                        if (!string.IsNullOrEmpty(guid)) p.EffectGuids.Add(guid);
+                    }
+
+                // StatModifications: List<StatModification> { StatModificationType Modification, string StatName, float Value, ... }.
+                if (GetField(dr, "StatModifications") is IEnumerable mods)
+                    foreach (var m in mods)
+                    {
+                        if (m == null) continue;
+                        p.StatMods.Add(new TacticalLiveCodec.DamageStatMod
+                        {
+                            StatName = GetField(m, "StatName") as string ?? "",
+                            ModKind = Convert.ToInt32(GetField(m, "Modification") ?? 0),
+                            Value = (float)(GetField(m, "Value") ?? 0f),
+                        });
+                    }
+
+                return p;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FlattenDamage failed: " + ex); return null; }
+        }
+
+        /// <summary>Rebuild a boxed <c>DamageResult</c> struct from a wire payload: numeric fields + defs
+        /// resolved by guid (null-skip) + source set to the resolved live actor (or null). <c>ImpactHit</c>
+        /// is left default (local-FX only). Statuses/effects/statMods are rebuilt and the native ApplyDamage
+        /// applies them.</summary>
+        private static object RebuildDamage(TacticalLiveCodec.DamagePayload p, object sourceActor)
+        {
+            var t = DamageResultType;
+            if (t == null) { Debug.LogError("[Multipleer][tac] RebuildDamage: DamageResult type not found"); return null; }
+            try
+            {
+                object dr = Activator.CreateInstance(t);   // struct default
+                SetField(t, ref dr, "HealthDamage", p.HealthDamage);
+                SetField(t, ref dr, "ArmorDamage", p.ArmorDamage);
+                SetField(t, ref dr, "ArmorMitigatedDamage", p.ArmorMitigatedDamage);
+                SetField(t, ref dr, "StunValue", p.StunValue);
+                SetField(t, ref dr, "HealValue", p.HealValue);
+                SetField(t, ref dr, "forceHurt", p.ForceHurt);
+                SetField(t, ref dr, "ImpactForce", new Vector3(p.IfX, p.IfY, p.IfZ));
+                SetField(t, ref dr, "DamageOrigin", new Vector3(p.DoX, p.DoY, p.DoZ));
+                SetField(t, ref dr, "Source", sourceActor);
+
+                object dmgTypeDef = DefReflection.GetDefByGuid(p.DamageTypeDefGuid);
+                if (dmgTypeDef != null) SetField(t, ref dr, "DamageTypeDef", dmgTypeDef);
+
+                // ApplyStatuses: rebuild List<StatusApplication> with resolved StatusDef + source actor.
+                if (p.Statuses != null && p.Statuses.Count > 0)
+                {
+                    var statusAppType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.StatusApplication");
+                    if (statusAppType != null)
+                    {
+                        var listType = typeof(List<>).MakeGenericType(statusAppType);
+                        var list = (IList)Activator.CreateInstance(listType);
+                        foreach (var s in p.Statuses)
+                        {
+                            object def = DefReflection.GetDefByGuid(s.DefGuid);
+                            if (def == null) continue;
+                            object sa = Activator.CreateInstance(statusAppType);
+                            SetField(statusAppType, ref sa, "StatusDef", def);
+                            SetField(statusAppType, ref sa, "Value", s.Value);
+                            object src = s.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(s.SourceNetId) : null;
+                            SetField(statusAppType, ref sa, "StatusSource", src);
+                            list.Add(sa);
+                        }
+                        if (list.Count > 0) SetField(t, ref dr, "ApplyStatuses", list);
+                    }
+                }
+
+                // ActorEffects: rebuild List<EffectDef>.
+                if (p.EffectGuids != null && p.EffectGuids.Count > 0)
+                {
+                    var effectDefType = AccessTools.TypeByName("Base.Entities.Effects.EffectDef");
+                    if (effectDefType != null)
+                    {
+                        var listType = typeof(List<>).MakeGenericType(effectDefType);
+                        var list = (IList)Activator.CreateInstance(listType);
+                        foreach (var g in p.EffectGuids)
+                        {
+                            object def = DefReflection.GetDefByGuid(g);
+                            if (def != null) list.Add(def);
+                        }
+                        if (list.Count > 0) SetField(t, ref dr, "ActorEffects", list);
+                    }
+                }
+
+                // StatModifications: rebuild List<StatModification> via its (modType, statName, value, source,
+                // applicationValue) ctor.
+                if (p.StatMods != null && p.StatMods.Count > 0)
+                {
+                    var statModType = AccessTools.TypeByName("Base.Entities.Statuses.StatModification");
+                    var modKindType = AccessTools.TypeByName("Base.Entities.Statuses.StatModificationType");
+                    if (statModType != null && modKindType != null)
+                    {
+                        var listType = typeof(List<>).MakeGenericType(statModType);
+                        var list = (IList)Activator.CreateInstance(listType);
+                        var ctor = statModType.GetConstructor(new[] { modKindType, typeof(string), typeof(float), typeof(object), typeof(float) });
+                        foreach (var m in p.StatMods)
+                        {
+                            object kind = Enum.ToObject(modKindType, m.ModKind);
+                            object sm = ctor != null
+                                ? ctor.Invoke(new object[] { kind, m.StatName, m.Value, null, 0f })
+                                : Activator.CreateInstance(statModType);
+                            list.Add(sm);
+                        }
+                        if (list.Count > 0) SetField(t, ref dr, "StatModifications", list);
+                    }
+                }
+
+                return dr;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] RebuildDamage failed: " + ex); return null; }
+        }
+
+        // ─── Engine reflection helpers ──────────────────────────────────────────────────────────────
+
+        /// <summary>Resolve the actor that an ability/weapon/status/etc. "source" object belongs to via the
+        /// engine's own <c>TacUtil.GetSourceTacticalActorBase(object)</c> (covers Weapon→actor,
+        /// TacticalAbility→actor, TacStatus→actor, GameObject→actor, raw actor). Null if unresolvable.</summary>
+        private static MethodInfo _getSourceActor;
+        private static object ResolveSourceActor(object source)
+        {
+            if (source == null) return null;
+            try
+            {
+                if (_getSourceActor == null)
+                {
+                    var tacUtil = AccessTools.TypeByName("PhoenixPoint.Tactical.TacUtil");
+                    _getSourceActor = tacUtil != null ? AccessTools.Method(tacUtil, "GetSourceTacticalActorBase", new[] { typeof(object) }) : null;
+                }
+                if (_getSourceActor != null) return _getSourceActor.Invoke(null, new[] { source });
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveSourceActor failed: " + ex); }
+            return null;
+        }
+
+        /// <summary>Resolve a <c>TacticalAbility</c> on an actor whose Def.Guid matches. Enumerates
+        /// <c>GetAbilities&lt;TacticalAbility&gt;()</c> and matches by guid (covers ShootAbility + variants).</summary>
+        private static object ResolveAbilityByGuid(object actor, string abilityGuid)
+        {
+            try
+            {
+                var tacAbilityType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility");
+                if (tacAbilityType == null) return null;
+                var getAbilities = AccessTools.Method(actor.GetType(), "GetAbilities");
+                if (getAbilities == null || !getAbilities.IsGenericMethodDefinition) return null;
+                var gen = getAbilities.MakeGenericMethod(tacAbilityType);
+                if (gen.GetParameters().Length != 0) return null;   // GetAbilities<T>() — the no-arg overload
+                var result = gen.Invoke(actor, null) as IEnumerable;
+                if (result == null) return null;
+                foreach (var a in result)
+                {
+                    if (a == null) continue;
+                    string g = DefReflection.GetGuid(GetProp(a, "Def"));
+                    if (g == abilityGuid) return a;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveAbilityByGuid failed: " + ex); }
+            return null;
+        }
+
+        /// <summary>Build a <c>TacticalAbilityTarget</c> for the host shot from the intent. Mirrors the proven
+        /// <c>TacticalMoveSync.BuildMoveTarget</c> pattern: TYPED-ctor first (so the host gets a fully-formed
+        /// target — Actor + GameObject + ActorGridPosition + PositionToApply populated by the ctor, which
+        /// <c>ShootAbility.Activate → Weapon.TryGetShootTarget</c> needs to re-resolve the shot solution),
+        /// with a default-ctor + field-set FALLBACK. Actor target uses the (actor, pos, AttackType=Regular)
+        /// ctor; a bare-position target (no actor) uses the (Vector3) ctor.</summary>
+        private static object BuildShootTarget(TacticalLiveCodec.IntentAbility intent)
+        {
+            var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+            if (targetType == null) return null;
+            var pos = new Vector3(intent.TX, intent.TY, intent.TZ);
+            object targetActor = intent.TargetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(intent.TargetNetId) : null;
+
+            try
+            {
+                if (targetActor != null)
+                {
+                    // new TacticalAbilityTarget(TacticalActorBase actor, Vector3 positionToApply, AttackType=Regular)
+                    var actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
+                    var attackType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.AttackType");
+                    var ctor = (actorBaseType != null && attackType != null)
+                        ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
+                        : null;
+                    if (ctor != null)
+                        return ctor.Invoke(new[] { targetActor, (object)pos, DefaultAttackType(attackType) });
+                }
+                else
+                {
+                    // new TacticalAbilityTarget(Vector3 pos) — bare-position shot.
+                    var posCtor = targetType.GetConstructor(new[] { typeof(Vector3) });
+                    if (posCtor != null) return posCtor.Invoke(new object[] { pos });
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildShootTarget ctor failed, falling back to field-set: " + ex); }
+
+            // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw).
+            object target = Activator.CreateInstance(targetType);
+            if (targetActor != null) AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
+            AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            return target;
+        }
+
+        /// <summary>The <c>AttackType.Regular</c> enum value (mirrors <c>TacticalMoveSync.DefaultAttackType</c>).</summary>
+        private static object DefaultAttackType(Type attackType)
+        {
+            if (attackType == null) return null;
+            try { return Enum.Parse(attackType, "Regular"); } catch { return Activator.CreateInstance(attackType); }
+        }
+
+        /// <summary>Read {targetNetId, targetPos} from a <c>TacticalAbilityTarget</c>: the actor (if any) →
+        /// netId, and PositionToApply (or the actor's Pos when PositionToApply is unset/NaN).</summary>
+        private static void ReadTarget(object parameter, out int targetNetId, out Vector3 targetPos)
+        {
+            targetNetId = TacticalLiveCodec.TargetNetIdNone;
+            targetPos = Vector3.zero;
+            if (parameter == null) return;
+            object actor = GetField(parameter, "Actor");
+            if (actor != null)
+            {
+                int net = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (net >= 0) targetNetId = net;
+            }
+            object pos = GetField(parameter, "PositionToApply");
+            if (pos is Vector3 v && !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z))) targetPos = v;
+            else if (actor != null && GetProp(actor, "Pos") is Vector3 ap) targetPos = ap;
+        }
+
+        /// <summary>Read the actor's current AP/WP via <c>CharacterStats.ActionPoints</c> / <c>.WillPoints</c>
+        /// (StatusStat, implicit float cast). Returns TRUE only when the actor actually has CharacterStats +
+        /// both stats (i.e. a <c>TacticalActor</c> — NOT a turret/vehicle/destructible/environmental source).
+        /// A FALSE result means "no readable stats" — the caller must NOT broadcast 0/0 as authoritative AP/WP
+        /// (that would let the client zero the actor's real AP/WP).</summary>
+        private static bool ReadApWp(object actor, out float ap, out float wp)
+        {
+            ap = 0f; wp = 0f;
+            object stats = GetProp(actor, "CharacterStats");
+            if (stats == null) return false;                       // TacticalActorBase w/o stats (turret/vehicle/etc.)
+            object apStat = GetField(stats, "ActionPoints");
+            object wpStat = GetField(stats, "WillPoints");
+            if (apStat == null || wpStat == null) return false;
+            ap = StatValue(apStat);
+            wp = StatValue(wpStat);
+            return true;
+        }
+
+        /// <summary>Set the actor's AP/WP via <c>BaseStat.Set(float)</c> on the AP/WP stats.</summary>
+        private static void SetApWp(object actor, float ap, float wp)
+        {
+            try
+            {
+                object stats = GetProp(actor, "CharacterStats");
+                if (stats == null) return;
+                SetStat(GetField(stats, "ActionPoints"), ap);
+                SetStat(GetField(stats, "WillPoints"), wp);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetApWp failed: " + ex); }
+        }
+
+        private static float StatValue(object stat)
+        {
+            if (stat == null) return 0f;
+            // BaseStat has implicit operator float. Reflectively: read its ModifiableValue Value or call the op.
+            try
+            {
+                var op = AccessTools.Method(stat.GetType(), "op_Implicit", new[] { stat.GetType() });
+                if (op != null) return Convert.ToSingle(op.Invoke(null, new[] { stat }));
+            }
+            catch { }
+            // Fallback: BaseStat.Value is a ModifiableValue; its float EndValue / implicit float.
+            try { return Convert.ToSingle(GetProp(stat, "IntValue") ?? 0); } catch { return 0f; }
+        }
+
+        private static void SetStat(object stat, float value)
+        {
+            if (stat == null) return;
+            var set = AccessTools.Method(stat.GetType(), "Set", new[] { typeof(float), typeof(bool) });
+            if (set != null) { set.Invoke(stat, new object[] { value, true }); return; }
+            var set1 = AccessTools.Method(stat.GetType(), "Set", new[] { typeof(float) });
+            set1?.Invoke(stat, new object[] { value });
+        }
+
+        private static Vector3 ToVec3(object o) => o is Vector3 v ? v : Vector3.zero;
+
+        private static object GetProp(object obj, string name)
+        {
+            if (obj == null) return null;
+            var p = AccessTools.Property(obj.GetType(), name);
+            if (p != null) return p.GetValue(obj, null);
+            var f = AccessTools.Field(obj.GetType(), name);
+            return f?.GetValue(obj);
+        }
+
+        private static object GetField(object obj, string name)
+        {
+            if (obj == null) return null;
+            var f = AccessTools.Field(obj.GetType(), name);
+            if (f != null) return f.GetValue(obj);
+            var p = AccessTools.Property(obj.GetType(), name);
+            return p != null ? p.GetValue(obj, null) : null;
+        }
+
+        // Struct field-set: a boxed struct must be re-boxed on each set (SetValue mutates the box in place
+        // for reference-typed boxes, which a boxed struct IS — so a single boxed instance accumulates all
+        // sets). The `ref` keeps the API explicit that `dr` is the live box.
+        private static void SetField(Type type, ref object boxed, string name, object value)
+        {
+            var f = AccessTools.Field(type, name);
+            if (f != null) f.SetValue(boxed, value);
+            else Debug.LogError("[Multipleer][tac] DamageResult field not found: " + name);
+        }
+    }
+}

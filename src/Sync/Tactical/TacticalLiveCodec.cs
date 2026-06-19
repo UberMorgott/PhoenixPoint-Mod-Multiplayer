@@ -217,6 +217,174 @@ namespace Multipleer.Sync.Tactical
             }
             catch { return false; }
         }
+
+        // ─── tac.intent.ability (client→host, Inc 3a) ─────────────────────
+        // A client SHOOT intent: which actor shoots which ability (by def guid) at which target. The target
+        // is carried as BOTH a netId (actor target; -1 sentinel when the shot is at a bare position) AND a
+        // position (always present — the host rebuilds a TacticalAbilityTarget from whichever is valid).
+        public struct IntentAbility
+        {
+            public int ShooterNetId;
+            public string AbilityDefGuid;
+            public int TargetNetId;          // -1 sentinel when the target is a position, not an actor
+            public float TX, TY, TZ;
+            public uint Nonce;
+            public IntentAbility(int shooterNetId, string abilityDefGuid, int targetNetId,
+                float tx, float ty, float tz, uint nonce)
+            {
+                ShooterNetId = shooterNetId; AbilityDefGuid = abilityDefGuid ?? ""; TargetNetId = targetNetId;
+                TX = tx; TY = ty; TZ = tz; Nonce = nonce;
+            }
+        }
+
+        public const int TargetNetIdNone = -1;   // sentinel: the shot target is a position, not an actor
+
+        public static byte[] EncodeIntentAbility(int shooterNetId, string abilityDefGuid, int targetNetId,
+            float tx, float ty, float tz, uint nonce)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(shooterNetId);
+                w.Write(abilityDefGuid ?? "");
+                w.Write(targetNetId);
+                w.Write(tx); w.Write(ty); w.Write(tz);
+                w.Write(nonce);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeIntentAbility(byte[] data, out IntentAbility intent)
+        {
+            intent = default(IntentAbility);
+            // Minimum: i32 shooter + at least a 1-byte length-prefixed string + i32 target + 3*f32 + u32.
+            if (data == null || data.Length < 4 + 1 + 4 + 12 + 4) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    int shooter = r.ReadInt32();
+                    string guid = r.ReadString();
+                    int targetNetId = r.ReadInt32();
+                    float tx = r.ReadSingle(); float ty = r.ReadSingle(); float tz = r.ReadSingle();
+                    uint nonce = r.ReadUInt32();
+                    intent = new IntentAbility(shooter, guid, targetNetId, tx, ty, tz, nonce);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
+        // ─── tac.damage (host→all, Inc 3a) ────────────────────────────────
+        // A flattened DamageResult (DamageResult.cs) — the FINAL applied result the host captured in its
+        // ApplyDamage postfix. The client rebuilds a DamageResult from this and applies it to the target
+        // mirror, so HP/armor/stun/status/effects/stat-mods all converge. ImpactHit is intentionally omitted
+        // (left default on rebuild — it only drives local hit FX, not authoritative state). The shooter's
+        // post-shot AP/WP ride along so the client mirror can set the shooter's spent AP/WP exactly.
+        public struct DamageStatus { public string DefGuid; public float Value; public int SourceNetId; }
+        public struct DamageStatMod { public string StatName; public int ModKind; public float Value; }
+
+        public sealed class DamagePayload
+        {
+            public uint Seq;
+            public int TargetNetId;
+            public int SourceNetId;            // -1 sentinel when the damage source is unresolved/null
+            public float HealthDamage, ArmorDamage, ArmorMitigatedDamage, StunValue, HealValue;
+            public float IfX, IfY, IfZ;        // ImpactForce
+            public float DoX, DoY, DoZ;        // DamageOrigin
+            public bool ForceHurt;
+            public string DamageTypeDefGuid;
+            public List<DamageStatus> Statuses = new List<DamageStatus>();
+            public List<string> EffectGuids = new List<string>();
+            public List<DamageStatMod> StatMods = new List<DamageStatMod>();
+            public int ShooterNetId;           // -1 when the source is not the shooter / not carried
+            public float ShooterApAfter, ShooterWpAfter;
+        }
+
+        public static byte[] EncodeDamage(DamagePayload p)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(p.Seq);
+                w.Write(p.TargetNetId);
+                w.Write(p.SourceNetId);
+                w.Write(p.HealthDamage); w.Write(p.ArmorDamage); w.Write(p.ArmorMitigatedDamage);
+                w.Write(p.StunValue); w.Write(p.HealValue);
+                w.Write(p.IfX); w.Write(p.IfY); w.Write(p.IfZ);
+                w.Write(p.DoX); w.Write(p.DoY); w.Write(p.DoZ);
+                w.Write(p.ForceHurt);
+                w.Write(p.DamageTypeDefGuid ?? "");
+
+                var statuses = p.Statuses ?? new List<DamageStatus>();
+                w.Write(statuses.Count);
+                foreach (var s in statuses) { w.Write(s.DefGuid ?? ""); w.Write(s.Value); w.Write(s.SourceNetId); }
+
+                var effects = p.EffectGuids ?? new List<string>();
+                w.Write(effects.Count);
+                foreach (var e in effects) w.Write(e ?? "");
+
+                var mods = p.StatMods ?? new List<DamageStatMod>();
+                w.Write(mods.Count);
+                foreach (var m in mods) { w.Write(m.StatName ?? ""); w.Write(m.ModKind); w.Write(m.Value); }
+
+                w.Write(p.ShooterNetId);
+                w.Write(p.ShooterApAfter); w.Write(p.ShooterWpAfter);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeDamage(byte[] data, out DamagePayload payload)
+        {
+            payload = null;
+            // Minimum fixed-size prefix (before the var-length string/lists): seq + target + source +
+            // 5 dmg floats + 3+3 vector floats + bool. The strings/lists are guarded by the reader.
+            if (data == null || data.Length < 4 + 4 + 4 + (5 * 4) + (6 * 4) + 1) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    var p = new DamagePayload
+                    {
+                        Seq = r.ReadUInt32(),
+                        TargetNetId = r.ReadInt32(),
+                        SourceNetId = r.ReadInt32(),
+                        HealthDamage = r.ReadSingle(),
+                        ArmorDamage = r.ReadSingle(),
+                        ArmorMitigatedDamage = r.ReadSingle(),
+                        StunValue = r.ReadSingle(),
+                        HealValue = r.ReadSingle(),
+                        IfX = r.ReadSingle(), IfY = r.ReadSingle(), IfZ = r.ReadSingle(),
+                        DoX = r.ReadSingle(), DoY = r.ReadSingle(), DoZ = r.ReadSingle(),
+                        ForceHurt = r.ReadBoolean(),
+                        DamageTypeDefGuid = r.ReadString(),
+                    };
+
+                    int statusCount = r.ReadInt32();
+                    if (statusCount < 0 || statusCount > 4096) return false;
+                    for (int i = 0; i < statusCount; i++)
+                        p.Statuses.Add(new DamageStatus { DefGuid = r.ReadString(), Value = r.ReadSingle(), SourceNetId = r.ReadInt32() });
+
+                    int effectCount = r.ReadInt32();
+                    if (effectCount < 0 || effectCount > 4096) return false;
+                    for (int i = 0; i < effectCount; i++) p.EffectGuids.Add(r.ReadString());
+
+                    int modCount = r.ReadInt32();
+                    if (modCount < 0 || modCount > 4096) return false;
+                    for (int i = 0; i < modCount; i++)
+                        p.StatMods.Add(new DamageStatMod { StatName = r.ReadString(), ModKind = r.ReadInt32(), Value = r.ReadSingle() });
+
+                    p.ShooterNetId = r.ReadInt32();
+                    p.ShooterApAfter = r.ReadSingle();
+                    p.ShooterWpAfter = r.ReadSingle();
+                    payload = p;
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 
     /// <summary>

@@ -37,6 +37,16 @@ namespace Multipleer.Sync.Tactical
         public const ushort TacIntentEndTurn = 0x84; // 132: client→host  "end the current turn"      (intent, carries nonce)
         public const ushort TacTurn = 0x85;          // 133: host→all     "current faction advanced"  (outcome, carries seq)
         public const ushort TacMoveStart = 0x86;     // 134: host→all     "actor netId begins move to pos" (start, carries own seq) — client animates CONCURRENTLY with host; tac.move (0x83) END reconciles the exact final cell
+
+        // ─── Increment 3a LIVE combat/damage surfaces (shoot intent + damage outcome) ───────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Inc3a host-authoritative
+        // shot replication: a client sends a SHOOT intent, the host runs the real shot (roll → projectile
+        // → ApplyDamage), then the host broadcasts the FINAL applied DamageResult so every peer's mirror
+        // applies identical damage (the client's own roll chain is suppressed by FireWeaponPatch). All
+        // damage funnels through TacticalActorBase.ApplyDamage, so this one surface covers shots, melee,
+        // overwatch, AI, and the death cascade alike.
+        public const ushort TacIntentAbility = 0x87; // 135: client→host  "actor netId shoots ability@guid at target" (intent, carries nonce)
+        public const ushort TacDamage = 0x88;        // 136: host→all     "actor netId took this DamageResult" (outcome, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape
