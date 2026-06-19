@@ -732,6 +732,20 @@ namespace Multipleer.Sync.Tactical
                 try { TacticalVisionSync.HandleVision(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.vision failed: " + ex); }
                 return true;
             }
+
+            // ─── LIVE equip/weapon-swap rail (Inc Equip) ──────────────────────────────────────────
+            // Intent (client→host) lands on the host; outcome (host→all) lands on clients. Each handler is
+            // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacIntentEquip)
+            {
+                try { TacticalEquipSync.HostOnEquipIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.equip failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacEquip)
+            {
+                try { TacticalEquipSync.HandleEquip(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.equip failed: " + ex); }
+                return true;
+            }
             return false;
         }
 

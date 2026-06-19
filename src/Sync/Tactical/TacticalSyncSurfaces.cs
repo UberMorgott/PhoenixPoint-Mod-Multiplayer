@@ -55,6 +55,17 @@ namespace Multipleer.Sync.Tactical
         // faction's KnownActors on every FactionKnowledgeChangedEvent and pushes a full RECONCILE snapshot here;
         // the client sets/forgets to match. Outcome-style host→all push, carries its own TacticalLiveSeq.
         public const ushort TacVision = 0x89;        // 137: host→all     "player-faction vision snapshot" (reconcile, carries seq)
+
+        // ─── Inc Equip: host-authoritative WEAPON/EQUIPMENT-SWAP replication ────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Mirrors the move/shoot model:
+        // a CLIENT switching a soldier's active weapon/equipment is suppressed and sends a tac.intent.equip
+        // (carries the equipment SLOT INDEX, stable across host/client via the shared save); the HOST re-invokes
+        // the real EquipmentComponent.SetSelectedEquipment, then broadcasts tac.equip so every peer mirrors the
+        // selected equipment (updating BOTH the visible weapon and the abilities the actor exposes). Selecting a
+        // weapon is FREE (no AP/WP), so the outcome carries no AP-after. Self-contained tactical seq (last-writer-
+        // wins) like tac.move / tac.turn / tac.vision.
+        public const ushort TacIntentEquip = 0x8A;   // 138: client→host  "actor netId selects equipment@slot" (intent, carries nonce)
+        public const ushort TacEquip = 0x8B;         // 139: host→all     "actor netId now has equipment@slot selected" (outcome, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape
