@@ -662,9 +662,14 @@ namespace Multipleer.Network.Sync.State
                 if (_resourcesListField == null || _namedListGetDef == null || _viewDisplayName1 == null) return null;
                 var list = _resourcesListField.GetValue(module);
                 if (list == null) return null;
-                // ResourceType enum name from its raw value.
-                var resEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceType");
-                string typeName = resEnum != null ? Enum.GetName(resEnum, Enum.ToObject(resEnum, resourceTypeRaw)) : resourceTypeRaw.ToString();
+                // ResourceType enum name from its raw value via a STABLE compile-time map (FIX #1). The native
+                // renderer keys ResourcesList by Type.ToString() — the enum NAME ("Materials"/"Supplies"), never
+                // the number (UIModuleSiteEncounters.cs:417). The previous runtime AccessTools.TypeByName(
+                // "...ResourceType") + Enum.GetName could return null on a fuzzy/cached miss and fell back to
+                // resourceTypeRaw.ToString() — the literal "2"/"1" — which GetDef can never resolve, dropping
+                // every reward resource line ("unresolved type 2"/"unresolved type 1" in-game). The map mirrors
+                // the compile-time game enum (identical host↔client) so the key is always the resolvable name.
+                string typeName = RewardResourceTypes.NameForRaw(resourceTypeRaw);
                 if (string.IsNullOrEmpty(typeName)) return null;
                 var viewDef = _namedListGetDef.Invoke(list, new object[] { typeName });
                 if (viewDef == null) return null;

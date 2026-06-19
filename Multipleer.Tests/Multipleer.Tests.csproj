@@ -76,6 +76,10 @@
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
+    <!-- FIX #1: pure, Unity-free stable ResourceType int→enum-name map (mirrors the compile-time game enum).
+         Replaces the fragile runtime AccessTools.TypeByName+Enum.GetName the client renderer used, whose
+         numeric fallback ("2"/"1") the NamedListDef could never resolve → dropped reward resource lines. -->
+    <Compile Include="..\src\Network\Sync\State\RewardResourceTypes.cs"><Link>Sync\State\RewardResourceTypes.cs</Link></Compile>
     <!-- Pure, Unity-free reflection-overload disambiguator (fixes the NamedListDef.GetDef ambiguity that
          silently killed the client RESULT-card reward lines). Linked so it can be unit-tested directly. -->
     <Compile Include="..\src\Network\Sync\State\MethodOverloadResolver.cs"><Link>Sync\State\MethodOverloadResolver.cs</Link></Compile>
