@@ -56,22 +56,25 @@ public class EventCorrelatorTests
     }
 
     [Fact]
-    public void OutOfOrder_SingleChoiceDismissBeforeRaise_MirrorsModalNotResultPage()
+    public void OutOfOrder_SingleChoiceCompletedDismissBeforeRaise_ResolvesToResultPage()
     {
         var c = new EventCorrelator();
 
-        // Single-choice geoscape event: the host auto-completes the lone choice at trigger and broadcasts the
-        // result-bearing Dismiss(occ=5, choice=0) BEFORE the Raise. The CLIENT must MIRROR the host's native
-        // flavor modal (ShowDialog) — NOT jump to a synthetic result page, which is a different dialog STAGE
-        // than the host is still showing.
-        var dismissed = c.Dismissed(5, "EX20", choiceIndex: 0);
-        Assert.Equal(Kind.BufferDismiss, dismissed.Kind);
+        // Bug repro (scavenging-site events are SINGLE-CHOICE): the host completes the event and advances to
+        // window 2 (result + reward); the client buffers the out-of-order result-bearing Dismiss(occ=1, choice=0)
+        // BEFORE the Raise. On the raise the client MUST advance to the result page too — NOT re-show the
+        // window-1 choice dialog (the old singleChoice→ShowDialog branch stranded the client on window 1 while
+        // the host showed window 2). Whether a window 2 actually renders is decided DOWNSTREAM by
+        // BuildResultEvent (reward → window 2; null → clean close); the correlator just unifies on ShowResultPage.
+        var d1 = c.Dismissed(1, "EX99", choiceIndex: 0);
+        Assert.Equal(Kind.BufferDismiss, d1.Kind);         // sanity: dismiss beat the raise → buffered
         Assert.Equal(1, c.PendingCount);
 
-        var raised = c.Raised(5, "EX20", singleChoice: true);
-        Assert.Equal(Kind.ShowDialog, raised.Kind);        // mirror the host's native modal, not the result page
+        var d2 = c.Raised(1, "EX99", singleChoice: true);
+        Assert.Equal(Kind.ShowResultPage, d2.Kind);        // advance to the result page, NOT re-show the dialog
+        Assert.Equal(0, d2.ChoiceIndex);
         Assert.Equal(0, c.PendingCount);                   // buffer drained
-        Assert.Equal(1, c.OpenCount);                      // tracked as open → closes locally on the player's OK
+        Assert.Equal(0, c.OpenCount);                      // resolved → not left stranded open on window 1
     }
 
     [Fact]

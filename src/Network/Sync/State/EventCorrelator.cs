@@ -99,14 +99,14 @@ namespace Multipleer.Network.Sync.State
         /// matches, resolve it directly (skip leaving an orphan choice dialog); otherwise show the dialog and
         /// record the open occurrence.
         ///
-        /// <paramref name="singleChoice"/> mirrors <c>GeoscapeEventData.HasSingleChoice</c> (Choices.Count &lt;= 1):
-        /// a single-choice event is AUTO-COMPLETED by the host at trigger time, so its result-bearing dismiss
-        /// arrives BEFORE this raise. For that case the client must MIRROR the host's native flavor modal
-        /// (<see cref="ActionKind.ShowDialog"/>) — the host shows the same single-button modal until the human
-        /// OKs it — instead of jumping to a synthetic result page (a different dialog STAGE than the host shows).
-        /// The outcome/reward is applied independently via the state channels, so showing the modal vs the result
-        /// page changes ONLY the display. A MULTI-choice buffered dismiss (<paramref name="singleChoice"/> == false)
-        /// is unchanged: it resolves straight to the result page.
+        /// A buffered out-of-order dismiss with a picked choice (<c>ChoiceIndex &gt;= 0</c>) resolves STRAIGHT to
+        /// the result page for BOTH single- and multi-choice events: the host advances to its window-2
+        /// result/reward page in either case, so re-showing the window-1 choice dialog would strand the client on
+        /// window 1 while the host shows window 2. Whether a window 2 actually renders is left to the downstream
+        /// builder (<c>SyncEngine.ResolveToResultPage</c> → <c>EventReflection.BuildResultEvent</c>): a buildable
+        /// page is shown; a null page falls back to a clean close. <paramref name="singleChoice"/> (mirrors
+        /// <c>GeoscapeEventData.HasSingleChoice</c>) is retained for call-site compatibility but no longer changes
+        /// the drain outcome.
         /// </summary>
         public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false)
         {
@@ -116,16 +116,12 @@ namespace Multipleer.Network.Sync.State
                 RemovePending(occurrenceId);
                 if (buffered.ChoiceIndex >= 0)
                 {
-                    // Single-choice auto-completed event: MIRROR the host's native modal (it still shows the
-                    // single-button flavor modal until the human OKs it) instead of the synthetic result page.
-                    // Track it open so the player's local OK can close it (no host dismiss will follow — the
-                    // authoritative dismiss was already consumed at trigger time).
-                    if (singleChoice)
-                    {
-                        _open[occurrenceId] = eventId ?? buffered.EventId;
-                        return new Decision(ActionKind.ShowDialog, occurrenceId, eventId ?? buffered.EventId, -1);
-                    }
-                    // Multi-choice: the picked choice produced a result/outcome page → jump straight to it.
+                    // A completed event whose result-bearing dismiss beat its raise → resolve STRAIGHT to the
+                    // result page, regardless of singleChoice. The host advances to its window-2 result/reward
+                    // page for single- AND multi-choice events alike, so re-showing the window-1 choice dialog
+                    // would strand the client on window 1 while the host shows window 2. Whether a window 2
+                    // actually renders is decided DOWNSTREAM (SyncEngine.ResolveToResultPage →
+                    // EventReflection.BuildResultEvent): a buildable page → show it; a null page → clean close.
                     return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                 }
                 // Close-only dismiss that beat its raise: the player never saw the dialog → nothing to show.
