@@ -140,19 +140,32 @@ namespace Multipleer.Sync.Tactical
 
             try
             {
-                // 1a) Exit the OUTGOING player turn on every handoff: if the faction we are leaving is still
-                //     IsPlayingTurn, set its _endTurnRequested=true so the native player PlayTurnCrt loop
+                // 1a) Exit the OUTGOING turn on every handoff.
+                //   • PLAYER faction: set its _endTurnRequested=true so the native player PlayTurnCrt loop
                 //     (TacticalFaction.cs:479) breaks, runs end-turn side-effects, and clears IsPlayingTurn.
                 //     Without this the client's own PlayTurnCrt stays running → "already running" dead-end on
                 //     return to the player turn.
+                //   • NON-PLAYER faction (Feature A): we marked its IsPlayingTurn=true by hand for the
+                //     enemy-turn presentation and never started PlayTurnCrt, so nothing native clears it.
+                //     Clear it directly (mirror native PlayTurnCrt exit TacticalFaction.cs:486) so the next
+                //     handoff starts clean and the view dispatcher can re-evaluate.
                 bool prevEnded = false;
                 try
                 {
                     object outgoing = GetProp(tlc, "CurrentFaction");
                     if (outgoing != null && ToBool(GetProp(outgoing, "IsPlayingTurn")))
                     {
-                        Traverse.Create(outgoing).Field("_endTurnRequested").SetValue(true);
-                        prevEnded = true;
+                        bool outgoingIsPlayer = ToBool(GetProp(outgoing, "IsControlledByPlayer"));
+                        if (ClientEnemyTurnPresentationGate.ShouldClearOutgoingIsPlayingTurn(outgoingIsPlayer, outgoingIsPlayingTurn: true))
+                        {
+                            SetIsPlayingTurn(outgoing, false);   // outgoing enemy presentation → clear our manual flag
+                            prevEnded = true;
+                        }
+                        else
+                        {
+                            Traverse.Create(outgoing).Field("_endTurnRequested").SetValue(true);   // outgoing player → native loop exit
+                            prevEnded = true;
+                        }
                     }
                 }
                 catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.turn: outgoing end-turn failed: " + ex); }
@@ -195,17 +208,35 @@ namespace Multipleer.Sync.Tactical
                     // because the NewTurnEvent we raise can fire BEFORE TacticalView subscribes to it.
                     EnsureClientTurnHud(current);
                 }
+                else if (ClientEnemyTurnPresentationGate.ShouldEnterEnemyPresentation(incomingIsControlledByPlayer: false))
+                {
+                    // 3b) AI/enemy faction (Feature A) → enter the NATIVE enemy-turn PRESENTATION instead of the
+                    //     old frozen-spectator view-down. We still do NOT start PlayTurnCrt and do NOT run AI
+                    //     (host is authoritative; NextTurnCrt + AIUpdateCrt stay suppressed) — enemy actions
+                    //     stream in via tac.move / tac.intent.ability and the camera follows them for free
+                    //     (TacticalAbility.Activate → CameraDirector.Hint(AbilityActivated)).
+                    SetTurnNumber(current, t.TurnNumber);
+                    // VIEW GATE: set the enemy faction's IsPlayingTurn=true (private setter → Traverse). The
+                    // native UIStateInitial.InitialStateUpdateCrt (UIStateInitial.cs:58-65), once the view is in
+                    // UIStateInitial with a non-player CurrentFaction, spins `while (!IsPlayingTurn)` and then
+                    // SwitchToState(new UIStateOtherFactionTurn()) — which hides the player action bar, shows the
+                    // "<faction> turn" banner, and sets overwatch visuals. Setting IsPlayingTurn is the one missing
+                    // input on the client (PlayTurnCrt, which sets it natively at :442, never runs here).
+                    SetIsPlayingTurn(current, true);
+                    // Drive the view into UIStateInitial (mirror native OnViewerFactionEndedTurn,
+                    // TacticalView.cs:1248-1252) so its dispatcher re-evaluates and, with IsPlayingTurn now true +
+                    // a non-player CurrentFaction, transitions to UIStateOtherFactionTurn on its own. We KEEP the
+                    // viewer faction = the client's own player faction (fog/vision correctness) — do NOT call
+                    // SetViewerTacticalFaction. Reuses the readiness-guard + deferred retry (survives a not-yet-
+                    // ready view).
+                    viewDown = EnsureClientViewDown(current);
+                    Debug.Log("[Multipleer][tac] CLIENT entered ENEMY-TURN presentation idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (UIStateOtherFactionTurn, host-authoritative)");
+                }
                 else
                 {
-                    // 3b) AI/enemy faction → stay frozen spectator. Stamp the turn number; enemy actions arrive
-                    //     via tac.move / tac.damage. Do NOT start PlayTurnCrt (would touch view/AI state).
+                    // Defensive: non-player target that should NOT show enemy presentation (currently unreachable;
+                    // ShouldEnterEnemyPresentation is true for every non-player). Stay a frozen spectator.
                     SetTurnNumber(current, t.TurnNumber);
-                    // DRIVE THE VIEW DOWN: the client's NextTurnCrt is suppressed so native
-                    // NewTurnEvent/FactionEndedTurnEvent never fire — the mirror is the ONLY thing that can
-                    // dismiss the player HUD. Mirror native TacticalView.OnViewerFactionEndedTurn
-                    // (TacticalView.cs:1248-1252): switch _statesStack to a fresh UIStateInitial() via
-                    // ClearStackAndPush. Reuses the readiness-guard + deferred retry so it survives a
-                    // not-yet-ready view.
                     viewDown = EnsureClientViewDown(current);
                     Debug.Log("[Multipleer][tac] CLIENT mirrored ENEMY/AI turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (frozen spectator)");
                 }
@@ -572,6 +603,22 @@ namespace Multipleer.Sync.Tactical
                 Traverse.Create(faction).Property("TurnNumber").SetValue(turnNumber);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetTurnNumber failed: " + ex); }
+        }
+
+        /// <summary>Set <c>TacticalFaction.IsPlayingTurn</c> (TacticalFaction.cs:79, public getter / PRIVATE
+        /// setter). Used by the Feature-A enemy-turn presentation: setting it true is the one input the native
+        /// view dispatcher (UIStateInitial.InitialStateUpdateCrt:58-65) is missing on the client so it can enter
+        /// UIStateOtherFactionTurn; clearing it false on handoff mirrors PlayTurnCrt's exit (TacticalFaction.cs:486)
+        /// since we never run PlayTurnCrt for the enemy. Private setter → Traverse, with AccessTools fallback.</summary>
+        private static void SetIsPlayingTurn(object faction, bool value)
+        {
+            try
+            {
+                var p = AccessTools.Property(faction.GetType(), "IsPlayingTurn");
+                if (p != null && p.CanWrite) { p.SetValue(faction, value, null); return; }
+                Traverse.Create(faction).Property("IsPlayingTurn").SetValue(value);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetIsPlayingTurn failed: " + ex); }
         }
 
         private static int ResolveFactionIndex(object tlc, object faction)

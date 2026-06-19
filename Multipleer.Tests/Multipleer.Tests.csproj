@@ -145,6 +145,10 @@
          excluding Move/Overwatch/Reload. The engine glue (TacticalCombatSync + the AbilityActivateRelayPatch
          Harmony patch) binds game types and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\TacticalAbilityRelay.cs"><Link>Sync\Tactical\TacticalAbilityRelay.cs</Link></Compile>
+    <!-- Feature A: pure, Unity-free CLIENT enemy-turn presentation gate (enter UIStateOtherFactionTurn for a
+         non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
+         engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\ClientEnemyTurnPresentationGate.cs"><Link>Sync\Tactical\ClientEnemyTurnPresentationGate.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->
