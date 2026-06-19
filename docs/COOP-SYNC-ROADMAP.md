@@ -126,7 +126,7 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 | #1 Core skeleton | **IN PROGRESS — Phase 1 code-complete (Tasks 1-6), Task 7 pending in-game gate** | spec+plan written; 6/7 tasks merged to inner main; 215 tests green; in-game UNVERIFIED (additive, behavior-unchanged) |
 | #2 Migrate existing + in-game gate | IN PROGRESS | surfaces below already work & deployed; skeleton consolidation pending; in-game verification ongoing |
 | #3 Geoscape surfaces | **REFRAMED → Inc1-Inc5** | interim baseline DONE: research, manufacture, facility, geoscape-events(answer), wallet, time/anchor-rate. Full-replication increments replace per-surface piecemeal |
-| Inc1 sim-freeze | NOT STARTED | 13-producer freeze + TFTV maintenance guard + snapshot-on-join |
+| Inc1 sim-freeze | **CODE-COMPLETE @ `546dcca`** | 13-producer freeze + TFTV maintenance guard + snapshot-on-join; build clean, unit tests green; **in-game verification pending** (acceptance gate not yet run) |
 | Inc2 discrete deltas | NOT STARTED | entity-op + travel + events via SurfaceRouter |
 | Inc3 InstanceData-diff | NOT STARTED | generic per-entity diff; retire per-domain channels starts here |
 | Inc4 retire channels | NOT STARTED | surface-by-surface; each in-game-gated |
