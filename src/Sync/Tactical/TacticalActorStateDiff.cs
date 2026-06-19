@@ -89,6 +89,93 @@ namespace Multipleer.Sync.Tactical
         /// of the key so a duration tick / value drift never forces a remove+re-add (which would re-run OnApply).</summary>
         public static string KeyOf(StatusRec r) => (r.DefGuid ?? "") + "|" + r.SourceNetId;
 
+        // ─── Feature B: VISUAL-ONLY status mirror policy (VisibleOnHealthbar → mirror as inert icon) ───────
+        //
+        // POLICY SHIFT vs the old type-name allowlist: the generic delta now mirrors a status purely for its
+        // HEALTHBAR ICON. The decision is the engine's own healthbar-visibility flag — TacStatusDef.
+        // VisibleOnHealthbar, an enum {Hidden=0, VisibleWhenSelected=1, AlwaysVisible=5} — NOT the C# type. A
+        // status that shows an icon on the host (visibility != Hidden) is mirrored; everything else (Hidden, or
+        // a non-tactical status with no such field) is default-DENY. The mirrored status is made INERT on the
+        // client: the spine pre-sets Status.Applied=true before ApplyStatus (engine deserialize path → subclass
+        // OnApply skips its gameplay effects), and ClientStatusMirrorGuards skips the per-turn StartTurn/EndTurn/
+        // ApplyEffect ticks + the effect-reverting OnUnapply — so NO effect runs (no double DoT damage, AP drain,
+        // faction flip, or stat double-apply). Identity stays {DefGuid, SourceNetId}; the reconcile diff +
+        // signature below are unchanged.
+
+        /// <summary>The TacStatusDef.HealthBarVisibility enum value for "Hidden" (the engine default 0). The
+        /// engine glue reads the live enum and passes its int value here.</summary>
+        public const int HealthBarVisibilityHidden = 0;
+
+        /// <summary>Status types EXCLUDED from the visual mirror even when visible-on-healthbar. Two reasons:
+        /// (1) a DEDICATED sync surface already owns the cosmetic replication — mirroring here too would create a
+        /// duplicate instance / fight that surface (<c>OverwatchStatus</c>, owned by tac.overwatch.state 0x8D,
+        /// which (re)creates + SetCone the cone status on the client); (2) FACTION-SAFETY — the status flips the
+        /// actor's faction, so it must never run live on the client even as an "inert" mirror.
+        /// <c>MindControlStatus</c> leaks an UNCONDITIONAL ActorDeathEvent subscription regardless of the Applied
+        /// pre-set, and <c>ZombifiedStatus</c> would flip the faction if the pre-set ever fails — a wrong-faction
+        /// actor on the client is far worse than a missing badge, so the icon is dropped for both. The DoT family
+        /// is deliberately NOT excluded: its damage rides tac.damage (0x88) but its ICON (Bleed/Fire/Acid/…) is
+        /// exactly what Feature B mirrors — made inert by the apply-time Applied pre-set + the ApplyEffect guard,
+        /// so the icon shows with no client-side tick.</summary>
+        private static readonly HashSet<string> SurfaceOwnedStatusTypeNames = new HashSet<string>
+        {
+            "OverwatchStatus",
+            "MindControlStatus",   // flips faction + leaks an unconditional ActorDeathEvent subscription
+            "ZombifiedStatus",     // flips faction if the Applied pre-set ever fails
+        };
+
+        /// <summary>PURE mirror decision: a status is mirrored as an INERT healthbar icon iff its host
+        /// VisibleOnHealthbar is NOT Hidden (it draws an icon on the host) AND it is not owned by a dedicated
+        /// sync surface (<see cref="SurfaceOwnedStatusTypeNames"/>). Default-DENY: a Hidden status / a non-
+        /// tactical status with no visibility (caller passes Hidden) / a surface-owned status is not mirrored.
+        /// Unit-tested.</summary>
+        public static bool ShouldMirrorStatus(int healthBarVisibility, string simpleTypeName = null)
+        {
+            if (healthBarVisibility == HealthBarVisibilityHidden) return false;
+            if (!string.IsNullOrEmpty(simpleTypeName) && SurfaceOwnedStatusTypeNames.Contains(simpleTypeName))
+                return false;
+            return true;
+        }
+
+        // ─── Feature B PART 1: per-bodypart-HP RECONCILE diff (limb-disable mirror) ───────────────────────
+
+        /// <summary>One bodypart HP entry: the slot name (stable host↔client key) + the part's absolute HP.</summary>
+        public struct BodyPartHpRec
+        {
+            public string SlotName;
+            public float Hp;
+            public BodyPartHpRec(string slotName, float hp) { SlotName = slotName ?? ""; Hp = hp; }
+        }
+
+        /// <summary>HP-equality tolerance so a sub-epsilon float jitter never re-applies (and never re-fires the
+        /// native StatChangeEvent → UI churn). A whole-HP game so 0.01 is far below any real change.</summary>
+        public const float BodyPartHpEpsilon = 0.01f;
+
+        /// <summary>PURE limb-HP diff: given the CLIENT's current per-slot HP (<paramref name="current"/>, keyed
+        /// by slot name) and the host's <paramref name="incoming"/> set, return the entries to APPLY on the
+        /// client — a part the client lacks, or whose HP drifted beyond <see cref="BodyPartHpEpsilon"/>. A
+        /// part already at the host HP is a no-op (not returned), so re-applying the same set yields an empty
+        /// list (idempotent) — and the native StatChangeEvent only fires when an HP actually changes. A part the
+        /// host does not mention is left untouched (we only ever push host HP down/over; absent ≠ remove, since a
+        /// disabled limb stays at 0). Unit-tested.</summary>
+        public static List<BodyPartHpRec> ComputeBodyPartHpDiff(
+            IDictionary<string, float> current, IEnumerable<BodyPartHpRec> incoming)
+        {
+            var toApply = new List<BodyPartHpRec>();
+            if (incoming == null) return toApply;
+            foreach (var inc in incoming)
+            {
+                if (string.IsNullOrEmpty(inc.SlotName)) continue;
+                bool have = current != null && current.TryGetValue(inc.SlotName, out float cur);
+                if (!have || System.Math.Abs(GetOrZero(current, inc.SlotName) - inc.Hp) > BodyPartHpEpsilon)
+                    toApply.Add(inc);
+            }
+            return toApply;
+        }
+
+        private static float GetOrZero(IDictionary<string, float> map, string key)
+            => (map != null && map.TryGetValue(key, out float v)) ? v : 0f;
+
         // ─── Status INCLUDE/EXCLUDE policy (spec risk #1 / §7) — DEFAULT-DENY allowlist ─────────────────
         //
         // SAFE-BY-CONSTRUCTION: the generic delta carries a status ONLY if its simple type name is on a VETTED

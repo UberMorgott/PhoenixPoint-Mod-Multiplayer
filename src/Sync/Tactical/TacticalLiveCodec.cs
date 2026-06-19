@@ -720,6 +720,14 @@ namespace Multipleer.Sync.Tactical
         public const ushort ActorFieldArmor     = 0x0040;   // f32 absolute armor (backstop)
         public const ushort ActorFieldEquip     = 0x0080;   // i32 selected-equip index
         public const ushort ActorFieldOverwatch = 0x0100;   // bool + 8×f32 cone
+        // Feature B: per-bodypart HP sub-channel (limb-disable mirror). Keyed by ItemSlot.GetSlotName() — a
+        // STABLE host↔client key (both sides build the body from the SAME shared save → identical slot names;
+        // the bodypart def guid would also be stable but the slot name is what the healthbar UI + stat
+        // registration already key on, so it is the canonical identity). The client SETS each part's StatusStat
+        // HP so the native StatChangeEvent → OnBodyPartHealthChanged → SlotState.Disabled UI fires for free
+        // (limb-disable is NOT a status). Encoded in ascending bit order AFTER statuses (it is the highest bit
+        // we emit; the reserved bits between are never set by us).
+        public const ushort ActorFieldBodyPartHp = 0x0200;  // i32 count then per part: [slotName:string][hp:f32]
 
         /// <summary>One synced status on the wire (T1): def guid + source-actor netId (-1 = none) + value.</summary>
         public struct ActorStatus
@@ -731,6 +739,16 @@ namespace Multipleer.Sync.Tactical
             { DefGuid = defGuid ?? ""; SourceNetId = sourceNetId; Value = value; }
         }
 
+        /// <summary>One bodypart HP entry on the wire (Feature B): the slot name (stable host↔client key) + the
+        /// part's absolute current HP. The client sets the part's StatusStat to this so the native body-part
+        /// changed event drives the disabled-limb UI (limb-disable is NOT modelled as a status).</summary>
+        public struct BodyPartHp
+        {
+            public string SlotName;
+            public float Hp;
+            public BodyPartHp(string slotName, float hp) { SlotName = slotName ?? ""; Hp = hp; }
+        }
+
         /// <summary>One per-actor state record. Only the fields whose <see cref="FieldMask"/> bit is set are
         /// valid on the wire (and were read from the host actor).</summary>
         public sealed class ActorStateRecord
@@ -740,10 +758,12 @@ namespace Multipleer.Sync.Tactical
             public float Ap;
             public float Wp;
             public List<ActorStatus> Statuses = new List<ActorStatus>();
+            public List<BodyPartHp> BodyParts = new List<BodyPartHp>();
 
             public bool HasAp => (FieldMask & ActorFieldAp) != 0;
             public bool HasWp => (FieldMask & ActorFieldWp) != 0;
             public bool HasStatuses => (FieldMask & ActorFieldStatuses) != 0;
+            public bool HasBodyParts => (FieldMask & ActorFieldBodyPartHp) != 0;
         }
 
         public sealed class ActorStateBatch
@@ -758,6 +778,7 @@ namespace Multipleer.Sync.Tactical
         /// <summary>Hard caps so a corrupt count can never allocate wildly.</summary>
         public const int ActorStateMaxActors = 4096;
         public const int ActorStateMaxStatusesPerActor = 1024;
+        public const int ActorStateMaxBodyPartsPerActor = 256;
 
         public static byte[] EncodeActorState(ActorStateBatch batch)
         {
@@ -783,6 +804,17 @@ namespace Multipleer.Sync.Tactical
                             w.Write(s.DefGuid ?? "");
                             w.Write(s.SourceNetId);
                             w.Write(s.Value);
+                        }
+                    }
+                    // BODYPARTHP is the highest bit we emit → encoded LAST (ascending bit order).
+                    if ((a.FieldMask & ActorFieldBodyPartHp) != 0)
+                    {
+                        var parts = a.BodyParts ?? new List<BodyPartHp>();
+                        w.Write(parts.Count);
+                        foreach (var p in parts)
+                        {
+                            w.Write(p.SlotName ?? "");
+                            w.Write(p.Hp);
                         }
                     }
                 }
@@ -837,6 +869,21 @@ namespace Multipleer.Sync.Tactical
                                 int src = r.ReadInt32();
                                 float val = r.ReadSingle();
                                 rec.Statuses.Add(new ActorStatus(guid, src, val));
+                            }
+                        }
+                        // BODYPARTHP decoded LAST (ascending bit order), only if its bit is set.
+                        if ((rec.FieldMask & ActorFieldBodyPartHp) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            int bc = r.ReadInt32();
+                            if (bc < 0 || bc > ActorStateMaxBodyPartsPerActor) return false;
+                            for (int j = 0; j < bc; j++)
+                            {
+                                // string is length-prefixed (guarded by the reader); then f32 = 4 bytes.
+                                string slot = r.ReadString();
+                                if (ms.Length - ms.Position < 4) return false;
+                                float hp = r.ReadSingle();
+                                rec.BodyParts.Add(new BodyPartHp(slot, hp));
                             }
                         }
                         result.Actors.Add(rec);

@@ -4,14 +4,15 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
+using Multipleer.Harmony.Tactical;
 using Multipleer.Network;
 using Multipleer.Network.Sync;
 using UnityEngine;
 
-// CS0162 (unreachable code): INTENTIONAL. SyncStatuses is a compile-time `const false` gate (T1 ships AP/WP
-// only); the `if (SyncStatuses) …` status branches are deliberately dead-but-kept (correct, unit-tested) for
-// when the flag flips in a later increment. Suppress the warning for this file only so the gated code can stay
-// in-place rather than be deleted + re-added.
+// CS0162 (unreachable code): SyncStatuses is a compile-time `const` gate. It is now TRUE (Feature B — visual-
+// only status mirror), so the status branches are LIVE; the const remains a single kill-switch should the
+// visual mirror ever need to be disabled wholesale. Keep the suppression so flipping the const back to false
+// does not break the build on the then-dead branches.
 #pragma warning disable CS0162
 
 namespace Multipleer.Sync.Tactical
@@ -43,17 +44,16 @@ namespace Multipleer.Sync.Tactical
     public static class TacticalActorStateSync
     {
         /// <summary>
-        /// STATUS-SYNC GATE — DEFAULT OFF. When false (T1 ship state), the generic delta carries ONLY AP/WP:
-        /// the host never reads/encodes statuses (the STATUSES fieldMask bit is never set, the signature is
-        /// AP+WP only → no chatty duration-tick re-broadcasts), and the client naturally skips reconcile (the
-        /// bit is absent). The status read + reconcile code is kept INTACT (correct, unit-tested) for when this
-        /// flag flips in a later increment — which requires a VETTED default-DENY allowlist
-        /// (<see cref="TacticalActorStateDiff.IsSyncableStatusType"/>, empty in T1) AND 2-instance verification
-        /// (MindControl + Stun are the must-test divergence cases: re-running a status OnApply on the client
-        /// diverges — faction flip / AP reduction / state-machine / stat-mod double-add). Do NOT enable without
-        /// that work.
+        /// STATUS-MIRROR GATE — ON (Feature B). The generic delta mirrors every host status whose healthbar
+        /// VISIBILITY is not Hidden (<see cref="TacticalActorStateDiff.ShouldMirrorStatus"/>) so its ICON draws
+        /// on the client; the mirrored status is made INERT by <c>ClientStatusMirrorGuards</c> (its OnApply/
+        /// AfterApply/StartTurn/EndTurn/ApplyEffect/OnUnapply are skipped on the client mirror) so NO gameplay
+        /// effect ever runs — no double DoT damage, AP drain, faction flip, or stat double-apply. This SUPERSEDES
+        /// the old type-name allowlist (<see cref="TacticalActorStateDiff.IsSyncableStatusType"/>, now unused):
+        /// the new policy is "visible-on-healthbar → mirror as inert icon", inertness enforced by the guards
+        /// rather than a per-type review. Single kill-switch: flip to false to disable the visual mirror.
         /// </summary>
-        internal const bool SyncStatuses = false;
+        internal const bool SyncStatuses = true;
 
         /// <summary>Heartbeat cadence: flush every N tactical frames. At ~60 fps this is ~4 Hz (idle = 0 bytes
         /// via the signature pre-check). Low enough to be cheap, high enough that a mid-turn AP/WP change
@@ -157,20 +157,24 @@ namespace Multipleer.Sync.Tactical
                 if (actor == null) continue;
                 liveNetIds.Add(netId);
 
-                if (!ReadActorState(actor, out float ap, out float wp, out var statuses))
+                if (!ReadActorState(actor, out float ap, out float wp, out var statuses, out var bodyParts))
                     continue;   // not a stats-bearing actor (turret/vehicle/destructible) → skip
 
-                // GATED: with SyncStatuses off (T1), the signature is AP+WP ONLY (no status set → no chatty
-                // duration-tick re-broadcasts) and the wire carries ONLY AP/WP (the STATUSES bit is never set).
+                // Signature includes AP/WP + the mirrored status set + the bodypart-HP set, so a status icon
+                // change OR a limb-HP change re-broadcasts (idle actor = 0 bytes via the unchanged-sig skip).
                 string sig = SyncStatuses
-                    ? TacticalActorStateDiff.Signature(ap, wp, statuses)
+                    ? TacticalActorStateDiff.Signature(ap, wp, statuses) + BodyPartSig(bodyParts)
                     : TacticalActorStateDiff.Signature(ap, wp, null);
                 if (_lastSig.TryGetValue(netId, out var prev) && prev == sig)
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
 
                 ushort mask = (ushort)(TacticalLiveCodec.ActorFieldAp | TacticalLiveCodec.ActorFieldWp);
-                if (SyncStatuses) mask |= TacticalLiveCodec.ActorFieldStatuses;
+                if (SyncStatuses)
+                {
+                    mask |= TacticalLiveCodec.ActorFieldStatuses;
+                    if (bodyParts.Count > 0) mask |= TacticalLiveCodec.ActorFieldBodyPartHp;
+                }
                 var rec = new TacticalLiveCodec.ActorStateRecord
                 {
                     NetId = netId,
@@ -179,8 +183,12 @@ namespace Multipleer.Sync.Tactical
                     Wp = wp,
                 };
                 if (SyncStatuses)
+                {
                     foreach (var s in statuses)
                         rec.Statuses.Add(new TacticalLiveCodec.ActorStatus(s.DefGuid, s.SourceNetId, s.Value));
+                    foreach (var b in bodyParts)
+                        rec.BodyParts.Add(new TacticalLiveCodec.BodyPartHp(b.SlotName, b.Hp));
+                }
                 changed.Add(rec);
             }
 
@@ -213,7 +221,7 @@ namespace Multipleer.Sync.Tactical
             { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0;
             try
             {
                 _applyingRemote = true;
@@ -225,13 +233,17 @@ namespace Multipleer.Sync.Tactical
                         if (actor == null) continue;   // not deployed/registered on the client yet → re-push heals
                         applied++;
 
-                        // APPLY ORDER (matters when statuses are later enabled): reconcile STATUSES FIRST, then
-                        // set AP/WP ABSOLUTE LAST — so the host's authoritative absolute AP/WP always WINS over
-                        // any stat change a status' OnApply makes (e.g. a stat-mod status re-adding its AP/WP
-                        // delta). With SyncStatuses off (T1) the STATUSES bit is never set → reconcile is skipped.
+                        // APPLY ORDER: reconcile STATUSES FIRST, then set AP/WP ABSOLUTE LAST — so the host's
+                        // authoritative absolute AP/WP always WINS over any stat change a status touches (the
+                        // mirrored statuses are INERT via the guards, so they apply no stat delta anyway, but
+                        // the order is kept correct). Body-part HP is independent (own stat) → apply any time.
                         if (rec.HasStatuses)
                         {
                             ReconcileStatuses(actor, rec.Statuses, ref sAdd, ref sRem);
+                        }
+                        if (rec.HasBodyParts)
+                        {
+                            bp += ApplyBodyPartHp(actor, rec.BodyParts);
                         }
                         if (rec.HasAp || rec.HasWp)
                         {
@@ -242,9 +254,10 @@ namespace Multipleer.Sync.Tactical
                 finally { _applyingRemote = false; }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
-                              " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem);
+                              " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
+                              " limbHp=" + bp);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
@@ -256,10 +269,12 @@ namespace Multipleer.Sync.Tactical
         /// Statuses are filtered by <see cref="TacticalActorStateDiff.IsSyncableStatusType"/> (excludes
         /// Overwatch + DoT family). Source→netId via the registry (-1 when the source isn't a resolvable actor).</summary>
         private static bool ReadActorState(object actor, out float ap, out float wp,
-            out List<TacticalActorStateDiff.StatusRec> statuses)
+            out List<TacticalActorStateDiff.StatusRec> statuses,
+            out List<TacticalActorStateDiff.BodyPartHpRec> bodyParts)
         {
             ap = 0f; wp = 0f;
             statuses = new List<TacticalActorStateDiff.StatusRec>();
+            bodyParts = new List<TacticalActorStateDiff.BodyPartHpRec>();
 
             object stats = GetProp(actor, "CharacterStats");
             if (stats == null) return false;                       // not a stats-bearing TacticalActor
@@ -269,19 +284,20 @@ namespace Multipleer.Sync.Tactical
             ap = StatValue(apStat);
             wp = StatValue(wpStat);
 
-            // GATED: skip the status enumeration entirely when status sync is off (T1) — the wire + signature
-            // carry only AP/WP. The read code below stays intact for when SyncStatuses flips on.
+            // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP.
             if (!SyncStatuses) return true;
 
-            // Statuses: enumerate StatusComponent.Statuses, filter by policy, flatten {defGuid, sourceNetId, value}.
+            // Statuses: enumerate StatusComponent.Statuses, mirror those whose healthbar visibility != Hidden
+            // (visual-only icon), flatten {defGuid, sourceNetId, value}. The mirrored status is made INERT on
+            // the client by ClientStatusMirrorGuards — so no effect runs there.
             object statusComponent = GetProp(actor, "Status");
             if (statusComponent != null && GetProp(statusComponent, "Statuses") is IEnumerable list)
             {
                 foreach (var st in list)
                 {
                     if (st == null) continue;
-                    if (!TacticalActorStateDiff.IsSyncableStatusType(st.GetType().Name)) continue;
                     object def = GetProp(st, "Def");
+                    if (!TacticalActorStateDiff.ShouldMirrorStatus(ReadVisibility(def), st.GetType().Name)) continue;
                     string guid = DefReflection.GetGuid(def);
                     if (string.IsNullOrEmpty(guid)) continue;       // un-resolvable def → can't reconcile cross-side
                     int sourceNetId = ResolveSourceNetId(GetProp(st, "Source"));
@@ -289,7 +305,50 @@ namespace Multipleer.Sync.Tactical
                     statuses.Add(new TacticalActorStateDiff.StatusRec(guid, sourceNetId, value));
                 }
             }
+
+            // Body-part HP (Feature B PART 1): each health slot's absolute HP, keyed by slot name (stable
+            // host↔client). The client sets these so the native StatChangeEvent drives the disabled-limb UI.
+            ReadBodyPartHp(actor, bodyParts);
             return true;
+        }
+
+        /// <summary>Read a status def's <c>TacStatusDef.VisibleOnHealthbar</c> enum as an int (Hidden=0 default).
+        /// A def without the field (a non-tactical status) reads as Hidden → not mirrored.</summary>
+        private static int ReadVisibility(object def)
+        {
+            if (def == null) return TacticalActorStateDiff.HealthBarVisibilityHidden;
+            try
+            {
+                object v = GetField(def, "VisibleOnHealthbar");
+                return v == null ? TacticalActorStateDiff.HealthBarVisibilityHidden : Convert.ToInt32(v);
+            }
+            catch { return TacticalActorStateDiff.HealthBarVisibilityHidden; }
+        }
+
+        /// <summary>Enumerate the actor's body-part health slots (<c>TacticalActor.BodyState.GetHealthSlots()</c>)
+        /// and flatten {slotName, currentHp}. Slot name (<c>ItemSlot.GetSlotName()</c>) is the stable cross-side
+        /// key; HP is the slot's <c>GetHealth()</c> StatusStat current value. Best-effort: silently skips an
+        /// actor with no body state (turret/destructible).</summary>
+        private static void ReadBodyPartHp(object actor, List<TacticalActorStateDiff.BodyPartHpRec> outList)
+        {
+            try
+            {
+                object bodyState = GetProp(actor, "BodyState");
+                if (bodyState == null) return;
+                var getHealthSlots = AccessTools.Method(bodyState.GetType(), "GetHealthSlots");
+                if (getHealthSlots == null) return;
+                if (!(getHealthSlots.Invoke(bodyState, null) is IEnumerable slots)) return;
+                foreach (var slot in slots)
+                {
+                    if (slot == null) continue;
+                    string slotName = InvokeGetSlotName(slot);
+                    if (string.IsNullOrEmpty(slotName)) continue;
+                    object healthStat = InvokeGetHealth(slot);
+                    if (healthStat == null) continue;
+                    outList.Add(new TacticalActorStateDiff.BodyPartHpRec(slotName, StatValue(healthStat)));
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ReadBodyPartHp failed: " + ex); }
         }
 
         /// <summary>Map a status <c>Source</c> to a netId if it is a resolvable live actor, else -1 (weapon /
@@ -313,7 +372,89 @@ namespace Multipleer.Sync.Tactical
             catch { return 0f; }
         }
 
+        /// <summary>Order-stable signature fragment over the bodypart-HP set (sorted by slot name) so a limb-HP
+        /// change re-broadcasts the actor. Appended to the AP/WP/status signature.</summary>
+        private static string BodyPartSig(List<TacticalActorStateDiff.BodyPartHpRec> parts)
+        {
+            if (parts == null || parts.Count == 0) return "";
+            var list = new List<TacticalActorStateDiff.BodyPartHpRec>(parts);
+            list.Sort((a, b) => string.CompareOrdinal(a.SlotName ?? "", b.SlotName ?? ""));
+            var sb = new System.Text.StringBuilder("@");
+            foreach (var p in list)
+                sb.Append(p.SlotName ?? "").Append('=')
+                  .Append(p.Hp.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
+            return sb.ToString();
+        }
+
         // ─── CLIENT apply helpers ───────────────────────────────────────────────────────────────────────
+
+        /// <summary>Apply host-absolute per-bodypart HP to the client actor's matching health slots. For each
+        /// incoming {slotName, hp} whose client HP drifted (<see cref="TacticalActorStateDiff.ComputeBodyPartHpDiff"/>),
+        /// <c>ItemSlot.GetHealth().Set(hp, triggerStatChangeEvent:true)</c> — the native StatChangeEvent then
+        /// fires <c>OnBodyPartHealthChanged</c> → the disabled-limb UI updates for FREE (limb-disable is NOT a
+        /// status). Idempotent: an unchanged part is skipped (no churn, no event). Returns the count applied.</summary>
+        private static int ApplyBodyPartHp(object actor, List<TacticalLiveCodec.BodyPartHp> incoming)
+        {
+            if (incoming == null || incoming.Count == 0) return 0;
+            object bodyState = GetProp(actor, "BodyState");
+            if (bodyState == null) return 0;
+            var getHealthSlots = AccessTools.Method(bodyState.GetType(), "GetHealthSlots");
+            if (getHealthSlots == null) return 0;
+
+            // Build the client's current {slotName → hp} + a lookup back to the live ItemSlot for the apply.
+            var current = new Dictionary<string, float>();
+            var slotByName = new Dictionary<string, object>();
+            if (getHealthSlots.Invoke(bodyState, null) is IEnumerable slots)
+            {
+                foreach (var slot in slots)
+                {
+                    if (slot == null) continue;
+                    string name = InvokeGetSlotName(slot);
+                    if (string.IsNullOrEmpty(name)) continue;
+                    object health = InvokeGetHealth(slot);
+                    if (health == null) continue;
+                    current[name] = StatValue(health);
+                    slotByName[name] = slot;
+                }
+            }
+
+            var inc = new List<TacticalActorStateDiff.BodyPartHpRec>(incoming.Count);
+            foreach (var b in incoming) inc.Add(new TacticalActorStateDiff.BodyPartHpRec(b.SlotName, b.Hp));
+
+            int applied = 0;
+            foreach (var toApply in TacticalActorStateDiff.ComputeBodyPartHpDiff(current, inc))
+            {
+                if (!slotByName.TryGetValue(toApply.SlotName, out var slot) || slot == null) continue;
+                object health = InvokeGetHealth(slot);
+                if (health == null) continue;
+                SetStat(health, toApply.Hp);   // fires StatChangeEvent → OnBodyPartHealthChanged → UI
+                applied++;
+            }
+            return applied;
+        }
+
+        /// <summary>Invoke <c>ItemSlot.GetSlotName()</c> → string (the stable host↔client bodypart key).</summary>
+        private static string InvokeGetSlotName(object slot)
+        {
+            try
+            {
+                var m = AccessTools.Method(slot.GetType(), "GetSlotName");
+                return m?.Invoke(slot, null) as string;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Invoke <c>ItemSlot.GetHealth()</c> → the slot's HP StatusStat (read via the BaseStat implicit
+        /// float, written via <c>Set(float,bool)</c>).</summary>
+        private static object InvokeGetHealth(object slot)
+        {
+            try
+            {
+                var m = AccessTools.Method(slot.GetType(), "GetHealth");
+                return m?.Invoke(slot, null);
+            }
+            catch { return null; }
+        }
 
         /// <summary>Set the actor's AP/WP to the host-absolute values via <c>BaseStat.Set(float,bool)</c> (only
         /// the fields whose bit is set). Returns true if at least one stat was set.</summary>
@@ -327,18 +468,18 @@ namespace Multipleer.Sync.Tactical
             return any;
         }
 
-        /// <summary>Reconcile the actor's status set to the incoming set: ApplyStatus the genuinely-MISSING ones
-        /// (def resolved by guid; source = the resolved live actor or null), UnapplyStatus the absent ones. A
-        /// status already present (by {defGuid, sourceNetId}) is left untouched so its <c>OnApply</c> never
-        /// re-runs (spec risk #1). Only policy-syncable statuses on the actor participate in the "current" set,
-        /// so a surface-owned status (Overwatch) is never seen as "extra" and removed.</summary>
+        /// <summary>Reconcile the actor's MIRRORED status set to the incoming set: ApplyStatus the genuinely-
+        /// MISSING ones (def resolved by guid; source = the resolved live actor or null) as INERT mirrors,
+        /// UnapplyStatus the absent ones. A status already present (by {defGuid, sourceNetId}) is left untouched
+        /// so its OnApply never re-runs. Only VISIBLE-on-healthbar statuses participate in the "current" set, so
+        /// a non-mirrored / surface-owned status (Overwatch) is never seen as "extra" and removed.</summary>
         private static void ReconcileStatuses(object actor, List<TacticalLiveCodec.ActorStatus> incoming,
             ref int addCount, ref int removeCount)
         {
             object statusComponent = GetProp(actor, "Status");
             if (statusComponent == null) return;
 
-            // Build the CLIENT's current syncable set + a lookup back to the live Status object for removal.
+            // Build the CLIENT's current mirrored set + a lookup back to the live Status object for removal.
             var current = new List<TacticalActorStateDiff.StatusRec>();
             var liveByKey = new Dictionary<string, object>();
             if (GetProp(statusComponent, "Statuses") is IEnumerable list)
@@ -346,8 +487,9 @@ namespace Multipleer.Sync.Tactical
                 foreach (var st in list)
                 {
                     if (st == null) continue;
-                    if (!TacticalActorStateDiff.IsSyncableStatusType(st.GetType().Name)) continue;
-                    string guid = DefReflection.GetGuid(GetProp(st, "Def"));
+                    object def = GetProp(st, "Def");
+                    if (!TacticalActorStateDiff.ShouldMirrorStatus(ReadVisibility(def), st.GetType().Name)) continue;
+                    string guid = DefReflection.GetGuid(def);
                     if (string.IsNullOrEmpty(guid)) continue;
                     int src = ResolveSourceNetId(GetProp(st, "Source"));
                     float val = ReadStatusValue(st);
@@ -383,22 +525,109 @@ namespace Multipleer.Sync.Tactical
 
         // ─── engine reflection ──────────────────────────────────────────────────────────────────────────
 
+        /// <summary>Apply a status as an INERT visual-only MIRROR. Instead of the simple
+        /// <c>ApplyStatus(StatusDef,…)</c> (whose subclass OnApply would run gameplay effects), this replicates
+        /// the engine's own deserialize/"load a saved status" path: instantiate the Status, set Source/Target,
+        /// PRE-SET <c>Applied = true</c> so every subclass OnApply takes its inert reattach branch (the pervasive
+        /// `bool applied = base.Applied; if(!applied){effects}` / `if(CurrentlyDeserializing) return;` idiom),
+        /// then drive <c>ApplyStatus(Status)</c> — the status lands in the list (icon draws) + the healthbar
+        /// events fire, but NO gameplay side effect runs. The instance is registered with
+        /// <c>ClientStatusMirrorGuards</c> so its per-turn ticks (DoT) + its effect-reverting OnUnapply are also
+        /// skipped. Returns true on success.</summary>
         private static bool InvokeApplyStatus(object statusComponent, object statusDef, object source, object target)
         {
             try
             {
-                var statusDefType = AccessTools.TypeByName("Base.Entities.Statuses.StatusDef");
-                if (statusDefType == null) return false;
-                // public Status ApplyStatus(StatusDef def, object source = null, object target = null)
-                var m = AccessTools.Method(statusComponent.GetType(), "ApplyStatus",
-                    new[] { statusDefType, typeof(object), typeof(object) });
-                if (m == null) { Debug.LogError("[Multipleer][tac] actorstate: ApplyStatus(StatusDef,object,object) not found"); return false; }
-                object applied = m.Invoke(statusComponent, new[] { statusDef, source, target });
-                return applied != null;
+                object repo = GetField(statusComponent, "Repo");
+                if (repo == null) { Debug.LogError("[Multipleer][tac] actorstate: StatusComponent.Repo null"); return false; }
+
+                // DefRepository.Instantiate(BaseDef def, …optional) → object (the new Status). Use the non-generic
+                // overload (no MakeGenericMethod needed); optional params → Type.Missing.
+                var inst = FindInstantiate(repo.GetType());
+                if (inst == null) { Debug.LogError("[Multipleer][tac] actorstate: DefRepository.Instantiate(BaseDef,…) not found"); return false; }
+                var ip = inst.GetParameters();
+                var iargs = new object[ip.Length];
+                iargs[0] = statusDef;
+                for (int i = 1; i < ip.Length; i++) iargs[i] = Type.Missing;
+                object status = inst.Invoke(repo, iargs);
+                if (status == null) { Debug.LogError("[Multipleer][tac] actorstate: Instantiate returned null status"); return false; }
+
+                // Set Source/Target (the engine's ApplyStatus(StatusDef,…) does this) + pre-set Applied=true.
+                SetMember(status, "Source", source);
+                SetMember(status, "Target", target);
+                // ABORT if we can't pre-set Applied=true: without it the subclass OnApply runs its LIVE gameplay
+                // side effects on the client (faction flip, AP drain, double DoT, …). A status that can't be made
+                // inert must NEVER be applied live — drop the mirror entirely (no ApplyStatus, no Mirrored entry).
+                if (!SetApplied(status, true))
+                {
+                    Debug.LogWarning("[Multipleer][tac] mirror-apply ABORTED: SetApplied failed for "
+                        + (DefReflection.GetGuid(statusDef) ?? "<unknown def>"));
+                    return false;
+                }
+
+                // Register BEFORE ApplyStatus so the per-turn/unapply guards already know this instance.
+                ClientStatusMirrorGuards.RegisterMirror(status);
+
+                var statusType = AccessTools.TypeByName("Base.Entities.Statuses.Status");
+                var apply = AccessTools.Method(statusComponent.GetType(), "ApplyStatus", new[] { statusType });
+                if (apply == null) { Debug.LogError("[Multipleer][tac] actorstate: ApplyStatus(Status) not found"); ClientStatusMirrorGuards.UnregisterMirror(status); return false; }
+                apply.Invoke(statusComponent, new[] { status });
+                return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ApplyStatus failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ApplyStatus(mirror) failed: " + ex); return false; }
         }
 
+        /// <summary>Resolve <c>DefRepository.Instantiate(BaseDef, …)</c> — the non-generic overload whose first
+        /// param is a BaseDef and the rest optional. Avoids the generic <c>Instantiate&lt;T&gt;</c> overload.</summary>
+        private static MethodInfo FindInstantiate(Type repoType)
+        {
+            foreach (var m in repoType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (m.Name != "Instantiate" || m.IsGenericMethod) continue;
+                var p = m.GetParameters();
+                if (p.Length < 1) continue;
+                if (!typeof(Base.Defs.BaseDef).IsAssignableFrom(p[0].ParameterType)) continue;
+                bool restOptional = true;
+                for (int i = 1; i < p.Length; i++) if (!p[i].IsOptional) { restOptional = false; break; }
+                if (restOptional) return m;
+            }
+            return null;
+        }
+
+        /// <summary>Set <c>Status.Applied</c> (the protected setter) via reflection so a freshly-instantiated
+        /// mirror enters its subclass OnApply on the engine's inert deserialize branch.</summary>
+        private static bool SetApplied(object status, bool value)
+        {
+            try
+            {
+                var p = AccessTools.Property(status.GetType(), "Applied");
+                if (p != null && p.GetSetMethod(true) != null)
+                {
+                    p.GetSetMethod(true).Invoke(status, new object[] { value });
+                    return true;
+                }
+                var f = AccessTools.Field(status.GetType(), "Applied");
+                if (f != null) { f.SetValue(status, value); return true; }
+                // Auto-property backing field fallback.
+                var bf = AccessTools.Field(status.GetType(), "<Applied>k__BackingField");
+                if (bf != null) { bf.SetValue(status, value); return true; }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private static void SetMember(object obj, string name, object value)
+        {
+            if (obj == null) return;
+            var p = AccessTools.Property(obj.GetType(), name);
+            if (p != null && p.GetSetMethod(true) != null) { p.GetSetMethod(true).Invoke(obj, new[] { value }); return; }
+            var f = AccessTools.Field(obj.GetType(), name);
+            f?.SetValue(obj, value);
+        }
+
+        /// <summary>Remove an inert MIRROR status under the unapply guard (so its effect-reverting OnUnapply is
+        /// skipped) + unregister it. The status still leaves the list + the icon clears (StatusComponent removes
+        /// it + raises OnStatusUnapplied/OnStatusesChanged, OUTSIDE the skipped OnUnapply).</summary>
         private static bool InvokeUnapplyStatus(object statusComponent, object status)
         {
             try
@@ -407,7 +636,10 @@ namespace Multipleer.Sync.Tactical
                 if (statusType == null) return false;
                 var m = AccessTools.Method(statusComponent.GetType(), "UnapplyStatus", new[] { statusType });
                 if (m == null) { Debug.LogError("[Multipleer][tac] actorstate: UnapplyStatus(Status) not found"); return false; }
-                m.Invoke(statusComponent, new[] { status });
+                ClientStatusMirrorGuards.UnapplyInProgress = true;
+                try { m.Invoke(statusComponent, new[] { status }); }
+                finally { ClientStatusMirrorGuards.UnapplyInProgress = false; }
+                ClientStatusMirrorGuards.UnregisterMirror(status);
                 return true;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate UnapplyStatus failed: " + ex); return false; }

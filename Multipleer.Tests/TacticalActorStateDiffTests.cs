@@ -156,4 +156,116 @@ public class TacticalActorStateDiffTests
         string b = TacticalActorStateDiff.Signature(3f, 2f, Set(S("x", 1, 5f)));
         Assert.Equal(a, b);
     }
+
+    // ─── Feature B: visual-only status mirror decision (VisibleOnHealthbar != Hidden) ─────────────────
+
+    [Fact]
+    public void ShouldMirrorStatus_Hidden_False()
+        => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(TacticalActorStateDiff.HealthBarVisibilityHidden));
+
+    [Theory]
+    [InlineData(1)]   // VisibleWhenSelected
+    [InlineData(5)]   // AlwaysVisible
+    public void ShouldMirrorStatus_NonHidden_True(int visibility)
+        => Assert.True(TacticalActorStateDiff.ShouldMirrorStatus(visibility));
+
+    [Theory]
+    [InlineData("BleedStatus")]    // DoT icon IS mirrored (made inert by guards) — the headline Feature B case
+    [InlineData("FireStatus")]
+    [InlineData("ParalysedStatus")]
+    [InlineData("FrenzyStatus")]
+    public void ShouldMirrorStatus_VisibleNonSurfaceOwned_True(string typeName)
+        => Assert.True(TacticalActorStateDiff.ShouldMirrorStatus(5, typeName));
+
+    [Fact]
+    public void ShouldMirrorStatus_OverwatchStatus_Excluded_EvenWhenVisible()
+        => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(5, "OverwatchStatus"));
+
+    // Faction-changer statuses are excluded even when visible: applying them live (even "inert") risks flipping
+    // the actor's faction on the client (MindControl leaks an unconditional ActorDeathEvent sub; Zombified flips
+    // if the Applied pre-set fails). Faction-safety > the badge.
+    [Theory]
+    [InlineData("MindControlStatus")]
+    [InlineData("ZombifiedStatus")]
+    public void ShouldMirrorStatus_FactionChanger_Excluded_EvenWhenVisible(string typeName)
+        => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(5, typeName));
+
+    [Fact]
+    public void ShouldMirrorStatus_HiddenWins_OverTypeName()
+        => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(0, "BleedStatus"));
+
+    // ─── Feature B PART 1: per-bodypart-HP reconcile diff ─────────────────────────────────────────────
+
+    private static TacticalActorStateDiff.BodyPartHpRec B(string slot, float hp)
+        => new TacticalActorStateDiff.BodyPartHpRec(slot, hp);
+
+    private static System.Collections.Generic.Dictionary<string, float> Cur(
+        params (string slot, float hp)[] parts)
+    {
+        var d = new System.Collections.Generic.Dictionary<string, float>();
+        foreach (var p in parts) d[p.slot] = p.hp;
+        return d;
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_NewPart_IsApplied()
+    {
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(Cur(), new[] { B("Torso", 100f) });
+        var r = Assert.Single(toApply);
+        Assert.Equal("Torso", r.SlotName);
+        Assert.Equal(100f, r.Hp);
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_ChangedHp_IsApplied()
+    {
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(
+            Cur(("LeftArm", 80f)), new[] { B("LeftArm", 0f) });   // limb knocked out
+        var r = Assert.Single(toApply);
+        Assert.Equal("LeftArm", r.SlotName);
+        Assert.Equal(0f, r.Hp);
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_SameHp_NoOp_Idempotent()
+    {
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(
+            Cur(("Torso", 100f), ("Head", 50f)),
+            new[] { B("Torso", 100f), B("Head", 50f) });
+        Assert.Empty(toApply);
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_SubEpsilonJitter_NoOp()
+    {
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(
+            Cur(("Torso", 100f)), new[] { B("Torso", 100.001f) });
+        Assert.Empty(toApply);
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_HostSilentOnAPart_LeavesItUntouched()
+    {
+        // The host mentions only Torso; the client's LeftArm (already 0 / disabled) is NOT in the incoming set
+        // → it must NOT be re-applied (absent ≠ restore). Only the mentioned changed part is returned.
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(
+            Cur(("Torso", 100f), ("LeftArm", 0f)), new[] { B("Torso", 70f) });
+        var r = Assert.Single(toApply);
+        Assert.Equal("Torso", r.SlotName);
+        Assert.Equal(70f, r.Hp);
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_NullInputs_Empty()
+    {
+        Assert.Empty(TacticalActorStateDiff.ComputeBodyPartHpDiff(null, null));
+        Assert.Empty(TacticalActorStateDiff.ComputeBodyPartHpDiff(Cur(("a", 1f)), null));
+    }
+
+    [Fact]
+    public void BodyPartHpDiff_BlankSlotName_Skipped()
+    {
+        var toApply = TacticalActorStateDiff.ComputeBodyPartHpDiff(Cur(), new[] { B("", 100f), B(null, 5f) });
+        Assert.Empty(toApply);
+    }
 }

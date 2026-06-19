@@ -633,6 +633,7 @@ namespace Multipleer.Sync.Tactical
             Registry = new TacticalActorRegistry();
             TacticalVisionSync.HostResetBroadcastGuard();   // Inc Vision: clear the per-mission chattiness guard
             TacticalActorStateSync.HostResetFlushGuard();   // Inc T1: clear the per-actor state-delta signatures
+            Multipleer.Harmony.Tactical.ClientStatusMirrorGuards.Reset();   // Feature B: drop inert-mirror tracking
             LiveTlc = null;                                  // Inc T1: the flush coroutine watches this → self-stops
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();

@@ -8,6 +8,7 @@ public class TacticalActorStateCodecTests
     private const ushort Ap = TacticalLiveCodec.ActorFieldAp;
     private const ushort Wp = TacticalLiveCodec.ActorFieldWp;
     private const ushort St = TacticalLiveCodec.ActorFieldStatuses;
+    private const ushort Bp = TacticalLiveCodec.ActorFieldBodyPartHp;
 
     private static TacticalLiveCodec.ActorStateRecord Rec(int netId, ushort mask, float ap, float wp,
         params TacticalLiveCodec.ActorStatus[] statuses)
@@ -127,6 +128,91 @@ public class TacticalActorStateCodecTests
         Assert.Single(got.Actors[2].Statuses);
         Assert.Equal("g3", got.Actors[2].Statuses[0].DefGuid);
         Assert.Equal(1.5f, got.Actors[2].Wp);
+    }
+
+    // ─── Feature B: per-bodypart-HP sub-channel (0x0200) round-trip ──────────────────────────────────
+
+    private static TacticalLiveCodec.BodyPartHp Part(string slot, float hp)
+        => new TacticalLiveCodec.BodyPartHp(slot, hp);
+
+    private static TacticalLiveCodec.ActorStateRecord RecBp(int netId, ushort mask, float ap, float wp,
+        TacticalLiveCodec.ActorStatus[] statuses, TacticalLiveCodec.BodyPartHp[] parts)
+    {
+        var r = new TacticalLiveCodec.ActorStateRecord { NetId = netId, FieldMask = mask, Ap = ap, Wp = wp };
+        if (statuses != null) r.Statuses.AddRange(statuses);
+        if (parts != null) r.BodyParts.AddRange(parts);
+        return r;
+    }
+
+    [Fact]
+    public void BodyPartsOnly_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(8u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            {
+                RecBp(11, Bp, 0f, 0f, null, new[] { Part("Torso", 100f), Part("LeftArm", 0f) }),
+            });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.False(a.HasAp);
+        Assert.True(a.HasBodyParts);
+        Assert.Equal(2, a.BodyParts.Count);
+        Assert.Equal("Torso", a.BodyParts[0].SlotName);
+        Assert.Equal(100f, a.BodyParts[0].Hp);
+        Assert.Equal("LeftArm", a.BodyParts[1].SlotName);
+        Assert.Equal(0f, a.BodyParts[1].Hp);
+    }
+
+    [Fact]
+    public void ApWpStatusesBodyParts_AllFields_RoundTrip_AscendingBitOrder()
+    {
+        // All four emitted bits set on ONE record → exercises the ascending-bit-order encode/decode
+        // (AP, WP, STATUSES, then BODYPARTHP last). A misordered read would misalign and fail.
+        var batch = new TacticalLiveCodec.ActorStateBatch(9u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            {
+                RecBp(3, (ushort)(Ap | Wp | St | Bp), 2f, 5f,
+                    new[] { Stat("g-bleed", 7, 4f) },
+                    new[] { Part("Head", 40f), Part("Torso", 90f) }),
+            });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.Equal(2f, a.Ap);
+        Assert.Equal(5f, a.Wp);
+        Assert.Equal("g-bleed", Assert.Single(a.Statuses).DefGuid);
+        Assert.Equal(2, a.BodyParts.Count);
+        Assert.Equal("Head", a.BodyParts[0].SlotName);
+        Assert.Equal(40f, a.BodyParts[0].Hp);
+        Assert.Equal("Torso", a.BodyParts[1].SlotName);
+    }
+
+    [Fact]
+    public void BodyPartsZeroCount_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(10u,
+            new List<TacticalLiveCodec.ActorStateRecord> { RecBp(1, Bp, 0f, 0f, null, null) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasBodyParts);
+        Assert.Empty(a.BodyParts);
+    }
+
+    [Fact]
+    public void AbsurdBodyPartCount_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u);          // seq
+            w.Write(1);           // count = 1 actor
+            w.Write(5);           // netId
+            w.Write(Bp);          // fieldMask = bodyparts
+            w.Write(int.MaxValue);// bodyPartCount → exceeds cap → false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
     }
 
     [Fact]
