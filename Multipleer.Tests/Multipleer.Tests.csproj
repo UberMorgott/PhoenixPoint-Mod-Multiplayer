@@ -140,6 +140,11 @@
          engine glue (TacticalActorStateSync) binds game types and is NOT linked. The ActorStateBatch wire codec
          lives in TacticalLiveCodec.cs (already linked above). -->
     <Compile Include="..\src\Sync\Tactical\TacticalActorStateDiff.cs"><Link>Sync\Tactical\TacticalActorStateDiff.cs</Link></Compile>
+    <!-- Tactical replication Inc-T2 (generic ability-intent): pure, Unity-free relay allowlist deciding which
+         TacticalAbility subclasses ride the generic client→host tac.intent.ability (shoot/grenade/melee/heal),
+         excluding Move/Overwatch/Reload. The engine glue (TacticalCombatSync + the AbilityActivateRelayPatch
+         Harmony patch) binds game types and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\TacticalAbilityRelay.cs"><Link>Sync\Tactical\TacticalAbilityRelay.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->

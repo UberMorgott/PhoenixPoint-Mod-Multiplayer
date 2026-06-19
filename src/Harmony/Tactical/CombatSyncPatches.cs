@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multipleer.Sync.Tactical;
@@ -6,41 +7,46 @@ using UnityEngine;
 namespace Multipleer.Harmony.Tactical
 {
     /// <summary>
-    /// LIVE host-authoritative COMBAT/DAMAGE replication patches (spec §3, Inc 3a). Two Harmony patches,
-    /// mirroring <see cref="MoveAbilityActivatePatch"/> / <see cref="MoveAbilityEndPatch"/>:
-    ///   • CLIENT prefix on <c>ShootAbility.Activate(object)</c> → send <c>tac.intent.ability</c>, suppress
-    ///     the local shot (the existing <see cref="Multipleer.Harmony.FireWeaponPatch"/> already suppresses
-    ///     the client roll chain; this stops the client even queuing the shot).
+    /// LIVE host-authoritative COMBAT/DAMAGE replication patches (spec §3, Inc 3a; generalized in Inc T2).
+    /// Two Harmony patches, mirroring <see cref="MoveAbilityActivatePatch"/> / <see cref="MoveAbilityEndPatch"/>:
+    ///   • CLIENT prefix on the GENERIC relayable ability set's <c>Activate(object)</c> (ShootAbility[shoot+
+    ///     grenade] / BashAbility[melee] / HealAbility — see <see cref="TacticalAbilityRelay"/>) → send ONE
+    ///     <c>tac.intent.ability</c> (surface 0x87, reused) and suppress the local activation; the host runs
+    ///     it authoritatively and its outcome replicates via tac.damage + the T1 state-delta.
     ///   • postfix on <c>TacticalActorBase.ApplyDamage(DamageResult)</c> → on the HOST only, broadcast the
     ///     FINAL applied <c>DamageResult</c> as <c>tac.damage</c> (the funnel ALL damage flows through). The
     ///     method internally gates IsHost + the re-entrancy flag, so this binds on both sides harmlessly.
     /// Both delegate to <see cref="TacticalCombatSync"/>. Auto-register via PatchAll; reflection targets.
     /// </summary>
     [HarmonyPatch]
-    public static class ShootAbilityActivatePatch
+    public static class AbilityActivateRelayPatch
     {
-        private static MethodBase _target;
-
-        public static bool Prepare()
+        // GENERIC relay: one prefix bound to Activate(object) on EACH relayable TacticalAbility subclass.
+        // Move/Overwatch are deliberately absent from TacticalAbilityRelay, so this patch never binds their
+        // Activate methods → NO Harmony double-prefix with MoveAbilityActivatePatch / the overwatch patches.
+        public static IEnumerable<MethodBase> TargetMethods()
         {
-            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.ShootAbility");
-            if (t == null) return false;
-            // public override void Activate(object parameter)
-            _target = AccessTools.Method(t, "Activate", new[] { typeof(object) });
-            return _target != null;
+            const string ns = "PhoenixPoint.Tactical.Entities.Abilities.";
+            foreach (var name in TacticalAbilityRelay.RelayableAbilityTypeNames)
+            {
+                var t = AccessTools.TypeByName(ns + name);
+                if (t == null) { Debug.LogError("[Multipleer][tac] relay: ability type not found: " + ns + name); continue; }
+                // public override void Activate(object parameter) — EXACT (object) param match per subclass.
+                var m = AccessTools.Method(t, "Activate", new[] { typeof(object) });
+                if (m == null) { Debug.LogError("[Multipleer][tac] relay: Activate(object) not found on " + name); continue; }
+                yield return m;
+            }
         }
 
-        public static MethodBase TargetMethod() => _target;
-
-        // Returns false to SUPPRESS the local shot on a mirroring client (intent already sent to host),
-        // true otherwise (host / single-player roll the real shot).
+        // Returns false to SUPPRESS the local activation on a mirroring client (intent already sent to host),
+        // true otherwise (host / single-player run the real ability).
         public static bool Prefix(object __instance, object parameter)
         {
-            try { return TacticalCombatSync.ClientInterceptShoot(__instance, parameter); }
+            try { return TacticalCombatSync.ClientInterceptAbility(__instance, parameter); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ShootAbilityActivatePatch.Prefix failed: " + ex);
-                return true;   // fail-open: never wedge the native shot on an unexpected error
+                Debug.LogError("[Multipleer][tac] AbilityActivateRelayPatch.Prefix failed: " + ex);
+                return true;   // fail-open: never wedge the native ability on an unexpected error
             }
         }
     }

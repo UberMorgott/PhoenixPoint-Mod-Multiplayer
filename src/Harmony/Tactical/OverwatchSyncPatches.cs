@@ -8,7 +8,7 @@ namespace Multipleer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative OVERWATCH-ARM replication patches (Inc Overwatch). Two Harmony patches,
-    /// mirroring <see cref="ShootAbilityActivatePatch"/> / <see cref="ApplyDamagePatch"/>:
+    /// mirroring <see cref="AbilityActivateRelayPatch"/> / <see cref="ApplyDamagePatch"/>:
     ///   • CLIENT prefix on <c>OverwatchAbility.Activate(object)</c> → send <c>tac.intent.overwatch</c> (with
     ///     the flattened watch cone read from the <c>TacticalAbilityTarget</c> parameter) and SUPPRESS the local
     ///     arm (return false). On the host / single-player, or while re-applying a host outcome, it passes

@@ -40,15 +40,22 @@ namespace Multipleer.Sync.Tactical
         // flag is defense-in-depth (and keeps the host's own apply-of-a-relayed-result clean).
         [ThreadStatic] private static bool _applyingRemote;
 
-        // ─── CLIENT: intercept the local shot, send intent, suppress ──────────────────────────────
+        // ─── CLIENT: intercept the local gameplay ability, send intent, suppress ───────────────────
         /// <summary>
-        /// CLIENT (mirroring) entry from <c>ShootAbilityActivatePatch</c>: capture {shooterNetId,
-        /// abilityDefGuid, target} and send <c>tac.intent.ability</c> to the host. Returns false to SUPPRESS
-        /// the local shot (the host runs the authoritative shot + broadcasts damage). Returns true (let the
-        /// shot run) when this is NOT a mirroring client or the shooter/ability can't be read (fail-open on
-        /// the host path; a mirroring client still suppresses on read-failure — it must never roll locally).
+        /// CLIENT (mirroring) entry from <c>AbilityActivateRelayPatch</c> (the generic per-subclass
+        /// <c>Activate(object)</c> prefix on the RELAYABLE ability types — see
+        /// <see cref="TacticalAbilityRelay"/>: ShootAbility[shoot+grenade] / BashAbility[melee] /
+        /// HealAbility). Captures {actorNetId, abilityDefGuid, target(actor/pos)} and sends ONE generic
+        /// <c>tac.intent.ability</c> (surface 0x87, reused) to the host. Returns false to SUPPRESS the local
+        /// activation (the host runs the authoritative ability + its outcome surfaces — tac.damage etc. —
+        /// replicate it). Returns true (let it run) only when this is NOT a mirroring client; a mirroring
+        /// client still suppresses on a read-failure — it must never execute the ability locally.
+        ///
+        /// THE FIX (Inc T2): the def guid is read from the base <c>Ability.BaseDef</c> property — the actual
+        /// def carrying <c>BaseDef.Guid</c> — NOT a non-existent <c>Def</c> member (the old read returned null
+        /// → empty guid → the shot/grenade was suppressed WITHOUT ever sending the intent → host never fired).
         /// </summary>
-        public static bool ClientInterceptShoot(object shootAbility, object parameter)
+        public static bool ClientInterceptAbility(object ability, object parameter)
         {
             if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player / non-mirror
             var engine = NetworkEngine.Instance;
@@ -56,40 +63,44 @@ namespace Multipleer.Sync.Tactical
 
             try
             {
-                object actor = GetProp(shootAbility, "TacticalActorBase");
+                object actor = GetProp(ability, "TacticalActorBase");
                 if (actor == null)
                 {
-                    Debug.LogError("[Multipleer][tac] shoot intent: no shooter actor — suppressing local shot");
+                    Debug.LogError("[Multipleer][tac] ability intent: no actor — suppressing local activation");
                     return false;
                 }
-                int shooterNetId = TacticalDeploySync.NetIdForLiveActor(actor);
-                if (shooterNetId < 0)
+                int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (actorNetId < 0)
                 {
-                    Debug.LogError("[Multipleer][tac] shoot intent: unknown shooter netId — suppressing local shot");
+                    Debug.LogError("[Multipleer][tac] ability intent: unknown actor netId — suppressing local activation");
                     return false;
                 }
 
-                string abilityGuid = DefReflection.GetGuid(GetProp(shootAbility, "Def"));
+                // FIX: read the def guid off Ability.BaseDef (the real guid-bearing def), not "Def" (null).
+                string abilityGuid = DefReflection.GetGuid(GetProp(ability, "BaseDef"));
                 if (string.IsNullOrEmpty(abilityGuid))
                 {
-                    Debug.LogError("[Multipleer][tac] shoot intent: no ability def guid — suppressing local shot");
+                    // Should never happen now BaseDef is read; kept so we never SILENTLY suppress again.
+                    Debug.LogError("[Multipleer][tac] ability intent: no ability def guid (type=" +
+                                   ability.GetType().Name + ") — suppressing local activation");
                     return false;
                 }
 
                 ReadTarget(parameter, out int targetNetId, out Vector3 targetPos);
 
                 byte[] payload = TacticalLiveCodec.EncodeIntentAbility(
-                    shooterNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, NextNonce());
+                    actorNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentAbility, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.ability shooter=" + shooterNetId +
-                          " ability=" + abilityGuid + " targetNetId=" + targetNetId +
+                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.ability actor=" + actorNetId +
+                          " type=" + ability.GetType().Name + " ability=" + abilityGuid +
+                          " targetNetId=" + targetNetId +
                           " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
-                return false;   // suppress local shot
+                return false;   // suppress local activation (host is authoritative)
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientInterceptShoot failed: " + ex);
-                return false;   // a mirroring client must not roll a local shot even on error
+                Debug.LogError("[Multipleer][tac] ClientInterceptAbility failed: " + ex);
+                return false;   // a mirroring client must not run a local ability even on error
             }
         }
 
@@ -119,13 +130,17 @@ namespace Multipleer.Sync.Tactical
                 object target = BuildShootTarget(intent);
                 if (target == null) { Debug.LogError("[Multipleer][tac] shoot intent: could not build target"); return; }
 
-                // public override void Activate(object parameter) — runs the real shot. The host is NOT
-                // mirroring, so ClientInterceptShoot passes through; the roll → ApplyDamage funnel then
-                // broadcasts tac.damage per hit.
+                // public override void Activate(object parameter) — runs the real ability (shoot/grenade/
+                // melee — the relayable set, all of which deal damage via ApplyDamage). The host is NOT
+                // mirroring, so ClientInterceptAbility passes through; the ability's outcome → ApplyDamage
+                // funnel then broadcasts tac.damage per hit (and the T1 per-actor state-delta carries the
+                // resulting AP/WP/status). NOTE: heal is deliberately NOT relayed (it uses Health.Add directly,
+                // raising no tac.damage, and no health surface exists yet) — see TacticalAbilityRelay.
                 var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
-                if (activate == null) { Debug.LogError("[Multipleer][tac] shoot intent: Activate(object) not found"); return; }
+                if (activate == null) { Debug.LogError("[Multipleer][tac] ability intent: Activate(object) not found"); return; }
                 activate.Invoke(ability, new[] { target });
-                Debug.Log("[Multipleer][tac] HOST executed shot for shooter " + intent.ShooterNetId);
+                Debug.Log("[Multipleer][tac] HOST executed ability " + ability.GetType().Name +
+                          " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ShooterNetId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnAbilityIntent exec failed: " + ex); }
         }
@@ -421,7 +436,8 @@ namespace Multipleer.Sync.Tactical
                 foreach (var a in result)
                 {
                     if (a == null) continue;
-                    string g = DefReflection.GetGuid(GetProp(a, "Def"));
+                    // FIX: match on Ability.BaseDef.Guid (the real def), not the non-existent "Def" member.
+                    string g = DefReflection.GetGuid(GetProp(a, "BaseDef"));
                     if (g == abilityGuid) return a;
                 }
             }
