@@ -55,10 +55,16 @@ namespace Multipleer.Network.Sync
         // Raise is buffered then resolved straight to the result page (fixes the "EX20" collision/ordering bug).
         private readonly State.EventCorrelator _eventCorrelator = new State.EventCorrelator();
 
-        // NOTE: the first-click-wins ChoiceArbiter is intentionally NOT wired here for now (user directive:
-        // event choices are un-gated, last-write-wins; the native CompleteEvent self-guards on IsCompleted so a
-        // double-resolve is a safe no-op). The ChoiceArbiter class is kept (and unit-tested) for when the
-        // permission/turn system is re-enabled. Re-add the field + claim gate then.
+        // First-click-wins arbiter for geoscape-event choices, keyed by per-occurrence id. WIRED: the
+        // CompleteEventPatch.Prefix host gate (the universal chokepoint both a host click AND a client-relayed
+        // answer converge on, via native CompleteEvent) reaches it through NetworkEngine.Instance.Sync.Arbiter
+        // and Claim()s the occId — the FIRST claim per occurrence proceeds (one RNG roll, one EventDismiss
+        // broadcast); every later claim is skipped (no second roll/broadcast, no native-CompleteEvent throw).
+        // Instance-scoped so it resets automatically when NetworkEngine recreates Sync on session teardown.
+        private readonly State.ChoiceArbiter _choiceArbiter = new State.ChoiceArbiter();
+
+        /// <summary>Host-side first-click-wins arbiter for event choices (reached from CompleteEventPatch.Prefix).</summary>
+        public State.ChoiceArbiter Arbiter => _choiceArbiter;
 
         public SyncEngine(NetworkEngine engine)
         {
@@ -130,8 +136,10 @@ namespace Multipleer.Network.Sync
                 return;
             }
 
-            // A REMOTE client answered a geoscape event (no arbiter lock — last-write-wins; the native CompleteEvent
-            // self-guards on IsCompleted so a repeat is a safe no-op). Prefer driving the host's OWN open native
+            // A REMOTE client answered a geoscape event. First-click-wins arbitration is enforced one layer down at
+            // the CompleteEvent chokepoint (CompleteEventPatch.Prefix → Arbiter.Claim(occId)), which both this
+            // relayed answer and a host-local click pass through — so a lost near-simultaneous double is skipped
+            // there (no second roll/broadcast). Prefer driving the host's OWN open native
             // modal through the exact native click path (TryHostNativeResolve) → the host shows the native
             // result/reward page + OK-closes + auto-broadcasts the dismiss, identical to a host click. If the host
             // isn't showing that event (TryHostNativeResolve == false), fall back to the model-only reflected resolve
@@ -488,10 +496,12 @@ namespace Multipleer.Network.Sync
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
         }
 
-        // (Removed TryClaimLocalAnswer: the host's own event-choice click is now PURE NATIVE — the click patch lets
-        // the native UIModuleSiteEncounters.OnChoiceSelected run untouched, which renders the host's result/reward
-        // page and broadcasts the dismiss. No arbiter gate (user directive: last-write-wins). Re-add when the
-        // permission/turn system is re-enabled.)
+        // The host's own event-choice click is PURE NATIVE — the click patch lets the native
+        // UIModuleSiteEncounters.OnChoiceSelected run untouched, which renders the host's result/reward page and
+        // broadcasts the dismiss. First-click-wins arbitration lives one layer down at the universal CompleteEvent
+        // chokepoint (CompleteEventPatch.Prefix → Arbiter.Claim(occId)): both a host click and a client-relayed
+        // answer (TryHostNativeResolve drives the same native OnChoiceSelected → CompleteEvent) pass through that
+        // single host gate, so the FIRST to complete an occurrence wins and any near-simultaneous double is skipped.
 
         // ─── Per-frame tick (from NetworkEngine.Update) ───────────────────
 

@@ -97,7 +97,10 @@ namespace Multipleer.Harmony.Sync
     }
 
     /// <summary>
-    /// Choice-button handler interceptor (last-write-wins, NO arbiter / NO permission gate — user directive).
+    /// Choice-button handler interceptor. First-click-wins is enforced HOST-SIDE at the CompleteEvent chokepoint
+    /// (CompleteEventPatch.Prefix → SyncEngine.Arbiter.Claim), NOT here — the client never resolves locally; it
+    /// only relays an AnswerEventAction and shows immediate local feedback (greys/blocks the choice buttons so the
+    /// click visibly registers and can't double-fire). NO permission gate (user directive).
     ///   • HOST = PURE NATIVE: the host's click (paging, choice, OR the OK on its result page) runs the untouched
     ///     native OnChoiceSelected → SelectChoice → CompleteEvent → SetClosingEncounter (result + rewards) → OK →
     ///     FinishEncounter → FinishQueriedState (close). CompleteEventPatch/CompleteEventDismissPatch.Postfix
@@ -121,6 +124,7 @@ namespace Multipleer.Harmony.Sync
         private static FieldInfo _geoEventField;   // UIModuleSiteEncounters._geoEvent
         private static FieldInfo _pagingField;     // UIModuleSiteEncounters._pagingEvent
         private static MethodInfo _finishEncounter; // UIModuleSiteEncounters.FinishEncounter()
+        private static FieldInfo _choiceContainerField; // UIModuleSiteEncounters.ChoiceButtonsContainer (GameObject)
 
         public static bool Prepare()
         {
@@ -131,7 +135,33 @@ namespace Multipleer.Harmony.Sync
             _geoEventField = AccessTools.Field(t, "_geoEvent");
             _pagingField = AccessTools.Field(t, "_pagingEvent");
             _finishEncounter = AccessTools.Method(t, "FinishEncounter");
+            _choiceContainerField = AccessTools.Field(t, "ChoiceButtonsContainer");
             return _target != null;
+        }
+
+        /// <summary>
+        /// Client choice-button group toggle via a CanvasGroup on ChoiceButtonsContainer (one toggle dims+disables,
+        /// or restores, every choice button at once). Same container lookup for both directions so the grey/restore
+        /// is symmetric.
+        ///   • <paramref name="enabled"/>=false → grey + block: the click registered and input is inert while the
+        ///     modal waits for the host's authoritative result (the 8f9452f EventDismiss path drives the outcome).
+        ///   • <paramref name="enabled"/>=true → restore: re-enable for a FRESHLY shown dialog. The module/container
+        ///     is POOLED across events, so without this the next event's buttons stay permanently greyed/dead.
+        ///     Driven per event render from <see cref="EncounterResetButtonsClientPatch"/> (SetEncounter Postfix).
+        /// Reflection-only, best-effort, NEVER throws into game code; does NOT close the modal or apply any outcome.
+        /// </summary>
+        internal static void SetChoiceButtonsEnabled(object module, bool enabled)
+        {
+            try
+            {
+                var container = _choiceContainerField?.GetValue(module) as GameObject;
+                if (container == null) return;
+                var cg = container.GetComponent<CanvasGroup>() ?? container.AddComponent<CanvasGroup>();
+                cg.interactable = enabled;
+                cg.blocksRaycasts = enabled;
+                cg.alpha = enabled ? 1f : 0.4f;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterChoiceClientPatch SetChoiceButtonsEnabled failed: " + ex.Message); }
         }
 
         public static MethodBase TargetMethod() => _target;
@@ -191,6 +221,11 @@ namespace Multipleer.Harmony.Sync
                               " occId=" + occId + " choiceIndex=" + claimIndex + " → SendActionRequest(AnswerEventAction) (modal stays open)");
                     NetworkEngine.Instance?.Sync?.SendActionRequest(
                         new Multipleer.Network.Sync.Actions.AnswerEventAction(occId, eventId, claimIndex));
+                    // Immediate local feedback that the click registered: grey + block the choice buttons so the
+                    // player sees it took and can't double-fire. NOT an outcome/close — the authoritative result
+                    // still arrives via the host's EventDismiss (8f9452f path) which rebuilds the result page.
+                    // The grey is undone per fresh dialog by EncounterResetButtonsClientPatch (SetEncounter Postfix).
+                    SetChoiceButtonsEnabled(__instance, false);
                     return false;
                 }
                 // Confirmed SINGLE-choice real host event (Choices.Count == 1): the host auto-completed it at trigger
@@ -217,6 +252,47 @@ namespace Multipleer.Harmony.Sync
                 // On any failure fail SAFE: swallow the click (never let the native body NRE / apply locally).
                 return false;
             }
+        }
+    }
+
+    /// <summary>
+    /// Client per-event RESET for the choice-button grey applied on a click (<see cref="EncounterChoiceClientPatch"/>
+    /// → <c>SetChoiceButtonsEnabled(module, false)</c>). The <c>UIModuleSiteEncounters</c> + its
+    /// <c>ChoiceButtonsContainer</c> are POOLED across events, so a CanvasGroup left disabled would leave the NEXT
+    /// dialog's buttons permanently greyed/dead. <c>SetEncounter</c> (UIModuleSiteEncounters.cs:267) is the universal
+    /// client render entry — <c>ShowEncounter</c> (:194 → :247) routes EVERY freshly shown dialog through it (the
+    /// client forces <c>IsSingleChoiceEncounter</c>=false via <see cref="EncounterSingleChoiceClientPatch"/>, so the
+    /// auto-select branch :241 is never taken), INCLUDING the synthetic result page
+    /// (<c>EventDisplay.ShowResult</c> → <c>Show</c> → <c>ShowEncounter</c> → <c>SetEncounter</c>). A Postfix here
+    /// re-enables the group right after the native build, before the player can interact — guaranteeing live buttons
+    /// for every event AND a clickable OK on the result page that replaces a just-greyed choice modal. Host unaffected.
+    /// </summary>
+    [HarmonyPatch]
+    public static class EncounterResetButtonsClientPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
+            var evtT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEvent");
+            if (t == null || evtT == null) return false;
+            // SetEncounter(GeoscapeEvent geoEvent, bool pagingEvent, string overrideText = null)
+            _target = AccessTools.Method(t, "SetEncounter", new[] { evtT, typeof(bool), typeof(string) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // __instance = UIModuleSiteEncounters. Runs after the native build (re)populated the choice buttons.
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!EventDialogClientGuard.IsClient) return;   // host: buttons are never greyed → nothing to reset
+                EncounterChoiceClientPatch.SetChoiceButtonsEnabled(__instance, true);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterResetButtonsClientPatch failed: " + ex.Message); }
         }
     }
 

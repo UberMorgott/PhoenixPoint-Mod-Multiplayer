@@ -9,10 +9,19 @@ using UnityEngine;
 namespace Multipleer.Harmony.Sync
 {
     /// <summary>
-    /// Host-side broadcast interceptor for geoscape event choices:
+    /// Host-side broadcast interceptor + FIRST-CLICK-WINS gate for geoscape event choices:
     /// <c>GeoscapeEvent.CompleteEvent(GeoEventChoice choice, GeoFaction faction)</c> (GeoscapeEvent.cs:86).
     /// The host's choice is authoritative; on a host pick this broadcasts the confirmed answer (Postfix) and
     /// marks the research channel dirty for an instant reveal.
+    ///
+    /// FIRST-CLICK-WINS: CompleteEvent is the SINGLE chokepoint both a host's own click and a client-relayed
+    /// answer converge on (client: SyncEngine.OnActionRequest → EventReflection.TryHostNativeResolve drives the
+    /// host's own native OnChoiceSelected → SelectChoice → CompleteEvent; or the fallback
+    /// CompleteEventByOccurrence → CompleteEvent). The Prefix below claims the per-occurrence id on the shared
+    /// <c>SyncEngine.Arbiter</c>: the FIRST claim proceeds (one RNG roll, one EventDismiss); a near-simultaneous
+    /// LOSER skips native CompleteEvent entirely (no second roll/broadcast/throw). Because the winner's own native
+    /// completion already advanced the host's open modal to the result page, a losing host click is dropped
+    /// harmlessly.
     ///
     /// CLIENT relay is now DEAD/DORMANT: under the two-class dialog model
     /// (<see cref="EventDialogClientGuard"/>) the client never reaches <c>CompleteEvent</c> — its choice
@@ -65,7 +74,29 @@ namespace Multipleer.Harmony.Sync
                 // THIS live instance (order-independent GetOrAssign). The client suppresses this echo
                 // (IHostOnlyApply) — its real result arrives via the EventDismiss broadcast — so the occId here
                 // only needs to keep the action well-formed.
-                if (engine.IsHost) { __state = new AnswerEventAction(EventOccurrenceIds.GetOrAssign(__instance), eventId, choiceIndex); return true; }
+                if (engine.IsHost)
+                {
+                    ushort occId = EventOccurrenceIds.GetOrAssign(__instance);
+                    // FIRST-CLICK-WINS gate. CompleteEvent is the universal host chokepoint both a host's own
+                    // click AND a client-relayed answer (TryHostNativeResolve drives the same native
+                    // OnChoiceSelected → CompleteEvent) converge on. Claim the occurrence: the FIRST claim wins
+                    // (proceeds through native CompleteEvent → one RNG roll → Postfix broadcasts exactly ONE
+                    // EventDismiss). A LOST claim is a near-simultaneous double — SKIP native CompleteEvent
+                    // (no second roll, no second dismiss broadcast, and no native IsCompleted-throw); the winner's
+                    // own native completion already advanced the host modal to the result page (TryHostNativeResolve
+                    // drives the host's live module either way), so the loser is harmlessly dropped. Silent (no
+                    // error dialog). occId 0 (unresolvable) is never claimed → fail OPEN to native (single-resolve).
+                    var arbiter = engine.Sync?.Arbiter;
+                    if (occId != 0 && arbiter != null && !arbiter.Claim(occId))
+                    {
+                        Debug.Log("[Multipleer] CompleteEventPatch first-wins LOST occId=" + occId + " eventId=" + eventId +
+                                  " → skip native CompleteEvent (winner already resolved this occurrence)");
+                        __state = null;
+                        return false;
+                    }
+                    __state = new AnswerEventAction(occId, eventId, choiceIndex);
+                    return true;
+                }
                 // Client: DEAD path under the two-class model — never reached (client choice buttons are inert
                 // / INFO is a pure local hide / SelectChoice is short-circuited). Kept only as a fail-safe:
                 // block any stray local CompleteEvent and do NOT relay an answer (host owns every outcome).

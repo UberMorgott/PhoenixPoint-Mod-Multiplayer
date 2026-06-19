@@ -13,8 +13,11 @@ namespace Multipleer.Network.Sync.Actions
     ///   <item><c>eventId</c> = <c>GeoscapeEvent.EventID</c> (def-name; validity/logging).</item>
     ///   <item><c>choiceIndex</c> = index into <c>EventData.Choices</c> (-1 = the null "decline" choice).</item>
     /// </list>
-    /// Host-side first-click-wins arbitration + the host-modal close live in <c>SyncEngine</c> (the host
-    /// orchestration layer that owns the <c>ChoiceArbiter</c>); this action stays transport-agnostic.
+    /// Host-side first-click-wins arbitration is enforced at the native CompleteEvent chokepoint
+    /// (<c>CompleteEventPatch.Prefix</c> → <c>SyncEngine.Arbiter.Claim(occId)</c>), which both this relayed answer
+    /// (resolved via <c>EventReflection.TryHostNativeResolve</c>/<c>CompleteEventByOccurrence</c>) and a host-local
+    /// click pass through; the winner's native completion advances the host modal to the result page. This action
+    /// stays transport-agnostic.
     /// </summary>
     public sealed class AnswerEventAction : ISyncedAction, IHostOnlyApply, IResolvesOutsideScope
     {
