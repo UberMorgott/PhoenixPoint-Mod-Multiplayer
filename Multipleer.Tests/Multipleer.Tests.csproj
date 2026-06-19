@@ -131,6 +131,10 @@
          The engine glue (TacticalMoveSync / TacticalTurnSync / Harmony patches) binds game types and is
          NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\TacticalLiveCodec.cs"><Link>Sync\Tactical\TacticalLiveCodec.cs</Link></Compile>
+    <!-- Tactical replication Inc-Vision: pure, Unity-free reconcile diff (host→client tac.vision). The engine
+         glue (TacticalVisionSync + the client recompute-suppress Harmony patches) binds game types and is NOT
+         linked. The VisionSnapshot wire codec lives in TacticalLiveCodec.cs (already linked above). -->
+    <Compile Include="..\src\Sync\Tactical\TacticalVisionDiff.cs"><Link>Sync\Tactical\TacticalVisionDiff.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->

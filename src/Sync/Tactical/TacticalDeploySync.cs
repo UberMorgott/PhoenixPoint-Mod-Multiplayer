@@ -341,9 +341,15 @@ namespace Multipleer.Sync.Tactical
                 BroadcastDeploy(siteId, generation, payload);
 
                 _lastBroadcastSiteId = siteId;
-                LiveTlc = tacticalLevelController;       // live-rail handle for tac.move/tac.turn
+                LiveTlc = tacticalLevelController;       // live-rail handle for tac.move/tac.turn/tac.vision
                 LiveSeq = new TacticalLiveSeq();         // fresh per-mission seq stream
                 IntentDedup = new TacticalIntentDedup();
+                // Inc Vision: the host vision push is driven by an always-registered Harmony postfix on
+                // TacticalLevelController.FactionKnowledgeChanged (VisionBroadcastPatch) — no event subscription
+                // to wire here. Reset the per-mission chattiness guard so the first push always goes out, then push
+                // an initial snapshot so the client is seeded with vision from turn 0 (before any change fires).
+                TacticalVisionSync.HostResetBroadcastGuard();
+                TacticalVisionSync.HostBroadcastVision();
                 Debug.Log("[Multipleer][tac] HOST broadcast tac.deploy site=" + siteId +
                           " gpBytes=" + gpBytes.Length + " snapBytes=" + snapBytes.Length +
                           " actors=" + table.Count);
@@ -621,6 +627,7 @@ namespace Multipleer.Sync.Tactical
             _hydratedSiteId = int.MinValue;
             _chunkReassembler = new ChunkReassembler();   // drop any half-received chunk set
             Registry = new TacticalActorRegistry();
+            TacticalVisionSync.HostResetBroadcastGuard();   // Inc Vision: clear the per-mission chattiness guard
             LiveTlc = null;
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();
@@ -716,6 +723,13 @@ namespace Multipleer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacDamage)
             {
                 try { TacticalCombatSync.HandleDamage(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.damage failed: " + ex); }
+                return true;
+            }
+
+            // ─── LIVE vision rail (Inc Vision) ────────────────────────────────────────────────────
+            if (surfaceId == (byte)TacticalSurfaceIds.TacVision)
+            {
+                try { TacticalVisionSync.HandleVision(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.vision failed: " + ex); }
                 return true;
             }
             return false;

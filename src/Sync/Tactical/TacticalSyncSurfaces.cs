@@ -47,6 +47,14 @@ namespace Multipleer.Sync.Tactical
         // overwatch, AI, and the death cascade alike.
         public const ushort TacIntentAbility = 0x87; // 135: client→host  "actor netId shoots ability@guid at target" (intent, carries nonce)
         public const ushort TacDamage = 0x88;        // 136: host→all     "actor netId took this DamageResult" (outcome, carries seq)
+
+        // ─── Inc Vision: host→client player-faction vision replication ──────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The client mirror suppresses local
+        // perception, so the shared player faction's TacticalFactionVision.KnownActors stays empty → spotted-enemy
+        // icons / RED-GREY target markers / the shoot target-gate all read empty. The host snapshots its player
+        // faction's KnownActors on every FactionKnowledgeChangedEvent and pushes a full RECONCILE snapshot here;
+        // the client sets/forgets to match. Outcome-style host→all push, carries its own TacticalLiveSeq.
+        public const ushort TacVision = 0x89;        // 137: host→all     "player-faction vision snapshot" (reconcile, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape
