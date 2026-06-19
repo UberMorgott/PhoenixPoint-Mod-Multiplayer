@@ -62,5 +62,29 @@ namespace Multipleer.Sync.Tactical
         /// path runs, or its dedicated sync handles it).</summary>
         public static bool IsRelayable(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _relayable.Contains(abilityTypeName);
+
+        /// <summary>Feature C (client-side attack animation) — the ability types whose ATTACK ANIMATION the
+        /// client replays via <c>tac.fire.start</c>. SHOOT + GRENADE only (both are <c>ShootAbility</c>):
+        /// the client replays the native <c>TacticalLevelController.FireWeaponAtTargetCrt</c> coroutine, which
+        /// is the SHOOT animation path. MELEE (<c>BashAbility</c>) is DELIBERATELY EXCLUDED here even though it
+        /// is damage-relayable: <c>BashAbility : TacticalAbility</c> (not ShootAbility) animates via its OWN
+        /// <c>BashCrt</c> (BashAbility.cs:199), NOT FireWeaponAtTargetCrt — replaying the shoot coroutine for a
+        /// bash would mis-bind. Melee animation is a follow-on (it needs a BashCrt-shaped replay).</summary>
+        public static readonly string[] FireStartAnimAbilityTypeNames =
+        {
+            "ShootAbility",   // shoot + grenade (ThrowGrenade_ShootAbilityDef is a ShootAbility)
+        };
+
+        private static readonly HashSet<string> _fireStartAnim =
+            new HashSet<string>(FireStartAnimAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>Feature C (client-side attack animation): PURE decision whether the HOST should broadcast a
+        /// <c>tac.fire.start</c> for an attack of this ability type. Scoped to the SHOOT-coroutine animation set
+        /// (<see cref="FireStartAnimAbilityTypeNames"/>) — shoot + grenade. Melee/Move/Overwatch/Reload/Heal/
+        /// unknown return false (melee animation is a documented follow-on; the rest never use the shoot path).
+        /// NOTE: this is a SUBSET of <see cref="IsRelayable"/> (which also relays melee DAMAGE) — damage and
+        /// animation share the shoot subset, and melee damage still replicates via tac.damage with no anim.</summary>
+        public static bool ShouldBroadcastFireStart(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _fireStartAnim.Contains(abilityTypeName);
     }
 }

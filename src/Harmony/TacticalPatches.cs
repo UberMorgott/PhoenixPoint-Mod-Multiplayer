@@ -179,6 +179,9 @@ namespace Multipleer.Harmony
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true;
             if (engine.IsHost) return true;
+            // Feature C: when the client is deliberately REPLAYING this coroutine to play the attack ANIMATION
+            // (projectile-free, camera-silent), let it run — otherwise this prefix would suppress our own replay.
+            if (Multipleer.Sync.Tactical.TacticalFireAnimSync.ReplayActive) return true;
             return false;
         }
     }

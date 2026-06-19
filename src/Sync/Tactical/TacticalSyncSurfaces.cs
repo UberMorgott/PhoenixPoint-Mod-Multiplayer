@@ -93,6 +93,15 @@ namespace Multipleer.Sync.Tactical
         // tactical seq (last-writer-wins) like the other live surfaces. 0x8E is RESERVED for the future generic
         // ability-INTENT (state-spine §3) — do NOT reuse it here.
         public const ushort TacActorState = 0x8F;        // 143: host→all     "per-actor AP/WP + status-set delta" (state, carries seq)
+
+        // ─── Feature C: client-side ATTACK ANIMATION (tac.fire.start) ────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The host broadcasts this at the
+        // MOMENT an actor BEGINS a shoot/grenade attack (ShootAbility — melee is a documented follow-on), so the
+        // client mirror plays the shooting/throw animation CONCURRENTLY with the host. ANIMATION-ONLY: DAMAGE stays owned by tac.damage
+        // (0x88); the client replays FireWeaponAtTargetCrt with AttackType.Synced + a neutered FireProjectile
+        // (no projectile → ZERO client damage) under a camera-hint guard (no camera fly). 0x8E is RESERVED for
+        // the future generic ability-INTENT; 0x8F is TacActorState → this takes the next free id 0x90.
+        public const ushort TacFireStart = 0x90;         // 144: host→all     "actor netId begins attack@guid at target" (start, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape

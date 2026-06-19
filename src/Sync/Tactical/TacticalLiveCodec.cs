@@ -386,6 +386,71 @@ namespace Multipleer.Sync.Tactical
             catch { return false; }
         }
 
+        // ─── tac.fire.start (host→all, Feature C — client-side ATTACK ANIMATION) ───────────────────
+        // The host broadcasts this at the MOMENT an actor BEGINS a relayable attack (shoot / grenade-throw /
+        // melee — see TacticalAbilityRelay), so the client mirror plays the SHOOTING/THROW animation
+        // CONCURRENTLY with the host. DAMAGE is owned exclusively by tac.damage (0x88) — this surface is
+        // animation-only: the client replays FireWeaponAtTargetCrt with AttackType.Synced and a neutered
+        // FireProjectile (no projectile → ZERO client damage) under a camera-hint guard (no camera fly).
+        // Mirrors the EncodeIntentAbility layout (so target encode/decode is identical), MINUS the nonce
+        // (an outcome-style host→all push carries a seq instead) PLUS a shotCount (informational; the host's
+        // real GetNumberOfShots drives the replay, but it is carried for parity/diagnostics).
+        //   [seq:u32][shooterNetId:i32][abilityDefGuid:string][targetNetId:i32][tx:f32][ty:f32][tz:f32][shotCount:i32]
+        public struct FireStart
+        {
+            public uint Seq;
+            public int ShooterNetId;
+            public string AbilityDefGuid;
+            public int TargetNetId;          // -1 sentinel when the target is a bare position, not an actor
+            public float TX, TY, TZ;
+            public int ShotCount;
+            public FireStart(uint seq, int shooterNetId, string abilityDefGuid, int targetNetId,
+                float tx, float ty, float tz, int shotCount)
+            {
+                Seq = seq; ShooterNetId = shooterNetId; AbilityDefGuid = abilityDefGuid ?? "";
+                TargetNetId = targetNetId; TX = tx; TY = ty; TZ = tz; ShotCount = shotCount;
+            }
+        }
+
+        public static byte[] EncodeFireStart(uint seq, int shooterNetId, string abilityDefGuid, int targetNetId,
+            float tx, float ty, float tz, int shotCount)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write(shooterNetId);
+                w.Write(abilityDefGuid ?? "");
+                w.Write(targetNetId);
+                w.Write(tx); w.Write(ty); w.Write(tz);
+                w.Write(shotCount);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeFireStart(byte[] data, out FireStart start)
+        {
+            start = default(FireStart);
+            // Minimum: u32 seq + i32 shooter + at least a 1-byte length-prefixed string + i32 target + 3*f32 + i32.
+            if (data == null || data.Length < 4 + 4 + 1 + 4 + 12 + 4) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    int shooter = r.ReadInt32();
+                    string guid = r.ReadString();
+                    int targetNetId = r.ReadInt32();
+                    float tx = r.ReadSingle(); float ty = r.ReadSingle(); float tz = r.ReadSingle();
+                    int shotCount = r.ReadInt32();
+                    start = new FireStart(seq, shooter, guid, targetNetId, tx, ty, tz, shotCount);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
         // ─── tac.intent.equip (client→host, Inc Equip) ───────────────────
         // A client EQUIPMENT-SWAP intent: which actor switches its SELECTED equipment to which slot. The
         // equipment is identified by its INDEX in the actor's ordered equipment list (actor.Equipments.Equipments,

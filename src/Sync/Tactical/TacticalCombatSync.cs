@@ -57,7 +57,17 @@ namespace Multipleer.Sync.Tactical
         /// </summary>
         public static bool ClientInterceptAbility(object ability, object parameter)
         {
-            if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player / non-mirror
+            if (!TacticalDeploySync.IsClientMirroring)
+            {
+                // HOST / single-player / non-mirror: the native ability runs unchanged. Feature C — this is the
+                // SINGLE host choke for a relayable attack BEGINNING (the host's own click AND a relayed client
+                // intent re-Activated in HostOnAbilityIntent both run through the patched Activate(object), so
+                // they both trip this once). Broadcast tac.fire.start NOW so every client mirror plays the
+                // shooting/throw animation CONCURRENTLY with the host. Animation-only; DAMAGE rides tac.damage.
+                // Fail-open: HostBroadcastFireStart logs + swallows, never blocking the native attack.
+                TacticalFireAnimSync.HostBroadcastFireStart(ability, parameter);
+                return true;
+            }
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return true;
 

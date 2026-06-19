@@ -637,6 +637,7 @@ namespace Multipleer.Sync.Tactical
             LiveTlc = null;                                  // Inc T1: the flush coroutine watches this → self-stops
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();
+            TacticalFireAnimSync.Reset();                    // Feature C: drop any stuck replay-guard depth
         }
 
         // ─── Wire send + inbound (rides the 0x67 SyncEnvelope rail) ─────────────────────────
@@ -729,6 +730,15 @@ namespace Multipleer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacDamage)
             {
                 try { TacticalCombatSync.HandleDamage(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.damage failed: " + ex); }
+                return true;
+            }
+
+            // ─── Feature C: client-side ATTACK ANIMATION rail (tac.fire.start) ────────────────────────
+            // Host→all START push; client-only play (the handler is side-gated internally, so a stray
+            // envelope on the host is a clean no-op). DAMAGE stays on tac.damage (0x88).
+            if (surfaceId == (byte)TacticalSurfaceIds.TacFireStart)
+            {
+                try { TacticalFireAnimSync.ClientOnFireStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.fire.start failed: " + ex); }
                 return true;
             }
 
