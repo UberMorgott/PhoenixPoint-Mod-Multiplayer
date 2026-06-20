@@ -266,6 +266,11 @@ namespace Multipleer.UI
 
         public void Show()
         {
+            // IDEMPOTENT: the state-driven visibility (Update → LoadOverlayVisibility.ShouldShow) calls this
+            // EVERY frame while a co-op load is in progress. Re-zeroing the bars on each call would thrash
+            // the live progress back to 0% every frame, so do the one-time reset + activate only on the
+            // rising edge (not already visible). Re-entrant calls while visible are a no-op.
+            if (_visible) return;
             EnsureCanvas();
             // Rows persist across sessions (_rows is never cleared; Hide() only deactivates the canvas).
             // Reset each row's visible bar/text to 0 so a 2nd co-op load starts from 0 instead of the
@@ -283,19 +288,47 @@ namespace Multipleer.UI
 
         public void Hide()
         {
+            // IDEMPOTENT: also called every frame from the state-driven path when no load is in progress.
+            if (!_visible) return;
             if (_canvas != null) _canvas.gameObject.SetActive(false);
             _visible = false;
         }
 
         private void Update()
         {
-            // UI refresh only. The phase-2 native-load driver (progress read + done detection) moved
-            // to SaveTransferCoordinator.Update() so it runs on every peer regardless of overlay
-            // visibility — see RosterProgressTracker.InPhase2 / SaveTransferCoordinator pump.
-            if (!_visible) return;
+            // STATE-DRIVEN visibility (robustness fix): the overlay no longer relies on a single fire-once
+            // Harmony show that a frame-race could miss ("через раз"). Each frame we build a snapshot from
+            // the live SaveTransfer coordinator + per-peer tracker and ask the pure predicate whether the
+            // overlay should be up, then Show()/Hide() idempotently. This self-heals every transition path
+            // and every frame-race: a missed show OR a missed hide is corrected on the very next frame.
+            //
+            // The phase-2 native-load driver (progress read + done detection) lives in
+            // SaveTransferCoordinator.Update() and runs on every peer regardless of overlay visibility.
             var engine = NetworkEngine.Instance;
-            if (engine == null || engine.SaveTransfer == null || engine.Session == null) return;
-            Refresh(engine);
+            if (engine == null || engine.SaveTransfer == null || engine.Session == null)
+            {
+                // No live session/coordinator → nothing can be loading; ensure the overlay is down.
+                Hide();
+                return;
+            }
+
+            var coord = engine.SaveTransfer;
+            // Authoritative per-peer completion from the shared tracker over the participating roster slots.
+            var tracker = coord.Tracker;
+            int expectedPeers = 0, donePeers = 0;
+            foreach (var slot in engine.Session.GetRosterSlots())
+            {
+                expectedPeers++;
+                if (tracker.IsDone(slot)) donePeers++;
+            }
+
+            bool shouldShow = LoadOverlayVisibility.ShouldShow(
+                coord.TransferActive, coord.InPhase2, expectedPeers, donePeers);
+
+            if (shouldShow) Show(); else Hide();
+
+            // Repaint the per-slot bars only while visible (skip self).
+            if (_visible) Refresh(engine);
         }
 
         private void Refresh(NetworkEngine engine)

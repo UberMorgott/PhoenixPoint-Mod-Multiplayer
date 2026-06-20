@@ -49,9 +49,23 @@ namespace Multipleer.Network
         // 32 KB and document the limitation rather than branch the chunk size per transport.
         public const int ChunkSize = 32 * 1024;
 
-        // Barrier timeout after SaveDone is sent / the barrier opens. On expiry the host kicks peers
-        // that have not reported LOADED and begins with whoever is ready (required, not optional).
-        private const long BarrierTimeoutMs = 60_000;
+        // Phase-1 (LOADED barrier) timeout: time the host waits, after the barrier opens, for every
+        // connected peer to download + prepare its save (ack LOADED) before kicking the stragglers and
+        // beginning with whoever is ready. This window covers the chunked transfer AND the in-memory
+        // PrepareEntryFromBlobCrt (metadata/level-param read of a 1–5 MB geoscape blob), which on a slow
+        // disk can take well over a minute — so it is deliberately generous (3 min). It does NOT cover
+        // the native world-load (that is phase-2). Splitting this off the old single 60 s constant
+        // stops a slow-but-healthy client being kicked mid-prepare (review fix #3).
+        private const long Phase1LoadTimeoutMs = 180_000;
+
+        // Phase-2 reveal deadline: how long the held (opaque) overlay stays up — i.e. how long both
+        // reveal fallbacks wait for every peer to finish its NATIVE world-load and report done — before
+        // forcing the synchronized reveal anyway. Used by BOTH fallbacks: the host forced-reveal
+        // (a peer errored / never reported done) and the per-peer self-reveal (RevealAll never arrived,
+        // dead host). A 1–5 MB geoscape world-load on an HDD can exceed 60 s, so under the old single
+        // 60 s constant a healthy-but-slow client got force-revealed MID-LOAD (black globe). 3 min gives
+        // a real world-load room to finish while still bounding a genuinely stuck peer (review fix #3).
+        private const long RevealDeadlineMs = 180_000;
 
         private readonly NetworkEngine _engine;
 
@@ -59,7 +73,16 @@ namespace Multipleer.Network
         private Guid _transferId;
         private bool _barrierOpen;
         private long _barrierOpenedAtMs;
+        // CLIENT loaded-acks only — keyed by the authoritative transport sender id (msg.SenderSteamId).
+        // The host's OWN loaded-state is tracked separately in _hostLoaded (NOT added here): on
+        // DirectIP/no-Steam LocalSteamId==0, so if the transport ever handed a client peerId 0 its ack
+        // would collide with a host self-entry in this set → barrier under-counts → 60 s stall. Keeping
+        // the host out of this set makes host and client entries structurally un-collidable (fix #2).
         private readonly HashSet<ulong> _loadedPeers = new HashSet<ulong>();
+        // The host's own loaded-state, tracked under a dedicated flag instead of an id key in
+        // _loadedPeers — see above. Set when the host finishes preparing its own entry, reset in
+        // OpenBarrier.
+        private bool _hostLoaded;
 
         // ─── Client reassembly state ──────────────────────────────────────
         private Guid _rxTransferId;
@@ -142,6 +165,47 @@ namespace Multipleer.Network
         public SaveTransferCoordinator(NetworkEngine engine)
         {
             _engine = engine;
+            // Fix #1: react to a peer dropping mid-load. We subscribe to the EXISTING id-only disconnect
+            // event NetworkEngine already exposes (Action<ulong> peerId) — the same one HostLeaveHandler
+            // (named variant) and SessionNotifier ride. It fires in NetworkEngine.OnPeerDisconnected
+            // AFTER Session.RemoveClient(peerId), so by the time our handler runs the dropped peer is
+            // already out of GetConnectedClients()/GetRosterSlots() — the expected count self-corrects.
+            if (_engine != null)
+                _engine.OnClientDisconnected += OnPeerDisconnectedDuringLoad;
+        }
+
+        // Fix #1: unsubscribe so a coordinator instance does not leak on the engine's long-lived event.
+        // NetworkEngine re-creates this coordinator each Initialize() (and nulls it on Shutdown/TearDown)
+        // WITHOUT calling Detach, so we ALSO self-detach defensively inside the handler (see there); this
+        // public hook lets a future engine teardown drop the subscription explicitly.
+        public void Detach()
+        {
+            if (_engine != null)
+                _engine.OnClientDisconnected -= OnPeerDisconnectedDuringLoad;
+        }
+
+        // Fix #1: a peer dropped. If it drops AFTER OpenBarrier but BEFORE its LOADED ack, the barrier
+        // would otherwise wait out the full phase-1 timeout. Remove any stale loaded-entry for the gone
+        // peer and re-evaluate release immediately. Session.RemoveClient already ran (event ordering), so
+        // GetConnectedClients()/GetRosterSlots() no longer count this peer → expected drops by one and the
+        // phase-2 reveal's AllDone(GetRosterSlots()) no longer waits on it. No tracker mutation needed:
+        // AllDone only consults REQUIRED (remaining) slots, and the dropped slot is already gone.
+        private void OnPeerDisconnectedDuringLoad(ulong peerId)
+        {
+            // Self-detach guard: NetworkEngine replaces this coordinator on re-Initialize without calling
+            // Detach, so a stale instance could still be subscribed. If we are no longer the live
+            // coordinator, unsubscribe and bail — never act on behalf of a dead session.
+            if (_engine == null || !ReferenceEquals(_engine.SaveTransfer, this))
+            {
+                if (_engine != null)
+                    _engine.OnClientDisconnected -= OnPeerDisconnectedDuringLoad;
+                return;
+            }
+            // _loadedPeers holds client ids only; the host (_hostLoaded) is never keyed by id, so this
+            // can never drop the host. Removing a not-yet-loaded peer is a harmless no-op.
+            _loadedPeers.Remove(peerId);
+            // Phase-1: release now if the remaining connected peers are all loaded (no-op once begun).
+            TryReleaseBarrier();
         }
 
         /// <summary>True while a peer has a save prepared but must wait for BEGIN before entering.</summary>
@@ -343,8 +407,9 @@ namespace Multipleer.Network
             yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
             OpenBarrier();
-            // Host counts as loaded immediately.
-            _loadedPeers.Add(_engine.LocalSteamId);
+            // Host counts as loaded immediately — under the dedicated sentinel flag, NOT an id key in
+            // _loadedPeers, so it can never collide with a peerId-0 client ack on DirectIP (fix #2).
+            _hostLoaded = true;
             TryReleaseBarrier();
         }
 
@@ -385,6 +450,7 @@ namespace Multipleer.Network
             _barrierOpen = true;
             _barrierOpenedAtMs = NowMs();
             _loadedPeers.Clear();
+            _hostLoaded = false; // fix #2: host self-loaded flag reset per fresh barrier
             _peerDownloadPct.Clear();
             _slotProgress.Clear();
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
@@ -440,6 +506,16 @@ namespace Multipleer.Network
                 _revealed = false;
                 _revealAllSent = false;
                 _pendingResult = null;
+                // Reset symmetry (overlay robustness fix): mirror the host's OpenBarrier reset on the CLIENT
+                // transfer-entry path so a 2nd consecutive client load starts clean. Without this the phase-2
+                // driver (_lastReportedLoadPct/_loadingLevel/_liveProgressBar) keeps the prior run's stale
+                // values, and the per-peer done-set keeps the prior run's done slots — which would make the
+                // state-driven overlay predicate (LoadOverlayVisibility.ShouldShow, fed by tracker.IsDone)
+                // read "all peers already done" at the new transfer's start and never show the overlay.
+                _lastReportedLoadPct = -1;
+                _loadingLevel = null;
+                _liveProgressBar = null;
+                _tracker.Reset(); // drop prior run's per-slot progress + done so the new load shows from 0
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
@@ -447,14 +523,17 @@ namespace Multipleer.Network
                 Debug.Log($"[Multipleer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
             }
 
-            if (chunk.Chunk != null && chunk.Offset >= 0 &&
-                chunk.Offset + chunk.Chunk.Length <= _rxBuffer.Length)
+            // Fix #4: validate the chunk maps to a clean grid index BEFORE indexing _rxChunkSeen.
+            // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so a well-formed offset is a
+            // multiple of ChunkSize and within bounds. A malformed/hostile chunk (offset not on the grid,
+            // or out of range) must be rejected rather than mis-mapped onto the wrong coverage index.
+            if (chunk.Chunk != null &&
+                TryChunkIndex(chunk.Offset, chunk.Chunk.Length, _rxBuffer.Length, ChunkSize, out var index))
             {
                 // Copy is idempotent; only count a chunk once toward coverage/progress even if the
                 // transport redelivers it (Stun duplicates reliable packets).
                 Array.Copy(chunk.Chunk, 0, _rxBuffer, chunk.Offset, chunk.Chunk.Length);
 
-                var index = (int)(chunk.Offset / ChunkSize);
                 if (_rxChunkSeen != null && index >= 0 && index < _rxChunkSeen.Length && !_rxChunkSeen[index])
                 {
                     _rxChunkSeen[index] = true;
@@ -465,6 +544,12 @@ namespace Multipleer.Network
                     if (_rxChunksRemaining == 0 || (_rxChunksRemaining % 64) == 0)
                         Debug.Log($"[Multipleer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
                 }
+            }
+            else if (chunk.Chunk != null)
+            {
+                Debug.LogWarning($"[Multipleer] OnSaveChunk: rejecting malformed chunk " +
+                                 $"(offset={chunk.Offset} len={chunk.Chunk.Length} total={_rxBuffer.Length} " +
+                                 $"chunkSize={ChunkSize}) — not on the ChunkSize grid or out of bounds.");
             }
         }
 
@@ -626,22 +711,35 @@ namespace Multipleer.Network
             }
         }
 
-        // Host: release the barrier once every connected peer (+ host) has reported LOADED.
+        // Host: release the barrier once the host AND every currently-connected client has reported
+        // LOADED. Expected-client count is read LIVE from the roster, so a peer that dropped mid-load is
+        // already absent (Session.RemoveClient ran before the disconnect event) → release happens with
+        // whoever remains (fix #1). Host vs client counting is kept structurally separate (fix #2).
         private void TryReleaseBarrier()
         {
             if (!_engine.IsHost || !_barrierOpen) return;
 
-            // Expected = host + all currently connected clients.
-            var expected = 1; // host
-            foreach (var _ in _engine.Session.GetConnectedClients()) expected++;
+            // Expected CLIENTS = all currently connected clients (host is counted via _hostLoaded).
+            var expectedClients = 0;
+            foreach (var _ in _engine.Session.GetConnectedClients()) expectedClients++;
 
-            var release = _loadedPeers.Count >= expected;
-            Debug.Log($"[Multipleer] TryReleaseBarrier: loadedPeers={_loadedPeers.Count} " +
-                      $"expected={expected} release={release}.");
+            var release = BarrierReleased(_hostLoaded, _loadedPeers.Count, expectedClients);
+            Debug.Log($"[Multipleer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
+                      $"loadedClients={_loadedPeers.Count} expectedClients={expectedClients} release={release}.");
 
             if (release)
                 Begin();
         }
+
+        /// <summary>
+        /// Pure barrier-release predicate (fix #1/#2, unit-testable): the LOADED barrier releases iff the
+        /// host has prepared AND every currently-expected client has acked. The host is counted via a
+        /// dedicated flag, never an id in <paramref name="loadedClientCount"/>, so a peerId-0 client can
+        /// never masquerade as the host. When a not-yet-loaded peer drops, the caller passes the reduced
+        /// live <paramref name="expectedClientCount"/>, so the barrier releases early with the rest.
+        /// </summary>
+        internal static bool BarrierReleased(bool hostLoaded, int loadedClientCount, int expectedClientCount)
+            => hostLoaded && loadedClientCount >= expectedClientCount;
 
         /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
         public void SendLoadComplete()
@@ -738,7 +836,9 @@ namespace Multipleer.Network
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;
             // Host forced-reveal deadline: if a peer errors / never reports done, reveal anyway.
-            _phase2DeadlineMs = NowMs() + BarrierTimeoutMs;
+            // Uses the phase-2 reveal deadline (NOT the phase-1 load timeout) so a long native world-load
+            // is not force-revealed mid-load (fix #3).
+            _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
 
             Debug.Log("[Multipleer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
@@ -904,7 +1004,7 @@ namespace Multipleer.Network
             }
             // Per-peer self-reveal: this peer is holding (reached Playing) but the RevealAll never
             // arrived (dead host). After the hold timeout, reveal locally so it isn't stuck forever.
-            if (_reachedPlaying && !_revealed && NowMs() - _revealHoldStartedMs > BarrierTimeoutMs)
+            if (_reachedPlaying && !_revealed && NowMs() - _revealHoldStartedMs > RevealDeadlineMs)
             {
                 PerformDeferredLift();
             }
@@ -945,8 +1045,10 @@ namespace Multipleer.Network
             }
 
             // Timeout/kick + Begin only apply while the LOADED barrier is still open (phase-1).
+            // Uses the generous phase-1 load timeout so a slow-but-healthy download/prepare is not kicked
+            // (fix #3).
             if (!_barrierOpen) return;
-            if (NowMs() - _barrierOpenedAtMs <= BarrierTimeoutMs) return;
+            if (NowMs() - _barrierOpenedAtMs <= Phase1LoadTimeoutMs) return;
 
             // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
             var stragglers = new List<ulong>();
@@ -960,7 +1062,8 @@ namespace Multipleer.Network
                 _engine.Session.RemoveClient(clientId);
             }
 
-            // Host is always in _loadedPeers; begin with whoever remains (at least the host).
+            // The host's own loaded-state is tracked by _hostLoaded (never keyed in _loadedPeers), so it
+            // is unaffected by the straggler kicks above; begin with whoever remains (at least the host).
             Begin();
         }
 
@@ -1067,6 +1170,22 @@ namespace Multipleer.Network
         }
 
         private static long NowMs() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+
+        /// <summary>
+        /// Pure chunk-grid validator (fix #4, unit-testable): a well-formed chunk sits exactly on the
+        /// <paramref name="chunkSize"/> grid (offset a non-negative multiple of chunkSize) and lies fully
+        /// within [0, <paramref name="totalLen"/>). Returns the grid index (offset/chunkSize) only when
+        /// all hold; rejects (false, index=-1) a malformed/out-of-range offset instead of mis-mapping it.
+        /// </summary>
+        internal static bool TryChunkIndex(long offset, int chunkLen, int totalLen, int chunkSize, out int index)
+        {
+            index = -1;
+            if (chunkSize <= 0 || chunkLen < 0) return false;
+            if (offset < 0 || offset % chunkSize != 0) return false;        // off the grid
+            if (offset + chunkLen > totalLen) return false;                 // out of bounds
+            index = (int)(offset / chunkSize);
+            return true;
+        }
 
         // CRC-32 (IEEE 802.3, reflected) — small local impl, no external dependency.
         private static readonly uint[] _crcTable = BuildCrcTable();

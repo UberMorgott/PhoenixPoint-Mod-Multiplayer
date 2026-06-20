@@ -28,6 +28,11 @@
     <Compile Include="..\src\Network\TimeSync\ClockOffsetEstimator.cs"><Link>ClockOffsetEstimator.cs</Link></Compile>
     <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
     <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>
+    <!-- Co-op load-overlay VISIBILITY decision (pure, Unity-free): "is a genuine co-op save-transfer/load
+         window open AND not all participating peers finished?" The live LoadOverlayController builds the
+         snapshot from engine.SaveTransfer each frame and calls ShouldShow; state-driven so visibility
+         self-heals regardless of which transition path / frame-race happened. Mirrors the gate-helper pattern. -->
+    <Compile Include="..\src\UI\LoadOverlayVisibility.cs"><Link>UI\LoadOverlayVisibility.cs</Link></Compile>
     <Compile Include="..\src\Transport\TransportType.cs"><Link>TransportType.cs</Link></Compile>
     <Compile Include="..\src\Transport\ITransport.cs"><Link>ITransport.cs</Link></Compile>
     <Compile Include="..\src\Transport\CompositeTransport.cs"><Link>CompositeTransport.cs</Link></Compile>
