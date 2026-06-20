@@ -93,8 +93,28 @@ namespace Multipleer.Transport
         {
             IsHost = true;
             _running = true;
-            _listener = new TcpListener(IPAddress.Any, port);
-            _listener.Start();
+            try
+            {
+                _listener = new TcpListener(IPAddress.Any, port);
+                _listener.Start();
+            }
+            catch (SocketException ex)
+            {
+                // Bind failed (port already in use / address not available). Surface it: set State to
+                // Failed and label the endpoint so the host learns this LAN path is down instead of
+                // silently believing it is listening. We do NOT re-throw — StartHost may call this on
+                // a bare DirectTransport (not only inside a Composite), so an escaping exception would
+                // abort the whole host bring-up; the queryable Failed state is the signal instead, and
+                // CompositeTransport.Host inspects each child's State after hosting.
+                _running = false;
+                _listener = null;
+                LocalEndpoint = $"DirectIP(bind failed: {ex.SocketErrorCode})";
+                State = ConnectionState.Failed;
+                LogError($"[Multipleer] DirectTransport host bind failed on port {port}: " +
+                         $"{ex.Message} (SocketErrorCode={ex.SocketErrorCode})");
+                OnStateChanged?.Invoke(State);
+                return;
+            }
             LocalEndpoint = $"DirectIP(host:{port})";
             State = ConnectionState.Connected;
             OnStateChanged?.Invoke(State);
@@ -236,16 +256,26 @@ namespace Multipleer.Transport
         public void Disconnect()
         {
             _running = false;
+            // Collect (peerId, label) under the lock — reading RemoteEndPoint BEFORE Close() (a disposed
+            // socket throws ObjectDisposedException on RemoteEndPoint) — then raise OnPeerDisconnected
+            // OUTSIDE the lock. Raising under the lock risked a reentrancy deadlock if a handler calls
+            // back into Send/Broadcast, and the post-Close read used to throw on the UI thread and abort
+            // the whole leave. Mirrors the Update() peer-event drain.
+            var dropped = new List<(ulong peerId, string label)>();
             lock (_lock)
             {
                 foreach (var kvp in _clients)
                 {
+                    string label;
+                    try { label = kvp.Value.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
+                    catch { label = "unknown"; }   // socket already torn down → never throw here
                     try { kvp.Value.Close(); } catch { }
-                    OnPeerDisconnected?.Invoke(kvp.Key,
-                        kvp.Value.Client.RemoteEndPoint?.ToString() ?? "unknown");
+                    dropped.Add((kvp.Key, label));
                 }
                 _clients.Clear();
             }
+            foreach (var (peerId, label) in dropped)
+                OnPeerDisconnected?.Invoke(peerId, label);
             _listener?.Stop();
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);

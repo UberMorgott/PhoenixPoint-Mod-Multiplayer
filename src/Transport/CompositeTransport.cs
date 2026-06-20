@@ -180,11 +180,52 @@ namespace Multipleer.Transport
         public void Host(int port = 0)
         {
             // Per-child try/catch: if one transport can't host (port in use, Steam
-            // unavailable, …) the rest still come up. Children log their own failures.
+            // unavailable, …) the rest still come up. Log which child failed so a down LAN/STUN/Steam
+            // path is diagnosable (a silent swallow previously hid e.g. a DirectIP bind clash).
             foreach (var c in _children)
             {
-                try { c.Host(port); } catch { }
+                try
+                {
+                    c.Host(port);
+                    // A child may report a bind/host failure via State rather than throwing
+                    // (DirectTransport flips to Failed on a port clash instead of escaping). Log that
+                    // too so a down path is visible even when no exception propagates.
+                    if (c.State == ConnectionState.Failed)
+                        LogError($"[Multipleer] CompositeTransport: child {c.TransportType} reported " +
+                                 $"Failed after Host on port {port} ({c.LocalEndpoint}).");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"[Multipleer] CompositeTransport: child {c.TransportType} failed to host " +
+                             $"on port {port}: {ex.GetType().Name}: {ex.Message}");
+                }
             }
+        }
+
+        // CompositeTransport is intentionally Unity-free at compile time (the test project links it
+        // directly without referencing UnityEngine), so we reach UnityEngine.Debug.LogError via
+        // reflection. In-game the call resolves and lands in the Player.log; under tests it is a
+        // harmless no-op. Resolution is cached after first use.
+        private static System.Reflection.MethodInfo _unityLogError;
+        private static bool _unityLogErrorResolved;
+        private static void LogError(string message)
+        {
+            try
+            {
+                if (!_unityLogErrorResolved)
+                {
+                    _unityLogErrorResolved = true;
+                    var debugType = Type.GetType("UnityEngine.Debug, UnityEngine.CoreModule")
+                                    ?? Type.GetType("UnityEngine.Debug, UnityEngine");
+                    if (debugType != null)
+                        _unityLogError = debugType.GetMethod("LogError", new[] { typeof(object) });
+                }
+                if (_unityLogError != null)
+                    _unityLogError.Invoke(null, new object[] { message });
+                else
+                    Console.WriteLine(message); // fallback (e.g. test host with no UnityEngine loaded)
+            }
+            catch { /* logging must never break the host path */ }
         }
 
         // Composite is HOST-side only; clients always use a single concrete transport.

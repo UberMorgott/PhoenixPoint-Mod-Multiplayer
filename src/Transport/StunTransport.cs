@@ -31,7 +31,9 @@ namespace Multipleer.Transport
         };
 
         private UdpClient _udp;
-        private IPEndPoint _publicEndPoint;
+        // Written by the connect/discovery worker, read by the UI rail (PublicEndPoint) on the main
+        // thread → volatile for a safe cross-thread publish of the reference.
+        private volatile IPEndPoint _publicEndPoint;
         private readonly Dictionary<ulong, IPEndPoint> _peers = new Dictionary<ulong, IPEndPoint>();
         private readonly Queue<(ulong, byte[])> _incomingQueue = new Queue<(ulong, byte[])>();
         private readonly object _lock = new object();
@@ -39,6 +41,12 @@ namespace Multipleer.Transport
         private Thread _receiveThread;
         private long _nextPeerId = 1;
         private int _listenPort;
+        // Peer connect/disconnect raised on the background receive thread are marshalled here and
+        // surfaced on the main thread in Update() — mirroring DirectTransport's _peerEventQueue —
+        // because their downstream handlers touch Unity APIs / shared clock state that must run on
+        // the main thread only.
+        private readonly Queue<(bool connected, ulong peerId, string endpoint)> _peerEventQueue
+            = new Queue<(bool, ulong, string)>();
 
         // ─── Non-blocking client connect (anti-freeze) ─────────────────────
         // STUN discovery + hole-punch block for up to a few seconds; running them on the Unity main
@@ -48,8 +56,18 @@ namespace Multipleer.Transport
         private volatile bool _connectAborted;
         private bool _pendingConnectResult;       // a result is waiting to be surfaced (guarded by _lock)
         private bool _pendingConnectSucceeded;    // true = connected, false = failed
+        private string _pendingFailReason;        // human-readable reason (failure only)
         private ulong _pendingPeerId;             // minted peer id (success only)
         private IPEndPoint _pendingRemoteEp;      // remote endpoint (success only)
+
+        // ─── Hole-punch ACK coordination (client side) ─────────────────────
+        // Connect success must be gated on RECEIVING the host's HOLE_PUNCH_ACK, not on merely sending
+        // a HOLE_PUNCH datagram (UDP send always "succeeds" even into a black hole). ConnectWorker
+        // resends HOLE_PUNCH on a bounded retry loop and blocks on this signal; ReceiveLoop sets it
+        // when it sees the ACK from the expected remote endpoint.
+        private volatile bool _holePunchAcked;
+        private readonly ManualResetEventSlim _holePunchAckSignal = new ManualResetEventSlim(false);
+        private volatile IPEndPoint _holePunchExpectedFrom;   // remote we are punching toward
 
         // ─── STUN discovery coordination ──────────────────────────────────
         // The transport binds a SINGLE UdpClient (_udp) and ReceiveLoop is the ONLY thread that
@@ -89,14 +107,19 @@ namespace Multipleer.Transport
             // _running == false and exit promptly instead of hanging on the timeout.
             _stunDiscoveryPending = false;
             _stunSignal.Set();
+            // Release the hole-punch retry loop so it observes the abort and exits instead of
+            // burning its remaining retry budget.
+            _holePunchAckSignal.Set();
             _udp?.Close();
             _receiveThread?.Join(1000);
             _connectThread?.Join(1000);
             lock (_lock)
             {
                 _peers.Clear();
+                _peerEventQueue.Clear();
                 _pendingConnectResult = false;
                 _pendingRemoteEp = null;
+                _pendingFailReason = null;
             }
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);
@@ -208,25 +231,66 @@ namespace Multipleer.Transport
                         var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
                         lock (_lock) { _peers[peerId] = remoteEp; }
 
-                        // Hole punching: send dummy packets from different ports
-                        SendRaw(remoteEp, Encoding.UTF8.GetBytes("HOLE_PUNCH"));
-
-                        if (!_connectAborted)
-                            QueueConnectResult(true, peerId, remoteEp);
+                        // Hole punch and WAIT for the host's HOLE_PUNCH_ACK before declaring success.
+                        // A bare UDP send always "succeeds" even into a black hole, so without this
+                        // gate Connect would report Connected against an unreachable host. Resend on a
+                        // bounded retry loop (each datagram may be dropped while the NAT mapping opens)
+                        // and only succeed once ReceiveLoop signals the ACK.
+                        if (WaitForHolePunchAck(remoteEp))
+                        {
+                            if (!_connectAborted)
+                                QueueConnectResult(true, peerId, remoteEp, null);
+                        }
+                        else if (!_connectAborted)
+                        {
+                            // No ACK after the full punch budget → host unreachable (symmetric NAT /
+                            // firewall / host down). Drop the speculative peer mapping.
+                            lock (_lock) { _peers.Remove(peerId); }
+                            QueueConnectResult(false, 0, null,
+                                "no HOLE_PUNCH_ACK from host (NAT/firewall or host unreachable)");
+                        }
                         return;
                     }
                 }
 
                 // Malformed address → connect failed (surfaced as Failed so the UI returns to lobby).
-                if (!_connectAborted) QueueConnectResult(false, 0, null);
+                if (!_connectAborted) QueueConnectResult(false, 0, null, "malformed host address");
             }
-            catch
+            catch (Exception ex)
             {
-                if (!_connectAborted) QueueConnectResult(false, 0, null);
+                if (!_connectAborted) QueueConnectResult(false, 0, null, ex.Message);
             }
         }
 
-        private void QueueConnectResult(bool succeeded, ulong peerId, IPEndPoint remoteEp)
+        // Punch-and-wait: resend HOLE_PUNCH up to HolePunchMaxAttempts times, HolePunchIntervalMs
+        // apart, blocking on the ACK signal between sends. Returns true the moment ReceiveLoop reports
+        // the host's HOLE_PUNCH_ACK; false if the budget is exhausted or the connect is aborted.
+        private const int HolePunchMaxAttempts = 15;   // ~15 × 200ms ≈ 3s total before giving up
+        private const int HolePunchIntervalMs = 200;
+        private bool WaitForHolePunchAck(IPEndPoint remoteEp)
+        {
+            // Arm the cooperative path so ReceiveLoop knows which remote's ACK to honour.
+            _holePunchAcked = false;
+            _holePunchAckSignal.Reset();
+            _holePunchExpectedFrom = remoteEp;
+            try
+            {
+                var punch = Encoding.UTF8.GetBytes("HOLE_PUNCH");
+                for (int attempt = 0; attempt < HolePunchMaxAttempts && !_connectAborted && _running; attempt++)
+                {
+                    SendRaw(remoteEp, punch);
+                    if (_holePunchAckSignal.Wait(HolePunchIntervalMs))
+                        return _holePunchAcked && !_connectAborted;
+                }
+                return false;
+            }
+            finally
+            {
+                _holePunchExpectedFrom = null;
+            }
+        }
+
+        private void QueueConnectResult(bool succeeded, ulong peerId, IPEndPoint remoteEp, string failReason)
         {
             lock (_lock)
             {
@@ -234,6 +298,7 @@ namespace Multipleer.Transport
                 _pendingConnectSucceeded = succeeded;
                 _pendingPeerId = peerId;
                 _pendingRemoteEp = remoteEp;
+                _pendingFailReason = failReason;
             }
         }
 
@@ -244,6 +309,7 @@ namespace Multipleer.Transport
             bool succeeded;
             ulong peerId;
             IPEndPoint remoteEp;
+            string failReason;
             lock (_lock)
             {
                 if (!_pendingConnectResult) return;
@@ -251,7 +317,9 @@ namespace Multipleer.Transport
                 succeeded = _pendingConnectSucceeded;
                 peerId = _pendingPeerId;
                 remoteEp = _pendingRemoteEp;
+                failReason = _pendingFailReason;
                 _pendingRemoteEp = null;
+                _pendingFailReason = null;
             }
 
             if (succeeded && remoteEp != null)
@@ -262,6 +330,7 @@ namespace Multipleer.Transport
             }
             else
             {
+                Debug.LogWarning($"[Multipleer] STUN connect failed: {failReason ?? "unknown"}");
                 State = ConnectionState.Failed;
                 OnStateChanged?.Invoke(State);
             }
@@ -271,14 +340,20 @@ namespace Multipleer.Transport
         {
             _running = false;
             _udp?.Close();
+            // Collect (peerId, label) under the lock, then raise OnPeerDisconnected OUTSIDE the lock so a
+            // handler that calls back into Send/Broadcast can't deadlock and transport state isn't held
+            // while arbitrary handler code runs. Mirrors the Update() peer-event drain and the same fix
+            // in DirectTransport.Disconnect. (label is an IPEndPoint string — no socket read, so no
+            // ObjectDisposedException here, but the raise-under-lock reentrancy hazard is the same class.)
+            var dropped = new List<(ulong peerId, string label)>();
             lock (_lock)
             {
                 foreach (var kvp in _peers)
-                {
-                    OnPeerDisconnected?.Invoke(kvp.Key, kvp.Value.ToString());
-                }
+                    dropped.Add((kvp.Key, kvp.Value.ToString()));
                 _peers.Clear();
             }
+            foreach (var (peerId, label) in dropped)
+                OnPeerDisconnected?.Invoke(peerId, label);
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);
         }
@@ -315,8 +390,26 @@ namespace Multipleer.Transport
 
         public void Update()
         {
-            // Surface a completed client-connect on the main thread first, then drain packets.
+            // Surface a completed client-connect on the main thread first, then drain peer events
+            // (before packets, preserving "connect precedes packets"), then drain received packets —
+            // all on the main thread.
             SurfacePendingConnect();
+
+            // Drain peer events into locals and raise WITHOUT the lock so a handler that calls back
+            // into Send/Broadcast can't deadlock and transport state isn't held while handler runs.
+            while (true)
+            {
+                bool connected;
+                ulong peerId;
+                string endpoint;
+                lock (_lock)
+                {
+                    if (_peerEventQueue.Count == 0) break;
+                    (connected, peerId, endpoint) = _peerEventQueue.Dequeue();
+                }
+                if (connected) OnPeerConnected?.Invoke(peerId, endpoint);
+                else OnPeerDisconnected?.Invoke(peerId, endpoint);
+            }
 
             lock (_lock)
             {
@@ -451,11 +544,34 @@ namespace Multipleer.Transport
         {
             while (_running)
             {
+                byte[] data;
+                var from = new IPEndPoint(IPAddress.Any, 0);
                 try
                 {
-                    var from = new IPEndPoint(IPAddress.Any, 0);
-                    var data = _udp.Receive(ref from);
+                    data = _udp.Receive(ref from);
+                }
+                catch (ObjectDisposedException)
+                {
+                    break; // socket closed (Shutdown/Disconnect) → exit the loop, not spin forever
+                }
+                catch (SocketException se)
+                {
+                    // A ReceiveTimeout (1000ms) surfaces as a transient WouldBlock/TimedOut — keep
+                    // looping. A closed socket (Interrupted/NotSocket) is terminal — exit. Anything
+                    // else is treated as transient (continue) to survive a stray ICMP-port-unreachable.
+                    if (se.SocketErrorCode == SocketError.Interrupted
+                        || se.SocketErrorCode == SocketError.NotSocket
+                        || se.SocketErrorCode == SocketError.OperationAborted)
+                        break;
+                    continue;
+                }
+                catch
+                {
+                    continue; // transient — keep serving
+                }
 
+                try
+                {
                     // STUN binding response (host- or client-side discovery in flight): hand the
                     // parsed public endpoint to the waiting DiscoverPublicEndpoint thread. ParseStunResponse
                     // self-validates (BindingResponse type + magic cookie), so this can never swallow a
@@ -478,14 +594,31 @@ namespace Multipleer.Transport
                         if (IsHost)
                         {
                             var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
-                            lock (_lock) { _peers[peerId] = from; }
-                            OnPeerConnected?.Invoke(peerId, $"STUN({from})");
+                            // Marshal the connect onto the main thread (drained in Update before
+                            // packets) so the Unity-touching OnPeerConnected handler never runs on
+                            // this background receive thread — mirroring DirectTransport.ListenLoop.
+                            lock (_lock)
+                            {
+                                _peers[peerId] = from;
+                                _peerEventQueue.Enqueue((true, peerId, $"STUN({from})"));
+                            }
                             SendRaw(from, Encoding.UTF8.GetBytes("HOLE_PUNCH_ACK"));
                         }
                         continue;
                     }
                     if (dataStr == "HOLE_PUNCH_ACK")
                     {
+                        // Client side: the host accepted our punch. Signal the waiting ConnectWorker
+                        // so it can declare success. Match on the expected remote so a stray ACK from
+                        // an unexpected source can't spoof a connect.
+                        var expected = _holePunchExpectedFrom;
+                        if (expected != null
+                            && expected.Address.Equals(from.Address)
+                            && expected.Port == from.Port)
+                        {
+                            _holePunchAcked = true;
+                            _holePunchAckSignal.Set();
+                        }
                         continue;
                     }
 
@@ -508,7 +641,7 @@ namespace Multipleer.Transport
                         lock (_lock) { _incomingQueue.Enqueue((foundPeerId, data)); }
                     }
                 }
-                catch { }
+                catch { /* malformed datagram — drop and keep serving */ }
             }
         }
 
