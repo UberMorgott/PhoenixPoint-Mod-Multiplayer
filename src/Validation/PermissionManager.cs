@@ -68,6 +68,13 @@ namespace Multipleer.Validation
             assignment.Permissions = permissions;
         }
 
+        /// <summary>
+        /// Clear ALL player assignments + permissions. Test-support: lets a test reset this process-global
+        /// holder to a clean slate so leaked entries can't bleed across tests. Behavior-neutral for the live
+        /// game (single co-op session — the holder is populated fresh from the roster on each session).
+        /// </summary>
+        public static void Reset() => _assignments.Clear();
+
         // ─── Combat Permissions ───────────────────────────────────────────
 
         public static bool CanControlSoldier(Guid playerGuid, int geoUnitId)

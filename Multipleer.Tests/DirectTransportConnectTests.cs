@@ -52,16 +52,21 @@ namespace Multipleer.Tests
             t.Initialize();
             var port = GetClosedLoopbackPort();
 
-            var sw = Stopwatch.StartNew();
-            t.Connect("127.0.0.1", port);
-            sw.Stop();
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                t.Connect("127.0.0.1", port);
+                sw.Stop();
 
-            // The blocking-connect bug would hold the caller here for ~20s on an unreachable host.
-            // The fix runs the connect on a worker, so Connect() must return effectively instantly.
-            Assert.True(sw.ElapsedMilliseconds < 500,
-                $"Connect blocked the caller for {sw.ElapsedMilliseconds}ms (must be non-blocking)");
-
-            t.Shutdown();
+                // The blocking-connect bug would hold the caller here for ~20s on an unreachable host.
+                // The fix runs the connect on a worker, so Connect() must return effectively instantly.
+                Assert.True(sw.ElapsedMilliseconds < 500,
+                    $"Connect blocked the caller for {sw.ElapsedMilliseconds}ms (must be non-blocking)");
+            }
+            finally
+            {
+                try { t.Shutdown(); } catch { }
+            }
         }
 
         [Fact]
@@ -74,31 +79,32 @@ namespace Multipleer.Tests
             ConnectionState? lastState = null;
             t.OnStateChanged += s => lastState = s;
 
-            t.Connect("127.0.0.1", port);
-            // Immediately after Connect we are Connecting, NOT yet Failed — the outcome is surfaced
-            // only when Update() runs (main-thread marshaling).
-            Assert.Equal(ConnectionState.Connecting, t.State);
+            try
+            {
+                t.Connect("127.0.0.1", port);
+                // Immediately after Connect we are Connecting, NOT yet Failed — the outcome is surfaced
+                // only when Update() runs (main-thread marshaling).
+                Assert.Equal(ConnectionState.Connecting, t.State);
 
-            var failed = PumpUntil(t, () => t.State == ConnectionState.Failed, 8000);
-            Assert.True(failed, "connect to a closed port should surface Failed via Update");
-            Assert.Equal(ConnectionState.Failed, lastState);
-
-            t.Shutdown();
+                var failed = PumpUntil(t, () => t.State == ConnectionState.Failed, 8000);
+                Assert.True(failed, "connect to a closed port should surface Failed via Update");
+                Assert.Equal(ConnectionState.Failed, lastState);
+            }
+            finally
+            {
+                try { t.Shutdown(); } catch { }
+            }
         }
 
         [Fact]
         public void Connect_LiveHost_SurfacesConnectedAndPeer_ViaUpdate()
         {
             // Host on a real loopback listener, then connect a second DirectTransport to it.
-            var host = new DirectTransport();
-            host.Initialize();
-            host.Host(0); // bind ephemeral
-            // DirectTransport.Host uses a fixed port arg; bind our own listener to learn the port
-            // is awkward, so host on a known free port instead.
-            host.Shutdown();
-
+            // DirectTransport.Host's LocalEndpoint label is built from the port ARG (not the bound
+            // socket), so we must hand it a concrete free port rather than 0 — grab a fresh ephemeral
+            // one per test so two real-socket tests never bind the same port.
             var freePort = GetFreeLoopbackPort();
-            host = new DirectTransport();
+            var host = new DirectTransport();
             host.Initialize();
             host.Host(freePort);
 
@@ -108,15 +114,20 @@ namespace Multipleer.Tests
             ulong connectedPeer = 0;
             client.OnPeerConnected += (id, ep) => connectedPeer = id;
 
-            client.Connect("127.0.0.1", freePort);
-            Assert.Equal(ConnectionState.Connecting, client.State);
+            try
+            {
+                client.Connect("127.0.0.1", freePort);
+                Assert.Equal(ConnectionState.Connecting, client.State);
 
-            var connected = PumpUntil(client, () => client.State == ConnectionState.Connected, 8000);
-            Assert.True(connected, "connect to a live host should surface Connected via Update");
-            Assert.NotEqual((ulong)0, connectedPeer);
-
-            client.Shutdown();
-            host.Shutdown();
+                var connected = PumpUntil(client, () => client.State == ConnectionState.Connected, 8000);
+                Assert.True(connected, "connect to a live host should surface Connected via Update");
+                Assert.NotEqual((ulong)0, connectedPeer);
+            }
+            finally
+            {
+                try { client.Shutdown(); } catch { }
+                try { host.Shutdown(); } catch { }
+            }
         }
 
         [Fact]

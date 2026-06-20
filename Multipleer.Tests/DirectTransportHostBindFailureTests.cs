@@ -32,11 +32,10 @@ namespace Multipleer.Tests
         public void Host_PortInUse_SurfacesFailed_DoesNotThrow()
         {
             var occupier = OccupyAnyPort(out var port);
+            var t = new DirectTransport();
+            t.Initialize();
             try
             {
-                var t = new DirectTransport();
-                t.Initialize();
-
                 ConnectionState? lastState = null;
                 t.OnStateChanged += s => lastState = s;
 
@@ -51,11 +50,10 @@ namespace Multipleer.Tests
                 Assert.Equal(ConnectionState.Failed, lastState);
                 // Endpoint label reflects the bind failure (not a bogus "host:<port>" listening label).
                 Assert.Contains("bind failed", t.LocalEndpoint);
-
-                t.Shutdown();
             }
             finally
             {
+                try { t.Shutdown(); } catch { }
                 occupier.Stop();
             }
         }
@@ -71,12 +69,17 @@ namespace Multipleer.Tests
 
             var t = new DirectTransport();
             t.Initialize();
-            t.Host(port);
+            try
+            {
+                t.Host(port);
 
-            Assert.Equal(ConnectionState.Connected, t.State);
-            Assert.Contains($"host:{port}", t.LocalEndpoint);
-
-            t.Shutdown();
+                Assert.Equal(ConnectionState.Connected, t.State);
+                Assert.Contains($"host:{port}", t.LocalEndpoint);
+            }
+            finally
+            {
+                try { t.Shutdown(); } catch { }
+            }
         }
     }
 }

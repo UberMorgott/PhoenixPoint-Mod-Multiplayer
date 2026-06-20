@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Multipleer.Network.MessageLayer;
 using Multipleer.Network.Sync;
@@ -10,11 +11,30 @@ namespace Multipleer.Bridge.Tests
     /// <summary>
     /// In-process host↔client action-sync scenarios over the in-memory bus, exercising the REAL
     /// SyncEngine relay. Each test dumps the global trace so the packet exchange is visible.
+    ///
+    /// ISOLATION: the relay path touches process-GLOBAL statics (PermissionManager registry +
+    /// BridgeContext.CurrentPeer apply-context). xUnit creates a FRESH instance of this class per test,
+    /// so the constructor resets those holders to a clean slate before each test and Dispose() clears the
+    /// apply-context after. Combined with assembly-level DisableTestParallelization (AssemblyInfo.cs),
+    /// this removes the cross-test state bleed that made S1 flake in the full collection run.
     /// </summary>
-    public class BridgeScenarioTests
+    public class BridgeScenarioTests : IDisposable
     {
         private readonly ITestOutputHelper _o;
-        public BridgeScenarioTests(ITestOutputHelper o) => _o = o;
+        public BridgeScenarioTests(ITestOutputHelper o)
+        {
+            _o = o;
+            ResetGlobals();
+        }
+
+        public void Dispose() => ResetGlobals();
+
+        /// <summary>Reset every process-global holder the relay path mutates to a clean slate.</summary>
+        private static void ResetGlobals()
+        {
+            PermissionManager.Reset();   // drop any leaked per-guid assignments/permissions
+            BridgeContext.CurrentPeer = null; // clear the apply-context so a stray apply can't hit a stale peer
+        }
 
         private void DumpTrace(SimCluster c)
         {

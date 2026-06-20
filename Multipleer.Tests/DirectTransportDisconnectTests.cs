@@ -69,9 +69,16 @@ namespace Multipleer.Tests
                 var ex = Record.Exception(() => host.Disconnect());
                 Assert.Null(ex);
 
-                // The disconnect event is raised on the leaving side. It may be surfaced synchronously
-                // or drained via Update(); pump to be robust, then assert exactly one with a label.
-                PumpUntil(() => hostDisconnects >= 1, host);
+                // Disconnect() raises OnPeerDisconnected for each live peer SYNCHRONOUSLY (it builds the
+                // dropped list under _lock, then invokes the handler outside the lock before returning).
+                // So at this point exactly one disconnect has been raised — assert it directly, WITHOUT
+                // pumping Update(). Pumping here was the source of a flake: closing the peer socket in
+                // Disconnect() unblocks the host's per-peer read thread, whose catch enqueues a SECOND
+                // ("connection lost") peer event onto _peerEventQueue; whether that thread wins the race
+                // to enqueue before an Update() drains it is timing-dependent, so a post-Disconnect pump
+                // intermittently surfaced a 2nd disconnect → hostDisconnects==2. The synchronous raise is
+                // the deterministic contract; the read-thread teardown event is an async side channel we
+                // must not drain in this assertion.
                 Assert.Equal(1, hostDisconnects);
                 Assert.NotNull(lastLabel);
                 Assert.NotEqual("SENTINEL", lastLabel); // a real label was passed, not the sentinel
