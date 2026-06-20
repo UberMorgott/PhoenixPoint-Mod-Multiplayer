@@ -7,40 +7,6 @@ namespace Multipleer.Network.MessageLayer
 {
     public static class MessageSerializer
     {
-        // ─── Campaign Action Messages ─────────────────────────────────────
-
-        public static byte[] SerializeCampaignAction(CampaignActionMessage action)
-        {
-            using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                bw.Write(action.ActionId.ToByteArray());
-                bw.Write((byte)action.ActionType);
-                bw.Write(action.TargetId ?? "");
-                bw.Write(action.Payload?.Length ?? 0);
-                if (action.Payload != null && action.Payload.Length > 0)
-                    bw.Write(action.Payload);
-                bw.Write(action.Timestamp);
-                return ms.ToArray();
-            }
-        }
-
-        public static CampaignActionMessage DeserializeCampaignAction(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                var msg = new CampaignActionMessage();
-                msg.ActionId = new Guid(br.ReadBytes(16));
-                msg.ActionType = (CampaignActionType)br.ReadByte();
-                msg.TargetId = br.ReadString();
-                var payloadLen = br.ReadInt32();
-                msg.Payload = payloadLen > 0 ? br.ReadBytes(payloadLen) : null;
-                msg.Timestamp = br.ReadInt64();
-                return msg;
-            }
-        }
-
         // ─── Permission Messages ──────────────────────────────────────────
 
         // PERMISSION (reshaped): per-flag toggle keyed by playerGUID.
@@ -66,33 +32,6 @@ namespace Multipleer.Network.MessageLayer
                 var flagBit = br.ReadByte();
                 var value = br.ReadByte() != 0;
                 return (guid, flagBit, value);
-            }
-        }
-
-        // ─── Game State ────────────────────────────────────────────────────
-
-        public static byte[] SerializeGameState(string levelName, byte[] stateData)
-        {
-            using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                bw.Write(levelName ?? "");
-                bw.Write(stateData?.Length ?? 0);
-                if (stateData != null && stateData.Length > 0)
-                    bw.Write(stateData);
-                return ms.ToArray();
-            }
-        }
-
-        public static (string levelName, byte[] stateData) DeserializeGameState(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                var levelName = br.ReadString();
-                var stateLen = br.ReadInt32();
-                var stateData = stateLen > 0 ? br.ReadBytes(stateLen) : null;
-                return (levelName, stateData);
             }
         }
 
@@ -503,34 +442,6 @@ namespace Multipleer.Network.MessageLayer
     }
 
     // ─── Action Data Types ─────────────────────────────────────────────────
-
-    public enum CampaignActionType : byte
-    {
-        StartResearch = 0,
-        QueueManufacturing = 1,
-        CancelManufacturing = 2,
-        ConstructFacility = 3,
-        RemoveFacility = 4,
-        RepairFacility = 5,
-        EquipSoldier = 6,
-        EquipVehicle = 7,
-        DeployAircraft = 8,
-        HireRecruit = 9,
-        DismissSoldier = 10,
-        AssignSoldier = 11,
-        RemoveSoldier = 12,
-        StartTravel = 13,
-        SetTimeState = 14
-    }
-
-    public class CampaignActionMessage
-    {
-        public Guid ActionId { get; set; }
-        public CampaignActionType ActionType { get; set; }
-        public string TargetId { get; set; }
-        public byte[] Payload { get; set; }
-        public long Timestamp { get; set; }
-    }
 
     public class JoinMessage
     {

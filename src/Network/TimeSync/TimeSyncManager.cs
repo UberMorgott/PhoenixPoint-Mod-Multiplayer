@@ -36,8 +36,9 @@ namespace Multipleer.Network.TimeSync
     public class TimeSyncManager
     {
         // ~3 Hz authoritative anchor re-delivery over the unreliable channel (idempotent: SAME anchor
-        // each time, so packet loss self-corrects). This heartbeat IS the lag/late-join watchdog.
-        private const float HeartbeatIntervalSeconds = 0.33f;
+        // each time, so packet loss self-corrects). This re-delivery IS the lag/late-join watchdog —
+        // it is the clock-anchor re-send cadence, NOT a connection heartbeat (cf. SessionManager).
+        private const float AnchorRedeliverIntervalSeconds = 0.33f;
 
         // Visual smoothing time-constant (~150 ms) + hard-set threshold (skip lerp across a big gap).
         private const double VisualTauSeconds = 0.15;
@@ -338,7 +339,7 @@ namespace Multipleer.Network.TimeSync
 
             // Periodic unreliable heartbeat: re-deliver the SAME stored anchor (safety re-sync).
             _hbAccum += Time.unscaledDeltaTime;
-            if (_hbAccum >= HeartbeatIntervalSeconds && _haveAnchor)
+            if (_hbAccum >= AnchorRedeliverIntervalSeconds && _haveAnchor)
             {
                 _hbAccum = 0f;
                 BroadcastAnchor(_lastAnchor, reliable: false);

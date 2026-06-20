@@ -40,8 +40,7 @@ namespace Multipleer.Network.MessageLayer
         CampaignActionRequest = 0x30,
         CampaignActionApproved = 0x31,
         CampaignActionRejected = 0x32,
-        CampaignActionResult = 0x33,
-        CampaignStateUpdate = 0x34,
+        // 0x33 (CampaignActionResult) + 0x34 (CampaignStateUpdate) removed: never sent, no handler. Do NOT reuse the ids.
         GeoStateDiff = 0x35,
         GeoEntityOp = 0x36,
         TimeAnchor = 0x37,    // host->all: authoritative anchor {version, tAnchor, gAnchor, paused, speedIndex}
