@@ -202,6 +202,12 @@ namespace Multipleer.UI
             NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
+            // Fresh host: drop any chosen-save carried over from a PRIOR session. Without this the
+            // stale _pendingChosenSave (the rich transfer payload) survives a host→PLAY→leave→re-host
+            // and PLAY could ship a save the new lobby's clients never chose. (The gate itself now keys
+            // on the authoritative Session.ChosenSaveName, which is null on a fresh lobby because
+            // Initialize() above builds a new SessionManager — the field is never carried over.)
+            _pendingChosenSave = null;
             _lobbyController.Reset();      // fresh lobby (idempotent; clears any stale lock)
             _lobbyController.BeginHost();
             ShowInGameBar();
@@ -218,7 +224,7 @@ namespace Multipleer.UI
         }
 
         // Ready toggle from the lobby panel.
-        public void OnLobbyToggleReady()
+        public void OnLobbyToggleReady(bool ready)
         {
             var engine = NetworkEngine.Instance;
             if (engine?.Session == null) return;
@@ -228,8 +234,9 @@ namespace Multipleer.UI
             // non-host peers ready + save chosen), projected via RefreshGateFacts.
             if (engine.IsHost) return;
 
-            // Client → host ClientReady (foundation keys by sender; host broadcasts the updated roster).
-            engine.Session.SetClientReady(engine.LocalSteamId);
+            // Client → host ClientReady / ClientUnready per the local intent (keyed by sender; the host
+            // broadcasts the updated roster, which un-arms PLAY on an unready).
+            engine.Session.SetClientReady(engine.LocalSteamId, ready);
         }
 
         // Nickname edit committed in the lobby panel.
@@ -255,17 +262,14 @@ namespace Multipleer.UI
             // chosen, and which LOCKS the lobby on success so no mid-start ready flip can race in.
             RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen);
 
-            if (_lobbyController.CommitStart())
+            // Shared reopen path: the gate passed and we LOCKED the lobby, but the start could not
+            // proceed (HostStartSession returned false OR threw in its synchronous portion —
+            // timing.Start / first MoveNext of HostSerializeAndSendCrt). Reopen instead of leaving the
+            // lobby permanently dead-locked: unlock the FSM, undo the visible commit side effects
+            // (overlay + early curtain drop), re-show the lobby, and warn. The cached facts are intact,
+            // so the gate is satisfied again on reopen.
+            void ReopenAfterFailedStart()
             {
-                DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
-                ShowLoadOverlay();
-                bool started = engine.SaveTransfer?.HostStartSession(_pendingChosenSave) ?? false;
-                if (started) return;
-
-                // The gate passed and we LOCKED the lobby, but the start failed downstream (no game /
-                // no timing). Reopen instead of leaving the lobby permanently dead-locked: unlock the
-                // FSM, undo the visible commit side effects (overlay + early curtain drop), re-show the
-                // lobby, and warn. The cached facts are intact, so the gate is satisfied again on reopen.
                 _lobbyController.CancelStart();
                 HideLoadOverlay();
                 LiftCurtainEarly();
@@ -281,6 +285,30 @@ namespace Multipleer.UI
                 {
                     _lobby?.Show();
                 }
+            }
+
+            if (_lobbyController.CommitStart())
+            {
+                DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
+                ShowLoadOverlay();
+                bool started;
+                try
+                {
+                    started = engine.SaveTransfer?.HostStartSession(_pendingChosenSave) ?? false;
+                }
+                catch (System.Exception e)
+                {
+                    // The synchronous portion of HostStartSession threw AFTER the lobby was locked.
+                    // Without this the exception would escape with the gate stuck false forever → dead
+                    // Play button. Run the EXACT SAME reopen sequence as the started==false branch, log
+                    // the cause, and swallow (the user is informed via the same warning box).
+                    Debug.LogError("[Multipleer] HostStartSession threw during start: " + e);
+                    ReopenAfterFailedStart();
+                    return;
+                }
+                if (started) return;
+
+                ReopenAfterFailedStart();
                 return;
             }
 
@@ -306,7 +334,8 @@ namespace Multipleer.UI
         // press-time guard (OnLobbyPlay) call through here, so they can never derive a different gate.
         //   • clientCount      = connected NON-host peers (host self-entry excluded).
         //   • allClientsReady  = LobbyController.AllClientsReady over the non-host ready flags.
-        //   • saveChosen       = a save has been picked for this session (_pendingChosenSave).
+        //   • saveChosen       = the AUTHORITATIVE broadcast value Session.ChosenSaveName is non-empty
+        //                        (single source of truth; see the gate-vs-rail divergence note below).
         // UpdateLobby ignores updates while the FSM is locked, so this is safe to call every frame.
         private void RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen)
         {
@@ -320,7 +349,13 @@ namespace Multipleer.UI
 
             clientCount = nonHostReady.Count;
             allClientsReady = LobbyController.AllClientsReady(nonHostReady);
-            saveChosen = _pendingChosenSave != null;
+            // SINGLE SOURCE OF TRUTH for "a save is chosen": the AUTHORITATIVE broadcast value
+            // (Session.ChosenSaveName, set only by SetChosenSave which also broadcasts SetSave + drives
+            // the rail), NOT the local _pendingChosenSave field. A stale _pendingChosenSave surviving a
+            // re-host used to arm the gate while ChosenSaveName was null and the rail read "(none)" and
+            // nothing was broadcast — gate, rail and broadcast could diverge. Keying the gate on the
+            // broadcast value makes them converge: PLAY can never arm unless a save was really broadcast.
+            saveChosen = !string.IsNullOrEmpty(engine?.Session?.ChosenSaveName);
 
             _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
         }
@@ -368,10 +403,21 @@ namespace Multipleer.UI
                 NetworkEngine.Instance?.Disconnect();
                 NetworkEngine.Instance?.Shutdown();
 
+                // Fix #4: drive the lobby FSM down the CLIENT path. We may be in HostLobby (the menu
+                // auto-hosts) when the user pastes a join target, so Reset() returns the FSM to Idle
+                // first, then BeginJoin() moves it Idle→Joining. JoinConfirmed() fires later, when the
+                // first host PEER_LIST roster arrives (see Update), moving Joining→ClientLobby.
+                _lobbyController.Reset();
+                _lobbyController.BeginJoin();
+
                 NetworkEngine.Create();
                 switch (target.Kind)
                 {
                     case JoinKind.DirectIp:
+                    case JoinKind.DirectHost:
+                        // DirectHost carries a DNS hostname in target.Ip; DirectTransport's
+                        // BeginConnect(host, port) resolves it, so the routing is identical to a
+                        // literal IP — just hand the host string + port to the same transport.
                         NetworkEngine.Instance.Initialize(TransportType.DirectIP);
                         NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
                         NetworkEngine.Instance.JoinGame(target.Ip, target.Port);
@@ -610,16 +656,20 @@ namespace Multipleer.UI
             }
         }
 
-        // Two picked saves are the SAME selection iff they reference the same on-disk save. Prefer the
-        // filesystem Path (unique, set when the meta is loaded); fall back to display name + creation
-        // time if Path is unset on either side.
+        // Two picked saves are the SAME selection iff they reference the same on-disk save, identified
+        // by the filesystem Path (unique, set when the meta is loaded). If Path is unset/empty on either
+        // side the identity is unknown, so the saves are treated as DIFFERENT (never equal by name/time).
         private static bool SameSave(SavegameMetaData a, SavegameMetaData b)
         {
             if (ReferenceEquals(a, b)) return true;
             if (a == null || b == null) return false;
-            if (!string.IsNullOrEmpty(a.Path) && !string.IsNullOrEmpty(b.Path))
-                return string.Equals(a.Path, b.Path, System.StringComparison.OrdinalIgnoreCase);
-            return SaveDisplayName(a) == SaveDisplayName(b) && SaveDisplayMeta(a) == SaveDisplayMeta(b);
+            // Path is the only reliable save identity. If it is unset/empty on EITHER side, treat the
+            // saves as DIFFERENT rather than falling back to name/time equality — otherwise two distinct
+            // saves that happen to share a display-name + creation-time (both with empty Path) compare
+            // equal, so a genuine save swap fails to reset client Ready (stale ready survives).
+            if (string.IsNullOrEmpty(a.Path) || string.IsNullOrEmpty(b.Path))
+                return false;
+            return string.Equals(a.Path, b.Path, System.StringComparison.OrdinalIgnoreCase);
         }
 
         // Called from SaveLoadInterceptPatch when the native Load screen closes (after a pick OR a
@@ -823,6 +873,10 @@ namespace Multipleer.UI
             // it can't double-fire. The in-game bar is hidden because this session is over.
             NetworkEngine.Instance?.Disconnect();
             NetworkEngine.Instance?.Shutdown();
+            // Fix #5: a dropped/failed connect must also reset the local FSM + clear the stale chosen
+            // save, exactly like LEAVE/cancel — otherwise the next host/join inherits a HostLobby/
+            // Starting FSM state and a phantom _pendingChosenSave from the session that just failed.
+            TeardownLobbyState();
             _inGameBar?.SetActive(false);
 
             var mb = GameUtl.GetMessageBox();
@@ -887,18 +941,50 @@ namespace Multipleer.UI
             _connectingBox = null;
             NetworkEngine.Instance?.Disconnect();
             NetworkEngine.Instance?.Shutdown();
-            _lobbyController.Reset();
+            TeardownLobbyState();
             _inGameBar?.SetActive(false);
             _lobby?.Hide();
         }
 
+        // SINGLE teardown hook for the lobby's local FSM + chosen-save state. Every path that ends a
+        // session (LEAVE / connect-cancel / connection-failure) routes through here so the FSM can
+        // never carry a stale HostLobby/Starting state and _pendingChosenSave can never carry a stale
+        // save into the NEXT host/join. Pure-local + idempotent (the network teardown is done by the
+        // caller's Disconnect/Shutdown); safe to call more than once.
+        private void TeardownLobbyState()
+        {
+            _lobbyController.Reset();
+            _pendingChosenSave = null;
+        }
+
+        // Public teardown entry for the F3 host-leave path. When the HOST ends/leaves the session, the
+        // CLIENT is returned to the main menu by HostLeaveHandler (native FinishLevelAndGoToLobby +
+        // NetworkEngine.TearDown). That path tears down the NETWORK session but never touched this UI's
+        // lobby FSM / chosen-save, so a stale ClientLobby/Starting state + phantom _pendingChosenSave
+        // would survive into the next host/join (the same Fix #5 bug LEAVE/cancel/OnConnectionFailed
+        // already guard against, just on the host-left trigger). Routes through the single
+        // TeardownLobbyState hook so the reset stays consistent. Null-safe via the static Instance.
+        public void TeardownLobbyOnSessionEnd() => TeardownLobbyState();
+
         private void OnDisconnectClicked()
         {
-            NetworkEngine.Instance?.Disconnect();
-            NetworkEngine.Instance?.Shutdown();
-            _lobbyController.Reset();
-            _inGameBar.SetActive(false);
-            _lobby?.Hide();
+            // Defense-in-depth: a transport-layer exception during Disconnect() (e.g. the old
+            // ObjectDisposedException from reading a just-closed peer socket) must NEVER prevent the
+            // session from being fully shut down + the lobby torn down. Without this, an escaping throw
+            // aborted the leave before Shutdown()/TeardownLobbyState() (and HostLeaveHandler.Detach via
+            // Shutdown) ran → the client froze in a half-torn-down lobby. The finally guarantees the
+            // leave always completes cleanly and the client returns to the menu (lobby panel hidden).
+            try
+            {
+                NetworkEngine.Instance?.Disconnect();
+            }
+            finally
+            {
+                NetworkEngine.Instance?.Shutdown();
+                TeardownLobbyState();
+                _inGameBar.SetActive(false);
+                _lobby?.Hide();
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -961,6 +1047,10 @@ namespace Multipleer.UI
                     (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
                 {
                     _clientConnecting = false;
+                    // Fix #4: the host's first PEER_LIST IS the explicit accept, so advance the FSM
+                    // Joining→ClientLobby here (BeginJoin ran in OnLobbyJoin). Idempotent: JoinConfirmed
+                    // no-ops if the FSM is not in Joining, so a re-entered frame can't corrupt the state.
+                    _lobbyController.JoinConfirmed();
                     DismissConnectingBox();   // close "Connecting…" before showing the lobby
                     ShowInGameBar();
                     _lobby?.Show();           // real, populated roster — never a fake empty lobby

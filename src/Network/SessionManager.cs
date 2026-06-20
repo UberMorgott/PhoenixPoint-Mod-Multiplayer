@@ -323,13 +323,21 @@ namespace Multipleer.Network
 
         // ─── Ready State ──────────────────────────────────────────────────
 
-        public void SetClientReady(ulong steamId)
+        // Back-compat shim: a bare call means "ready up". Toggle off via SetClientReady(steamId, false).
+        public void SetClientReady(ulong steamId) => SetClientReady(steamId, true);
+
+        // Ready is a real toggle. ready=true adds the client + lights its roster flag; ready=false
+        // removes it + clears the flag, which de-arms the host start gate (RefreshGateFacts reads the
+        // authoritative roster Ready flags). Either way the host re-broadcasts the roster and recomputes
+        // AllClientsReady. On the client, this sends the matching ClientReady / ClientUnready packet.
+        public void SetClientReady(ulong steamId, bool ready)
         {
             if (_engine.IsHost)
             {
-                _readyClients.Add(steamId);
+                if (ready) _readyClients.Add(steamId);
+                else _readyClients.Remove(steamId);
                 if (_clients.TryGetValue(steamId, out var readyClient))
-                    readyClient.IsReady = true;
+                    readyClient.IsReady = ready;
                 OnClientReady?.Invoke(steamId);
 
                 // Ready-state changed → refresh the authoritative roster for all peers.
@@ -344,6 +352,8 @@ namespace Multipleer.Network
                 // the geoscape model is live; versioned per channel, so current peers drop stale echoes.
                 _engine.Sync?.BroadcastAllChannels();
 
+                // AllClientsReady only fires when EVERY connected client is ready. An unready that drops
+                // the count below the bar must NOT broadcast it (the gate de-arms via the roster flags).
                 if (_readyClients.Count >= _clients.Count && _clients.Count > 0)
                 {
                     var allReady = new NetworkMessage(PacketType.AllClientsReady);
@@ -353,7 +363,7 @@ namespace Multipleer.Network
             }
             else
             {
-                var readyMsg = new NetworkMessage(PacketType.ClientReady);
+                var readyMsg = new NetworkMessage(ready ? PacketType.ClientReady : PacketType.ClientUnready);
                 _engine.SendToHost(readyMsg);
             }
         }
@@ -373,7 +383,11 @@ namespace Multipleer.Network
         {
             if (msg.Type == PacketType.ClientReady && _engine.IsHost)
             {
-                SetClientReady(msg.SenderSteamId);
+                SetClientReady(msg.SenderSteamId, true);
+            }
+            else if (msg.Type == PacketType.ClientUnready && _engine.IsHost)
+            {
+                SetClientReady(msg.SenderSteamId, false);
             }
             else if (msg.Type == PacketType.AllClientsReady)
             {
@@ -488,12 +502,18 @@ namespace Multipleer.Network
                     PermissionManager.SetPermissionsRaw(p.PlayerGuid, p.Permissions);
                 }
 
+            // Build the authoritative non-host keep-set while mirroring, then prune any _clients entry
+            // absent from it (next block). The host self-entry is never a _clients key, so excluding it
+            // from the keep-set preserves it by construction.
+            var newClientKeys = new HashSet<ulong>();
             foreach (var p in peers)
             {
                 // Do NOT mirror the host self-entry into _clients: _clients holds remote *clients*
                 // only (used by ClientCount and other handlers). The host row is served to the UI
                 // via _clientRoster / GetLobbyRoster() instead.
                 if (p.IsHost) continue;
+
+                newClientKeys.Add(p.SteamId);
 
                 if (!_clients.TryGetValue(p.SteamId, out var client))
                 {
@@ -505,6 +525,18 @@ namespace Multipleer.Network
                 client.Permissions = p.Permissions;
                 client.IsReady = p.Ready;
                 client.SlotIndex = p.SlotIndex;
+            }
+
+            // Prune peers that vanished from the roster. On a crash/timeout drop the host re-broadcasts
+            // ONLY PEER_LIST (no ClientLeave packet → no RemoveClient here), so without this a dropped
+            // peer would linger in _clients forever → ClientCount / GetConnectedClients over-count
+            // (client status-bar drift). Mirror RemoveClient's cleanup (heartbeat + ready set) so the
+            // derived counts stay consistent.
+            foreach (var stale in PeerListPrune.PruneKeys(_clients.Keys, newClientKeys))
+            {
+                _clients.Remove(stale);
+                _lastHeartbeat.Remove(stale);
+                _readyClients.Remove(stale);
             }
         }
 

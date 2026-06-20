@@ -100,6 +100,11 @@
     <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
     <Compile Include="..\src\Network\ClientIdentity.cs"><Link>ClientIdentity.cs</Link></Compile>
     <Compile Include="..\src\Network\LobbyController.cs"><Link>LobbyController.cs</Link></Compile>
+    <!-- Fix #2 (peer-list prune): pure, Unity-free set-arithmetic decision (keys present in _clients
+         but absent from the new non-host roster). Extracted into its own file so it links WITHOUT
+         dragging SessionManager → NetworkEngine → SaveTransferCoordinator/TimeSyncManager/SyncEngine
+         (all Unity-coupled, unlinked). Mirrors the project's gate-helper pattern. -->
+    <Compile Include="..\src\Network\PeerListPrune.cs"><Link>PeerListPrune.cs</Link></Compile>
     <!-- Session-lifecycle pure helpers (F1 message format, F2 host-load guard, F3 idempotency latch).
          Unity-free → unit-tested directly; the live SessionNotifier/HostLeaveHandler/intercept that USE
          them bind game types and are NOT linked (in-game verified). -->
