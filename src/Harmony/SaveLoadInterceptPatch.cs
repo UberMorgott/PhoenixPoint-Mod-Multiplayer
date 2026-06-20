@@ -1,10 +1,13 @@
 using System;
 using System.Reflection;
+using Base.Core;
 using Base.Serialization;
 using Base.UI;
+using Base.UI.MessageBox;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.UI;
+using PhoenixPoint.Common.Saves;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Home.View;
 using PhoenixPoint.Home.View.ViewStates;
@@ -315,6 +318,127 @@ namespace Multipleer.Harmony
             {
                 Debug.LogError("[Multipleer] InGameLoadArm postfix failed: " + e.Message);
             }
+        }
+    }
+
+    /// <summary>
+    /// CONTINUE / Quickload intercept hole — the durable backstop.
+    ///
+    /// The UI save-pick intercept (<see cref="SaveLoadInterceptPatch.OnLoadGamePressed_Prefix"/>) only
+    /// covers the native Load SCREEN. Two solo-load doors bypass it entirely and converge instead at
+    /// <c>PhoenixSaveManager.LoadGame(PPSavegameMetaData)</c> (decompiled PhoenixSaveManager.cs:609-621 →
+    /// <c>_game.FinishLevelAndLoadGame</c>):
+    ///   • main-menu CONTINUE — <c>UIModuleMainMenuButtons.OnContinueGameButtonClicked</c> → TryLoadSave →
+    ///     <c>OnLoadSaveConfirmed</c> → <c>SaveManager.LoadGame(saveData)</c> (UIModuleMainMenuButtons.cs:236-252).
+    ///   • Quickload — menu <c>OnQuickloadButtonClicked</c> → OnLoadSaveConfirmed → LoadGame; AND
+    ///     <c>PhoenixSaveManager.QuickLoad</c> → <c>LoadGame(QuickSavegame)</c> (PhoenixSaveManager.cs:586-607),
+    ///     reached in-geoscape via <c>GeoscapeView.QuickLoadGame</c> → QuickLoad (GeoscapeView.cs:1159-1176).
+    /// All of these end at the SAME <c>LoadGame</c>, so a single Prefix there closes both holes.
+    ///
+    /// WHY THIS DOES NOT DOUBLE-GATE THE LEGIT CO-OP ENTRY: the co-op session entry does NOT call
+    /// <c>LoadGame</c> at all — <see cref="Multipleer.Network.SaveTransferCoordinator"/> reimplements the
+    /// load in-memory (ApplyPrepareLoadGameState) and enters the level by calling
+    /// <c>PhoenixGame.FinishLevel(_pendingResult)</c> DIRECTLY (EnterLevel). The barrier-gated FinishLevel
+    /// seam (<see cref="FinishLevelBarrierPatch"/>) still solely owns that entry; this prefix only ever
+    /// catches a VANILLA solo-load door. The UI prefix, when it captures, returns false so LoadGame is
+    /// never reached on that path → no double handling.
+    ///
+    /// GATE (reuses the same <see cref="Multipleer.Network.SessionLifecycle"/> predicates as the UI path):
+    ///   • host + active lobby + !started → treat exactly like a lobby save pick: capture as the lobby's
+    ///     chosen save (label only, NO load) and re-show the lobby; skip the solo load.
+    ///   • host + session STARTED (mid-session) → reroute to the host-authoritative in-session reload
+    ///     (the F2 / HostStartSessionInGame transfer) via <see cref="MultiplayerUI.OnInGameLoadPicked"/>
+    ///     when <see cref="Multipleer.Network.SessionLifecycle.HostLoadGuard"/> permits; otherwise BLOCK
+    ///     the solo load and log (a host loading a different save solo would desync the clients). Either
+    ///     way the original solo <c>LoadGame</c> is skipped.
+    ///   • not host / no active session → pass through (vanilla single-player CONTINUE/Quickload unchanged).
+    /// </summary>
+    [HarmonyPatch(typeof(PhoenixSaveManager), "LoadGame")]
+    public static class LoadGameConvergenceGatePatch
+    {
+        [HarmonyPrefix]
+        public static bool Prefix(PPSavegameMetaData metaData)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null) return true; // no co-op engine → vanilla load
+
+                bool isHost = engine.IsHost;
+                bool lobbyActive = engine.IsActiveSession;
+                var coord = engine.SaveTransfer;
+                bool sessionStarted = coord?.SessionStarted ?? false;
+                var picked = metaData as SavegameMetaData; // PPSavegameMetaData : SavegameMetaData
+
+                // Case A — host + active lobby + not started: a CONTINUE/Quickload here is the old
+                // immediate-solo-load regression via an unpatched door. Treat it like a lobby save pick.
+                if (SessionLifecycle.ShouldCaptureAsLobbyPick(isHost, lobbyActive, sessionStarted))
+                {
+                    if (picked != null) MultiplayerUI.Instance?.OnLobbyLoadPickCaptured(picked);
+                    Debug.Log("[Multipleer] CONTINUE/Quickload at lobby captured as lobby save pick (no solo load).");
+                    return false; // skip SaveManager.LoadGame
+                }
+
+                // Case B — host mid-session: a solo load here would silently desync the clients.
+                if (SessionLifecycle.ShouldInterceptInSessionHostLoad(isHost, lobbyActive, sessionStarted))
+                {
+                    int connectedClients = engine.Session?.ClientCount ?? 0;
+
+                    // Clientless host: every peer has left, so there is nothing to desync. Let the vanilla
+                    // solo load proceed (CONTINUE/Quickload) — the in-game co-op reload reroute below is
+                    // itself >=1-client gated, so a lone host would otherwise be locked out of loading.
+                    if (SessionLifecycle.HostInSessionHasNoClients(isHost, lobbyActive, sessionStarted, connectedClients))
+                    {
+                        Debug.Log("[Multipleer] Host mid-session load with no connected clients — allowing vanilla solo load.");
+                        return true; // run SaveManager.LoadGame (no peers to desync)
+                    }
+
+                    bool canReroute = SessionLifecycle.HostLoadGuard(
+                        isHost: isHost,
+                        isActiveSession: lobbyActive,
+                        sessionStarted: sessionStarted,
+                        connectedClientCount: connectedClients,
+                        transferActive: coord?.TransferActive ?? false);
+
+                    if (canReroute && picked != null)
+                    {
+                        // Reroute into the proven F2 host-authoritative reload (chunked transfer + barrier):
+                        // every client reloads into the chosen save. OnInGameLoadPicked re-validates the guard.
+                        Debug.Log("[Multipleer] Host mid-session CONTINUE/Quickload rerouted to co-op in-session reload.");
+                        MultiplayerUI.Instance?.OnInGameLoadPicked(picked);
+                    }
+                    else
+                    {
+                        // Clean reroute not available (>=1 client connected but a transfer is already
+                        // running, or null meta): block the solo load rather than desync the clients. The
+                        // host should use the in-game co-op reload (pause-menu LOAD) instead. (The zero-
+                        // client case was already handled above by allowing the vanilla solo load.)
+                        Debug.LogWarning("[Multipleer] Host mid-session CONTINUE/Quickload BLOCKED — would desync clients. " +
+                            "Use the in-game co-op reload (pause-menu LOAD) instead.");
+                    }
+                    return false; // skip SaveManager.LoadGame either way (never solo-load mid-session)
+                }
+
+                // Case C — NON-HOST in an active session: a CONTINUE / pause-menu LOAD / Quickload here
+                // would solo-load a save on the client while it stays wired into the live co-op session →
+                // desync. Host-authoritative: ONLY the host may load. Block the solo load and tell the
+                // user to ask the host. (Single-player on a non-host machine — no active session — is not
+                // gated and passes through below.)
+                if (SessionLifecycle.ShouldBlockClientLoad(isHost, lobbyActive))
+                {
+                    Debug.LogWarning("[Multipleer] Client CONTINUE/LOAD/Quickload BLOCKED — only the host can load in co-op.");
+                    GameUtl.GetMessageBox()?.ShowSimplePrompt(
+                        "Only the host can load the game in co-op.",
+                        MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+                    return false; // skip SaveManager.LoadGame — client must never solo-load mid-session
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multipleer] LoadGame convergence gate failed: " + e.Message);
+            }
+
+            return true; // not host / no active session → vanilla single-player load
         }
     }
 }

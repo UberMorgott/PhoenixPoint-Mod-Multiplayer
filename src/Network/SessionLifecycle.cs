@@ -26,6 +26,24 @@ namespace Multipleer.Network
         public const string HostEndedSession = "Host ended the session";
 
         /// <summary>
+        /// F3 host-left suppression gate. A CLIENT closing its only peer (the host) on a VOLUNTARY
+        /// LEAVE produces a transport drop that is byte-for-byte indistinguishable from a genuine host
+        /// crash — the read-loop enqueues "connection lost" either way. To tell them apart we consult
+        /// the local teardown intent: <see cref="NetworkEngine.IsIntentionalDisconnect"/> is set true at
+        /// the top of every intentional teardown (Disconnect/Shutdown/TearDown) just before the peer
+        /// socket is closed.
+        ///
+        /// Returns FALSE (suppress: no "Host ended the session" toast, no forced reload) when the local
+        /// teardown was intentional — the client is leaving on its own, so it tears down + returns to
+        /// the menu via its own leave path. Returns TRUE (notify) for a genuine UNEXPECTED host drop the
+        /// client did not initiate. Pure + Unity-free so it is unit-testable.
+        /// </summary>
+        public static bool ShouldNotifyHostLeft(bool localDisconnectIntentional)
+        {
+            return !localDisconnectIntentional;
+        }
+
+        /// <summary>
         /// F2 host-load guard. True iff the host may re-run the chunked save transfer mid-session to
         /// pull every client into a newly picked save: we are the host, a networked session is up, the
         /// session has already started (we are in-game, not in the lobby), at least one client is
@@ -57,6 +75,62 @@ namespace Multipleer.Network
         public static bool ShouldCaptureAsLobbyPick(bool isHost, bool lobbyActive, bool sessionStarted)
         {
             return isHost && lobbyActive && !sessionStarted;
+        }
+
+        /// <summary>
+        /// In-session host-load gate. True iff a host whose co-op session has ALREADY STARTED reached a
+        /// campaign-load convergence (<c>PhoenixSaveManager.LoadGame</c>) — i.e. via main-menu CONTINUE or
+        /// Quickload (menu OR in-geoscape), which BYPASS the UI <c>OnLoadGamePressed</c> intercept. Such a
+        /// load must NEVER run as a silent solo load while clients keep playing (it would desync them);
+        /// the LoadGame prefix reroutes it into the host-authoritative in-session reload
+        /// (<c>SaveTransferCoordinator.HostStartSessionInGame</c>, the F2 path) when the
+        /// <see cref="HostLoadGuard"/> permits, or otherwise BLOCKS the solo load and logs.
+        ///
+        /// Deliberately EXCLUDES the lobby case (<paramref name="sessionStarted"/> == false): that is owned
+        /// by <see cref="ShouldCaptureAsLobbyPick"/>. For a host in an active session, exactly ONE of the
+        /// two predicates fires (partition on <paramref name="sessionStarted"/>). Non-host peers and the
+        /// no-session single-player case return false so vanilla CONTINUE/Quickload is untouched.
+        /// </summary>
+        public static bool ShouldInterceptInSessionHostLoad(bool isHost, bool isActiveSession, bool sessionStarted)
+        {
+            return isHost && isActiveSession && sessionStarted;
+        }
+
+        /// <summary>
+        /// Clientless-host solo-load allowance. True iff a host in an already-started co-op session has
+        /// ZERO connected clients — i.e. every peer has left and the host is effectively alone. In that
+        /// state a CONTINUE / Quickload has no peers to desync, so the vanilla solo load SHOULD proceed
+        /// rather than being blocked: the in-game co-op reload reroute is itself >=1-client gated (see
+        /// <see cref="HostLoadGuard"/>), so without this the lone host would be locked out of loading.
+        ///
+        /// This refines <see cref="ShouldInterceptInSessionHostLoad"/>: that gate still fires for the
+        /// in-session host, but the LoadGame prefix consults THIS predicate first and, when it is true,
+        /// lets the vanilla load run. Partitions cleanly with the reroute path on client count — with
+        /// >=1 client this is false and the host load is intercepted (reroute or block) as before.
+        /// </summary>
+        public static bool HostInSessionHasNoClients(bool isHost, bool isActiveSession, bool sessionStarted,
+            int connectedClientCount)
+        {
+            return isHost && isActiveSession && sessionStarted && connectedClientCount <= 0;
+        }
+
+        /// <summary>
+        /// Client-load block gate. True iff a NON-HOST peer in an ACTIVE co-op session reached a
+        /// campaign-load convergence (<c>PhoenixSaveManager.LoadGame</c>) — via main-menu CONTINUE,
+        /// pause-menu LOAD, or in-game Quickload (all of which BYPASS the host-only UI intercept and
+        /// fall through to vanilla <c>LoadGame</c>). In a host-authoritative model ONLY the host may
+        /// load; a client solo-loading a save while still wired into the live session desyncs it from
+        /// the host. The LoadGame prefix returns <c>false</c> (block) and surfaces a "only the host can
+        /// load" notice when this fires.
+        ///
+        /// Deliberately the COMPLEMENT of the host gates on the host axis: it fires ONLY for
+        /// <paramref name="isHost"/> == false, so the host lobby-capture and in-session-reroute paths are
+        /// never claimed by it. Excludes the no-session case (<paramref name="isActiveSession"/> == false)
+        /// so ordinary single-player CONTINUE/Quickload on a non-host machine passes through untouched.
+        /// </summary>
+        public static bool ShouldBlockClientLoad(bool isHost, bool isActiveSession)
+        {
+            return isActiveSession && !isHost;
         }
     }
 
