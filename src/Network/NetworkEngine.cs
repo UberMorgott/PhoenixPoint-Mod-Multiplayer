@@ -36,6 +36,15 @@ namespace Multipleer.Network
         // Initialize() so the next genuine connect attempt still reports real failures.
         private bool _intentionalDisconnect;
 
+        /// <summary>
+        /// True once an intentional local teardown (Disconnect/Shutdown/TearDown) has begun — i.e. THIS
+        /// peer initiated the leave. Consulted by <see cref="HostLeaveHandler"/> via
+        /// <see cref="SessionLifecycle.ShouldNotifyHostLeft"/> so a client's VOLUNTARY lobby LEAVE
+        /// (which closes its only peer, the host) is not mistaken for a genuine host drop and does not
+        /// raise the false "Host ended the session" toast + forced reload. Reset in Initialize().
+        /// </summary>
+        public bool IsIntentionalDisconnect => _intentionalDisconnect;
+
         // ─── Events ───────────────────────────────────────────────────────
 
         public event Action OnHostStarted;
@@ -47,8 +56,6 @@ namespace Multipleer.Network
         // notice). Additive alongside OnClientDisconnected so existing id-only subscribers are intact.
         public event Action<ulong, string, bool> OnClientDisconnectedNamed;
         public event Action<string> OnConnectionFailed;
-        public event Action<ulong, TacticalActionMessage> OnTacticalActionRequest;
-        public event Action<TacticalActionMessage> OnHostTacticalActionResult;
 
         // ─── Initialization ───────────────────────────────────────────────
 
@@ -132,6 +139,7 @@ namespace Multipleer.Network
             Transport?.Shutdown();
             Transport = null;
             Session = null;
+            SaveTransfer?.Detach();  // unsubscribe from OnClientDisconnected before dropping the coordinator (re-host leak).
             SaveTransfer = null;
             TimeSync = null;
             // Drop the host wallet-event subscription before the engine goes away (session end).
@@ -172,6 +180,7 @@ namespace Multipleer.Network
             Transport?.Shutdown();
             Transport = null;
             Session = null;
+            SaveTransfer?.Detach();  // unsubscribe from OnClientDisconnected before dropping the coordinator (re-host leak).
             SaveTransfer = null;   // re-created fresh in Initialize() → resets _begun / SessionStarted
             TimeSync = null;
             Sync = null;
@@ -287,50 +296,6 @@ namespace Multipleer.Network
                 if (client != excludeSteamId)
                     Transport?.Send(client, data);
             }
-        }
-
-        // ─── Tactical Action Flow ─────────────────────────────────────────
-
-        public void SendTacticalAction(TacticalActionMessage action)
-        {
-            var payload = MessageSerializer.SerializeTacticalAction(action);
-            var msg = new NetworkMessage(PacketType.TacticalActionRequest, payload);
-            SendToHost(msg);
-        }
-
-        public void ApproveTacticalAction(ulong clientId, TacticalActionMessage action, byte[] resultData)
-        {
-            action.Timestamp = DateTime.UtcNow.Ticks;
-            var payload = MessageSerializer.SerializeTacticalAction(action);
-
-            // Send approval + result to requesting client
-            var resultPayload = new byte[payload.Length + (resultData?.Length ?? 0) + 4];
-            Array.Copy(payload, 0, resultPayload, 0, payload.Length);
-            var resultLen = BitConverter.GetBytes(resultData?.Length ?? 0);
-            Array.Copy(resultLen, 0, resultPayload, payload.Length, 4);
-            if (resultData != null)
-                Array.Copy(resultData, 0, resultPayload, payload.Length + 4, resultData.Length);
-
-            var msg = new NetworkMessage(PacketType.TacticalActionApproved, resultPayload);
-            SendToClient(clientId, msg);
-
-            // Broadcast action to other clients (without result data, just for state tracking)
-            var broadcastMsg = new NetworkMessage(PacketType.TacticalActionBroadcast, payload);
-            BroadcastExcept(clientId, broadcastMsg);
-        }
-
-        public void RejectTacticalAction(ulong clientId, TacticalActionMessage action, string reason)
-        {
-            var payload = MessageSerializer.SerializeTacticalAction(action);
-            var reasonBytes = System.Text.Encoding.UTF8.GetBytes(reason ?? "denied");
-            var rejectPayload = new byte[payload.Length + reasonBytes.Length + 4];
-            Array.Copy(payload, 0, rejectPayload, 0, payload.Length);
-            var reasonLen = BitConverter.GetBytes(reasonBytes.Length);
-            Array.Copy(reasonLen, 0, rejectPayload, payload.Length, 4);
-            Array.Copy(reasonBytes, 0, rejectPayload, payload.Length + 4, reasonBytes.Length);
-
-            var msg = new NetworkMessage(PacketType.TacticalActionRejected, rejectPayload);
-            SendToClient(clientId, msg);
         }
 
         // ─── Update Loop (call every frame) ──────────────────────────────
@@ -456,23 +421,6 @@ namespace Multipleer.Network
                     Session.HandleRename(msg);
                     break;
 
-                case PacketType.TacticalActionRequest:
-                    var tacAction = MessageSerializer.DeserializeTacticalAction(msg.Payload);
-                    OnTacticalActionRequest?.Invoke(msg.SenderSteamId, tacAction);
-                    break;
-
-                case PacketType.TacticalActionApproved:
-                    var approvedAction = MessageSerializer.DeserializeTacticalAction(
-                        ExtractActionPayload(msg.Payload));
-                    OnHostTacticalActionResult?.Invoke(approvedAction);
-                    break;
-
-                case PacketType.TacticalActionRejected:
-                    var rejectedAction = MessageSerializer.DeserializeTacticalAction(
-                        ExtractActionPayload(msg.Payload));
-                    OnHostTacticalActionResult?.Invoke(rejectedAction);
-                    break;
-
                 case PacketType.PermissionUpdate:
                     Session.HandlePermissionUpdate(msg);
                     break;
@@ -494,6 +442,7 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.ClientReady:
+                case PacketType.ClientUnready:
                 case PacketType.AllClientsReady:
                     Session.HandleReadyState(msg);
                     break;
@@ -612,16 +561,8 @@ namespace Multipleer.Network
                     break;
 
                 // ─── STUB + TODO: members no longer silently fall through. ───────────
-                case PacketType.TacticalActionBroadcast:
-                    // TODO(tactical-sync): apply broadcast on clients (latent: sent but never received-routed).
-                    break;
-
                 case PacketType.GameStateDelta:
                     // TODO(delta-sync): geoscape/tactical delta application.
-                    break;
-
-                case PacketType.TurnStateUpdate:
-                    // TODO(tactical-turn): turn-state sync.
                     break;
 
                 case PacketType.PauseRequest:
@@ -629,23 +570,10 @@ namespace Multipleer.Network
                     // TODO(pause): cooperative pause feature.
                     break;
 
-                case PacketType.TacticalActionResult:
-                    // TODO(tactical-sync): not currently emitted; reserved.
-                    break;
-
                 default:
                     Debug.LogWarning($"[Multipleer] Unrouted packet type: {msg.Type}");
                     break;
             }
-        }
-
-        private static byte[] ExtractActionPayload(byte[] fullPayload)
-        {
-            if (fullPayload == null || fullPayload.Length < 29) return null;
-
-            // Parse TacticalActionMessage size: Guid(16) + byte(1) + int(4) + string prefix(4) + int(4) + long(8) = 37
-            // We just need the action portion. Return full payload — the deserializer knows its format.
-            return fullPayload;
         }
 
         private static ulong ResolveLocalSteamId()

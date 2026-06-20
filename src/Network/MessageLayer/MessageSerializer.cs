@@ -7,42 +7,6 @@ namespace Multipleer.Network.MessageLayer
 {
     public static class MessageSerializer
     {
-        // ─── Tactical Action Messages ──────────────────────────────────────
-
-        public static byte[] SerializeTacticalAction(TacticalActionMessage action)
-        {
-            using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                bw.Write(action.ActionId.ToByteArray());
-                bw.Write((byte)action.ActionType);
-                bw.Write(action.ActorGeoId);
-                bw.Write(action.AbilityDefId ?? "");
-                bw.Write(action.TargetData?.Length ?? 0);
-                if (action.TargetData != null && action.TargetData.Length > 0)
-                    bw.Write(action.TargetData);
-                bw.Write(action.Timestamp);
-                return ms.ToArray();
-            }
-        }
-
-        public static TacticalActionMessage DeserializeTacticalAction(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                var msg = new TacticalActionMessage();
-                msg.ActionId = new Guid(br.ReadBytes(16));
-                msg.ActionType = (TacticalActionType)br.ReadByte();
-                msg.ActorGeoId = br.ReadInt32();
-                msg.AbilityDefId = br.ReadString();
-                var targetLen = br.ReadInt32();
-                msg.TargetData = targetLen > 0 ? br.ReadBytes(targetLen) : null;
-                msg.Timestamp = br.ReadInt64();
-                return msg;
-            }
-        }
-
         // ─── Campaign Action Messages ─────────────────────────────────────
 
         public static byte[] SerializeCampaignAction(CampaignActionMessage action)
@@ -540,19 +504,6 @@ namespace Multipleer.Network.MessageLayer
 
     // ─── Action Data Types ─────────────────────────────────────────────────
 
-    public enum TacticalActionType : byte
-    {
-        Move = 0,
-        Shoot = 1,
-        Reload = 2,
-        UseAbility = 3,
-        InventoryTransfer = 4,
-        Overwatch = 5,
-        Interact = 6,
-        UseItem = 7,
-        Standby = 8
-    }
-
     public enum CampaignActionType : byte
     {
         StartResearch = 0,
@@ -570,16 +521,6 @@ namespace Multipleer.Network.MessageLayer
         RemoveSoldier = 12,
         StartTravel = 13,
         SetTimeState = 14
-    }
-
-    public class TacticalActionMessage
-    {
-        public Guid ActionId { get; set; }
-        public TacticalActionType ActionType { get; set; }
-        public int ActorGeoId { get; set; }
-        public string AbilityDefId { get; set; }
-        public byte[] TargetData { get; set; }
-        public long Timestamp { get; set; }
     }
 
     public class CampaignActionMessage

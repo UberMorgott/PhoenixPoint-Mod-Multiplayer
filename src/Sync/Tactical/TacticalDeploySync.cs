@@ -342,7 +342,12 @@ namespace Multipleer.Sync.Tactical
 
                 _lastBroadcastSiteId = siteId;
                 LiveTlc = tacticalLevelController;       // live-rail handle for tac.move/tac.turn/tac.vision
-                LiveSeq = new TacticalLiveSeq();         // fresh per-mission seq stream
+                // Do NOT recreate LiveSeq here: the level is already turn-0-ready and the pre-deploy tac.turn
+                // (seq=1) has been emitted on the live stream. Recreating it would rewind _hostNext, so the
+                // next turn re-emits seq=1 and the client's strict seq>last guard drops it ("turn doesn't end").
+                // The stream is created once per mission (ctor + OnMissionExit reset) and must survive the
+                // capture. (RCA 2026-06-20, 2-instance log decode.)
+                LiveSeq.BeginDeployCaptureMission();     // capture-time seq hook (no rewind)
                 IntentDedup = new TacticalIntentDedup();
                 // Inc Vision: the host vision push is driven by an always-registered Harmony postfix on
                 // TacticalLevelController.FactionKnowledgeChanged (VisionBroadcastPatch) — no event subscription
@@ -816,10 +821,9 @@ namespace Multipleer.Sync.Tactical
             {
                 // Small snapshot → single envelope. The client recognizes TacDeploy via the TacticalInbound
                 // hook and hands the payload straight to OnDeployReceived (no tracker / per-action dedup —
-                // the handler is site-id idempotent).
-                byte[] envelope = Network.Sync.SyncProtocol.EncodeEnvelope(
-                    (byte)TacticalSurfaceIds.TacDeploy, Network.Sync.SyncKind.StateSnapshot, payload);
-                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, envelope));
+                // the handler is site-id idempotent). Routed through the shared TacticalMoveSync helper,
+                // which wraps payload -> EncodeEnvelope(surfaceId, StateSnapshot) -> SyncEnvelope (same wire).
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacDeploy, payload);
                 return;
             }
 
@@ -828,9 +832,9 @@ namespace Multipleer.Sync.Tactical
             var chunks = TacticalDeployChunkCodec.Split(siteId, generation, payload);
             foreach (var chunkPayload in chunks)
             {
-                byte[] envelope = Network.Sync.SyncProtocol.EncodeEnvelope(
-                    (byte)TacticalSurfaceIds.TacDeployChunk, Network.Sync.SyncKind.StateSnapshot, chunkPayload);
-                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, envelope));
+                // Same shared helper as the single-envelope path: payload -> EncodeEnvelope(TacDeployChunk,
+                // StateSnapshot) -> SyncEnvelope (byte-identical wire to the prior inline encode).
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacDeployChunk, chunkPayload);
             }
             Debug.Log("[Multipleer][tac] HOST chunked tac.deploy site=" + siteId + " gen=" + generation +
                       " totalLen=" + payload.Length + " chunks=" + chunks.Count);

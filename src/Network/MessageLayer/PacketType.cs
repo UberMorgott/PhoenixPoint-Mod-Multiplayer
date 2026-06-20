@@ -32,14 +32,9 @@ namespace Multipleer.Network.MessageLayer
         RevealAll = 0x1F,
 
         // Tactical Actions
-        TacticalActionRequest = 0x20,
-        TacticalActionApproved = 0x21,
-        TacticalActionRejected = 0x22,
-        TacticalActionResult = 0x23,
-        TacticalActionBroadcast = 0x24,
+        TacticalActionRequest = 0x20,   // 0x21-0x24, 0x27 retired (legacy approve/reject/result/broadcast/turn-state path removed); do NOT reuse
         EndTurnRequest = 0x25,
         EndTurnAccepted = 0x26,
-        TurnStateUpdate = 0x27,
 
         // Campaign Actions
         CampaignActionRequest = 0x30,
@@ -59,6 +54,7 @@ namespace Multipleer.Network.MessageLayer
         SoldierAssignment = 0x41,
         PlayerListUpdate = 0x42,
         SetSave = 0x43,
+        ClientUnready = 0x44,   // client->host: un-ready toggle (pair of ClientReady=0x14; no payload, keyed by sender)
 
         // ActionSync 0x60-0x6F
         ActionRequest = 0x60,   // client -> host

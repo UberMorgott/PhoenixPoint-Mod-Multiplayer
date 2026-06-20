@@ -1082,6 +1082,18 @@ namespace Multipleer.Sync.Tactical
             _hostNext.Clear();
             _clientLast.Clear();
         }
+
+        /// <summary>HOST: capture-time per-mission seq hook, called from the deploy capture.
+        /// Intentionally does NOT touch the host streams: by the time the deploy capture runs the level
+        /// is already turn-0-ready and the pre-deploy <c>tac.turn</c> (seq=1) has been emitted on this
+        /// instance. Recreating/resetting the stream here (the previous <c>LiveSeq = new TacticalLiveSeq()</c>)
+        /// rewound <c>_hostNext[TacTurn]</c> to 0, so the next turn re-emitted seq=1 and the client's strict
+        /// <c>seq &gt; last</c> guard dropped it ⇒ "turn doesn't end". The stream is created exactly once per
+        /// mission (constructor + <c>OnMissionExit</c> reset) and must survive the capture monotonically.</summary>
+        public void BeginDeployCaptureMission()
+        {
+            // No-op by design: the host seq streams must survive a mid-mission deploy capture (never rewind).
+        }
     }
 
     /// <summary>
