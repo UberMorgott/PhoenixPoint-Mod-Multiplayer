@@ -325,4 +325,65 @@ public class TacticalActorStateDiffTests
         bool apply = TacticalActorStateDiff.ShouldApplyHealthMirror(100f, 100.001f, out _);
         Assert.False(apply);
     }
+
+    // ─── Inc1 full-state: position-delta WALK-vs-TELEPORT decision (pure, distance-driven) ─────────────
+    //
+    // The client receives an actor's absolute position in the 0x8F delta. The engine glue computes the
+    // distance from the actor's current mirror pos to the incoming pos and asks this pure function how to
+    // present it: snap nothing (None, already converged), drive the NATIVE walk animation (Walk), or snap
+    // instantly (Teleport — a sub-cell nudge OR a large/disconnected jump that should not animate a long walk).
+
+    [Fact]
+    public void PositionApply_SubEpsilon_None()
+    {
+        // Already converged (≤ epsilon) → no-op: do not re-trigger Navigate or SetPosition (avoid churn).
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.None,
+            TacticalActorStateDiff.DecidePositionApply(0f));
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.None,
+            TacticalActorStateDiff.DecidePositionApply(TacticalActorStateDiff.PositionEpsilon * 0.5f));
+    }
+
+    [Fact]
+    public void PositionApply_SubCell_Teleport()
+    {
+        // Above epsilon but below one grid cell → a degenerate path (0/1 node) would OOR in the native
+        // ExecutePoints, so SNAP instantly instead of animating.
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Teleport,
+            TacticalActorStateDiff.DecidePositionApply(0.5f));
+    }
+
+    [Theory]
+    [InlineData(1.0f)]    // exactly the walk floor (one cell) → walk
+    [InlineData(5f)]
+    [InlineData(20f)]
+    [InlineData(40f)]     // exactly the teleport ceiling → still walk (inclusive upper bound)
+    public void PositionApply_PlausibleMove_Walk(float dist)
+        => Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Walk,
+            TacticalActorStateDiff.DecidePositionApply(dist));
+
+    [Fact]
+    public void PositionApply_LargeJump_Teleport()
+    {
+        // Beyond the ceiling (a disconnected jump / first-seen pos / post-loss catch-up) → snap, never
+        // animate an absurd cross-map walk.
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Teleport,
+            TacticalActorStateDiff.DecidePositionApply(TacticalActorStateDiff.PositionTeleportMaxDist + 1f));
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Teleport,
+            TacticalActorStateDiff.DecidePositionApply(500f));
+    }
+
+    [Fact]
+    public void PositionApply_WalkFloor_IsOneCell_MatchesMoveRail()
+    {
+        // The walk floor must equal one grid cell (≈ the move rail's MoveAnimateMinDist = 1.0) so the delta
+        // path and the tac.move.start rail make the SAME walk/teleport choice for the same distance.
+        Assert.Equal(1.0f, TacticalActorStateDiff.PositionWalkMinDist);
+    }
+
+    [Fact]
+    public void PositionApply_BandBoundaries_AreOrdered()
+    {
+        Assert.True(TacticalActorStateDiff.PositionEpsilon < TacticalActorStateDiff.PositionWalkMinDist);
+        Assert.True(TacticalActorStateDiff.PositionWalkMinDist < TacticalActorStateDiff.PositionTeleportMaxDist);
+    }
 }

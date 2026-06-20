@@ -827,20 +827,29 @@ namespace Multipleer.Sync.Tactical
         // mask is read strictly in bit order and unknown bits beyond the ones we encode are never set by us;
         // the decoder consumes exactly the fields for the bits it knows, in ascending bit order). T1 encodes
         // only AP / WP / STATUSES. All values are ABSOLUTE (re-applying a record is a no-op → idempotent).
-        //   [seq:u32][count:i32]  then per actor:
+        //   [seq:u32][count:i32]  then per actor (fields in ASCENDING bit order):
         //     [netId:i32][fieldMask:u16]
         //     (if AP)       [ap:f32]
         //     (if WP)       [wp:f32]
         //     (if STATUSES) [statusCount:i32]  then per status: [defGuid:string][sourceNetId:i32][value:f32]
+        //     (if POS)      [posX:f32][posY:f32][posZ:f32]                                   (Inc1 full-state)
+        //     (if HEALTH)   [health:f32]
+        //     (if BODYPART) [partCount:i32]  then per part: [slotName:string][hp:f32]
 
         /// <summary>fieldMask bit assignments. T1 encodes AP|WP|STATUSES; the rest are RESERVED for later
         /// increments (encode/decode them in ascending bit order when added).</summary>
         public const ushort ActorFieldAp        = 0x0001;
         public const ushort ActorFieldWp        = 0x0002;
         public const ushort ActorFieldStatuses  = 0x0004;
-        // Reserved (NOT encoded in T1) — fold in ascending bit order:
+        // Inc1 full-state: actor ABSOLUTE POSITION (world Vector3 → 3×f32). The single host→client state writer
+        // for soldier movement: the client turns a POSITION delta into a native walk animation (Navigate) when
+        // the change is a plausible move, or an instant snap (SetPosition) for a sub-cell nudge / large
+        // disconnected jump (see TacticalActorStateDiff.DecidePositionApply). ABSOLUTE (re-apply = idempotent).
+        // Encoded in ascending bit order AFTER statuses (0x0004) and BEFORE facing/health. Runs ADDITIVE
+        // alongside the tac.move / tac.move.start rails (which stay the proven path until a later increment).
         public const ushort ActorFieldPos       = 0x0008;   // 3×f32 position
-        public const ushort ActorFieldFacing    = 0x0010;   // 3×f32 forward
+        // Reserved (NOT encoded yet) — fold in ascending bit order:
+        public const ushort ActorFieldFacing    = 0x0010;   // 3×f32 forward (Inc2)
         // Feature D: actor-level absolute HEALTH (HP) mirror. Carries the host's CURRENT HP (float) so a
         // host-side HEAL or any non-damage HP drift converges on the client (HP DECREASES already replicate
         // via tac.damage 0x88; DEATH stays owned by tac.damage — the client apply is DEATH-SAFE, see
@@ -889,12 +898,14 @@ namespace Multipleer.Sync.Tactical
             public float Ap;
             public float Wp;
             public float Health;   // Feature D: absolute current HP (valid only when HasHealth)
+            public float PosX, PosY, PosZ;   // Inc1 full-state: absolute world position (valid only when HasPos)
             public List<ActorStatus> Statuses = new List<ActorStatus>();
             public List<BodyPartHp> BodyParts = new List<BodyPartHp>();
 
             public bool HasAp => (FieldMask & ActorFieldAp) != 0;
             public bool HasWp => (FieldMask & ActorFieldWp) != 0;
             public bool HasStatuses => (FieldMask & ActorFieldStatuses) != 0;
+            public bool HasPos => (FieldMask & ActorFieldPos) != 0;
             public bool HasHealth => (FieldMask & ActorFieldHealth) != 0;
             public bool HasBodyParts => (FieldMask & ActorFieldBodyPartHp) != 0;
         }
@@ -938,6 +949,14 @@ namespace Multipleer.Sync.Tactical
                             w.Write(s.SourceNetId);
                             w.Write(s.Value);
                         }
+                    }
+                    // POSITION (0x0008) — Inc1 full-state. Encoded AFTER statuses (0x0004) and BEFORE health
+                    // (0x0020), i.e. ascending bit order. Absolute world Vector3 as 3×f32.
+                    if ((a.FieldMask & ActorFieldPos) != 0)
+                    {
+                        w.Write(a.PosX);
+                        w.Write(a.PosY);
+                        w.Write(a.PosZ);
                     }
                     // HEALTH (0x0020) — Feature D. Encoded AFTER statuses (0x0004), BEFORE bodypart-HP (0x0200),
                     // i.e. ascending bit order. Absolute current HP (float).
@@ -1006,6 +1025,15 @@ namespace Multipleer.Sync.Tactical
                                 float val = r.ReadSingle();
                                 rec.Statuses.Add(new ActorStatus(guid, src, val));
                             }
+                        }
+                        // POSITION (0x0008) — Inc1 full-state. Decoded AFTER statuses, BEFORE health (ascending
+                        // bit order), only if its bit is set. 3×f32 = 12 bytes, guarded as a unit.
+                        if ((rec.FieldMask & ActorFieldPos) != 0)
+                        {
+                            if (ms.Length - ms.Position < 12) return false;
+                            rec.PosX = r.ReadSingle();
+                            rec.PosY = r.ReadSingle();
+                            rec.PosZ = r.ReadSingle();
                         }
                         // HEALTH (0x0020) — Feature D. Decoded AFTER statuses, BEFORE bodypart-HP (ascending
                         // bit order), only if its bit is set.

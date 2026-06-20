@@ -10,6 +10,7 @@ public class TacticalActorStateCodecTests
     private const ushort St = TacticalLiveCodec.ActorFieldStatuses;
     private const ushort Bp = TacticalLiveCodec.ActorFieldBodyPartHp;
     private const ushort He = TacticalLiveCodec.ActorFieldHealth;
+    private const ushort Po = TacticalLiveCodec.ActorFieldPos;   // Inc1 full-state: absolute position
 
     private static TacticalLiveCodec.ActorStateRecord Rec(int netId, ushort mask, float ap, float wp,
         params TacticalLiveCodec.ActorStatus[] statuses)
@@ -297,6 +298,118 @@ public class TacticalActorStateCodecTests
             w.Write(1);    // count = 1 actor
             w.Write(5);    // netId
             w.Write(He);   // fieldMask = health, but NO health float follows → safe false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
+
+    // ─── Inc1 full-state: absolute POSITION field (0x0008) round-trip ─────────────────────────────────
+    //
+    // Position sits BETWEEN statuses (0x0004) and health (0x0020) in ascending bit order, so these tests
+    // also guard that an all-fields record keeps the encode/decode aligned with pos wedged in the middle.
+
+    private static TacticalLiveCodec.ActorStateRecord RecPos(int netId, ushort mask, float ap, float wp,
+        float health, float px, float py, float pz,
+        TacticalLiveCodec.ActorStatus[] statuses, TacticalLiveCodec.BodyPartHp[] parts)
+    {
+        var r = new TacticalLiveCodec.ActorStateRecord
+        { NetId = netId, FieldMask = mask, Ap = ap, Wp = wp, Health = health, PosX = px, PosY = py, PosZ = pz };
+        if (statuses != null) r.Statuses.AddRange(statuses);
+        if (parts != null) r.BodyParts.AddRange(parts);
+        return r;
+    }
+
+    [Fact]
+    public void PosOnly_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(20u,
+            new List<TacticalLiveCodec.ActorStateRecord> { RecPos(42, Po, 0f, 0f, 0f, 12.5f, 1.0f, -7.25f, null, null) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.Equal(42, a.NetId);
+        Assert.False(a.HasAp);
+        Assert.False(a.HasWp);
+        Assert.False(a.HasStatuses);
+        Assert.False(a.HasHealth);
+        Assert.True(a.HasPos);
+        Assert.Equal(12.5f, a.PosX);
+        Assert.Equal(1.0f, a.PosY);
+        Assert.Equal(-7.25f, a.PosZ);
+    }
+
+    [Fact]
+    public void ApWpPos_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(21u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            { RecPos(7, (ushort)(Ap | Wp | Po), 4f, 6f, 0f, 3f, 0f, 9f, null, null) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasAp);
+        Assert.True(a.HasWp);
+        Assert.True(a.HasPos);
+        Assert.Equal(4f, a.Ap);
+        Assert.Equal(6f, a.Wp);
+        Assert.Equal(3f, a.PosX);
+        Assert.Equal(0f, a.PosY);
+        Assert.Equal(9f, a.PosZ);
+    }
+
+    [Fact]
+    public void AllFieldsWithPos_RoundTrip_AscendingBitOrder()
+    {
+        // AP | WP | STATUSES | POS | HEALTH | BODYPARTHP all set on ONE record → exercises the full ascending
+        // bit order with POS wedged between STATUSES(0x04) and HEALTH(0x20). A misordered read would misalign.
+        var batch = new TacticalLiveCodec.ActorStateBatch(22u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            {
+                RecPos(3, (ushort)(Ap | Wp | St | Po | He | Bp), 2f, 5f, 64.25f, 11f, 2f, 33f,
+                    new[] { Stat("g-bleed", 7, 4f) },
+                    new[] { Part("Head", 40f), Part("Torso", 90f) }),
+            });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.Equal(2f, a.Ap);
+        Assert.Equal(5f, a.Wp);
+        Assert.Equal("g-bleed", Assert.Single(a.Statuses).DefGuid);
+        Assert.True(a.HasPos);
+        Assert.Equal(11f, a.PosX);
+        Assert.Equal(2f, a.PosY);
+        Assert.Equal(33f, a.PosZ);
+        Assert.True(a.HasHealth);
+        Assert.Equal(64.25f, a.Health);
+        Assert.Equal(2, a.BodyParts.Count);
+        Assert.Equal("Head", a.BodyParts[0].SlotName);
+        Assert.Equal(90f, a.BodyParts[1].Hp);
+    }
+
+    [Fact]
+    public void PosTruncated_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u);     // seq
+            w.Write(1);      // count = 1 actor
+            w.Write(5);      // netId
+            w.Write(Po);     // fieldMask = pos, but NO 3 floats follow → safe false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
+
+    [Fact]
+    public void PosPartiallyTruncated_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u);     // seq
+            w.Write(1);      // count = 1 actor
+            w.Write(5);      // netId
+            w.Write(Po);     // fieldMask = pos
+            w.Write(1.0f);   // only PosX present; PosY/PosZ missing → safe false (12-byte guard)
             Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
         }
     }

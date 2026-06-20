@@ -473,6 +473,54 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryCancelNavigation failed: " + ex); return false; }
         }
 
+        // ─── Inc1 full-state: drive the mirror from an ABSOLUTE position delta (tac.actorstate 0x8F) ──
+
+        /// <summary>CLIENT (mirror): present an actor's host-authoritative ABSOLUTE position carried by the
+        /// generic per-actor delta (<c>tac.actorstate</c> 0x8F). This is the Inc1 "walk-from-state" bridge: a
+        /// position change becomes a NATIVE walk animation (<see cref="TryAnimatedNavigate"/>) or an instant snap
+        /// (<see cref="TrySetPosition"/>) per the PURE <see cref="TacticalActorStateDiff.DecidePositionApply"/>
+        /// decision — never a custom interpolator (uses the game's own animator, avoiding the geoscape render-drift
+        /// failure mode). Reuses the SAME inert mirror <c>NavigationSettings</c> as the move rail (no AP spend, no
+        /// overwatch). Returns true when it actually moved/snapped the actor.
+        ///
+        /// ADDITIVE-SAFE: runs ALONGSIDE the proven tac.move / tac.move.start rails. If the move rail already set
+        /// this actor NAVIGATING (a concurrent <c>tac.move.start</c> Navigate is in flight), this SKIPS — the move
+        /// rail owns that animation and its END outcome reconciles the exact cell, so the delta must not start a
+        /// second Navigate (double-animate) nor snap mid-walk. Once the move rail's nav stops, the next delta
+        /// heartbeat converges any residual drift. Re-entrancy-safe: only ever called inside the client's
+        /// remote-apply scope. No-op off-mirror / off-session.</summary>
+        public static bool ApplyMirrorPosition(object actor, Vector3 dst)
+        {
+            try
+            {
+                if (actor == null) return false;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || engine.IsHost) return false;   // client-only
+                if (!TacticalDeploySync.IsClientMirroring) return false;
+
+                object nav = GetProp(actor, "TacticalNav");
+                // Move rail owns an in-flight walk → let it finish (no double-animate / no mid-walk snap).
+                if (nav != null && ToBool(GetProp(nav, "IsNavigating"))) return false;
+
+                Vector3 cur = GetPos(actor);
+                float dist = Vector3.Distance(cur, dst);
+                var mode = TacticalActorStateDiff.DecidePositionApply(dist);
+                switch (mode)
+                {
+                    case TacticalActorStateDiff.PositionApplyMode.None:
+                        return false;   // already converged → no churn
+                    case TacticalActorStateDiff.PositionApplyMode.Walk:
+                        if (nav != null && TryAnimatedNavigate(nav, dst)) return true;
+                        // Navigate unavailable / threw → snap so the position still converges (correct cell).
+                        return TrySetPosition(actor, dst);
+                    case TacticalActorStateDiff.PositionApplyMode.Teleport:
+                    default:
+                        return TrySetPosition(actor, dst);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorPosition failed: " + ex); return false; }
+        }
+
         // ─── CLIENT animated-mirror helpers (FIX B) ────────────────────────────────────────────────
 
         /// <summary>Lazily build the reusable mirror <c>NavigationSettings</c>: <c>CostsAPToActor=false</c>

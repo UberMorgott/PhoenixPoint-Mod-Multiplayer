@@ -171,6 +171,57 @@ namespace Multipleer.Sync.Tactical
             return true;
         }
 
+        // ─── Inc1 full-state: position-delta WALK-vs-TELEPORT decision (PURE, distance-driven) ────────────
+
+        /// <summary>How the client should PRESENT an incoming absolute-position delta for a mirrored actor.</summary>
+        public enum PositionApplyMode
+        {
+            /// <summary>Already converged (≤ <see cref="PositionEpsilon"/>) — do nothing (no Navigate, no
+            /// SetPosition) so an idle re-apply never churns the transform or re-fires ActorMovedEvent.</summary>
+            None,
+            /// <summary>Drive the NATIVE walk animation (<c>TacticalNavigationComponent.Navigate</c>) — a
+            /// plausible single move: the soldier WALKS to the new cell instead of teleporting.</summary>
+            Walk,
+            /// <summary>Snap instantly (<c>ActorComponent.SetPosition</c>) — either a SUB-CELL nudge (a path
+            /// of 0/1 nodes would over-run the native ExecutePoints animator) OR a LARGE/disconnected jump
+            /// (first-seen pos, post-packet-loss catch-up, evac/relocate) that must not animate an absurd
+            /// cross-map walk.</summary>
+            Teleport,
+        }
+
+        /// <summary>Below this distance the incoming pos is treated as already-there → no-op (avoid re-firing
+        /// the native ActorMovedEvent on sub-epsilon float jitter). Far below one grid cell.</summary>
+        public const float PositionEpsilon = 0.05f;
+
+        /// <summary>The WALK floor: at/above this distance the delta animates a native walk; below it (but above
+        /// <see cref="PositionEpsilon"/>) the path is degenerate (0/1 nodes) and would over-run the native
+        /// ExecutePoints animator, so it SNAPS. Equal to the move rail's <c>MoveAnimateMinDist</c> (PP tactical
+        /// grid cell ≈ 1 world unit) so the delta path and the tac.move.start rail make the SAME choice.</summary>
+        public const float PositionWalkMinDist = 1.0f;
+
+        /// <summary>The TELEPORT ceiling: at/below this distance a plausible move animates; ABOVE it the delta is
+        /// a large/disconnected jump (first-seen pos, post-loss catch-up, evac/relocate) → SNAP instead of
+        /// animating an absurdly long cross-map walk. Generous (well past any single legitimate move range) so a
+        /// normal move always walks; only a genuine teleport-scale gap snaps.</summary>
+        public const float PositionTeleportMaxDist = 40.0f;
+
+        /// <summary>PURE walk-vs-teleport decision for an incoming absolute-position delta, given ONLY the
+        /// distance from the actor's current mirror pos to the incoming pos (the engine glue computes it via
+        /// <c>Vector3.Distance</c>, keeping this function Unity-free + unit-testable). Bands:
+        ///   • dist ≤ <see cref="PositionEpsilon"/>                       → <see cref="PositionApplyMode.None"/>
+        ///   • <see cref="PositionEpsilon"/> &lt; dist &lt; <see cref="PositionWalkMinDist"/> → Teleport (sub-cell)
+        ///   • <see cref="PositionWalkMinDist"/> ≤ dist ≤ <see cref="PositionTeleportMaxDist"/> → Walk
+        ///   • dist &gt; <see cref="PositionTeleportMaxDist"/>            → Teleport (disconnected jump)
+        /// A NaN/negative distance is treated as Teleport (safest: snap rather than animate an unknown path).</summary>
+        public static PositionApplyMode DecidePositionApply(float distance)
+        {
+            if (float.IsNaN(distance)) return PositionApplyMode.Teleport;
+            if (distance <= PositionEpsilon) return PositionApplyMode.None;
+            if (distance < PositionWalkMinDist) return PositionApplyMode.Teleport;       // sub-cell nudge → snap
+            if (distance > PositionTeleportMaxDist) return PositionApplyMode.Teleport;   // disconnected jump → snap
+            return PositionApplyMode.Walk;
+        }
+
         // ─── Feature B PART 1: per-bodypart-HP RECONCILE diff (limb-disable mirror) ───────────────────────
 
         /// <summary>One bodypart HP entry: the slot name (stable host↔client key) + the part's absolute HP.</summary>

@@ -157,16 +157,23 @@ namespace Multipleer.Sync.Tactical
                 if (actor == null) continue;
                 liveNetIds.Add(netId);
 
-                if (!ReadActorState(actor, out float ap, out float wp, out float health, out var statuses, out var bodyParts))
+                if (!ReadActorState(actor, out float ap, out float wp, out float health, out Vector3 pos,
+                        out bool hasPos, out var statuses, out var bodyParts))
                     continue;   // not a stats-bearing actor (turret/vehicle/destructible) → skip
 
-                // Signature includes AP/WP + HEALTH + the mirrored status set + the bodypart-HP set, so a HEAL,
-                // a status icon change OR a limb-HP change re-broadcasts (idle actor = 0 bytes via the
-                // unchanged-sig skip). Health rides AP/WP (not gated by SyncStatuses) → always in the signature.
+                // Signature includes AP/WP + HEALTH + POSITION + the mirrored status set + the bodypart-HP set,
+                // so a HEAL, a status icon change, a MOVE or a limb-HP change re-broadcasts (idle actor = 0 bytes
+                // via the unchanged-sig skip). Health + position ride AP/WP (not gated by SyncStatuses) → always
+                // in the signature. (Inc1 full-state: position drives the client walk/teleport mirror.)
                 string healthSig = "$hp=" + health.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                string posSig = hasPos
+                    ? "$p=" + pos.x.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
+                            + pos.y.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
+                            + pos.z.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
+                    : "";
                 string sig = (SyncStatuses
                     ? TacticalActorStateDiff.Signature(ap, wp, statuses) + BodyPartSig(bodyParts)
-                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig;
+                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig + posSig;
                 if (_lastSig.TryGetValue(netId, out var prev) && prev == sig)
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
@@ -177,6 +184,10 @@ namespace Multipleer.Sync.Tactical
                 // but not setting the bit at all keeps a dead/dying actor's delta clean.
                 bool shipHealth = health > TacticalActorStateDiff.HealthDeathThreshold;
                 if (shipHealth) mask |= TacticalLiveCodec.ActorFieldHealth;
+                // Inc1 full-state: ship the absolute POSITION bit whenever the actor exposes a readable Pos.
+                // NOT gated by SyncStatuses (it is core movement state, like Health). The client turns it into a
+                // native walk (or a snap) — see TacticalMoveSync.ApplyMirrorPosition / DecidePositionApply.
+                if (hasPos) mask |= TacticalLiveCodec.ActorFieldPos;
                 if (SyncStatuses)
                 {
                     mask |= TacticalLiveCodec.ActorFieldStatuses;
@@ -189,6 +200,9 @@ namespace Multipleer.Sync.Tactical
                     Ap = ap,
                     Wp = wp,
                     Health = health,
+                    PosX = pos.x,
+                    PosY = pos.y,
+                    PosZ = pos.z,
                 };
                 if (SyncStatuses)
                 {
@@ -229,7 +243,7 @@ namespace Multipleer.Sync.Tactical
             { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0, posCnt = 0;
             try
             {
                 _applyingRemote = true;
@@ -264,15 +278,26 @@ namespace Multipleer.Sync.Tactical
                         {
                             if (SetApWpAbsolute(actor, rec)) apwp++;
                         }
+                        // Inc1 full-state: drive the actor toward the host's ABSOLUTE position. The native walk
+                        // animation (or an instant snap for a sub-cell nudge / disconnected jump) is triggered by
+                        // TacticalMoveSync.ApplyMirrorPosition, which reuses the SAME mirror NavigationSettings +
+                        // walk/teleport primitives as the tac.move.start rail and SKIPS re-animating an actor that
+                        // the move rail already set navigating (no double-animate while running ADDITIVE). Applied
+                        // LAST (after stats) so the transform move lands on a fully-converged actor.
+                        if (rec.HasPos)
+                        {
+                            if (TacticalMoveSync.ApplyMirrorPosition(
+                                    actor, new Vector3(rec.PosX, rec.PosY, rec.PosZ))) posCnt++;
+                        }
                     }
                 }
                 finally { _applyingRemote = false; }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0 || posCnt > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
-                              " limbHp=" + bp + " hp=" + hp);
+                              " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
@@ -286,10 +311,11 @@ namespace Multipleer.Sync.Tactical
         /// <paramref name="health"/> is the actor's CURRENT HP (Feature D); the host only ships it when > 0
         /// (see HostFlushOnce) — death is owned by tac.damage, never this delta.</summary>
         private static bool ReadActorState(object actor, out float ap, out float wp, out float health,
+            out Vector3 pos, out bool hasPos,
             out List<TacticalActorStateDiff.StatusRec> statuses,
             out List<TacticalActorStateDiff.BodyPartHpRec> bodyParts)
         {
-            ap = 0f; wp = 0f; health = 0f;
+            ap = 0f; wp = 0f; health = 0f; pos = Vector3.zero; hasPos = false;
             statuses = new List<TacticalActorStateDiff.StatusRec>();
             bodyParts = new List<TacticalActorStateDiff.BodyPartHpRec>();
 
@@ -306,7 +332,12 @@ namespace Multipleer.Sync.Tactical
             // health-mirrored — HostFlushOnce only sets the Health bit when health > 0).
             health = StatValue(GetProp(stats, "Health"));
 
-            // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP/HEALTH.
+            // Inc1 full-state: the actor's ABSOLUTE world position (ActorComponent.Pos = transform.position).
+            // Read off the live actor (not CharacterStats) and shipped unconditionally (core movement state, NOT
+            // gated by SyncStatuses). A NaN/unreadable Pos is dropped (hasPos stays false → no Pos bit).
+            if (TryReadPos(actor, out Vector3 p)) { pos = p; hasPos = true; }
+
+            // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP/HEALTH/POSITION.
             if (!SyncStatuses) return true;
 
             // Statuses: enumerate StatusComponent.Statuses, mirror those whose healthbar visibility != Hidden
@@ -371,6 +402,24 @@ namespace Multipleer.Sync.Tactical
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ReadBodyPartHp failed: " + ex); }
+        }
+
+        /// <summary>Inc1 full-state: read the actor's absolute world position (<c>ActorComponent.Pos</c> =
+        /// transform.position). Returns false (so no Pos bit is shipped) when Pos is unreadable or NaN — a
+        /// turret/destructible without a transform, or a mid-spawn actor. Mirrors <c>TacticalMoveSync.GetPos</c>
+        /// but rejects NaN (a half-initialized transform must not ship a garbage position).</summary>
+        private static bool TryReadPos(object actor, out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            try
+            {
+                object raw = GetProp(actor, "Pos");
+                if (!(raw is Vector3 v)) return false;
+                if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z)) return false;
+                pos = v;
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>Map a status <c>Source</c> to a netId if it is a resolvable live actor, else -1 (weapon /
