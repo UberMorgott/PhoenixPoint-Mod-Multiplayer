@@ -42,12 +42,12 @@ namespace Multipleer.Network.Sync
         private readonly Dictionary<byte, ulong> _channelVersion = new Dictionary<byte, ulong>(); // host: per-channel monotonic version
         private readonly HashSet<byte> _channelDirty = new HashSet<byte>();                        // host: channels changed since last flush
 
-        // ─── Unified surface router (Phase 1 chokepoint) ───────────────────
-        // Additive: lives ALONGSIDE the legacy action path. Dormant until something SENDS a
-        // SyncEnvelope (Task 7 flip); shares the engine's existing _tracker + _seenRequests so the
-        // envelope path's ordering/dedup stays consistent with the still-live legacy path.
-        private readonly SurfaceRegistry _surfaces = new SurfaceRegistry();
-        private readonly SurfaceRouter _router;
+        // ─── Unified 0x67 envelope router (LIVE tactical fast-path only) ───────────────────
+        // Thin dispatcher to the tactical replication hook (SurfaceRouter.TacticalInbound, armed by
+        // TacticalDeploySync.ArmInboundHook). The geoscape ACTION relay rides the LEGACY 0x60/0x61/0x62 path
+        // above (OnActionRequest/OnActionApply/OnActionReject); the dead 0x67 action-relay was never wired
+        // (zero senders) and has been removed.
+        private readonly SurfaceRouter _router = new SurfaceRouter();
 
         // ─── Client geoscape-event raise/dismiss correlation (occurrence-id keyed) ─────────
         // Pure, Unity-free ordering brain: keys raise/dismiss on the host-synthesized per-occurrence id so two
@@ -69,9 +69,7 @@ namespace Multipleer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
-            SyncRegistration.RegisterAll();   // registers every action reader (later batch)
-            SyncRegistration.RegisterSurfaces(_surfaces);
-            _router = new SurfaceRouter(_surfaces, _tracker, _seenRequests);
+            SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -539,45 +537,17 @@ namespace Multipleer.Network.Sync
             }
         }
 
-        // ─── Unified envelope inbound + ISyncSink outbound ─────────────────
-        // Additive (Phase 1, Task 6): the SurfaceRouter receive path lives ALONGSIDE the legacy
-        // OnActionRequest/OnActionApply path, which stays primary. Dormant until a SyncEnvelope is
-        // actually sent (the Task-7 flip wires SendActionRequest → SendActionRequestViaEnvelope).
+        // ─── Unified 0x67 envelope inbound (LIVE tactical fast-path) ─────────────────
+        // The SurfaceRouter dispatches the decoded envelope to the tactical replication hook
+        // (SurfaceRouter.TacticalInbound). The geoscape ACTION relay rides the LEGACY 0x60/0x61/0x62 path
+        // above (OnActionRequest/OnActionApply/OnActionReject), which stays primary.
 
-        /// <summary>Inbound: a unified surface envelope arrived. Routes through the single chokepoint.</summary>
+        /// <summary>Inbound: a unified 0x67 envelope arrived. Routes to the tactical fast-path chokepoint.</summary>
         public void OnSyncEnvelope(ulong senderPeerId, byte[] data) => _router.OnInbound(senderPeerId, data, this);
-
-        /// <summary>Client: send an action as a request envelope (new unified path; not yet wired to interceptors).</summary>
-        public void SendActionRequestViaEnvelope(ISyncedAction a)
-        {
-            if (a == null) return;
-            byte surfaceId = (byte)a.ActionId;   // action surface ids mirror SyncedActionIds (== SurfaceIds)
-            var payload = WriteAction(a);
-            _engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope,
-                SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest, payload)));
-        }
 
         bool ISyncSink.IsHost => _engine.IsHost;
         GeoRuntime ISyncSink.Runtime => GeoRuntime.Instance;
         Guid ISyncSink.ResolveActor(ulong peerId) => ResolveActor(peerId);
-
-        void ISyncSink.RejectTo(ulong peerId, byte surfaceId)
-            => _engine.SendToClient(peerId, new NetworkMessage(PacketType.ActionReject,
-                SyncProtocol.EncodeActionReject(0u, 1, "rejected")));
-
-        void ISyncSink.RebroadcastActionApply(byte surfaceId, ulong sequence, byte[] payload)
-            => _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
-                SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionApply,
-                    SurfaceRouter.EncodeApplyPayload(sequence, payload))));
-
-        void ISyncSink.MarkSurfaceDirty(byte surfaceId)
-        {
-            // Phase 1: mirror the legacy OnActionRequest special-case — research surfaces re-echo
-            // channel 2 (research has no faction-level cancel event to self-mark the channel dirty).
-            if (surfaceId == SurfaceIds.StartResearch || surfaceId == SurfaceIds.CancelResearch
-                || surfaceId == SurfaceIds.ResearchCompleted || surfaceId == SurfaceIds.ReorderResearch)
-                MarkChannelDirty(2);
-        }
 
         /// <summary>After a synced apply, re-drive the open needs-kick geoscape modules (mirrors legacy GeoUiRefresh fan-out).</summary>
         void ISyncSink.RefreshUi() => GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);

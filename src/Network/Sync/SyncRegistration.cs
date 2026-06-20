@@ -1,5 +1,4 @@
 using Multipleer.Network.Sync.Actions;
-using Multipleer.Network.Sync.State;
 
 namespace Multipleer.Network.Sync
 {
@@ -34,32 +33,6 @@ namespace Multipleer.Network.Sync
 
             // Events / dialogs
             SyncedActionRegistry.Register(SyncedActionIds.AnswerEvent, AnswerEventAction.Read);
-        }
-
-        /// <summary>
-        /// Register every action surface into the unified <see cref="SurfaceRegistry"/> (Phase 1).
-        /// Same readers as <see cref="RegisterAll"/>, each mapped to the geoscape screen its apply
-        /// refreshes. State channels are registered in a later phase. Idempotent per registry instance.
-        /// </summary>
-        public static void RegisterSurfaces(SurfaceRegistry reg)
-        {
-            // Research → Research screen
-            reg.RegisterAction(SurfaceIds.StartResearch, StartResearchAction.Read, GeoUiRefresh.Screen.Research);
-            reg.RegisterAction(SurfaceIds.ResearchCompleted, ResearchCompletedAction.Read, GeoUiRefresh.Screen.Research);
-            reg.RegisterAction(SurfaceIds.CancelResearch, CancelResearchAction.Read, GeoUiRefresh.Screen.Research);
-            reg.RegisterAction(SurfaceIds.ReorderResearch, ReorderResearchAction.Read, GeoUiRefresh.Screen.Research);
-
-            // Manufacturing → Manufacturing screen
-            reg.RegisterAction(SurfaceIds.QueueManufacture, QueueManufactureAction.Read, GeoUiRefresh.Screen.Manufacturing);
-            reg.RegisterAction(SurfaceIds.ManufactureCompleted, ManufactureCompletedAction.Read, GeoUiRefresh.Screen.Manufacturing);
-
-            // Base construction / repair → BaseLayout screen
-            reg.RegisterAction(SurfaceIds.ConstructFacility, ConstructFacilityAction.Read, GeoUiRefresh.Screen.BaseLayout);
-            reg.RegisterAction(SurfaceIds.RepairFacility, RepairFacilityAction.Read, GeoUiRefresh.Screen.BaseLayout);
-            reg.RegisterAction(SurfaceIds.FacilityCompleted, FacilityCompletedAction.Read, GeoUiRefresh.Screen.BaseLayout);
-
-            // Event answer → no single screen (event dialog closes via its own path); null screen.
-            reg.RegisterAction(SurfaceIds.AnswerEvent, AnswerEventAction.Read, null);
         }
     }
 }

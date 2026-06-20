@@ -47,9 +47,8 @@
     <Compile Include="..\src\Network\Sync\SurfaceIds.cs"><Link>Sync\SurfaceIds.cs</Link></Compile>
     <!-- GeoUiRefresh is Unity/Harmony-reflective but binds game types lazily inside try/catch and
          never runs reflection in tests; compiles against the already-referenced 0Harmony +
-         UnityEngine.CoreModule. Needed by SurfaceRegistry (Screen enum). -->
+         UnityEngine.CoreModule. Linked for the State channel/snapshot codecs (Screen enum). -->
     <Compile Include="..\src\Network\Sync\State\GeoUiRefresh.cs"><Link>Sync\State\GeoUiRefresh.cs</Link></Compile>
-    <Compile Include="..\src\Network\Sync\SurfaceRegistry.cs"><Link>Sync\SurfaceRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\ISyncSink.cs"><Link>Sync\ISyncSink.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SurfaceRouter.cs"><Link>Sync\SurfaceRouter.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>

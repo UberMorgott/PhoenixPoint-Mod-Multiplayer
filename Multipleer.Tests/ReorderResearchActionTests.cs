@@ -2,7 +2,6 @@ using System.IO;
 using System.Text;
 using Multipleer.Network.Sync;
 using Multipleer.Network.Sync.Actions;
-using Multipleer.Network.Sync.State;
 using Xunit;
 
 /// <summary>
@@ -66,14 +65,4 @@ public class ReorderResearchActionTests
     [Fact]
     public void ReorderResearch_IsHostOnlyApply()
         => Assert.IsAssignableFrom<IHostOnlyApply>(new ReorderResearchAction("PX_LaserTech_ResearchDef", ResearchReorderKind.Up));
-
-    [Fact]
-    public void ReorderResearch_SurfaceIsRegistered()
-    {
-        var reg = new SurfaceRegistry();
-        SyncRegistration.RegisterSurfaces(reg);
-        Assert.True(reg.IsRegistered(SurfaceIds.ReorderResearch));
-        Assert.True(reg.Get(SurfaceIds.ReorderResearch).Accepts(SyncKind.ActionRequest));
-        Assert.Equal(GeoUiRefresh.Screen.Research, reg.Get(SurfaceIds.ReorderResearch).Screen);
-    }
 }
