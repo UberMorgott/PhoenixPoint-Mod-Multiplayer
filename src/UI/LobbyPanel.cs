@@ -637,7 +637,7 @@ namespace Multipleer.UI
                 () =>
                 {
                     _localReady = !_localReady;        // optimistic flip for instant feedback
-                    _owner.OnLobbyToggleReady();        // reuse the EXACT existing propagation path
+                    _owner.OnLobbyToggleReady(_localReady); // send the post-flip ready/unready intent
                     UpdateReadyButtonLabel();
                 });
             if (_readyButton != null)
@@ -649,7 +649,7 @@ namespace Multipleer.UI
                     () =>
                     {
                         _localReady = !_localReady;
-                        _owner.OnLobbyToggleReady();
+                        _owner.OnLobbyToggleReady(_localReady);
                         UpdateReadyButtonLabel();
                     });
                 LE(_readyButton.gameObject).preferredWidth = FooterButtonSize.x;
