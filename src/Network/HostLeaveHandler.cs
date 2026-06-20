@@ -60,6 +60,14 @@ namespace Multipleer.Network
         {
             var engine = _attached;
             if (engine == null || engine.IsHost) return; // host side: a client dropped, not a host-leave
+
+            // Symptom B: a CLIENT clicking LEAVE closes its only peer (the host), producing a transport
+            // drop indistinguishable from a real host crash. Suppress the false "Host ended the session"
+            // toast + forced reload when THIS client initiated the teardown — its own leave path
+            // (OnDisconnectClicked → Disconnect/Shutdown + TeardownLobbyState) already returns it to the
+            // menu. A genuine host drop the client did NOT initiate still notifies.
+            if (!SessionLifecycle.ShouldNotifyHostLeft(engine.IsIntentionalDisconnect)) return;
+
             HandleHostLeft();
         }
 
@@ -108,6 +116,14 @@ namespace Multipleer.Network
             // did not (e.g. called outside a level). TearDown is idempotent + safe to call twice.
             try { NetworkEngine.Instance?.TearDown(); }
             catch (Exception e) { Debug.LogError("[Multipleer] F3 TearDown failed: " + e.Message); }
+
+            // Fix #5 (host-left remainder): the network TearDown above does NOT reset the UI lobby FSM
+            // or clear the chosen save, so without this the next host/join would inherit a stale
+            // ClientLobby/Starting state + a phantom _pendingChosenSave (the same bug LEAVE/cancel/
+            // OnConnectionFailed already guard via TeardownLobbyState). Route the host-left trigger
+            // through the same single hook. Null-safe (no MultiplayerUI in a headless/edge teardown).
+            try { Multipleer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
+            catch (Exception e) { Debug.LogError("[Multipleer] F3 UI teardown failed: " + e.Message); }
         }
     }
 }
