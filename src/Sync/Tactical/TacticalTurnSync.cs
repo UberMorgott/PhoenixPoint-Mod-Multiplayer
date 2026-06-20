@@ -127,6 +127,10 @@ namespace Multipleer.Sync.Tactical
             if (!TacticalLiveCodec.TryDecodeTurn(payload, out var t)) { Debug.LogError("[Multipleer][tac] tac.turn decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacTurn, t.Seq)) return;
 
+            // DIAG: incoming handoff envelope (before any state resolution). Catches faction-index desync (cause C).
+            Debug.Log("[Multipleer][tac] ClientOnTurn ENTER seq=" + t.Seq + " incomingIdx=" + t.CurrentFactionIndex +
+                      " turn=" + t.TurnNumber + " guid=" + t.FactionDefGuid);
+
             object tlc = TacticalDeploySync.LiveTlc ?? ResolveTlc();
             if (tlc == null)
             {
@@ -185,28 +189,58 @@ namespace Multipleer.Sync.Tactical
 
                 if (isPlayer)
                 {
-                    // 3a) ENTER the player turn natively so the client view/input come alive. PlayTurnCrt is
-                    //     NOT suppressed on the client (only NextTurnCrt + AIUpdateCrt are), so this runs the
-                    //     real player-turn setup + input loop. It exits when the LOCAL user ends the turn
-                    //     (RequestEndTurn → _endTurnRequested) — at which point the client waits for the next
-                    //     host tac.turn. It never advances the faction index itself.
-                    // Guard re-entry: if this faction's PlayTurnCrt is already running (IsPlayingTurn true),
-                    // do NOT launch a 2nd coroutine (would double the player turn loop / input). Just re-stamp.
-                    if (ToBool(GetProp(current, "IsPlayingTurn")))
-                    {
-                        SetTurnNumber(current, t.TurnNumber);
-                        Debug.Log("[Multipleer][tac] CLIENT player turn already running idx=" + t.CurrentFactionIndex + " — re-stamped turn=" + t.TurnNumber + " (no re-start)");
-                    }
-                    else
-                    {
-                        StartPlayTurn(current);
-                        // PlayTurnCrt increments TurnNumber by 1 internally; re-stamp the host's authoritative value.
-                        SetTurnNumber(current, t.TurnNumber);
-                        Debug.Log("[Multipleer][tac] CLIENT entered PLAYER turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber);
-                    }
-                    // UI-LOCK FIX: drive the view into the new-turn HUD state explicitly (race-independent),
-                    // because the NewTurnEvent we raise can fire BEFORE TacticalView subscribes to it.
-                    EnsureClientTurnHud(current);
+                    // 3a) PLAYER-TURN CONTROL RESTORE (deterministic; runs EVERY player resume).
+                    //
+                    // CONTROL == the view in UIStateCharacterSelected (the only state with the action bar +
+                    // soldier selection; there is no UIStatePlayerTurn). That state is reached ONLY by the native
+                    // dispatcher UIStateInitial.InitialStateUpdateCrt, whose player branch (UIStateInitial.cs:66-87)
+                    // SPINS `while (!CurrentFaction.IsPlayingTurn)` (line 68) before switching to
+                    // UIStateCharacterSelected. So the load-bearing precondition for regaining control is
+                    // IsPlayingTurn == true on THIS player faction PLUS the view being driven into
+                    // UIStateInitial(initForNewTurn:true).
+                    //
+                    // The OLD "if IsPlayingTurn already true → just re-stamp, no re-start" early-out is REMOVED:
+                    // it made control restoration depend on PlayTurnCrt having reached TacticalFaction.cs:442
+                    // (where the native code sets IsPlayingTurn=true). On a frozen mirror PlayTurnCrt stalls
+                    // BEFORE :442 on host-authoritative yields (Map.IsMapUpdateInProgress / EnsureNavObstacle /
+                    // ExecuteQueuedAbilitiesSequence / SituationCache.WaitForAutomaticEvaluation, :432-441) that
+                    // may never complete → IsPlayingTurn stays false → the dispatcher dead-spins → permanent loss
+                    // of control after the first enemy turn (cause B). We therefore FORCE the precondition by hand
+                    // (exactly as the enemy-presentation gate already forces IsPlayingTurn for UIStateOtherFactionTurn).
+                    bool wasPlaying = ToBool(GetProp(current, "IsPlayingTurn"));
+
+                    // (i) Start the native PlayTurnCrt ONLY if no player loop is currently live (wasPlaying==false).
+                    //     This runs the real player-turn setup + input/end-turn loop while avoiding doubling the
+                    //     coroutine when one is already running. PlayTurnCrt never advances the faction index, so a
+                    //     standalone run can never auto-advance the client. (There is no stored coroutine handle to
+                    //     tear down a stale loop; not re-starting when one is live is the safe minimal equivalent —
+                    //     control is restored regardless by the forced IsPlayingTurn + HUD drive below.)
+                    if (!wasPlaying) StartPlayTurn(current);
+
+                    // (ii) FORCE IsPlayingTurn=true (private setter → Traverse), NOT relying on PlayTurnCrt reaching
+                    //      :442. This is the single missing input the native player-branch dispatcher needs so its
+                    //      `while (!IsPlayingTurn)` (UIStateInitial.cs:68) breaks and it enters UIStateCharacterSelected.
+                    SetIsPlayingTurn(current, true);
+
+                    // (iii) Re-stamp the host's authoritative TurnNumber (PlayTurnCrt's internal +1 is corrected here).
+                    SetTurnNumber(current, t.TurnNumber);
+
+                    // (iv) ALWAYS drive the view into UIStateInitial(initForNewTurn:true) + set ViewerFaction
+                    //      (race-independent; the NewTurnEvent we raise can fire before TacticalView subscribes).
+                    //      With IsPlayingTurn now true the dispatcher will reach UIStateCharacterSelected.
+                    bool hudRan = EnsureClientTurnHud(current);
+
+                    // DIAG: player-resume restore receipt — catches cause B (IsPlayingTurn stays false) and the
+                    // resolved view state. isPlayingBefore is pre-restore; isPlayingAfter must be true.
+                    Debug.Log("[Multipleer][tac] CLIENT PLAYER resume idx=" + t.CurrentFactionIndex +
+                              " faction=" + ResolveFactionDefName(current) +
+                              " isControlledByPlayer=" + isPlayer +
+                              " isPlayingBefore=" + wasPlaying +
+                              " isPlayingAfter=" + ToBool(GetProp(current, "IsPlayingTurn")) +
+                              " startedPlayTurn=" + (!wasPlaying) +
+                              " hudRan=" + hudRan +
+                              " viewState=" + ResolveViewStateName(current) +
+                              " turn=" + t.TurnNumber);
                 }
                 else if (ClientEnemyTurnPresentationGate.ShouldEnterEnemyPresentation(incomingIsControlledByPlayer: false))
                 {
@@ -317,21 +351,24 @@ namespace Multipleer.Sync.Tactical
         /// view/stack isn't ready yet we DEFER onto the level Timing and retry (same coroutine pattern as the
         /// rest of this file), exactly mirroring the engine's own <c>OnNewTurn(null, CurrentFaction)</c> call.
         /// </summary>
-        private static void EnsureClientTurnHud(object faction)
+        /// <returns>true if the HUD drive was applied SYNCHRONOUSLY this call; false if it was deferred onto
+        /// Timing (view not ready) or could not be driven. Returned for diagnostics in the player-resume log.</returns>
+        private static bool EnsureClientTurnHud(object faction)
         {
             try
             {
-                if (TryDriveClientTurnHud(faction)) return;
+                if (TryDriveClientTurnHud(faction)) return true;
                 // View / _statesStack not ready → defer onto Timing and poll until it is (bounded).
                 object tlc = GetProp(faction, "TacticalLevel");
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return; }
+                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return false; }
                 object timing = ResolveTiming(faction, tlc);
                 if (timing == null || !InvokeStart(timing, timing.GetType(), DriveTurnHudCrt(faction)))
                     Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: could not defer HUD drive onto Timing (view may stay locked)");
                 else
                     Debug.Log("[Multipleer][tac] EnsureClientTurnHud: view not ready → deferred HUD drive onto Timing");
+                return false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud failed: " + ex); return false; }
         }
 
         /// <summary>Deferred poll: each frame, retry the HUD drive until it succeeds (view + _statesStack ready)
@@ -646,6 +683,47 @@ namespace Multipleer.Sync.Tactical
                 return guid?.ToString() ?? "";
             }
             catch { return ""; }
+        }
+
+        /// <summary>DIAG ONLY: readable faction name for logs — <c>TacticalFactionDef.GetName()</c>
+        /// (native, used at TacticalFaction.cs:386), falling back to the def guid then the runtime type.</summary>
+        private static string ResolveFactionDefName(object faction)
+        {
+            try
+            {
+                object tfd = GetProp(faction, "TacticalFactionDef");
+                if (tfd != null)
+                {
+                    var getName = AccessTools.Method(tfd.GetType(), "GetName");
+                    object name = getName?.Invoke(tfd, null);
+                    if (name != null && !string.IsNullOrEmpty(name.ToString())) return name.ToString();
+                }
+                string guid = ResolveFactionDefGuid(faction);
+                return !string.IsNullOrEmpty(guid) ? guid : (faction?.GetType().Name ?? "null");
+            }
+            catch { return faction?.GetType().Name ?? "null"; }
+        }
+
+        /// <summary>DIAG ONLY: name of the live view's current state for logs, read from
+        /// <c>TacticalLevelController.View._statesStack.CurrentState</c> (Base.UI.StateStack.CurrentState,
+        /// StateStack.cs:23). Returns a marker when the view/stack isn't ready. NOTE: the
+        /// UIStateInitial → UIStateCharacterSelected transition runs async inside the dispatcher coroutine, so
+        /// immediately after a synchronous HUD drive this typically reads "UIStateInitial" (the gateway state),
+        /// not yet "UIStateCharacterSelected" — that is expected and still confirms control restore reached the
+        /// dispatcher.</summary>
+        private static string ResolveViewStateName(object faction)
+        {
+            try
+            {
+                object tlc = GetProp(faction, "TacticalLevel");
+                object view = tlc != null ? GetProp(tlc, "View") : null;
+                if (view == null) return "<no-view>";
+                object statesStack = Traverse.Create(view).Field("_statesStack").GetValue();
+                if (statesStack == null) return "<no-statesStack>";
+                object cur = GetProp(statesStack, "CurrentState");
+                return cur != null ? cur.GetType().Name : "<no-currentState>";
+            }
+            catch (Exception ex) { return "<err:" + ex.GetType().Name + ">"; }
         }
 
         private static object ResolveTlc()
