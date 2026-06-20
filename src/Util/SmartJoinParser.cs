@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace Multipleer.Util
 {
-    public enum JoinKind { Invalid, DirectIp, StunCode, SteamId }
+    public enum JoinKind { Invalid, DirectIp, DirectHost, StunCode, SteamId }
 
     public readonly struct JoinTarget
     {
@@ -17,6 +17,9 @@ namespace Multipleer.Util
 
         public static JoinTarget Invalid() => new JoinTarget(JoinKind.Invalid, null, 0, 0);
         public static JoinTarget Direct(string ip, int port) => new JoinTarget(JoinKind.DirectIp, ip, port, 0);
+        // DirectHost: a DNS hostname[:port]. The host string is carried in Ip; DirectTransport's
+        // BeginConnect(host, port) resolves it at connect time (the parser never does networking).
+        public static JoinTarget DirectHost(string host, int port) => new JoinTarget(JoinKind.DirectHost, host, port, 0);
         public static JoinTarget Stun(IPEndPoint ep) => new JoinTarget(JoinKind.StunCode, ep.Address.ToString(), ep.Port, 0);
         public static JoinTarget Steam(ulong id) => new JoinTarget(JoinKind.SteamId, null, 0, id);
     }
@@ -67,7 +70,46 @@ namespace Multipleer.Util
             if (ulong.TryParse(s, out var steamId) && s.Length >= 15)
                 return JoinTarget.Steam(steamId);
 
+            // 4) DNS hostname[:port] (e.g. "myhost.ddns.net", "host.com:9000"). Checked LAST so a
+            // Crockford code or a bare SteamID is never misread as a host. DirectTransport resolves
+            // the name via BeginConnect(host, port); only the parser previously rejected it.
+            if (IsHostname(hostPart))
+                return JoinTarget.DirectHost(hostPart, port);
+
             return JoinTarget.Invalid();
+        }
+
+        // A pasteable DNS hostname: dotted, hostname char-class only, with an alphabetic top-level
+        // label (a real TLD is never all-numeric — this is what keeps "999.999.999.999" Invalid
+        // rather than a bogus host, and lets dotless codes/SteamIDs fall through untouched).
+        private static bool IsHostname(string h)
+        {
+            if (string.IsNullOrEmpty(h) || h.Length > 253) return false;
+            if (h[0] == '.' || h[0] == '-' || h[h.Length - 1] == '.' || h[h.Length - 1] == '-')
+                return false;
+
+            var labels = h.Split('.');
+            if (labels.Length < 2) return false; // require at least one dot (one label separator)
+
+            foreach (var label in labels)
+            {
+                if (label.Length == 0) return false; // no empty label ("..", leading/trailing dot)
+                foreach (var c in label)
+                {
+                    var u = char.ToUpperInvariant(c);
+                    var ok = (u >= 'A' && u <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+                    if (!ok) return false;
+                }
+            }
+
+            // The rightmost label (TLD) must contain at least one ASCII letter.
+            var tld = labels[labels.Length - 1];
+            foreach (var c in tld)
+            {
+                var u = char.ToUpperInvariant(c);
+                if (u >= 'A' && u <= 'Z') return true;
+            }
+            return false;
         }
 
         private static bool IsCrockford(char c)
