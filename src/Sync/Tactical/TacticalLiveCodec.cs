@@ -451,6 +451,66 @@ namespace Multipleer.Sync.Tactical
             catch { return false; }
         }
 
+        // ─── tac.melee.start (host→all, Feature C melee — client-side MELEE ANIMATION) ───────────────
+        // The MELEE counterpart of tac.fire.start (0x90). The host broadcasts this at the MOMENT an actor
+        // BEGINS a melee swing (BashAbility — see TacticalAbilityRelay.MeleeStartAnimAbilityTypeNames), so the
+        // client mirror plays the swing animation CONCURRENTLY with the host. DAMAGE is owned exclusively by
+        // tac.damage (0x88) — this surface is animation-only. Phase 1 is the WIRE FOUNDATION only: the client
+        // decodes + STUB-logs (no replay yet); the BashCrt-shaped replay + damage/cost neuter is a follow-on.
+        // Mirrors the FireStart layout EXACTLY, MINUS the shotCount (a melee is a single swing).
+        //   [seq:u32][attackerNetId:i32][abilityDefGuid:string][targetNetId:i32][tx:f32][ty:f32][tz:f32]
+        public struct MeleeStart
+        {
+            public uint Seq;
+            public int AttackerNetId;
+            public string AbilityDefGuid;
+            public int TargetNetId;          // -1 sentinel when the target is a bare position, not an actor
+            public float TX, TY, TZ;
+            public MeleeStart(uint seq, int attackerNetId, string abilityDefGuid, int targetNetId,
+                float tx, float ty, float tz)
+            {
+                Seq = seq; AttackerNetId = attackerNetId; AbilityDefGuid = abilityDefGuid ?? "";
+                TargetNetId = targetNetId; TX = tx; TY = ty; TZ = tz;
+            }
+        }
+
+        public static byte[] EncodeMeleeStart(uint seq, int attackerNetId, string abilityDefGuid, int targetNetId,
+            float tx, float ty, float tz)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write(attackerNetId);
+                w.Write(abilityDefGuid ?? "");
+                w.Write(targetNetId);
+                w.Write(tx); w.Write(ty); w.Write(tz);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeMeleeStart(byte[] data, out MeleeStart start)
+        {
+            start = default(MeleeStart);
+            // Minimum: u32 seq + i32 attacker + at least a 1-byte length-prefixed string + i32 target + 3*f32.
+            if (data == null || data.Length < 4 + 4 + 1 + 4 + 12) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    int attacker = r.ReadInt32();
+                    string guid = r.ReadString();
+                    int targetNetId = r.ReadInt32();
+                    float tx = r.ReadSingle(); float ty = r.ReadSingle(); float tz = r.ReadSingle();
+                    start = new MeleeStart(seq, attacker, guid, targetNetId, tx, ty, tz);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
         // ─── tac.intent.equip (client→host, Inc Equip) ───────────────────
         // A client EQUIPMENT-SWAP intent: which actor switches its SELECTED equipment to which slot. The
         // equipment is identified by its INDEX in the actor's ordered equipment list (actor.Equipments.Equipments,
@@ -794,7 +854,8 @@ namespace Multipleer.Sync.Tactical
         // STABLE host↔client key (both sides build the body from the SAME shared save → identical slot names;
         // the bodypart def guid would also be stable but the slot name is what the healthbar UI + stat
         // registration already key on, so it is the canonical identity). The client SETS each part's StatusStat
-        // HP so the native StatChangeEvent → OnBodyPartHealthChanged → SlotState.Disabled UI fires for free
+        // HP so the native StatChangeEvent → OnBodyPartHealthChanged drives the engine's own limb-disable path
+        // (ItemSlot.SetToDisabled() flips ItemSlot.Enabled when GetHealth() <= 1E-05) and its UI fires for free
         // (limb-disable is NOT a status). Encoded in ascending bit order AFTER statuses (it is the highest bit
         // we emit; the reserved bits between are never set by us).
         public const ushort ActorFieldBodyPartHp = 0x0200;  // i32 count then per part: [slotName:string][hp:f32]

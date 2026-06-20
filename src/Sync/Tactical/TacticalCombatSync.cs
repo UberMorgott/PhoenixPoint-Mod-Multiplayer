@@ -66,6 +66,11 @@ namespace Multipleer.Sync.Tactical
                 // shooting/throw animation CONCURRENTLY with the host. Animation-only; DAMAGE rides tac.damage.
                 // Fail-open: HostBroadcastFireStart logs + swallows, never blocking the native attack.
                 TacticalFireAnimSync.HostBroadcastFireStart(ability, parameter);
+                // Feature C (melee): the same host choke also begins a MELEE swing. The fire-start and
+                // melee-start gates are DISJOINT (shoot/grenade → fire 0x90; BashAbility → melee 0x91), so at
+                // most ONE of these broadcasts per attack — a Bash emits melee-start only, never fire-start.
+                // Animation-only; DAMAGE rides tac.damage. Fail-open: logs + swallows, never blocks the attack.
+                TacticalMeleeAnimSync.HostBroadcastMeleeStart(ability, parameter);
                 return true;
             }
             var engine = NetworkEngine.Instance;

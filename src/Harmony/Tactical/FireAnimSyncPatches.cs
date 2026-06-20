@@ -15,11 +15,12 @@ namespace Multipleer.Harmony.Tactical
     ///     push, so the camera NEVER flies to the shooter (even the <c>ShootingStarted</c> hint the engine
     ///     fires regardless of AttackType). The enemy-turn camera-follow path is untouched (it works via the
     ///     enemy's own local Activate, which is NOT during a replay).
-    ///   • PROJECTILE-FREE / ZERO-DAMAGE — <see cref="FireProjectileNeuterPatch"/> skips
-    ///     <c>Weapon.FireProjectile</c> (returns null) so NO damage-carrying projectile is instantiated; DAMAGE
-    ///     stays owned by tac.damage. <see cref="WaitForProjectilesNeuterPatch"/> then returns an empty
-    ///     coroutine so the null-in-list never NPEs and the post-shot damage/casualty events never re-raise on
-    ///     the client.
+    ///   • PROJECTILE FLIES, DAMAGE-LESS — <c>Weapon.FireProjectile</c> runs FULLY (muzzle flash, smoke, shell,
+    ///     SFX, and a real tracer projectile that flies to the target) so the firing visuals appear; only the
+    ///     DAMAGE is suppressed: <see cref="ProjectileDamageNeuterPatch"/> skips <c>ProjectileLogic.AffectTarget</c>
+    ///     so <c>_damageAccum</c> stays null → <c>OnTrajectoryEnd</c>'s <c>ApplyAddedDamage()</c> never runs → no
+    ///     client-side damage (DAMAGE stays owned by tac.damage / 0x88). <see cref="WaitForProjectilesNeuterPatch"/>
+    ///     then returns an empty coroutine so the post-shot damage/casualty events never re-raise on the client.
     ///   • GRENADE-DESTROY-SAFE — <see cref="ThrowableDestroyGuardPatch"/> no-ops the throwable's
     ///     <c>weapon.Destroy()</c> (the <c>if (weapon.IsThrowable) weapon.Destroy()</c> step inside
     ///     <c>FireWeaponAtTargetCrt</c>). On the client that <c>Destroy()</c> would call
@@ -39,6 +40,15 @@ namespace Multipleer.Harmony.Tactical
         // True ONLY during a client fire-anim replay. Flag check first (cheap, almost always false); the host
         // check is a never-hit-on-host backstop reading the mod's own engine accessor.
         public static bool ClientReplay => TacticalFireAnimSync.ReplayActive && !IsHost;
+
+        // True ONLY during a client MELEE-anim replay (TacticalMeleeAnimSync.ClientOnMeleeStart). Same !IsHost
+        // backstop so a melee guard can never neuter the host's own authoritative swing.
+        public static bool MeleeReplay => TacticalMeleeAnimSync.MeleeReplayActive && !IsHost;
+
+        // Shared predicate for guards that must fire during EITHER replay (e.g. the ammo-charge neuter — both
+        // the fire and the melee coroutines spend charges via CommonItemData.ModifyCharges). Fire-only guards
+        // (projectile-damage, wait-for-projectiles, throwable-destroy, camera-hint) stay on ClientReplay.
+        public static bool AnyReplay => ClientReplay || MeleeReplay;
 
         private static bool IsHost
         {
@@ -69,37 +79,83 @@ namespace Multipleer.Harmony.Tactical
         public static bool Prefix() => !FireReplayGate.ClientReplay;
     }
 
-    /// <summary>Client replay: skip <c>Weapon.FireProjectile(...)</c> → no projectile, no damage. Returns null
-    /// for the skipped <c>Projectile</c>; the partner <see cref="WaitForProjectilesNeuterPatch"/> makes the
-    /// coroutine's wait-for-hit a no-op so the null is never dereferenced.</summary>
+    /// <summary>Client replay: let <c>Weapon.FireProjectile</c> run FULLY (real tracer + flash/smoke/shell/SFX so
+    /// the firing visuals appear), but skip the projectile's DAMAGE by Prefix-no-opping
+    /// <c>ProjectileLogic.AffectTarget(CastHit, Vector3)</c> — the SOLE call that builds <c>_damageAccum</c>
+    /// (decompile <c>ProjectileLogic.cs:384,433-440</c>). With <c>AffectTarget</c> skipped, <c>_damageAccum</c>
+    /// stays null, so <c>OnTrajectoryEnd</c>'s <c>if (_damageAccum != null) … ApplyAddedDamage()</c>
+    /// (decompile <c>ProjectileLogic.cs:404,424</c>) never runs → ZERO client-side damage. DAMAGE stays the
+    /// host's authority and arrives via tac.damage (opcode 0x88). Single private method, no overloads, so the
+    /// name-only <c>AccessTools.Method</c> binds unambiguously (verified against the decompile). HARD-GATED on
+    /// <see cref="FireReplayGate.ClientReplay"/> exactly like the other guards — the host's own projectile keeps
+    /// its damage.</summary>
     [HarmonyPatch]
-    public static class FireProjectileNeuterPatch
+    public static class ProjectileDamageNeuterPatch
     {
         private static MethodBase _target;
 
         public static bool Prepare()
         {
-            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Weapons.Weapon");
+            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Weapons.ProjectileLogic");
             if (t == null) return false;
-            // internal Projectile FireProjectile(TacticalActor, TacticalAbilityTarget, ShootAbility, string, int)
-            _target = AccessTools.Method(t, "FireProjectile");
+            // private void AffectTarget(CastHit hit, Vector3 dir) — single overload, name-only match is exact.
+            _target = AccessTools.Method(t, "AffectTarget");
             return _target != null;
         }
 
         public static MethodBase TargetMethod() => _target;
 
-        public static bool Prefix(ref object __result)
+        public static bool Prefix()
         {
-            if (!FireReplayGate.ClientReplay) return true;   // host / normal client flow → real shot
-            __result = null;   // no projectile spawned during the replay → zero client damage
-            return false;
+            // host / normal client flow → real damage-accum; client replay → skip so _damageAccum stays null.
+            return !FireReplayGate.ClientReplay;
+        }
+    }
+
+    /// <summary>Client replay (FIX #2a): NEUTER the ammo-charge decrement that the now-fully-running
+    /// <c>Weapon.FireProjectile</c> performs — <c>base.CommonItemData.ModifyCharges(-AmmoChargesPerProjectile)</c>
+    /// (decompile <c>Weapon.cs:530</c>, the SOLE charge-spend inside FireProjectile; the <c>ChargesMax &lt;= 0</c>
+    /// branch at <c>:525-528</c> returns before it). Since FIX #4 let the projectile fly for real, that decrement
+    /// now also runs on the client replay, draining the client's (host-authoritative) ammo with no sync surface to
+    /// refill it → ammo drifts low. Prefix-no-op <c>CommonItemData.ModifyCharges(int, bool)</c> (single method, no
+    /// overloads → name-only <c>AccessTools.Method</c> binds exactly) so NO charge mutation happens during the
+    /// replay. SCOPING: <c>FireReplayGate.ClientReplay</c> is true ONLY inside the <c>ReplayFireCrt</c> window, so
+    /// the only ModifyCharges calls it can suppress are the replay's own fire decrements — unrelated charge changes
+    /// (reload, item use, host's own shots) are never in that window. Ammo stays host-authoritative, frozen at the
+    /// snapshot value until a future ammo-sync surface (TODO — NOT built here). HARD-GATED exactly like the other
+    /// guards (replay flag + <c>!IsHost</c>).</summary>
+    [HarmonyPatch]
+    public static class FireAmmoChargeNeuterPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Common.Entities.CommonItemData");
+            if (t == null) return false;
+            // public bool ModifyCharges(int chargesDelta, bool canCreateMagazines = false) — single overload.
+            _target = AccessTools.Method(t, "ModifyCharges");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // host / normal client flow → real charge change; client replay → skip so ammo stays host-authoritative.
+        // Gated on AnyReplay (fire OR melee): BOTH coroutines spend charges via this SAME ModifyCharges (fire =
+        // Weapon.cs:530, melee = BashAbility.BashCrt:525). One shared neuter, no duplicate patch on the method.
+        public static bool Prefix(ref bool __result)
+        {
+            if (!FireReplayGate.AnyReplay) return true;
+            __result = false;   // ModifyCharges returns false when it makes no change → safe no-op result
+            return false;       // skip the original decrement during the replay
         }
     }
 
     /// <summary>Client replay: short-circuit <c>Weapon.WaitForProjectilesToHit(List&lt;Projectile&gt;, Action)</c>
-    /// to an EMPTY coroutine so (a) the null projectile from the neutered FireProjectile is never dereferenced,
-    /// and (b) the onProjectilesHit callback (which re-raises shooting/damage/casualty events) does NOT run on
-    /// the client — those are the host's authority and arrive via tac.damage. Reuses <see cref="EmptyCrt"/>.</summary>
+    /// to an EMPTY coroutine so the onProjectilesHit callback (which re-raises shooting/damage/casualty events)
+    /// does NOT run on the client — those are the host's authority and arrive via tac.damage. The projectile now
+    /// flies for real (damage-less, see <see cref="ProjectileDamageNeuterPatch"/>); we still skip the wait so the
+    /// host stays the sole authority for the post-shot events. Reuses <see cref="EmptyCrt"/>.</summary>
     [HarmonyPatch]
     public static class WaitForProjectilesNeuterPatch
     {

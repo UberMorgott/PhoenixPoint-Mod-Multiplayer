@@ -78,7 +78,7 @@ public class TacticalFireStartCodecTests
         => Assert.True(TacticalAbilityRelay.ShouldBroadcastFireStart("ShootAbility"));  // shoot + grenade
 
     [Theory]
-    [InlineData("BashAbility")]       // melee — DEFERRED (BashAbility animates via BashCrt, not FireWeaponAtTargetCrt)
+    [InlineData("BashAbility")]       // melee — rides tac.melee.start (0x91), NOT fire-start (BashCrt, not FireWeaponAtTargetCrt)
     [InlineData("MoveAbility")]       // dedicated move command-sync + animation (tac.move.start)
     [InlineData("OverwatchAbility")]  // dedicated arm + cone
     [InlineData("ReloadAbility")]     // equipment/ammo target — not actor/pos
@@ -100,7 +100,7 @@ public class TacticalFireStartCodecTests
             Assert.True(TacticalAbilityRelay.ShouldBroadcastFireStart(name));
             Assert.True(TacticalAbilityRelay.IsRelayable(name));   // anim ⊆ damage relay
         }
-        // Melee is damage-relayable but has NO animation broadcast (deferred).
+        // Melee is damage-relayable and animates via tac.melee.start (0x91) — NOT fire-start.
         Assert.True(TacticalAbilityRelay.IsRelayable("BashAbility"));
         Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStart("BashAbility"));
         // Damage-excluded types are also animation-excluded.

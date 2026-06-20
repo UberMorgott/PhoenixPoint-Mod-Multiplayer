@@ -638,6 +638,7 @@ namespace Multipleer.Sync.Tactical
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();
             TacticalFireAnimSync.Reset();                    // Feature C: drop any stuck replay-guard depth
+            TacticalMeleeAnimSync.Reset();                   // Feature C (melee): symmetry (Phase 1 stateless)
         }
 
         // ─── Wire send + inbound (rides the 0x67 SyncEnvelope rail) ─────────────────────────
@@ -739,6 +740,15 @@ namespace Multipleer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacFireStart)
             {
                 try { TacticalFireAnimSync.ClientOnFireStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.fire.start failed: " + ex); }
+                return true;
+            }
+
+            // ─── Feature C (melee): client-side MELEE ANIMATION rail (tac.melee.start) ────────────────
+            // Host→all START push; client-only play (Phase 1 = STUB decode+log, no replay). DAMAGE stays on
+            // tac.damage (0x88). Side-gated internally, so a stray envelope on the host is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacMeleeStart)
+            {
+                try { TacticalMeleeAnimSync.ClientOnMeleeStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.melee.start failed: " + ex); }
                 return true;
             }
 

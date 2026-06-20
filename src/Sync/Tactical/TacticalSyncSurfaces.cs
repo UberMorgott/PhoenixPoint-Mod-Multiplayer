@@ -102,6 +102,15 @@ namespace Multipleer.Sync.Tactical
         // (no projectile → ZERO client damage) under a camera-hint guard (no camera fly). 0x8E is RESERVED for
         // the future generic ability-INTENT; 0x8F is TacActorState → this takes the next free id 0x90.
         public const ushort TacFireStart = 0x90;         // 144: host→all     "actor netId begins attack@guid at target" (start, carries seq)
+
+        // ─── Feature C (melee): client-side MELEE ATTACK ANIMATION (tac.melee.start) ──────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The MELEE counterpart of
+        // tac.fire.start (0x90): the host broadcasts this at the MOMENT an actor BEGINS a melee swing
+        // (BashAbility — which animates via its OWN BashCrt, NOT FireWeaponAtTargetCrt, so it needs its own
+        // surface). ANIMATION-ONLY: DAMAGE stays owned by tac.damage (0x88). Phase 1 is the WIRE FOUNDATION
+        // only — the client replays a STUB no-op (logs); the BashCrt-shaped replay + damage/cost neuter is a
+        // follow-on. Wire = tac.fire.start MINUS shotCount (a melee is one swing). Takes the next free id 0x91.
+        public const ushort TacMeleeStart = 0x91;        // 145: host→all     "actor netId begins melee swing@guid at target" (start, carries seq)
     }
 
     /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape

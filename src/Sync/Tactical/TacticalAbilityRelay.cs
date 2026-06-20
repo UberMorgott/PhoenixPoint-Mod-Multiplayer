@@ -86,5 +86,27 @@ namespace Multipleer.Sync.Tactical
         /// animation share the shoot subset, and melee damage still replicates via tac.damage with no anim.</summary>
         public static bool ShouldBroadcastFireStart(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _fireStartAnim.Contains(abilityTypeName);
+
+        /// <summary>Feature C (melee) — the ability types whose MELEE swing animation the client replays via
+        /// <c>tac.melee.start</c> (0x91). MELEE only: <c>BashAbility : TacticalAbility</c> animates via its OWN
+        /// <c>BashCrt</c> (BashAbility.cs:199), NOT <c>FireWeaponAtTargetCrt</c> — so it cannot ride the
+        /// fire-start (shoot-coroutine) surface and gets its own. SHOOT/GRENADE stay on tac.fire.start; this
+        /// set is the strict complement within the relayable attack set.</summary>
+        public static readonly string[] MeleeStartAnimAbilityTypeNames =
+        {
+            "BashAbility",    // melee swing (animates via BashCrt, not the shoot coroutine)
+        };
+
+        private static readonly HashSet<string> _meleeStartAnim =
+            new HashSet<string>(MeleeStartAnimAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>Feature C (melee): PURE decision whether the HOST should broadcast a <c>tac.melee.start</c>
+        /// for an attack of this ability type. Scoped to the MELEE set (<see cref="MeleeStartAnimAbilityTypeNames"/>)
+        /// — BashAbility only. Shoot/grenade (fire-start) / Move / Overwatch / Reload / Heal / unknown return
+        /// false. Like <see cref="ShouldBroadcastFireStart"/> this is a SUBSET of <see cref="IsRelayable"/>
+        /// (which also relays melee DAMAGE) — damage still replicates via tac.damage, this adds only the swing.
+        /// It is DISJOINT from the fire-start set, so a Bash broadcasts ONLY melee-start, never fire-start.</summary>
+        public static bool ShouldBroadcastMeleeStart(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _meleeStartAnim.Contains(abilityTypeName);
     }
 }

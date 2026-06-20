@@ -32,10 +32,12 @@ namespace Multipleer.Sync.Tactical
     /// <c>FireWeaponAtTargetCrt</c> with three client-only guards active for the duration of the replay:
     ///   • <see cref="ReplayActive"/>  → lets the client <c>FireWeaponPatch</c> NOT suppress THIS replay (it
     ///     normally returns false on a non-host, which would block us).
-    ///   • <see cref="NeuterProjectile"/> → the client-only <c>FireProjectileNeuterPatch</c> skips
-    ///     <c>Weapon.FireProjectile</c> (returns null) so NO projectile is instantiated → ZERO client damage
-    ///     (damage stays owned by tac.damage), and <c>WaitForProjectilesToHitNeuterPatch</c> returns an empty
-    ///     coroutine so the null-in-list never NPEs and the shot-events never re-raise on the client.
+    ///   • <see cref="NeuterProjectileDamage"/> → <c>Weapon.FireProjectile</c> runs FULLY so the firing visuals
+    ///     appear (muzzle flash, smoke, shell, SFX, and a real tracer projectile that flies to the target); only
+    ///     the projectile's DAMAGE is suppressed — the client-only <c>ProjectileDamageNeuterPatch</c> skips
+    ///     <c>ProjectileLogic.AffectTarget</c> so <c>_damageAccum</c> stays null and <c>ApplyAddedDamage</c> never
+    ///     runs → ZERO client damage (damage stays owned by tac.damage), and <c>WaitForProjectilesNeuterPatch</c>
+    ///     returns an empty coroutine so the shot-events never re-raise on the client.
     ///   • <see cref="CameraSilent"/>  → the client-only <c>FireCameraHintGuardPatch</c> no-ops every
     ///     <c>CameraDirector.Hint(CameraDirectorHint, …)</c> push during the replay → the camera NEVER flies,
     ///     even for the <c>ShootingStarted</c> hint the engine fires regardless of AttackType.
@@ -44,7 +46,7 @@ namespace Multipleer.Sync.Tactical
     /// which already gates off the in-coroutine Shoot hint, the ProjectileFired hint, and return-fire. We do
     /// NOT enter <c>TacticalAbility.Activate</c> (which would fire the AbilityActivated camera hint + spend
     /// AP/WP) — we drive <c>FireWeaponAtTargetCrt</c> directly, exactly like the host's authoritative shot but
-    /// projectile-free.
+    /// damage-less (the tracer flies for the visual; only <c>ProjectileLogic.AffectTarget</c> is skipped).
     /// </summary>
     public static class TacticalFireAnimSync
     {
@@ -57,7 +59,7 @@ namespace Multipleer.Sync.Tactical
         // but we ref-count to be safe so an overlapping replay never clears a still-active guard early.
         private static int _replayDepth;
         public static bool ReplayActive => _replayDepth > 0;
-        public static bool NeuterProjectile => _replayDepth > 0;
+        public static bool NeuterProjectileDamage => _replayDepth > 0;
         public static bool CameraSilent => _replayDepth > 0;
 
         /// <summary>Reset all replay state (mission exit). Idempotent.</summary>
@@ -101,10 +103,10 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastFireStart failed: " + ex); }
         }
 
-        // ─── CLIENT: play the attack animation CONCURRENTLY (projectile-free, camera-silent) ─────────
+        // ─── CLIENT: play the attack animation CONCURRENTLY (projectile flies, damage-less, camera-silent) ─
         /// <summary>CLIENT inbound (<c>tac.fire.start</c>): resolve shooter+ability+weapon+target and REPLAY
-        /// <c>FireWeaponAtTargetCrt</c> with the projectile + camera guards active so the real animation plays
-        /// with NO damage and NO camera fly. No AP/WP/overwatch (we never enter Activate). No-op off-client /
+        /// <c>FireWeaponAtTargetCrt</c> with the damage + camera guards active so the real animation plays (tracer
+        /// flies) with NO damage and NO camera fly. No AP/WP/overwatch (we never enter Activate). No-op off-client /
         /// off-session / when the seq is stale.</summary>
         public static void ClientOnFireStart(byte[] payload)
         {
@@ -191,9 +193,25 @@ namespace Multipleer.Sync.Tactical
         // ─── Build the SYNCED (camera-silent, projectile-free) fire target ──────────────────────────
         /// <summary>Build a <c>TacticalAbilityTarget</c> for the client replay from the fire.start, tagged
         /// <c>AttackType.Synced</c> (the engine's camera-silent MP attack type — gates off the Shoot hint,
-        /// ProjectileFired hint, and return-fire). Mirrors <c>TacticalCombatSync.BuildShootTarget</c>:
-        /// typed-ctor (actor,pos,Synced) for an actor target, (Vector3) ctor for a bare position, with a
-        /// default-ctor + field-set fallback (AttackType field also set to Synced on the fallback path).</summary>
+        /// ProjectileFired hint, and return-fire).
+        ///
+        /// ACTOR target (<c>TargetNetId &gt;= 0</c>, FIX #4): build with the actor ctor
+        /// <c>TacticalAbilityTarget(TacticalActorBase, AttackType)</c> — which leaves <c>PositionToApply</c> NaN
+        /// (<c>InvalidPosition</c>) — AND set <c>DamageReceiver = targetActor</c>, exactly mirroring native
+        /// <c>Weapon.GetShootTargets</c> (decompile <c>Weapon.cs:1070-1073</c>: <c>new TacticalAbilityTarget(target)
+        /// { DamageReceiver = target.Actor }</c>). The wire-sent <c>pos</c> is the host's NaN-substituted
+        /// <c>actor.Pos</c> (feet); using it as <c>PositionToApply</c> made <c>GetWorkingPosition()</c> return the
+        /// floor (decompile <c>TacticalAbilityTarget.cs:303-305</c> short-circuits on a non-NaN PositionToApply →
+        /// projectile flew into the ground). With PositionToApply NaN, <c>GetWorkingPosition()</c> falls through to
+        /// <c>GetDamageReceiverAimPointPos()</c> (decompile <c>:307,320-329</c> — 2nd in the ?? chain, BEFORE the
+        /// GameObject/ActorGridPosition entries the actor ctor also sets) → <c>DamageReceiver.GetAimPoint().position</c>
+        /// = the target's TORSO, the native aim point.
+        ///
+        /// BARE-POSITION target (<c>TargetNetId &lt; 0</c>, e.g. grenade/ground-cell): keep the <c>(Vector3)</c> ctor —
+        /// these legitimately aim at the sent world point, so PositionToApply=pos is correct.
+        ///
+        /// Fallback (default-ctor + field-set): same split — actor target → set Actor + DamageReceiver, leave
+        /// PositionToApply NaN; bare position → set PositionToApply=pos. AttackType set to Synced on every path.</summary>
         private static object BuildSyncedFireTarget(TacticalLiveCodec.FireStart s)
         {
             var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
@@ -207,12 +225,18 @@ namespace Multipleer.Sync.Tactical
             {
                 if (targetActor != null)
                 {
+                    // FIX #4: actor ctor leaves PositionToApply NaN so the native aim-point chain resolves the
+                    // torso; DamageReceiver=actor is what GetWorkingPosition reads first (GetDamageReceiverAimPointPos).
                     var actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
                     var ctor = (actorBaseType != null && attackType != null)
-                        ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
+                        ? targetType.GetConstructor(new[] { actorBaseType, attackType })
                         : null;
                     if (ctor != null)
-                        return ctor.Invoke(new[] { targetActor, (object)pos, synced });
+                    {
+                        object t = ctor.Invoke(new[] { targetActor, synced });
+                        AccessTools.Field(targetType, "DamageReceiver")?.SetValue(t, targetActor);
+                        return t;
+                    }
                 }
                 else
                 {
@@ -228,8 +252,16 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildSyncedFireTarget ctor failed, falling back to field-set: " + ex); }
 
             object target = Activator.CreateInstance(targetType);
-            if (targetActor != null) AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
-            AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            if (targetActor != null)
+            {
+                // Actor target: mirror native — Actor + DamageReceiver, NO PositionToApply (stays NaN → torso aim).
+                AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
+                AccessTools.Field(targetType, "DamageReceiver")?.SetValue(target, targetActor);
+            }
+            else
+            {
+                AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            }
             SetAttackType(targetType, target, synced);
             return target;
         }
