@@ -167,6 +167,11 @@
          loop — true only for the player faction. The engine glue (PlayTurnCrtMirrorFreezePatch.MirrorPlayTurnCrt)
          binds game types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ClientTurnStartSetupGate.cs"><Link>Sync\Tactical\ClientTurnStartSetupGate.cs</Link></Compile>
+    <!-- FIX E: pure, Unity-free gate pinning that the CLIENT mirror's per-actor turn-start StartTurn replay must
+         PRESERVE (capture-before / restore-after) host-streamed AP/WP — undoing the native RestartAbilities
+         SetToMax re-max (TacticalActor.cs:1243) so the client never re-maxes spent AP (pure mirror). The engine
+         glue (PlayTurnCrtMirrorFreezePatch.StartTurnForOwnActors) binds game types via reflection and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\ClientApPreserveGate.cs"><Link>Sync\Tactical\ClientApPreserveGate.cs</Link></Compile>
     <!-- Control-gate fix: pure, Unity-free gate deciding when the CLIENT mirror must mark
          TacticalLevelController.TurnIsPlaying true (set _nextTurnUpdateable non-null) so the native view
          dispatcher (UIStateInitial.cs:49 → TacticalView.cs:965 !TurnIsPlaying) leaves UIStateWaiting and grants

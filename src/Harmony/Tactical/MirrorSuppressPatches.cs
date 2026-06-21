@@ -222,10 +222,12 @@ namespace Multipleer.Harmony.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup SetViewerTacticalFaction failed: " + ex); }
 
             // (5) Per-actor StartTurn for the client's OWN actors (native :424-427). This is the load-bearing one:
-            //     it RestartAbilities / RemoveUnusableAbilities / resets AP so each soldier becomes SELECTABLE, the
-            //     precondition UIStateInitial needs (:66 HasAliveActors, :77 GetSelectableActors) to reach
-            //     UIStateCharacterSelected (action HUD + camera snap). Pure per-actor presentation/selection state;
-            //     host re-stamps real AP via the tac actor-state mirror, so this never fights the authority.
+            //     it RemoveUnusableAbilities / SetAbilityTraits("start") / standby so each soldier becomes SELECTABLE,
+            //     the precondition UIStateInitial needs (:66 HasAliveActors, :77 GetSelectableActors) to reach
+            //     UIStateCharacterSelected (action HUD + camera snap). FIX E: it would ALSO SetToMax AP/WP
+            //     (RestartAbilities → TacticalActor.cs:1243) which a PURE MIRROR must NOT do — AP is host-streamed —
+            //     so StartTurnForOwnActors CAPTURES each own-actor's host AP/WP and RESTORES it across the replay
+            //     (ClientApPreserveGate). Net: selectability/HUD intact, but the client never re-maxes spent AP.
             StartTurnForOwnActors(faction);
 
             // Provide the dispatcher precondition the native code sets at :442 (UIStateInitial spins on this),
@@ -259,8 +261,27 @@ namespace Multipleer.Harmony.Tactical
         }
 
         /// <summary>Replay native PlayTurnCrt's per-actor StartTurn loop (:424-427) over this faction's own
-        /// <c>TacticalActors</c>. Each <c>TacticalActor.StartTurn</c> (TacticalActor.cs:1188) restarts abilities /
-        /// resets AP so the actor is selectable. Per-actor guarded so one bad actor can't abort the whole turn.</summary>
+        /// <c>TacticalActors</c>, but PRESERVING each actor's host-streamed AP/WP across the replay (FIX E).
+        ///
+        /// Each <c>TacticalActor.StartTurn</c> (TacticalActor.cs:1188) does the selection/HUD-load-bearing work the
+        /// client mirror needs — <c>RemoveUnusableAbilities</c>, the <c>SetAbilityTraits("start")</c> trait reset
+        /// (TacticalActor.cs:1242, the precondition for any "start"-trait-gated ability via
+        /// <c>TraitsTagsRequirementSatisfied</c>, TacticalAbility.cs:471), <c>TrySetStandBy</c> (TacticalActor.cs:1211)
+        /// — so an actor becomes SELECTABLE (<c>IsActive &amp;&amp; !IsOnStandBy &amp;&amp; CanAct()</c>,
+        /// TacticalView.cs:886) and the action HUD appears. BUT it ALSO calls <c>RestartAbilities</c> →
+        /// <c>ActionPoints.SetToMax()</c> (TacticalActor.cs:1243), which on a PURE MIRROR is WRONG: the client must
+        /// take AP ONLY from the host stream (tac.damage ShooterApAfter + the T1 actor-state delta), never re-max it
+        /// locally. The old replay let SetToMax stick → after the client spent AP, the next player turn re-maxed it →
+        /// ability icons stayed lit (selectability + ability-lit state are LIVE functions of current AP:
+        /// <c>ActionPointRequirementSatisfied</c>, TacticalAbility.cs:146).
+        ///
+        /// FIX (minimal, non-fragile, pure-mirror): CAPTURE each own-actor's AP+WP immediately BEFORE its StartTurn
+        /// replay and RESTORE them immediately AFTER. The full StartTurn machinery still runs (selectability / trait
+        /// reset / standby intact — no behavioural change to the HUD path), but the AP/WP re-max never sticks, so the
+        /// client's AP stays exactly the host-streamed value until the next host update. Restore goes through the same
+        /// grounded <c>BaseStat.Set(float,true)</c> the actor-state mirror uses (TacticalActorStateSync.SetStat), which
+        /// re-fires <c>StatChangeEvent</c> → the action-points UI + ability-enabled recompute refresh (icons grey out
+        /// at 0 AP). Per-actor guarded so one bad actor can't abort the whole turn.</summary>
         private static void StartTurnForOwnActors(object faction)
         {
             try
@@ -270,17 +291,63 @@ namespace Multipleer.Harmony.Tactical
                 // Snapshot to a list first (native does .ToList()) so a StartTurn side-effect can't mutate-while-iterate.
                 var snapshot = new List<object>();
                 foreach (var a in actors) if (a != null) snapshot.Add(a);
+                // We only ever run inside the client mirror (MirrorPlayTurnCrt is gated by IsClientMirroring), so the
+                // pure gate reads true here; consulting it keeps the "preserve host AP/WP" contract explicit + tested.
+                bool preserveApWp = ClientTurnStartSetupGateApWp();
                 foreach (var actor in snapshot)
                 {
                     try
                     {
+                        // Capture host-streamed AP/WP BEFORE StartTurn (which would SetToMax both).
+                        object stats = preserveApWp ? GetMember(actor, "CharacterStats") : null;
+                        object apStat = stats != null ? GetMember(stats, "ActionPoints") : null;
+                        object wpStat = stats != null ? GetMember(stats, "WillPoints") : null;
+                        bool haveAp = apStat != null; float apBefore = haveAp ? StatValue(apStat) : 0f;
+                        bool haveWp = wpStat != null; float wpBefore = haveWp ? StatValue(wpStat) : 0f;
+
                         var m = AccessTools.Method(actor.GetType(), "StartTurn", new System.Type[0]);
                         m?.Invoke(actor, null);
+
+                        // Restore the host-streamed AP/WP AFTER StartTurn — undo its local SetToMax re-max (pure mirror).
+                        if (haveAp) SetStat(apStat, apBefore);
+                        if (haveWp) SetStat(wpStat, wpBefore);
                     }
                     catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup actor.StartTurn failed: " + ex); }
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup StartTurnForOwnActors failed: " + ex); }
+        }
+
+        /// <summary>FIX E decision: should the per-actor StartTurn replay preserve host-streamed AP/WP? Delegates to
+        /// the pure <see cref="Multipleer.Sync.Tactical.ClientApPreserveGate"/> with the live mirror flag. Always true
+        /// on this path (we only run under IsClientMirroring), but routed through the gate so the contract is tested.</summary>
+        private static bool ClientTurnStartSetupGateApWp()
+            => Multipleer.Sync.Tactical.ClientApPreserveGate.ShouldPreserveActorApWp(TacticalDeploySync.IsClientMirroring);
+
+        /// <summary>Read a <c>BaseStat</c>'s current float value (its <c>op_Implicit</c> → float; IntValue fallback).
+        /// Mirrors <see cref="Multipleer.Sync.Tactical.TacticalActorStateSync"/>.StatValue so AP/WP capture uses the
+        /// SAME grounded accessor as the actor-state mirror that authoritatively writes those stats.</summary>
+        private static float StatValue(object stat)
+        {
+            if (stat == null) return 0f;
+            try
+            {
+                var op = AccessTools.Method(stat.GetType(), "op_Implicit", new[] { stat.GetType() });
+                if (op != null) return Convert.ToSingle(op.Invoke(null, new[] { stat }));
+            }
+            catch { }
+            try { return Convert.ToSingle(GetMember(stat, "IntValue") ?? 0); } catch { return 0f; }
+        }
+
+        /// <summary>Write a <c>BaseStat</c> via <c>Set(float, true)</c> (clamps + fires <c>StatChangeEvent</c> →
+        /// UI/ability-enabled refresh). Same grounded path as <c>TacticalActorStateSync.SetStat</c>.</summary>
+        private static void SetStat(object stat, float value)
+        {
+            if (stat == null) return;
+            var set = AccessTools.Method(stat.GetType(), "Set", new[] { typeof(float), typeof(bool) });
+            if (set != null) { set.Invoke(stat, new object[] { value, true }); return; }
+            var set1 = AccessTools.Method(stat.GetType(), "Set", new[] { typeof(float) });
+            set1?.Invoke(stat, new object[] { value });
         }
 
         /// <summary>Raise a faction-level event (e.g. <c>StartTurnEvent</c>) via its backing delegate field
