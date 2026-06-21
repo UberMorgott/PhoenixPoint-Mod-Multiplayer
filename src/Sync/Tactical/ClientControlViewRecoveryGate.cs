@@ -23,19 +23,27 @@ namespace Multipleer.Sync.Tactical
     ///
     /// The <c>ClearStackAndPush</c> is therefore NATIVE (issued by the engine's own <c>ActivateAbility</c>), not
     /// mod code — so option B (push-over) is not available. The fix is option A: after the client APPLIES the
-    /// mirrored completion of its own non-shoot action, RE-ESTABLISH the control view exactly the way the engine
-    /// itself recovers — <c>TacticalView.ResetViewState()</c> (TacticalView.cs:262-268 =
-    /// <c>SwitchToState(new UIStateInitial(), ClearStackAndPush)</c>), which re-pushes <c>UIStateInitial</c> whose
-    /// <c>InitialStateUpdateCrt</c> advances to <c>UIStateCharacterSelected</c> for the (own, still-controllable)
-    /// actor (UIStateInitial.cs:66-87). This is VIEW/selection only — no game-state mutation (no AP/HP).
+    /// mirrored completion of its own non-shoot action, RE-ESTABLISH the control view by driving the view STRAIGHT
+    /// into <c>UIStateCharacterSelected</c> — exactly what a player CLICK on a soldier does, and what the native
+    /// <c>reset_tactical_view</c> console command does
+    /// (<c>view._statesStack.SwitchToState(new UIStateCharacterSelected(), ClearStackAndPush)</c>,
+    /// UIStateCharacterSelected.cs:1292-1300). <c>UIStateCharacterSelected.EnterState</c> (UIStateCharacterSelected.cs
+    /// :349-379) auto-selects the (own, still-controllable) actor. This is VIEW/selection only — no game-state
+    /// mutation (no AP/HP).
+    ///
+    /// NOTE the earlier <c>TacticalView.ResetViewState()</c> approach was an in-game-proven NO-OP: it targets
+    /// <c>UIStateInitial</c> and guards <c>if (!(CurrentState is UIStateInitial))</c> (TacticalView.cs:264), but
+    /// post-move the wedged view is ALREADY <c>UIStateInitial</c> (whose <c>InitialStateUpdateCrt</c> does NOT
+    /// auto-advance post-move) → the guard skipped the switch and the view sat stuck. Switching straight to
+    /// <c>UIStateCharacterSelected</c> sidesteps the dead <c>UIStateInitial</c> spin.
     ///
     /// This gate pins the PRECISE wedge-detection so the recovery NEVER disrupts a HEALTHY view: recover ONLY when
     /// this is a mirroring client AND the live top view-state is one of the no-control "wedge" states — none
     /// (empty stack), <c>UIStateWaiting</c>, or <c>UIStateInitial</c>. If the view already shows a live control
     /// state (<c>UIStateCharacterSelected</c>/<c>UIStateShoot</c>/…) — e.g. a HOST or ENEMY move broadcast that
-    /// never wedged this client's view — the gate returns false and <c>ResetViewState</c> is never called, so a
-    /// healthy <c>UIStateCharacterSelected</c> is never clobbered. The recovery is thus correct regardless of which
-    /// actor's action arrived; it only ever un-sticks an actually-wedged client view. The engine glue
+    /// never wedged this client's view — the gate returns false and the switch is never invoked, so a healthy
+    /// <c>UIStateCharacterSelected</c> is never clobbered. The recovery is thus correct regardless of which actor's
+    /// action arrived; it only ever un-sticks an actually-wedged client view. The engine glue
     /// (<c>ClientControlViewRecovery.RestoreClientControlView</c>) binds game types via reflection and is NOT linked.
     /// </summary>
     public static class ClientControlViewRecoveryGate
