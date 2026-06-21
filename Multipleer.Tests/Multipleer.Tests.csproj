@@ -162,6 +162,11 @@
          non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
          engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ClientEnemyTurnPresentationGate.cs"><Link>Sync\Tactical\ClientEnemyTurnPresentationGate.cs</Link></Compile>
+    <!-- Inc1 over-suppression fix: pure, Unity-free gate deciding whether the CLIENT mirror replays the
+         client-safe turn-start SETUP (vision / viewer-faction+camera / per-actor StartTurn) before its input
+         loop — true only for the player faction. The engine glue (PlayTurnCrtMirrorFreezePatch.MirrorPlayTurnCrt)
+         binds game types via reflection and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\ClientTurnStartSetupGate.cs"><Link>Sync\Tactical\ClientTurnStartSetupGate.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->

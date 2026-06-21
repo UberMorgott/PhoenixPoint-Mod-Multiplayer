@@ -298,6 +298,12 @@ namespace Multipleer.Sync.Tactical
                 int turnNumber = ToInt(GetProp(current, "TurnNumber"));
                 StartPlayTurn(current);
                 SetTurnNumber(current, turnNumber);   // undo PlayTurnCrt's internal +1
+                // CONTROL-RESTORE PARITY with ClientOnTurn's player branch (:223): FORCE IsPlayingTurn=true by
+                // hand BEFORE driving the HUD. StartPlayTurn only schedules the (mirror) PlayTurnCrt coroutine —
+                // its IsPlayingTurn=true runs one Timing tick LATER, so without this synchronous force the native
+                // dispatcher's `while (!IsPlayingTurn)` (UIStateInitial.cs:68) spins for a frame and the HUD drive
+                // below races it. Setting it here closes that gap (idempotent with the coroutine's own set).
+                SetIsPlayingTurn(current, true);
                 Debug.Log("[Multipleer][tac] CLIENT entered INITIAL player turn (turn " + turnNumber + ")");
                 // UI-LOCK FIX: the initial turn entry fires at the END of deploy-hydrate, typically BEFORE
                 // TacticalView's UIStateInitView callback has subscribed OnNewTurn → the raised NewTurnEvent

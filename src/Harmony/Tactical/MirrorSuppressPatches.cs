@@ -155,10 +155,20 @@ namespace Multipleer.Harmony.Tactical
             return false;   // skip the native sim body (setup + stall yields + teardown)
         }
 
-        /// <summary>The frozen-mirror replacement for PlayTurnCrt: NO sim setup, NO stall yields, NO teardown —
-        /// just the player input/end-turn wait loop, bounded by <c>_endTurnRequested</c> / game-over. For a
-        /// non-player faction it returns immediately (pure spectator). Reads turn-state via reflection/Traverse
-        /// so it stays bound to the real engine fields without a hard type reference.</summary>
+        /// <summary>The frozen-mirror replacement for PlayTurnCrt: REPLAYS the client-SAFE turn-start SETUP
+        /// (presentation / vision / per-actor selection) for the client's OWN player faction, then runs the
+        /// player input/end-turn wait loop — with NO host-authoritative STALL yields (native :432-441) and NO
+        /// turn-END teardown (native :486-509). For a non-player faction it returns immediately (pure spectator;
+        /// the enemy-turn presentation is driven by TacticalTurnSync.ClientOnTurn). Reads turn-state via
+        /// reflection/Traverse so it stays bound to the real engine fields without a hard type reference.
+        ///
+        /// WHY the setup replay (the Inc1 over-suppression fix): the OLD mirror loop set IsPlayingTurn and ran
+        /// the input loop but SKIPPED native :394-431, so the client's own soldiers were never StartTurn'd
+        /// (RestartAbilities / RemoveUnusableAbilities / AP reset — TacticalActor.cs:1188), vision was never
+        /// recomputed, and the view's viewer faction + camera were never bound. With no selectable actor,
+        /// UIStateInitial.InitialStateUpdateCrt (UIStateInitial.cs:66-87) never advances to
+        /// UIStateCharacterSelected (:80) → no action HUD and the camera stays mid-map (no :81 SnapWorldCursor).
+        /// We replay ONLY the load-bearing, client-safe subset (no AI, no stall, no double-tick teardown).</summary>
         private static IEnumerator<NextUpdate> MirrorPlayTurnCrt(object faction, Action turnStartAction)
         {
             // Reset the end-turn latch for this turn (native PlayTurnCrt:391 does the same first thing).
@@ -167,8 +177,56 @@ namespace Multipleer.Harmony.Tactical
             // Only player-controlled factions get a live input turn on the client; enemy/AI factions are pure
             // spectators here (their presentation is driven by TacticalTurnSync.ClientOnTurn).
             bool isPlayer = ReadBool(faction, "IsControlledByPlayer");
-            if (!isPlayer)
+            if (!ClientTurnStartSetupGate.ShouldReplayTurnStartSetup(isControlledByPlayer: isPlayer))
                 yield break;
+
+            // ── Client-SAFE turn-start SETUP replay (native PlayTurnCrt :392-427, presentation/vision/selection
+            //    subset only; skips the host-authoritative stall yields :432-441 and the teardown :486-509). Each
+            //    step is independently guarded so a missing engine member degrades gracefully (file style). ──
+
+            // (1) TurnNumber += 1 (native :392-393). The callers (ClientOnTurn / ClientEnterInitialTurn) re-stamp
+            //     the host-authoritative TurnNumber right after starting us, so this +1 is corrected there.
+            try
+            {
+                int turnNumber = ToInt(GetMember(faction, "TurnNumber")) + 1;
+                Traverse.Create(faction).Property("TurnNumber").SetValue(turnNumber);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup TurnNumber++ failed: " + ex); }
+
+            // (2) Faction-level start-turn event (native :394) — presentation hook.
+            try { InvokeEvent(faction, "StartTurnEvent"); }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup StartTurnEvent failed: " + ex); }
+
+            // (3) Recompute this faction's vision/fog (native :396). Presentation-correct on a mirror: it renders
+            //     the client's own fog from the host-mirrored actor positions. NOT host-authoritative.
+            try
+            {
+                object vision = GetMember(faction, "Vision");
+                var m = vision != null ? AccessTools.Method(vision.GetType(), "OnFactionStartTurn") : null;
+                m?.Invoke(vision, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup Vision.OnFactionStartTurn failed: " + ex); }
+
+            // (4) Bind the view's VIEWER faction + camera to the client's own faction (native :397-400, only when
+            //     player & State==Playing). This is what re-anchors the camera onto the squad. Presentation only.
+            try
+            {
+                if (IsFactionStatePlaying(faction))
+                {
+                    object tlc = GetMember(faction, "TacticalLevel");
+                    object view = tlc != null ? GetMember(tlc, "View") : null;
+                    var setViewer = view != null ? AccessTools.Method(view.GetType(), "SetViewerTacticalFaction") : null;
+                    setViewer?.Invoke(view, new[] { faction });
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup SetViewerTacticalFaction failed: " + ex); }
+
+            // (5) Per-actor StartTurn for the client's OWN actors (native :424-427). This is the load-bearing one:
+            //     it RestartAbilities / RemoveUnusableAbilities / resets AP so each soldier becomes SELECTABLE, the
+            //     precondition UIStateInitial needs (:66 HasAliveActors, :77 GetSelectableActors) to reach
+            //     UIStateCharacterSelected (action HUD + camera snap). Pure per-actor presentation/selection state;
+            //     host re-stamps real AP via the tac actor-state mirror, so this never fights the authority.
+            StartTurnForOwnActors(faction);
 
             // Provide the dispatcher precondition the native code sets at :442 (UIStateInitial spins on this),
             // then fire the per-turn-start action (mirror native :443). Belt to ClientOnTurn's hand-force.
@@ -183,9 +241,57 @@ namespace Multipleer.Harmony.Tactical
                 yield return NextUpdate.NextFrame;
 
             // Clear the turn-phase flag on exit (mirror native :486). The handoff in ClientOnTurn also clears it,
-            // so this is idempotent.
+            // so this is idempotent. We do NOT run the native teardown (:487-509) — host-authoritative.
             SetIsPlayingTurn(faction, false);
         }
+
+        /// <summary>True when the faction's <c>State == TacFactionState.Playing</c> (native PlayTurnCrt :397 gates
+        /// SetViewerTacticalFaction on this). Read by name to avoid a hard enum reference; treat unreadable as
+        /// playing (best-effort, so the camera bind still attempts).</summary>
+        private static bool IsFactionStatePlaying(object faction)
+        {
+            try
+            {
+                object state = GetMember(faction, "State");
+                return state == null || state.ToString() == "Playing";
+            }
+            catch { return true; }
+        }
+
+        /// <summary>Replay native PlayTurnCrt's per-actor StartTurn loop (:424-427) over this faction's own
+        /// <c>TacticalActors</c>. Each <c>TacticalActor.StartTurn</c> (TacticalActor.cs:1188) restarts abilities /
+        /// resets AP so the actor is selectable. Per-actor guarded so one bad actor can't abort the whole turn.</summary>
+        private static void StartTurnForOwnActors(object faction)
+        {
+            try
+            {
+                var actors = GetMember(faction, "TacticalActors") as System.Collections.IEnumerable;
+                if (actors == null) return;
+                // Snapshot to a list first (native does .ToList()) so a StartTurn side-effect can't mutate-while-iterate.
+                var snapshot = new List<object>();
+                foreach (var a in actors) if (a != null) snapshot.Add(a);
+                foreach (var actor in snapshot)
+                {
+                    try
+                    {
+                        var m = AccessTools.Method(actor.GetType(), "StartTurn", new System.Type[0]);
+                        m?.Invoke(actor, null);
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup actor.StartTurn failed: " + ex); }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup StartTurnForOwnActors failed: " + ex); }
+        }
+
+        /// <summary>Raise a faction-level event (e.g. <c>StartTurnEvent</c>) via its backing delegate field
+        /// (the field shares the event's name), with no args. No-op if absent / not a delegate.</summary>
+        private static void InvokeEvent(object obj, string eventName)
+        {
+            object del = Traverse.Create(obj).Field(eventName).GetValue();
+            if (del is Delegate handler) handler.DynamicInvoke();
+        }
+
+        private static int ToInt(object o) { try { return o != null ? Convert.ToInt32(o) : 0; } catch { return 0; } }
 
         // ─── reflection/Traverse helpers (kept local to the patch) ───────────────────────────────────────
 
