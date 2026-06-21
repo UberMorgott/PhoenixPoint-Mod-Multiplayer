@@ -86,20 +86,9 @@ namespace Multipleer.Sync.Tactical
                 Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.overwatch actorNetId=" + actorNetId +
                           " coneH=" + c.Height.ToString("0.0") + " coneR=" + c.Radius.ToString("0.0"));
 
-                // ── FIX D DIAG (overwatch-freeze, runtime-only — cause NOT pinnable from static code) ──
-                // Both a relayed FIRE and a relayed OVERWATCH suppress the client's local Activate, so BOTH take the
-                // SAME native view path: TacticalViewState.ActivateAbility (TacticalViewState.cs:300 suppressed →
-                // :302 state unchanged → :304-305 SwitchToState(UIStateWaiting, ClearStackAndPush)). UIStateWaiting
-                // then recovers via ClearStackAndPush(UIStateInitial) once its gate clears (UIStateWaiting.cs:25 =
-                // !CameraDirector.Busy && !IsWaitingForActiveAndQueuedAbilitiesAndMapUpdate(), TacticalView.cs:972).
-                // FIRE returns control; OVERWATCH instead EMPTIES the view-state stack (observed in-game) so the view
-                // tick stops ticking it (TacticalView.cs:1051 guards Update() with !IsEmpty → no exception, just a
-                // silent HUD-less hang). Statically the two paths are identical, so WHICH gate arm (or restoration
-                // gap) diverges can only be read at runtime. Log the gate arms + the live view-state-stack at the
-                // exact overwatch-arm moment so the next in-game overwatch test reveals the trip. (AnyGlobalEffect was
-                // already disproven for overwatch; we log it anyway to keep the snapshot complete.)
-                LogOverwatchViewGateDiag(actorNetId);
-
+                // The suppressed-arm view freeze (the native ActivateAbility ClearStackAndPush wedge) is recovered
+                // generally on the OUTCOME side in HandleOverwatchState via ClientControlViewRecovery — no per-arm
+                // runtime diagnostics needed here.
                 return false;   // suppress local arm
             }
             catch (Exception ex)
@@ -236,6 +225,14 @@ namespace Multipleer.Sync.Tactical
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacOverwatchState, s.Seq);
                 Debug.Log("[Multipleer][tac] CLIENT applied tac.overwatch.state seq=" + s.Seq + " actorNetId=" + s.ActorNetId +
                           " armed=" + s.Armed);
+
+                // VIEW-FREEZE FIX (general, non-shoot): when the CLIENT armed its OWN overwatch it SUPPRESSED the
+                // local OverwatchAbility.Activate, so the native ActivateAbility had already emptied the control
+                // state via SwitchToState(UIStateWaiting, ClearStackAndPush) (TacticalViewState.cs:289-307),
+                // wedging the HUD-less view (same path as a suppressed move). Now that the host outcome is applied,
+                // re-establish the client's control view — gated so it ONLY fires on an actually-wedged view (a
+                // host/enemy overwatch broadcast that never affected this client's healthy view is untouched).
+                ClientControlViewRecovery.RestoreClientControlView(actor);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleOverwatchState failed: " + ex); }
         }
@@ -282,45 +279,6 @@ namespace Multipleer.Sync.Tactical
             if (existing == null) return;
             InvokeUnapplyStatus(statusComponent, existing);
         }
-
-        // ─── FIX D DIAG: snapshot the view-control gate + view-state stack at the overwatch-arm moment ──
-        /// <summary>Emit one DIAG line capturing the view-control gate arms the native dispatcher checks
-        /// (<c>TacticalLevelController.TurnIsPlaying</c>, <c>Map.IsMapUpdateInProgress</c>,
-        /// <c>AnyGlobalEffectExecuting</c> — UIStateInitial.cs:49 → TacticalView.cs:961/965/974) PLUS the live
-        /// view-state-stack contents, at the instant the client confirms an overwatch arm. Reflection-only, fully
-        /// guarded — a missing member must never wedge the arm (DIAG is observational). Reads the live
-        /// <c>TacticalDeploySync.LiveTlc</c> → <c>Map</c>/<c>View</c>; the stack is read via the private
-        /// <c>TacticalView._statesStack</c> (its <c>ToString()</c> = "StateStack: a, b, …" or empty).</summary>
-        private static void LogOverwatchViewGateDiag(int actorNetId)
-        {
-            try
-            {
-                object tlc = TacticalDeploySync.LiveTlc;
-                if (tlc == null) { Debug.Log("[Multipleer][tac][DIAG] OW-GATE actorNetId=" + actorNetId + " LiveTlc=null"); return; }
-
-                bool turnIsPlaying = ToBoolSafe(GetProp(tlc, "TurnIsPlaying"));
-                bool anyGlobalEffect = ToBoolSafe(GetProp(tlc, "AnyGlobalEffectExecuting"));
-                object map = GetProp(tlc, "Map");
-                bool mapUpdating = map != null && ToBoolSafe(GetProp(map, "IsMapUpdateInProgress"));
-
-                object view = GetProp(tlc, "View");
-                object curState = view != null ? GetProp(view, "CurrentState") : null;
-                string curStateName = curState != null ? curState.GetType().Name : "null";
-                // The full stack lives in the private TacticalView._statesStack; its ToString lists the states.
-                object stack = view != null ? Traverse.Create(view).Field("_statesStack").GetValue() : null;
-                string stackStr = stack != null ? stack.ToString() : "null";
-
-                Debug.Log("[Multipleer][tac][DIAG] OW-GATE actorNetId=" + actorNetId +
-                          " TurnIsPlaying=" + turnIsPlaying +
-                          " MapUpdateInProgress=" + mapUpdating +
-                          " AnyGlobalEffectExecuting=" + anyGlobalEffect +
-                          " topState=" + curStateName +
-                          " stack={ " + stackStr + " }");
-            }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] LogOverwatchViewGateDiag failed: " + ex); }
-        }
-
-        private static bool ToBoolSafe(object o) => o is bool b && b;
 
         // ─── Engine reflection helpers ──────────────────────────────────────────────────────────────
 

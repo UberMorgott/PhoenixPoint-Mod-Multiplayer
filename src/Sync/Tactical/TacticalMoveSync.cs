@@ -362,6 +362,15 @@ namespace Multipleer.Sync.Tactical
                       " branch=" + branch + " netId=" + m.NetId + " navigating=" + navigating + " interrupt=" + interrupt +
                       " actorPosAfter=(" + posAfter.x.ToString("0.0") + "," + posAfter.y.ToString("0.0") + "," + posAfter.z.ToString("0.0") + ")");
             Debug.Log("[Multipleer][tac] CLIENT applied tac.move seq=" + m.Seq + " netId=" + m.NetId + " branch=" + branch);
+
+            // VIEW-FREEZE FIX (general, non-shoot): the client SUPPRESSED its own MoveAbility.Activate (and any
+            // melee/charge, which begin with a move), so the native ActivateAbility had already done
+            // SwitchToState(UIStateWaiting, ClearStackAndPush) — emptying the control state off a bare
+            // [UIStateCharacterSelected] stack (TacticalViewState.cs:289-307; UIStateCharacterSelected.cs:958) and
+            // wedging the HUD-less view. Now that the authoritative outcome has been applied, re-establish the
+            // client's control view (UIStateInitial → UIStateCharacterSelected) — but ONLY if it is actually
+            // wedged (gate), so a host/enemy move that never affected this client's healthy view is untouched.
+            ClientControlViewRecovery.RestoreClientControlView(actor);
         }
 
         // ─── Engine reflection helpers ────────────────────────────────────────────────────────────
