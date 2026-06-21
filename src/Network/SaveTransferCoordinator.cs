@@ -222,6 +222,17 @@ namespace Multipleer.Network
         public bool InPhase2 => RosterProgressTracker.InPhase2(_begun, _loadCompleteSent);
 
         /// <summary>
+        /// True once the NATIVE loading curtain has actually entered "Loading" (mission load-start) and
+        /// not yet handed off to Playing/Loaded — i.e. a loading Level is captured (<see cref="_loadingLevel"/>).
+        /// This is the real "mission loading started" seam, distinct from <see cref="TransferActive"/>
+        /// which goes true at COMMAND time (barrier open / download) while the host is still in the lobby.
+        /// The overlay visibility gate keys on THIS so the load overlay never pops up in the lobby on the
+        /// PLAY press — only when the curtain drops for the load. Set/cleared exclusively via
+        /// <see cref="SetLoadingLevel"/> from CurtainShowPatch (Loading→non-null, Playing/Loaded→null).
+        /// </summary>
+        public bool LoadPhaseStarted => _loadingLevel != null;
+
+        /// <summary>
         /// CurtainShowPatch passes the loading Level on Loading (capture) and null on Playing/Loaded
         /// (clear). The phase-2 pump reads progress off this — see <see cref="_loadingLevel"/>.
         /// Typed object so the patch needs no hard Level ref; unboxed to Base.Levels.Level here.

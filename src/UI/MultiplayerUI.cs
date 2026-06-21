@@ -290,7 +290,12 @@ namespace Multipleer.UI
             if (_lobbyController.CommitStart())
             {
                 DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
-                ShowLoadOverlay();
+                // NOTE: do NOT ShowLoadOverlay() here. The overlay visibility is fully state-driven
+                // (LoadOverlayController.Update → LoadOverlayVisibility.ShouldShow) and now gates on the
+                // NATIVE load-start (LoadPhaseStarted = curtain entered "Loading"), NOT on the command-time
+                // TransferActive. An eager show here would only flash the overlay in the LOBBY one frame
+                // before any mission load began (the reported bug). It appears on its own at real load-start
+                // via CurtainShowPatch.Postfix (state=="Loading"). Curtain drop stays — phase-1 seamlessness.
                 bool started;
                 try
                 {
@@ -777,8 +782,10 @@ namespace Multipleer.UI
                 return;
             }
 
-            // Show the co-op load overlay (same as the lobby Play start) so the host sees the transfer.
-            ShowLoadOverlay();
+            // Do NOT ShowLoadOverlay() here. As with OnLobbyPlay, overlay visibility is state-driven and
+            // gates on the NATIVE load-start (LoadPhaseStarted, curtain "Loading") via CurtainShowPatch —
+            // showing it on the F2 pick would pop it mid-game before the load curtain dropped. HideLoadOverlay
+            // on the failure path stays (idempotent: clears any overlay if the in-game start never began).
             bool started = coord.HostStartSessionInGame(chosen);
             if (!started)
             {

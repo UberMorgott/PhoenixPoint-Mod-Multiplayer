@@ -323,7 +323,7 @@ namespace Multipleer.UI
             }
 
             bool shouldShow = LoadOverlayVisibility.ShouldShow(
-                coord.TransferActive, coord.InPhase2, expectedPeers, donePeers);
+                coord.LoadPhaseStarted, coord.InPhase2, expectedPeers, donePeers);
 
             if (shouldShow) Show(); else Hide();
 
