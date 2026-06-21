@@ -63,6 +63,38 @@ namespace Multipleer.Sync.Tactical
         public static bool IsRelayable(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _relayable.Contains(abilityTypeName);
 
+        /// <summary>Ability type NAMES whose <c>Activate(object)</c> a mirroring client SUPPRESSES via a dedicated
+        /// Harmony prefix that is NOT the generic relay: <c>MoveAbility</c> (<c>MoveAbilityActivatePatch</c>) and
+        /// <c>OverwatchAbility</c> (<c>OverwatchAbilityActivatePatch</c>). Combined with
+        /// <see cref="RelayableAbilityTypeNames"/> (suppressed by <c>AbilityActivateRelayPatch</c>) this is the FULL
+        /// set of client-suppressed activations. <c>ReloadAbility</c>/<c>HealAbility</c> are deliberately ABSENT —
+        /// they have NO suppression patch and run locally on the client.</summary>
+        private static readonly string[] DedicatedSuppressedAbilityTypeNames =
+        {
+            "MoveAbility",       // MoveAbilityActivatePatch
+            "OverwatchAbility",  // OverwatchAbilityActivatePatch
+        };
+
+        private static readonly HashSet<string> _clientSuppressed =
+            new HashSet<string>(StringComparer.Ordinal);
+
+        static TacticalAbilityRelay()
+        {
+            foreach (var n in RelayableAbilityTypeNames) _clientSuppressed.Add(n);
+            foreach (var n in DedicatedSuppressedAbilityTypeNames) _clientSuppressed.Add(n);
+        }
+
+        /// <summary>True when a mirroring client SUPPRESSES this ability's local <c>Activate(object)</c> (relays an
+        /// intent to the host instead) — the exact union of the generic relay set (<see cref="IsRelayable"/>:
+        /// ShootAbility, BashAbility) and the dedicated-patch set (MoveAbility, OverwatchAbility). This is the
+        /// predicate the CLIENT view-freeze prefix (<c>SuppressedAbilityViewClearPrefix</c>) reuses to decide
+        /// whether the native post-Activate <c>ClearStackAndPush</c> must be skipped (the suppressed Activate left
+        /// the stack unchanged, so the native clear would empty the bare control state → HUD-less wedge). Unknown /
+        /// non-suppressed types (Reload/Heal/EndTurn/…) return false — their Activate runs locally and legitimately
+        /// drives the view, so it must NOT be intercepted.</summary>
+        public static bool IsClientSuppressedActivation(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _clientSuppressed.Contains(abilityTypeName);
+
         /// <summary>Feature C (client-side attack animation) — the ability types whose ATTACK ANIMATION the
         /// client replays via <c>tac.fire.start</c>. SHOOT + GRENADE only (both are <c>ShootAbility</c>):
         /// the client replays the native <c>TacticalLevelController.FireWeaponAtTargetCrt</c> coroutine, which

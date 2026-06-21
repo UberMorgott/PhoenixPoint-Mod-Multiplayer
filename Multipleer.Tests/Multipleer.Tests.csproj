@@ -178,12 +178,6 @@
          control / enemy-turn presentation. The engine glue (TacticalTurnSync.MarkClientTurnPlaying) binds game
          types via reflection/Traverse and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\TurnPlayingMirrorGate.cs"><Link>Sync\Tactical\TurnPlayingMirrorGate.cs</Link></Compile>
-    <!-- Client non-shoot-action VIEW-FREEZE recovery: pure, Unity-free gate deciding when the CLIENT mirror must
-         re-establish its control view after a suppressed non-shoot action (move/melee/charge/overwatch) — i.e. the
-         live top view-state is a no-control wedge (empty / UIStateWaiting / UIStateInitial). Recovers via the
-         native TacticalView.ResetViewState(), but never clobbers a healthy control state. The engine glue
-         (ClientControlViewRecovery.RestoreClientControlView) binds game types via reflection and is NOT linked. -->
-    <Compile Include="..\src\Sync\Tactical\ClientControlViewRecoveryGate.cs"><Link>Sync\Tactical\ClientControlViewRecoveryGate.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->

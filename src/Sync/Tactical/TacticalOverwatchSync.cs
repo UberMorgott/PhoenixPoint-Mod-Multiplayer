@@ -86,9 +86,9 @@ namespace Multipleer.Sync.Tactical
                 Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.overwatch actorNetId=" + actorNetId +
                           " coneH=" + c.Height.ToString("0.0") + " coneR=" + c.Radius.ToString("0.0"));
 
-                // The suppressed-arm view freeze (the native ActivateAbility ClearStackAndPush wedge) is recovered
-                // generally on the OUTCOME side in HandleOverwatchState via ClientControlViewRecovery — no per-arm
-                // runtime diagnostics needed here.
+                // The suppressed-arm view freeze (the native ActivateAbility ClearStackAndPush wedge) is now PREVENTED
+                // up-front by SuppressedAbilityViewClearPatch (CLIENT prefix on TacticalViewState.ActivateAbility) —
+                // no per-arm runtime diagnostics needed here.
                 return false;   // suppress local arm
             }
             catch (Exception ex)
@@ -226,13 +226,9 @@ namespace Multipleer.Sync.Tactical
                 Debug.Log("[Multipleer][tac] CLIENT applied tac.overwatch.state seq=" + s.Seq + " actorNetId=" + s.ActorNetId +
                           " armed=" + s.Armed);
 
-                // VIEW-FREEZE FIX (general, non-shoot): when the CLIENT armed its OWN overwatch it SUPPRESSED the
-                // local OverwatchAbility.Activate, so the native ActivateAbility had already emptied the control
-                // state via SwitchToState(UIStateWaiting, ClearStackAndPush) (TacticalViewState.cs:289-307),
-                // wedging the HUD-less view (same path as a suppressed move). Now that the host outcome is applied,
-                // re-establish the client's control view — gated so it ONLY fires on an actually-wedged view (a
-                // host/enemy overwatch broadcast that never affected this client's healthy view is untouched).
-                ClientControlViewRecovery.RestoreClientControlView(actor);
+                // NOTE: the client view-freeze is now PREVENTED up-front by SuppressedAbilityViewClearPatch (a CLIENT
+                // prefix on TacticalViewState.ActivateAbility that skips the wedging ClearStackAndPush for suppressed
+                // non-shoot abilities incl. OverwatchAbility), so no after-the-fact control-view recovery is needed here.
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleOverwatchState failed: " + ex); }
         }
