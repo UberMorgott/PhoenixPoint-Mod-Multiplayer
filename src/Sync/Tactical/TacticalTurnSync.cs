@@ -215,7 +215,15 @@ namespace Multipleer.Sync.Tactical
                     //     standalone run can never auto-advance the client. (There is no stored coroutine handle to
                     //     tear down a stale loop; not re-starting when one is live is the safe minimal equivalent —
                     //     control is restored regardless by the forced IsPlayingTurn + HUD drive below.)
-                    if (!wasPlaying) StartPlayTurn(current);
+                    object playHandle = (!wasPlaying) ? StartPlayTurn(current) : null;
+
+                    // (i.5) MARK TurnIsPlaying — assign the live PlayTurnCrt handle to TLC._nextTurnUpdateable so
+                    //      TacticalLevelController.TurnIsPlaying (TLC.cs:251 => _nextTurnUpdateable != null) is true.
+                    //      This is the load-bearing control gate the native view dispatcher checks FIRST
+                    //      (UIStateInitial.cs:49 → TacticalView.cs:965 `!TurnIsPlaying` → UIStateWaiting), BEFORE the
+                    //      player branch's `while (!IsPlayingTurn)`. Without it the view never leaves UIStateWaiting
+                    //      (no HUD/control, camera stuck) even with IsPlayingTurn forced below.
+                    MarkClientTurnPlaying(tlc, playHandle);
 
                     // (ii) FORCE IsPlayingTurn=true (private setter → Traverse), NOT relying on PlayTurnCrt reaching
                     //      :442. This is the single missing input the native player-branch dispatcher needs so its
@@ -257,6 +265,13 @@ namespace Multipleer.Sync.Tactical
                     // "<faction> turn" banner, and sets overwatch visuals. Setting IsPlayingTurn is the one missing
                     // input on the client (PlayTurnCrt, which sets it natively at :442, never runs here).
                     SetIsPlayingTurn(current, true);
+                    // MARK TurnIsPlaying for the enemy turn too. The gate at UIStateInitial.cs:49 (→ TacticalView.cs:965
+                    // `!TurnIsPlaying`) runs BEFORE the enemy branch (:58) just as it does before the player branch,
+                    // so UIStateOtherFactionTurn is reachable only when TurnIsPlaying is true. Native keeps
+                    // _nextTurnUpdateable non-null across the whole mission (TLC.cs:680, one updateable for every
+                    // faction turn) — we mirror that: no fresh handle here (we don't start PlayTurnCrt for the enemy),
+                    // so reuse the cached/last live handle (or the already-set field) to keep it non-null.
+                    MarkClientTurnPlaying(tlc, handle: null);
                     // Drive the view into UIStateInitial (mirror native OnViewerFactionEndedTurn,
                     // TacticalView.cs:1248-1252) so its dispatcher re-evaluates and, with IsPlayingTurn now true +
                     // a non-player CurrentFaction, transitions to UIStateOtherFactionTurn on its own. We KEEP the
@@ -296,7 +311,12 @@ namespace Multipleer.Sync.Tactical
             if (isPlayer)
             {
                 int turnNumber = ToInt(GetProp(current, "TurnNumber"));
-                StartPlayTurn(current);
+                object playHandle = StartPlayTurn(current);
+                // MARK TurnIsPlaying for the INITIAL/deploy player turn — assign the live PlayTurnCrt handle to
+                // TLC._nextTurnUpdateable so TacticalLevelController.TurnIsPlaying (TLC.cs:251) is true. The native
+                // view dispatcher gates ALL turn presentation on this FIRST (UIStateInitial.cs:49 →
+                // TacticalView.cs:965); without it the initial view sits in UIStateWaiting (no HUD/control).
+                MarkClientTurnPlaying(tlc, playHandle);
                 SetTurnNumber(current, turnNumber);   // undo PlayTurnCrt's internal +1
                 // CONTROL-RESTORE PARITY with ClientOnTurn's player branch (:223): FORCE IsPlayingTurn=true by
                 // hand BEFORE driving the HUD. StartPlayTurn only schedules the (mirror) PlayTurnCrt coroutine —
@@ -368,7 +388,7 @@ namespace Multipleer.Sync.Tactical
                 object tlc = GetProp(faction, "TacticalLevel");
                 if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return false; }
                 object timing = ResolveTiming(faction, tlc);
-                if (timing == null || !InvokeStart(timing, timing.GetType(), DriveTurnHudCrt(faction)))
+                if (timing == null || InvokeStart(timing, timing.GetType(), DriveTurnHudCrt(faction)) == null)
                     Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: could not defer HUD drive onto Timing (view may stay locked)");
                 else
                     Debug.Log("[Multipleer][tac] EnsureClientTurnHud: view not ready → deferred HUD drive onto Timing");
@@ -452,7 +472,7 @@ namespace Multipleer.Sync.Tactical
                 object tlc = GetProp(faction, "TacticalLevel");
                 if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientViewDown: no TacticalLevel on faction"); return false; }
                 object timing = ResolveTiming(faction, tlc);
-                if (timing == null || !InvokeStart(timing, timing.GetType(), DriveViewDownCrt(faction)))
+                if (timing == null || InvokeStart(timing, timing.GetType(), DriveViewDownCrt(faction)) == null)
                     Debug.LogError("[Multipleer][tac] EnsureClientViewDown: could not defer view-down onto Timing (HUD may stay up)");
                 else
                     Debug.Log("[Multipleer][tac] EnsureClientViewDown: view not ready → deferred view-down onto Timing");
@@ -528,13 +548,17 @@ namespace Multipleer.Sync.Tactical
 
         // ─── Engine helpers ────────────────────────────────────────────────────────────────────────
 
-        private static void StartPlayTurn(object faction)
+        /// <summary>Start the client's (mirror) PlayTurnCrt on the game Timing and RETURN the live
+        /// <c>IUpdateable</c> handle (Timing.Start → IUpdateable, Timing.cs:246). The caller assigns this handle
+        /// to <c>TacticalLevelController._nextTurnUpdateable</c> so <c>TurnIsPlaying</c> (TLC.cs:251) flips true
+        /// and the native view dispatcher leaves <c>UIStateWaiting</c>. Returns null on failure.</summary>
+        private static object StartPlayTurn(object faction)
         {
             // IEnumerator<NextUpdate> PlayTurnCrt(Action turnStartAction). Drive it on the game's Timing so it
             // runs as a real coroutine (the player branch loops until _endTurnRequested). Use the faction's
             // own Timing (Actor.Timing) via Timing.Start.
             var playTurn = AccessTools.Method(faction.GetType(), "PlayTurnCrt");
-            if (playTurn == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt not found"); return; }
+            if (playTurn == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt not found"); return null; }
             // turnStartAction MUST replicate native NextTurnCrt's closure (TLC.cs:717-721) so the client's
             // turn-start side-effects fire: set TacticalLevelController.HasAnyTurnStarted=true and raise its
             // NewTurnEvent(prev, next). Without this the client's objective/UI hooks (GameOverCondition,
@@ -543,9 +567,44 @@ namespace Multipleer.Sync.Tactical
             // prev is a sanctioned pattern its subscribers tolerate.
             Action turnStartAction = MakeTurnStartAction(faction);
             object crt = playTurn.Invoke(faction, new object[] { turnStartAction });
-            if (crt == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt returned null"); return; }
-            if (!StartCoroutineOnTiming(faction, crt))
+            if (crt == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt returned null"); return null; }
+            object handle = StartCoroutineOnTiming(faction, crt);
+            if (handle == null)
                 Debug.LogError("[Multipleer][tac] could not start PlayTurnCrt on Timing");
+            return handle;
+        }
+
+        // CLIENT: the most-recent live PlayTurnCrt updateable handle, cached so an enemy-turn entry (which does
+        // NOT start PlayTurnCrt) can still keep TurnIsPlaying non-null when the field would otherwise read null
+        // (e.g. an enemy faction acts first, before any client player turn). Purely LOCAL presentation state.
+        private static object _lastTurnUpdateable;
+
+        /// <summary>CLIENT: mark <c>TurnIsPlaying</c> true by assigning a live <c>IUpdateable</c> to
+        /// <c>TacticalLevelController._nextTurnUpdateable</c> (private field → Traverse), gated by
+        /// <see cref="TurnPlayingMirrorGate.ShouldMarkTurnPlaying"/>. This is the load-bearing fix: the native
+        /// view dispatcher (UIStateInitial.cs:49 → TacticalView.cs:965 <c>!TurnIsPlaying</c>) keeps the view in
+        /// <c>UIStateWaiting</c> (no HUD/control, camera stuck) until this is non-null. Mirrors how native sets
+        /// it once per mission (TLC.cs:680). Faction-agnostic — see <see cref="TurnPlayingMirrorGate"/>.
+        /// <paramref name="handle"/> may be null (e.g. enemy branch); we then reuse the cached last handle, or
+        /// leave any already-non-null field untouched. Best-effort; never throws into the turn flow.</summary>
+        private static bool MarkClientTurnPlaying(object tlc, object handle)
+        {
+            if (tlc == null) return false;
+            if (!TurnPlayingMirrorGate.ShouldMarkTurnPlaying(
+                    isClientMirroring: TacticalDeploySync.IsClientMirroring, turnActive: true))
+                return false;
+            try
+            {
+                if (handle != null) _lastTurnUpdateable = handle;
+                var fieldTrav = Traverse.Create(tlc).Field("_nextTurnUpdateable");
+                object current = fieldTrav.GetValue();
+                // Prefer a fresh live handle; else keep an already-set field; else fall back to the cache.
+                object toSet = handle ?? (current ?? _lastTurnUpdateable);
+                if (toSet == null) return false;            // nothing live to assign yet
+                if (!ReferenceEquals(current, toSet)) fieldTrav.SetValue(toSet);
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] MarkClientTurnPlaying failed: " + ex); return false; }
         }
 
         /// <summary>Build the per-turn-start action native <c>NextTurnCrt</c> passes into <c>PlayTurnCrt</c>
@@ -581,8 +640,9 @@ namespace Multipleer.Sync.Tactical
 
         /// <summary>Start a game coroutine (IEnumerator&lt;NextUpdate&gt;) on the faction's Timing, mirroring
         /// the native <c>Timing.Start(NextTurnCrt())</c> pattern (TLC.cs:680). Resolves Timing via the
-        /// faction's <c>TacticalLevel.Timing</c> or a static <c>Timing.Current</c>.</summary>
-        private static bool StartCoroutineOnTiming(object faction, object crt)
+        /// faction's <c>TacticalLevel.Timing</c> or a static <c>Timing.Current</c>. Returns the started
+        /// <c>IUpdateable</c> handle on success, else null.</summary>
+        private static object StartCoroutineOnTiming(object faction, object crt)
         {
             try
             {
@@ -592,7 +652,11 @@ namespace Multipleer.Sync.Tactical
                     object tlc = GetProp(faction, "TacticalLevel");
                     timing = tlc != null ? GetProp(tlc, "Timing") : null;
                 }
-                if (timing != null && InvokeStart(timing, timing.GetType(), crt)) return true;
+                if (timing != null)
+                {
+                    object h = InvokeStart(timing, timing.GetType(), crt);
+                    if (h != null) return h;
+                }
 
                 // Fallback: static Timing.Current.Start(...).
                 var timingType = AccessTools.TypeByName("Base.Core.Timing");
@@ -600,19 +664,24 @@ namespace Multipleer.Sync.Tactical
                 {
                     var currentProp = AccessTools.Property(timingType, "Current");
                     object cur = currentProp?.GetValue(null, null);
-                    if (cur != null && InvokeStart(cur, timingType, crt)) return true;
+                    if (cur != null)
+                    {
+                        object h = InvokeStart(cur, timingType, crt);
+                        if (h != null) return h;
+                    }
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] StartCoroutineOnTiming failed: " + ex); }
-            return false;
+            return null;
         }
 
         /// <summary>Find and invoke the <c>Timing.Start(IEnumerator&lt;NextUpdate&gt; coroutine, …)</c> overload
         /// whose FIRST param is the coroutine and whose remaining params are all OPTIONAL (the native
         /// signature is <c>Start(IEnumerator&lt;NextUpdate&gt;, Func&lt;…&gt; catchException = null)</c>,
         /// Timing.cs:246). Optional trailing params are filled with <see cref="Type.Missing"/> so the invoke
-        /// matches. Returns true on a successful start.</summary>
-        private static bool InvokeStart(object timingInstance, Type timingType, object crt)
+        /// matches. Returns the started <c>IUpdateable</c> handle on success (Timing.Start never returns null),
+        /// else null if no overload was found.</summary>
+        private static object InvokeStart(object timingInstance, Type timingType, object crt)
         {
             MethodInfo best = null;
             foreach (var m in timingType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
@@ -628,13 +697,14 @@ namespace Multipleer.Sync.Tactical
                 // Prefer the fewest-param overload (the simplest Start).
                 if (best == null || pars.Length < best.GetParameters().Length) best = m;
             }
-            if (best == null) return false;
+            if (best == null) return null;
             var bp = best.GetParameters();
             var args = new object[bp.Length];
             args[0] = crt;
             for (int i = 1; i < bp.Length; i++) args[i] = Type.Missing;   // use the optional default
-            best.Invoke(timingInstance, args);
-            return true;
+            // Timing.Start(IEnumerator<NextUpdate>, …) → IUpdateable (Timing.cs:246) — the live handle we feed
+            // into TacticalLevelController._nextTurnUpdateable so TurnIsPlaying flips true on the client mirror.
+            return best.Invoke(timingInstance, args);
         }
 
         private static void SetTurnNumber(object faction, int turnNumber)

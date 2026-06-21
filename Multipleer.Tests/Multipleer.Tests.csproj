@@ -167,6 +167,12 @@
          loop — true only for the player faction. The engine glue (PlayTurnCrtMirrorFreezePatch.MirrorPlayTurnCrt)
          binds game types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ClientTurnStartSetupGate.cs"><Link>Sync\Tactical\ClientTurnStartSetupGate.cs</Link></Compile>
+    <!-- Control-gate fix: pure, Unity-free gate deciding when the CLIENT mirror must mark
+         TacticalLevelController.TurnIsPlaying true (set _nextTurnUpdateable non-null) so the native view
+         dispatcher (UIStateInitial.cs:49 → TacticalView.cs:965 !TurnIsPlaying) leaves UIStateWaiting and grants
+         control / enemy-turn presentation. The engine glue (TacticalTurnSync.MarkClientTurnPlaying) binds game
+         types via reflection/Traverse and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\TurnPlayingMirrorGate.cs"><Link>Sync\Tactical\TurnPlayingMirrorGate.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->
