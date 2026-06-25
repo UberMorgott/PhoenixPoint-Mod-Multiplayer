@@ -11,6 +11,7 @@
          AccessTools, so the test build needs 0Harmony + UnityEngine.CoreModule at compile time.
          Tests only COMPILE against these types; they never invoke the Unity/reflection paths. -->
     <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
   </PropertyGroup>
   <ItemGroup>
     <!-- Test files in THIS project. -->
@@ -186,7 +187,7 @@
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(ModSDK)\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

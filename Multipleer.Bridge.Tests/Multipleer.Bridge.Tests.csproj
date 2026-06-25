@@ -8,6 +8,7 @@
   </PropertyGroup>
   <PropertyGroup>
     <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
   </PropertyGroup>
   <ItemGroup>
     <!-- Real compiled mod: NetworkEngine / SessionManager / SyncEngine / transports as built. -->
@@ -18,7 +19,7 @@
          test project needs its own compile-time reference to the Unity types it touches directly
          (Debug, ILogHandler, SystemInfo). Assembly-CSharp is reached transitively via the mod DLL. -->
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(ModSDK)\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <!-- GeoRuntime (constructed on the relay path via GeoRuntime.Instance) uses HarmonyLib.AccessTools,
