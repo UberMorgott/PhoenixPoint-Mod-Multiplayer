@@ -179,10 +179,11 @@
          control / enemy-turn presentation. The engine glue (TacticalTurnSync.MarkClientTurnPlaying) binds game
          types via reflection/Traverse and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\TurnPlayingMirrorGate.cs"><Link>Sync\Tactical\TurnPlayingMirrorGate.cs</Link></Compile>
-    <!-- Combat shoot-intent REBUILD aim policy: pure, Unity-free decision pinning that the host-rebuilt shoot
-         target carries the client's ground pos ONLY for a bare-ground shot, and stays position-less (NaN) when a
-         target actor is resolved so the host re-snaps the body-part (fixes the low-shot-clips-cover 0-damage bug).
-         The engine glue (TacticalCombatSync.BuildShootTarget) binds game types via reflection and is NOT linked. -->
+    <!-- Combat shoot-intent REBUILD aim policy: pure, Unity-free decision pinning the seed position source for the
+         host-rebuilt shoot target — an ACTOR target seeds PositionToApply with the actor AIM POINT (non-NaN, body-
+         center) so the shot hits the body (not the NaN→feet fallthrough that caused 0 damage) and the host's body-part
+         snap has a valid seed; a bare-GROUND shot (no actor) seeds the explicit ground pos. The engine glue
+         (TacticalCombatSync.BuildShootTarget + GetShootTarget snap) binds game types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ShootTargetAimPolicy.cs"><Link>Sync\Tactical\ShootTargetAimPolicy.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>

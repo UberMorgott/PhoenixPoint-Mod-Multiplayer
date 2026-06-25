@@ -35,11 +35,24 @@ namespace Multipleer.Harmony.Tactical
             var module = AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewModules.UIModuleAbilities");
             var actor = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActor");
             var input = AccessTools.TypeByName("Base.Input.InputController");
-            if (module == null || actor == null || input == null) return false;
+            // SELF-REPORT binding: the previous build logged NOTHING from Prepare, so a "zero log lines" run could not be
+            // told apart from a never-fired postfix. Log the exact resolution so the next test PROVES whether the patch
+            // bound at PatchAll time (independent of whether SetAbilities is later invoked under the host gate).
+            if (module == null || actor == null || input == null)
+            {
+                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch NOT bound (type resolve failed): " +
+                                 "UIModuleAbilities=" + (module != null) + " TacticalActor=" + (actor != null) +
+                                 " InputController=" + (input != null));
+                return false;
+            }
 
             // public void SetAbilities(TacticalActor actor, InputController input) — 2-param EXACT match.
             _target = AccessTools.Method(module, "SetAbilities", new[] { actor, input });
-            if (_target == null) return false;
+            if (_target == null)
+            {
+                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch NOT bound: SetAbilities(TacticalActor,InputController) not found");
+                return false;
+            }
 
             // Closed GetAbilities<TacticalAbility>() (zero-arg generic on ActorComponent) for per-ability logging.
             var tacAbility = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility");
@@ -54,10 +67,19 @@ namespace Multipleer.Harmony.Tactical
                     }
                 }
             }
+            Debug.Log("[Multipleer][tac] AbilityBarStateDiagPatch BOUND to UIModuleAbilities.SetAbilities (getAbilities=" +
+                      (_getAbilities != null) + ")");
             return true;
         }
 
-        public static MethodBase TargetMethod() => _target;
+        // Harmony calls Prepare() (which sets _target) BEFORE TargetMethod() in the PatchAll bulk path (same proven order
+        // ApplyDamagePatch relies on). Log if _target is somehow null here so a binding regression is never silent again.
+        public static MethodBase TargetMethod()
+        {
+            if (_target == null)
+                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch.TargetMethod returned null — patch will not bind");
+            return _target;
+        }
 
         // Signature: void SetAbilities(TacticalActor actor, InputController input)
         public static void Postfix(object __0 /*actor*/)

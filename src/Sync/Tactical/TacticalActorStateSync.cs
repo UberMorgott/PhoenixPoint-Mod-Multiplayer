@@ -244,6 +244,10 @@ namespace Multipleer.Sync.Tactical
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
             int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0, posCnt = 0;
+            // TASK 3: netIds whose AP/WP this batch actually wrote — used AFTER the apply loop to re-grey the ability bar
+            // if the client's currently-selected actor is among them (the async AP delta arrives after the activation-time
+            // re-grey, so the bar can otherwise stay lit). Collected under the apply, acted on once below.
+            var apAppliedNetIds = new HashSet<int>();
             try
             {
                 _applyingRemote = true;
@@ -276,7 +280,7 @@ namespace Multipleer.Sync.Tactical
                         }
                         if (rec.HasAp || rec.HasWp)
                         {
-                            if (SetApWpAbsolute(actor, rec)) apwp++;
+                            if (SetApWpAbsolute(actor, rec)) { apwp++; apAppliedNetIds.Add(rec.NetId); }
                         }
                         // Inc1 full-state: drive the actor toward the host's ABSOLUTE position. The native walk
                         // animation (or an instant snap for a sub-cell nudge / disconnected jump) is triggered by
@@ -293,6 +297,11 @@ namespace Multipleer.Sync.Tactical
                 }
                 finally { _applyingRemote = false; }
 
+                // TASK 3: re-grey the ability bar at the AP-DELTA apply site (re-grey site #2). Done OUTSIDE the
+                // _applyingRemote guard (it is a pure view re-push, not a state apply). No-op unless the selected actor's
+                // AP changed this batch.
+                ReGreySelectedBarAfterApDelta(apAppliedNetIds);
+
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
                 if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0 || posCnt > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
@@ -300,6 +309,37 @@ namespace Multipleer.Sync.Tactical
                               " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
+        }
+
+        /// <summary>TASK 3 (re-grey site #2 — AP-delta apply). CLIENT-only: when the async host AP/WP delta lands for the
+        /// client's CURRENTLY-SELECTED actor, re-push <c>UIStateCharacterSelected</c> via
+        /// <c>TacticalView.ResetCharacterSelectedState()</c> (TacticalView.cs:306) so <c>UIModuleAbilities.SetAbilities</c>
+        /// re-runs and every ability button re-evaluates <c>IsEnabled()</c> against the now-decremented AP (the buttons'
+        /// lit/grey state is stamped once and only re-evaluated on a CharacterSelected re-entry). The activation-time
+        /// re-grey (<c>SuppressedAbilityViewClearPatch</c>) runs BEFORE this delta arrives, so this is the second, robust
+        /// trigger. ResetCharacterSelectedState SELF-GUARDS on <c>CurrentState is UIStateCharacterSelected</c> (no-op in a
+        /// shoot/melee/overwatch sub-state). NRE-guarded: no live view / no selection / actor not AP-updated → no-op.
+        /// Diag logs whether it fired + the view CurrentState type + the actor netId (so a blocking state is visible).</summary>
+        private static void ReGreySelectedBarAfterApDelta(HashSet<int> apAppliedNetIds)
+        {
+            try
+            {
+                if (apAppliedNetIds == null || apAppliedNetIds.Count == 0) return;
+                object view = GetProp(TacticalDeploySync.LiveTlc, "View");   // TacticalLevelController.View (TacticalLevelController.cs:165)
+                if (view == null) return;
+                object selected = GetProp(view, "SelectedActor");            // TacticalView.SelectedActor (TacticalView.cs:148)
+                if (selected == null) return;
+                int selNet = TacticalDeploySync.NetIdForLiveActor(selected);
+                if (selNet < 0 || !apAppliedNetIds.Contains(selNet)) return; // selected actor's AP didn't change → nothing to re-grey
+
+                string stateName = "<null>";
+                try { object cs = GetProp(view, "CurrentState"); stateName = cs?.GetType().Name ?? "<null>"; } catch { /* diag only */ }
+                var reset = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState");
+                Debug.Log("[Multipleer][tac] CLIENT re-grey@apdelta fired=" + (reset != null) +
+                          " state=" + stateName + " actorNet=" + selNet);
+                reset?.Invoke(view, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] re-grey@apdelta failed: " + ex); }
         }
 
         // ─── HOST read helpers (AP/WP + filtered status set) ────────────────────────────────────────────

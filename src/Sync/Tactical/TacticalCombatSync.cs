@@ -145,6 +145,20 @@ namespace Multipleer.Sync.Tactical
                 object target = BuildShootTarget(intent);
                 if (target == null) { Debug.LogError("[Multipleer][tac] shoot intent: could not build target"); return; }
 
+                // BODY-PART SNAP (combat-bug fix, limb-faithful damage matching a host-LOCAL shot). The aim-point seed in
+                // BuildShootTarget already guarantees a non-NaN center-of-mass aim (no more feet/Y=0 ground hit). This
+                // refines it to the NEAREST body part by running the ability's OWN snapper — ShootAbility.GetShootTarget
+                // (ShootAbility.cs:194; SnapToBodyparts at :198-224 reads target.PositionToApply, our non-NaN seed, to
+                // pick the nearest TacticalItem) — so the relayed shot carries a TacticalItem exactly like the host's own
+                // click. Best-effort + fail-safe: a non-ShootAbility (BashAbility melee) has no GetShootTarget → skipped;
+                // any throw/null leaves the aim-point actor target (which still hits the body). See TrySnapShootTarget.
+                object snapped = TrySnapShootTarget(ability, target);
+                if (snapped != null) target = snapped;
+
+                // DIAG (host combat path): confirm the relayed shot now aims at a BODY PART / non-zero-Y point rather than
+                // the actor feet. Logs the snapped TacticalItem (or "noItem") + the resolved working position.
+                LogShootAim(target);
+
                 // public override void Activate(object parameter) — runs the real ability (shoot/grenade/
                 // melee — the relayable set, all of which deal damage via ApplyDamage). The host is NOT
                 // mirroring, so ClientInterceptAbility passes through; the ability's outcome → ApplyDamage
@@ -463,52 +477,81 @@ namespace Multipleer.Sync.Tactical
         /// <summary>Build a <c>TacticalAbilityTarget</c> for the host shot from the intent. Mirrors the proven
         /// <c>TacticalMoveSync.BuildMoveTarget</c> pattern (TYPED-ctor first, default-ctor + field-set FALLBACK).
         ///
-        /// AIM (combat-bug fix): the wire only carries the actor's GROUND pos (height ~0). When a target ACTOR is
-        /// resolved, the rebuilt target must stay POSITION-LESS — <c>PositionToApply</c> left InvalidPosition (NaN)
-        /// — so the host re-resolves the body-part aim authoritatively (<c>ShootAbility.GetShootTarget</c> /
-        /// SnapToBodyparts). Stamping the ground pos onto <c>PositionToApply</c> SUPPRESSES that snapping → the shot
-        /// fires LOW and clips cover → 0 damage. So the actor branch uses the NO-POSITION ctor
-        /// <c>(TacticalActorBase actor, AttackType=Regular)</c> (sets Actor/GameObject/ActorGridPosition, leaves
-        /// PositionToApply NaN); only a bare-GROUND shot (no actor) uses the <c>(Vector3 pos)</c> ctor. The pure
+        /// AIM (combat-bug fix, CORRECTED): the wire only carries the actor's GROUND pos (height ~0). The RETIRED
+        /// contract left an actor target's <c>PositionToApply</c> NaN on the false premise the host re-snaps the body-
+        /// part on re-Activate — it does NOT (the snapper is only on the UI GetTargets path; <c>ShootAbility.Activate</c>
+        /// casts the raw target as-is). A NaN actor target then falls through <c>GetWorkingPosition</c> to the actor
+        /// ROOT/FEET (Y=0) → the shot hits the ground → 0 damage. So an ACTOR target now SEEDS <c>PositionToApply</c> with
+        /// the actor's AIM POINT (center-of-mass, <c>GetAimPoint().position</c>, always NON-NaN) via the 3-arg ctor
+        /// <c>(TacticalActorBase actor, Vector3 positionToApply, AttackType=Regular)</c>; a bare-GROUND shot (no actor)
+        /// uses the <c>(Vector3 pos)</c> ctor. (HostOnAbilityIntent then best-effort snaps the actor target to the nearest
+        /// body part via <c>GetShootTarget</c>, which the aim-point seed makes possible.) The pure
         /// <see cref="ShootTargetAimPolicy"/> pins this decision (tested).</summary>
         private static object BuildShootTarget(TacticalLiveCodec.IntentAbility intent)
         {
             var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
             if (targetType == null) return null;
-            var pos = new Vector3(intent.TX, intent.TY, intent.TZ);
+            var groundPos = new Vector3(intent.TX, intent.TY, intent.TZ);
             object targetActor = intent.TargetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(intent.TargetNetId) : null;
-            bool applyGroundPos = ShootTargetAimPolicy.ShouldApplyGroundPosition(targetActor != null);
+            var aimSource = ShootTargetAimPolicy.Decide(targetActor != null);
+            // For an actor target, seed with the body-center aim point (non-NaN); ground fallback never used for actors.
+            Vector3 aimPos = targetActor != null ? GetActorAimPosition(targetActor, groundPos) : groundPos;
 
             try
             {
-                if (!applyGroundPos)
+                if (aimSource == ShootTargetAimPolicy.AimSource.ActorAimPoint && targetActor != null)
                 {
-                    // ACTOR target → new TacticalAbilityTarget(TacticalActorBase actor, AttackType=Regular). NO
-                    // PositionToApply → stays InvalidPosition (NaN) → host re-snaps the body-part authoritatively.
+                    // ACTOR target → new TacticalAbilityTarget(TacticalActorBase actor, Vector3 positionToApply,
+                    // AttackType=Regular). PositionToApply = the actor AIM POINT (center-of-mass, NON-NaN) so the working
+                    // position is the BODY (not the feet) AND the host's GetShootTarget snap has a valid seed.
                     var actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
                     var attackType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.AttackType");
                     var ctor = (actorBaseType != null && attackType != null)
-                        ? targetType.GetConstructor(new[] { actorBaseType, attackType })
+                        ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
                         : null;
                     if (ctor != null)
-                        return ctor.Invoke(new[] { targetActor, DefaultAttackType(attackType) });
+                        return ctor.Invoke(new[] { targetActor, aimPos, DefaultAttackType(attackType) });
                 }
                 else
                 {
                     // new TacticalAbilityTarget(Vector3 pos) — bare-ground shot (no actor to snap to).
                     var posCtor = targetType.GetConstructor(new[] { typeof(Vector3) });
-                    if (posCtor != null) return posCtor.Invoke(new object[] { pos });
+                    if (posCtor != null) return posCtor.Invoke(new object[] { groundPos });
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildShootTarget ctor failed, falling back to field-set: " + ex); }
 
-            // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw). For an ACTOR target
-            // leave PositionToApply at its InvalidPosition (NaN) default so the host still re-snaps the body-part;
-            // ONLY a bare-ground target gets the explicit Vector3 pos (governed by the same pure policy).
+            // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw). For an ACTOR target seed
+            // Actor + GameObject + ActorGridPosition + PositionToApply(aim point) so GetWorkingPosition lands on the body
+            // (never the NaN→feet fallthrough); a bare-ground target gets the explicit Vector3 ground pos.
             object target = Activator.CreateInstance(targetType);
-            if (targetActor != null) AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
-            if (applyGroundPos) AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            if (targetActor != null)
+            {
+                AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
+                object go = GetProp(targetActor, "gameObject");
+                if (go != null) AccessTools.Field(targetType, "GameObject")?.SetValue(target, go);
+                if (GetProp(targetActor, "Pos") is Vector3 actorPos)
+                    AccessTools.Field(targetType, "ActorGridPosition")?.SetValue(target, actorPos);
+                AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, aimPos);
+            }
+            else AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, groundPos);
             return target;
+        }
+
+        /// <summary>Resolve the target actor's AIM POINT world position (<c>TacticalActorBase.GetAimPoint().position</c> —
+        /// the default aim-slot / center-of-mass; TacticalActorBase.cs:754, TacticalActor.cs:1475). This NON-NaN point
+        /// seeds the rebuilt shoot target's <c>PositionToApply</c>. Falls back to <paramref name="groundFallback"/> only
+        /// if GetAimPoint is missing/throws/returns null (an actor normally always has one).</summary>
+        private static Vector3 GetActorAimPosition(object targetActor, Vector3 groundFallback)
+        {
+            try
+            {
+                var getAim = AccessTools.Method(targetActor.GetType(), "GetAimPoint");
+                if (getAim != null && getAim.Invoke(targetActor, null) is Transform tr && tr != null)
+                    return tr.position;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetActorAimPosition failed: " + ex); }
+            return groundFallback;
         }
 
         /// <summary>The <c>AttackType.Regular</c> enum value (mirrors <c>TacticalMoveSync.DefaultAttackType</c>).</summary>
@@ -516,6 +559,61 @@ namespace Multipleer.Sync.Tactical
         {
             if (attackType == null) return null;
             try { return Enum.Parse(attackType, "Regular"); } catch { return Activator.CreateInstance(attackType); }
+        }
+
+        // Cached reflection for the GetShootTarget body-part snap (resolved lazily, once).
+        private static MethodInfo _getShootTargetCached;
+        private static Type _getShootTargetOwner;   // the ability type _getShootTargetCached was resolved for
+        private static Type _tacAbilityTargetType;
+        private static Type _tacTargetDataType;
+
+        /// <summary>Best-effort body-part SNAP: run the ability's own <c>ShootAbility.GetShootTarget(target, null, null)</c>
+        /// (ShootAbility.cs:194 — 3-param overload, the trailing two optional) so the relayed shot carries the nearest
+        /// body part's <c>TacticalItem</c>, matching a host-local shot. Returns the snapped target, or null when there is
+        /// nothing to snap (the caller then keeps the aim-point actor target):
+        ///   • the ability is NOT a ShootAbility (e.g. BashAbility melee) → no GetShootTarget → null (no snap needed);
+        ///   • GetShootTarget threw or returned null. NOTE: even on a null return the passed target may have been mutated
+        ///     in place by SnapToBodyparts (TacticalItem set) — that's harmless, the aim-point/body target still hits.</summary>
+        private static object TrySnapShootTarget(object ability, object target)
+        {
+            try
+            {
+                Type abilityType = ability.GetType();
+                if (_getShootTargetCached == null || _getShootTargetOwner != abilityType)
+                {
+                    _tacAbilityTargetType = _tacAbilityTargetType ?? AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+                    _tacTargetDataType = _tacTargetDataType ?? AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalTargetData");
+                    _getShootTargetOwner = abilityType;
+                    _getShootTargetCached = (_tacAbilityTargetType != null && _tacTargetDataType != null)
+                        // TacticalAbilityTarget GetShootTarget(TacticalAbilityTarget, Vector3?, TacticalTargetData) — EXACT match.
+                        ? AccessTools.Method(abilityType, "GetShootTarget", new[] { _tacAbilityTargetType, typeof(Vector3?), _tacTargetDataType })
+                        : null;
+                }
+                if (_getShootTargetCached == null) return null;   // not a ShootAbility → no snap (aim-point target stands)
+                return _getShootTargetCached.Invoke(ability, new object[] { target, null, null });
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] GetShootTarget snap failed (using aim-point target): " + ex);
+                return null;
+            }
+        }
+
+        /// <summary>DIAG: log the relayed shot's aim — its snapped <c>TacticalItem</c> (body part) or "noItem", plus the
+        /// resolved <c>GetWorkingPosition()</c> (TacticalAbilityTarget.cs:175). A non-zero Y / a real item name confirms
+        /// the shot now aims at the BODY rather than the actor feet (the 0-damage bug).</summary>
+        private static void LogShootAim(object target)
+        {
+            try
+            {
+                object item = GetField(target, "TacticalItem");
+                string itemDesc = item == null ? "noItem" : item.ToString();
+                var getWp = AccessTools.Method(target.GetType(), "GetWorkingPosition");
+                Vector3 v = (getWp != null && getWp.Invoke(target, null) is Vector3 wp) ? wp : Vector3.zero;
+                Debug.Log("[Multipleer][tac] HOST shoot aim item=" + itemDesc +
+                          " workingPos=(" + v.x.ToString("0.0") + "," + v.y.ToString("0.0") + "," + v.z.ToString("0.0") + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] LogShootAim failed: " + ex); }
         }
 
         /// <summary>Read {targetNetId, targetPos} from a <c>TacticalAbilityTarget</c>: the actor (if any) →

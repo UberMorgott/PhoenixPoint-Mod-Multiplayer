@@ -121,6 +121,20 @@ namespace Multipleer.Harmony.Tactical
                     // is selected or we're in a melee/overwatch sub-state) and re-pushes CharacterSelected — NOT
                     // UIStateWaiting — so HUD and control are preserved. It does NOT change which actor is selected.
                     var reset = _resetCharSelected ?? (_resetCharSelected = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState"));
+
+                    // DIAG (re-grey site #1 — activation time): report whether the re-grey path runs and WHAT view state it
+                    // sees. ResetCharacterSelectedState SELF-GUARDS on `CurrentState is UIStateCharacterSelected`
+                    // (TacticalView.cs:306-312) → it is a NO-OP in any other state, so logging CurrentState here shows what
+                    // (if anything) blocks the re-grey. NRE-guarded; reads CurrentState BEFORE the reset mutates it.
+                    string stateName = "<null>";
+                    try { object cs = AccessTools.Property(view.GetType(), "CurrentState")?.GetValue(view, null); stateName = cs?.GetType().Name ?? "<null>"; }
+                    catch { /* diag only */ }
+                    int actorNet = -1;
+                    try { object aActor = AccessTools.Property(__0.GetType(), "TacticalActorBase")?.GetValue(__0, null); if (aActor != null) actorNet = TacticalDeploySync.NetIdForLiveActor(aActor); }
+                    catch { /* diag only */ }
+                    Debug.Log("[Multipleer][tac] CLIENT re-grey@activate fired=" + (reset != null) +
+                              " state=" + stateName + " actorNet=" + actorNet);
+
                     reset?.Invoke(view, null);
                 }
 

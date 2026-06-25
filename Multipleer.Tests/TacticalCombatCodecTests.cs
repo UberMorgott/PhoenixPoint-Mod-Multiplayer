@@ -63,23 +63,26 @@ public class TacticalCombatCodecTests
     }
 
     // ─── shoot-intent REBUILD aim policy (TacticalCombatSync.BuildShootTarget) ──────────────────────────
-    // The wire only carries the actor's GROUND pos (height ~0). When the host rebuilds the TacticalAbilityTarget
-    // and a target ACTOR is resolved, it must NOT stamp that ground pos onto PositionToApply (that suppresses host
-    // body-part snapping → low shot clips cover → 0 damage); it must leave PositionToApply INVALID (NaN) so the host
-    // re-snaps the body-part. A bare-GROUND shot (no actor) keeps the explicit position. The engine TacticalAbilityTarget
-    // can't be constructed in this pure project, so we test the DECISION the rebuild consults (ShouldApplyGroundPosition).
+    // The wire only carries the actor's GROUND pos (height ~0). The RETIRED contract left PositionToApply NaN for an
+    // actor target on the false premise the host re-snaps on re-Activate — it does NOT, so a NaN actor target falls
+    // through GetWorkingPosition to the actor FEET (Y=0) → shot hits the ground → 0 damage. The CORRECTED contract: an
+    // actor target SEEDS PositionToApply with the actor AIM POINT (non-NaN, body-center); a bare-GROUND shot (no actor)
+    // seeds the explicit ground pos. The engine TacticalAbilityTarget/aim point can't be built in this pure project, so
+    // we pin the DECISION (Decide) — actor → ActorAimPoint (non-NaN seed), ground → GroundPosition (explicit pos).
     [Fact]
-    public void ShootTargetAim_ActorTarget_LeavesPositionForHostSnap()
+    public void ShootTargetAim_ActorTarget_SeedsAimPointPosition()
     {
-        // actor resolved → do NOT apply the client's ground pos → PositionToApply stays NaN → host re-snaps body-part.
-        Assert.False(ShootTargetAimPolicy.ShouldApplyGroundPosition(hasTargetActor: true));
+        // actor resolved → seed PositionToApply with the actor AIM POINT (NON-NaN) → host then snaps body-part.
+        Assert.Equal(ShootTargetAimPolicy.AimSource.ActorAimPoint,
+            ShootTargetAimPolicy.Decide(hasTargetActor: true));
     }
 
     [Fact]
-    public void ShootTargetAim_GroundOnly_KeepsExplicitPosition()
+    public void ShootTargetAim_GroundOnly_UsesExplicitGroundPosition()
     {
-        // no actor → bare-ground shot → keep the explicit Vector3 pos (set PositionToApply).
-        Assert.True(ShootTargetAimPolicy.ShouldApplyGroundPosition(hasTargetActor: false));
+        // no actor → bare-ground shot → seed PositionToApply with the explicit Vector3 ground pos.
+        Assert.Equal(ShootTargetAimPolicy.AimSource.GroundPosition,
+            ShootTargetAimPolicy.Decide(hasTargetActor: false));
     }
 
     // ─── tac.damage ───────────────────────────────────────────────────
