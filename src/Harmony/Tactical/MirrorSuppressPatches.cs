@@ -308,9 +308,22 @@ namespace Multipleer.Harmony.Tactical
                         var m = AccessTools.Method(actor.GetType(), "StartTurn", new System.Type[0]);
                         m?.Invoke(actor, null);
 
+                        // DIAG capture: the value StartTurn (RestartAbilities.SetToMax) left BEFORE we restore.
+                        float apMaxed = haveAp ? StatValue(apStat) : 0f;
+                        float wpMaxed = haveWp ? StatValue(wpStat) : 0f;
+
                         // Restore the host-streamed AP/WP AFTER StartTurn — undo its local SetToMax re-max (pure mirror).
                         if (haveAp) SetStat(apStat, apBefore);
                         if (haveWp) SetStat(wpStat, wpBefore);
+
+                        // DIAG (co-op client-mirror turn-start, fires turn 2+): show host->StartTurn-maxed->restored so
+                        // a re-test can confirm FIX E captures+restores the host AP and isn't itself leaking the re-max
+                        // (AP-not-greying RCA). Cheap: one line per own-actor at turn start.
+                        if (preserveApWp && (haveAp || haveWp))
+                            Debug.Log("[Multipleer][tac] FIX-E StartTurn netId=" +
+                                      TacticalDeploySync.NetIdForLiveActor(actor) +
+                                      (haveAp ? (" AP host=" + apBefore + " maxed=" + apMaxed + " restored=" + StatValue(apStat)) : "") +
+                                      (haveWp ? (" WP host=" + wpBefore + " maxed=" + wpMaxed + " restored=" + StatValue(wpStat)) : ""));
                     }
                     catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup actor.StartTurn failed: " + ex); }
                 }

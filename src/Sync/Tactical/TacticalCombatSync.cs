@@ -461,44 +461,53 @@ namespace Multipleer.Sync.Tactical
         }
 
         /// <summary>Build a <c>TacticalAbilityTarget</c> for the host shot from the intent. Mirrors the proven
-        /// <c>TacticalMoveSync.BuildMoveTarget</c> pattern: TYPED-ctor first (so the host gets a fully-formed
-        /// target — Actor + GameObject + ActorGridPosition + PositionToApply populated by the ctor, which
-        /// <c>ShootAbility.Activate → Weapon.TryGetShootTarget</c> needs to re-resolve the shot solution),
-        /// with a default-ctor + field-set FALLBACK. Actor target uses the (actor, pos, AttackType=Regular)
-        /// ctor; a bare-position target (no actor) uses the (Vector3) ctor.</summary>
+        /// <c>TacticalMoveSync.BuildMoveTarget</c> pattern (TYPED-ctor first, default-ctor + field-set FALLBACK).
+        ///
+        /// AIM (combat-bug fix): the wire only carries the actor's GROUND pos (height ~0). When a target ACTOR is
+        /// resolved, the rebuilt target must stay POSITION-LESS — <c>PositionToApply</c> left InvalidPosition (NaN)
+        /// — so the host re-resolves the body-part aim authoritatively (<c>ShootAbility.GetShootTarget</c> /
+        /// SnapToBodyparts). Stamping the ground pos onto <c>PositionToApply</c> SUPPRESSES that snapping → the shot
+        /// fires LOW and clips cover → 0 damage. So the actor branch uses the NO-POSITION ctor
+        /// <c>(TacticalActorBase actor, AttackType=Regular)</c> (sets Actor/GameObject/ActorGridPosition, leaves
+        /// PositionToApply NaN); only a bare-GROUND shot (no actor) uses the <c>(Vector3 pos)</c> ctor. The pure
+        /// <see cref="ShootTargetAimPolicy"/> pins this decision (tested).</summary>
         private static object BuildShootTarget(TacticalLiveCodec.IntentAbility intent)
         {
             var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
             if (targetType == null) return null;
             var pos = new Vector3(intent.TX, intent.TY, intent.TZ);
             object targetActor = intent.TargetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(intent.TargetNetId) : null;
+            bool applyGroundPos = ShootTargetAimPolicy.ShouldApplyGroundPosition(targetActor != null);
 
             try
             {
-                if (targetActor != null)
+                if (!applyGroundPos)
                 {
-                    // new TacticalAbilityTarget(TacticalActorBase actor, Vector3 positionToApply, AttackType=Regular)
+                    // ACTOR target → new TacticalAbilityTarget(TacticalActorBase actor, AttackType=Regular). NO
+                    // PositionToApply → stays InvalidPosition (NaN) → host re-snaps the body-part authoritatively.
                     var actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
                     var attackType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.AttackType");
                     var ctor = (actorBaseType != null && attackType != null)
-                        ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
+                        ? targetType.GetConstructor(new[] { actorBaseType, attackType })
                         : null;
                     if (ctor != null)
-                        return ctor.Invoke(new[] { targetActor, (object)pos, DefaultAttackType(attackType) });
+                        return ctor.Invoke(new[] { targetActor, DefaultAttackType(attackType) });
                 }
                 else
                 {
-                    // new TacticalAbilityTarget(Vector3 pos) — bare-position shot.
+                    // new TacticalAbilityTarget(Vector3 pos) — bare-ground shot (no actor to snap to).
                     var posCtor = targetType.GetConstructor(new[] { typeof(Vector3) });
                     if (posCtor != null) return posCtor.Invoke(new object[] { pos });
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildShootTarget ctor failed, falling back to field-set: " + ex); }
 
-            // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw).
+            // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw). For an ACTOR target
+            // leave PositionToApply at its InvalidPosition (NaN) default so the host still re-snaps the body-part;
+            // ONLY a bare-ground target gets the explicit Vector3 pos (governed by the same pure policy).
             object target = Activator.CreateInstance(targetType);
             if (targetActor != null) AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
-            AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            if (applyGroundPos) AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
             return target;
         }
 

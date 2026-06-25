@@ -534,8 +534,24 @@ namespace Multipleer.Sync.Tactical
             object stats = GetProp(actor, "CharacterStats");
             if (stats == null) return false;
             bool any = false;
-            if (rec.HasAp) { SetStat(GetField(stats, "ActionPoints"), rec.Ap); any = true; }
-            if (rec.HasWp) { SetStat(GetField(stats, "WillPoints"), rec.Wp); any = true; }
+            float apBefore = 0f, apAfter = 0f, wpBefore = 0f, wpAfter = 0f;
+            if (rec.HasAp)
+            {
+                object apStat = GetField(stats, "ActionPoints");
+                apBefore = StatValue(apStat); SetStat(apStat, rec.Ap); apAfter = StatValue(apStat); any = true;
+            }
+            if (rec.HasWp)
+            {
+                object wpStat = GetField(stats, "WillPoints");
+                wpBefore = StatValue(wpStat); SetStat(wpStat, rec.Wp); wpAfter = StatValue(wpStat); any = true;
+            }
+            // DIAG (co-op tactical client-mirror path only — runs solely under HandleActorState): trace the
+            // authoritative AP/WP write so a clean re-test can confirm whether the client actually receives + applies
+            // the host's decremented AP (AP-not-greying RCA). Cheap: one line per actor that carried an AP/WP bit.
+            if (any)
+                Debug.Log("[Multipleer][tac] SetApWpAbsolute netId=" + rec.NetId +
+                          (rec.HasAp ? (" AP " + apBefore + "->" + apAfter) : "") +
+                          (rec.HasWp ? (" WP " + wpBefore + "->" + wpAfter) : ""));
             return any;
         }
 

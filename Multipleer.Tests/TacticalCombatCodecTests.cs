@@ -62,6 +62,26 @@ public class TacticalCombatCodecTests
         Assert.False(TacticalLiveCodec.TryDecodeIntentAbility(null, out _));
     }
 
+    // ─── shoot-intent REBUILD aim policy (TacticalCombatSync.BuildShootTarget) ──────────────────────────
+    // The wire only carries the actor's GROUND pos (height ~0). When the host rebuilds the TacticalAbilityTarget
+    // and a target ACTOR is resolved, it must NOT stamp that ground pos onto PositionToApply (that suppresses host
+    // body-part snapping → low shot clips cover → 0 damage); it must leave PositionToApply INVALID (NaN) so the host
+    // re-snaps the body-part. A bare-GROUND shot (no actor) keeps the explicit position. The engine TacticalAbilityTarget
+    // can't be constructed in this pure project, so we test the DECISION the rebuild consults (ShouldApplyGroundPosition).
+    [Fact]
+    public void ShootTargetAim_ActorTarget_LeavesPositionForHostSnap()
+    {
+        // actor resolved → do NOT apply the client's ground pos → PositionToApply stays NaN → host re-snaps body-part.
+        Assert.False(ShootTargetAimPolicy.ShouldApplyGroundPosition(hasTargetActor: true));
+    }
+
+    [Fact]
+    public void ShootTargetAim_GroundOnly_KeepsExplicitPosition()
+    {
+        // no actor → bare-ground shot → keep the explicit Vector3 pos (set PositionToApply).
+        Assert.True(ShootTargetAimPolicy.ShouldApplyGroundPosition(hasTargetActor: false));
+    }
+
     // ─── tac.damage ───────────────────────────────────────────────────
     private static TacticalLiveCodec.DamagePayload SampleDamage(int statusN, int effectN, int modN, int sourceNetId)
     {
