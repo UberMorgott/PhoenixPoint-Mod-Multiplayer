@@ -170,6 +170,12 @@ namespace Multipleer.Sync.Tactical
                 activate.Invoke(ability, new[] { target });
                 Debug.Log("[Multipleer][tac] HOST executed ability " + ability.GetType().Name +
                           " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ShooterNetId);
+
+                // TASK 2 (host staleness): the host executed this relayed CLIENT action programmatically and never
+                // UI-selected the soldier, so if the host UI currently has THIS actor selected its ability bar stays
+                // lit despite the AP just spent (the cost is paid synchronously in Activate). Re-grey it the same
+                // direct, state-independent way as the client. No-op unless the host has THIS actor selected.
+                TacticalActorStateSync.RefreshHostSelectedBarForActor(intent.ShooterNetId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnAbilityIntent exec failed: " + ex); }
         }

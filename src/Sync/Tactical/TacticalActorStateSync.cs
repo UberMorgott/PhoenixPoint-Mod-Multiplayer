@@ -311,35 +311,85 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
 
-        /// <summary>TASK 3 (re-grey site #2 — AP-delta apply). CLIENT-only: when the async host AP/WP delta lands for the
-        /// client's CURRENTLY-SELECTED actor, re-push <c>UIStateCharacterSelected</c> via
-        /// <c>TacticalView.ResetCharacterSelectedState()</c> (TacticalView.cs:306) so <c>UIModuleAbilities.SetAbilities</c>
-        /// re-runs and every ability button re-evaluates <c>IsEnabled()</c> against the now-decremented AP (the buttons'
-        /// lit/grey state is stamped once and only re-evaluated on a CharacterSelected re-entry). The activation-time
-        /// re-grey (<c>SuppressedAbilityViewClearPatch</c>) runs BEFORE this delta arrives, so this is the second, robust
-        /// trigger. ResetCharacterSelectedState SELF-GUARDS on <c>CurrentState is UIStateCharacterSelected</c> (no-op in a
-        /// shoot/melee/overwatch sub-state). NRE-guarded: no live view / no selection / actor not AP-updated → no-op.
-        /// Diag logs whether it fired + the view CurrentState type + the actor netId (so a blocking state is visible).</summary>
+        /// <summary>AP-delta re-grey (CLIENT, re-grey site #2). When the async host AP/WP delta lands for the
+        /// client's CURRENTLY-SELECTED actor, DIRECTLY re-push the ability bar via
+        /// <c>UIModuleAbilities.SetAbilities(selected, Context.Input)</c> (UIModuleAbilities.cs:112) — exactly the
+        /// native call from <c>UIStateCharacterSelected.cs:247</c> — so every ability button re-evaluates
+        /// <c>IsEnabled()</c> against the now-decremented AP (button lit/grey state is stamped once and only
+        /// re-evaluated on a re-push). This REPLACES the old <c>TacticalView.ResetCharacterSelectedState()</c>
+        /// trigger, which SELF-GUARDS on <c>CurrentState is UIStateCharacterSelected</c> (TacticalView.cs:308) and
+        /// so NO-OPs while the view sits in a shoot/melee/overwatch sub-state — leaving the buttons lit. The direct
+        /// refresh is state-INDEPENDENT. The activation-time re-grey (<c>SuppressedAbilityViewClearPatch</c>) runs
+        /// BEFORE this delta arrives, so this is the second, robust trigger. NRE-guarded: no live view / no
+        /// selection / actor not AP-updated this batch → no-op.</summary>
         private static void ReGreySelectedBarAfterApDelta(HashSet<int> apAppliedNetIds)
         {
             try
             {
                 if (apAppliedNetIds == null || apAppliedNetIds.Count == 0) return;
-                object view = GetProp(TacticalDeploySync.LiveTlc, "View");   // TacticalLevelController.View (TacticalLevelController.cs:165)
-                if (view == null) return;
-                object selected = GetProp(view, "SelectedActor");            // TacticalView.SelectedActor (TacticalView.cs:148)
-                if (selected == null) return;
-                int selNet = TacticalDeploySync.NetIdForLiveActor(selected);
+                int selNet = ResolveSelectedActorNet(out object view, out object selected);
                 if (selNet < 0 || !apAppliedNetIds.Contains(selNet)) return; // selected actor's AP didn't change → nothing to re-grey
-
-                string stateName = "<null>";
-                try { object cs = GetProp(view, "CurrentState"); stateName = cs?.GetType().Name ?? "<null>"; } catch { /* diag only */ }
-                var reset = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState");
-                Debug.Log("[Multipleer][tac] CLIENT re-grey@apdelta fired=" + (reset != null) +
-                          " state=" + stateName + " actorNet=" + selNet);
-                reset?.Invoke(view, null);
+                DoDirectAbilityBarRefresh(view, selected, selNet, "CLIENT@apdelta");
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] re-grey@apdelta failed: " + ex); }
+        }
+
+        /// <summary>TASK 2 (HOST staleness). After the host EXECUTES a relayed CLIENT action programmatically
+        /// (<c>TacticalCombatSync.HostOnAbilityIntent</c> → <c>Activate</c>), it never UI-selected that soldier, so
+        /// the host's ability bar is not natively re-cycled. If the host UI happens to have THAT actor selected, do
+        /// the SAME direct, state-independent <c>UIModuleAbilities.SetAbilities</c> refresh as the client re-grey.
+        /// No-op unless the host's currently-selected actor IS <paramref name="actorNetId"/> — so the host's OWN
+        /// soldiers (which grey natively on re-select) are never touched. Runs on the HOST only.</summary>
+        public static void RefreshHostSelectedBarForActor(int actorNetId)
+        {
+            try
+            {
+                if (actorNetId < 0) return;
+                int selNet = ResolveSelectedActorNet(out object view, out object selected);
+                if (selNet < 0 || selNet != actorNetId) return;   // host has a different (or no) actor selected → nothing stale
+                DoDirectAbilityBarRefresh(view, selected, selNet, "HOST@relay");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] host re-grey failed: " + ex); }
+        }
+
+        /// <summary>Resolve the live tactical view's currently-SELECTED actor + its netId (-1 when none / unresolved).
+        /// Shared by the client AP-delta re-grey and the host post-relay re-grey. The out params are the live
+        /// <c>TacticalView</c> and the selected <c>TacticalActor</c> (both null when -1 is returned).</summary>
+        private static int ResolveSelectedActorNet(out object view, out object selected)
+        {
+            view = null; selected = null;
+            view = GetProp(TacticalDeploySync.LiveTlc, "View");          // TacticalLevelController.View → TacticalView
+            if (view == null) return -1;
+            selected = GetProp(view, "SelectedActor");                  // TacticalView.SelectedActor (TacticalView.cs:148)
+            if (selected == null) return -1;
+            return TacticalDeploySync.NetIdForLiveActor(selected);
+        }
+
+        /// <summary>DIRECT, state-independent ability-bar refresh: <c>UIModuleAbilities.SetAbilities(selected,
+        /// Context.Input)</c> (UIModuleAbilities.cs:112) — the exact native call from
+        /// <c>UIStateCharacterSelected.cs:247</c>. Reaches the module the native way:
+        /// <c>TacticalView.TacticalModules</c> (TacticalView.cs:114) <c>.AbilitiesModule</c>
+        /// (TacticalModulesData.cs:18, a <c>UIModuleAbilities</c>); and the input via
+        /// <c>TacticalView._context.Input</c> (TacticalView.cs:91 → TacticalViewContext.Input,
+        /// TacticalViewContext.cs:15, == <c>GameUtl.GameComponent&lt;InputController&gt;()</c>). Bypasses
+        /// <c>ResetCharacterSelectedState</c>'s state self-guard so it re-stamps the buttons in ANY view sub-state.
+        /// Fully NRE-guarded; diag logs the caller tag + the view CurrentState type + the actor netId.</summary>
+        private static void DoDirectAbilityBarRefresh(object view, object selected, int selNet, string who)
+        {
+            object modules = GetProp(view, "TacticalModules");           // TacticalView.TacticalModules : TacticalModulesData
+            object abilitiesModule = GetProp(modules, "AbilitiesModule"); // TacticalModulesData.AbilitiesModule : UIModuleAbilities
+            if (abilitiesModule == null) return;
+            object ctx = GetField(view, "_context");                     // TacticalView._context : TacticalViewContext
+            object input = GetProp(ctx, "Input");                        // TacticalViewContext.Input : InputController
+            if (input == null) return;
+
+            string stateName = "<null>";
+            try { object cs = GetProp(view, "CurrentState"); stateName = cs?.GetType().Name ?? "<null>"; } catch { /* diag only */ }
+
+            var setAbilities = AccessTools.Method(abilitiesModule.GetType(), "SetAbilities"); // (TacticalActor, InputController) — single overload
+            Debug.Log("[Multipleer][tac] " + who + " direct SetAbilities found=" + (setAbilities != null) +
+                      " state=" + stateName + " actorNet=" + selNet);
+            setAbilities?.Invoke(abilitiesModule, new[] { selected, input });
         }
 
         // ─── HOST read helpers (AP/WP + filtered status set) ────────────────────────────────────────────
@@ -654,20 +704,41 @@ namespace Multipleer.Sync.Tactical
             var diff = TacticalActorStateDiff.Compute(current, inc);
             if (!diff.HasChanges) return;
 
-            // REMOVE absent first, then ADD missing.
+            // REMOVE absent first, then ADD missing. TASK 3: each per-status apply is ISOLATED in try/catch so one
+            // bad status (e.g. a mirrored status whose OnApply NREs on the inert client mirror — BleedStatus.OnApply
+            // foreach-iterates the null _slotNames that its Applied=true inert branch never populated) NEVER aborts
+            // the remaining statuses or the rest of the actor-state apply (AP/WP/health/pos). The inner Invoke*
+            // helpers already swallow + return false; this loop guard additionally covers any throw BEFORE the
+            // invoke (def/source resolution). On failure: log the status id + exception type/message, then CONTINUE.
             foreach (var r in diff.ToRemove)
             {
-                if (liveByKey.TryGetValue(TacticalActorStateDiff.KeyOf(r), out var liveStatus) && liveStatus != null)
+                try
                 {
-                    if (InvokeUnapplyStatus(statusComponent, liveStatus)) removeCount++;
+                    if (liveByKey.TryGetValue(TacticalActorStateDiff.KeyOf(r), out var liveStatus) && liveStatus != null)
+                    {
+                        if (InvokeUnapplyStatus(statusComponent, liveStatus)) removeCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multipleer][tac] status mirror failed: " + (r.DefGuid ?? "<null>") +
+                                   " " + ex.GetType().Name + ": " + ex.Message);
                 }
             }
             foreach (var a in diff.ToAdd)
             {
-                object def = DefReflection.GetDefByGuid(a.DefGuid);
-                if (def == null) continue;
-                object source = a.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(a.SourceNetId) : null;
-                if (InvokeApplyStatus(statusComponent, def, source, actor)) addCount++;
+                try
+                {
+                    object def = DefReflection.GetDefByGuid(a.DefGuid);
+                    if (def == null) continue;
+                    object source = a.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(a.SourceNetId) : null;
+                    if (InvokeApplyStatus(statusComponent, def, source, actor)) addCount++;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multipleer][tac] status mirror failed: " + (a.DefGuid ?? "<null>") +
+                                   " " + ex.GetType().Name + ": " + ex.Message);
+                }
             }
         }
 
@@ -722,7 +793,26 @@ namespace Multipleer.Sync.Tactical
                 apply.Invoke(statusComponent, new[] { status });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ApplyStatus(mirror) failed: " + ex); return false; }
+            catch (Exception ex)
+            {
+                // TASK 3: the actual OnApply NRE site for a mirrored status (e.g. BleedStatus.OnApply derefs the
+                // null _slotNames that its Applied=true inert branch never populated). Log the status NAME +
+                // exception type/message in the agreed format and return false so ReconcileStatuses CONTINUES with
+                // the remaining statuses + the rest of the actor-state apply. (Proper status-mirror RCA is deferred.)
+                Debug.LogError("[Multipleer][tac] status mirror failed: " + DescribeDef(statusDef) +
+                               " " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>Best-effort human-readable id for a status DEF (its <c>UnityEngine.Object.name</c>, falling
+        /// back to its <c>BaseDef.Guid</c>, then its CLR type name) for diagnostics. Never throws.</summary>
+        private static string DescribeDef(object def)
+        {
+            if (def == null) return "<null def>";
+            try { if (GetProp(def, "name") is string n && !string.IsNullOrEmpty(n)) return n; } catch { }
+            try { string g = DefReflection.GetGuid(def); if (!string.IsNullOrEmpty(g)) return g; } catch { }
+            return def.GetType().Name;
         }
 
         /// <summary>Resolve <c>DefRepository.Instantiate(BaseDef, …)</c> — the non-generic overload whose first
@@ -790,7 +880,14 @@ namespace Multipleer.Sync.Tactical
                 ClientStatusMirrorGuards.UnregisterMirror(status);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate UnapplyStatus failed: " + ex); return false; }
+            catch (Exception ex)
+            {
+                // TASK 3: same isolation for the removal path — log the status type + exception, then return false
+                // so ReconcileStatuses keeps applying the rest of the state.
+                Debug.LogError("[Multipleer][tac] status mirror failed: " + (status?.GetType().Name ?? "<null status>") +
+                               " " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
         }
 
         private static float StatValue(object stat)
