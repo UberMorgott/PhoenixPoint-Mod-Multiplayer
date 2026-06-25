@@ -51,6 +51,7 @@ namespace Multipleer.Harmony.Tactical
         private static PropertyInfo _contextProp;     // TacticalViewState.Context (protected)
         private static PropertyInfo _viewProp;         // TacticalViewContext.View
         private static MethodInfo _updateApWp;        // TacticalView.UpdateSquadMembersActionAndWillPoints()
+        private static MethodInfo _resetCharSelected; // TacticalView.ResetCharacterSelectedState()
         private static object _clearStackAndPush;     // StateStackAction.ClearStackAndPush (boxed)
 
         public static bool Prepare()
@@ -107,6 +108,20 @@ namespace Multipleer.Harmony.Tactical
                 {
                     var upd = _updateApWp ?? (_updateApWp = AccessTools.Method(view.GetType(), "UpdateSquadMembersActionAndWillPoints"));
                     upd?.Invoke(view, null);
+
+                    // RE-GREY THE ABILITY BAR. The squad-portrait dots above refresh, but the ability buttons keep
+                    // their pre-action lit/grey state: Button.IsEnabled is stamped ONCE in AbilityButtonController
+                    // .SetButton and only re-evaluated when UIModuleAbilities.SetAbilities re-runs, which only happens
+                    // when UIStateCharacterSelected is (re-)entered. Skipping the native clear above (the HUD-loss fix)
+                    // means it is NOT re-entered → buttons stay lit even when AP is now insufficient (cosmetic only —
+                    // the native AP gate still blocks the activation). TacticalView.ResetCharacterSelectedState
+                    // (TacticalView.cs:306) re-pushes a fresh UIStateCharacterSelected via ClearStackAndPush →
+                    // re-runs SetAbilities → every button re-evaluates ability.IsEnabled() (a LIVE AP check) and greys
+                    // out. It SELF-GUARDS on `CurrentState is UIStateCharacterSelected` (NRE-safe + no-op when nothing
+                    // is selected or we're in a melee/overwatch sub-state) and re-pushes CharacterSelected — NOT
+                    // UIStateWaiting — so HUD and control are preserved. It does NOT change which actor is selected.
+                    var reset = _resetCharSelected ?? (_resetCharSelected = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState"));
+                    reset?.Invoke(view, null);
                 }
 
                 Debug.Log("[Multipleer][tac] CLIENT skipped view-clear for suppressed " + __0.GetType().Name +
