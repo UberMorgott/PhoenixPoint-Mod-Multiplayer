@@ -59,12 +59,6 @@ namespace Multipleer.Sync.Tactical
         // Client: the pending deploy we received but haven't hydrated yet (waiting for scene Playing).
         private static TacticalDeployCodec.DeployPayload _pendingClientDeploy;
         private static int _hydratedSiteId = int.MinValue;
-        // Client: true when the level being hydrated was ALREADY built by the client's own native tactical
-        // load (the "hydrate existing, no relaunch" arrival path). On that path the native load already ran
-        // ProcessInstanceData on a fresh level, so re-running it here would collide (KnownActors.AddRange is
-        // add-only) and double-apply faction effects → we SKIP the snapshot ProcessInstanceData. False on the
-        // legacy launch-then-hydrate path (fresh level ⇒ ProcessInstanceData is required). (RCA 2026-06-18.)
-        private static bool _hydrateLevelAlreadyLoaded;
 
         // The live NetId registry for the current mission (both sides). Rebuilt per deploy.
         public static TacticalActorRegistry Registry { get; private set; } = new TacticalActorRegistry();
@@ -412,17 +406,18 @@ namespace Multipleer.Sync.Tactical
                 // FactionEffects. So on THIS path we skip the snapshot ProcessInstanceData and only rebuild
                 // the NetId registry + reconcile + arm mirror (the deploy snapshot's actual job — the actor
                 // set/positions ride the registry + tac.move rail, NOT ProcessInstanceData). (RCA 2026-06-18.)
-                _hydrateLevelAlreadyLoaded = true;
                 Debug.Log("[Multipleer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch, skip redundant ProcessInstanceData)");
-                try { ClientOnLevelReady(liveTlc); }
+                // alreadyLoaded=true travels WITH this call (formerly the free _hydrateLevelAlreadyLoaded static):
+                // the level was natively loaded ⇒ ClientHydrateNow skips the redundant snapshot ProcessInstanceData.
+                try { ClientOnLevelReady(liveTlc, alreadyLoaded: true); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
             }
             else
             {
                 // Legacy path: the client has NO live tactical level → it must launch fresh, and the snapshot
                 // ProcessInstanceData IS required (it restores faction-level state onto that fresh level,
-                // exactly like the game's own save-load at TacticalLevelController BeforePlaying:550).
-                _hydrateLevelAlreadyLoaded = false;
+                // exactly like the game's own save-load at TacticalLevelController BeforePlaying:550). The
+                // deferred Playing-transition postfix later calls ClientOnLevelReady(level, alreadyLoaded: false).
                 try { ClientLaunchMission(p); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientLaunchMission failed: " + ex); }
             }
@@ -493,7 +488,11 @@ namespace Multipleer.Sync.Tactical
         /// runs inside a running IUpdateable. If no Timing resolves, fall back to an inline best-effort
         /// hydrate (mirrors the host's <see cref="StartDeferredCapture"/> immediate fallback).
         /// </summary>
-        public static void ClientOnLevelReady(object tacticalLevelController)
+        /// <param name="alreadyLoaded">True when the level was ALREADY natively loaded (the late-deploy-into-a-
+        /// live-level arrival path) ⇒ <see cref="ClientHydrateNow"/> SKIPS the redundant snapshot
+        /// ProcessInstanceData. Threaded explicitly (replaces the former free <c>_hydrateLevelAlreadyLoaded</c>
+        /// static) so the flag travels with the call instead of as hidden cross-method state.</param>
+        public static void ClientOnLevelReady(object tacticalLevelController, bool alreadyLoaded)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
@@ -505,14 +504,14 @@ namespace Multipleer.Sync.Tactical
             if (decision == TacticalHydrateSchedulingGate.Decision.DeferOnTiming)
             {
                 Debug.Log("[Multipleer][tac] CLIENT hydrate → deferring onto level Timing (serializer needs a running IUpdateable)");
-                if (InvokeTimingStart(timing, ClientHydrateCrt(tacticalLevelController))) return;
+                if (InvokeTimingStart(timing, ClientHydrateCrt(tacticalLevelController, alreadyLoaded))) return;
                 Debug.LogError("[Multipleer][tac] CLIENT hydrate: Timing.Start failed — hydrating inline (may throw on serializer)");
             }
             else
             {
                 Debug.LogError("[Multipleer][tac] CLIENT hydrate: no Timing resolvable — hydrating inline (may throw on serializer)");
             }
-            ClientHydrateNow(tacticalLevelController);
+            ClientHydrateNow(tacticalLevelController, alreadyLoaded);
         }
 
         /// <summary>Resolve a <c>Base.Core.Timing</c> to start the client hydrate coroutine on: prefer the live
@@ -536,9 +535,9 @@ namespace Multipleer.Sync.Tactical
         /// <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> overload — see the host
         /// <see cref="DeferredCaptureCrt"/> note. The work runs on the first pump (no inter-frame wait), then
         /// the coroutine ends.</summary>
-        private static IEnumerator<NextUpdate> ClientHydrateCrt(object tacticalLevelController)
+        private static IEnumerator<NextUpdate> ClientHydrateCrt(object tacticalLevelController, bool alreadyLoaded)
         {
-            ClientHydrateNow(tacticalLevelController);
+            ClientHydrateNow(tacticalLevelController, alreadyLoaded);
             yield break;
         }
 
@@ -547,7 +546,7 @@ namespace Multipleer.Sync.Tactical
         /// the host actor table, and arm mirror mode. MUST run inside a running IUpdateable (the native
         /// serializer reads <c>Timing.Current</c>) — see <see cref="ClientOnLevelReady"/>.
         /// </summary>
-        private static void ClientHydrateNow(object tacticalLevelController)
+        private static void ClientHydrateNow(object tacticalLevelController, bool alreadyLoaded)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
@@ -567,7 +566,7 @@ namespace Multipleer.Sync.Tactical
                 //    positions — is applied below via the registry + reconcile (+ the live tac.move rail), NOT
                 //    via ProcessInstanceData. (RCA 2026-06-18: matches the game's own load pattern, which runs
                 //    ProcessInstanceData exactly once on a freshly-created level — TacticalLevelController:550.)
-                if (_hydrateLevelAlreadyLoaded)
+                if (alreadyLoaded)
                 {
                     Debug.Log("[Multipleer][tac] ClientHydrateNow: level already natively loaded → skipping redundant snapshot ProcessInstanceData (registry rebuild only)");
                 }
@@ -628,22 +627,34 @@ namespace Multipleer.Sync.Tactical
         /// <summary>Disarm mirror mode + clear per-mission state (mission exit). Idempotent.</summary>
         public static void OnMissionExit()
         {
+            // (a) Reset the lifecycle-critical + purely-local statics FIRST — BEFORE any EXTERNAL guard reset
+            //     below can throw. The Inc-T1 HostStartFlush coroutine self-stops by watching LiveTlc, so if an
+            //     external reset threw and skipped `LiveTlc = null`, that coroutine would LEAK into the next
+            //     mission. Doing the local teardown up-front makes the lifecycle reset exception-proof. (N1.)
             _mirrorArmed = false;
             _pendingClientDeploy = null;
-            _hydrateLevelAlreadyLoaded = false;
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;
             _chunkReassembler = new ChunkReassembler();   // drop any half-received chunk set
             Registry = new TacticalActorRegistry();
-            TacticalVisionSync.HostResetBroadcastGuard();   // Inc Vision: clear the per-mission chattiness guard
-            TacticalActorStateSync.HostResetFlushGuard();   // Inc T1: clear the per-actor state-delta signatures
-            Multipleer.Harmony.Tactical.ClientStatusMirrorGuards.Reset();   // Feature B: drop inert-mirror tracking
-            LiveTlc = null;                                  // Inc T1: the flush coroutine watches this → self-stops
+            LiveTlc = null;                               // Inc T1: the flush coroutine watches this → self-stops
             LiveSeq = new TacticalLiveSeq();
             IntentDedup = new TacticalIntentDedup();
-            TacticalFireAnimSync.Reset();                    // Feature C: drop any stuck replay-guard depth
-            TacticalMeleeAnimSync.Reset();                   // Feature C (melee): symmetry (Phase 1 stateless)
+
+            // (b) EXTERNAL guard resets — each isolated in its OWN try/catch so one throwing does NOT skip the
+            //     others (the lifecycle statics above already reset, so a throw here can no longer leak the
+            //     flush coroutine). (N1.)
+            try { TacticalVisionSync.HostResetBroadcastGuard(); }                  // Inc Vision: clear the per-mission chattiness guard
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalActorStateSync.HostResetFlushGuard(); }                  // Inc T1: clear the per-actor state-delta signatures
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { Multipleer.Harmony.Tactical.ClientStatusMirrorGuards.Reset(); }  // Feature B: drop inert-mirror tracking
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalFireAnimSync.Reset(); }                                  // Feature C: drop any stuck replay-guard depth
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalMeleeAnimSync.Reset(); }                                 // Feature C (melee): symmetry (Phase 1 stateless)
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
         }
 
         // ─── Wire send + inbound (rides the 0x67 SyncEnvelope rail) ─────────────────────────

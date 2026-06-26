@@ -1,3 +1,4 @@
+using System;
 using System.Reflection;
 using HarmonyLib;
 using Multipleer.Network;
@@ -56,7 +57,10 @@ namespace Multipleer.Harmony.Tactical
             try
             {
                 if (engine.IsHost) TacticalDeploySync.HostOnLevelReady(__instance);
-                else TacticalDeploySync.ClientOnLevelReady(__instance);
+                // Legacy fresh-load path: this Playing-transition postfix only fires for a level the client
+                // built natively (launch-then-hydrate) ⇒ alwaysLoaded=false (snapshot ProcessInstanceData IS
+                // required). The late-deploy-into-a-live-level path calls ClientOnLevelReady(…, true) directly.
+                else TacticalDeploySync.ClientOnLevelReady(__instance, alreadyLoaded: false);
             }
             catch (System.Exception ex)
             {
@@ -97,7 +101,8 @@ namespace Multipleer.Harmony.Tactical
             if (engine == null || !engine.IsActive) return true;   // single-player → untouched
 
             // Always stamp the launching site id (both sides need it).
-            try { TacticalDeploySync.OnTacticalLaunch(mission); } catch { }
+            try { TacticalDeploySync.OnTacticalLaunch(mission); }
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnTacticalLaunch failed: {ex}"); }
 
             if (engine.IsHost) return true;   // host launches authoritatively
 
@@ -133,7 +138,8 @@ namespace Multipleer.Harmony.Tactical
 
         public static void Postfix()
         {
-            try { TacticalDeploySync.OnMissionExit(); } catch { }
+            try { TacticalDeploySync.OnMissionExit(); }
+            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit failed: {ex}"); }
         }
     }
 }
