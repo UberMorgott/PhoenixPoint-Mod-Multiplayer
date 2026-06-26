@@ -3,6 +3,7 @@ using System.Reflection;
 using Base.Core;
 using HarmonyLib;
 using Multipleer.Network;
+using UnityEngine;
 
 namespace Multipleer.Harmony
 {
@@ -24,8 +25,18 @@ namespace Multipleer.Harmony
     // body entirely -> no NRE, no TFTVLogger.Error, no popup.
     //
     // TFTV is NEVER hard-referenced: types/methods resolve via AccessTools reflection; when TFTV is absent
-    // Prepare() returns false and Harmony skips the patch entirely (zero impact, so non-TFTV installs still
-    // load). Harmony auto-registers both classes via MultipleerMain's PatchAll.
+    // the type never resolves so the guard never patches (zero impact, so non-TFTV installs still load).
+    //
+    // BINDING (load-order race fix). PP enables mods alphabetically, so "Morgott.Multipleer" runs its
+    // PatchAll BEFORE "phoenixrising.tftv" is loaded. At PatchAll time these [HarmonyPatch] classes hit
+    // their Prepare() TFTV-present gate (TypeByName == null) and Harmony PERMANENTLY drops them -> the guard
+    // never bound and the teardown NRE popup returned (commit 1e26a7f's guard never took effect). So instead
+    // of relying on PatchAll+Prepare, ClientTftvGeoscapeUiTeardownDeferredInstaller (below) defers the bind
+    // via AppDomain.AssemblyLoad and applies these prefixes the instant the TFTV assembly loads -- the SAME
+    // mechanism TftvLogDeferredInstaller already uses for the log redirect. If TFTV is ALREADY loaded at
+    // PatchAll time (load order changed) the [HarmonyPatch]/Prepare() path binds eagerly and the installer
+    // no-ops (no double patch). The Prepare()/TargetMethod() gate is kept as defense for that eager path and
+    // so a non-TFTV install never patches.
     internal static class ClientTftvGeoscapeUiTeardownDecision
     {
         // Shared runtime decision for both prefixes. Returns true => let the TFTV body run; false => skip it.
@@ -59,19 +70,19 @@ namespace Multipleer.Harmony
     [HarmonyPatch]
     public static class ClientTftvFoodMutagenTooltipTeardownGuardPatch
     {
-        private static Type _tftvType; // resolved once in Prepare(); used by TargetMethod()
-
+        // Resolve the TFTV type FRESH on each call (no Prepare()-cached field) so the deferred installer can
+        // call TargetMethod() standalone the instant the TFTV assembly loads -- exactly like the log patch.
         public static bool Prepare()
         {
-            _tftvType = AccessTools.TypeByName("TFTV.TFTVCapturePandoransGeoscape");
-            return _tftvType != null; // TFTV not loaded -> Harmony skips this class
+            return AccessTools.TypeByName("TFTV.TFTVCapturePandoransGeoscape") != null; // TFTV absent -> Harmony skips
         }
 
         public static MethodBase TargetMethod()
         {
-            if (_tftvType == null) return null; // defensive: TFTV absent -> no target
+            var tftvType = AccessTools.TypeByName("TFTV.TFTVCapturePandoransGeoscape");
+            if (tftvType == null) return null; // defensive: TFTV absent (or not yet loaded) -> no target
             // Exact, parameterless overload (Type.EmptyTypes) so AccessTools binds the right member.
-            return AccessTools.Method(_tftvType, "RefreshFoodAndMutagenProductionTooltupUI", Type.EmptyTypes);
+            return AccessTools.Method(tftvType, "RefreshFoodAndMutagenProductionTooltupUI", Type.EmptyTypes);
         }
 
         // Returning false SKIPS TFTV's body (no NRE, no rethrow, no popup) during the client teardown window.
@@ -90,25 +101,139 @@ namespace Multipleer.Harmony
     [HarmonyPatch]
     public static class ClientTftvOdiMeterTeardownGuardPatch
     {
-        private static Type _tftvType; // resolved once in Prepare(); used by TargetMethod()
-
+        // Resolve the TFTV type FRESH on each call (no Prepare()-cached field) so the deferred installer can
+        // call TargetMethod() standalone the instant the TFTV assembly loads -- exactly like the log patch.
         public static bool Prepare()
         {
-            _tftvType = AccessTools.TypeByName("TFTV.TFTVUI.Geoscape.TopInfoBar+TFTV_ODI_meter_patch");
-            return _tftvType != null; // TFTV not loaded (or class renamed) -> Harmony skips this class
+            return AccessTools.TypeByName("TFTV.TFTVUI.Geoscape.TopInfoBar+TFTV_ODI_meter_patch") != null; // absent/renamed -> skip
         }
 
         public static MethodBase TargetMethod()
         {
-            if (_tftvType == null) return null; // defensive: TFTV absent -> no target
+            var tftvType = AccessTools.TypeByName("TFTV.TFTVUI.Geoscape.TopInfoBar+TFTV_ODI_meter_patch");
+            if (tftvType == null) return null; // defensive: TFTV absent (or not yet loaded) -> no target
             // Single Postfix in this nested class -> unambiguous by name.
-            return AccessTools.Method(_tftvType, "Postfix");
+            return AccessTools.Method(tftvType, "Postfix");
         }
 
         // Returning false SKIPS TFTV's ODI postfix body (no NRE, no TFTVLogger.Error) during teardown.
         public static bool Prefix()
         {
             return ClientTftvGeoscapeUiTeardownDecision.RunTftvUiNormally();
+        }
+    }
+
+    // Deferred installer for the two TFTV geoscape-UI teardown guards above.
+    //
+    // WHY: PP enables mods alphabetically, so MultipleerMain.OnModEnabled runs harmony.PatchAll BEFORE
+    // "phoenixrising.tftv" is loaded. At PatchAll time TFTV.TFTVCapturePandoransGeoscape /
+    // TFTV.TFTVUI.Geoscape.TopInfoBar+TFTV_ODI_meter_patch are NOT yet loaded, so both [HarmonyPatch] guard
+    // classes hit their Prepare() null-gate and are SILENTLY dropped forever -- the guards never bind and
+    // TFTV's teardown NRE popup ("An error has occurred in the Terror from the Void mod") returns on a co-op
+    // save-load. This is the SAME alphabetical PatchAll race the log redirect already solved.
+    //
+    // FIX: subscribe to AppDomain.AssemblyLoad (identical to TftvLogDeferredInstaller). The event fires
+    // synchronously while the CLR loads TFTV's assembly, which necessarily precedes any geoscape teardown.
+    // The moment each guarded type resolves we install the SAME existing Prefix via harmony.Patch -- no
+    // forked decision logic, the runtime gate (ShouldRunTftvUiNormally) is unchanged. A static guard per
+    // target makes the patch idempotent across the multiple AssemblyLoad events.
+    //
+    // If TFTV is ALREADY loaded when we install (unexpected load order), the [HarmonyPatch]/PatchAll path
+    // above already covered it; we set the guards and do nothing, so there is never a double patch. If TFTV
+    // is absent entirely the type never resolves -> we never patch (non-TFTV installs unaffected).
+    internal static class ClientTftvGeoscapeUiTeardownDeferredInstaller
+    {
+        private static readonly object _lock = new object();
+        private static HarmonyLib.Harmony _harmony;
+        private static AssemblyLoadEventHandler _handler;
+        private static bool _foodTooltipPatched;
+        private static bool _odiMeterPatched;
+
+        // Called from MultipleerMain.OnModEnabled right after PatchAll, with the mod's Harmony instance.
+        public static void Install(HarmonyLib.Harmony harmony)
+        {
+            if (harmony == null)
+                return;
+
+            _harmony = harmony;
+
+            // Already loaded (e.g. load order changed)? Then PatchAll's [HarmonyPatch] guard classes already
+            // bound (Prepare() returned true) -- mark handled and do NOT patch again (avoid a duplicate prefix).
+            if (AccessTools.TypeByName("TFTV.TFTVCapturePandoransGeoscape") != null)
+            {
+                _foodTooltipPatched = true;
+                _odiMeterPatched = true;
+                Debug.Log("[Multipleer] TFTV already loaded at PatchAll time; geoscape teardown guard handled by PatchAll.");
+                return;
+            }
+
+            _handler = (sender, args) => OnAssemblyLoad();
+            AppDomain.CurrentDomain.AssemblyLoad += _handler;
+            Debug.Log("[Multipleer] deferred TFTV geoscape teardown guard armed; waiting for TFTV assembly load.");
+        }
+
+        private static void OnAssemblyLoad()
+        {
+            // NEVER throw into an AppDomain event -- that can destabilize the host. Swallow everything.
+            try
+            {
+                lock (_lock)
+                {
+                    TryPatchFoodTooltipGuard();
+                    TryPatchOdiMeterGuard();
+
+                    if (_foodTooltipPatched && _odiMeterPatched)
+                        Unsubscribe();
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Multipleer] deferred TFTV geoscape teardown guard handler failed: " + e.Message);
+            }
+        }
+
+        private static void TryPatchFoodTooltipGuard()
+        {
+            if (_foodTooltipPatched)
+                return;
+
+            var target = ClientTftvFoodMutagenTooltipTeardownGuardPatch.TargetMethod(); // null until TFTV type resolves.
+            if (target == null)
+                return;
+
+            _harmony.Patch(
+                target,
+                prefix: new HarmonyMethod(typeof(ClientTftvFoodMutagenTooltipTeardownGuardPatch),
+                    nameof(ClientTftvFoodMutagenTooltipTeardownGuardPatch.Prefix)));
+
+            _foodTooltipPatched = true;
+            Debug.Log("[Multipleer] deferred TFTV food/mutagen tooltip teardown guard installed.");
+        }
+
+        private static void TryPatchOdiMeterGuard()
+        {
+            if (_odiMeterPatched)
+                return;
+
+            var target = ClientTftvOdiMeterTeardownGuardPatch.TargetMethod(); // null until the nested ODI type resolves.
+            if (target == null)
+                return;
+
+            _harmony.Patch(
+                target,
+                prefix: new HarmonyMethod(typeof(ClientTftvOdiMeterTeardownGuardPatch),
+                    nameof(ClientTftvOdiMeterTeardownGuardPatch.Prefix)));
+
+            _odiMeterPatched = true;
+            Debug.Log("[Multipleer] deferred TFTV ODI meter teardown guard installed.");
+        }
+
+        private static void Unsubscribe()
+        {
+            if (_handler == null)
+                return;
+            AppDomain.CurrentDomain.AssemblyLoad -= _handler;
+            _handler = null;
         }
     }
 }
