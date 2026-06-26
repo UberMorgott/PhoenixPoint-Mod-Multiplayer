@@ -32,5 +32,6 @@ namespace Multipleer.Network.Sync
         // in the geoscape partition (non-overlapping with tactical 0x80-0x9F and the legacy action/channel
         // ids 1-30 above). Emitted only behind GeoRailGate; the legacy raw packet stays the primary path.
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
+        public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
     }
 }

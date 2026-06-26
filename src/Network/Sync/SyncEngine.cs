@@ -288,8 +288,19 @@ namespace Multipleer.Network.Sync
             _channelVersion.TryGetValue(id, out var v);
             v++;
             _channelVersion[id] = v;
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.StateSync,
-                SyncProtocol.EncodeStateSync(id, v, payload)));
+            var stateBytes = SyncProtocol.EncodeStateSync(id, v, payload);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.StateSync, stateBytes));
+            // Inc1 rail-unify slice 2 (additive, gated): ALSO mirror the SAME per-channel state echo onto the
+            // unified 0x67 envelope rail under the GeoState surface. The inner bytes are the IDENTICAL
+            // EncodeStateSync(id, v, payload) the legacy 0x64 carries, so OnStateSync's per-channel version
+            // guard (SequenceTracker.ShouldApplyChannel, strict >) drops whichever of the two arrives second —
+            // applying twice is a no-op. Legacy 0x64 above is retained (retirement deferred to a later slice).
+            if (GeoRailGate.Enabled)
+            {
+                Debug.Log("[Multipleer][geo] mirror state onto 0x67 envelope (GeoState) ch=" + id + " ver=" + v);
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, stateBytes)));
+            }
         }
 
         /// <summary>Host: push every channel's current state (geoscape became active / late joiner ready).</summary>
@@ -703,6 +714,16 @@ namespace Multipleer.Network.Sync
                 Debug.Log("[Multipleer][geo] inbound wallet via 0x67 envelope (GeoWallet surface)");
                 try { OnWalletSync(payload); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo wallet envelope failed: " + ex.Message); }
+                return true;
+            }
+            if (surfaceId == SurfaceIds.GeoState)
+            {
+                // Behavior-identical to the legacy 0x64 path: OnStateSync is host-guarded + per-channel
+                // version-guarded (SequenceTracker.ShouldApplyChannel), so applying via the envelope is
+                // idempotent — a same-version duplicate from the legacy packet (or a re-send) drops.
+                Debug.Log("[Multipleer][geo] inbound state via 0x67 envelope (GeoState surface)");
+                try { OnStateSync(payload); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo state envelope failed: " + ex.Message); }
                 return true;
             }
             return false;
