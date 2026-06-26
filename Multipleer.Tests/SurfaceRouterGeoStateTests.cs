@@ -1,10 +1,10 @@
 using Multipleer.Network.Sync;
 using Xunit;
 
-// Slice-2 of the rail-unification: the legacy per-channel state echo (0x64 / StateSync) ALSO rides the
-// unified 0x67 envelope under the GeoState (0xA1) surface when GeoRailGate.Enabled. These mirror the
-// slice-1 wallet rail tests (SurfaceRouterGeoscapeTests) for the new surface: envelope encode/decode wire
-// parity, router-consume routing, tactical precedence, idempotent per-channel apply, and the shared gate.
+// Rail-unification (phase 1 complete): the per-channel state echo rides the unified 0x67 envelope under the
+// GeoState (0xA1) surface as the SOLE rail — the legacy 0x64 / StateSync send is retired. These mirror the
+// slice-1 wallet rail tests (SurfaceRouterGeoscapeTests) for this surface: envelope encode/decode wire parity,
+// router-consume routing, tactical precedence, idempotent per-channel apply, and the sole-rail byte parity.
 public class SurfaceRouterGeoStateTests
 {
     // The mirror the host emits: an envelope on the GeoState surface whose INNER bytes are the IDENTICAL
@@ -99,32 +99,20 @@ public class SurfaceRouterGeoStateTests
         Assert.True(tracker.ShouldApplyChannel(3, 1));
     }
 
-    // Gate governs the additive mirror only: with GeoRailGate disabled, the host emits the GeoState envelope
-    // for NO channel (legacy 0x64 only); enabling it mirrors the SAME bytes additively. Mirrors the production
-    // `if (GeoRailGate.Enabled)` guard in SyncEngine.FlushChannel without touching the (game-bound) engine.
+    // Rail-unify phase 1: the legacy 0x64 StateSync send is RETIRED — the per-channel state echo now rides the
+    // unified 0x67 envelope under the GeoState (0xA1) surface as the SOLE rail, emitted UNCONDITIONALLY (the
+    // former `if (GeoRailGate.Enabled)` guard was removed from SyncEngine.FlushChannel; the gate is left intact
+    // for other surfaces). This pins that the sole rail carries the SAME per-channel StateSync bytes the retired
+    // 0x64 used to, so the wire payload is byte-for-byte preserved regardless of any gate state.
     [Fact]
-    public void GateOff_MeansLegacyOnly_NoGeoStateEnvelopeEmitted()
+    public void GeoStateEnvelope_IsSoleRail_CarriesLegacyStateSyncBytesVerbatim()
     {
-        bool saved = GeoRailGate.Enabled;
-        try
-        {
-            // The legacy per-channel state bytes are produced unconditionally (independent of the gate).
-            var legacy = SyncProtocol.EncodeStateSync(5, 1, new byte[] { 1 });
+        var legacy = SyncProtocol.EncodeStateSync(5, 1, new byte[] { 1 });   // the exact bytes the retired 0x64 carried
+        var mirror = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, legacy);
 
-            GeoRailGate.Enabled = false;
-            byte[] mirrorWhenOff = GeoRailGate.Enabled
-                ? SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, legacy)
-                : null;
-            Assert.Null(mirrorWhenOff);   // gate OFF → legacy-only, byte-for-byte unchanged geoscape wire
-
-            GeoRailGate.Enabled = true;
-            byte[] mirrorWhenOn = GeoRailGate.Enabled
-                ? SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, legacy)
-                : null;
-            Assert.NotNull(mirrorWhenOn);                                  // gate ON → additive mirror exists
-            Assert.True(SyncProtocol.TryDecodeEnvelope(mirrorWhenOn, out _, out _, out var inner));
-            Assert.Equal(legacy, inner);                                   // and it carries the SAME legacy bytes
-        }
-        finally { GeoRailGate.Enabled = saved; }
+        Assert.True(SyncProtocol.TryDecodeEnvelope(mirror, out var sid, out var kind, out var inner));
+        Assert.Equal(SurfaceIds.GeoState, sid);                             // sole rail = GeoState 0xA1 surface
+        Assert.Equal(SyncKind.StateSnapshot, kind);
+        Assert.Equal(legacy, inner);                                        // carries the retired-0x64 bytes verbatim
     }
 }

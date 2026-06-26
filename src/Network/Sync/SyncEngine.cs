@@ -70,8 +70,10 @@ namespace Multipleer.Network.Sync
         {
             _engine = engine;
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
-            // Inc1 rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+)
-            // routes to this engine's appliers. Inert for traffic the host never sends (gated by GeoRailGate).
+            // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
+            // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
+            // (0xA1) now ride this envelope rail ONLY (host emits them unconditionally; see BroadcastFullWallet/
+            // FlushChannel/Tick).
             _router.GeoscapeInbound = HandleGeoscapeEnvelope;
         }
 
@@ -260,17 +262,13 @@ namespace Multipleer.Network.Sync
             var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
             if (slots == null) return;
             ulong ver = ++_walletVersion;
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.WalletSync,
-                SyncProtocol.EncodeWalletSync(ver, slots)));
-            // Inc1 rail-unify (additive, default OFF): ALSO mirror the SAME versioned snapshot onto the unified
-            // 0x67 envelope rail. Same version ⇒ the client applies whichever arrives first and drops the other
-            // (ShouldApplyWallet is strict >). Retiring the legacy 0x63 send above is a later, in-game-verified slice.
-            if (GeoRailGate.Enabled)
-            {
-                _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
-                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
-                        SyncProtocol.EncodeWalletSync(ver, slots))));
-            }
+            // Rail-unify phase 1: the legacy 0x63 WalletSync send is RETIRED — the versioned full-wallet snapshot
+            // now rides ONLY the unified 0x67 envelope rail under the GeoWallet (0xA0) surface. The inner bytes are
+            // the IDENTICAL EncodeWalletSync(ver, slots) the legacy 0x63 carried; the client applier (OnWalletSync,
+            // version-guarded) is unchanged, reached via HandleGeoscapeEnvelope. Sole rail, emitted unconditionally.
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
+                    SyncProtocol.EncodeWalletSync(ver, slots))));
         }
 
         // ─── Generic state-channel echo (mechanism C) ────────────────────
@@ -288,17 +286,12 @@ namespace Multipleer.Network.Sync
             v++;
             _channelVersion[id] = v;
             var stateBytes = SyncProtocol.EncodeStateSync(id, v, payload);
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.StateSync, stateBytes));
-            // Inc1 rail-unify slice 2 (additive, gated): ALSO mirror the SAME per-channel state echo onto the
-            // unified 0x67 envelope rail under the GeoState surface. The inner bytes are the IDENTICAL
-            // EncodeStateSync(id, v, payload) the legacy 0x64 carries, so OnStateSync's per-channel version
-            // guard (SequenceTracker.ShouldApplyChannel, strict >) drops whichever of the two arrives second —
-            // applying twice is a no-op. Legacy 0x64 above is retained (retirement deferred to a later slice).
-            if (GeoRailGate.Enabled)
-            {
-                _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
-                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, stateBytes)));
-            }
+            // Rail-unify phase 1: the legacy 0x64 StateSync send is RETIRED — the per-channel state echo now rides
+            // ONLY the unified 0x67 envelope rail under the GeoState (0xA1) surface. The inner bytes are the
+            // IDENTICAL EncodeStateSync(id, v, payload) the legacy 0x64 carried, so the client applier (OnStateSync,
+            // per-channel version-guarded) is unchanged, reached via HandleGeoscapeEnvelope. Sole rail, unconditional.
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, stateBytes)));
         }
 
         /// <summary>Host: push every channel's current state (geoscape became active / late joiner ready).</summary>
@@ -666,16 +659,12 @@ namespace Multipleer.Network.Sync
                 if (slots != null)
                 {
                     ulong ver = ++_walletVersion;
-                    _engine.BroadcastToAll(new NetworkMessage(PacketType.WalletSync,
-                        SyncProtocol.EncodeWalletSync(ver, slots)));
-                    // Inc1 rail-unify (additive, default OFF): mirror the same versioned snapshot onto the 0x67
-                    // envelope rail. Idempotent (version-guarded) so both paths can run live during verification.
-                    if (GeoRailGate.Enabled)
-                    {
-                        _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
-                            SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
-                                SyncProtocol.EncodeWalletSync(ver, slots))));
-                    }
+                    // Rail-unify phase 1: legacy 0x63 WalletSync send RETIRED — the coalesced dirty-flush snapshot
+                    // now rides ONLY the unified 0x67 envelope rail (GeoWallet 0xA0 surface), same inner
+                    // EncodeWalletSync bytes, same version-guarded OnWalletSync applier. Sole rail, unconditional.
+                    _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                        SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
+                            SyncProtocol.EncodeWalletSync(ver, slots))));
                 }
             }
 

@@ -57,8 +57,8 @@ namespace Multipleer.Network.MessageLayer
         ActionRequest = 0x60,   // client -> host
         ActionApply   = 0x61,   // host -> all
         ActionReject  = 0x62,   // host -> originator
-        WalletSync    = 0x63,   // host -> all
-        StateSync     = 0x64,   // host -> all: per-channel versioned state echo [channelId][version][payload]
+        WalletSync    = 0x63,   // RETIRED (rail-unify phase 1): wallet now rides 0x67 SyncEnvelope GeoWallet 0xA0 surface; no senders
+        StateSync     = 0x64,   // RETIRED (rail-unify phase 1): per-channel state now rides 0x67 SyncEnvelope GeoState 0xA1 surface; no senders
         EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
         EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
         SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]

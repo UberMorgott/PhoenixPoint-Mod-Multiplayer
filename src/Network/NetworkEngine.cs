@@ -529,15 +529,10 @@ namespace Multipleer.Network
                     Sync?.OnActionReject(msg.Payload);
                     break;
 
-                case PacketType.WalletSync:
-                    // Host->all versioned full-wallet snapshot. Clients apply as signed diffs.
-                    Sync?.OnWalletSync(msg.Payload);
-                    break;
-
-                case PacketType.StateSync:
-                    // Host->all per-channel versioned state echo. Clients overwrite + refresh UI.
-                    Sync?.OnStateSync(msg.Payload);
-                    break;
+                // Rail-unify phase 1: the legacy raw 0x63 WalletSync / 0x64 StateSync inbound routes are RETIRED —
+                // wallet + state now ride the unified 0x67 SyncEnvelope rail (GeoWallet 0xA0 / GeoState 0xA1),
+                // dispatched by Sync.OnSyncEnvelope -> SurfaceRouter -> HandleGeoscapeEnvelope, which still reaches
+                // the SAME OnWalletSync / OnStateSync appliers. Zero senders remain for 0x63/0x64.
 
                 case PacketType.EventRaised:
                     // Host->all geoscape event raised. Clients reconstruct + show the dialog (no local pause).
