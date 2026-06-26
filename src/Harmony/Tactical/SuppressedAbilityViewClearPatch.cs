@@ -49,7 +49,7 @@ namespace Multipleer.Harmony.Tactical
         private static MethodBase _target;
         private static MethodInfo _activate;          // TacticalAbility.Activate(object)
         private static PropertyInfo _contextProp;     // TacticalViewState.Context (protected)
-        private static PropertyInfo _viewProp;         // TacticalViewContext.View
+        private static FieldInfo _viewField;           // TacticalViewContext.View (public FIELD, not a property)
         private static MethodInfo _updateApWp;        // TacticalView.UpdateSquadMembersActionAndWillPoints()
         private static MethodInfo _resetCharSelected; // TacticalView.ResetCharacterSelectedState()
         private static object _clearStackAndPush;     // StateStackAction.ClearStackAndPush (boxed)
@@ -80,9 +80,12 @@ namespace Multipleer.Harmony.Tactical
             _updateApWp = null; // resolved lazily off the live View instance (TacticalView is the concrete type)
             if (_activate == null || _contextProp == null) return false;
 
+            // TacticalViewContext.View is a public FIELD (TacticalViewContext.cs:13 `public TacticalView View;`),
+            // NOT a property. The old AccessTools.Property(ctxType, "View") returned null → Prepare() false → the
+            // WHOLE patch never bound (no overwatch/bash recovery ever ran). Resolve it as a Field.
             var ctxType = _contextProp.PropertyType;
-            _viewProp = AccessTools.Property(ctxType, "View");
-            if (_viewProp == null) return false;
+            _viewField = AccessTools.Field(ctxType, "View");
+            if (_viewField == null) return false;
 
             try { _clearStackAndPush = Enum.Parse(action, "ClearStackAndPush"); }
             catch { return false; }
@@ -109,7 +112,7 @@ namespace Multipleer.Harmony.Tactical
                 _activate.Invoke(__0, new[] { __1 });
 
                 object ctx = _contextProp.GetValue(__instance, null);
-                object view = ctx != null ? _viewProp.GetValue(ctx, null) : null;
+                object view = ctx != null ? _viewField.GetValue(ctx) : null;
                 if (view != null)
                 {
                     var upd = _updateApWp ?? (_updateApWp = AccessTools.Method(view.GetType(), "UpdateSquadMembersActionAndWillPoints"));
