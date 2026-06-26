@@ -253,6 +253,10 @@ namespace Multipleer.Network.Sync
             _tracker.MarkWallet(ver);
             try { using (SyncApplyScope.Enter()) WalletApplier.Apply(GeoRuntime.Instance, slots); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnWalletSync failed: " + ex.Message); }
+            // The persistent top resource bar (UIModuleInfoBar) repaints only from native Wallet model
+            // events, which the reflective WalletApplier.Apply write doesn't trip — so the synced money sat
+            // stale until the client's next local action. Re-drive the native repaint now (no-op if no view).
+            GeoUiRefresh.RefreshPersistentBars(GeoRuntime.Instance);
         }
 
         /// <summary>Host: push a full versioned wallet snapshot (geoscape became active / late joiner ready).</summary>
@@ -319,6 +323,12 @@ namespace Multipleer.Network.Sync
             var screen = _channels.ScreenFor(channelId);
             if (screen.HasValue) GeoUiRefresh.Refresh(GeoRuntime.Instance, screen.Value);
             else if (channelId >= 3) GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);
+            // The persistent bottom section bar's Research progress segment (UIModuleGeoSectionBar) +
+            // the top resource bar repaint only from native model events / the hourly progress coroutine,
+            // which the reflective channel apply doesn't trip — so research progress + any resource refund
+            // on a synced research/state change stayed stale until the next local action. Re-drive the
+            // native persistent-bar repaints now (idempotent; each is null-guarded + no-op if no view).
+            GeoUiRefresh.RefreshPersistentBars(GeoRuntime.Instance);
         }
 
         /// <summary>Host: drop all channel change-event subscriptions (session end). Idempotent.</summary>

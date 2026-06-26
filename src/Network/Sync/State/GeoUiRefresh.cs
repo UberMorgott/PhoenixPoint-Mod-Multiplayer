@@ -48,6 +48,16 @@ namespace Multipleer.Network.Sync.State
         private static PropertyInfo _baseLayoutPxBaseProp; // UIModuleBaseLayout.PxBase (public getter)
         private static MethodInfo _baseLayoutInit;         // UIModuleBaseLayout.Init(GeoPhoenixBase, GeoscapeViewContext, bool=true)
 
+        // ─── Persistent bars (do NOT rebuild from a reflective model write) ──
+        private static FieldInfo _infoBarModuleField;     // GeoscapeModulesData.ResourcesModule → UIModuleInfoBar
+        private static FieldInfo _infoBarContextField;    // UIModuleInfoBar._context (private GeoscapeViewContext)
+        private static MethodInfo _infoBarUpdateResource; // UIModuleInfoBar.UpdateResourceInfo(GeoFaction, bool) (private)
+        private static PropertyInfo _ctxViewerFactionProp; // GeoscapeViewContext.ViewerFaction (public getter → GeoFaction)
+        private static FieldInfo _sectionBarModuleField;  // GeoscapeModulesData.GeoSectionBarModule → UIModuleGeoSectionBar
+        private static FieldInfo _sectionBarContextField; // UIModuleGeoSectionBar._context (private GeoscapeViewContext)
+        private static MethodInfo _sectionBarUpdateProgress; // UIModuleGeoSectionBar.UpdateProgressBar(UIGeoSection) (public)
+        private static object _uiGeoSectionResearch;      // boxed UIGeoSection.Research enum value
+
         private static void Ensure(GeoRuntime rt)
         {
             if (_ready) return;
@@ -101,6 +111,34 @@ namespace Multipleer.Network.Sync.State
                 }
             }
 
+            // Persistent geoscape bars (wallet info bar + bottom section progress bar). Unlike the screen
+            // modules above, these stay open across the whole geoscape but only repaint from native model
+            // events (Wallet.ResourcesChanged / the hourly progress coroutine), which a reflective host-echo
+            // apply does not trip — so the client shows stale money/progress until its next local action. We
+            // re-drive the modules' own native repaint methods. Best-effort: absence must not break the
+            // screen-module refreshes above, so this is gated independently and never affects `_ready`.
+            var infoBarType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleInfoBar");
+            var ctxType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeViewContext");
+            if (infoBarType != null && ctxType != null)
+            {
+                _infoBarModuleField = AccessTools.Field(modulesType, "ResourcesModule");
+                _infoBarContextField = AccessTools.Field(infoBarType, "_context");
+                // UIModuleInfoBar.UpdateResourceInfo(GeoFaction faction, bool useAnimation) — single overload (:388).
+                _infoBarUpdateResource = AccessTools.Method(infoBarType, "UpdateResourceInfo");
+                _ctxViewerFactionProp = AccessTools.Property(ctxType, "ViewerFaction");
+            }
+            var sectionBarType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleGeoSectionBar");
+            var sectionEnumType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIGeoSection");
+            if (sectionBarType != null && sectionEnumType != null)
+            {
+                _sectionBarModuleField = AccessTools.Field(modulesType, "GeoSectionBarModule");
+                _sectionBarContextField = AccessTools.Field(sectionBarType, "_context");
+                // UIModuleGeoSectionBar.UpdateProgressBar(UIGeoSection geoSection) — public, reads model (:347).
+                _sectionBarUpdateProgress = AccessTools.Method(sectionBarType, "UpdateProgressBar", new[] { sectionEnumType });
+                try { _uiGeoSectionResearch = Enum.Parse(sectionEnumType, "Research"); }
+                catch { _uiGeoSectionResearch = null; }
+            }
+
             _ready = _viewField != null && _modulesField != null && _manufModuleField != null
                      && _manufContextField != null && _manufInit != null;
         }
@@ -132,6 +170,72 @@ namespace Multipleer.Network.Sync.State
             Refresh(rt, Screen.Research);
             Refresh(rt, Screen.Manufacturing);
             Refresh(rt, Screen.BaseLayout);
+        }
+
+        /// <summary>
+        /// Re-drive the two PERSISTENT geoscape bars after a CLIENT-side synced apply: the top wallet/
+        /// resource info bar (UIModuleInfoBar.UpdateResourceInfo) and the bottom section bar's Research
+        /// progress segment (UIModuleGeoSectionBar.UpdateProgressBar). These stay open across the whole
+        /// geoscape but only repaint from native model events — a reflective host-echo apply doesn't trip
+        /// those, so they show stale money/progress until the next local action. Inbound sync is delivered
+        /// on the Unity main thread (the transport drains its receive queue inside Update()), so calling
+        /// these UI methods directly here is main-thread-safe. Every step is null-guarded + IsOpen-gated +
+        /// try/catch → a safe no-op when no geoscape view is shown (and harmless if ever run on the host).
+        /// </summary>
+        public static void RefreshPersistentBars(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure(rt);
+                RefreshWalletBar(rt);
+                RefreshResearchProgressBar(rt);
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multipleer] GeoUiRefresh.RefreshPersistentBars best-effort failed: " + ex.Message); }
+        }
+
+        private static void RefreshWalletBar(GeoRuntime rt)
+        {
+            if (_infoBarModuleField == null || _infoBarContextField == null
+                || _infoBarUpdateResource == null || _ctxViewerFactionProp == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return;
+            var module = _infoBarModuleField.GetValue(modules);
+            if (module == null) return;
+            if (!IsOpen(module)) return;
+
+            var context = _infoBarContextField.GetValue(module);
+            if (context == null) return; // never opened yet → nothing cached
+            var faction = _ctxViewerFactionProp.GetValue(context, null);
+            if (faction == null) return;
+
+            // UIModuleInfoBar.UpdateResourceInfo(viewerFaction, useAnimation:false) — repaint resource text now.
+            _infoBarUpdateResource.Invoke(module, new object[] { faction, false });
+        }
+
+        private static void RefreshResearchProgressBar(GeoRuntime rt)
+        {
+            if (_sectionBarModuleField == null || _sectionBarContextField == null
+                || _sectionBarUpdateProgress == null || _uiGeoSectionResearch == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return;
+            var module = _sectionBarModuleField.GetValue(modules);
+            if (module == null) return;
+            if (!IsOpen(module)) return;
+
+            // UpdateProgressBar reads _context.ViewerFaction.Research.Progress; a null _context would NPE.
+            var context = _sectionBarContextField.GetValue(module);
+            if (context == null) return; // never opened yet → nothing cached
+
+            // UIModuleGeoSectionBar.UpdateProgressBar(UIGeoSection.Research) — repaint the research segment.
+            _sectionBarUpdateProgress.Invoke(module, new object[] { _uiGeoSectionResearch });
         }
 
         private static void RefreshManufacturing(GeoRuntime rt)
