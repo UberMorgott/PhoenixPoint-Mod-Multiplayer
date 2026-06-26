@@ -67,6 +67,7 @@ namespace Multipleer.Network.MessageLayer
         // 0x68 retired (was ChoiceClaim): geoscape event-choice resolution now rides AnswerEventAction over the
         // research-style ActionRequest/ActionApply relay (occId on the action wire). Do NOT reuse this id.
         ReportModalShow = 0x69, // host -> all: show a geoscape REPORT modal on clients (Phase-A report-window mirror)
+        EventAdvanceResult = 0x6A, // host -> all: single-choice PROMPT->RESULT advance (no native CompleteEvent fires); reuses the EventDismiss codec (occId/eventId/choiceIndex/siteId, no reward blob)
 
         // Chat
         ChatMessage = 0x50,

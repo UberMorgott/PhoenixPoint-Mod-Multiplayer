@@ -554,6 +554,12 @@ namespace Multipleer.Network
                     Sync?.OnEventDismiss(msg.Payload);
                     break;
 
+                case PacketType.EventAdvanceResult:
+                    // Host->all single-choice PROMPT->RESULT advance. A client mirroring the host prompt jumps
+                    // to its result page (no native CompleteEvent/EventDismiss fires on that host click).
+                    Sync?.OnEventAdvanceResult(msg.Payload);
+                    break;
+
                 case PacketType.ReportModalShow:
                     // Host->all report window opened. Clients reconstruct + show the same modal (Phase-A mirror).
                     Sync?.OnReportModalShow(msg.Payload);

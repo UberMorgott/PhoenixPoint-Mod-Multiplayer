@@ -678,9 +678,26 @@ namespace Multipleer.Network.Sync.State
         {
             try
             {
-                if (_resourcesListField == null || _namedListGetDef == null || _viewDisplayName1 == null) return null;
+                // The enum-NAME map (RewardResourceTypes, verified vs decompiled ResourceType: Supplies=1,
+                // Materials=2, …) is correct, so a dropped resource line is now a RUNTIME resolve failure further
+                // down (an unbound reflection member that _clientReady doesn't gate, a NamedListDef key miss, or
+                // an empty localization). The gated markers below pinpoint WHICH stage failed so the next in-game
+                // run is verifiable instead of just logging the coarse "unresolved type N" at the call site.
+                bool diag = EventMirrorFixGate.Enabled;
+                if (_resourcesListField == null || _namedListGetDef == null || _viewDisplayName1 == null)
+                {
+                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve UNBOUND raw=" + resourceTypeRaw
+                        + " (_resourcesListField=" + (_resourcesListField != null)
+                        + " _namedListGetDef=" + (_namedListGetDef != null)
+                        + " _viewDisplayName1=" + (_viewDisplayName1 != null) + ") — resource line drops");
+                    return null;
+                }
                 var list = _resourcesListField.GetValue(module);
-                if (list == null) return null;
+                if (list == null)
+                {
+                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " ResourcesList NULL on module — resource line drops");
+                    return null;
+                }
                 // ResourceType enum name from its raw value via a STABLE compile-time map (FIX #1). The native
                 // renderer keys ResourcesList by Type.ToString() — the enum NAME ("Materials"/"Supplies"), never
                 // the number (UIModuleSiteEncounters.cs:417). The previous runtime AccessTools.TypeByName(
@@ -689,11 +706,21 @@ namespace Multipleer.Network.Sync.State
                 // every reward resource line ("unresolved type 2"/"unresolved type 1" in-game). The map mirrors
                 // the compile-time game enum (identical host↔client) so the key is always the resolvable name.
                 string typeName = RewardResourceTypes.NameForRaw(resourceTypeRaw);
-                if (string.IsNullOrEmpty(typeName)) return null;
+                if (string.IsNullOrEmpty(typeName))
+                {
+                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " UNMAPPED (flag combo / unknown member) — resource line drops");
+                    return null;
+                }
                 var viewDef = _namedListGetDef.Invoke(list, new object[] { typeName });
-                if (viewDef == null) return null;
+                if (viewDef == null)
+                {
+                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' GetDef MISS (no '" + typeName + "' key in live ResourcesList) — resource line drops");
+                    return null;
+                }
                 var bind = _viewDisplayName1.GetValue(viewDef);
-                return LocalizeBind(bind);
+                var name = LocalizeBind(bind);
+                if (diag) Debug.Log("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' → display='" + name + "'");
+                return name;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ResourceDisplayName failed: " + ex.Message); return null; }
         }

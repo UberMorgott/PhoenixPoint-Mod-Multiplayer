@@ -340,10 +340,16 @@ namespace Multipleer.Network.Sync
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
-                var decision = _eventCorrelator.Raised(occId, eventId, singleChoice);
+                // The gate decides whether a single-choice event MIRRORS the host's window-1 prompt (ON) or keeps
+                // the legacy unconditional jump to the result page (OFF): off-gate we pass singleChoice=false so
+                // EventCorrelator.Raised takes its byte-for-byte legacy ShowResultPage branch.
+                bool mirrorSingleChoice = EventMirrorFixGate.Enabled && singleChoice;
+                var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice);
                 Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
-                          " siteId=" + siteId + " vehicleId=" + vehicleId + " decision=" + decision.Kind +
-                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
+                          " siteId=" + siteId + " vehicleId=" + vehicleId + " singleChoice=" + singleChoice +
+                          " mirror=" + mirrorSingleChoice + " decision=" + decision.Kind +
+                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount +
+                          " promptMirror=" + _eventCorrelator.PromptMirrorCount);
                 var rt = GeoRuntime.Instance;
                 switch (decision.Kind)
                 {
@@ -357,6 +363,13 @@ namespace Multipleer.Network.Sync
                         // drops the call entirely (never throw a reward away from under a page the client will show).
                         // Byte-for-byte legacy when the gate is OFF.
                         if (!EventMirrorFixGate.Enabled) DropBufferedReward(occId);
+                        // Single-choice prompt-MIRROR (gate ON): ChoiceIndex>=0 marks a buffered-dismiss raise that
+                        // EventCorrelator re-showed as the host's window-1 PROMPT (not a jump to the result page).
+                        // The reward stashed from the earlier out-of-order dismiss is intentionally LEFT in place
+                        // (not dropped above) so the host's later advance (OnEventAdvanceResult) can render it.
+                        if (decision.ChoiceIndex >= 0)
+                            Debug.Log("[Multipleer] CLIENT singleChoice prompt-mirror occId=" + occId + " eventId=" + eventId +
+                                      " choiceIndex=" + decision.ChoiceIndex + " → showing PROMPT, awaiting host advance (reward stashed)");
                         // Case B: an in-play site this sim-frozen client never created is ABSENT. Spawn an inert
                         // mirror site from the carried identity BEFORE building the event so BuildEvent's own
                         // site resolution finds it and renders the correct backdrop/subtitle (not StartingBase).
@@ -455,6 +468,37 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// Client: the host advanced a SINGLE-CHOICE event from its window-1 PROMPT to its window-2 RESULT page
+        /// (the host player clicked the lone prompt button). Because the event auto-completed at trigger, that
+        /// click runs no native CompleteEvent — so no EventDismiss fires — and THIS dedicated signal is how the
+        /// client learns to follow. Correlated by occurrence id (<see cref="State.EventCorrelator.Advanced"/>):
+        /// if the client is mirroring the prompt it advances to the result page (reusing the reward stashed from
+        /// the earlier out-of-order dismiss); if the advance beat the raise it is buffered until the raise lands.
+        /// Reuses the EventDismiss codec on the wire (no reward blob). Host never applies its own broadcast.
+        /// Inert when <c>EventMirrorFixGate</c> is OFF: the host emits no such packet.
+        /// </summary>
+        public void OnEventAdvanceResult(byte[] data)
+        {
+            if (_engine.IsHost) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out _, out var siteId)) return;
+            try
+            {
+                var rt = GeoRuntime.Instance;
+                var decision = _eventCorrelator.Advanced(occId, eventId, choiceIndex);
+                Debug.Log("[Multipleer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
+                          " choiceIndex=" + choiceIndex + " siteId=" + siteId + " decision=" + decision.Kind +
+                          " promptMirror=" + _eventCorrelator.PromptMirrorCount +
+                          " pendingAdvance=" + _eventCorrelator.PendingAdvanceCount);
+                // Mirroring the prompt → advance to the result page (reward = the one stashed at the earlier
+                // out-of-order dismiss). Otherwise the advance was BUFFERED (it beat the raise) → no-op now; the
+                // upcoming raise resolves it straight to the result page.
+                if (decision.Kind == State.EventCorrelator.ActionKind.ShowResultPage)
+                    ResolveToResultPage(rt, occId, eventId, choiceIndex, TakeBufferedReward(occId), siteId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventAdvanceResult failed: " + ex.Message); }
+        }
+
+        /// <summary>
         /// Client: rebuild the chosen choice's RESULT/OUTCOME page and replace the (possibly already-resolved)
         /// dialog with it, arming the reward render keyed to THIS synthetic event instance right before the show
         /// so the ReferenceEquals-correlated RewardRenderPatch lands on the correct page exactly once. Falls back
@@ -508,6 +552,22 @@ namespace Multipleer.Network.Sync
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
+        }
+
+        /// <summary>
+        /// Host: tell clients a SINGLE-CHOICE event advanced from its window-1 PROMPT to its window-2 RESULT page.
+        /// Used ONLY for the single-choice-with-outcome case where the host's prompt click runs no native
+        /// CompleteEvent (the event auto-completed at trigger) — so no <see cref="BroadcastEventDismiss"/> fires
+        /// to advance the client. Reuses the EventDismiss wire codec (occId/eventId/<paramref name="choiceIndex"/>/
+        /// <paramref name="siteId"/>; NO reward blob — the client reuses the reward stashed from the earlier
+        /// dismiss). Emitted by <c>SingleChoiceAdvancePatch</c> only when <c>EventMirrorFixGate</c> is ON; no-op
+        /// off-host.
+        /// </summary>
+        public void BroadcastEventAdvanceResult(ushort occurrenceId, string eventId, int choiceIndex, int siteId)
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.EventAdvanceResult,
+                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null, siteId)));
         }
 
         // ─── Geoscape report-window mirror (host->all show, Phase-A) ───────

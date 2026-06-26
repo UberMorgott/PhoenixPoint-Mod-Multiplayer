@@ -56,25 +56,68 @@ public class EventCorrelatorTests
     }
 
     [Fact]
-    public void OutOfOrder_SingleChoiceCompletedDismissBeforeRaise_ResolvesToResultPage()
+    public void OutOfOrder_SingleChoiceDismissBeforeRaise_MirrorsPromptThenAdvancesOnHostAdvance()
     {
         var c = new EventCorrelator();
 
-        // Bug repro (scavenging-site events are SINGLE-CHOICE): the host completes the event and advances to
-        // window 2 (result + reward); the client buffers the out-of-order result-bearing Dismiss(occ=1, choice=0)
-        // BEFORE the Raise. On the raise the client MUST advance to the result page too — NOT re-show the
-        // window-1 choice dialog (the old singleChoice→ShowDialog branch stranded the client on window 1 while
-        // the host showed window 2). Whether a window 2 actually renders is decided DOWNSTREAM by
-        // BuildResultEvent (reward → window 2; null → clean close); the correlator just unifies on ShowResultPage.
-        var d1 = c.Dismissed(1, "EX99", choiceIndex: 0);
-        Assert.Equal(Kind.BufferDismiss, d1.Kind);         // sanity: dismiss beat the raise → buffered
+        // Single-choice-WITH-OUTCOME site exploration ("Мост"): the host auto-completes the event at trigger so
+        // its result-bearing Dismiss(occ=1, choice=0) beats the Raise — BUT the host stays on its window-1 PROMPT
+        // page (native IsSingleChoiceEncounter()==false), advancing to window 2 only when the player clicks the
+        // lone prompt button. So under the gated single-choice branch (caller passes singleChoice=true ONLY when
+        // EventMirrorFixGate is ON) the client must MIRROR the prompt and WAIT for the host's explicit advance —
+        // not jump to the result page (the old unconditional ShowResultPage made the client show window 2 while
+        // the host showed window 1).
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(1, "EX99", choiceIndex: 0).Kind);
         Assert.Equal(1, c.PendingCount);
 
-        var d2 = c.Raised(1, "EX99", singleChoice: true);
-        Assert.Equal(Kind.ShowResultPage, d2.Kind);        // advance to the result page, NOT re-show the dialog
-        Assert.Equal(0, d2.ChoiceIndex);
-        Assert.Equal(0, c.PendingCount);                   // buffer drained
-        Assert.Equal(0, c.OpenCount);                      // resolved → not left stranded open on window 1
+        var raised = c.Raised(1, "EX99", singleChoice: true);
+        Assert.Equal(Kind.ShowDialog, raised.Kind);        // mirror the host PROMPT, do NOT jump to result
+        Assert.Equal(0, raised.ChoiceIndex);               // carries the picked index (mirror discriminator, >=0)
+        Assert.Equal(1, c.OpenCount);                      // prompt is open
+        Assert.Equal(1, c.PromptMirrorCount);              // awaiting the host's advance
+        Assert.Equal(0, c.PendingCount);                   // dismiss buffer drained
+
+        // Host clicks its prompt → SetClosingEncounter → EventAdvanceResult → client advances to the result page.
+        var advanced = c.Advanced(1, "EX99", choiceIndex: 0);
+        Assert.Equal(Kind.ShowResultPage, advanced.Kind);
+        Assert.Equal(0, advanced.ChoiceIndex);
+        Assert.Equal(0, c.OpenCount);                      // result page replaces the mirrored prompt
+        Assert.Equal(0, c.PromptMirrorCount);
+    }
+
+    [Fact]
+    public void OutOfOrder_SingleChoiceAdvanceBeforeRaise_ResolvesStraightToResultPage()
+    {
+        var c = new EventCorrelator();
+
+        // Empty-outcome single-choice: the host shows the result IMMEDIATELY (SetSingleChoiceEncounter →
+        // SetClosingEncounter during ShowEncounter), so the advance can beat the raise. Wire order:
+        // Dismiss → Advance → Raise. The buffered advance makes the raise resolve straight to the result page
+        // (no prompt flicker), reusing the reward stashed from the dismiss.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(2, "EXI", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.DropNoop, c.Advanced(2, "EXI", choiceIndex: 0).Kind);   // no prompt mirror yet → buffered
+        Assert.Equal(1, c.PendingAdvanceCount);
+
+        var raised = c.Raised(2, "EXI", singleChoice: true);
+        Assert.Equal(Kind.ShowResultPage, raised.Kind);    // pending advance → jump to result, not the prompt
+        Assert.Equal(0, raised.ChoiceIndex);
+        Assert.Equal(0, c.PromptMirrorCount);
+        Assert.Equal(0, c.PendingAdvanceCount);            // consumed
+        Assert.Equal(0, c.OpenCount);
+    }
+
+    [Fact]
+    public void Advance_ForUnmirroredOccurrence_BuffersBounded_AndResetClears()
+    {
+        var c = new EventCorrelator();
+
+        // An advance with no matching prompt mirror (and no buffered dismiss/raise yet) is BUFFERED, not acted on.
+        Assert.Equal(Kind.DropNoop, c.Advanced(9, "Z", choiceIndex: 0).Kind);
+        Assert.Equal(1, c.PendingAdvanceCount);
+
+        c.Reset();
+        Assert.Equal(0, c.PendingAdvanceCount);
+        Assert.Equal(0, c.PromptMirrorCount);
     }
 
     [Fact]
