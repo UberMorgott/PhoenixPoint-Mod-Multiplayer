@@ -791,6 +791,21 @@ namespace Multipleer.Sync.Tactical
                     return false;
                 }
 
+                // ATOMIC-MIRROR SEED: the Applied=true inert path makes each subclass OnApply take its
+                // deserialize/"reattach a saved status" branch — which ASSUMES every [SerializeMember] field the
+                // live first-apply branch would have built was already restored by deserialization. The mirror
+                // instantiates fresh (no deserialize), so those fields are still null. BleedStatus.OnApply is the
+                // confirmed casualty: its inert branch `foreach (slotName in _slotNames)` derefs the null
+                // `_slotNames` that only its skipped `if(!applied)` branch (or PostRead) would populate → NRE
+                // (TargetInvocationException). The throw landed AFTER OnApply already subscribed OnBodyPartDetaching
+                // to the enemy's AddonsManager → partial, never-completed mutation → the actor's addon tree goes
+                // inconsistent → the next native post-shot RefreshIdle→GetBestEnemyTarget→DestroyTargetAddon NRE-
+                // loops, the fire CompleteAction coroutine never finishes, and the client HUD/camera lock up.
+                // Seeding the field(s) the inert branch needs lets OnApply RUN TO COMPLETION cleanly (empty list →
+                // zero reattach iterations, no particles, no NRE, addon tree untouched), exactly mirroring the
+                // engine's own restored-from-save state — so the mirror is atomic, not partially applied.
+                SeedInertStatusFields(status, statusDef);
+
                 // Register BEFORE ApplyStatus so the per-turn/unapply guards already know this instance.
                 ClientStatusMirrorGuards.RegisterMirror(status);
 
@@ -859,6 +874,37 @@ namespace Multipleer.Sync.Tactical
                 return false;
             }
             catch { return false; }
+        }
+
+        /// <summary>ATOMIC-MIRROR SEED. A fresh inert mirror (Applied pre-set true) drives each subclass OnApply
+        /// down its deserialize/reattach branch, which assumes the <c>[SerializeMember]</c> collection fields the
+        /// live first-apply branch builds were already restored. They are null on a non-deserialized instance, so
+        /// the reattach loop NREs (BleedStatus.OnApply: <c>foreach (slotName in _slotNames)</c>) AFTER it has
+        /// already half-mutated the actor (event subscription) → corrupt addon tree → post-shot UI/camera lockup.
+        /// Pre-seed the known null collection field(s) to EMPTY so OnApply runs clean (zero reattach iterations,
+        /// no gameplay, no NRE) — the engine's restored-from-save state for an actor with no recorded slots. Only
+        /// touches a field that EXISTS on this status type AND is currently null; never throws (best-effort).</summary>
+        private static void SeedInertStatusFields(object status, object statusDef)
+        {
+            if (status == null) return;
+            try
+            {
+                // BleedStatus._slotNames (List<string>): the inert OnApply reattach loop derefs it. Native populates
+                // it only in the skipped first-apply branch or via [SerializeMember] deserialization. Seed empty.
+                var f = AccessTools.Field(status.GetType(), "_slotNames");
+                if (f != null && typeof(System.Collections.IList).IsAssignableFrom(f.FieldType) && f.GetValue(status) == null)
+                {
+                    f.SetValue(status, Activator.CreateInstance(f.FieldType));
+                    Debug.Log("[Multipleer][tac] status mirror slotNames seeded: " + DescribeDef(statusDef));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Fail-open: a seed miss only risks the pre-existing OnApply NRE (still caught by InvokeApplyStatus);
+                // it must never itself abort the mirror.
+                Debug.LogWarning("[Multipleer][tac] status mirror seed skipped: " +
+                                 DescribeDef(statusDef) + " " + ex.GetType().Name + ": " + ex.Message);
+            }
         }
 
         private static void SetMember(object obj, string name, object value)
