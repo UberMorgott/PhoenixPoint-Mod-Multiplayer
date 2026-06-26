@@ -95,6 +95,37 @@ namespace Multipleer.Sync.Tactical
         public static bool IsClientSuppressedActivation(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _clientSuppressed.Contains(abilityTypeName);
 
+        /// <summary>View-state type NAMES of the PUSHED AIM SUB-STATES the game stacks ON TOP of the bare control
+        /// state <c>UIStateCharacterSelected</c> (PushOnTop, UIStateCharacterSelected.cs:682-683/686-688) when an
+        /// ability is selected for aiming: <c>UIStateOverwatchAbilitySelected</c> (overwatch) and
+        /// <c>UIStateAbilitySelected</c> (bash + other non-shoot abilities). Confirming an ability from one of these
+        /// activates with <c>ClearStackAndPush</c>, which the CLIENT mirror suppresses
+        /// (<see cref="IsClientSuppressedActivation"/>). The after-suppress re-grey
+        /// <c>TacticalView.ResetCharacterSelectedState</c> SELF-GUARDS on <c>CurrentState is UIStateCharacterSelected</c>
+        /// (TacticalView.cs:308) → it NO-OPs while one of these sub-states is on top, so the sub-state's
+        /// <c>ExitState</c> teardown (overwatch/aim visuals + <c>DoCameraChaseParam</c> camera, restored only by a fresh
+        /// CharacterSelected) never runs → HUD-less, camera-locked wedge. (Shoot uses <c>UIStateShoot</c> but confirms
+        /// with ReplaceTop — never ClearStackAndPush — so it never reaches the suppress gate.)</summary>
+        public static readonly string[] AimSubStateViewNames =
+        {
+            "UIStateOverwatchAbilitySelected", // overwatch arm (PushOnTop; ExitState restores cones + StopDrawing)
+            "UIStateAbilitySelected",          // bash + other non-shoot abilities (PushOnTop)
+        };
+
+        private static readonly HashSet<string> _aimSubStates =
+            new HashSet<string>(AimSubStateViewNames, StringComparer.Ordinal);
+
+        /// <summary>PURE decision for the CLIENT view-freeze recovery (<c>SuppressedAbilityViewClearPatch</c>): given
+        /// the CURRENT tactical view-state type name at the moment the client suppresses a <c>ClearStackAndPush</c>
+        /// ability activation, does HUD/camera recovery need a FULL stack-clear (force-exit the pushed aim sub-state by
+        /// <c>ClearStackAndPush</c>-ing a fresh <c>UIStateCharacterSelected</c>) rather than the guarded
+        /// <c>ResetCharacterSelectedState</c> re-grey? TRUE when the current state is a pushed aim sub-state
+        /// (<see cref="AimSubStateViewNames"/> — overwatch/bash), because there the guarded reset NO-OPs and the
+        /// sub-state never exits → wedge. FALSE for the bare <c>UIStateCharacterSelected</c> (e.g. a Move confirm,
+        /// where the guarded reset works fine) and for null/unknown (conservative: keep today's guarded-reset path).</summary>
+        public static bool NeedsFullStackRecovery(string currentViewStateName)
+            => !string.IsNullOrEmpty(currentViewStateName) && _aimSubStates.Contains(currentViewStateName);
+
         /// <summary>Feature C (client-side attack animation) — the ability types whose ATTACK ANIMATION the
         /// client replays via <c>tac.fire.start</c>. SHOOT + GRENADE only (both are <c>ShootAbility</c>):
         /// the client replays the native <c>TacticalLevelController.FireWeaponAtTargetCrt</c> coroutine, which

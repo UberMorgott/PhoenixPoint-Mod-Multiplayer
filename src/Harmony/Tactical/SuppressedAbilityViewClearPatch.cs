@@ -54,6 +54,12 @@ namespace Multipleer.Harmony.Tactical
         private static MethodInfo _resetCharSelected; // TacticalView.ResetCharacterSelectedState()
         private static object _clearStackAndPush;     // StateStackAction.ClearStackAndPush (boxed)
 
+        // Full-stack recovery (pushed aim sub-state → fresh UIStateCharacterSelected). Resolved lazily off the live View.
+        private static Type _charSelectedType;            // PhoenixPoint.Tactical.View.ViewStates.UIStateCharacterSelected (internal)
+        private static ConstructorInfo _charSelectedCtor; // (bool showPlayersIntroText, bool cameraChaseSelectedCharacter)
+        private static FieldInfo _statesStackField;       // TacticalView._statesStack (StateStack<TacticalViewContext>)
+        private static MethodInfo _switchToState;         // StateStack.SwitchToState(IState, StateStackAction)
+
         public static bool Prepare()
         {
             var viewState = AccessTools.TypeByName("PhoenixPoint.Tactical.View.TacticalViewState");
@@ -120,22 +126,41 @@ namespace Multipleer.Harmony.Tactical
                     // out. It SELF-GUARDS on `CurrentState is UIStateCharacterSelected` (NRE-safe + no-op when nothing
                     // is selected or we're in a melee/overwatch sub-state) and re-pushes CharacterSelected — NOT
                     // UIStateWaiting — so HUD and control are preserved. It does NOT change which actor is selected.
-                    var reset = _resetCharSelected ?? (_resetCharSelected = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState"));
-
-                    // DIAG (re-grey site #1 — activation time): report whether the re-grey path runs and WHAT view state it
-                    // sees. ResetCharacterSelectedState SELF-GUARDS on `CurrentState is UIStateCharacterSelected`
-                    // (TacticalView.cs:306-312) → it is a NO-OP in any other state, so logging CurrentState here shows what
-                    // (if anything) blocks the re-grey. NRE-guarded; reads CurrentState BEFORE the reset mutates it.
+                    // Read CurrentState name BEFORE any recovery mutates the stack — it is BOTH the diag value and the
+                    // input to the PURE recovery decision (TacticalAbilityRelay.NeedsFullStackRecovery). NRE-guarded.
                     string stateName = "<null>";
                     try { object cs = AccessTools.Property(view.GetType(), "CurrentState")?.GetValue(view, null); stateName = cs?.GetType().Name ?? "<null>"; }
                     catch { /* diag only */ }
                     int actorNet = -1;
                     try { object aActor = AccessTools.Property(__0.GetType(), "TacticalActorBase")?.GetValue(__0, null); if (aActor != null) actorNet = TacticalDeploySync.NetIdForLiveActor(aActor); }
                     catch { /* diag only */ }
-                    Debug.Log("[Multipleer][tac] CLIENT re-grey@activate fired=" + (reset != null) +
-                              " state=" + stateName + " actorNet=" + actorNet);
 
-                    reset?.Invoke(view, null);
+                    if (TacticalAbilityRelay.NeedsFullStackRecovery(stateName))
+                    {
+                        // FULL-STACK RECOVERY (overwatch / bash / any pushed aim sub-state). The arm was confirmed from a
+                        // sub-state PushOnTop ABOVE UIStateCharacterSelected, so ResetCharacterSelectedState would NO-OP
+                        // (it self-guards on `CurrentState is UIStateCharacterSelected`, TacticalView.cs:308) → the
+                        // sub-state never exits → HUD torn down + camera stuck (the reported unplayable wedge). Force-exit
+                        // it exactly like the game's own back-out (UIStateOverwatchAbilitySelected.OnCancel:105-106 and
+                        // TacticalView.ResetTacticalViewCmd:1190): _statesStack.SwitchToState(new UIStateCharacterSelected(
+                        // showPlayersIntroText:false, cameraChaseSelectedCharacter:true), ClearStackAndPush). ClearStackAndPush
+                        // runs StateStack.Clear → the sub-state's ExitState (StopDrawing + SetOverwatchVisuals,
+                        // UIStateOverwatchAbilitySelected.cs:90-100) → a fresh UIStateCharacterSelected re-selects
+                        // View.SelectedActor and DoCameraChases it (cameraChase:true un-sticks the DoCameraChaseParam camera
+                        // left by SetInitialTargetPosition:135-141) + re-runs SetAbilities (re-grey). Mirrors native cancel.
+                        bool driven = DriveFullStackRecovery(view);
+                        Debug.Log("[Multipleer][tac] CLIENT full-stack recovery@activate fired=" + driven +
+                                  " (exited aim sub-state " + stateName + ") actorNet=" + actorNet);
+                    }
+                    else
+                    {
+                        // Bare control state (e.g. a Move confirm from UIStateCharacterSelected): the guarded re-grey works
+                        // in place — re-push CharacterSelected so the ability bar re-evaluates live AP. (Unchanged path.)
+                        var reset = _resetCharSelected ?? (_resetCharSelected = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState"));
+                        Debug.Log("[Multipleer][tac] CLIENT re-grey@activate fired=" + (reset != null) +
+                                  " state=" + stateName + " actorNet=" + actorNet);
+                        reset?.Invoke(view, null);
+                    }
                 }
 
                 Debug.Log("[Multipleer][tac] CLIENT skipped view-clear for suppressed " + __0.GetType().Name +
@@ -147,6 +172,37 @@ namespace Multipleer.Harmony.Tactical
                 Debug.LogError("[Multipleer][tac] SuppressedAbilityViewClearPatch.Prefix failed: " + ex);
                 return true;    // fail-open: never wedge the native path on an unexpected error
             }
+        }
+
+        /// <summary>CLIENT-only: force-exit a pushed aim sub-state by re-establishing a fresh
+        /// <c>UIStateCharacterSelected</c> via <c>_statesStack.SwitchToState(new UIStateCharacterSelected(false, true),
+        /// ClearStackAndPush)</c> — the SAME native call <c>ResetCharacterSelectedState</c> (TacticalView.cs:310) and the
+        /// overwatch <c>OnCancel</c> (UIStateOverwatchAbilitySelected.cs:105-106) use, but UNCONDITIONAL (no
+        /// `CurrentState is UIStateCharacterSelected` guard). ClearStackAndPush triggers the sub-state's ExitState
+        /// teardown and re-selects View.SelectedActor; cameraChaseSelectedCharacter:true re-chases the actor to release
+        /// the sub-state's DoCameraChaseParam camera lock. Returns true if the stack was driven; false (fail-open, never
+        /// throws) if any native member could not be resolved.</summary>
+        private static bool DriveFullStackRecovery(object view)
+        {
+            var charType = _charSelectedType ?? (_charSelectedType =
+                AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateCharacterSelected"));
+            if (charType == null) return false;
+
+            var ctor = _charSelectedCtor ?? (_charSelectedCtor =
+                AccessTools.Constructor(charType, new[] { typeof(bool), typeof(bool) }));
+            if (ctor == null) return false;
+
+            var stackField = _statesStackField ?? (_statesStackField = AccessTools.Field(view.GetType(), "_statesStack"));
+            object stack = stackField?.GetValue(view);
+            if (stack == null) return false;
+
+            // StateStack<T>.SwitchToState(IState<T>, StateStackAction) — single method named SwitchToState (no overload).
+            var switchTo = _switchToState ?? (_switchToState = AccessTools.Method(stack.GetType(), "SwitchToState"));
+            if (switchTo == null) return false;
+
+            object fresh = ctor.Invoke(new object[] { false /*showPlayersIntroText*/, true /*cameraChaseSelectedCharacter*/ });
+            switchTo.Invoke(stack, new[] { fresh, _clearStackAndPush });
+            return true;
         }
     }
 }

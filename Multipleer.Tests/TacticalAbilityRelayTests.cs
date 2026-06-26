@@ -92,4 +92,45 @@ public class TacticalAbilityRelayTests
         foreach (var r in TacticalAbilityRelay.RelayableAbilityTypeNames)
             Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation(r));
     }
+
+    // ── NeedsFullStackRecovery: PURE decision for SuppressedAbilityViewClearPatch — when the client suppresses a
+    //    ClearStackAndPush arm confirmed from a PUSHED aim sub-state (overwatch/bash on top of CharacterSelected),
+    //    the guarded ResetCharacterSelectedState NO-OPs → the sub-state never exits → HUD/camera wedge, so the
+    //    recovery must instead force-exit it by ClearStackAndPush-ing a fresh UIStateCharacterSelected. The
+    //    imperative stack-driving itself is engine-only → in-game verified; only this decision is unit-tested.
+
+    [Theory]
+    [InlineData("UIStateOverwatchAbilitySelected")] // overwatch arm — the reported critical wedge
+    [InlineData("UIStateAbilitySelected")]          // bash (co-affected by the same latent bug)
+    public void AimSubState_NeedsFullStackRecovery(string currentViewStateName)
+    {
+        Assert.True(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
+    }
+
+    [Theory]
+    [InlineData("UIStateCharacterSelected")] // Move confirms from here directly → guarded reset works → no full clear
+    [InlineData("UIStateShoot")]             // shoot confirms with ReplaceTop, never reaches the gate → conservative
+    [InlineData("UIStateWaiting")]
+    [InlineData("UIStateInitial")]
+    [InlineData("SomeFutureUnknownState")]
+    public void NonAimSubState_DoesNotNeedFullStackRecovery(string currentViewStateName)
+    {
+        Assert.False(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void NeedsFullStackRecovery_NullOrEmpty_IsFalse(string currentViewStateName)
+    {
+        Assert.False(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
+    }
+
+    [Fact]
+    public void AimSubStates_AreNotConfusedWith_CharacterSelected()
+    {
+        // The whole bug: the aim sub-states are distinct from the control state the guarded reset checks for.
+        foreach (var s in TacticalAbilityRelay.AimSubStateViewNames)
+            Assert.NotEqual("UIStateCharacterSelected", s);
+    }
 }
