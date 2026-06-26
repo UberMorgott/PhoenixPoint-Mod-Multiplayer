@@ -68,8 +68,17 @@ namespace Multipleer.Sync.Tactical
         public static bool NeuterProjectileDamage => _replayDepth > 0;
         public static bool CameraSilent => _replayDepth > 0;
 
+        // CLIENT-PREDICTED fire-anim de-dup ledger (combat concurrency fix). The originating client animates its OWN
+        // shot immediately on press (ClientPredictFireStart) and records the shooter here; the host's echoed
+        // tac.fire.start for that same shooter is then SKIPPED in ClientOnFireStart so the shooter animates exactly
+        // once. Pure decision logic + TTL self-expiry are unit-tested in PredictedFireGuard.
+        private static readonly PredictedFireGuard _predictedFire = new PredictedFireGuard();
+
+        // Monotonic wall-clock seconds for the de-dup TTL (client runtime only; the pure guard takes it as a param).
+        private static float NowSeconds() => Time.unscaledTime;
+
         /// <summary>Reset all replay state (mission exit). Idempotent.</summary>
-        public static void Reset() => _replayDepth = 0;
+        public static void Reset() { _replayDepth = 0; _predictedFire.Reset(); }
 
         // ─── HOST: an attack is STARTING → broadcast tac.fire.start so clients animate concurrently ──
         /// <summary>HOST: at the moment the host's authoritative shot animation BEGINS — the host prefix on
@@ -129,6 +138,18 @@ namespace Multipleer.Sync.Tactical
             if (!TacticalLiveCodec.TryDecodeFireStart(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.fire.start decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacFireStart, s.Seq)) return;
 
+            // DE-DUP (client-predicted local anim): if THIS client already played a predicted local fire animation
+            // for this shooter (ClientPredictFireStart on its own press), the host's echoed fire-start is that SAME
+            // shot coming back — consume the predicted entry + SKIP the replay so the shooter animates exactly ONCE.
+            // A non-originating viewer / host-origin shot (e.g. overwatch reaction) has no predicted entry → replays.
+            if (_predictedFire.ConsumeIfPredicted(s.ShooterNetId, NowSeconds()))
+            {
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacFireStart, s.Seq);
+                Debug.Log("[Multipleer][tac] CLIENT skipped echoed tac.fire.start (own predicted anim) seq=" + s.Seq +
+                          " shooter=" + s.ShooterNetId);
+                return;
+            }
+
             object shooter = TacticalDeploySync.ResolveLiveActor(s.ShooterNetId);
             if (shooter == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: no actor for netId " + s.ShooterNetId); return; }
 
@@ -165,6 +186,71 @@ namespace Multipleer.Sync.Tactical
                           " type=" + ability.GetType().Name + " targetNetId=" + s.TargetNetId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnFireStart failed: " + ex); }
+        }
+
+        // ─── CLIENT: PREDICTED local fire animation (Option B — animate instantly on the player's own press) ─
+        /// <summary>CLIENT (mirroring): kicked off from <c>TacticalCombatSync.ClientInterceptAbility</c> the instant
+        /// the client SUPPRESSES its own shot and sends <c>tac.intent.ability</c>. Plays the EXISTING damage-less /
+        /// camera-silent <c>FireWeaponAtTargetCrt</c> replay (same <see cref="ReplayFireCrt"/> path as the wire-driven
+        /// <see cref="ClientOnFireStart"/>) LOCALLY using the live ability + aim target, so the shooter animates
+        /// CONCURRENTLY with the press instead of waiting for the host's DEFERRED (EnqueueAction + camera-blend) shot
+        /// and its echoed <c>tac.fire.start</c> (which always arrives late). DAMAGE stays 100% host-authoritative
+        /// (tac.damage) — this is animation-only; a mispredict (host rejects the shot) is cosmetic.
+        ///
+        /// DE-DUP: records the shooter in <see cref="PredictedFireGuard"/> so the host's echoed <c>tac.fire.start</c>
+        /// for THIS shooter is consumed + skipped in <see cref="ClientOnFireStart"/> → the shooter animates EXACTLY
+        /// ONCE. SHOOT/grenade only (<see cref="TacticalAbilityRelay.ShouldBroadcastFireStart"/>) — melee animates via
+        /// its own BashCrt path. No-op off-client / off-session / non-fire ability. Fail-open: any failure is logged +
+        /// swallowed and (crucially) NO predicted entry is recorded, so the host echo will REPLAY normally instead of
+        /// being wrongly skipped — the client never ends up with no animation at all.</summary>
+        public static void ClientPredictFireStart(object ability, object parameter)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || engine.IsHost) return;
+                if (ability == null) return;
+                // Shoot/grenade only — melee animates via its own BashCrt path (TacticalMeleeAnimSync), not this coroutine.
+                if (!TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name)) return;
+
+                object shooter = GetProp(ability, "TacticalActorBase");
+                if (shooter == null) return;
+                int shooterNetId = TacticalDeploySync.NetIdForLiveActor(shooter);
+                if (shooterNetId < 0) return;
+
+                object weapon = GetProp(ability, "Weapon");
+                if (weapon == null) { Debug.LogError("[Multipleer][tac] predict fire: ability has no Weapon (type=" + ability.GetType().Name + ")"); return; }
+
+                // Build a fresh Synced (camera-silent, return-fire-gated) target from the LIVE aim target — never reuse
+                // the Regular-typed live parameter (its AttackType would let the engine fire return-fire / extra hints).
+                ReadTarget(parameter, out int targetNetId, out Vector3 targetPos);
+                object target = BuildSyncedFireTarget(targetNetId, targetPos);
+                if (target == null) { Debug.LogError("[Multipleer][tac] predict fire: could not build target"); return; }
+
+                object tlc = TacticalDeploySync.LiveTlc;
+                if (tlc == null) { Debug.LogError("[Multipleer][tac] predict fire: no LiveTlc"); return; }
+
+                var fire = AccessTools.Method(tlc.GetType(), "FireWeaponAtTargetCrt");
+                if (fire == null) { Debug.LogError("[Multipleer][tac] predict fire: FireWeaponAtTargetCrt not found"); return; }
+
+                object timing = GetTiming(shooter, tlc);
+                if (timing == null) { Debug.LogError("[Multipleer][tac] predict fire: no Timing to drive the replay"); return; }
+
+                var crt = ReplayFireCrt(tlc, fire, weapon, target, ability);
+                if (!InvokeStart(timing, timing.GetType(), crt))
+                {
+                    // Could not start the predicted anim → do NOT record the guard, so the host echo will replay
+                    // normally (the client still gets ONE animation, just the late echoed one instead of the predict).
+                    Debug.LogError("[Multipleer][tac] predict fire: could not start predicted coroutine netId=" + shooterNetId);
+                    return;
+                }
+
+                // Record AFTER a successful start so the host's echoed fire-start for this shooter is de-duped (skipped).
+                _predictedFire.RecordPredicted(shooterNetId, NowSeconds());
+                Debug.Log("[Multipleer][tac] CLIENT predicted fire anim shooter=" + shooterNetId +
+                          " type=" + ability.GetType().Name + " targetNetId=" + targetNetId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientPredictFireStart failed: " + ex); }
         }
 
         /// <summary>Wrapper coroutine: raise the client-only replay guards, run the native
@@ -227,13 +313,19 @@ namespace Multipleer.Sync.Tactical
         /// Fallback (default-ctor + field-set): same split — actor target → set Actor + DamageReceiver, leave
         /// PositionToApply NaN; bare position → set PositionToApply=pos. AttackType set to Synced on every path.</summary>
         private static object BuildSyncedFireTarget(TacticalLiveCodec.FireStart s)
+            => BuildSyncedFireTarget(s.TargetNetId, new Vector3(s.TX, s.TY, s.TZ));
+
+        /// <summary>Overload building the Synced fire target from a resolved {targetNetId, groundPos} — shared by the
+        /// wire-driven replay (<see cref="ClientOnFireStart"/>) and the CLIENT-PREDICTED local anim
+        /// (<see cref="ClientPredictFireStart"/>, which reads them straight off the live aim target). Same actor /
+        /// bare-position split as the wire path.</summary>
+        private static object BuildSyncedFireTarget(int targetNetId, Vector3 pos)
         {
             var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
             if (targetType == null) return null;
             var attackType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.AttackType");
             object synced = SyncedAttackType(attackType);
-            var pos = new Vector3(s.TX, s.TY, s.TZ);
-            object targetActor = s.TargetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(s.TargetNetId) : null;
+            object targetActor = targetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(targetNetId) : null;
 
             try
             {

@@ -112,6 +112,15 @@ namespace Multipleer.Sync.Tactical
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid +
                           " targetNetId=" + targetNetId +
                           " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
+
+                // COMBAT CONCURRENCY FIX (client-predicted local anim): the host's relayed shot is DEFERRED
+                // (EnqueueAction + camera-blend), so its echoed tac.fire.start always arrives LATE — the client would
+                // animate after the host already played the whole shot. Instead, kick off the EXISTING damage-less,
+                // camera-silent fire-anim replay LOCALLY right now so the shooter animates the instant the player
+                // presses. The host still runs the authoritative shot; its echoed fire-start for this shooter is
+                // de-duped (skipped) in ClientOnFireStart so it animates exactly ONCE. Shoot/grenade only + fully
+                // fail-open inside; melee/other abilities no-op there. Damage stays host-authoritative (tac.damage).
+                TacticalFireAnimSync.ClientPredictFireStart(ability, parameter);
                 return false;   // suppress local activation (host is authoritative)
             }
             catch (Exception ex)

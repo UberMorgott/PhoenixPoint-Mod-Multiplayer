@@ -185,6 +185,11 @@
          snap has a valid seed; a bare-GROUND shot (no actor) seeds the explicit ground pos. The engine glue
          (TacticalCombatSync.BuildShootTarget + GetShootTarget snap) binds game types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ShootTargetAimPolicy.cs"><Link>Sync\Tactical\ShootTargetAimPolicy.cs</Link></Compile>
+    <!-- Combat concurrency fix: pure, Unity-free de-dup ledger for CLIENT-PREDICTED fire animations. The
+         originating client animates its own shot immediately on press + records the shooter; the host's echoed
+         tac.fire.start is then SKIPPED (consume) so the shooter animates exactly once. TTL self-expiry. The engine
+         glue (TacticalFireAnimSync.ClientPredictFireStart / ClientOnFireStart) binds game types and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\PredictedFireGuard.cs"><Link>Sync\Tactical\PredictedFireGuard.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->
