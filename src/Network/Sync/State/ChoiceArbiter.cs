@@ -47,8 +47,14 @@ namespace Multipleer.Network.Sync.State
             }
         }
 
-        /// <summary>Test/teardown hook: forget all resolved occurrences.</summary>
-        public void ResetForTests()
+        /// <summary>
+        /// Forget all resolved occurrences. Called on the save-load / co-op save-transfer boundary
+        /// (SaveTransferCoordinator.PrepareEntryFromBlobCrt — the shared host+client reload-entry hook):
+        /// the engine REUSES occurrence ids (occId) across a reload, so a stale resolved-set entry from
+        /// before the reload would otherwise make a legit post-reload host CompleteEvent LOSE its claim
+        /// (Claim returns false) and skip the native grant. Also used by tests. Idempotent.
+        /// </summary>
+        public void Reset()
         {
             lock (_lock) { _resolved.Clear(); _order.Clear(); }
         }

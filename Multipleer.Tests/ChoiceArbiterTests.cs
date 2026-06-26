@@ -63,7 +63,24 @@ public class ChoiceArbiterTests
         var a = new ChoiceArbiter();
         a.Claim(1);
         Assert.False(a.Claim(1));
-        a.ResetForTests();
+        a.Reset();
         Assert.True(a.Claim(1));   // forgotten after reset
+    }
+
+    [Fact]
+    public void Reset_OnSaveLoad_LetsReusedOccId_BeClaimedAgain()
+    {
+        // Regression: after a save-load / co-op save-transfer the engine REUSES occurrence ids. Without a
+        // boundary reset, a stale resolved entry for occId N (resolved BEFORE the reload) would make the
+        // legit post-reload HOST claim for the SAME occId N return false → the native grant is skipped.
+        // PrepareEntryFromBlobCrt calls Reset() on that boundary; here we assert Reset() restores the claim.
+        var a = new ChoiceArbiter();
+        const ushort reusedOccId = 7;
+        Assert.True(a.Claim(reusedOccId));    // pre-reload winner resolved this occId
+        Assert.False(a.Claim(reusedOccId));   // still resolved → stale entry would block a reissue
+
+        a.Reset();                            // save-load boundary clears the resolved set
+
+        Assert.True(a.Claim(reusedOccId));    // post-reload reissue of the SAME occId is granted again
     }
 }

@@ -635,6 +635,16 @@ namespace Multipleer.Network
         private IEnumerator<NextUpdate> PrepareEntryFromBlobCrt(PhoenixGame game, byte[] blob, string ext)
         {
             Debug.Log("[Multipleer] PrepareEntryFromBlobCrt: start");
+
+            // Save-load / co-op save-transfer boundary: forget every resolved event-choice occurrence id.
+            // This coroutine is the SHARED host+client reload-entry hook (host: HostSerializeAndSendCrt,
+            // client: ClientLoadCrt), and the SyncEngine — hence its ChoiceArbiter — is NOT recreated on a
+            // mid-session reload (only on full session teardown). The engine REUSES occIds across a reload,
+            // so a stale resolved entry from before the reload would otherwise make a legit post-reload host
+            // CompleteEvent LOSE its first-claim (Claim → false) and skip the native grant. Mirrors the
+            // per-load _tracker.Reset() already done on this boundary. No-op on a client (it never claims).
+            _engine.Sync?.Arbiter?.Reset();
+
             var serializer = game.SaveManager.Serializer;
             var slice = new TimeSlice(serializer.SerializeTimeSlice);
 
