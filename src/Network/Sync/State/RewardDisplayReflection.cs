@@ -654,7 +654,14 @@ namespace Multipleer.Network.Sync.State
 
         private static string LocalizeBind(object bind)
         {
-            try { return bind == null ? null : _localize.Invoke(bind, null) as string; }
+            // LocalizedTextBind.Localize(string language = null) has ONE (optional) parameter
+            // (LocalizedTextBind.cs:35). MethodInfo.Invoke does NOT auto-apply optional defaults — passing
+            // null (== zero args) for a 1-param method throws TargetParameterCountException, which the catch
+            // swallowed → LocalizeBind returned null for EVERY localized reward line, so each line dropped on
+            // the client result page (in-game: "reward-type resolve … → display=''", then "drew 0"). Pass an
+            // explicit 1-element arg array (language=null) so it mirrors native DisplayName1.Localize(), which
+            // the C# compiler emits as Localize(null) (UIModuleSiteEncounters.cs:415).
+            try { return bind == null ? null : _localize.Invoke(bind, new object[] { null }) as string; }
             catch { return null; }
         }
 

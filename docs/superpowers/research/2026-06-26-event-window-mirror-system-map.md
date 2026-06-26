@@ -171,6 +171,31 @@ narrative+OK but NO reward lines; client top-bar = host top-bar +92 on both reso
   callback (SyncEngine.cs:246) or after the host event completes, so the host bar repaints its own
   grant without waiting for modal-close/next native repaint. No model change (both sides already agree).
 
+**D3. Post-oneWindow-fix (2a25c79) reward STILL absent — H1–H4 all ruled out in CODE; runtime resolve.**
+Verified each link statically; none of the four hypotheses as framed is the bug:
+- H1 classifier OK: `IsOneWindowSingleChoice` = `!ChoiceHasOutcomeText` = `OutcomeText.General.LocalizationKey`
+  empty (EventReflection.cs:738-778) — EXACT inverse of native `IsSingleChoiceEncounter` (UIModuleSiteEncounters.cs:260).
+  Wire bit2 0x04 encode/decode symmetric (SyncProtocol EncodeEventRaised/TryDecodeEventRaised). So client gets
+  oneWindow=true → `Raised`→`ShowResultPage` (EventCorrelator.cs:143-152).
+- H2 DEAD: native renders "МАТЕРИАЛЫ +92" from `geoEvent.ChoiceReward.Resources` (UIModuleSiteEncounters.cs:413) —
+  the EXACT field `BuildFromReward` reads first (`_frResources`, RewardDisplayReflection.cs:156). `GeoFactionReward.Resources`
+  is a public FIELD (GeoFactionReward.cs:22). Host showing the line PROVES `ChoiceReward.Resources` non-empty → blob non-empty.
+- H3 OK: shared `ResolveToResultPage` does `SetPending` BEFORE `ShowResult` (SyncEngine.cs:532-536); `RewardRenderPatch`
+  binds `ShowEncounter(GeoscapeEvent)` (exists, UIModuleSiteEncounters.cs:192); `UIStateGeoscapeEvent.EnterState`
+  calls `ShowEncounter(base.Event)` = the SAME armed `resultEvent` ref (UIStateGeoscapeEvent.cs:52) → reference-keyed
+  `TryConsume` matches; `AddRewardText`→`SiteEncounterTextContainer` AFTER `SetEncounter` clears it (:267/:626) = native order.
+- H4 OK: single-choice dismiss broadcast at trigger (`CompleteEvent`:655 → `CompleteEventDismissPatch.Postfix`) BEFORE
+  the raise (:657); client `BufferDismiss`→`StashBufferedReward`, reused via `TakeBufferedReward` in every ordering.
+- **CONCLUSION: the drop is a RUNTIME reflection-resolve, not wiring. Read the EXISTING logs (no new ones needed):**
+  1. HOST `BroadcastEventDismiss … rewardBytes=N` (EventDisplayPatches.cs:180) — **N==0 ⇒ host BuildFromReward empty**
+     (host-side reflection/timing); **N>0 ⇒ reward sent, drop is client-side.**
+  2. CLIENT `OnEventRaised … oneWindow=B … decision=K` (SyncEngine.cs:360) — decision≠ShowResultPage ⇒ classifier/buffer-order.
+  3. CLIENT `ResolveToResultPage … builtResult=B rewardEmpty=B` (SyncEngine.cs:523) — rewardEmpty=True ⇒ stash empty (←#1).
+  4. CLIENT `RewardRenderPatch: … rendering reward lines` (RewardRenderPatch.cs:62) — ABSENT ⇒ TryConsume miss / Postfix not firing.
+  5. CLIENT `RewardDisplayRender drew N` (RewardDisplayReflection.cs:639) / `SKIP (reflection not ready)` (:549) — 0/SKIP ⇒ render-resolve / `_clientReady` false.
+  Decisive single value = #1 (host rewardBytes). All-lines-missing (incl. the stamina line, which BYPASSES the fragile
+  resource-name resolve) ⇒ if N>0, most likely #4 (TryConsume miss) or #5 SKIP (`_clientReady` false), NOT a per-line resolve drop.
+
 ---
 
 ## KEY DESIGN DECISIONS TO RESOLVE
