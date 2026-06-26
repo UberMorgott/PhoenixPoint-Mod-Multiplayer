@@ -206,20 +206,29 @@ namespace Multipleer.Network.Sync
         // guard on remaining length, never throw.
 
         // Trailing flag byte is a BITMASK so optional fields can be added without a new field/length:
-        //   bit0 (0x01) = an identity block follows; bit1 (0x02) = singleChoice (HasSingleChoice, Choices.Count<=1).
-        // A LEGACY raise with no trailing byte decodes flag 0 → hasIdentity=false, singleChoice=false (the old
-        // multi-choice default). The flag byte is emitted ONLY when at least one bit is set, so a plain
-        // multi-choice no-identity raise stays byte-IDENTICAL to the legacy 4-field wire (keeps the wire pin).
+        //   bit0 (0x01) = an identity block follows; bit1 (0x02) = singleChoice (HasSingleChoice, Choices.Count<=1);
+        //   bit2 (0x04) = oneWindow (host's IsSingleChoiceEncounter()==true: lone choice has EMPTY outcome text →
+        //   host shows reward+narrative in ONE combined window, so the client skips the phantom prompt and resolves
+        //   straight to the result page). oneWindow is a SUBSET of singleChoice (count==1 + empty outcome).
+        // A LEGACY raise with no trailing byte decodes flag 0 → hasIdentity=false, singleChoice=false,
+        // oneWindow=false (the old multi-choice default). The flag byte is emitted ONLY when at least one bit is
+        // set, so a plain multi-choice no-identity raise stays byte-IDENTICAL to the legacy 4-field wire (keeps the
+        // wire pin).
         private const byte RaiseFlagIdentity = 0x01;
         private const byte RaiseFlagSingleChoice = 0x02;
+        private const byte RaiseFlagOneWindow = 0x04;
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
             => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null, false);
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity)
-            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, false);
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, false, false);
 
+        // singleChoice-only shim: callers that stamp HasSingleChoice but not the 1-window bit.
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice)
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, false);
+
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -233,6 +242,7 @@ namespace Multipleer.Network.Sync
                 byte flag = 0;
                 if (identity.HasValue) flag |= RaiseFlagIdentity;
                 if (singleChoice) flag |= RaiseFlagSingleChoice;
+                if (oneWindow) flag |= RaiseFlagOneWindow;
                 if (flag != 0)
                 {
                     w.Write(flag);
@@ -248,12 +258,16 @@ namespace Multipleer.Network.Sync
 
         // 6-out shim: callers/tests that read the identity but ignore singleChoice.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity)
-            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out _);
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out _, out _);
 
+        // 8-out shim: callers/tests that read singleChoice but ignore the 1-window bit.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice)
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out singleChoice, out _);
+
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow)
         {
             occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1; hasIdentity = false;
-            identity = default(GeoSiteState); singleChoice = false;
+            identity = default(GeoSiteState); singleChoice = false; oneWindow = false;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -269,6 +283,7 @@ namespace Multipleer.Network.Sync
                     {
                         byte flag = r.ReadByte();
                         singleChoice = (flag & RaiseFlagSingleChoice) != 0;
+                        oneWindow = (flag & RaiseFlagOneWindow) != 0;
                         if ((flag & RaiseFlagIdentity) != 0)
                         {
                             identity = ReadSiteIdentity(r);

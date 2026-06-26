@@ -86,6 +86,49 @@ public class EventCorrelatorTests
     }
 
     [Fact]
+    public void OutOfOrder_OneWindowSingleChoiceDismissBeforeRaise_ResolvesStraightToResultPage_NoPrompt()
+    {
+        var c = new EventCorrelator();
+
+        // 1-WINDOW single-choice ("МЕСТНОСТЬ РАЗВЕДКИ" / empty outcome text → host IsSingleChoiceEncounter()==true →
+        // reward+narrative in ONE combined window). The host auto-completes at trigger so its result-bearing
+        // Dismiss(occ=3, choice=0) beats the Raise. With oneWindow=true the client must SKIP the phantom reward-less
+        // prompt and resolve STRAIGHT to the result page (reusing the stashed reward), matching the host's single
+        // window — NOT mirror a prompt (the 2-window path) and NOT wait for an advance.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(3, "EX1W", choiceIndex: 0).Kind);
+        Assert.Equal(1, c.PendingCount);
+
+        var raised = c.Raised(3, "EX1W", singleChoice: true, oneWindow: true);
+        Assert.Equal(Kind.ShowResultPage, raised.Kind);   // straight to result, no prompt mirror
+        Assert.Equal(0, raised.ChoiceIndex);
+        Assert.Equal(0, c.PromptMirrorCount);             // never mirrored a prompt
+        Assert.Equal(0, c.OpenCount);
+        Assert.Equal(0, c.PendingCount);                  // dismiss buffer drained
+
+        // The host's empty-outcome SetClosingEncounter also emits an advance; arriving AFTER the result page is
+        // already shown it is a harmless no-op (no prompt mirror to advance).
+        Assert.Equal(Kind.DropNoop, c.Advanced(3, "EX1W", choiceIndex: 0).Kind);
+    }
+
+    [Fact]
+    public void OutOfOrder_OneWindowAdvanceBeforeRaise_StillResolvesStraightToResultPage_AdvanceConsumed()
+    {
+        var c = new EventCorrelator();
+
+        // 1-window event where the wire order is Dismiss → Advance → Raise. The buffered advance is consumed by the
+        // oneWindow raise (so it can't linger), and the raise still resolves straight to the result page.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(4, "EX1W2", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.DropNoop, c.Advanced(4, "EX1W2", choiceIndex: 0).Kind);
+        Assert.Equal(1, c.PendingAdvanceCount);
+
+        var raised = c.Raised(4, "EX1W2", singleChoice: true, oneWindow: true);
+        Assert.Equal(Kind.ShowResultPage, raised.Kind);
+        Assert.Equal(0, c.PendingAdvanceCount);           // buffered advance consumed (no leak)
+        Assert.Equal(0, c.PromptMirrorCount);
+        Assert.Equal(0, c.OpenCount);
+    }
+
+    [Fact]
     public void OutOfOrder_SingleChoiceAdvanceBeforeRaise_ResolvesStraightToResultPage()
     {
         var c = new EventCorrelator();

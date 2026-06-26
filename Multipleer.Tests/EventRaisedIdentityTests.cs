@@ -107,6 +107,54 @@ public class EventRaisedIdentityTests
     }
 
     [Fact]
+    public void EventRaised_OneWindowFlag_RoundTrips()
+    {
+        // The 1-window bit (host IsSingleChoiceEncounter()==true → reward+narrative in ONE combined window) rides
+        // bit2 alongside singleChoice (bit1). singleChoice+oneWindow, no identity → flag byte 0x06.
+        var bytes = SyncProtocol.EncodeEventRaised(15, "EV_1W", 5, 6, identity: null, singleChoice: true, oneWindow: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out var occ, out var ev, out _, out _, out var hasId, out _, out var single, out var oneWin));
+        Assert.Equal(15, occ);
+        Assert.Equal("EV_1W", ev);
+        Assert.False(hasId);
+        Assert.True(single);
+        Assert.True(oneWin);
+    }
+
+    [Fact]
+    public void EventRaised_SingleChoiceWithoutOneWindow_DecodesOneWindowFalse()
+    {
+        // 2-window single-choice-WITH-outcome (singleChoice=true, oneWindow=false) → flag byte 0x02, oneWindow false.
+        var bytes = SyncProtocol.EncodeEventRaised(16, "EV_2W", 1, 2, identity: null, singleChoice: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out _, out _, out var single, out var oneWin));
+        Assert.True(single);
+        Assert.False(oneWin);
+    }
+
+    [Fact]
+    public void EventRaised_OneWindowAndIdentity_RoundTripTogether()
+    {
+        var id = new GeoSiteState(8, "G3", siteType: 4, state: 1, siteName: "K3", encounterID: "E3");
+        var bytes = SyncProtocol.EncodeEventRaised(17, "EV_1WID", 8, 9, identity: id, singleChoice: true, oneWindow: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out var hasId, out var got, out var single, out var oneWin));
+        Assert.True(hasId);
+        Assert.Equal(id, got);
+        Assert.True(single);
+        Assert.True(oneWin);
+    }
+
+    [Fact]
+    public void EventRaised_LegacyPayload_DecodesOneWindowFalse()
+    {
+        // An OLD peer's identity+singleChoice payload (flag 0x03, no bit2) must decode oneWindow=false (back-compat).
+        var id = new GeoSiteState(2, "G4", siteType: 1, state: 0, siteName: "K4", encounterID: "E4");
+        var bytes = SyncProtocol.EncodeEventRaised(18, "EV_OLD2", 2, 3, identity: id, singleChoice: true);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out var hasId, out _, out var single, out var oneWin));
+        Assert.True(hasId);
+        Assert.True(single);
+        Assert.False(oneWin);
+    }
+
+    [Fact]
     public void EventRaised_ThreeArg_StillRoundTripsViaLegacyOverload()
     {
         // The legacy 4-out decode overload must still work (callers/tests that ignore the identity block).

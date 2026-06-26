@@ -125,8 +125,15 @@ namespace Multipleer.Network.Sync.State
         /// (the same-frame empty-outcome case), in which case it jumps straight to the result page. When the gate
         /// is OFF the caller passes singleChoice=false → the legacy unconditional <c>ShowResultPage</c> below
         /// (byte-for-byte unchanged).
+        ///
+        /// <paramref name="oneWindow"/> (a SUBSET of <paramref name="singleChoice"/>: the host's
+        /// <c>IsSingleChoiceEncounter()</c>==true — the lone choice has EMPTY outcome text so the host shows
+        /// reward+narrative in ONE combined window) SKIPS the prompt-mirror entirely and resolves STRAIGHT to the
+        /// result page (reusing the stashed reward), matching the host's single window and curing the client's
+        /// reward-less "phantom prompt". The prompt-mirror+advance lockstep is kept ONLY for the genuine 2-window
+        /// (non-empty outcome-text) single-choice case (<paramref name="oneWindow"/>=false).
         /// </summary>
-        public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false)
+        public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false, bool oneWindow = false)
         {
             if (_pending.TryGetValue(occurrenceId, out var buffered))
             {
@@ -136,7 +143,16 @@ namespace Multipleer.Network.Sync.State
                 {
                     if (singleChoice)
                     {
-                        // SINGLE-CHOICE prompt-mirror (gate ON). If the host already advanced to its result page
+                        // 1-WINDOW single-choice (host IsSingleChoiceEncounter()==true → one combined window WITH
+                        // reward): skip the phantom reward-less prompt and resolve STRAIGHT to the result page,
+                        // matching the host. The host's empty-outcome SetClosingEncounter may also emit an advance —
+                        // consume any buffered one so it can't linger.
+                        if (oneWindow)
+                        {
+                            RemovePendingAdvance(occurrenceId);
+                            return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
+                        }
+                        // SINGLE-CHOICE prompt-mirror (gate ON, 2-window: non-empty outcome text). If the host already advanced to its result page
                         // (advance beat this raise — the same-frame SetClosingEncounter of an empty-outcome
                         // single-choice), jump straight to the result page; the host is already on window 2.
                         if (RemovePendingAdvance(occurrenceId))

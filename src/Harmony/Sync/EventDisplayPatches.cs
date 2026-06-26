@@ -109,10 +109,15 @@ namespace Multipleer.Harmony.Sync
                 // matching the lock-side fail-safe (an ambiguous event is treated as a locked CHOICE, not single).
                 int choiceCount = EventReflection.GetChoiceCount(geoEvent);
                 bool singleChoice = choiceCount >= 0 && choiceCount <= 1;
+                // 1-WINDOW discriminator (mirrors native IsSingleChoiceEncounter(), UIModuleSiteEncounters.cs:256-262):
+                // a single choice with EMPTY outcome text → the host shows reward+narrative in ONE combined window. Stamp
+                // it so the client skips the phantom reward-less prompt and resolves straight to the result page. A
+                // 2-window single-choice-WITH-outcome (oneWindow=false) keeps the prompt-mirror+advance lockstep.
+                bool oneWindow = EventReflection.IsOneWindowSingleChoice(geoEvent);
                 Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue +
-                          " singleChoice=" + singleChoice);
-                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice);
+                          " singleChoice=" + singleChoice + " oneWindow=" + oneWindow);
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }

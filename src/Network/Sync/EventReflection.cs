@@ -754,6 +754,30 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// Host: mirror native <c>UIModuleSiteEncounters.IsSingleChoiceEncounter()</c> (UIModuleSiteEncounters.cs:256-262)
+        /// off the live raised event — true iff the event has EXACTLY ONE choice whose
+        /// <c>Outcome.OutcomeText.General.LocalizationKey</c> is EMPTY. In that case the host shows the
+        /// reward+narrative in ONE combined window (<c>SetSingleChoiceEncounter</c> → <c>SetClosingEncounter</c>),
+        /// never a separate prompt then result. Stamped on the EventRaised wire (oneWindow bit) so the client
+        /// SKIPS the phantom reward-less prompt and resolves straight to the result page (reusing the stashed
+        /// reward), matching the host's single window. Returns false on null / non-single / non-empty outcome /
+        /// unreadable — those keep the 2-window prompt-mirror+advance lockstep. Best-effort (never throws).
+        /// </summary>
+        public static bool IsOneWindowSingleChoice(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return false;
+            try
+            {
+                Ensure();
+                var data = _eventDataProp?.GetValue(geoscapeEvent, null);
+                var choices = _choicesField?.GetValue(data) as IList;
+                if (choices == null || choices.Count != 1) return false;   // native requires Choices.Count == 1 exactly
+                return !ChoiceHasOutcomeText(choices[0]);                   // empty outcome text → ONE combined window
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.IsOneWindowSingleChoice failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
         /// Client: build a synthetic closing <c>GeoscapeEvent{EventID=""}</c> carrying ONLY the chosen choice's
         /// outcome text + a single OK button — mirroring the TEXT half of
         /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:326-358). It deliberately does NOT touch

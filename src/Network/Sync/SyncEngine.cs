@@ -348,7 +348,7 @@ namespace Multipleer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice, out var oneWindow)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
@@ -356,10 +356,16 @@ namespace Multipleer.Network.Sync
                 // the legacy unconditional jump to the result page (OFF): off-gate we pass singleChoice=false so
                 // EventCorrelator.Raised takes its byte-for-byte legacy ShowResultPage branch.
                 bool mirrorSingleChoice = EventMirrorFixGate.Enabled && singleChoice;
-                var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice);
+                // 1-WINDOW single-choice (host's IsSingleChoiceEncounter()==true: empty outcome text → host shows
+                // reward+narrative in ONE combined window): resolve STRAIGHT to the result page (skip the phantom
+                // reward-less prompt) so the client matches the host's single window. Gate-coupled (off-gate stays
+                // legacy). A 2-window single-choice-WITH-outcome (oneWindow=false) keeps the prompt-mirror+advance.
+                bool oneWindowMirror = EventMirrorFixGate.Enabled && oneWindow;
+                var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice, oneWindowMirror);
                 Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " singleChoice=" + singleChoice +
-                          " mirror=" + mirrorSingleChoice + " decision=" + decision.Kind +
+                          " oneWindow=" + oneWindow + " mirror=" + mirrorSingleChoice + " oneWindowMirror=" + oneWindowMirror +
+                          " decision=" + decision.Kind +
                           " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount +
                           " promptMirror=" + _eventCorrelator.PromptMirrorCount);
                 var rt = GeoRuntime.Instance;
@@ -543,11 +549,11 @@ namespace Multipleer.Network.Sync
 
         /// <summary>Host: broadcast a show event-dialog packet to all peers, carrying the occurrence id and an
         /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase).</summary>
-        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false)
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false, bool oneWindow = false)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow)));
         }
 
         /// <summary>
