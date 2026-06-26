@@ -20,12 +20,18 @@ namespace Multipleer.Sync.Tactical
     /// documented follow-on: it animates via its own BashCrt (NOT FireWeaponAtTargetCrt), so the shoot-coroutine
     /// replay here does not cover it — see TacticalAbilityRelay.FireStartAnimAbilityTypeNames.
     ///
-    /// HOST broadcast (<see cref="HostBroadcastFireStart"/>): called from the single host choke
-    /// <c>TacticalCombatSync.ClientInterceptAbility</c> (host / non-mirror branch) — both the host's own click
-    /// AND a relayed client intent re-Activated in <c>HostOnAbilityIntent</c> run through the patched
-    /// <c>Activate(object)</c>, so this fires exactly once per attack. Gated to the relayable attack set
-    /// (<see cref="TacticalAbilityRelay.ShouldBroadcastFireStart"/>) so the animation surface stays in
-    /// lock-step with the tac.damage surface.
+    /// HOST broadcast (<see cref="HostBroadcastFireStart"/>): called from the host branch of
+    /// <c>FireWeaponPatch</c> — the prefix on <c>TacticalLevelController.FireWeaponAtTargetCrt</c>, i.e. the
+    /// moment the host's authoritative shot animation ACTUALLY begins. RE-TIMING FIX: it used to fire at the
+    /// <c>Activate</c>/enqueue prefix (<c>TacticalCombatSync.ClientInterceptAbility</c>), but a long-range
+    /// sniper shot is ENQUEUED with a camera-blend defer, so the client replayed the shot early at enqueue while
+    /// the host's real shot fired later → a SEQUENTIAL double-play (client anim → late host anim → damage).
+    /// Broadcasting from the shot coroutine's host prefix makes the client replay coincide with the host's
+    /// visible shot (and damage lands together), matching MOVE. The single coroutine runs for the host's OWN
+    /// click, a relayed client intent (re-Activated in <c>HostOnAbilityIntent</c>), AND overwatch/return-fire
+    /// reactions — once per shoot action (the whole burst loops inside it). Gated by
+    /// <see cref="TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart"/> (shoot/grenade set, and never the
+    /// client's own Synced replay) so the animation surface stays in lock-step with the tac.damage surface.
     ///
     /// CLIENT play (<see cref="ClientOnFireStart"/>): resolve shooter (netId) + ability (guid) + weapon
     /// (<c>ability.Weapon</c>) + target (netId or world point), then REPLAY the native
@@ -66,12 +72,15 @@ namespace Multipleer.Sync.Tactical
         public static void Reset() => _replayDepth = 0;
 
         // ─── HOST: an attack is STARTING → broadcast tac.fire.start so clients animate concurrently ──
-        /// <summary>HOST: at the moment the host BEGINS a shoot/grenade attack (own click OR a relayed client
-        /// intent, both via the patched <c>Activate(object)</c>), read {shooterNetId, abilityDefGuid,
-        /// target(actor/pos), shotCount} and broadcast <c>tac.fire.start</c> to all peers. Animation-only —
-        /// the DAMAGE rides tac.damage. Only the shoot-coroutine set (shoot+grenade) is broadcast; melee + any
-        /// non-shoot ability is skipped. Fail-open: any failure is logged + swallowed so the native host attack
-        /// always proceeds.</summary>
+        /// <summary>HOST: at the moment the host's authoritative shot animation BEGINS — the host prefix on
+        /// <c>FireWeaponAtTargetCrt</c> (own click, a relayed client intent re-Activated in
+        /// <c>HostOnAbilityIntent</c>, OR an overwatch/return-fire reaction all run this single coroutine) —
+        /// read {shooterNetId, abilityDefGuid, target(actor/pos), shotCount} and broadcast <c>tac.fire.start</c>
+        /// to all peers so clients replay the shot animation CONCURRENTLY with the host. Animation-only — the
+        /// DAMAGE rides tac.damage. Gated by <see cref="TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart"/>:
+        /// the shoot-coroutine set (shoot+grenade) on a real host attack type, never the client's own Synced
+        /// replay; melee + any non-shoot ability is skipped. Runs once per shoot action (the burst loops inside
+        /// the coroutine). Fail-open: any failure is logged + swallowed so the native host attack always proceeds.</summary>
         public static void HostBroadcastFireStart(object ability, object parameter)
         {
             try
@@ -79,7 +88,12 @@ namespace Multipleer.Sync.Tactical
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActive || !engine.IsHost) return;
                 if (ability == null) return;
-                if (!TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name)) return;
+                // Read the attack type so the shot-start gate can reject the client's OWN Synced replay
+                // (defense-in-depth beside the IsHost gate above) while passing real host shots (Regular /
+                // Burst / Overwatch reaction / ReturnFire). Per-action: one FireWeaponAtTargetCrt = one shoot
+                // action (the whole burst loops inside the single coroutine) → exactly one broadcast.
+                string attackTypeName = ReadAttackTypeName(parameter);
+                if (!TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart(ability.GetType().Name, attackTypeName)) return;
 
                 object actor = GetProp(ability, "TacticalActorBase");
                 if (actor == null) return;
@@ -96,8 +110,8 @@ namespace Multipleer.Sync.Tactical
                 byte[] payload = TacticalLiveCodec.EncodeFireStart(
                     seq, shooterNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, shotCount);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacFireStart, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.fire.start seq=" + seq + " shooter=" + shooterNetId +
-                          " type=" + ability.GetType().Name + " ability=" + abilityGuid +
+                Debug.Log("[Multipleer][tac] HOST broadcast tac.fire.start@shot-start seq=" + seq + " shooter=" + shooterNetId +
+                          " type=" + ability.GetType().Name + " ability=" + abilityGuid + " attack=" + attackTypeName +
                           " targetNetId=" + targetNetId + " shots=" + shotCount);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastFireStart failed: " + ex); }
@@ -345,6 +359,15 @@ namespace Multipleer.Sync.Tactical
             }
             catch { }
             return 1;
+        }
+
+        /// <summary>Read the <c>AttackType</c> enum NAME (e.g. "Regular", "Overwatch", "Synced") off a
+        /// <c>TacticalAbilityTarget</c>; "" when unreadable. Feeds <c>ShouldBroadcastFireStartAtShotStart</c>
+        /// so the client's own Synced replay of this coroutine is never re-broadcast as a fire-start.</summary>
+        private static string ReadAttackTypeName(object parameter)
+        {
+            object atk = GetField(parameter, "AttackType");
+            return atk != null ? atk.ToString() : "";
         }
 
         private static object GetTiming(object actor, object tlc)

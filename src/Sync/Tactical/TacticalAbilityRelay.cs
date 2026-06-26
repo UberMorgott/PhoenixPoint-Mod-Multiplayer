@@ -150,6 +150,24 @@ namespace Multipleer.Sync.Tactical
         public static bool ShouldBroadcastFireStart(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _fireStartAnim.Contains(abilityTypeName);
 
+        /// <summary>Feature C (RE-TIMING fix): PURE decision whether the HOST should broadcast a
+        /// <c>tac.fire.start</c> at the SHOT-ANIMATION-START chokepoint — the host prefix on
+        /// <c>TacticalLevelController.FireWeaponAtTargetCrt</c> — for a shot of this ability type + attack type.
+        /// The broadcast was MOVED here from the <c>Activate</c>/enqueue prefix so the client's animation replay
+        /// coincides with the host's REAL (deferred, post camera-blend) shot rather than firing early at enqueue
+        /// (the sequential client-replay→late-host-shot→damage double-play bug). This chokepoint runs ONCE per
+        /// shoot action — the whole burst loops inside the single coroutine — so one broadcast covers a burst.
+        ///
+        /// TRUE for the shoot/grenade set (<see cref="ShouldBroadcastFireStart"/>) on every REAL host attack
+        /// type: Regular, Burst, Overwatch (reaction fire — the client now ALSO sees the reaction-shot
+        /// animation), ReturnFire, etc. FALSE for the <c>Synced</c> attack type — that is the CLIENT's OWN
+        /// damage-less replay of this very coroutine (<see cref="TacticalFireAnimSync"/>), which must never
+        /// re-broadcast a fire-start (defense-in-depth alongside the IsHost gate at the call site, or the
+        /// animation surface would loop). FALSE for non-shoot abilities / null / empty.</summary>
+        public static bool ShouldBroadcastFireStartAtShotStart(string abilityTypeName, string attackTypeName)
+            => ShouldBroadcastFireStart(abilityTypeName)
+               && !string.Equals(attackTypeName, "Synced", StringComparison.Ordinal);
+
         /// <summary>Feature C (melee) — the ability types whose MELEE swing animation the client replays via
         /// <c>tac.melee.start</c> (0x91). MELEE only: <c>BashAbility : TacticalAbility</c> animates via its OWN
         /// <c>BashCrt</c> (BashAbility.cs:199), NOT <c>FireWeaponAtTargetCrt</c> — so it cannot ride the

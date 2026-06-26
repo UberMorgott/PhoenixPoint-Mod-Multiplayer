@@ -107,4 +107,54 @@ public class TacticalFireStartCodecTests
         foreach (var name in TacticalAbilityRelay.ExcludedAbilityTypeNames)
             Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStart(name));
     }
+
+    // ─── (d) re-timing fix: broadcast at the SHOT-ANIMATION-START chokepoint ──────────────────────────
+    // The fire-start broadcast was MOVED out of the Activate/enqueue prefix and into the host prefix of
+    // TacticalLevelController.FireWeaponAtTargetCrt (the moment the host's authoritative shot animation
+    // ACTUALLY begins — after the sniper's enqueue + camera-blend defer), so the client's animation replay
+    // coincides with the host's REAL shot instead of running early at enqueue (the sequential double-play bug).
+    // That chokepoint runs ONCE per shoot action (the whole burst loops inside the single coroutine) and ALSO
+    // sees Overwatch/ReturnFire reaction shots + the client's own Synced replay — hence this PURE gate adds an
+    // attack-type term. The Harmony hook relocation itself is engine integration → in-game verified; only this
+    // pure decision is unit-tested.
+
+    [Theory]
+    [InlineData("Regular")]      // normal aimed shot
+    [InlineData("Burst")]        // burst weapon — one coroutine loops the whole burst → ONE broadcast
+    [InlineData("Overwatch")]    // reaction fire — client now also sees the reaction-shot animation
+    [InlineData("ReturnFire")]   // return fire reaction
+    public void ShouldBroadcastFireStartAtShotStart_True_ForShoot_OnRealHostAttackTypes(string attackType)
+        => Assert.True(TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart("ShootAbility", attackType));
+
+    [Fact]
+    public void ShouldBroadcastFireStartAtShotStart_False_ForSyncedReplayAttackType()
+        // Synced = the CLIENT's OWN damage-less replay of this very coroutine — it must NEVER re-broadcast a
+        // fire-start (defense-in-depth beside the IsHost gate at the call site) or the animation surface loops.
+        => Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart("ShootAbility", "Synced"));
+
+    [Theory]
+    [InlineData("BashAbility", "Regular")]        // melee — rides tac.melee.start, never the shoot coroutine
+    [InlineData("MoveAbility", "Regular")]
+    [InlineData("OverwatchAbility", "Overwatch")]
+    [InlineData("HealAbility", "Regular")]
+    [InlineData("SomeUnknownAbility", "Regular")]
+    [InlineData("", "Regular")]
+    [InlineData(null, "Regular")]
+    public void ShouldBroadcastFireStartAtShotStart_False_ForNonShootAbilities(string typeName, string attackType)
+        => Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart(typeName, attackType));
+
+    // The shot-start gate equals the plain type gate on every REAL host attack type and only diverges (→ false)
+    // on the Synced replay type — so relocating the broadcast preserves the exact shoot/grenade coverage.
+    [Theory]
+    [InlineData("Regular")]
+    [InlineData("Overwatch")]
+    [InlineData("ReturnFire")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void ShouldBroadcastFireStartAtShotStart_MatchesPlainGate_ExceptSynced(string attackType)
+    {
+        foreach (var name in new[] { "ShootAbility", "BashAbility", "MoveAbility", "" })
+            Assert.Equal(TacticalAbilityRelay.ShouldBroadcastFireStart(name),
+                         TacticalAbilityRelay.ShouldBroadcastFireStartAtShotStart(name, attackType));
+    }
 }

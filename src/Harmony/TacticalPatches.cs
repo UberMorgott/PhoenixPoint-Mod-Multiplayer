@@ -58,11 +58,26 @@ namespace Multipleer.Harmony
 
         public static MethodBase TargetMethod() => _targetMethod;
 
-        public static bool Prefix()
+        // Harmony injects the original args by NAME: FireWeaponAtTargetCrt(Weapon weapon,
+        // TacticalAbilityTarget abilityTarget, ShootAbility shootAbility). We only need the ability + its target;
+        // typed as object so this layer needs no engine-type references (HostBroadcastFireStart reflects them).
+        public static bool Prefix(object shootAbility, object abilityTarget)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true;
-            if (engine.IsHost) return true;
+            if (engine.IsHost)
+            {
+                // RE-TIMING FIX (sequential double-play): broadcast tac.fire.start HERE — the moment the host's
+                // authoritative shot animation ACTUALLY begins. This coroutine is invoked from ShootAbility.Shoot
+                // AFTER a long-range shot's EnqueueAction(soloAfterCurrent)+camera-blend defer, so the client's
+                // animation replay now starts CONCURRENTLY with the host's visible shot (and damage lands
+                // together), instead of replaying early at the Activate/enqueue prefix. ONE call per shoot action
+                // (the whole burst loops inside this single coroutine); covers host-OWN shots, host-executed
+                // client intents, AND overwatch/return-fire reactions. Host-gated so the client never re-broadcasts;
+                // the per-attack-type gate inside also rejects the client's own Synced replay. Fail-open.
+                Multipleer.Sync.Tactical.TacticalFireAnimSync.HostBroadcastFireStart(shootAbility, abilityTarget);
+                return true;
+            }
             // Feature C: when the client is deliberately REPLAYING this coroutine to play the attack ANIMATION
             // (projectile-free, camera-silent), let it run — otherwise this prefix would suppress our own replay.
             if (Multipleer.Sync.Tactical.TacticalFireAnimSync.ReplayActive) return true;

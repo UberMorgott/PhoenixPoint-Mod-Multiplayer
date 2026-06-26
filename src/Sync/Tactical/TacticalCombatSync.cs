@@ -59,17 +59,19 @@ namespace Multipleer.Sync.Tactical
         {
             if (!TacticalDeploySync.IsClientMirroring)
             {
-                // HOST / single-player / non-mirror: the native ability runs unchanged. Feature C — this is the
-                // SINGLE host choke for a relayable attack BEGINNING (the host's own click AND a relayed client
-                // intent re-Activated in HostOnAbilityIntent both run through the patched Activate(object), so
-                // they both trip this once). Broadcast tac.fire.start NOW so every client mirror plays the
-                // shooting/throw animation CONCURRENTLY with the host. Animation-only; DAMAGE rides tac.damage.
-                // Fail-open: HostBroadcastFireStart logs + swallows, never blocking the native attack.
-                TacticalFireAnimSync.HostBroadcastFireStart(ability, parameter);
-                // Feature C (melee): the same host choke also begins a MELEE swing. The fire-start and
-                // melee-start gates are DISJOINT (shoot/grenade → fire 0x90; BashAbility → melee 0x91), so at
-                // most ONE of these broadcasts per attack — a Bash emits melee-start only, never fire-start.
-                // Animation-only; DAMAGE rides tac.damage. Fail-open: logs + swallows, never blocks the attack.
+                // HOST / single-player / non-mirror: the native ability runs unchanged. Feature C (melee): this
+                // host choke begins a MELEE swing — broadcast tac.melee.start NOW so every client mirror plays
+                // the swing CONCURRENTLY with the host. Melee animates INLINE via BashCrt (no enqueue/camera-blend
+                // defer), so enqueue-time is the right moment for it.
+                //
+                // SHOOT/grenade fire-start is NO LONGER broadcast here. It was RE-TIMED to the host prefix on
+                // FireWeaponAtTargetCrt (FireWeaponPatch) — the moment the host's REAL shot animation actually
+                // begins. A long-range sniper shot is EnqueueAction(soloAfterCurrent)+camera-blend DEFERRED, so
+                // broadcasting at this Activate/enqueue prefix made the client replay the shot early (before the
+                // host's visible shot) → a sequential double-play. Broadcasting from the shot coroutine fixes the
+                // timing for OWN shots, relayed client intents, AND overwatch/return-fire reactions in one place.
+                // Animation-only; DAMAGE rides tac.damage. Fail-open: HostBroadcastMeleeStart logs + swallows,
+                // never blocking the native attack.
                 TacticalMeleeAnimSync.HostBroadcastMeleeStart(ability, parameter);
                 return true;
             }
