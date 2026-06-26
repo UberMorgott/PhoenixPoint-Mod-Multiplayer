@@ -349,12 +349,14 @@ namespace Multipleer.Network.Sync
                 {
                     case State.EventCorrelator.ActionKind.ShowDialog:
                     {
-                        // Single-choice mirror: the host auto-completed at trigger so a result-bearing dismiss was
-                        // BUFFERED (reward stashed) before this raise. We now mirror the host's native flavor modal
-                        // instead of a result card, so release the stashed reward (the reward STATE already synced
-                        // via the channels; there is no result page to render the delta lines onto). Harmless no-op
-                        // for a normal in-order raise (nothing was ever stashed for it).
-                        DropBufferedReward(occId);
+                        // A normal in-order raise: NOTHING was buffered for this occurrence. (A result-bearing
+                        // out-of-order dismiss now resolves via ShowResultPage, and a close-only one via DropNoop —
+                        // see EventCorrelator.Raised; neither lands here. The old "single-choice flavor-mirror"
+                        // comment predates that correlator change.) DropBufferedReward is therefore a no-op here,
+                        // but it WOULD silently discard a reward if a stash ever existed, so the EventMirrorFix gate
+                        // drops the call entirely (never throw a reward away from under a page the client will show).
+                        // Byte-for-byte legacy when the gate is OFF.
+                        if (!EventMirrorFixGate.Enabled) DropBufferedReward(occId);
                         // Case B: an in-play site this sim-frozen client never created is ABSENT. Spawn an inert
                         // mirror site from the carried identity BEFORE building the event so BuildEvent's own
                         // site resolution finds it and renders the correct backdrop/subtitle (not StartingBase).

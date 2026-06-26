@@ -229,11 +229,14 @@ namespace Multipleer.Harmony.Sync
                     return false;
                 }
                 // Confirmed SINGLE-choice real host event (Choices.Count == 1): the host auto-completed it at trigger
-                // and ALREADY broadcast its result-bearing dismiss (consumed when the raise landed → the client now
-                // mirrors the host's native flavor modal, EventCorrelator ShowDialog). The host's own modal closes
-                // LOCALLY on its OK (FinishEncounter; its second dismiss is suppressed by WasDismissed) — so NO host
-                // dismiss will ever arrive to close THIS modal. Mirror the host: close LOCALLY on the player's OK.
-                // The outcome/reward is already applied via the state channels; this is a pure UI hide, no host call.
+                // and ALREADY broadcast its result-bearing dismiss. The client normally lands on the SYNTHETIC RESULT
+                // page (closed by the EventID=="" branch above — ShowResultInPlace if the raise arrived first,
+                // ShowResultPage if the dismiss did; the old "consumed-at-raise → ShowDialog flavor mirror" path no
+                // longer applies). This branch only fires in the brief race where the player OKs the REAL flavor modal
+                // BEFORE that result page replaces it. NO host dismiss will ever arrive to close THIS modal (the
+                // host's own closed LOCALLY on its OK; its second dismiss is suppressed by WasDismissed) → mirror the
+                // host: close LOCALLY on the player's OK. The outcome/reward already applied via the state channels;
+                // this is a pure UI hide, no host call.
                 if (choiceCount == 1)
                 {
                     Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");

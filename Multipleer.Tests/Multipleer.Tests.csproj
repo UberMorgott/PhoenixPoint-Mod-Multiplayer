@@ -59,6 +59,10 @@
     <Compile Include="..\src\Network\Sync\SurfaceSeq.cs"><Link>Sync\SurfaceSeq.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\IntentDedup.cs"><Link>Sync\IntentDedup.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRailGate.cs"><Link>Sync\GeoRailGate.cs</Link></Compile>
+    <!-- Default-OFF gate for the client geoscape event-window desync fixes (occId-keyed result page + burst-safe
+         reward arming). Pure; linked for the default-OFF pin test. The fixes themselves live in EventDisplay /
+         SyncEngine / RewardDisplayReflection (game-bound, unlinked). -->
+    <Compile Include="..\src\Network\Sync\EventMirrorFixGate.cs"><Link>Sync\EventMirrorFixGate.cs</Link></Compile>
     <!-- Phase-A report-window mirror: pure gate + wire DTO/variant + whitelist classifier (Unity-free).
          SyncProtocol.cs (linked above) now references ReportModalPayload, so it MUST be linked too. The
          reflection bridge (ReportModalReflection / GeoModalDisplay) + Harmony patches bind game types and
@@ -102,6 +106,10 @@
     <!-- Client raise/dismiss correlation + ordering brain (pure, Unity-free): occurrence-id keyed open map +
          out-of-order dismiss buffer. Fixes the same-def-id collision / Dismiss-before-Raise bug. -->
     <Compile Include="..\src\Network\Sync\State\EventCorrelator.cs"><Link>Sync\State\EventCorrelator.cs</Link></Compile>
+    <!-- Burst-safe keyed reward-render pending slots (pure, Unity-free): replaces the single reference-identity
+         slot under EventMirrorFixGate so a 2nd result page (or empty-reward ClearPending) can't clobber a live
+         reward. RewardDisplayReflection (game-bound) delegates to it; linked here for direct unit tests. -->
+    <Compile Include="..\src\Network\Sync\State\RewardPendingSlots.cs"><Link>Sync\State\RewardPendingSlots.cs</Link></Compile>
     <!-- Host-side first-claim-wins choice arbiter (pure, Unity-free). -->
     <Compile Include="..\src\Network\Sync\State\ChoiceArbiter.cs"><Link>Sync\State\ChoiceArbiter.cs</Link></Compile>
     <!-- Host-side monotonic per-occurrence id authority (pure, Unity-free: ConditionalWeakTable + counter). -->

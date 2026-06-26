@@ -140,8 +140,15 @@ namespace Multipleer.Network.Sync.State
                 // Close the open locked choice modal for THIS occurrence first (host answer applied) so the result
                 // page replaces it in-place rather than stacking on top of a still-open dialog.
                 Dismiss(rt, occurrenceId, eventId);
-                // The synthetic result page is locally dismissible and never host-correlated → push with occId 0.
-                Show(rt, resultEvent, 0, eventId);
+                // Legacy (EventMirrorFixGate OFF): the synthetic result page is pushed with occId 0, so
+                // _openOccurrenceId is never recorded for it and a LATER occurrence's Dismiss bypasses the occId
+                // close-guard (Dismiss :176) and evicts THIS page → under a burst the client races to the last
+                // event and shows the wrong page. With the fix gate ON we push it WITH its occurrence id so the
+                // close-guard keeps a DIFFERENT occurrence's dismiss from closing it — the client becomes a
+                // faithful occId-keyed mirror of the native modal queue, one page at a time. The page is still
+                // locally dismissible (EventID=="" → unlocked): the player's own OK closes it natively.
+                ushort pushOccId = EventMirrorFixGate.Enabled ? occurrenceId : (ushort)0;
+                Show(rt, resultEvent, pushOccId, eventId);
             }
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.ShowResult best-effort failed: " + ex.Message); }
         }

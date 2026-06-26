@@ -479,17 +479,28 @@ namespace Multipleer.Network.Sync.State
 
         // ─── deterministic one-shot pending slot (armed by SyncEngine, consumed by the ShowEncounter hook) ───
         // The synthetic result GeoscapeEvent is correlated by REFERENCE IDENTITY (its EventID is "" so it can't
-        // be matched by id). A single slot: arming overwrites any stale prior (last dismiss wins); a stale
-        // reference can never match a different event's ShowEncounter, so a lingering slot is harmless.
+        // be matched by id).
+        //   • Legacy (EventMirrorFixGate OFF): a SINGLE slot — arming overwrites any stale prior (last dismiss
+        //     wins). Under a burst (≥2 result pages armed before the first's deferred ShowEncounter consumes it,
+        //     or an empty-reward ClearPending after a real-reward arm) the live reward is clobbered and lost
+        //     (log-confirmed: host rewardBytes=112, client drew 0 lines).
+        //   • EventMirrorFix (gate ON): a BURST-SAFE keyed slot map (RewardPendingSlots) — multiple armed rewards
+        //     coexist, each consumed one-shot by its own page's reference identity; an unrelated ClearPending no
+        //     longer drops a different page's still-armed reward. Bounded so a never-consumed arm can't leak.
         private static readonly object _pendingLock = new object();
-        private static object _pendingEvent;                 // the exact synthetic GeoscapeEvent instance
-        private static RewardDisplaySnapshot _pendingReward;  // its reward lines
+        private static object _pendingEvent;                 // legacy single slot: the exact synthetic GeoscapeEvent
+        private static RewardDisplaySnapshot _pendingReward;  // legacy single slot: its reward lines
+        private static readonly RewardPendingSlots _slots = new RewardPendingSlots();   // gate-ON keyed slots
 
         /// <summary>Client: arm the reward render for a specific synthetic result event instance (one-shot).</summary>
         public static void SetPending(object syntheticEvent, RewardDisplaySnapshot reward)
         {
             if (syntheticEvent == null || reward == null || reward.IsEmpty) return;
-            lock (_pendingLock) { _pendingEvent = syntheticEvent; _pendingReward = reward; }
+            lock (_pendingLock)
+            {
+                if (EventMirrorFixGate.Enabled) { _slots.Arm(syntheticEvent, reward); return; }
+                _pendingEvent = syntheticEvent; _pendingReward = reward;   // legacy single slot
+            }
         }
 
         /// <summary>
@@ -502,6 +513,7 @@ namespace Multipleer.Network.Sync.State
             if (shownEvent == null) return null;
             lock (_pendingLock)
             {
+                if (EventMirrorFixGate.Enabled) return _slots.TryConsume(shownEvent);
                 if (!ReferenceEquals(shownEvent, _pendingEvent)) return null;
                 var reward = _pendingReward;
                 _pendingEvent = null; _pendingReward = null;   // one-shot
@@ -512,7 +524,14 @@ namespace Multipleer.Network.Sync.State
         /// <summary>Client: drop any armed-but-unconsumed reward (e.g. a new event raised first). Idempotent.</summary>
         public static void ClearPending()
         {
-            lock (_pendingLock) { _pendingEvent = null; _pendingReward = null; }
+            lock (_pendingLock)
+            {
+                // Gate ON: do NOT wipe the keyed slots here — an empty-reward / fallback page must not drop a
+                // DIFFERENT page's still-armed reward (the exact single-slot clobber this fix removes). A stale
+                // never-consumed arm is FIFO-bounded inside RewardPendingSlots, so leaving it is harmless.
+                if (EventMirrorFixGate.Enabled) return;
+                _pendingEvent = null; _pendingReward = null;   // legacy single slot
+            }
         }
 
         /// <summary>
