@@ -40,6 +40,64 @@ namespace Multipleer.Sync.Tactical
         // flag is defense-in-depth (and keeps the host's own apply-of-a-relayed-result clean).
         [ThreadStatic] private static bool _applyingRemote;
 
+        // ─── FIX B (relayed-shot cosmetic-delay strip) ──────────────────────────────────────────────
+        // Identity registry of CLIENT-ORIGIN shoots the HOST is currently executing authoritatively. Scopes
+        // the inline (B1) + aim-up-skip (B2) strips to relayed shots ONLY — the host's OWN shots are never
+        // registered and keep the full native cinematic. Registered in HostOnAbilityIntent before Activate;
+        // cleared at the shot's OnPlayingActionEnd. Shared instance (the patches delegate here).
+        internal static readonly RelayedHostShotRegistry RelayedShots = new RelayedHostShotRegistry();
+
+        private static MethodInfo _playActionCached;
+        private static Type _playActionOwner;
+
+        /// <summary>B1 (called from <c>RelayedShootInlinePatch</c>, the prefix on
+        /// <c>TacticalAbility.EnqueueAction</c>): if <paramref name="ability"/> is a REGISTERED relayed shoot,
+        /// run its action IMMEDIATELY via <c>PlayAction</c> (the inline branch overwatch/point-blank already
+        /// take) instead of the long-range <c>EnqueueAction(soloAfterCurrent)</c> + camera-blend defer, then
+        /// return true so the patch SKIPS the native enqueue. Returns false (run native enqueue) for host-own /
+        /// non-registered abilities or on any error (fail-open). Does NOT touch the damage roll.</summary>
+        public static bool TryRunRelayedShootInline(object ability, object action, object parameter)
+        {
+            try
+            {
+                if (ability == null || !RelayedShots.IsAbilityActive(ability)) return false;
+                var t = ability.GetType();
+                if (_playActionCached == null || _playActionOwner != t)
+                {
+                    _playActionOwner = t;
+                    // public void PlayAction(Func<PlayingAction,IEnumerator<NextUpdate>> action, object parameter,
+                    // ActionChannel? channel = null) — single overload on TacticalAbility → name-only is exact.
+                    _playActionCached = AccessTools.Method(t, "PlayAction");
+                }
+                if (_playActionCached == null)
+                {
+                    Debug.LogError("[Multipleer][tac] B1: PlayAction not found on " + t.Name + " — relayed shoot stays enqueued");
+                    return false;   // fail-open: native enqueue runs
+                }
+                // channel = null → PlayAction defaults it to ActorActions internally.
+                _playActionCached.Invoke(ability, new object[] { action, parameter, null });
+                Debug.Log("[Multipleer][tac] B1 relayed shoot ran INLINE via PlayAction (stripped EnqueueAction+camera-blend defer) on " + t.Name);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] B1 inline reroute failed (falling back to native enqueue): " + ex);
+                return false;
+            }
+        }
+
+        /// <summary>B2 (called from <c>RelayedShootAimSkipPatch</c>, the postfix on
+        /// <c>TacticalActor.CurrentlyAiming</c>): true when <paramref name="actor"/> is the shooter of an
+        /// in-flight relayed shoot, so the host reports it as already aiming → <c>FireWeaponAtTargetCrt</c>
+        /// skips the standing aim-up wait (same native path an already-aiming overwatch reaction shot takes).
+        /// False for host-own / non-registered actors → full native aim-up. Damage roll untouched.</summary>
+        public static bool ShouldForceAimingForRelayedShot(object actor)
+            => actor != null && RelayedShots.IsActorActive(actor);
+
+        /// <summary>Clear a relayed shoot's registry entry at its <c>OnPlayingActionEnd</c> (hit / miss /
+        /// fumble). No-op for host-own / non-registered abilities.</summary>
+        public static void EndRelayedShot(object ability) => RelayedShots.End(ability);
+
         // ─── CLIENT: intercept the local gameplay ability, send intent, suppress ───────────────────
         /// <summary>
         /// CLIENT (mirroring) entry from <c>AbilityActivateRelayPatch</c> (the generic per-subclass
@@ -178,6 +236,21 @@ namespace Multipleer.Sync.Tactical
                 // raising no tac.damage, and no health surface exists yet) — see TacticalAbilityRelay.
                 var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
                 if (activate == null) { Debug.LogError("[Multipleer][tac] ability intent: Activate(object) not found"); return; }
+
+                // FIX B (relayed-shot cosmetic-delay strip): register this CLIENT-ORIGIN shoot so the host runs
+                // it INLINE (B1, read synchronously by the EnqueueAction prefix during Activate) and SKIPS the
+                // aim-up wait (B2, read later by the CurrentlyAiming postfix inside the deferred shot coroutine).
+                // Scoped to the SHOOT coroutine set (ShootAbility = shoot+grenade) — melee (BashAbility) already
+                // runs inline (PlayAction) and never reaches FireWeaponAtTargetCrt's aim-up. The host's OWN shots
+                // are never registered → they keep the full native cinematic. Cleared at OnPlayingActionEnd.
+                bool relayedShoot = TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name);
+                if (relayedShoot)
+                {
+                    RelayedShots.Begin(ability, shooter);
+                    Debug.Log("[Multipleer][tac] B1/B2 registered relayed shoot (inline+aim-skip) actor=" + intent.ShooterNetId +
+                              " ability=" + ability.GetType().Name);
+                }
+
                 activate.Invoke(ability, new[] { target });
                 Debug.Log("[Multipleer][tac] HOST executed ability " + ability.GetType().Name +
                           " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ShooterNetId);
@@ -527,7 +600,19 @@ namespace Multipleer.Sync.Tactical
                         ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
                         : null;
                     if (ctor != null)
-                        return ctor.Invoke(new[] { targetActor, aimPos, DefaultAttackType(attackType) });
+                    {
+                        object t = ctor.Invoke(new[] { targetActor, aimPos, DefaultAttackType(attackType) });
+                        // FIX A (relayed-melee ZERO-damage): the (actor, pos, AttackType) ctor seeds Actor/
+                        // GameObject/PositionToApply but NOT DamageReceiver. Native bash derefs target.DamageReceiver
+                        // UNGUARDED (BashAbility.GetEffectTarget BashAbility.cs:538/547/565 + AimIK :449) → NRE AFTER
+                        // the swing → the swing plays but the damage dies. Shoot is unaffected: its native UI target
+                        // sets DamageReceiver too, and HostOnAbilityIntent's GetShootTarget snap rebuilds the target
+                        // downstream. Mirror TacticalMeleeAnimSync.BuildMeleeTarget:258 — set it to the live actor
+                        // (TacticalActorBase : IDamageReceiver).
+                        AccessTools.Field(targetType, "DamageReceiver")?.SetValue(t, targetActor);
+                        Debug.Log("[Multipleer][tac] BuildShootTarget set DamageReceiver=actor on actor target (relayed-melee NRE fix)");
+                        return t;
+                    }
                 }
                 else
                 {
@@ -545,6 +630,7 @@ namespace Multipleer.Sync.Tactical
             if (targetActor != null)
             {
                 AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
+                AccessTools.Field(targetType, "DamageReceiver")?.SetValue(target, targetActor);   // FIX A: see ctor branch
                 object go = GetProp(targetActor, "gameObject");
                 if (go != null) AccessTools.Field(targetType, "GameObject")?.SetValue(target, go);
                 if (GetProp(targetActor, "Pos") is Vector3 actorPos)

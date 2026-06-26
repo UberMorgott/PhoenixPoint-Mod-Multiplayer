@@ -190,6 +190,11 @@
          tac.fire.start is then SKIPPED (consume) so the shooter animates exactly once. TTL self-expiry. The engine
          glue (TacticalFireAnimSync.ClientPredictFireStart / ClientOnFireStart) binds game types and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\PredictedFireGuard.cs"><Link>Sync\Tactical\PredictedFireGuard.cs</Link></Compile>
+    <!-- FIX B (relayed-shot cosmetic-delay strip): pure, Unity-free identity registry of CLIENT-ORIGIN shoots
+         the host is executing, scoping the inline (B1) + aim-up-skip (B2) strips to relayed shots only (host's
+         OWN shots keep the full native cinematic). The engine glue (TacticalCombatSync helpers + the
+         EnqueueAction/CurrentlyAiming/OnPlayingActionEnd Harmony patches) binds game types and is NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\RelayedHostShotRegistry.cs"><Link>Sync\Tactical\RelayedHostShotRegistry.cs</Link></Compile>
   </ItemGroup>
   <ItemGroup>
     <!-- Compile-time only: needed by GeoRuntime (HarmonyLib) + ClientIdentity (UnityEngine). -->
