@@ -218,6 +218,24 @@ namespace Multipleer.Network
 
             IsHost = true;
             Transport.Host(port);
+
+            // DIAGNOSTIC (additive, no behaviour change): the user EXPLICITLY chose to HOST. If the bind
+            // failed on EVERY transport the aggregate state reads Failed (e.g. a 2nd PhoenixPoint instance
+            // on this machine already holds port 14242 — TCP for DirectIP, UDP for STUN — so both report
+            // AddressAlreadyInUse). The per-transport Host() swallows that into a queryable Failed state
+            // rather than throwing, so without this shout the dead host looks alive: the user keeps watching
+            // a non-hosting instance (no reward credit) and it can read like a silent client demotion
+            // ("Connection accepted by host"). Do NOT change the fallback/port/transport selection — just
+            // make the all-transports bind failure LOUD and unmissable in the Player.log.
+            if (Transport.State == ConnectionState.Failed)
+            {
+                Debug.LogError(
+                    $"[Multipleer] HOST BIND FAILED on ALL transports (port {port}). This instance is NOT " +
+                    "hosting — it did NOT silently become a client. Most likely another PhoenixPoint instance " +
+                    "on this machine already holds the port. Close the other instance (or free the port), then " +
+                    "host again. Do NOT keep playing here expecting host/reward authority.");
+            }
+
             Session.InitializeAsHost();
             OnHostStarted?.Invoke();
         }
