@@ -12,13 +12,13 @@ namespace Multipleer.Network.Sync
     ///     (<see cref="State.RewardPendingSlots"/>) instead of a single reference-identity slot that a second
     ///     result page (or an empty-reward <c>ClearPending</c>) could clobber before the deferred render consumes it.
     ///
-    /// While <see cref="Enabled"/> is false (the SHIPPED default) BOTH fixes are inert and the legacy behavior is
+    /// While <see cref="Enabled"/> is false (legacy) BOTH fixes are inert and the legacy behavior is
     /// byte-for-byte unchanged: result pages push with occId 0 and the reward render uses the single-slot path.
-    /// Flip to true (a one-line dev edit + recompile) only after in-game verification.
+    /// Shipped ON (single-choice stage-lockstep in-game verified 2026-06-26); flip to false to fall back to legacy.
     /// </summary>
     public static class EventMirrorFixGate
     {
-        /// <summary>Master switch for the additive event-window desync fixes. Shipped OFF.</summary>
-        public static bool Enabled = false;
+        /// <summary>Master switch for the additive event-window desync fixes. Shipped ON (in-game verified 2026-06-26).</summary>
+        public static bool Enabled = true;
     }
 }

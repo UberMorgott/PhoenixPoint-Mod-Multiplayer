@@ -3,12 +3,12 @@ using Xunit;
 
 public class EventMirrorFixGateTests
 {
-    // Pins the SHIPPED default OFF: the geoscape event-window desync fixes (occId-keyed result page + burst-safe
-    // reward arming) are additive and must be byte-for-byte unchanged until in-game-validated. Mirrors
-    // GeoRailGateTests / ReportMirrorGateTests; flips to a DefaultsOn pin after in-game validation.
+    // Pins the SHIPPED default ON: the single-choice event-window stage-lockstep fix (occId-keyed result page +
+    // burst-safe reward arming + prompt-mirror/advance) is locked in after in-game validation (2026-06-26), so
+    // it is now the default. Mirrors GeoRailGateTests; flip back to false only to fall back to the legacy path.
     [Fact]
-    public void Enabled_DefaultsOff()
+    public void Enabled_DefaultsOn()
     {
-        Assert.False(EventMirrorFixGate.Enabled);
+        Assert.True(EventMirrorFixGate.Enabled);
     }
 }
