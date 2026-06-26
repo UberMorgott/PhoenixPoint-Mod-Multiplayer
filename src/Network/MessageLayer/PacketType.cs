@@ -66,6 +66,7 @@ namespace Multipleer.Network.MessageLayer
         SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]
         // 0x68 retired (was ChoiceClaim): geoscape event-choice resolution now rides AnswerEventAction over the
         // research-style ActionRequest/ActionApply relay (occId on the action wire). Do NOT reuse this id.
+        ReportModalShow = 0x69, // host -> all: show a geoscape REPORT modal on clients (Phase-A report-window mirror)
 
         // Chat
         ChatMessage = 0x50,

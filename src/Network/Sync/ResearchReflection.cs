@@ -75,6 +75,22 @@ namespace Multipleer.Network.Sync
             return _getById.Invoke(research, new object[] { id });
         }
 
+        /// <summary>
+        /// Resolve <paramref name="researchId"/> → live <c>ResearchElement</c> via the player faction's
+        /// <c>Research.GetResearchById</c>, or null. Read-only (no queue/complete). Used by the report-window
+        /// mirror to rebuild a <c>GeoResearchCompleteData</c>/<c>DiplomacyResearchRewardData</c> on the client.
+        /// </summary>
+        public static object ResolveElement(GeoRuntime rt, string researchId)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return null;
+                return Resolve(GetFactionResearch(rt), researchId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.ResolveElement failed: " + ex.Message); return null; }
+        }
+
         /// <summary>Resolve <paramref name="researchId"/> → ResearchElement and queue it (Apply side).</summary>
         public static void AddToQueue(GeoRuntime rt, string researchId)
         {

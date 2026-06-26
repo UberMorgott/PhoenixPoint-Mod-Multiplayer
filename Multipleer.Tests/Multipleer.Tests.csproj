@@ -59,6 +59,13 @@
     <Compile Include="..\src\Network\Sync\SurfaceSeq.cs"><Link>Sync\SurfaceSeq.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\IntentDedup.cs"><Link>Sync\IntentDedup.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRailGate.cs"><Link>Sync\GeoRailGate.cs</Link></Compile>
+    <!-- Phase-A report-window mirror: pure gate + wire DTO/variant + whitelist classifier (Unity-free).
+         SyncProtocol.cs (linked above) now references ReportModalPayload, so it MUST be linked too. The
+         reflection bridge (ReportModalReflection / GeoModalDisplay) + Harmony patches bind game types and
+         are NOT linked (mirrors GeoSiteReflection / EventDisplay — compiled only into the real mod DLL). -->
+    <Compile Include="..\src\Network\Sync\ReportMirrorGate.cs"><Link>Sync\ReportMirrorGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\ReportModalPayload.cs"><Link>Sync\State\ReportModalPayload.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\ReportModalClassifier.cs"><Link>Sync\State\ReportModalClassifier.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Sync\ISyncedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Sync\PermissionGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Sync\GeoRuntime.cs</Link></Compile>

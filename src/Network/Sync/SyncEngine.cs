@@ -508,6 +508,64 @@ namespace Multipleer.Network.Sync
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
         }
 
+        // ─── Geoscape report-window mirror (host->all show, Phase-A) ───────
+
+        /// <summary>
+        /// Host: broadcast a report window (mission/research/base/reveal/diplomacy outcome modal) to all peers.
+        /// The payload was built by <c>ReportModalClassifier.TryBuild</c> at the host chokepoint. Mirrors
+        /// <see cref="BroadcastEventRaised"/>. Gated upstream on <c>ReportMirrorGate.Enabled</c>; no-op off-host.
+        /// </summary>
+        public void BroadcastReportModal(State.ReportModalPayload payload)
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.ReportModalShow,
+                SyncProtocol.EncodeReportModal(payload)));
+        }
+
+        /// <summary>
+        /// Client: the host opened a report window. Decode + reconstruct the modalData from already-synced ids by
+        /// variant, then replay the native modal under <see cref="SyncApplyScope"/> (so any patched opener that
+        /// fires during the push is treated as engine-driven, exactly like the EventRaised path). Mirrors
+        /// <see cref="OnEventRaised"/>. Authority guard: a host never applies its own broadcast.
+        /// </summary>
+        public void OnReportModalShow(byte[] data)
+        {
+            if (_engine.IsHost) return;   // host shows it via its own local sim
+            if (!SyncProtocol.TryDecodeReportModal(data, out var p)) return;
+            try
+            {
+                var rt = GeoRuntime.Instance;
+                object modalData;
+                switch (p.Variant)
+                {
+                    case State.ReportModalVariant.NullData:
+                        modalData = null;
+                        break;
+                    case State.ReportModalVariant.SiteOnly:
+                        // Resolve the revealed site by id (null → the native no-site PandoranRevealResult path).
+                        modalData = State.ReportModalReflection.ResolveSite(rt, p.SiteId);
+                        break;
+                    case State.ReportModalVariant.Research:
+                        modalData = State.ReportModalReflection.BuildResearchCompleteData(rt, p.DefId);
+                        if (modalData == null) return;   // element unresolved → don't show an empty card
+                        break;
+                    case State.ReportModalVariant.Diplomacy:
+                        modalData = State.ReportModalReflection.BuildDiplomacyData(rt, p.DefId, p.ExtraIds, p.ShareLevel);
+                        break;
+                    default:
+                        return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
+                }
+                bool persistent = State.ReportModalClassifier.IsPersistent(p.Variant);
+                Debug.Log("[Multipleer] CLIENT OnReportModalShow modalType=" + p.ModalType + " variant=" + p.Variant +
+                          " siteId=" + p.SiteId + " defId=" + p.DefId + " extras=" + (p.ExtraIds?.Count ?? 0) +
+                          " shareLevel=" + p.ShareLevel + " priority=" + p.Priority + " persistent=" + persistent +
+                          " hasData=" + (modalData != null));
+                using (SyncApplyScope.Enter())
+                    State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
+        }
+
         // The host's own event-choice click is PURE NATIVE — the click patch lets the native
         // UIModuleSiteEncounters.OnChoiceSelected run untouched, which renders the host's result/reward page and
         // broadcasts the dismiss. First-click-wins arbitration lives one layer down at the universal CompleteEvent

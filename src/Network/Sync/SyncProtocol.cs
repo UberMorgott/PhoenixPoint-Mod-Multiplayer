@@ -404,6 +404,63 @@ namespace Multipleer.Network.Sync
         // relay (occId on the action wire). The host resolves a client's answer by driving its OWN native modal
         // (EventReflection.TryHostNativeResolve), falling back to the model-only CompleteEventByOccurrence.
 
+        // ─── Geoscape report-window mirror (host->all show, Phase-A) ───────
+        // Wire: [modalType:u8][variantTag:u8][siteId:i32][priority:i32][shareLevel:i32]
+        //       [defId: u16len+UTF8][extraCount:u16][(u16len+UTF8) * extraCount]
+        // A one-way notice (no dismiss packet): each peer closes its own copy locally with OK. variantTag
+        // (ReportModalVariant) selects the client rebuild path; only the fields a variant needs are non-default
+        // (siteId = -1, priority/shareLevel = 0, defId = "", no extras). Host + client run the SAME build, so
+        // every field is a fixed REQUIRED field (no cross-version optionality this phase). A Phase-B MissionOutcome
+        // variant can append a trailing reward blob behind the extras without disturbing the A-variant wire.
+
+        public static byte[] EncodeReportModal(ReportModalPayload p)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(p.ModalType);
+                w.Write((byte)p.Variant);
+                w.Write(p.SiteId);
+                w.Write(p.Priority);
+                w.Write(p.ShareLevel);
+                WriteWireStr(w, p.DefId);
+                var extras = p.ExtraIds ?? new List<string>();
+                if (extras.Count > ushort.MaxValue)
+                    throw new ArgumentOutOfRangeException(nameof(p),
+                        "ReportModal extraIds exceeds the u16 count field (" + extras.Count + " > " + ushort.MaxValue + ").");
+                w.Write((ushort)extras.Count);
+                foreach (var id in extras) WriteWireStr(w, id);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeReportModal(byte[] data, out ReportModalPayload payload)
+        {
+            payload = default(ReportModalPayload);
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    byte modalType = r.ReadByte();
+                    byte variantByte = r.ReadByte();
+                    // Forward-compat: an undefined variant byte is a graceful drop, never a crash.
+                    if (!Enum.IsDefined(typeof(ReportModalVariant), variantByte)) return false;
+                    int siteId = r.ReadInt32();
+                    int priority = r.ReadInt32();
+                    int shareLevel = r.ReadInt32();
+                    string defId = ReadWireStr(r);
+                    int extraCount = r.ReadUInt16();
+                    var extras = new List<string>(extraCount);
+                    for (int i = 0; i < extraCount; i++) extras.Add(ReadWireStr(r));
+                    payload = new ReportModalPayload(modalType, (ReportModalVariant)variantByte,
+                        siteId, priority, shareLevel, defId, extras);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
         // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
         // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;
         // kind (SyncKind) selects request/apply/snapshot/delta. The inner payload is the surface's

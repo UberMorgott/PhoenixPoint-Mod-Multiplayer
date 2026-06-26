@@ -554,6 +554,11 @@ namespace Multipleer.Network
                     Sync?.OnEventDismiss(msg.Payload);
                     break;
 
+                case PacketType.ReportModalShow:
+                    // Host->all report window opened. Clients reconstruct + show the same modal (Phase-A mirror).
+                    Sync?.OnReportModalShow(msg.Payload);
+                    break;
+
                 case PacketType.SyncEnvelope:
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).
