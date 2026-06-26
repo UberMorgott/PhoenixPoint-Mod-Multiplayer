@@ -12,6 +12,6 @@ namespace Multipleer.Network.Sync
     public static class GeoRailGate
     {
         /// <summary>Master switch for the additive geoscape envelope rail. Shipped OFF.</summary>
-        public static bool Enabled = false;
+        public static bool Enabled = true;
     }
 }

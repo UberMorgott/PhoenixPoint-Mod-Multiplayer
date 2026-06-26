@@ -3,11 +3,11 @@ using Xunit;
 
 public class GeoRailGateTests
 {
-    // Pins the SHIPPED default OFF: with the gate off the geoscape envelope rail emits nothing, so the
-    // legacy 0x60-0x66 path is byte-for-byte unchanged (behavior-preserving additive rollout).
+    // Pins the SHIPPED default ON: slice-1 locked in after in-game validation, so the new 0x67 wallet
+    // envelope rail is now the default and mirrors the migrated geoscape message onto the shared rail.
     [Fact]
-    public void Enabled_DefaultsOff()
+    public void Enabled_DefaultsOn()
     {
-        Assert.False(GeoRailGate.Enabled);
+        Assert.True(GeoRailGate.Enabled);
     }
 }
