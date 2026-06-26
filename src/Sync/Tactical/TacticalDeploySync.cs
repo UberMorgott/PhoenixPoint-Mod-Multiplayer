@@ -382,6 +382,13 @@ namespace Multipleer.Sync.Tactical
             }
             if (p.MissionSiteId == _hydratedSiteId) return;   // duplicate reliable double-send → ignore
 
+            // N3 guard: a still-pending deploy for a DIFFERENT site means we never finished hydrating the
+            // previous one before a new mission's deploy arrived. Surface it, then keep the newest (matching
+            // the existing latest-wins overwrite intent — same-site double-sends are already dropped above).
+            if (_pendingClientDeploy != null && _pendingClientDeploy.MissionSiteId != p.MissionSiteId)
+                Debug.LogWarning("[Multipleer][tac] overwriting pending deploy site " +
+                                 _pendingClientDeploy.MissionSiteId + " with " + p.MissionSiteId);
+
             _pendingClientDeploy = p;
             Debug.Log("[Multipleer][tac] CLIENT received tac.deploy site=" + p.MissionSiteId +
                       " gpBytes=" + p.GameParamsBytes.Length + " snapBytes=" + p.SnapshotBytes.Length +
