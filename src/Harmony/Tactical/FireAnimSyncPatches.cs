@@ -50,6 +50,12 @@ namespace Multipleer.Harmony.Tactical
         // (projectile-damage, wait-for-projectiles, throwable-destroy, camera-hint) stay on ClientReplay.
         public static bool AnyReplay => ClientReplay || MeleeReplay;
 
+        // True ONLY while the HOST is executing a RELAYED CLIENT shot (TacticalCombatSync.RelayedShots is populated
+        // solely in HostOnAbilityIntent, drained at OnPlayingActionEnd). Used by the camera-hint guard so the host's
+        // camera does NOT fly to the client's shooter during a relayed shot; the host's OWN shots are never in
+        // RelayedShots, so their cinematic is untouched. IsHost-gated so a client (Count is host-only anyway) no-ops.
+        public static bool HostRelayedShotActive => IsHost && TacticalCombatSync.RelayedShots.Count > 0;
+
         private static bool IsHost
         {
             get { var e = NetworkEngine.Instance; return e != null && e.IsHost; }
@@ -75,8 +81,10 @@ namespace Multipleer.Harmony.Tactical
 
         public static MethodBase TargetMethod() => _target;
 
-        // Skip the camera-directing hint push ONLY while a client fire-animation replay is in flight.
-        public static bool Prefix() => !FireReplayGate.ClientReplay;
+        // Skip the camera-directing hint push while EITHER a client fire-animation replay is in flight OR the host is
+        // executing a relayed CLIENT shot (FireWeaponAtTargetCrt's Hint pushes would otherwise fly the host camera to
+        // the client's shooter and steal control). The host's OWN shots are never in RelayedShots → full cinematic.
+        public static bool Prefix() => !(FireReplayGate.ClientReplay || FireReplayGate.HostRelayedShotActive);
     }
 
     /// <summary>Client replay: let <c>Weapon.FireProjectile</c> run FULLY (real tracer + flash/smoke/shell/SFX so

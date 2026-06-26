@@ -178,6 +178,13 @@ namespace Multipleer.Sync.Tactical
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
 
+                // TASK 2 (HOST staleness): the signature DRIFTED for this actor (AP/WP/status/pos changed) — if the
+                // change was a relayed CLIENT action the host executed programmatically (AP→0 + OverwatchStatus), the
+                // host's ability bar is never natively re-cycled, so its buttons stay lit. Re-stamp it here. No-op
+                // unless the host's currently-selected actor IS this netId (host's OWN soldiers grey natively on
+                // re-select), and it reads the settled post-SetToMin AP. Pure view re-push, not a state mutation.
+                RefreshHostSelectedBarForActor(netId);
+
                 ushort mask = (ushort)(TacticalLiveCodec.ActorFieldAp | TacticalLiveCodec.ActorFieldWp);
                 // Feature D: ship the actor-level HEALTH bit ONLY when HP > 0. Death (HP <= 0) is owned by
                 // tac.damage (0x88); the client apply is death-safe anyway (ShouldApplyHealthMirror skips <= 0),
