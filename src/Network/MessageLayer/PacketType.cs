@@ -33,16 +33,14 @@ namespace Multipleer.Network.MessageLayer
 
         // Tactical Actions
         TacticalActionRequest = 0x20,   // 0x21-0x24, 0x27 retired (legacy approve/reject/result/broadcast/turn-state path removed); do NOT reuse
-        EndTurnRequest = 0x25,
-        EndTurnAccepted = 0x26,
+        // 0x25 (EndTurnRequest) + 0x26 (EndTurnAccepted) retired: end-turn rides envelope TacIntentEndTurn 0x84 / TacTurn 0x85. Do NOT reuse the ids.
 
         // Campaign Actions
         CampaignActionRequest = 0x30,
         CampaignActionApproved = 0x31,
         CampaignActionRejected = 0x32,
         // 0x33 (CampaignActionResult) + 0x34 (CampaignStateUpdate) removed: never sent, no handler. Do NOT reuse the ids.
-        GeoStateDiff = 0x35,
-        GeoEntityOp = 0x36,
+        // 0x35 (GeoStateDiff) + 0x36 (GeoEntityOp) retired: orphan ids, no sender/handler; the diff codec they fronted no longer exists. Do NOT reuse the ids.
         TimeAnchor = 0x37,    // host->all: authoritative anchor {version, tAnchor, gAnchor, paused, speedIndex}
         TimeRequest = 0x38,   // client->host: time-control request {paused, speedIndex}
         TimeClockPing = 0x39, // client->host: NTP-style offset ping {pingId, t0}

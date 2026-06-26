@@ -447,11 +447,6 @@ namespace Multipleer.Network
                     Session.HandleReadyState(msg);
                     break;
 
-                case PacketType.EndTurnRequest:
-                case PacketType.EndTurnAccepted:
-                    // Handled by turn sync
-                    break;
-
                 case PacketType.InitialGameState:
                     Session.HandleInitialGameState(msg);
                     break;

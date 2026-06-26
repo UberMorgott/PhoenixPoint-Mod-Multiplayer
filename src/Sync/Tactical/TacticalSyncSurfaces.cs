@@ -113,14 +113,6 @@ namespace Multipleer.Sync.Tactical
         public const ushort TacMeleeStart = 0x91;        // 145: host→all     "actor netId begins melee swing@guid at target" (start, carries seq)
     }
 
-    /// <summary>Tactical surface ids as ushort wire ids (kept as an alias for symmetry with the geoscape
-    /// <c>SyncedActionIds</c> naming; the tac.deploy rail keys on the byte surfaceId, not an action id).</summary>
-    public static class TacticalActionIds
-    {
-        public const ushort TacDeploy = TacticalSurfaceIds.TacDeploy;
-        public const ushort TacDeployChunk = TacticalSurfaceIds.TacDeployChunk;
-    }
-
     /// <summary>
     /// PURE chunking layer for the <c>tac.deploy</c> snapshot (FIX 1). The full <see cref="TacticalDeployCodec"/>
     /// payload is hundreds of KB, but <c>SyncProtocol.EncodeEnvelope</c> caps an envelope payload at a u16

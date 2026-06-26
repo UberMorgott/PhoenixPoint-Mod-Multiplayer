@@ -103,6 +103,5 @@ public class TacticalDeployCodecTests
     {
         // tac.deploy must sit above the geoscape action surfaces (1-30) and state channels (1-5).
         Assert.True(TacticalSurfaceIds.TacDeploy >= 0x80);
-        Assert.Equal(TacticalSurfaceIds.TacDeploy, TacticalActionIds.TacDeploy);
     }
 }
