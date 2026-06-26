@@ -112,6 +112,10 @@
     <Compile Include="..\src\Network\Sync\State\RewardPendingSlots.cs"><Link>Sync\State\RewardPendingSlots.cs</Link></Compile>
     <!-- Host-side first-claim-wins choice arbiter (pure, Unity-free). -->
     <Compile Include="..\src\Network\Sync\State\ChoiceArbiter.cs"><Link>Sync\State\ChoiceArbiter.cs</Link></Compile>
+    <!-- WalletWatcher rebind decision (pure, Unity-free): no-op / first-bind / rebind-on-fresh-instance.
+         Fixes the post-reload stale-wallet binding (dead `if (_bound) return;` gate). The live WalletWatcher
+         glue (GeoRuntime.Wallet reflection + WalletReflection subscribe) binds game types and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\WalletBindDecision.cs"><Link>Sync\WalletBindDecision.cs</Link></Compile>
     <!-- Host-side monotonic per-occurrence id authority (pure, Unity-free: ConditionalWeakTable + counter). -->
     <Compile Include="..\src\Harmony\Sync\EventOccurrenceIds.cs"><Link>Harmony\Sync\EventOccurrenceIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>

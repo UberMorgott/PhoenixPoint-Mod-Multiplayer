@@ -124,6 +124,12 @@ namespace Multipleer.Harmony.Sync
                 // on the next real-time Tick flush. Host-only (__state is set in Prefix only when IsHost);
                 // idempotent reconcile. The client-relayed answer path is covered in SyncEngine.OnActionRequest.
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(2);
+                // BELT (wallet reward sync): an event choice can GRANT resources (ChoiceReward.Apply → Wallet.Apply).
+                // That normally fires Wallet.ResourcesChanged → WalletWatcher → MarkWalletDirty, but a missed/stale
+                // binding (e.g. a fresh post-reload wallet) would drop the echo + leave the host bar stale. Force the
+                // wallet dirty here so every host CompleteEvent ships the wallet echo + refreshes the host bar
+                // regardless of whether the ResourcesChanged subscription fired. Null-safe; idempotent (coalesced).
+                NetworkEngine.Instance?.Sync?.MarkWalletDirty();
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventPatch postfix broadcast failed: " + ex.Message); }
         }
