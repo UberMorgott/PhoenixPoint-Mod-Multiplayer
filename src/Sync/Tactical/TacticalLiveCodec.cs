@@ -1076,48 +1076,14 @@ namespace Multipleer.Sync.Tactical
     /// ORDERED transport, so a strictly-greater check is sufficient last-writer-wins (a stale duplicate or
     /// re-send is dropped; nothing newer can be overtaken).
     /// </summary>
-    public sealed class TacticalLiveSeq
+    public sealed class TacticalLiveSeq : Network.Sync.SurfaceSeq
     {
-        private readonly Dictionary<ushort, uint> _hostNext = new Dictionary<ushort, uint>();
-        private readonly Dictionary<ushort, uint> _clientLast = new Dictionary<ushort, uint>();
-
-        /// <summary>HOST: take the next monotonic seq for a surface (starts at 1).</summary>
-        public uint Next(ushort surfaceId)
-        {
-            _hostNext.TryGetValue(surfaceId, out var cur);
-            uint next = cur + 1;
-            _hostNext[surfaceId] = next;
-            return next;
-        }
-
-        /// <summary>CLIENT: true if this seq is newer than the last applied for the surface. Does NOT mark
-        /// (call <see cref="Mark"/> after a successful apply) so a failed apply can be retried by a re-send.</summary>
-        public bool ShouldApply(ushort surfaceId, uint seq)
-        {
-            _clientLast.TryGetValue(surfaceId, out var last);
-            return seq > last;
-        }
-
-        /// <summary>CLIENT: record the last applied seq for a surface.</summary>
-        public void Mark(ushort surfaceId, uint seq)
-        {
-            _clientLast.TryGetValue(surfaceId, out var last);
-            if (seq > last) _clientLast[surfaceId] = seq;
-        }
-
-        public void Reset()
-        {
-            _hostNext.Clear();
-            _clientLast.Clear();
-        }
-
-        /// <summary>HOST: capture-time per-mission seq hook, called from the deploy capture.
-        /// Intentionally does NOT touch the host streams: by the time the deploy capture runs the level
-        /// is already turn-0-ready and the pre-deploy <c>tac.turn</c> (seq=1) has been emitted on this
-        /// instance. Recreating/resetting the stream here (the previous <c>LiveSeq = new TacticalLiveSeq()</c>)
-        /// rewound <c>_hostNext[TacTurn]</c> to 0, so the next turn re-emitted seq=1 and the client's strict
-        /// <c>seq &gt; last</c> guard dropped it ⇒ "turn doesn't end". The stream is created exactly once per
-        /// mission (constructor + <c>OnMissionExit</c> reset) and must survive the capture monotonically.</summary>
+        /// <summary>HOST: capture-time per-mission seq hook, called from the deploy capture. Intentionally a
+        /// NO-OP: the host seq streams must survive a mid-mission deploy capture (never rewind). Recreating/
+        /// resetting the stream here (the old <c>LiveSeq = new TacticalLiveSeq()</c>) rewound <c>_hostNext[TacTurn]</c>
+        /// to 0, so the next turn re-emitted seq=1 and the client's strict <c>seq &gt; last</c> guard dropped it ⇒
+        /// "turn doesn't end". The stream is created exactly once per mission (constructor + OnMissionExit
+        /// reset) and must survive the capture monotonically.</summary>
         public void BeginDeployCaptureMission()
         {
             // No-op by design: the host seq streams must survive a mid-mission deploy capture (never rewind).
@@ -1129,31 +1095,8 @@ namespace Multipleer.Sync.Tactical
     /// double-applied MOVE would step the actor twice. Keyed by the intent's (surfaceId, nonce); a bounded
     /// ring drops the oldest so memory stays flat over a long battle. PURE (no engine types).
     /// </summary>
-    public sealed class TacticalIntentDedup
+    public sealed class TacticalIntentDedup : Network.Sync.IntentDedup
     {
-        private readonly int _capacity;
-        private readonly HashSet<ulong> _seen = new HashSet<ulong>();
-        private readonly Queue<ulong> _order = new Queue<ulong>();
-
-        public TacticalIntentDedup(int capacity = 512) { _capacity = capacity < 16 ? 16 : capacity; }
-
-        private static ulong Key(ushort surfaceId, uint nonce) => ((ulong)surfaceId << 32) | nonce;
-
-        /// <summary>True the FIRST time a (surface,nonce) is offered; false on any repeat (drop it).</summary>
-        public bool IsNew(ushort surfaceId, uint nonce)
-        {
-            ulong k = Key(surfaceId, nonce);
-            if (_seen.Contains(k)) return false;
-            _seen.Add(k);
-            _order.Enqueue(k);
-            if (_order.Count > _capacity) _seen.Remove(_order.Dequeue());
-            return true;
-        }
-
-        public void Reset()
-        {
-            _seen.Clear();
-            _order.Clear();
-        }
+        public TacticalIntentDedup(int capacity = 512) : base(capacity) { }
     }
 }

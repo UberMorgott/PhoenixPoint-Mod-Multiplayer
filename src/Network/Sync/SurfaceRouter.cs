@@ -25,6 +25,16 @@ namespace Multipleer.Network.Sync
         /// </summary>
         public static System.Func<byte, byte[], bool> TacticalInbound;
 
+        /// <summary>
+        /// Geoscape replication hook (armed by the owning <c>SyncEngine</c> via <c>_router.GeoscapeInbound</c>).
+        /// Geoscape envelope surfaces (spec §2.1 partition 0xA0-0xBF, e.g. <c>GeoWallet</c>) ride the SAME 0x67
+        /// chokepoint as tactical. INSTANCE-bound (the geoscape handler is an instance method on SyncEngine that
+        /// reaches that engine's applier state). Consulted AFTER the tactical fast-path so a tactical surface
+        /// always wins its own id range. NULL by default → inert (additive). Signature:
+        /// <c>(surfaceId, payload) -&gt; handled?</c>.
+        /// </summary>
+        public System.Func<byte, byte[], bool> GeoscapeInbound;
+
         /// <summary>Decode + route one inbound envelope to the tactical fast-path. Never throws (forward-compat: drop).</summary>
         public void OnInbound(ulong senderPeerId, byte[] data, ISyncSink sink)
         {
@@ -34,6 +44,11 @@ namespace Multipleer.Network.Sync
             // geoscape action relay rides the legacy 0x60/0x61/0x62 path in SyncEngine, not this router).
             var tac = TacticalInbound;
             if (tac != null && tac(surfaceId, payload)) return;
+            // Geoscape fast-path (additive, instance-bound): a geoscape envelope surface (0xA0-0xBF) is
+            // consumed here. Inert unless the owning SyncEngine armed the hook; consulted AFTER tactical so a
+            // tactical surface always wins its own id range.
+            var geo = GeoscapeInbound;
+            if (geo != null && geo(surfaceId, payload)) return;
         }
     }
 }

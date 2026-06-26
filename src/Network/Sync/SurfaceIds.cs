@@ -26,5 +26,11 @@ namespace Multipleer.Network.Sync
         public const byte UnlockChannel = 3;       // research-unlock availability (facilities/manufacture/augmentations)
         public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
         public const byte GeoSiteChannel = 5;       // GeoSite identity mirror (Owner/Type/State/name/EncounterID) — Case A
+
+        // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───
+        // Migrated geoscape host→all messages ride the SAME 0x67 SurfaceRouter chokepoint as tactical, on ids
+        // in the geoscape partition (non-overlapping with tactical 0x80-0x9F and the legacy action/channel
+        // ids 1-30 above). Emitted only behind GeoRailGate; the legacy raw packet stays the primary path.
+        public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
     }
 }

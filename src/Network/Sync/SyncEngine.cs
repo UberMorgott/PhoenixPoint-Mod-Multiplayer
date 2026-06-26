@@ -70,6 +70,9 @@ namespace Multipleer.Network.Sync
         {
             _engine = engine;
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
+            // Inc1 rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+)
+            // routes to this engine's appliers. Inert for traffic the host never sends (gated by GeoRailGate).
+            _router.GeoscapeInbound = HandleGeoscapeEnvelope;
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -256,8 +259,19 @@ namespace Multipleer.Network.Sync
             if (!_engine.IsHost) return;
             var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
             if (slots == null) return;
+            ulong ver = ++_walletVersion;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.WalletSync,
-                SyncProtocol.EncodeWalletSync(++_walletVersion, slots)));
+                SyncProtocol.EncodeWalletSync(ver, slots)));
+            // Inc1 rail-unify (additive, default OFF): ALSO mirror the SAME versioned snapshot onto the unified
+            // 0x67 envelope rail. Same version ⇒ the client applies whichever arrives first and drops the other
+            // (ShouldApplyWallet is strict >). Retiring the legacy 0x63 send above is a later, in-game-verified slice.
+            if (GeoRailGate.Enabled)
+            {
+                Debug.Log("[Multipleer][geo] mirror wallet onto 0x67 envelope (GeoWallet) ver=" + ver);
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
+                        SyncProtocol.EncodeWalletSync(ver, slots))));
+            }
         }
 
         // ─── Generic state-channel echo (mechanism C) ────────────────────
@@ -521,8 +535,20 @@ namespace Multipleer.Network.Sync
                 _walletDirty = false;
                 var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
                 if (slots != null)
+                {
+                    ulong ver = ++_walletVersion;
                     _engine.BroadcastToAll(new NetworkMessage(PacketType.WalletSync,
-                        SyncProtocol.EncodeWalletSync(++_walletVersion, slots)));
+                        SyncProtocol.EncodeWalletSync(ver, slots)));
+                    // Inc1 rail-unify (additive, default OFF): mirror the same versioned snapshot onto the 0x67
+                    // envelope rail. Idempotent (version-guarded) so both paths can run live during verification.
+                    if (GeoRailGate.Enabled)
+                    {
+                        Debug.Log("[Multipleer][geo] mirror wallet onto 0x67 envelope (GeoWallet, Tick flush) ver=" + ver);
+                        _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                            SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
+                                SyncProtocol.EncodeWalletSync(ver, slots))));
+                    }
+                }
             }
 
             // Coalesced per-channel flush: snapshot + ++version + broadcast each dirty channel once.
@@ -544,6 +570,23 @@ namespace Multipleer.Network.Sync
 
         /// <summary>Inbound: a unified 0x67 envelope arrived. Routes to the tactical fast-path chokepoint.</summary>
         public void OnSyncEnvelope(ulong senderPeerId, byte[] data) => _router.OnInbound(senderPeerId, data, this);
+
+        /// <summary>SurfaceRouter geoscape fast-path: returns true if this surface is a geoscape surface it
+        /// consumed (so the router stops). Mirrors the tactical HandleTacticalEnvelope switch. The inner payload
+        /// is the surface's own bytes (e.g. EncodeWalletSync output), routed to the EXISTING applier.</summary>
+        private bool HandleGeoscapeEnvelope(byte surfaceId, byte[] payload)
+        {
+            if (surfaceId == SurfaceIds.GeoWallet)
+            {
+                // Behavior-identical to the legacy 0x63 path: OnWalletSync is host-guarded + version-guarded, so
+                // applying via the envelope is idempotent (a same-version duplicate from the legacy packet drops).
+                Debug.Log("[Multipleer][geo] inbound wallet via 0x67 envelope (GeoWallet surface)");
+                try { OnWalletSync(payload); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo wallet envelope failed: " + ex.Message); }
+                return true;
+            }
+            return false;
+        }
 
         bool ISyncSink.IsHost => _engine.IsHost;
         GeoRuntime ISyncSink.Runtime => GeoRuntime.Instance;
