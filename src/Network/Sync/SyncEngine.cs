@@ -243,7 +243,20 @@ namespace Multipleer.Network.Sync
         // ─── Currency (mechanism A) ───────────────────────────────────────
 
         /// <summary>Host: WalletWatcher callback when the player wallet changes (coalesced in Tick).</summary>
-        public void MarkWalletDirty() => _walletDirty = true;
+        public void MarkWalletDirty()
+        {
+            _walletDirty = true;
+            // Host BAR repaint kick (cosmetic): the host's persistent top resource bar (UIModuleInfoBar) repaints
+            // ONLY off the native View.FactionResourcesChanged event and lags while an event modal is open — so
+            // after an event GRANT the host bar shows the stale pre-grant total even though its model already
+            // granted (the client converges + already repaints via OnWalletSync). RefreshPersistentBars was
+            // previously CLIENT-only; drive it on the HOST here too so the host bar repaints its OWN wallet change
+            // without waiting for modal-close/the next native repaint. WalletWatcher subscribes this host-only, on
+            // the Unity main thread (Wallet.ResourcesChanged), so the direct UI call is main-thread-safe. NO model
+            // change (both sides already agree). Self-guarded (null/IsOpen-gated + try/catch INSIDE
+            // RefreshPersistentBars) → harmless no-op when no geoscape view is shown. Mirrors the client path.
+            GeoUiRefresh.RefreshPersistentBars(GeoRuntime.Instance);
+        }
 
         public void OnWalletSync(byte[] data)
         {
