@@ -344,6 +344,7 @@ namespace Multipleer.Sync.Tactical
                 // side effects on the mirror; it only resolves StopReason + halts the path).
                 if (navigating) TryCancelNavigation(nav);
                 bool placed = TrySetPosition(actor, finalPos);
+                if (placed) TryRederiveCoverPose(actor, finalPos);   // bug A: re-derive cover/stance after the snap
                 branch = placed ? "reconcile-interrupt" : "reconcile-interrupt-failed";
                 if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
                 else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
@@ -360,6 +361,7 @@ namespace Multipleer.Sync.Tactical
             {
                 // Not navigating (START no-op/degenerate, or already arrived) → snap immediately (exact cell).
                 bool placed = TrySetPosition(actor, finalPos);
+                if (placed) TryRederiveCoverPose(actor, finalPos);   // bug A: re-derive cover/stance after the snap
                 branch = placed ? "reconcile-snap" : "reconcile-snap-failed";
                 if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
                 else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
@@ -523,12 +525,23 @@ namespace Multipleer.Sync.Tactical
                     case TacticalActorStateDiff.PositionApplyMode.None:
                         return false;   // already converged → no churn
                     case TacticalActorStateDiff.PositionApplyMode.Walk:
-                        if (nav != null && TryAnimatedNavigate(nav, dst)) return true;
+                        if (nav != null && TryAnimatedNavigate(nav, dst))
+                        {
+                            // bug A: DEFER the cover/stance re-derive to walk ARRIVAL — the host sets the pose only
+                            // AFTER the move finishes (MoveAbility.Move → WaitUntilFinished → SetIdleParams,
+                            // MoveAbility.cs:121). Setting it at kickoff would feed the animator cover params mid-walk
+                            // (wrong pose blend). Reuses the same Timing.Start launcher as the move rail's reconcile.
+                            if (!TryStartOnActorTiming(actor, RederiveCoverPoseAfterNavCrt(actor, nav, dst)))
+                                Debug.LogError("[Multipleer][tac] could not defer cover-pose re-derive — skipped (no mid-walk pose set)");
+                            return true;
+                        }
                         // Navigate unavailable / threw → snap so the position still converges (correct cell).
-                        return TrySetPosition(actor, dst);
+                        if (TrySetPosition(actor, dst)) { TryRederiveCoverPose(actor, dst); return true; }                      // bug A: re-derive after snap (instant placement = at arrival)
+                        return false;
                     case TacticalActorStateDiff.PositionApplyMode.Teleport:
                     default:
-                        return TrySetPosition(actor, dst);
+                        if (TrySetPosition(actor, dst)) { TryRederiveCoverPose(actor, dst); return true; }                      // bug A: re-derive after snap
+                        return false;
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorPosition failed: " + ex); return false; }
@@ -583,6 +596,46 @@ namespace Multipleer.Sync.Tactical
                 return true;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] TrySetForward failed: " + ex); return false; }
+        }
+
+        // ─── CLIENT: re-derive idle cover/stance pose (bug A) ───────────────────────────────────────
+
+        /// <summary>CLIENT (mirror): re-derive the idle cover/stance pose at <paramref name="finalPos"/> and push it
+        /// into the actor's <c>IdleAbility</c>, replacing the engine step the client's move-suppression skips. On the
+        /// host this runs inside the <c>MoveAbility.Move</c> coroutine (MoveAbility.cs:121):
+        /// <c>TacticalActor.IdleAbility.SetIdleParams(TacticalActor.TacticalPerception.GetBestIdleCoverPoseAt(target.PositionToApply))</c>.
+        /// A mirroring client never runs that coroutine (the move is suppressed + reconciled), so the animator
+        /// "CoverType" int stays 0 and the soldier never crouches into cover. This calls the SAME engine methods by
+        /// reflection with <c>searchForEnemy:false</c> — the client's vision is frozen, so we must NOT touch the enemy
+        /// search (the CharacterTargetDummy precedent, CharacterTargetDummy.cs:381). Pose-only + idempotent → safe to
+        /// call at every move-completion site. Returns false on a throw / missing member (e.g. an actor with no
+        /// IdleAbility) so callers stay fail-open. Signatures: TacticalActor.IdleAbility (TacticalActor.cs:200),
+        /// TacticalActor.TacticalPerception (TacticalActor.cs:147), TacticalPerception.GetBestIdleCoverPoseAt(
+        /// Vector3,bool=true)→CoverPose (TacticalPerception.cs:347), IdleAbility.SetIdleParams(CoverPose)
+        /// (IdleAbility.cs:101).</summary>
+        private static bool TryRederiveCoverPose(object actor, Vector3 finalPos)
+        {
+            try
+            {
+                if (actor == null) return false;
+                object idle = GetProp(actor, "IdleAbility");
+                object perception = GetProp(actor, "TacticalPerception");
+                if (idle == null || perception == null) return false;
+
+                var getPose = AccessTools.Method(perception.GetType(), "GetBestIdleCoverPoseAt", new[] { typeof(Vector3), typeof(bool) });
+                if (getPose == null) { Debug.LogError("[Multipleer][tac] GetBestIdleCoverPoseAt(Vector3,bool) not found"); return false; }
+                // searchForEnemy:false — the client's vision path is frozen; never trigger the enemy search here.
+                object pose = getPose.Invoke(perception, new object[] { finalPos, false });
+                if (pose == null) return false;
+
+                var setParams = AccessTools.Method(idle.GetType(), "SetIdleParams", new[] { pose.GetType() });
+                if (setParams == null) { Debug.LogError("[Multipleer][tac] SetIdleParams(CoverPose) not found"); return false; }
+                setParams.Invoke(idle, new[] { pose });
+                Debug.Log("[Multipleer][tac] CLIENT re-derived cover pose at (" +
+                          finalPos.x.ToString("0.0") + "," + finalPos.y.ToString("0.0") + "," + finalPos.z.ToString("0.0") + ")");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryRederiveCoverPose failed: " + ex); return false; }
         }
 
         // ─── CLIENT animated-mirror helpers (FIX B) ────────────────────────────────────────────────
@@ -641,13 +694,7 @@ namespace Multipleer.Sync.Tactical
         {
             try
             {
-                object timing = GetProp(actor, "Timing");
-                if (timing == null)
-                {
-                    object tlc = TacticalDeploySync.LiveTlc;
-                    timing = tlc != null ? GetProp(tlc, "Timing") : null;
-                }
-                if (timing == null || !InvokeStart(timing, timing.GetType(), ReconcileMoveCrt(actor, nav, dst, netId)))
+                if (!TryStartOnActorTiming(actor, ReconcileMoveCrt(actor, nav, dst, netId)))
                 {
                     // Could not defer → reconcile immediately (still correct cell, just not animated-to-stop).
                     TrySetPosition(actor, dst);
@@ -659,6 +706,21 @@ namespace Multipleer.Sync.Tactical
                 Debug.LogError("[Multipleer][tac] ScheduleReconcile failed: " + ex);
                 TrySetPosition(actor, dst);
             }
+        }
+
+        /// <summary>Resolve the actor's (or live TLC's) <c>Timing</c> and <c>Timing.Start</c> the given coroutine —
+        /// the shared launcher for the deferred mirror coroutines (<see cref="ReconcileMoveCrt"/>,
+        /// <see cref="RederiveCoverPoseAfterNavCrt"/>). Returns false when no Timing is available or Start could not
+        /// be invoked, so the caller can fall back.</summary>
+        private static bool TryStartOnActorTiming(object actor, IEnumerator<NextUpdate> crt)
+        {
+            object timing = GetProp(actor, "Timing");
+            if (timing == null)
+            {
+                object tlc = TacticalDeploySync.LiveTlc;
+                timing = tlc != null ? GetProp(tlc, "Timing") : null;
+            }
+            return timing != null && InvokeStart(timing, timing.GetType(), crt);
         }
 
         private static IEnumerator<NextUpdate> ReconcileMoveCrt(object actor, object nav, Vector3 dst, int netId)
@@ -676,11 +738,33 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 TrySetPosition(actor, dst);
+                TryRederiveCoverPose(actor, dst);   // bug A: re-derive cover/stance the client move-suppression skipped
                 Vector3 after = GetPos(actor);
                 Debug.Log("[Multipleer][tac] tac.move RECONCILE netId=" + netId + " frames=" + frames +
                           " finalPos=(" + after.x.ToString("0.0") + "," + after.y.ToString("0.0") + "," + after.z.ToString("0.0") + ")");
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileMoveCrt snap failed: " + ex); }
+        }
+
+        /// <summary>CLIENT (mirror): wait until the animated mirror-walk finishes (<c>nav.IsNavigating==false</c>),
+        /// THEN re-derive the idle cover/stance pose at <paramref name="dst"/> (bug A). Pose-only — the in-flight
+        /// Navigate owns the position. Mirrors the host's ordering: the host sets the pose at walk ARRIVAL inside the
+        /// <c>MoveAbility.Move</c> coroutine (after WaitUntilFinished, MoveAbility.cs:121). Setting it at walk KICKOFF
+        /// would feed the animator cover params while the walk anim is still playing (wrong pose blend / mid-walk
+        /// crouch). Same wait-loop + frame cap as <see cref="ReconcileMoveCrt"/>.</summary>
+        private static IEnumerator<NextUpdate> RederiveCoverPoseAfterNavCrt(object actor, object nav, Vector3 dst)
+        {
+            int frames = 0;
+            while (frames < ReconcileMaxFrames)
+            {
+                bool navigating = false;
+                try { navigating = ToBool(GetProp(nav, "IsNavigating")); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][tac] RederiveCoverPoseAfterNavCrt: IsNavigating read failed: " + ex); }
+                if (!navigating) break;
+                frames++;
+                yield return NextUpdate.NextFrame;
+            }
+            TryRederiveCoverPose(actor, dst);   // bug A: re-derive at walk ARRIVAL, matching the host (MoveAbility.cs:121)
         }
 
         /// <summary>Find and invoke <c>Timing.Start(IEnumerator&lt;NextUpdate&gt;, …)</c> (first param the
