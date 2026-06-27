@@ -76,3 +76,29 @@ Reserved for diagram assets (currently empty).
 - **Vanilla save untouched:** ownership/nicks/permissions = mod runtime-state, reconciled each session, never written into the PP save.
 - **Top desync risk:** RNG + hidden game systems → [research/02-rng-analysis](research/02-rng-analysis.md).
 - **Blocked on SDK:** UI injection, Steam availability, save/load API, loading-progress hook, 2nd-instance, mid-battle save → [specs/03-open-questions-sdk](specs/03-open-questions-sdk.md).
+
+## Save / Load Gate Matrix
+
+Who can load, when, and what blocks it.
+
+| Scenario | Allowed? | Mechanism / Gate | Notes |
+|---|---|---|---|
+| **Non-co-op** (mod installed, no active session) | **YES** — untouched | Gate returns `true` (`SaveLoadInterceptPatch.cs:441`); all suppress/curtain patches no-op when `engine==null \|\| !IsActive` | Normal SP load is fully clean; zero mod interference |
+| **Host — lobby, session NOT started** | **NO** — captured | Pick captured as lobby base save via `ShouldCaptureAsLobbyPick` (`SessionLifecycle.cs:75`; `SaveLoadInterceptPatch.cs:181`,`:375`) | Save becomes the co-op session seed, not a live load |
+| **Host — session started, ≥1 client** | **Rerouted** (conditionally) | CONTINUE / Quickload / pause-LOAD rerouted to F2 host-authoritative in-session reload (`HostStartSessionInGame`) when `HostLoadGuard` open (no transfer in flight); else **BLOCKED** (`SaveLoadInterceptPatch.cs:383-419`; `SessionLifecycle.cs:52`) | Re-runs chunked save transfer + barrier so every client reloads in sync |
+| **Host — session started, 0 clients** | **YES** | `HostInSessionHasNoClients` (`SessionLifecycle.cs:111`; `:390`) | No peers to desync; vanilla solo load allowed |
+| **Client — active session** | **BLOCKED** | `ShouldBlockClientLoad` (`SessionLifecycle.cs:131`; `:427`) — messagebox "Only the host can load" | Host-authoritative by design; client pulled in only via host transfer |
+| **Mid-tactical host load** | **Highest risk** | Gate does not distinguish tactical vs geoscape; reroutes through `HostStartSessionInGame` | Full host→client tactical state replication still incomplete; geoscape-anytime is safe; tactical reload deferred behind full-state tactical spine convergence |
+
+- **Summary:** HOST can load anytime (lobby pick / mid-session reload / clientless solo). CLIENT cannot load by design. NON-co-op player is completely unaffected.
+
+### Save-data poisoning verdict
+
+**Multipleer writes NOTHING into the savegame graph.** A save written with the mod active is a plain PP/TFTV save and loads cleanly without the mod installed.
+
+- **No save-WRITE hook** — no Harmony patch on `WriteSavegame*`/`SaveGame`/serializer write path.
+- **No persisted custom state** — no `ISerializable`, no custom `GameComponentDef`/`GameTagDef` registered into the persisted graph. `DefReflection` only resolves defs, never mutates/adds.
+- **All co-op runtime state is transient** — network messages, reassembly buffers, live engine fields; none reach disk.
+- The only savegame serialization is read-only on the host: `SaveTransferCoordinator.HostSerializeAndSendCrt` reads the host's existing vanilla save to a `byte[]` for network transfer (`SaveTransferCoordinator.cs:403`). No write/inject.
+
+> Full detail: [superpowers/research/2026-06-27-save-load-robustness-map.md](superpowers/research/2026-06-27-save-load-robustness-map.md)
