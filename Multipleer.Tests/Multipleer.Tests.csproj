@@ -194,6 +194,11 @@
          is on an enemy turn AND the actor resolved). The engine glue (TacticalEnemyTurnCamera) binds game
          types via reflection and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\ClientEnemyTurnCameraGate.cs"><Link>Sync\Tactical\ClientEnemyTurnCameraGate.cs</Link></Compile>
+    <!-- Invis-targeting desync fix: pure, Unity-free gate deciding whether the CLIENT must drop an enemy target
+         the mirrored HOST vision has forgotten (out of host sight / invisible). The engine glue
+         (TargetVisionGatePatch on TacticalAbility.TargetFilterPredicate) binds game types via reflection and is
+         NOT linked. -->
+    <Compile Include="..\src\Sync\Tactical\ClientVisionTargetGate.cs"><Link>Sync\Tactical\ClientVisionTargetGate.cs</Link></Compile>
     <!-- Inc1 over-suppression fix: pure, Unity-free gate deciding whether the CLIENT mirror replays the
          client-safe turn-start SETUP (vision / viewer-faction+camera / per-actor StartTurn) before its input
          loop — true only for the player faction. The engine glue (PlayTurnCrtMirrorFreezePatch.MirrorPlayTurnCrt)
