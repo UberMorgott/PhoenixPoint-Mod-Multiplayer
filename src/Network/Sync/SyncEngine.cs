@@ -28,6 +28,15 @@ namespace Multipleer.Network.Sync
         private ulong _walletVersion;  // host-assigned, monotonic wallet version
         private uint _nonceCounter;    // client request correlation
         private bool _walletDirty;     // host: wallet changed since last flush
+        // Host: the last absolute wallet snapshot actually broadcast (poll baseline). Updated only at the two
+        // broadcast sites (the Tick dirty-flush + BroadcastFullWallet) so the snapshot-diff poll never re-fires
+        // what was just sent. See WalletSnapshotDiff + the Tick poll backstop below.
+        private List<(int, float)> _lastWalletBroadcast;
+        private int _walletPollTick;   // host: frame counter throttling the absolute snapshot-diff poll
+        // Run the binding-independent wallet snapshot-diff poll every Nth Tick only, so the 11 reflection
+        // GetAmount reads don't run every frame — the event path + bind/ready belts catch the common case
+        // instantly; the poll is just the convergence backstop for a missed/stale-bound ResourcesChanged.
+        private const int WalletPollTickInterval = 15;
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
         private readonly Queue<uint> _pendingOrder = new Queue<uint>();   // FIFO eviction order for _pending (bounds growth)
 
@@ -286,6 +295,8 @@ namespace Multipleer.Network.Sync
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                 SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                     SyncProtocol.EncodeWalletSync(ver, slots))));
+            // Baseline = what we just sent, so the Tick snapshot-diff poll won't re-fire this push.
+            _lastWalletBroadcast = slots;
         }
 
         // ─── Generic state-channel echo (mechanism C) ────────────────────
@@ -678,6 +689,22 @@ namespace Multipleer.Network.Sync
             // deferred world-load: the wallet only appears frames after EnterLevel→FinishLevel.
             WalletWatcher.Attach(_engine);
 
+            // Host: ABSOLUTE wallet snapshot-diff POLL — the binding-independent currency convergence backstop.
+            // The event path (WalletWatcher → Wallet.ResourcesChanged → MarkWalletDirty) catches the common case
+            // instantly, but a host wallet change that misses ResourcesChanged or fires on a stale-bound instance
+            // (the binding has bitten us before) would leave _walletDirty unset → the client stays stale. So re-
+            // derive dirtiness from absolute truth: if the live snapshot drifted from the last one we broadcast,
+            // arm _walletDirty and let the SINGLE existing flush path below send it. Throttled (every
+            // WalletPollTickInterval ticks) so the 11 reflection reads don't run every frame; the poll only flags
+            // dirty — it never broadcasts directly (the dirty-flush + BroadcastFullWallet stay the only senders).
+            if (++_walletPollTick >= WalletPollTickInterval)
+            {
+                _walletPollTick = 0;
+                var polled = WalletApplier.Snapshot(GeoRuntime.Instance);
+                if (polled != null && WalletSnapshotDiff.Changed(_lastWalletBroadcast, polled))
+                    _walletDirty = true;
+            }
+
             // Host: bind every state channel's change-event the same way (idempotent per channel).
             foreach (var ch in _channels.All) ch.AttachHost(this);
 
@@ -694,6 +721,9 @@ namespace Multipleer.Network.Sync
                     _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                         SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                             SyncProtocol.EncodeWalletSync(ver, slots))));
+                    // Baseline = exactly what we just sent, so the poll won't immediately re-fire it (covers both
+                    // the event-path and poll-path dirty, regardless of whether the poll ran this tick).
+                    _lastWalletBroadcast = slots;
                 }
             }
 

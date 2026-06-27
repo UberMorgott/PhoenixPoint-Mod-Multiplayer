@@ -116,6 +116,10 @@
          Fixes the post-reload stale-wallet binding (dead `if (_bound) return;` gate). The live WalletWatcher
          glue (GeoRuntime.Wallet reflection + WalletReflection subscribe) binds game types and is NOT linked. -->
     <Compile Include="..\src\Network\Sync\WalletBindDecision.cs"><Link>Sync\WalletBindDecision.cs</Link></Compile>
+    <!-- Absolute wallet snapshot-diff comparator (pure, Unity-free): backs the SyncEngine.Tick poll that
+         converges currency independent of the event-driven Wallet.ResourcesChanged binding (which has bitten
+         us before). The live poll glue lives in SyncEngine (game-bound) and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\WalletSnapshotDiff.cs"><Link>Sync\WalletSnapshotDiff.cs</Link></Compile>
     <!-- Host-side monotonic per-occurrence id authority (pure, Unity-free: ConditionalWeakTable + counter). -->
     <Compile Include="..\src\Harmony\Sync\EventOccurrenceIds.cs"><Link>Harmony\Sync\EventOccurrenceIds.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Sync\Actions\QueueManufactureAction.cs</Link></Compile>
