@@ -128,6 +128,29 @@ namespace Multipleer.Sync.Tactical
             return matched;
         }
 
+        /// <summary>
+        /// CLIENT lazy re-bind for a SINGLE host netId whose actor is not (yet) in this registry — the
+        /// coverage hole for deploy-time position drift (a Pandoran whose client position differed by more
+        /// than <see cref="PosEpsilon"/> at deploy, so its row never matched) and mid-mission host spawns.
+        /// Reproduces the deploy match for just this netId against the current live actor set, REUSING the
+        /// exact same matcher as <see cref="MatchAndRegister"/>. The host netId itself encodes the scheme
+        /// (spec §4), so the client needs NO extra wire data: netId &lt; <see cref="MintBase"/> ⇒ the netId IS
+        /// a GeoUnitId (soldier/vehicle) → GeoUnitId-EXACT match; netId &gt;= MintBase ⇒ a host-minted Pandoran
+        /// (GeoUnitId 0) → position fallback within <see cref="PosEpsilon"/> (requires <paramref name="hasPos"/>).
+        /// The client NEVER mints — it only binds the host-authored netId. Pass ONLY unbound candidates so the
+        /// position fallback can never steal an already-bound actor. Returns true iff a candidate was matched
+        /// and bound to <paramref name="netId"/>.
+        /// </summary>
+        public bool TryLazyRebind(int netId, bool hasPos, ActorPos pos, IEnumerable<IActorRef> liveActors)
+        {
+            if (netId < 0 || liveActors == null) return false;
+            if (_byNetId.ContainsKey(netId)) return true;          // already bound (defensive) — caller resolves it
+            int geoUnitId = netId < MintBase ? netId : 0;          // scheme: sub-MintBase netId == GeoUnitId
+            if (geoUnitId == 0 && !hasPos) return false;           // minted id w/o a position → cannot match → drop
+            var row = new ActorRow(netId, geoUnitId, pos.x, pos.y, pos.z);
+            return MatchAndRegister(new[] { row }, liveActors) > 0;
+        }
+
         private static IActorRef TakeByGeoUnitId(List<IActorRef> remaining, int geoUnitId)
         {
             for (int i = 0; i < remaining.Count; i++)

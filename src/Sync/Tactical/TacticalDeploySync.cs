@@ -105,6 +105,82 @@ namespace Multipleer.Sync.Tactical
             return -1;
         }
 
+        /// <summary>HOST coverage (actorstate flush): ground every LIVE map actor that is missing from the
+        /// registry into it via the host id-minting path (<see cref="TacticalActorRegistry.AssignHost"/> — the
+        /// host stays the SOLE netId minter), so a mid-mission spawn or a deploy-drift actor that never bound
+        /// still rides the per-actor state flush (its AP/WP/status broadcast). Called at the TOP of the host
+        /// flush tick, BEFORE walking <c>Registry.Entries</c> (mutating the registry mid-enumeration would throw).
+        /// No-op for already-registered actors. Returns the count newly registered.</summary>
+        public static int HostEnsureLiveActorsRegistered()
+        {
+            var reg = Registry;
+            object tlc = LiveTlc;
+            if (reg == null || tlc == null) return 0;
+            int added = 0;
+            try
+            {
+                // Already-registered underlying actors. The adapter has NO value-equality, so a fresh adapter
+                // never compares equal to the registry's stored one — key the membership set on the WRAPPED
+                // actor object's reference identity instead.
+                var known = new HashSet<object>();
+                foreach (var kv in reg.Entries)
+                    if (kv.Value is TacticalActorAdapter a && a.Actor != null) known.Add(a.Actor);
+
+                foreach (var aref in EnumerateActorRefs(tlc))
+                {
+                    var adapter = aref as TacticalActorAdapter;
+                    object actor = adapter?.Actor;
+                    if (actor == null || known.Contains(actor)) continue;
+                    int netId = reg.AssignHost(adapter);   // GeoUnitId for soldiers, minted id for Pandorans
+                    known.Add(actor);
+                    added++;
+                    Debug.Log("[Multipleer][tac] lazy-registered netId=" + netId + " geoUnitId=" + adapter.GeoUnitId);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostEnsureLiveActorsRegistered failed: " + ex); }
+            return added;
+        }
+
+        /// <summary>CLIENT coverage (actorstate apply): a host netId whose actor is NOT in the registry —
+        /// deploy position drift left it unbound, or it is a mid-mission spawn. Try a LAZY re-bind against the
+        /// current live map using the SAME matcher as deploy (<see cref="TacticalActorRegistry.TryLazyRebind"/>:
+        /// GeoUnitId-EXACT preferred; position fallback within <see cref="TacticalActorRegistry.PosEpsilon"/> for
+        /// a minted Pandoran). Only UNBOUND live actors are offered as candidates so the position fallback can
+        /// never steal an already-bound actor. The client NEVER mints — it binds the host-authored netId. Returns
+        /// the now-bound live actor object, or null if nothing matched (actor truly absent on this client →
+        /// caller drops as before).</summary>
+        public static object ClientTryLazyRebind(int netId, bool hasPos, float px, float py, float pz)
+        {
+            var reg = Registry;
+            object tlc = LiveTlc;
+            if (reg == null || tlc == null) return null;
+            try
+            {
+                // Candidates = live actors NOT already bound (compare the wrapped actor object's reference; a
+                // fresh adapter has no value-equality with the registry's stored adapter).
+                var known = new HashSet<object>();
+                foreach (var kv in reg.Entries)
+                    if (kv.Value is TacticalActorAdapter a && a.Actor != null) known.Add(a.Actor);
+
+                var candidates = new List<IActorRef>();
+                foreach (var aref in EnumerateActorRefs(tlc))
+                {
+                    object actor = (aref as TacticalActorAdapter)?.Actor;
+                    if (actor == null || known.Contains(actor)) continue;
+                    candidates.Add(aref);
+                }
+                if (candidates.Count == 0) return null;
+
+                if (!reg.TryLazyRebind(netId, hasPos, new ActorPos(px, py, pz), candidates)) return null;
+                object bound = ResolveLiveActor(netId);
+                if (bound != null)
+                    Debug.Log("[Multipleer][tac] lazy-rebound netId=" + netId +
+                              " via " + (netId < TacticalActorRegistry.MintBase ? "GeoUnitId" : "pos"));
+                return bound;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientTryLazyRebind failed: " + ex); return null; }
+        }
+
         // Client re-entrancy: true only while OUR own ClientLaunchMission is driving the native
         // LaunchTacticalGame. The LaunchTacticalGame prefix uses this to ALLOW the deploy-driven launch
         // while GATING (blocking) any spontaneous client-initiated launch (spec §8: client never self-launches).

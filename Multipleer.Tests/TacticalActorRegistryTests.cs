@@ -237,4 +237,96 @@ public class TacticalActorRegistryTests
         int id = reg.AssignHost(new FakeActor(0));
         Assert.Equal(TacticalActorRegistry.MintBase, id);
     }
+
+    // ─── TryLazyRebind: client lazy re-bind decision (deploy-drift / mid-mission spawn coverage) ───
+
+    [Fact]
+    public void TryLazyRebind_SoldierNetId_BindsByGeoUnitId_PreferredOverPosition()
+    {
+        // A soldier netId (< MintBase ⇒ the netId IS a GeoUnitId). The host record's position is where the
+        // host soldier stands; a DIFFERENT unbound Pandoran happens to sit exactly at that position. The bind
+        // MUST resolve by GeoUnitId-exact (the soldier, at its own — different — spot), NOT steal the Pandoran.
+        var reg = new TacticalActorRegistry();
+        var soldier = new FakeActor(200, 0f, 0f, 0f);          // GeoUnitId 200, at origin
+        var pandoranAtRecPos = new FakeActor(0, 50f, 0f, 0f);  // unbound, sitting at the record position
+        var candidates = new List<IActorRef> { pandoranAtRecPos, soldier };
+
+        bool bound = reg.TryLazyRebind(200, hasPos: true, new ActorPos(50f, 0f, 0f), candidates);
+
+        Assert.True(bound);
+        Assert.True(reg.TryGet(200, out var got));
+        Assert.Same(soldier, got);                  // GeoUnitId match, not the pos-coincident Pandoran
+        Assert.Null(reg.NetIdOf(pandoranAtRecPos)); // Pandoran left untouched
+    }
+
+    [Fact]
+    public void TryLazyRebind_MintedNetId_BindsByPosition_WithinEpsilon()
+    {
+        var reg = new TacticalActorRegistry();
+        var jitter = TacticalActorRegistry.PosEpsilon * 0.4f;
+        var pandoran = new FakeActor(0, 5f + jitter, 5f, 5f);  // unbound, within epsilon of the record pos
+        var candidates = new List<IActorRef> { pandoran };
+
+        bool bound = reg.TryLazyRebind(TacticalActorRegistry.MintBase, hasPos: true,
+            new ActorPos(5f, 5f, 5f), candidates);
+
+        Assert.True(bound);
+        Assert.True(reg.TryGet(TacticalActorRegistry.MintBase, out var got));
+        Assert.Same(pandoran, got);
+    }
+
+    [Fact]
+    public void TryLazyRebind_MintedNetId_BeyondEpsilon_NoBind()
+    {
+        var reg = new TacticalActorRegistry();
+        var far = TacticalActorRegistry.PosEpsilon * 10f + 1f;
+        var pandoran = new FakeActor(0, 5f + far, 5f, 5f);     // too far → no match
+        var candidates = new List<IActorRef> { pandoran };
+
+        bool bound = reg.TryLazyRebind(TacticalActorRegistry.MintBase, hasPos: true,
+            new ActorPos(5f, 5f, 5f), candidates);
+
+        Assert.False(bound);
+        Assert.False(reg.TryGet(TacticalActorRegistry.MintBase, out _));
+        Assert.Null(reg.NetIdOf(pandoran));
+    }
+
+    [Fact]
+    public void TryLazyRebind_SoldierNetId_NoGeoIdCandidate_NoBind_AndDoesNotStealPandoran()
+    {
+        // No live actor carries the soldier's GeoUnitId; only a Pandoran sits at the record position. A soldier
+        // netId must NEVER fall back to a position steal → no bind, and the Pandoran stays unbound.
+        var reg = new TacticalActorRegistry();
+        var pandoranAtRecPos = new FakeActor(0, 1f, 1f, 1f);
+        var candidates = new List<IActorRef> { pandoranAtRecPos };
+
+        bool bound = reg.TryLazyRebind(300, hasPos: true, new ActorPos(1f, 1f, 1f), candidates);
+
+        Assert.False(bound);
+        Assert.False(reg.TryGet(300, out _));
+        Assert.Null(reg.NetIdOf(pandoranAtRecPos));
+    }
+
+    [Fact]
+    public void TryLazyRebind_MintedNetId_NoPosition_NoBind()
+    {
+        // A minted Pandoran netId with no position bit in the record cannot be position-matched → drop.
+        var reg = new TacticalActorRegistry();
+        var pandoran = new FakeActor(0, 0f, 0f, 0f);
+        var candidates = new List<IActorRef> { pandoran };
+
+        bool bound = reg.TryLazyRebind(TacticalActorRegistry.MintBase, hasPos: false,
+            new ActorPos(0f, 0f, 0f), candidates);
+
+        Assert.False(bound);
+        Assert.False(reg.TryGet(TacticalActorRegistry.MintBase, out _));
+    }
+
+    [Fact]
+    public void TryLazyRebind_EmptyCandidates_NoBind()
+    {
+        var reg = new TacticalActorRegistry();
+        Assert.False(reg.TryLazyRebind(200, hasPos: true, new ActorPos(0, 0, 0), new List<IActorRef>()));
+        Assert.False(reg.TryGet(200, out _));
+    }
 }

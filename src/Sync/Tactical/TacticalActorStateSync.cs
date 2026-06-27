@@ -147,6 +147,12 @@ namespace Multipleer.Sync.Tactical
             var registry = TacticalDeploySync.Registry;
             if (registry == null) return;
 
+            // HOST coverage: ground any LIVE map actor missing from the registry (a mid-mission spawn, or a
+            // deploy position-drift actor that never bound) via the host mint path BEFORE the walk — so its
+            // AP/WP/state still broadcasts. MUST run before iterating registry.Entries (mutating the registry
+            // mid-enumeration would throw).
+            TacticalDeploySync.HostEnsureLiveActorsRegistered();
+
             var changed = new List<TacticalLiveCodec.ActorStateRecord>();
             var liveNetIds = new HashSet<int>();
 
@@ -278,7 +284,12 @@ namespace Multipleer.Sync.Tactical
                     foreach (var rec in batch.Actors)
                     {
                         object actor = TacticalDeploySync.ResolveLiveActor(rec.NetId);
-                        if (actor == null) continue;   // not deployed/registered on the client yet → re-push heals
+                        if (actor == null)
+                            // CLIENT coverage: the netId is unbound (deploy position drift or a mid-mission
+                            // spawn). LAZY re-bind against the live map via the existing deploy matcher
+                            // (GeoUnitId-exact preferred; position fallback within PosEpsilon) before dropping.
+                            actor = TacticalDeploySync.ClientTryLazyRebind(rec.NetId, rec.HasPos, rec.PosX, rec.PosY, rec.PosZ);
+                        if (actor == null) continue;   // truly absent on the frozen client (host-only spawn) → drop (birth)
                         applied++;
 
                         // APPLY ORDER: reconcile STATUSES FIRST, then set AP/WP ABSOLUTE LAST — so the host's
