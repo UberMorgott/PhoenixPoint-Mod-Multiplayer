@@ -131,13 +131,16 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 | Inc3 InstanceData-diff | NOT STARTED | generic per-entity diff; retire per-domain channels starts here |
 | Inc4 retire channels | NOT STARTED | surface-by-surface; each in-game-gated |
 | Inc5 CRC + reconnect | NOT STARTED | divergence detection + reconnect (folds old #5) |
+| Tac Inc1 position (0x0008) | **BUILT** | delta pos in `tac.actorstate` 0x8F; in-game pending |
+| Tac Inc2 facing (0x0010) | **CODE-COMPLETE @ `74b462c`** | `feat(tactical): wire actor facing 0x0010 into actor-state delta`; build 0 err / 0 warn, 888 tests green (+6 new); **in-game acceptance gate pending**; plan: `docs/superpowers/plans/2026-06-25-multipleer-tactical-fullstate-spine-roadmap.md` §4 |
+| Tac Inc3 combat outcome + VFX | NEXT | enemy-turn camera + explosion VFX from damage-state |
 | #4 10-player efficiency | NOT STARTED | property of #1/Inc3 |
 | OUT | — | host-migration, network obfuscation — excluded by decision |
 
 ## CURRENT POSITION (update each session)
 
 - **Shipped (pre-skeleton):** inner main HEAD `60f45a2` (NOT pushed), DLL signature `829DA4F5`, deployed to `D:\Steam\steamapps\common\Phoenix Point\Mods\Multipleer`, 196 tests green
-- **#1 skeleton Phase 1:** inner main HEAD `0ed4937` (NOT pushed), 215 tests green, build 0err/0warn. Tasks 1-6 merged (see #1 Phase 1 progress block above). In-game UNVERIFIED (additive, behavior-unchanged).
+- **#1 skeleton Phase 1:** inner main HEAD `74b462c` (NOT pushed), 888 tests green, build 0err/0warn. Tasks 1-6 merged (see #1 Phase 1 progress block above). In-game UNVERIFIED (additive, behavior-unchanged). Tactical Inc2 (facing 0x0010) code-complete at `74b462c`.
 - **Working & deployed:**
   - Host-authoritative sync engine
   - Synced surfaces = research (single-source-of-truth via `ResearchChannel` ch2), manufacture, facility, geoscape events (answer), wallet echo, time-sync (anchor-rate clock)

@@ -90,7 +90,7 @@ frozen on the mirror (`MirrorSuppressPatches.PlayTurnCrtMirrorFreezePatch`).
 Each increment ends at its own 2-instance DirectIP 127.0.0.1 in-game gate; commit to inner `main`, tests-green;
 ADDITIVE-first, retire only after in-game OK. Diagnostic logs `[Multipleer][tac]`; strip before publish.
 
-### Inc2 — Facing (+ stance/cover free) into the delta  ← NEXT (fully detailed in §4)
+### Inc2 — Facing (+ stance/cover free) into the delta  ← CODE-COMPLETE (commit `74b462c`, build 0 err / 0 warn, 888 tests green (+6 new), in-game gate pending)
 - **Goal:** mirror actor FACING (forward vector) so a host turn-in-place / post-move heading shows on the client,
   and the soldier adopts the correct crouch/cover idle pose (derived from Pos+Facing).
 - **Scope/spine:** grow `tac.actorstate` 0x8F with the `ActorFieldFacing 0x0010` field; host reads `ActorComponent.Rot`
@@ -103,7 +103,7 @@ ADDITIVE-first, retire only after in-game OK. Diagnostic logs `[Multipleer][tac]
   a mirror walk. No NEW suppress patch needed (AI/turn/vision already frozen).
 - **In-game test:** §4 acceptance.
 
-### Inc3 — Combat outcome + explosion VFX from damage-state + enemy-turn camera
+### Inc3 — Combat outcome + explosion VFX from damage-state + enemy-turn camera  ← NEXT
 - **Goal:** with the sim frozen, confirm shot/grenade/melee fully replicate from EVENT+delta, and add the missing
   enemy-turn presentation + explosion/destruction VFX.
 - **Scope/spine:** `tac.damage` 0x88 (event) + `tac.fire.start`/`tac.melee.start` 0x90/0x91 (anim) + delta Health
