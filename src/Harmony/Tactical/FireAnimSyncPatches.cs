@@ -56,6 +56,19 @@ namespace Multipleer.Harmony.Tactical
         // RelayedShots, so their cinematic is untouched. IsHost-gated so a client (Count is host-only anyway) no-ops.
         public static bool HostRelayedShotActive => IsHost && TacticalCombatSync.RelayedShots.Count > 0;
 
+        // BUG2 — UNIFIED host camera-follow guard for ALL relayed CLIENT actions (not just shots). A ref-counted
+        // window the host raises around EVERY relayed client action it re-executes (move / overwatch / melee /
+        // non-shoot ability — each HostOn*Intent's activate.Invoke). Native TacticalAbility.Activate SYNCHRONOUSLY
+        // pushes CameraDirector.Hint(AbilityActivated) (TacticalAbility.cs:1104, gated TrackWithCamera) inside that
+        // Invoke; HostRelayedShotActive above is populated ONLY for ShootAbility, so without this window a relayed
+        // MOVE/OVERWATCH/MELEE flies the host camera to the client's actor and steals control. The host's OWN actions
+        // never enter HostOn*Intent, so their cinematic is untouched. Ref-counted (depth) so a nested/re-entrant apply
+        // pops safely; ExitHostApply floors at 0 so an unbalanced pop can never wedge the flag permanently true.
+        private static int _hostApplyDepth;
+        public static void EnterHostApply() { _hostApplyDepth++; }
+        public static void ExitHostApply() { if (_hostApplyDepth > 0) _hostApplyDepth--; }
+        public static bool HostApplyingClientAction => IsHost && _hostApplyDepth > 0;
+
         private static bool IsHost
         {
             get { var e = NetworkEngine.Instance; return e != null && e.IsHost; }
@@ -82,9 +95,10 @@ namespace Multipleer.Harmony.Tactical
         public static MethodBase TargetMethod() => _target;
 
         // Skip the camera-directing hint push while EITHER a client fire-animation replay is in flight OR the host is
-        // executing a relayed CLIENT shot (FireWeaponAtTargetCrt's Hint pushes would otherwise fly the host camera to
-        // the client's shooter and steal control). The host's OWN shots are never in RelayedShots → full cinematic.
-        public static bool Prefix() => !(FireReplayGate.ClientReplay || FireReplayGate.HostRelayedShotActive);
+        // executing a relayed CLIENT shot OR the host is applying ANY relayed client action (BUG2 — move/overwatch/
+        // melee/non-shoot, whose synchronous Activate camera hint would otherwise fly the host camera to the client's
+        // actor and steal control). The host's OWN actions never enter the HostApplyingClientAction window → full cinematic.
+        public static bool Prefix() => !(FireReplayGate.ClientReplay || FireReplayGate.HostRelayedShotActive || FireReplayGate.HostApplyingClientAction);
     }
 
     /// <summary>Client replay: let <c>Weapon.FireProjectile</c> run FULLY (real tracer + flash/smoke/shell/SFX so

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using Multipleer.Harmony.Tactical;
 using Multipleer.Network;
 using Multipleer.Network.MessageLayer;
 using Multipleer.Network.Sync;
@@ -251,7 +252,12 @@ namespace Multipleer.Sync.Tactical
                               " ability=" + ability.GetType().Name);
                 }
 
-                activate.Invoke(ability, new[] { target });
+                // BUG2: hold the host camera-follow guard across the relayed client ability's activate.Invoke so the
+                // synchronous Activate camera hint can't fly the host camera to the client's actor. Covers melee/non-
+                // shoot; harmlessly overlaps RelayedShots (HostRelayedShotActive) for shoot. try/finally pops on throw.
+                FireReplayGate.EnterHostApply();
+                try { activate.Invoke(ability, new[] { target }); }
+                finally { FireReplayGate.ExitHostApply(); }
                 Debug.Log("[Multipleer][tac] HOST executed ability " + ability.GetType().Name +
                           " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ShooterNetId);
 

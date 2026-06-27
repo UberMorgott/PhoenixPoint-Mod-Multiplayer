@@ -897,6 +897,39 @@ namespace Multipleer.Sync.Tactical
                     f.SetValue(status, Activator.CreateInstance(f.FieldType));
                     Debug.Log("[Multipleer][tac] status mirror slotNames seeded: " + DescribeDef(statusDef));
                 }
+
+                // BUG3a — BleedStatus._damageAccum (DamageAccumulation): the inert MERGE path derefs it. When a SECOND
+                // live BleedStatus is later applied to the same actor (a real mirrored bleed), its first-apply branch
+                // finds THIS mirror via statusComponent.GetStatus<BleedStatus>() and calls mirror.AddBleedDamage(num)
+                // → `_damageAccum.InitialAmount += amount` (BleedStatus.cs:107,150) → NRE if the mirror's _damageAccum
+                // is still null. Native populates it ONLY in the skipped first-apply branch (`new DamageAccumulation(
+                // DamageEffect.DamageEffectDef, this)`, BleedStatus.cs:157). Construct it EXACTLY that way (Effect is
+                // set in TacEffectStatus.Init, already run by Instantiate, so DamageEffect.DamageEffectDef is available
+                // here), then ZERO the rolled InitialAmount/Amount → an EMPTY seed (parallel to the empty _slotNames
+                // above; the real bleed level is host-authoritative). Field-exists + null guarded; any miss is caught
+                // below (fail-open) and only risks the pre-existing CAUGHT NRE.
+                var daF = AccessTools.Field(status.GetType(), "_damageAccum");
+                if (daF != null && daF.GetValue(status) == null)
+                {
+                    var deProp = AccessTools.Property(status.GetType(), "DamageEffect");
+                    object de = deProp != null ? deProp.GetValue(status, null) : null;
+                    var defProp = de != null ? AccessTools.Property(de.GetType(), "DamageEffectDef") : null;
+                    object dmgDef = defProp != null ? defProp.GetValue(de, null) : null;
+                    if (dmgDef != null)
+                    {
+                        // public DamageAccumulation(DamageEffectDef dmgDef, object source) — EXACT param match on the
+                        // declared DamageEffectDef type (defProp.PropertyType) + object (AccessTools is exact-match).
+                        var ctor = AccessTools.Constructor(daF.FieldType, new[] { defProp.PropertyType, typeof(object) });
+                        if (ctor != null)
+                        {
+                            object accum = ctor.Invoke(new object[] { dmgDef, status });
+                            AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accum, 0f);
+                            AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accum, 0f);
+                            daF.SetValue(status, accum);
+                            Debug.Log("[Multipleer][tac] status mirror damageAccum seeded: " + DescribeDef(statusDef));
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {

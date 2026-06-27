@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
+using Multipleer.Harmony.Tactical;
 using Multipleer.Network;
 using Multipleer.Network.MessageLayer;
 using UnityEngine;
@@ -166,10 +167,15 @@ namespace Multipleer.Sync.Tactical
                 if (activate == null) { Debug.LogError("[Multipleer][tac] move intent: MoveAbility.Activate(object) not found"); return; }
                 string activateExc = "none";
                 bool activateInvoked = false;
+                // BUG2: hold the host camera-follow guard across the relayed client MOVE's activate.Invoke so the
+                // synchronous Activate camera hint can't fly the host camera to the client's soldier. try/finally so
+                // the depth still pops if Activate throws.
+                FireReplayGate.EnterHostApply();
                 try { activate.Invoke(moveAbility, new[] { target }); activateInvoked = true; }
                 catch (Exception aex) { activateExc = aex.Message; throw; }
                 finally
                 {
+                    FireReplayGate.ExitHostApply();
                     Debug.Log("[Multipleer][tac][DIAG] HOSTEXEC builtTarget.PositionToApply=(" +
                               builtPos.x.ToString("0.0") + "," + builtPos.y.ToString("0.0") + "," + builtPos.z.ToString("0.0") + ")" +
                               " ctorPath=" + ctorPath + " activateInvoked=" + activateInvoked + " exception=" + activateExc);

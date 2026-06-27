@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using HarmonyLib;
+using Multipleer.Harmony.Tactical;
 using Multipleer.Network;
 using UnityEngine;
 
@@ -156,7 +157,11 @@ namespace Multipleer.Sync.Tactical
                 // authoritatively armed → TriggerOverwatch fires the reaction shot on enemy moves.
                 var activate = AccessTools.Method(overwatchAbility.GetType(), "Activate", new[] { typeof(object) });
                 if (activate == null) { Debug.LogError("[Multipleer][tac] overwatch intent: Activate(object) not found"); return; }
-                activate.Invoke(overwatchAbility, new[] { target });
+                // BUG2: hold the host camera-follow guard across the relayed client OVERWATCH arm so the synchronous
+                // Activate camera hint can't fly the host camera to the client's soldier. try/finally pops on throw.
+                FireReplayGate.EnterHostApply();
+                try { activate.Invoke(overwatchAbility, new[] { target }); }
+                finally { FireReplayGate.ExitHostApply(); }
                 Debug.Log("[Multipleer][tac] HOST armed overwatch actorNetId=" + intent.ActorNetId);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnArmIntent exec failed: " + ex); }
