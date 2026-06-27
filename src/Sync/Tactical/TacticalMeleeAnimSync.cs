@@ -127,6 +127,10 @@ namespace Multipleer.Sync.Tactical
                     return;
                 }
 
+                // Enemy-turn chase cam: snap to the attacker for the replayed swing (follow=false → one-shot snap).
+                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, attacker != null))
+                    TacticalEnemyTurnCamera.ChaseActor(attacker, follow: false);
+
                 // BashCrt is private: BashAbility.BashCrt(PlayingAction) — drive it directly (NOT via Activate),
                 // exactly like fire drives FireWeaponAtTargetCrt directly. It reads ONLY action.Param (the target).
                 var bash = AccessTools.Method(ability.GetType(), "BashCrt");

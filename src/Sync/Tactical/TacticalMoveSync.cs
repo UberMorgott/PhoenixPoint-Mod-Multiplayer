@@ -268,6 +268,9 @@ namespace Multipleer.Sync.Tactical
             var dst = new Vector3(s.X, s.Y, s.Z);
             // Record the requested dst so the END outcome can distinguish a normal completion from an interrupt.
             _clientStartDst[s.NetId] = dst;
+            // Enemy-turn chase cam: follow the moving actor's live transform across the navigate (follow=true).
+            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null))
+                TacticalEnemyTurnCamera.ChaseActor(actor, follow: true);
             string branch;
             Vector3 cur = GetPos(actor);
             object nav = GetProp(actor, "TacticalNav");

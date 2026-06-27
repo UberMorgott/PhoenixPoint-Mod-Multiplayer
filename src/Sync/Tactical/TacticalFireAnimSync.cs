@@ -164,6 +164,10 @@ namespace Multipleer.Sync.Tactical
                 object target = BuildSyncedFireTarget(s);
                 if (target == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: could not build target"); return; }
 
+                // Enemy-turn chase cam: snap to the shooter for the replayed shot (follow=false → one-shot snap).
+                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, shooter != null))
+                    TacticalEnemyTurnCamera.ChaseActor(shooter, follow: false);
+
                 object tlc = TacticalDeploySync.LiveTlc;
                 if (tlc == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: no LiveTlc"); return; }
 
