@@ -149,6 +149,22 @@ namespace Multipleer.Sync.Tactical
             return value * damagePerTurn;
         }
 
+        /// <summary>Magnitude-drift tolerance for the Inc2-follow-up in-place status-magnitude refresh. The
+        /// reconcile diff identity {DefGuid, SourceNetId} ignores <c>Value</c>, so a magnitude change on an
+        /// ALREADY-present status is invisible to ToAdd/ToRemove; this epsilon gates the SEPARATE in-place refresh
+        /// so a sub-epsilon float jitter never re-writes the mirror's <c>DamageAccumulation</c> (no churn). Bleed
+        /// and DoT display levels are whole numbers, so 0.01 is far below any real change.</summary>
+        public const float StatusMagnitudeEpsilon = 0.01f;
+
+        /// <summary>PURE refresh decision: should an ALREADY-mirrored status's display magnitude be refreshed IN
+        /// PLACE because the host value DRIFTED (bleed stacking from a 2nd shot, a DoT ticking down each turn)?
+        /// True iff |mirrored − incoming| &gt; <paramref name="eps"/>; equal / sub-epsilon → no-op. The engine
+        /// glue then re-derives <c>DamageAccumulation.InitialAmount</c> via <see cref="StatusMagnitudeToInitialAmount"/>
+        /// and sets the field directly (NEVER DoT <c>SetValue</c>) — see TacticalActorStateSync.RefreshMirrorMagnitude.
+        /// Unit-tested.</summary>
+        public static bool ShouldRefreshMagnitude(float mirroredValue, float incomingValue, float eps = StatusMagnitudeEpsilon)
+            => System.Math.Abs(mirroredValue - incomingValue) > eps;
+
         // ─── Feature D: actor-level absolute HEALTH mirror decision (DEATH-SAFE) ──────────────────────────
 
         /// <summary>HP-equality tolerance so a sub-epsilon float jitter never re-applies the actor HP (and never

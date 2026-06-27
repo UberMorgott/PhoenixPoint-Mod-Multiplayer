@@ -419,4 +419,34 @@ public class TacticalActorStateDiffTests
         Assert.Equal(12f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(12f, float.NaN));
         Assert.Equal(12f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(12f, -3f));
     }
+
+    // ─── Inc2 follow-up: in-place status-magnitude REFRESH decision (present key, host value drift) ─────
+    //
+    // The reconcile diff identity {DefGuid, SourceNetId} ignores Value, so a magnitude change on an ALREADY-
+    // present mirrored status is invisible to ToAdd/ToRemove — left untouched, the client display level goes
+    // stale. This pure predicate gates a separate in-place refresh of the mirror's DamageAccumulation.
+    // InitialAmount: refresh iff the host magnitude drifted beyond epsilon; converged / sub-epsilon jitter is
+    // a no-op (no churn, no re-write).
+
+    [Fact]
+    public void ShouldRefreshMagnitude_DriftOverEpsilon_True()
+    {
+        // Bleed stacked from a 2nd shot (level 5 → 7) — the present-key mirror must refresh in place.
+        Assert.True(TacticalActorStateDiff.ShouldRefreshMagnitude(5f, 7f));
+        // DoT ticking down each turn (level 30 → 25) — likewise.
+        Assert.True(TacticalActorStateDiff.ShouldRefreshMagnitude(30f, 25f));
+    }
+
+    [Fact]
+    public void ShouldRefreshMagnitude_Equal_NoOp()
+        => Assert.False(TacticalActorStateDiff.ShouldRefreshMagnitude(12f, 12f));
+
+    [Fact]
+    public void ShouldRefreshMagnitude_SubEpsilonJitter_NoOp()
+    {
+        // A sub-epsilon float jitter must NOT re-write the accumulator (avoid churn).
+        Assert.False(TacticalActorStateDiff.ShouldRefreshMagnitude(
+            12f, 12f + TacticalActorStateDiff.StatusMagnitudeEpsilon * 0.5f));
+        Assert.False(TacticalActorStateDiff.ShouldRefreshMagnitude(12f, 12.001f));
+    }
 }

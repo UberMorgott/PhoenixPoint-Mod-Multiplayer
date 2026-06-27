@@ -271,7 +271,7 @@ namespace Multipleer.Sync.Tactical
             { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, sRef = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0;
             // TASK 3: netIds whose AP/WP this batch actually wrote — used AFTER the apply loop to re-grey the ability bar
             // if the client's currently-selected actor is among them (the async AP delta arrives after the activation-time
             // re-grey, so the bar can otherwise stay lit). Collected under the apply, acted on once below.
@@ -298,7 +298,7 @@ namespace Multipleer.Sync.Tactical
                         // the order is kept correct). Body-part HP is independent (own stat) → apply any time.
                         if (rec.HasStatuses)
                         {
-                            ReconcileStatuses(actor, rec.Statuses, ref sAdd, ref sRem);
+                            ReconcileStatuses(actor, rec.Statuses, ref sAdd, ref sRem, ref sRef);
                         }
                         if (rec.HasBodyParts)
                         {
@@ -346,10 +346,10 @@ namespace Multipleer.Sync.Tactical
                 ReGreySelectedBarAfterApDelta(apAppliedNetIds);
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || sRef > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
-                              " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt);
+                              " status~" + sRef + " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
@@ -743,7 +743,7 @@ namespace Multipleer.Sync.Tactical
         /// so its OnApply never re-runs. Only VISIBLE-on-healthbar statuses participate in the "current" set, so
         /// a non-mirrored / surface-owned status (Overwatch) is never seen as "extra" and removed.</summary>
         private static void ReconcileStatuses(object actor, List<TacticalLiveCodec.ActorStatus> incoming,
-            ref int addCount, ref int removeCount)
+            ref int addCount, ref int removeCount, ref int refreshCount)
         {
             object statusComponent = GetProp(actor, "Status");
             if (statusComponent == null) return;
@@ -773,6 +773,16 @@ namespace Multipleer.Sync.Tactical
                 inc.Add(new TacticalActorStateDiff.StatusRec(s.DefGuid, s.SourceNetId, s.Value));
 
             var diff = TacticalActorStateDiff.Compute(current, inc);
+
+            // Inc2 follow-up: in-place MAGNITUDE refresh for an ALREADY-PRESENT status whose host display value
+            // DRIFTED (bleed stacking from a 2nd shot, a DoT ticking down each turn). The diff identity
+            // {DefGuid, SourceNetId} ignores Value, so a present-key magnitude change is in NEITHER ToAdd nor
+            // ToRemove — the mirror would go stale. Refresh keys are disjoint from ToAdd (absent on client) and
+            // ToRemove (absent on host), so this pass is independent of + safe alongside add/remove, and MUST run
+            // even when the diff is otherwise empty (a pure value drift). Re-derives the mirror's
+            // DamageAccumulation.InitialAmount IN PLACE — no remove+re-add → OnApply never re-runs.
+            RefreshPresentStatusMagnitudes(current, inc, liveByKey, ref refreshCount);
+
             if (!diff.HasChanges) return;
 
             // REMOVE absent first, then ADD missing. TASK 3: each per-status apply is ISOLATED in try/catch so one
@@ -812,6 +822,63 @@ namespace Multipleer.Sync.Tactical
                                    " " + ex.GetType().Name + ": " + ex.Message);
                 }
             }
+        }
+
+        /// <summary>Inc2 follow-up: refresh the IN-PLACE display magnitude of every ALREADY-MIRRORED status whose
+        /// host value drifted beyond <see cref="TacticalActorStateDiff.StatusMagnitudeEpsilon"/>. For each incoming
+        /// status whose {DefGuid, SourceNetId} is ALSO present on the client (so the reconcile add/remove never
+        /// touches it), compare the mirrored display Value against the incoming one; on real drift, re-derive + set
+        /// the live mirror's <c>DamageAccumulation.InitialAmount</c> via <see cref="RefreshMirrorMagnitude"/>. The
+        /// pure decision <see cref="TacticalActorStateDiff.ShouldRefreshMagnitude"/> drives the gate; each per-status
+        /// write is isolated in try/catch so one bad status never aborts the rest of the reconcile.</summary>
+        private static void RefreshPresentStatusMagnitudes(
+            List<TacticalActorStateDiff.StatusRec> current,
+            List<TacticalActorStateDiff.StatusRec> incoming,
+            Dictionary<string, object> liveByKey,
+            ref int refreshCount)
+        {
+            // The mirror's current display value by key (taken from the already-built current set — no re-read).
+            var mirroredByKey = new Dictionary<string, float>();
+            foreach (var c in current) mirroredByKey[TacticalActorStateDiff.KeyOf(c)] = c.Value;
+
+            foreach (var s in incoming)
+            {
+                string key = TacticalActorStateDiff.KeyOf(s);
+                if (!mirroredByKey.TryGetValue(key, out float mirroredVal)) continue;           // absent on client → ToAdd owns it
+                if (!TacticalActorStateDiff.ShouldRefreshMagnitude(mirroredVal, s.Value)) continue; // converged → no-op
+                if (!liveByKey.TryGetValue(key, out var liveStatus) || liveStatus == null) continue;
+                try { if (RefreshMirrorMagnitude(liveStatus, s.Value)) refreshCount++; }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multipleer][tac] status mirror refresh failed: " + (s.DefGuid ?? "<null>") +
+                                   " " + ex.GetType().Name + ": " + ex.Message);
+                }
+            }
+        }
+
+        /// <summary>Inc2 follow-up: refresh an already-mirrored status's display magnitude IN PLACE. Re-derives
+        /// <c>DamageAccumulation.InitialAmount</c> (+ <c>Amount</c>) from the host display <paramref name="value"/>
+        /// via the SAME pure map + direct-field write <see cref="SeedInertStatusFields"/> uses on first add —
+        /// NEVER DoT <c>SetValue</c> (which RequestUnapply's at IntValue&lt;=0, DamageOverTimeStatus.cs:186-188).
+        /// DoT vs Bleed is discriminated by the <c>DamagePerTurn</c> property (Bleed has none → maps 1:1, like the
+        /// seed). No-op (returns false) when the status carries no <c>_damageAccum</c> (seed missed / not a damage
+        /// status) or the value is non-positive (a near-0 level means the host is removing it → ToRemove handles
+        /// it). Best-effort; the caller isolates any throw.</summary>
+        private static bool RefreshMirrorMagnitude(object status, float value)
+        {
+            if (status == null || value <= 1e-05f) return false;
+            var daF = AccessTools.Field(status.GetType(), "_damageAccum");
+            object accum = daF != null ? daF.GetValue(status) : null;
+            if (accum == null) return false;
+            float dpt = 0f;
+            var dptProp = AccessTools.Property(status.GetType(), "DamagePerTurn");
+            if (dptProp != null) { object d = dptProp.GetValue(status, null); if (d != null) dpt = Convert.ToSingle(d); }
+            float initialAmount = TacticalActorStateDiff.StatusMagnitudeToInitialAmount(value, dpt);
+            AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accum, initialAmount);
+            AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accum, initialAmount);
+            Debug.Log("[Multipleer][tac] status mirror magnitude refreshed: " + status.GetType().Name +
+                      " value=" + value.ToString("0.##") + " initialAmount=" + initialAmount.ToString("0.##"));
+            return true;
         }
 
         // ─── engine reflection ──────────────────────────────────────────────────────────────────────────
