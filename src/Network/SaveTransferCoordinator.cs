@@ -1141,12 +1141,29 @@ namespace Multipleer.Network
                 var t = typeof(PhoenixSaveManager);
                 // LatestLoad setter (private) also assigns _currentGameId + IsIronmanMode (cs:70-78).
                 var latestLoadProp = AccessTools.Property(t, "LatestLoad");
-                latestLoadProp?.SetValue(saveManager, pp, null);
+                var currentGameIdField = AccessTools.Field(t, "_currentGameId");
+                var currentDifficultyField = AccessTools.Field(t, "_currentDifficulty");
+                var enabledDlcField = AccessTools.Field(t, "_enabledDlc");
 
-                AccessTools.Field(t, "_currentGameId").SetValue(saveManager, pp.GameId);
-                AccessTools.Field(t, "_currentDifficulty").SetValue(saveManager, pp.DifficultyDef);
-                AccessTools.Field(t, "_enabledDlc")
-                    .SetValue(saveManager, pp.EnabledDlc ?? new EntitlementDef[0]);
+                // Reflection can return null if PP/TFTV renames a member; warn specifically (instead of
+                // letting .SetValue NRE into the generic catch → silent empty geoscape) and apply the rest.
+                if (latestLoadProp == null)
+                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame property 'LatestLoad' not found " +
+                                     "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
+                if (currentGameIdField == null)
+                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_currentGameId' not found " +
+                                     "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
+                if (currentDifficultyField == null)
+                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_currentDifficulty' not found " +
+                                     "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
+                if (enabledDlcField == null)
+                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
+                                     "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
+
+                latestLoadProp?.SetValue(saveManager, pp, null);
+                currentGameIdField?.SetValue(saveManager, pp.GameId);
+                currentDifficultyField?.SetValue(saveManager, pp.DifficultyDef);
+                enabledDlcField?.SetValue(saveManager, pp.EnabledDlc ?? new EntitlementDef[0]);
             }
             catch (Exception e)
             {
