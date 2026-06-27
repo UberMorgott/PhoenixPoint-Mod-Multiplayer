@@ -396,4 +396,27 @@ public class TacticalActorStateDiffTests
     [Fact]
     public void FacingChanged_OverEpsilon_True()
         => Assert.True(TacticalActorStateDiff.FacingChanged(0f, 0f, 1f, 1f, 0f, 0f));
+
+    // ─── bug C: status display-magnitude → DamageAccumulation.InitialAmount mapping ───────────────────
+
+    [Fact]
+    public void Magnitude_Bleed_NoDamagePerTurn_MapsOneToOne()
+    {
+        // BleedStatus.Value = (int)InitialAmount → InitialAmount = value (Bleed has no DamagePerTurn → pass 0).
+        Assert.Equal(20f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(20f, 0f));
+    }
+
+    [Fact]
+    public void Magnitude_Dot_ScalesByDamagePerTurn()
+    {
+        // DamageOverTimeStatus.Value = InitialAmount / DamagePerTurn → InitialAmount = value * DamagePerTurn.
+        Assert.Equal(150f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(30f, 5f));
+    }
+
+    [Fact]
+    public void Magnitude_NaNOrNonPositiveDamagePerTurn_MapsOneToOne()
+    {
+        Assert.Equal(12f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(12f, float.NaN));
+        Assert.Equal(12f, TacticalActorStateDiff.StatusMagnitudeToInitialAmount(12f, -3f));
+    }
 }

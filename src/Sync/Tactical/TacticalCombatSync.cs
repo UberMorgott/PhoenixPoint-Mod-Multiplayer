@@ -454,28 +454,18 @@ namespace Multipleer.Sync.Tactical
                 object dmgTypeDef = DefReflection.GetDefByGuid(p.DamageTypeDefGuid);
                 if (dmgTypeDef != null) SetField(t, ref dr, "DamageTypeDef", dmgTypeDef);
 
-                // ApplyStatuses: rebuild List<StatusApplication> with resolved StatusDef + source actor.
-                if (p.Statuses != null && p.Statuses.Count > 0)
-                {
-                    var statusAppType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.StatusApplication");
-                    if (statusAppType != null)
-                    {
-                        var listType = typeof(List<>).MakeGenericType(statusAppType);
-                        var list = (IList)Activator.CreateInstance(listType);
-                        foreach (var s in p.Statuses)
-                        {
-                            object def = DefReflection.GetDefByGuid(s.DefGuid);
-                            if (def == null) continue;
-                            object sa = Activator.CreateInstance(statusAppType);
-                            SetField(statusAppType, ref sa, "StatusDef", def);
-                            SetField(statusAppType, ref sa, "Value", s.Value);
-                            object src = s.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(s.SourceNetId) : null;
-                            SetField(statusAppType, ref sa, "StatusSource", src);
-                            list.Add(sa);
-                        }
-                        if (list.Count > 0) SetField(t, ref dr, "ApplyStatuses", list);
-                    }
-                }
+                // CANON inv 2 + 4 (bug C): tac.damage NO LONGER live-applies statuses on the client. Statuses are
+                // host-authoritative DISPLAY state and ride the generic 0x8F spine as INERT mirrors only
+                // (TacticalActorStateSync.ReconcileStatuses → InvokeApplyStatus, Applied=true + magnitude seed).
+                // Live-applying them here broke one-writer (0x88 + 0x8F both wrote statuses) AND crashed: the wire
+                // DamageStatus struct carries no StatusTarget (TacticalLiveCodec.cs:285) and FlattenDamage drops it
+                // (TacticalCombatSync.cs:394-405), so the rebuilt StatusApplication.Target was null → native
+                // ApplyDamage ran BleedStatus.OnApply LIVE (Applied=false) → GetTargetSlotName(null) →
+                // BodyState.GetSlot(null)/GetSlotBleedValue NRE (BleedStatus.cs:133-135,226-229) AFTER it
+                // subscribed AddonsManager.AddonDetaching (:124) → §5 half-mutation/addon-tree corruption that also
+                // aborted the enemy's client ApplyDamage (no body-part doll). tac.damage keeps owning
+                // HP/armor/stun/death only. (FlattenDamage's status encode + the DamageStatus wire field are now
+                // vestigial; retiring them is deferred to the inc-4 one-writer convergence.)
 
                 // ActorEffects: rebuild List<EffectDef>.
                 if (p.EffectGuids != null && p.EffectGuids.Count > 0)

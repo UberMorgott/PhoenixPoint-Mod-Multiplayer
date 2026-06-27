@@ -137,6 +137,18 @@ namespace Multipleer.Sync.Tactical
             return true;
         }
 
+        /// <summary>PURE magnitude→accumulator mapping for the inert status mirror (bug C). The host's carried
+        /// <c>Status.Value</c> is the DISPLAY level; the client seeds <c>DamageAccumulation.InitialAmount</c> so the
+        /// mirrored icon shows that level. BleedStatus.Value = (int)InitialAmount → InitialAmount = value (no
+        /// DamagePerTurn). DamageOverTimeStatus.Value = InitialAmount / DamagePerTurn → InitialAmount =
+        /// value × DamagePerTurn. A NaN / non-positive <paramref name="damagePerTurn"/> (a non-DoT status such as
+        /// Bleed, which has no such property) maps 1:1. (BleedStatus.cs:29,116; DamageOverTimeStatus.cs:21,25,184)</summary>
+        public static float StatusMagnitudeToInitialAmount(float value, float damagePerTurn)
+        {
+            if (float.IsNaN(damagePerTurn) || damagePerTurn <= 1e-05f) return value;
+            return value * damagePerTurn;
+        }
+
         // ─── Feature D: actor-level absolute HEALTH mirror decision (DEATH-SAFE) ──────────────────────────
 
         /// <summary>HP-equality tolerance so a sub-epsilon float jitter never re-applies the actor HP (and never

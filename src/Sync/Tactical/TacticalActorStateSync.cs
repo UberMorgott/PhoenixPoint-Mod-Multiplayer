@@ -593,11 +593,14 @@ namespace Multipleer.Sync.Tactical
             catch { return TacticalActorStateDiff.SourceNetIdNone; }
         }
 
-        /// <summary>The status' carried value (its <c>Duration</c>, informational — drives the signature so a
-        /// duration change re-broadcasts). Best-effort: 0 when unreadable.</summary>
+        /// <summary>The status' carried DISPLAY magnitude — its <c>Status.Value</c> (BleedStatus.Value = (int)bleed
+        /// level; DamageOverTimeStatus.Value = level = InitialAmount/DamagePerTurn). Drives the signature (a
+        /// magnitude change re-broadcasts) AND is reconstructed on the inert client mirror (bug C: was
+        /// <c>Duration</c>, so the mirror always showed level 0; magnitude used to ride tac.damage 0x88, now
+        /// retired — canon inv 2). Best-effort: 0 when unreadable. (BleedStatus.cs:29; DamageOverTimeStatus.cs:25)</summary>
         private static float ReadStatusValue(object status)
         {
-            try { object d = GetProp(status, "Duration"); return d != null ? Convert.ToSingle(d) : 0f; }
+            try { object v = GetProp(status, "Value"); return v != null ? Convert.ToSingle(v) : 0f; }
             catch { return 0f; }
         }
 
@@ -800,7 +803,8 @@ namespace Multipleer.Sync.Tactical
                     object def = DefReflection.GetDefByGuid(a.DefGuid);
                     if (def == null) continue;
                     object source = a.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(a.SourceNetId) : null;
-                    if (InvokeApplyStatus(statusComponent, def, source, actor)) addCount++;
+                    // a.Value = host Status.Value (display magnitude) → reconstructed on the inert mirror (bug C).
+                    if (InvokeApplyStatus(statusComponent, def, source, actor, a.Value)) addCount++;
                 }
                 catch (Exception ex)
                 {
@@ -821,7 +825,7 @@ namespace Multipleer.Sync.Tactical
         /// events fire, but NO gameplay side effect runs. The instance is registered with
         /// <c>ClientStatusMirrorGuards</c> so its per-turn ticks (DoT) + its effect-reverting OnUnapply are also
         /// skipped. Returns true on success.</summary>
-        private static bool InvokeApplyStatus(object statusComponent, object statusDef, object source, object target)
+        private static bool InvokeApplyStatus(object statusComponent, object statusDef, object source, object target, float value)
         {
             try
             {
@@ -865,7 +869,7 @@ namespace Multipleer.Sync.Tactical
                 // Seeding the field(s) the inert branch needs lets OnApply RUN TO COMPLETION cleanly (empty list →
                 // zero reattach iterations, no particles, no NRE, addon tree untouched), exactly mirroring the
                 // engine's own restored-from-save state — so the mirror is atomic, not partially applied.
-                SeedInertStatusFields(status, statusDef);
+                SeedInertStatusFields(status, statusDef, value);
 
                 // Register BEFORE ApplyStatus so the per-turn/unapply guards already know this instance.
                 ClientStatusMirrorGuards.RegisterMirror(status);
@@ -945,7 +949,7 @@ namespace Multipleer.Sync.Tactical
         /// Pre-seed the known null collection field(s) to EMPTY so OnApply runs clean (zero reattach iterations,
         /// no gameplay, no NRE) — the engine's restored-from-save state for an actor with no recorded slots. Only
         /// touches a field that EXISTS on this status type AND is currently null; never throws (best-effort).</summary>
-        private static void SeedInertStatusFields(object status, object statusDef)
+        private static void SeedInertStatusFields(object status, object statusDef, float value)
         {
             if (status == null) return;
             try
@@ -990,6 +994,25 @@ namespace Multipleer.Sync.Tactical
                             Debug.Log("[Multipleer][tac] status mirror damageAccum seeded: " + DescribeDef(statusDef));
                         }
                     }
+                }
+
+                // BUG C / canon inv 4: APPLY the host's display magnitude to the freshly-seeded accum so the inert
+                // mirror shows the right level (was always 0 — magnitude used to ride tac.damage 0x88, now retired).
+                // value = host Status.Value: Bleed.Value=(int)InitialAmount, DoT.Value=InitialAmount/DamagePerTurn.
+                // Map via the PURE helper, then set the FIELD directly — NEVER DoT SetValue (it RequestUnapply's at
+                // IntValue<=0, DamageOverTimeStatus.cs:186-188). DoT discriminated by its DamagePerTurn property
+                // (BleedStatus has none → maps 1:1).
+                object accumNow = daF != null ? daF.GetValue(status) : null;
+                if (accumNow != null && value > 1e-05f)
+                {
+                    float dpt = 0f;
+                    var dptProp = AccessTools.Property(status.GetType(), "DamagePerTurn");
+                    if (dptProp != null) { object d = dptProp.GetValue(status, null); if (d != null) dpt = Convert.ToSingle(d); }
+                    float initialAmount = TacticalActorStateDiff.StatusMagnitudeToInitialAmount(value, dpt);
+                    AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accumNow, initialAmount);
+                    AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accumNow, initialAmount);
+                    Debug.Log("[Multipleer][tac] status mirror magnitude applied: " + DescribeDef(statusDef) +
+                              " value=" + value.ToString("0.##") + " initialAmount=" + initialAmount.ToString("0.##"));
                 }
             }
             catch (Exception ex)
