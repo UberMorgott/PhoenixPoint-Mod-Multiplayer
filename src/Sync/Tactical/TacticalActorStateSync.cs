@@ -158,22 +158,30 @@ namespace Multipleer.Sync.Tactical
                 liveNetIds.Add(netId);
 
                 if (!ReadActorState(actor, out float ap, out float wp, out float health, out Vector3 pos,
-                        out bool hasPos, out var statuses, out var bodyParts))
+                        out bool hasPos, out Vector3 forward, out bool hasFacing, out var statuses, out var bodyParts))
                     continue;   // not a stats-bearing actor (turret/vehicle/destructible) → skip
 
-                // Signature includes AP/WP + HEALTH + POSITION + the mirrored status set + the bodypart-HP set,
-                // so a HEAL, a status icon change, a MOVE or a limb-HP change re-broadcasts (idle actor = 0 bytes
-                // via the unchanged-sig skip). Health + position ride AP/WP (not gated by SyncStatuses) → always
-                // in the signature. (Inc1 full-state: position drives the client walk/teleport mirror.)
+                // Signature includes AP/WP + HEALTH + POSITION + FACING + the mirrored status set + the bodypart-HP
+                // set, so a HEAL, a status icon change, a MOVE, a TURN-IN-PLACE or a limb-HP change re-broadcasts
+                // (idle actor = 0 bytes via the unchanged-sig skip). Health + position + facing ride AP/WP (not
+                // gated by SyncStatuses) → always in the signature. (Inc1: position drives the client walk/teleport
+                // mirror; Inc2: facing drives the client SetForward mirror.)
                 string healthSig = "$hp=" + health.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
                 string posSig = hasPos
                     ? "$p=" + pos.x.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
                             + pos.y.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
                             + pos.z.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                     : "";
+                // Inc2: facing rides the signature (F2-rounded → dedups to 0.01 precision, like posSig) so a
+                // turn-in-place (pos unchanged, facing changed) still re-broadcasts. NOT gated by SyncStatuses.
+                string facingSig = hasFacing
+                    ? "$f=" + forward.x.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
+                            + forward.y.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
+                            + forward.z.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
+                    : "";
                 string sig = (SyncStatuses
                     ? TacticalActorStateDiff.Signature(ap, wp, statuses) + BodyPartSig(bodyParts)
-                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig + posSig;
+                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig + posSig + facingSig;
                 if (_lastSig.TryGetValue(netId, out var prev) && prev == sig)
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
@@ -195,6 +203,10 @@ namespace Multipleer.Sync.Tactical
                 // NOT gated by SyncStatuses (it is core movement state, like Health). The client turns it into a
                 // native walk (or a snap) — see TacticalMoveSync.ApplyMirrorPosition / DecidePositionApply.
                 if (hasPos) mask |= TacticalLiveCodec.ActorFieldPos;
+                // Inc2: ship the absolute FACING bit whenever the actor exposes a readable forward. NOT gated by
+                // SyncStatuses (core presentation state, like Pos). The client applies it via ActorComponent.SetForward
+                // (skip-while-navigating) — see TacticalMoveSync.ApplyMirrorFacing.
+                if (hasFacing) mask |= TacticalLiveCodec.ActorFieldFacing;
                 if (SyncStatuses)
                 {
                     mask |= TacticalLiveCodec.ActorFieldStatuses;
@@ -210,6 +222,9 @@ namespace Multipleer.Sync.Tactical
                     PosX = pos.x,
                     PosY = pos.y,
                     PosZ = pos.z,
+                    FacingX = forward.x,
+                    FacingY = forward.y,
+                    FacingZ = forward.z,
                 };
                 if (SyncStatuses)
                 {
@@ -250,7 +265,7 @@ namespace Multipleer.Sync.Tactical
             { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0, posCnt = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0;
             // TASK 3: netIds whose AP/WP this batch actually wrote — used AFTER the apply loop to re-grey the ability bar
             // if the client's currently-selected actor is among them (the async AP delta arrives after the activation-time
             // re-grey, so the bar can otherwise stay lit). Collected under the apply, acted on once below.
@@ -289,6 +304,16 @@ namespace Multipleer.Sync.Tactical
                         {
                             if (SetApWpAbsolute(actor, rec)) { apwp++; apAppliedNetIds.Add(rec.NetId); }
                         }
+                        // Inc2: apply the host's ABSOLUTE facing BEFORE position. A stationary actor keeps the host
+                        // heading (turn-in-place); a moved actor's Pos may start a Walk — which owns rotation and
+                        // makes ApplyMirrorFacing SKIP (skip-while-navigating) — then the next heartbeat converges
+                        // the final facing. SetForward is absolute/idempotent + sub-epsilon-skipped (no churn / no
+                        // ActorMovedEvent re-fire) — see TacticalMoveSync.ApplyMirrorFacing.
+                        if (rec.HasFacing)
+                        {
+                            if (TacticalMoveSync.ApplyMirrorFacing(
+                                    actor, new Vector3(rec.FacingX, rec.FacingY, rec.FacingZ))) facingCnt++;
+                        }
                         // Inc1 full-state: drive the actor toward the host's ABSOLUTE position. The native walk
                         // animation (or an instant snap for a sub-cell nudge / disconnected jump) is triggered by
                         // TacticalMoveSync.ApplyMirrorPosition, which reuses the SAME mirror NavigationSettings +
@@ -310,10 +335,10 @@ namespace Multipleer.Sync.Tactical
                 ReGreySelectedBarAfterApDelta(apAppliedNetIds);
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0 || posCnt > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0)
                     Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
-                              " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt);
+                              " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
         }
@@ -408,11 +433,12 @@ namespace Multipleer.Sync.Tactical
         /// <paramref name="health"/> is the actor's CURRENT HP (Feature D); the host only ships it when > 0
         /// (see HostFlushOnce) — death is owned by tac.damage, never this delta.</summary>
         private static bool ReadActorState(object actor, out float ap, out float wp, out float health,
-            out Vector3 pos, out bool hasPos,
+            out Vector3 pos, out bool hasPos, out Vector3 forward, out bool hasFacing,
             out List<TacticalActorStateDiff.StatusRec> statuses,
             out List<TacticalActorStateDiff.BodyPartHpRec> bodyParts)
         {
             ap = 0f; wp = 0f; health = 0f; pos = Vector3.zero; hasPos = false;
+            forward = Vector3.forward; hasFacing = false;
             statuses = new List<TacticalActorStateDiff.StatusRec>();
             bodyParts = new List<TacticalActorStateDiff.BodyPartHpRec>();
 
@@ -433,6 +459,11 @@ namespace Multipleer.Sync.Tactical
             // Read off the live actor (not CharacterStats) and shipped unconditionally (core movement state, NOT
             // gated by SyncStatuses). A NaN/unreadable Pos is dropped (hasPos stays false → no Pos bit).
             if (TryReadPos(actor, out Vector3 p)) { pos = p; hasPos = true; }
+
+            // Inc2: actor facing as a forward vector. ActorComponent.Rot is the world rotation (ActorComponent.cs:43);
+            // forward = Rot * Vector3.forward. Shipped unconditionally (core presentation state, like Pos), NOT gated
+            // by SyncStatuses. A NaN/unreadable rotation is dropped (hasFacing stays false → no Facing bit).
+            if (TryReadForward(actor, out Vector3 fwd)) { forward = fwd; hasFacing = true; }
 
             // Single kill-switch (Feature B): when off, the wire + signature carry only AP/WP/HEALTH/POSITION.
             if (!SyncStatuses) return true;
@@ -514,6 +545,25 @@ namespace Multipleer.Sync.Tactical
                 if (!(raw is Vector3 v)) return false;
                 if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z)) return false;
                 pos = v;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Inc2: read the actor's absolute world FORWARD vector (<c>ActorComponent.Rot</c> =
+        /// transform.rotation, ActorComponent.cs:43) as <c>Rot * Vector3.forward</c>. Returns false (so no Facing
+        /// bit is shipped) when the rotation is unreadable or the resulting forward is NaN — a turret/destructible
+        /// without a transform, or a mid-spawn actor. Mirrors <see cref="TryReadPos"/>.</summary>
+        private static bool TryReadForward(object actor, out Vector3 forward)
+        {
+            forward = Vector3.forward;
+            try
+            {
+                object raw = GetProp(actor, "Rot");          // ActorComponent.Rot : Quaternion
+                if (!(raw is Quaternion q)) return false;
+                Vector3 f = q * Vector3.forward;
+                if (float.IsNaN(f.x) || float.IsNaN(f.y) || float.IsNaN(f.z)) return false;
+                forward = f;
                 return true;
             }
             catch { return false; }

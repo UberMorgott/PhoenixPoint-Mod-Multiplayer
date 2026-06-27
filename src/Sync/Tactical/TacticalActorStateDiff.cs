@@ -222,6 +222,21 @@ namespace Multipleer.Sync.Tactical
             return PositionApplyMode.Walk;
         }
 
+        // ─── Inc2: facing-vector change decision (PURE, per-component epsilon) ─────────────────────────────
+
+        /// <summary>Facing-vector equality tolerance: below this per-component delta the forward is "unchanged" so a
+        /// sub-epsilon jitter never re-broadcasts (host signature) nor re-applies (client) — avoids re-firing the
+        /// native ActorMovedEvent. Tactical actors are yaw-only and the forward is unit-length, so 0.01 is far below
+        /// any real turn.</summary>
+        public const float FacingEpsilon = 0.01f;
+
+        /// <summary>PURE: did the forward vector change beyond <see cref="FacingEpsilon"/> on any component? Unity-free
+        /// (the glue passes the 3 components) so the host signature and the client skip make the SAME decision.</summary>
+        public static bool FacingChanged(float ax, float ay, float az, float bx, float by, float bz)
+            => System.Math.Abs(ax - bx) > FacingEpsilon
+            || System.Math.Abs(ay - by) > FacingEpsilon
+            || System.Math.Abs(az - bz) > FacingEpsilon;
+
         // ─── Feature B PART 1: per-bodypart-HP RECONCILE diff (limb-disable mirror) ───────────────────────
 
         /// <summary>One bodypart HP entry: the slot name (stable host↔client key) + the part's absolute HP.</summary>

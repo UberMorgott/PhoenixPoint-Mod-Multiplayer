@@ -386,4 +386,14 @@ public class TacticalActorStateDiffTests
         Assert.True(TacticalActorStateDiff.PositionEpsilon < TacticalActorStateDiff.PositionWalkMinDist);
         Assert.True(TacticalActorStateDiff.PositionWalkMinDist < TacticalActorStateDiff.PositionTeleportMaxDist);
     }
+
+    // ─── Inc2: facing-vector change decision (pure, per-component epsilon) ─────────────────────────────
+
+    [Fact]
+    public void FacingChanged_SubEpsilon_False()
+        => Assert.False(TacticalActorStateDiff.FacingChanged(0f, 0f, 1f, 0.005f, 0f, 0.999f));
+
+    [Fact]
+    public void FacingChanged_OverEpsilon_True()
+        => Assert.True(TacticalActorStateDiff.FacingChanged(0f, 0f, 1f, 1f, 0f, 0f));
 }

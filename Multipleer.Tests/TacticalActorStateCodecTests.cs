@@ -11,6 +11,7 @@ public class TacticalActorStateCodecTests
     private const ushort Bp = TacticalLiveCodec.ActorFieldBodyPartHp;
     private const ushort He = TacticalLiveCodec.ActorFieldHealth;
     private const ushort Po = TacticalLiveCodec.ActorFieldPos;   // Inc1 full-state: absolute position
+    private const ushort Fa = TacticalLiveCodec.ActorFieldFacing; // Inc2: absolute forward vector
 
     private static TacticalLiveCodec.ActorStateRecord Rec(int netId, ushort mask, float ap, float wp,
         params TacticalLiveCodec.ActorStatus[] statuses)
@@ -410,6 +411,78 @@ public class TacticalActorStateCodecTests
             w.Write(5);      // netId
             w.Write(Po);     // fieldMask = pos
             w.Write(1.0f);   // only PosX present; PosY/PosZ missing → safe false (12-byte guard)
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
+
+    // ─── Inc2: absolute FACING field (0x0010) round-trip ──────────────────────────────────────────────
+    //
+    // Facing sits BETWEEN pos (0x0008) and health (0x0020) in ascending bit order, so these tests guard
+    // that an all-fields record keeps the encode/decode aligned with facing wedged between pos and health.
+
+    private static TacticalLiveCodec.ActorStateRecord RecFac(int netId, ushort mask, float ap, float wp,
+        float health, float px, float py, float pz, float fx, float fy, float fz)
+    {
+        return new TacticalLiveCodec.ActorStateRecord
+        {
+            NetId = netId, FieldMask = mask, Ap = ap, Wp = wp, Health = health,
+            PosX = px, PosY = py, PosZ = pz, FacingX = fx, FacingY = fy, FacingZ = fz
+        };
+    }
+
+    [Fact]
+    public void FacingOnly_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(30u,
+            new List<TacticalLiveCodec.ActorStateRecord> { RecFac(42, Fa, 0, 0, 0, 0, 0, 0, 0f, 0f, 1f) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasFacing);
+        Assert.False(a.HasPos);
+        Assert.Equal(0f, a.FacingX); Assert.Equal(0f, a.FacingY); Assert.Equal(1f, a.FacingZ);
+    }
+
+    [Fact]
+    public void PosThenFacing_RoundTrips_AscendingBitOrder()
+    {
+        // Pos(0x08) then Facing(0x10) on one record → guards the ascending-bit-order insertion.
+        var batch = new TacticalLiveCodec.ActorStateBatch(31u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            { RecFac(7, (ushort)(Po | Fa), 0, 0, 0, 1f, 2f, 3f, 1f, 0f, 0f) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasPos); Assert.True(a.HasFacing);
+        Assert.Equal(3f, a.PosZ); Assert.Equal(1f, a.FacingX);
+    }
+
+    [Fact]
+    public void AllFieldsWithFacing_RoundTrip_AscendingBitOrder()
+    {
+        // AP|WP|STATUSES|POS|FACING|HEALTH|BODYPARTHP → full ascending order with Facing wedged between Pos and Health.
+        var r = RecFac(3, (ushort)(Ap | Wp | St | Po | Fa | He | Bp), 2f, 5f, 64.25f, 11f, 2f, 33f, 0f, 0f, 1f);
+        r.Statuses.Add(Stat("g-bleed", 7, 4f));
+        r.BodyParts.Add(Part("Head", 40f));
+        var batch = new TacticalLiveCodec.ActorStateBatch(32u,
+            new List<TacticalLiveCodec.ActorStateRecord> { r });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.Equal(33f, a.PosZ);
+        Assert.True(a.HasFacing); Assert.Equal(1f, a.FacingZ);
+        Assert.Equal(64.25f, a.Health);
+        Assert.Equal("Head", a.BodyParts[0].SlotName);
+    }
+
+    [Fact]
+    public void FacingTruncated_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u); w.Write(1); w.Write(5);
+            w.Write(Fa);     // facing bit, but NO 3 floats follow → safe false (12-byte guard)
             Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
         }
     }

@@ -531,6 +531,57 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorPosition failed: " + ex); return false; }
         }
 
+        // ─── Inc2: drive the mirror from an ABSOLUTE facing delta (tac.actorstate 0x8F) ──────────────
+
+        /// <summary>CLIENT (mirror): apply the host-authoritative ABSOLUTE facing carried by the tac.actorstate
+        /// delta. Sets the actor's forward via <c>ActorComponent.SetForward(Vector3)</c> (ActorComponent.cs:280 →
+        /// SetRotation → SetTransform :299). ABSOLUTE/idempotent. SKIPS while the mirror is navigating (a walk owns
+        /// rotation — the move rail or <see cref="ApplyMirrorPosition"/> Navigate turns the actor along the path;
+        /// the next heartbeat converges to the host's final facing). SKIPS a zero vector (SetForward(zero) → invalid
+        /// LookRotation) and a sub-epsilon change (no churn / no ActorMovedEvent re-fire — vision recompute is
+        /// already client-suppressed). No-op off-mirror. Returns true only when it actually re-faced the actor.</summary>
+        public static bool ApplyMirrorFacing(object actor, Vector3 forward)
+        {
+            try
+            {
+                if (actor == null) return false;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || engine.IsHost) return false;   // client-only
+                if (!TacticalDeploySync.IsClientMirroring) return false;
+                if (forward == Vector3.zero) return false;                                // SetForward(zero) → invalid LookRotation
+                object nav = GetProp(actor, "TacticalNav");
+                if (nav != null && ToBool(GetProp(nav, "IsNavigating"))) return false;    // walk owns rotation
+                Vector3 cur = GetForward(actor);
+                if (!TacticalActorStateDiff.FacingChanged(cur.x, cur.y, cur.z, forward.x, forward.y, forward.z))
+                    return false;   // already converged → no churn
+                return TrySetForward(actor, forward);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorFacing failed: " + ex); return false; }
+        }
+
+        /// <summary>Read the actor's current world forward vector (<c>ActorComponent.Rot</c> * Vector3.forward).
+        /// Defaults to Vector3.forward when the rotation is unreadable. Mirrors <see cref="GetPos"/>.</summary>
+        private static Vector3 GetForward(object actor)
+        {
+            object r = GetProp(actor, "Rot");
+            return r is Quaternion q ? q * Vector3.forward : Vector3.forward;
+        }
+
+        /// <summary>Set the actor's world forward via <c>ActorComponent.SetForward(Vector3)</c> (the single-Vector3
+        /// public override, ActorComponent.cs:280). Returns false on a throw / missing overload. Mirrors
+        /// <see cref="TrySetPosition"/>.</summary>
+        private static bool TrySetForward(object actor, Vector3 forward)
+        {
+            try
+            {
+                var m = AccessTools.Method(actor.GetType(), "SetForward", new[] { typeof(Vector3) });
+                if (m == null) { Debug.LogError("[Multipleer][tac] SetForward(Vector3) not found"); return false; }
+                m.Invoke(actor, new object[] { forward });
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TrySetForward failed: " + ex); return false; }
+        }
+
         // ─── CLIENT animated-mirror helpers (FIX B) ────────────────────────────────────────────────
 
         /// <summary>Lazily build the reusable mirror <c>NavigationSettings</c>: <c>CostsAPToActor=false</c>
