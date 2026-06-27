@@ -45,6 +45,11 @@ namespace Multipleer.Sync.Tactical
         // at hydrate-completion (ClientEnterInitialTurn). Self-ignores if stale (ShouldApply + monotonic seq).
         private static TacticalLiveCodec.TurnOutcome? _pendingTurn;
 
+        /// <summary>True while the client is presenting a non-player (enemy) faction turn on the
+        /// mirror. Drives the Inc3 enemy-turn cinematic camera (see TacticalEnemyTurnCamera). Set in
+        /// ClientOnTurn from the incoming faction; cleared on mission exit.</summary>
+        public static bool IsClientEnemyTurn;
+
         // ─── CLIENT: relay end-turn intent (called from the repointed RequestEndTurnPatch) ─────────
         /// <summary>CLIENT (mirroring): send <c>tac.intent.endturn</c> to the host. Returns true so the
         /// caller lets the native <c>RequestEndTurn</c> run locally (sets _endTurnRequested → the client's
@@ -184,6 +189,7 @@ namespace Multipleer.Sync.Tactical
                 // 2) Re-stamp the authoritative TurnNumber (public setter) — corrects any local drift and the
                 //    +1 PlayTurnCrt will apply when we start it (we re-stamp AFTER the start below for player).
                 bool isPlayer = ToBool(GetProp(current, "IsControlledByPlayer"));
+                IsClientEnemyTurn = !isPlayer;
                 bool viewDown = false;
                 string branch = isPlayer ? "player" : "enemy";
 

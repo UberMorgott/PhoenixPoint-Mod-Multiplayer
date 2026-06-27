@@ -662,6 +662,7 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalMeleeAnimSync.Reset(); }                                 // Feature C (melee): symmetry (Phase 1 stateless)
             catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
         // ─── Wire send + inbound (rides the 0x67 SyncEnvelope rail) ─────────────────────────
