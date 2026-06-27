@@ -32,12 +32,6 @@ namespace Multipleer
                 // deferred installer that patches them the instant their assembly loads (which precedes
                 // TFTV's synchronous *Logger.Initialize), giving the secondary instance its own log file.
                 Multipleer.Harmony.TftvLogDeferredInstaller.Install(harmony);
-
-                // SAME alphabetical-PatchAll race: TFTV's geoscape-UI types are not loaded yet, so the
-                // [HarmonyPatch] teardown-guard classes also get silently skipped by PatchAll. Arm a deferred
-                // installer that binds the guards the instant TFTV's assembly loads (precedes any teardown),
-                // so the co-op save-load NRE popup is suppressed for real (commit 1e26a7f lost this race).
-                Multipleer.Harmony.ClientTftvGeoscapeUiTeardownDeferredInstaller.Install(harmony);
             }
             catch (System.Exception e)
             {
