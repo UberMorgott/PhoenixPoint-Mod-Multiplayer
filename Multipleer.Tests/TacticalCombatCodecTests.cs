@@ -15,7 +15,7 @@ public class TacticalCombatCodecTests
     {
         var bytes = TacticalLiveCodec.EncodeIntentAbility(
             shooterNetId: 42, abilityDefGuid: "shoot-ability-guid-123", targetNetId: 99,
-            tx: 1.5f, ty: -2.25f, tz: 3f, nonce: 7u);
+            tx: 1.5f, ty: -2.25f, tz: 3f, bodyPartId: 5, nonce: 7u);
         Assert.True(TacticalLiveCodec.TryDecodeIntentAbility(bytes, out var i));
         Assert.Equal(42, i.ShooterNetId);
         Assert.Equal("shoot-ability-guid-123", i.AbilityDefGuid);
@@ -23,6 +23,7 @@ public class TacticalCombatCodecTests
         Assert.Equal(1.5f, i.TX);
         Assert.Equal(-2.25f, i.TY);
         Assert.Equal(3f, i.TZ);
+        Assert.Equal(5, i.BodyPartId);
         Assert.Equal(7u, i.Nonce);
     }
 
@@ -31,10 +32,11 @@ public class TacticalCombatCodecTests
     {
         var bytes = TacticalLiveCodec.EncodeIntentAbility(
             shooterNetId: 1, abilityDefGuid: "", targetNetId: TacticalLiveCodec.TargetNetIdNone,
-            tx: 10f, ty: 0f, tz: -7.5f, nonce: 1u);
+            tx: 10f, ty: 0f, tz: -7.5f, bodyPartId: TacticalLiveCodec.BodyPartIdNone, nonce: 1u);
         Assert.True(TacticalLiveCodec.TryDecodeIntentAbility(bytes, out var i));
         Assert.Equal("", i.AbilityDefGuid);
         Assert.Equal(TacticalLiveCodec.TargetNetIdNone, i.TargetNetId);   // -1 sentinel survives
+        Assert.Equal(TacticalLiveCodec.BodyPartIdNone, i.BodyPartId);     // -1 sentinel survives
         Assert.Equal(-7.5f, i.TZ);
     }
 
@@ -42,15 +44,16 @@ public class TacticalCombatCodecTests
     public void IntentAbility_RoundTrips_LongGuid()
     {
         var longGuid = new string('a', 600);   // forces a multi-byte 7-bit length prefix
-        var bytes = TacticalLiveCodec.EncodeIntentAbility(7, longGuid, 8, 0f, 0f, 0f, 2u);
+        var bytes = TacticalLiveCodec.EncodeIntentAbility(7, longGuid, 8, 0f, 0f, 0f, 3, 2u);
         Assert.True(TacticalLiveCodec.TryDecodeIntentAbility(bytes, out var i));
         Assert.Equal(longGuid, i.AbilityDefGuid);
+        Assert.Equal(3, i.BodyPartId);
     }
 
     [Fact]
     public void IntentAbility_NullGuid_BecomesEmpty()
     {
-        var bytes = TacticalLiveCodec.EncodeIntentAbility(1, null, 2, 0f, 0f, 0f, 1u);
+        var bytes = TacticalLiveCodec.EncodeIntentAbility(1, null, 2, 0f, 0f, 0f, -1, 1u);
         Assert.True(TacticalLiveCodec.TryDecodeIntentAbility(bytes, out var i));
         Assert.Equal("", i.AbilityDefGuid);
     }

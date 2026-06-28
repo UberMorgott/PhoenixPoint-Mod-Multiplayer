@@ -395,6 +395,26 @@ namespace Multipleer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] host re-grey failed: " + ex); }
         }
 
+        /// <summary>FIX B (CLIENT staleness). After a relayed client shot, the host spends the AP and ships
+        /// <c>ShooterApAfter</c> on the 0x88 <c>tac.damage</c> path (<c>TacticalCombatSync.HandleDamage</c> →
+        /// <c>SetApWp</c>) — but that write never re-cycles the client's ability bar, so the just-spent-AP buttons
+        /// stay LIT until the next 0x8F flush (~0.25 s). If the client's UI currently has THIS actor selected, do
+        /// the SAME direct, state-independent <c>UIModuleAbilities.SetAbilities</c> refresh as the host re-grey + the
+        /// AP-delta re-grey, so every button re-evaluates <c>IsEnabled</c>→<c>ActionPointRequirementSatisfied</c>
+        /// against the now-spent AP immediately. No-op unless the client's selected actor IS
+        /// <paramref name="actorNetId"/>. The only caller (<c>HandleDamage</c>) is already client-gated.</summary>
+        public static void RefreshClientBarForActor(int actorNetId)
+        {
+            try
+            {
+                if (actorNetId < 0) return;
+                int selNet = ResolveSelectedActorNet(out object view, out object selected);
+                if (selNet < 0 || selNet != actorNetId) return;   // client has a different (or no) actor selected → nothing stale
+                DoDirectAbilityBarRefresh(view, selected, selNet, "CLIENT@relay");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] client re-grey failed: " + ex); }
+        }
+
         /// <summary>Resolve the live tactical view's currently-SELECTED actor + its netId (-1 when none / unresolved).
         /// Shared by the client AP-delta re-grey and the host post-relay re-grey. The out params are the live
         /// <c>TacticalView</c> and the selected <c>TacticalActor</c> (both null when -1 is returned).</summary>

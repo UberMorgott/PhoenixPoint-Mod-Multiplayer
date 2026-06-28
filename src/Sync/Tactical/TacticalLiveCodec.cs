@@ -221,26 +221,32 @@ namespace Multipleer.Sync.Tactical
         // ─── tac.intent.ability (client→host, Inc 3a) ─────────────────────
         // A client SHOOT intent: which actor shoots which ability (by def guid) at which target. The target
         // is carried as BOTH a netId (actor target; -1 sentinel when the shot is at a bare position) AND a
-        // position (always present — the host rebuilds a TacticalAbilityTarget from whichever is valid).
+        // position (always present — the host rebuilds a TacticalAbilityTarget from whichever is valid). FIX A:
+        // it ALSO carries BodyPartId — the index of the player's SELECTED body part in the target actor's snapper
+        // enumeration (GetHealthSlots().GetAimPointItem() then visible Equipments.Items, the SAME order native
+        // ShootAbility.GetShootTarget walks) — so the host reproduces the EXACT limb + cover-aware ShootFromPos
+        // via native generation instead of snapping to center-of-mass. -1 = no selected body part (free shot).
         public struct IntentAbility
         {
             public int ShooterNetId;
             public string AbilityDefGuid;
             public int TargetNetId;          // -1 sentinel when the target is a position, not an actor
             public float TX, TY, TZ;
+            public int BodyPartId;           // -1 sentinel = no player-selected body part (bare-ground / free shot)
             public uint Nonce;
             public IntentAbility(int shooterNetId, string abilityDefGuid, int targetNetId,
-                float tx, float ty, float tz, uint nonce)
+                float tx, float ty, float tz, int bodyPartId, uint nonce)
             {
                 ShooterNetId = shooterNetId; AbilityDefGuid = abilityDefGuid ?? ""; TargetNetId = targetNetId;
-                TX = tx; TY = ty; TZ = tz; Nonce = nonce;
+                TX = tx; TY = ty; TZ = tz; BodyPartId = bodyPartId; Nonce = nonce;
             }
         }
 
         public const int TargetNetIdNone = -1;   // sentinel: the shot target is a position, not an actor
+        public const int BodyPartIdNone = -1;    // sentinel: no player-selected body part (bare-ground / free shot)
 
         public static byte[] EncodeIntentAbility(int shooterNetId, string abilityDefGuid, int targetNetId,
-            float tx, float ty, float tz, uint nonce)
+            float tx, float ty, float tz, int bodyPartId, uint nonce)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -249,6 +255,7 @@ namespace Multipleer.Sync.Tactical
                 w.Write(abilityDefGuid ?? "");
                 w.Write(targetNetId);
                 w.Write(tx); w.Write(ty); w.Write(tz);
+                w.Write(bodyPartId);
                 w.Write(nonce);
                 return ms.ToArray();
             }
@@ -257,8 +264,8 @@ namespace Multipleer.Sync.Tactical
         public static bool TryDecodeIntentAbility(byte[] data, out IntentAbility intent)
         {
             intent = default(IntentAbility);
-            // Minimum: i32 shooter + at least a 1-byte length-prefixed string + i32 target + 3*f32 + u32.
-            if (data == null || data.Length < 4 + 1 + 4 + 12 + 4) return false;
+            // Minimum: i32 shooter + at least a 1-byte length-prefixed string + i32 target + 3*f32 + i32 bodyPart + u32.
+            if (data == null || data.Length < 4 + 1 + 4 + 12 + 4 + 4) return false;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -268,8 +275,9 @@ namespace Multipleer.Sync.Tactical
                     string guid = r.ReadString();
                     int targetNetId = r.ReadInt32();
                     float tx = r.ReadSingle(); float ty = r.ReadSingle(); float tz = r.ReadSingle();
+                    int bodyPartId = r.ReadInt32();
                     uint nonce = r.ReadUInt32();
-                    intent = new IntentAbility(shooter, guid, targetNetId, tx, ty, tz, nonce);
+                    intent = new IntentAbility(shooter, guid, targetNetId, tx, ty, tz, bodyPartId, nonce);
                     return true;
                 }
             }

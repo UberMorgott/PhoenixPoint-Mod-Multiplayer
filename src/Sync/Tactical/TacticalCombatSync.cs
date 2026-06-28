@@ -164,12 +164,18 @@ namespace Multipleer.Sync.Tactical
 
                 ReadTarget(parameter, out int targetNetId, out Vector3 targetPos);
 
+                // FIX A (faithful shoot-aim relay): capture the player's EXACT selected body part (the parameter's
+                // DamageReceiver) as an index into the target actor's snapper enumeration, so the host reproduces
+                // the same limb + cover-aware ShootFromPos via native generation rather than snapping to the part
+                // nearest center-of-mass. -1 = no selected body part (bare-ground / free shot / no-snap weapon).
+                int bodyPartId = ComputeBodyPartId(parameter, targetNetId);
+
                 byte[] payload = TacticalLiveCodec.EncodeIntentAbility(
-                    actorNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, NextNonce());
+                    actorNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, bodyPartId, NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentAbility, payload);
                 Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.ability actor=" + actorNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid +
-                          " targetNetId=" + targetNetId +
+                          " targetNetId=" + targetNetId + " bodyPartId=" + bodyPartId +
                           " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
 
                 // COMBAT CONCURRENCY FIX (client-predicted local anim): the host's relayed shot is DEFERRED
@@ -353,6 +359,10 @@ namespace Multipleer.Sync.Tactical
                 {
                     object shooter = TacticalDeploySync.ResolveLiveActor(p.ShooterNetId);
                     if (shooter != null) SetApWp(shooter, p.ShooterApAfter, p.ShooterWpAfter);
+                    // FIX B: the relayed-shot AP just landed on the client; if the client's UI has this shooter
+                    // selected, re-grey its ability bar NOW so spent-AP buttons don't stay lit until the next 0x8F
+                    // flush. Client-only (HandleDamage already returned early on the host). No-op if not selected.
+                    TacticalActorStateSync.RefreshClientBarForActor(p.ShooterNetId);
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacDamage, p.Seq);
@@ -580,8 +590,29 @@ namespace Multipleer.Sync.Tactical
             var groundPos = new Vector3(intent.TX, intent.TY, intent.TZ);
             object targetActor = intent.TargetNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(intent.TargetNetId) : null;
             var aimSource = ShootTargetAimPolicy.Decide(targetActor != null);
-            // For an actor target, seed with the body-center aim point (non-NaN); ground fallback never used for actors.
-            Vector3 aimPos = targetActor != null ? GetActorAimPosition(targetActor, groundPos) : groundPos;
+
+            // FIX A (faithful shoot-aim relay): when the client carried a SELECTED body part, resolve the SAME item
+            // on the host (same index into the same GetHealthSlots().GetAimPointItem()+visible-Equipments.Items
+            // enumeration native ShootAbility.GetShootTarget walks) and aim at ITS aim point — so the native snap
+            // (HostOnAbilityIntent.TrySnapShootTarget → GetShootTarget → Weapon.TryGetShootTarget) picks the player's
+            // actual limb and GetBestShootPositionFor yields the cover-aware ShootFromPos for it, instead of the
+            // center-of-mass-nearest part. FAIL-OPEN to the center-of-mass aim path below when the index can't be
+            // resolved on the host (limb destroyed between aim and apply / enum drift) — log a one-line warning.
+            object selectedItem = null;
+            if (intent.BodyPartId >= 0 && targetActor != null)
+            {
+                var candidates = BuildBodyPartCandidates(targetActor);
+                if (intent.BodyPartId < candidates.Count) selectedItem = candidates[intent.BodyPartId];
+                if (selectedItem == null)
+                    Debug.LogWarning("[Multipleer][tac] BuildShootTarget: bodyPartId=" + intent.BodyPartId +
+                                     " unresolved on host (candidates=" + candidates.Count +
+                                     ") — falling open to center-of-mass aim");
+            }
+
+            // For an actor target, seed with the SELECTED body part's aim point when resolved (so the snap picks the
+            // exact limb), else the body-center aim point (non-NaN); ground fallback never used for actors.
+            Vector3 aimPos = selectedItem != null ? GetItemAimPosition(selectedItem, targetActor, groundPos)
+                : (targetActor != null ? GetActorAimPosition(targetActor, groundPos) : groundPos);
 
             try
             {
@@ -606,7 +637,13 @@ namespace Multipleer.Sync.Tactical
                         // downstream. Mirror TacticalMeleeAnimSync.BuildMeleeTarget:258 — set it to the live actor
                         // (TacticalActorBase : IDamageReceiver).
                         AccessTools.Field(targetType, "DamageReceiver")?.SetValue(t, targetActor);
-                        Debug.Log("[Multipleer][tac] BuildShootTarget set DamageReceiver=actor on actor target (relayed-melee NRE fix)");
+                        // FIX A: pin the player's selected body part. A SnapToBodyparts-ON weapon re-derives the
+                        // SAME item from the aim-point seed in the snap below; pinning it ALSO covers a
+                        // SnapToBodyparts-OFF weapon (whose snap leaves TacticalItem untouched).
+                        if (selectedItem != null) AccessTools.Field(targetType, "TacticalItem")?.SetValue(t, selectedItem);
+                        Debug.Log("[Multipleer][tac] BuildShootTarget set DamageReceiver=actor" +
+                                  (selectedItem != null ? " + TacticalItem=selectedBodyPart" : "") +
+                                  " on actor target (relayed-melee NRE fix)");
                         return t;
                     }
                 }
@@ -632,6 +669,7 @@ namespace Multipleer.Sync.Tactical
                 if (GetProp(targetActor, "Pos") is Vector3 actorPos)
                     AccessTools.Field(targetType, "ActorGridPosition")?.SetValue(target, actorPos);
                 AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, aimPos);
+                if (selectedItem != null) AccessTools.Field(targetType, "TacticalItem")?.SetValue(target, selectedItem);   // FIX A: see ctor branch
             }
             else AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, groundPos);
             return target;
@@ -651,6 +689,94 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetActorAimPosition failed: " + ex); }
             return groundFallback;
+        }
+
+        // Cached TacticalItem type (for the Equipments.Items OfType<TacticalItem> filter in the body-part walk).
+        private static Type _tacticalItemType;
+        private static Type TacticalItemType => _tacticalItemType ?? (_tacticalItemType =
+            AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.TacticalItem"));
+
+        /// <summary>FIX A (CLIENT capture): compute the index of the player-SELECTED body part — the
+        /// <c>parameter.DamageReceiver</c> (a <c>TacticalItem</c> for a SnapToBodyparts shot, == item.OwnerItem) —
+        /// within the target actor's body-part enumeration, walking the SAME order the host snapper uses in native
+        /// <c>ShootAbility.GetShootTarget</c> (ShootAbility.cs:205-219: <c>BodyState.GetHealthSlots().GetAimPointItem()</c>
+        /// then visible <c>Equipments.Items</c>). Returns <see cref="TacticalLiveCodec.BodyPartIdNone"/> (-1) when
+        /// there is no actor target, no DamageReceiver, the receiver is not a TacticalItem (bare actor / structural /
+        /// bare-ground), or it is not in the enumeration — the host then falls open to the center-of-mass aim path.</summary>
+        private static int ComputeBodyPartId(object parameter, int targetNetId)
+        {
+            try
+            {
+                if (parameter == null || targetNetId < 0) return TacticalLiveCodec.BodyPartIdNone;
+                object targetActor = GetField(parameter, "Actor");
+                if (targetActor == null) return TacticalLiveCodec.BodyPartIdNone;
+                object receiver = GetField(parameter, "DamageReceiver");
+                if (receiver == null) return TacticalLiveCodec.BodyPartIdNone;
+                var itemType = TacticalItemType;
+                if (itemType == null || !itemType.IsInstanceOfType(receiver)) return TacticalLiveCodec.BodyPartIdNone; // bare actor / structural
+                var candidates = BuildBodyPartCandidates(targetActor);
+                for (int i = 0; i < candidates.Count; i++)
+                    if (ReferenceEquals(candidates[i], receiver)) return i;
+                return TacticalLiveCodec.BodyPartIdNone;   // not found → fall open (host uses center-of-mass)
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multipleer][tac] ComputeBodyPartId failed (sending -1 / center-of-mass): " + ex);
+                return TacticalLiveCodec.BodyPartIdNone;
+            }
+        }
+
+        /// <summary>Build the target actor's ordered body-part <c>TacticalItem</c> candidate list EXACTLY as native
+        /// <c>ShootAbility.GetShootTarget</c> walks it (ShootAbility.cs:205-219): every health slot's
+        /// <c>GetAimPointItem()</c> (non-null), THEN every visible <c>Equipments.Items</c> TacticalItem. Both sides
+        /// build this from the SAME shared save (identical <c>GetHealthSlots()</c> insertion order + equipment list)
+        /// → the index is a stable cross-side body-part identity. Used by the CLIENT to find the selected part's
+        /// index and by the HOST to resolve the item at that index.</summary>
+        private static List<object> BuildBodyPartCandidates(object actor)
+        {
+            var list = new List<object>();
+            try
+            {
+                object bodyState = GetProp(actor, "BodyState");
+                if (bodyState != null)
+                {
+                    var getHealthSlots = AccessTools.Method(bodyState.GetType(), "GetHealthSlots");
+                    if (getHealthSlots?.Invoke(bodyState, null) is IEnumerable slots)
+                        foreach (var slot in slots)
+                        {
+                            if (slot == null) continue;
+                            var getAimItem = AccessTools.Method(slot.GetType(), "GetAimPointItem");
+                            object item = getAimItem?.Invoke(slot, null);
+                            if (item != null) list.Add(item);
+                        }
+                }
+                object equipments = GetProp(actor, "Equipments");
+                var itemType = TacticalItemType;
+                if (equipments != null && itemType != null && GetProp(equipments, "Items") is IEnumerable items)
+                    foreach (var it in items)
+                    {
+                        if (it == null || !itemType.IsInstanceOfType(it)) continue;
+                        if (GetProp(it, "IsVisible") is bool vis && vis) list.Add(it);
+                    }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildBodyPartCandidates failed: " + ex); }
+            return list;
+        }
+
+        /// <summary>Resolve the SELECTED body-part item's world aim position (<c>TacticalItem.GetAimPoint().position</c>)
+        /// — the exact point the player clicked — so the host snap pins this limb. Falls back to the actor
+        /// center-of-mass aim, then the ground pos, if the item exposes no aim transform (so the shot still lands on
+        /// the body rather than NaN→feet).</summary>
+        private static Vector3 GetItemAimPosition(object item, object fallbackActor, Vector3 groundFallback)
+        {
+            try
+            {
+                var getAim = AccessTools.Method(item.GetType(), "GetAimPoint");
+                if (getAim != null && getAim.Invoke(item, null) is Transform tr && tr != null)
+                    return tr.position;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetItemAimPosition failed: " + ex); }
+            return fallbackActor != null ? GetActorAimPosition(fallbackActor, groundFallback) : groundFallback;
         }
 
         /// <summary>The <c>AttackType.Regular</c> enum value (mirrors <c>TacticalMoveSync.DefaultAttackType</c>).</summary>
