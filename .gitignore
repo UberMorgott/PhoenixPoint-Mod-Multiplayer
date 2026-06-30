@@ -18,6 +18,8 @@ TestResults/
 
 # Tooling caches
 .serena/
+# Claude Code workspace (hooks, settings, commit-on-green sentinels) — must never enter the repo
+.claude/
 
 # OS cruft
 Thumbs.db

@@ -412,17 +412,24 @@ namespace Multipleer.Network.Sync
                         if (decision.ChoiceIndex >= 0)
                             Debug.Log("[Multipleer] CLIENT singleChoice prompt-mirror occId=" + occId + " eventId=" + eventId +
                                       " choiceIndex=" + decision.ChoiceIndex + " → showing PROMPT, awaiting host advance (reward stashed)");
-                        // Case B: an in-play site this sim-frozen client never created is ABSENT. Spawn an inert
-                        // mirror site from the carried identity BEFORE building the event so BuildEvent's own
-                        // site resolution finds it and renders the correct backdrop/subtitle (not StartingBase).
-                        if (hasIdentity && EventReflection.ShouldSpawnMirror(
-                                hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
-                            State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
-                        var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId,
-                            hasIdentity ? (GeoSiteState?)identity : null);
-                        if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
+                        ShowRaisedDialog(rt, occId, eventId, siteId, vehicleId, hasIdentity, identity);
                         break;
                     }
+                    case State.EventCorrelator.ActionKind.Enqueue:
+                        // Single-slot client display is busy showing another event → DEFER this raise (the correlator
+                        // queued it in occId order). Stash its build payload; it is released + shown when the current
+                        // dialog is dismissed (DrainQueuedRaises), so bursts/transport-reorders never overwrite the
+                        // shown dialog or display out of host emission order.
+                        _queuedRaises[occId] = new QueuedRaise(eventId, siteId, vehicleId, hasIdentity, identity);
+                        Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
+                                  " → ENQUEUED behind shown dialog (queued=" + _eventCorrelator.QueuedCount + ")");
+                        break;
+                    case State.EventCorrelator.ActionKind.Ignore:
+                        // Transport double-send of an already-shown/queued/resolved raise → idempotent no-op (no
+                        // duplicate dialog). Drop any stale stashed reward for this occurrence so it can't leak.
+                        DropBufferedReward(occId);
+                        Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate raise)");
+                        break;
                     case State.EventCorrelator.ActionKind.ShowResultPage:
                         // Out-of-order dismiss already buffered for this occurrence → jump straight to its
                         // result page. The reward lines were carried on the dismiss and stashed at buffer time.
@@ -466,6 +473,50 @@ namespace Multipleer.Network.Sync
         }
         private void DropBufferedReward(ushort occId) => _bufferedRewards.Remove(occId);
 
+        // ─── Deferred-raise stash (client FIFO mirror, keyed by occurrence id) ──────────────────────
+        // The pure EventCorrelator decides the ORDER (occId-ascending) and dedup; this holds the Unity/wire build
+        // payload for each DEFERRED raise so the released event can be rebuilt + shown exactly as the in-order path.
+        private readonly struct QueuedRaise
+        {
+            public readonly string EventId;
+            public readonly int SiteId;
+            public readonly int VehicleId;
+            public readonly bool HasIdentity;
+            public readonly GeoSiteState Identity;
+            public QueuedRaise(string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity)
+            {
+                EventId = eventId; SiteId = siteId; VehicleId = vehicleId; HasIdentity = hasIdentity; Identity = identity;
+            }
+        }
+        private readonly Dictionary<ushort, QueuedRaise> _queuedRaises = new Dictionary<ushort, QueuedRaise>();
+
+        // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
+        // deferred path). Spawns an inert mirror site first when the in-play site is absent on this sim-frozen client
+        // so BuildEvent renders the correct backdrop/subtitle (not StartingBase).
+        private void ShowRaisedDialog(GeoRuntime rt, ushort occId, string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity)
+        {
+            if (hasIdentity && EventReflection.ShouldSpawnMirror(
+                    hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
+                State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
+            var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId,
+                hasIdentity ? (GeoSiteState?)identity : null);
+            if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
+        }
+
+        // After a dismiss frees the single client slot, release the next deferred raise (lowest occId = earliest host
+        // emission) and show it — one at a time, so a burst is mirrored in host order without overwriting a dialog.
+        private void DrainQueuedRaises(GeoRuntime rt)
+        {
+            if (!_eventCorrelator.TryDequeueNext(out var next)) return;
+            if (_queuedRaises.TryGetValue(next.OccurrenceId, out var q))
+            {
+                _queuedRaises.Remove(next.OccurrenceId);
+                Debug.Log("[Multipleer] CLIENT releasing queued event occId=" + next.OccurrenceId + " eventId=" + q.EventId +
+                          " (remaining queued=" + _eventCorrelator.QueuedCount + ")");
+                ShowRaisedDialog(rt, next.OccurrenceId, q.EventId, q.SiteId, q.VehicleId, q.HasIdentity, q.Identity);
+            }
+        }
+
         /// <summary>
         /// Client: host's answer was applied. The dismiss is correlated by its per-OCCURRENCE id: when its dialog
         /// is open it is resolved in place (choiceIndex &gt;= 0 → rebuild + show the RESULT/OUTCOME page;
@@ -495,16 +546,24 @@ namespace Multipleer.Network.Sync
                 switch (decision.Kind)
                 {
                     case State.EventCorrelator.ActionKind.ShowResultInPlace:
+                        _queuedRaises.Remove(occId);   // if this dismiss resolved a still-deferred raise, drop its stash
                         ResolveToResultPage(rt, occId, eventId, choiceIndex, reward, siteId);
                         break;
                     case State.EventCorrelator.ActionKind.CloseDialog:
+                        _queuedRaises.Remove(occId);   // ditto for a close-only resolution of a deferred raise
                         State.EventDisplay.Dismiss(rt, occId, eventId);   // close-only
                         break;
                     case State.EventCorrelator.ActionKind.BufferDismiss:
                         // Raise hasn't arrived yet → hold the reward until OnEventRaised resolves this occurrence.
                         StashBufferedReward(occId, reward);
                         break;
+                    case State.EventCorrelator.ActionKind.Ignore:
+                        // Transport double-send of an already-resolved dismiss → idempotent no-op.
+                        Debug.Log("[Multipleer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate dismiss)");
+                        break;
                 }
+                // The shown dialog (if any) just closed → release the next deferred raise in occId order.
+                DrainQueuedRaises(rt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }

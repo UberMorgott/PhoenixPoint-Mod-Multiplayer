@@ -199,20 +199,28 @@ public class EventCorrelatorTests
     {
         var c = new EventCorrelator();
 
-        // Two occurrences of the SAME def-id "EX20", distinct occurrence ids → fully independent.
+        // Two occurrences of the SAME def-id "EX20", distinct occurrence ids → fully independent. On the single-slot
+        // client the first shows and the second is DEFERRED in occId order (not a second simultaneous dialog), then
+        // released when the first is dismissed — they never collide or cross-talk despite the reusable def-name.
         Assert.Equal(Kind.ShowDialog, c.Raised(1, "EX20").Kind);
-        Assert.Equal(Kind.ShowDialog, c.Raised(2, "EX20").Kind);
-        Assert.Equal(2, c.OpenCount);
+        Assert.Equal(Kind.Enqueue, c.Raised(2, "EX20").Kind);
+        Assert.Equal(1, c.OpenCount);
+        Assert.Equal(1, c.QueuedCount);
 
-        // Dismiss the SECOND one — the first stays open, no cross-talk.
-        var d2 = c.Dismissed(2, "EX20", choiceIndex: 1);
-        Assert.Equal(Kind.ShowResultInPlace, d2.Kind);
-        Assert.Equal(2, d2.OccurrenceId);
-        Assert.Equal(1, c.OpenCount);   // occurrence 1 still open
-
+        // Dismiss the FIRST (shown) occurrence — keyed to occId 1; the deferred occId 2 is untouched.
         var d1 = c.Dismissed(1, "EX20", choiceIndex: 0);
         Assert.Equal(Kind.ShowResultInPlace, d1.Kind);
         Assert.Equal(1, d1.OccurrenceId);
+
+        // Slot freed → the second occurrence is released, still keyed to its OWN occId 2 (no cross-talk).
+        Assert.True(c.TryDequeueNext(out var next2));
+        Assert.Equal(2, next2.OccurrenceId);
+        Assert.Equal(1, c.OpenCount);
+        Assert.Equal(0, c.QueuedCount);
+
+        var d2 = c.Dismissed(2, "EX20", choiceIndex: 1);
+        Assert.Equal(Kind.ShowResultInPlace, d2.Kind);
+        Assert.Equal(2, d2.OccurrenceId);
         Assert.Equal(0, c.OpenCount);
     }
 
@@ -250,5 +258,89 @@ public class EventCorrelatorTests
         c.Reset();
         Assert.Equal(0, c.OpenCount);
         Assert.Equal(0, c.PendingCount);
+    }
+
+    // ─── DEDUP + client FIFO-order mirror (transport double-send + burst out-of-order) ───────────
+
+    [Fact]  // (a) duplicate Raised for the same occId → only ONE show decision (transport double-send dedup)
+    public void DuplicateRaise_SameOccId_IgnoresSecond()
+    {
+        var c = new EventCorrelator();
+
+        Assert.Equal(Kind.ShowDialog, c.Raised(1, "EX20").Kind);
+        Assert.Equal(1, c.OpenCount);
+
+        // The transport double-sends the reliable EventRaised → a SECOND raise for the same occurrence arrives.
+        // It must be an idempotent no-op (no second dialog), not another ShowDialog.
+        Assert.Equal(Kind.Ignore, c.Raised(1, "EX20").Kind);
+        Assert.Equal(1, c.OpenCount);     // still exactly one open
+        Assert.Equal(0, c.QueuedCount);
+    }
+
+    [Fact]  // (b) two distinct events while one is open → second is QUEUED, not shown immediately
+    public void SecondDistinctRaise_WhileOneShown_IsQueued()
+    {
+        var c = new EventCorrelator();
+
+        Assert.Equal(Kind.ShowDialog, c.Raised(1, "A").Kind);   // first shows
+        var second = c.Raised(2, "B");                          // arrives while #1 is up
+        Assert.Equal(Kind.Enqueue, second.Kind);               // deferred, NOT a single-slot overwrite
+        Assert.Equal(1, c.OpenCount);                          // only the first is shown
+        Assert.Equal(1, c.QueuedCount);                        // the second waits
+    }
+
+    [Fact]  // (c) on Dismiss of the current → the next queued event is released to be shown
+    public void OnDismissOfCurrent_NextQueuedIsShown()
+    {
+        var c = new EventCorrelator();
+        c.Raised(1, "A");                 // shown
+        c.Raised(2, "B");                 // queued
+        Assert.Equal(1, c.QueuedCount);
+
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(1, "A", choiceIndex: -1).Kind);
+
+        // Slot freed → the queued #2 pops and becomes the shown dialog.
+        Assert.True(c.TryDequeueNext(out var next));
+        Assert.Equal(Kind.ShowDialog, next.Kind);
+        Assert.Equal(2, next.OccurrenceId);
+        Assert.Equal(0, c.QueuedCount);
+        Assert.Equal(1, c.OpenCount);     // #2 now shown
+
+        // Nothing left to pop.
+        Assert.False(c.TryDequeueNext(out _));
+    }
+
+    [Fact]  // (d) out-of-order arrival (higher occId before lower) → released in occId (host-emission) order
+    public void QueuedEvents_ReleasedInOccIdOrder_NotArrivalOrder()
+    {
+        var c = new EventCorrelator();
+        c.Raised(5, "A");                 // shown first (earliest arrival)
+        Assert.Equal(Kind.Enqueue, c.Raised(7, "C").Kind);   // arrives before 6 (transport reorder)
+        Assert.Equal(Kind.Enqueue, c.Raised(6, "B").Kind);
+        Assert.Equal(2, c.QueuedCount);
+
+        // Dismiss the shown #5 → next must be the LOWEST occId (6), not the first-arrived (7).
+        c.Dismissed(5, "A", choiceIndex: -1);
+        Assert.True(c.TryDequeueNext(out var first));
+        Assert.Equal(6, first.OccurrenceId);
+
+        // Dismiss #6 → then #7.
+        c.Dismissed(6, "B", choiceIndex: -1);
+        Assert.True(c.TryDequeueNext(out var secondPop));
+        Assert.Equal(7, secondPop.OccurrenceId);
+    }
+
+    [Fact]  // (e) duplicate / already-dismissed dismiss → idempotent no-op, no throw
+    public void DuplicateDismiss_AfterResolved_IsNoOp()
+    {
+        var c = new EventCorrelator();
+        c.Raised(1, "A");
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(1, "A", choiceIndex: -1).Kind);
+
+        // Transport double-sends the EventDismiss → the second dismiss for the now-resolved occurrence must be a
+        // harmless no-op (it must NOT re-buffer as a phantom out-of-order dismiss that a later raise would resolve).
+        Assert.Equal(Kind.Ignore, c.Dismissed(1, "A", choiceIndex: -1).Kind);
+        Assert.Equal(0, c.PendingCount);
+        Assert.Equal(0, c.OpenCount);
     }
 }

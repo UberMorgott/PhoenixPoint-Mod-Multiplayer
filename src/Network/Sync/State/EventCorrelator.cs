@@ -40,6 +40,10 @@ namespace Multipleer.Network.Sync.State
             BufferDismiss,
             /// <summary>Nothing to display (e.g. a close-only dismiss that arrived before a raise that never showed) → no-op.</summary>
             DropNoop,
+            /// <summary>Idempotent no-op: a transport-duplicated raise/dismiss for an occurrence already shown/queued/resolved → do nothing (kills the double-send dialog).</summary>
+            Ignore,
+            /// <summary>Raise that arrived while another dialog is already shown on the single-slot client → DEFER it (occId-ordered); it is shown when the current dialog is dismissed.</summary>
+            Enqueue,
         }
 
         /// <summary>The decided action plus the fields the caller needs to execute it.</summary>
@@ -77,6 +81,21 @@ namespace Multipleer.Network.Sync.State
 
         // occId → def-name of the currently-shown dialog (def-name is informational; the key is the occ id).
         private readonly Dictionary<ushort, string> _open = new Dictionary<ushort, string>();
+
+        // Single-slot client display model: occId of the currently-SHOWN PLAIN event dialog (0 = none). The native
+        // GeoscapeViewSwitchQuery serializes display one-at-a-time, so a NEW plain raise arriving while this is
+        // non-zero is DEFERRED into _queue (occId-ordered) instead of being pushed in arrival order — the upcoming
+        // raise/dismiss can then be released to the native queue in host emission order.
+        private ushort _shownPlain;
+        // Plain raises deferred while a dialog is shown, keyed+ORDERED by host-monotonic occId (lowest = earliest
+        // emitted). SortedDictionary keeps the FIFO in occId order so transport reordering can't swap display order.
+        private readonly SortedDictionary<ushort, string> _queue = new SortedDictionary<ushort, string>();
+        // Occurrences that reached a TERMINAL resolved state (shown+dismissed, or buffered-dismiss-then-resolved), for
+        // idempotent dedup of transport-duplicated raises/dismisses. Hard-bounded FIFO so it can never leak; the
+        // counter is host-monotonic and wraps only after 65535 occurrences, so an evicted id can never alias a live one.
+        private const int MaxCompletedTracked = 64;
+        private readonly HashSet<ushort> _completed = new HashSet<ushort>();
+        private readonly Queue<ushort> _completedOrder = new Queue<ushort>();
         // occId → buffered out-of-order dismiss. _pendingOrder preserves FIFO for bounded eviction.
         private readonly Dictionary<ushort, PendingDismiss> _pending = new Dictionary<ushort, PendingDismiss>();
         private readonly Queue<ushort> _pendingOrder = new Queue<ushort>();
@@ -91,6 +110,8 @@ namespace Multipleer.Network.Sync.State
 
         /// <summary>Currently-open dialog count (diagnostics/tests).</summary>
         public int OpenCount => _open.Count;
+        /// <summary>Plain raises deferred behind the currently-shown dialog, awaiting its dismiss (diagnostics/tests).</summary>
+        public int QueuedCount => _queue.Count;
         /// <summary>Buffered out-of-order dismiss count (diagnostics/tests).</summary>
         public int PendingCount => _pending.Count;
         /// <summary>Single-choice prompt mirrors awaiting a host advance (diagnostics/tests).</summary>
@@ -107,6 +128,10 @@ namespace Multipleer.Network.Sync.State
             _promptMirror.Clear();
             _pendingAdvance.Clear();
             _pendingAdvanceOrder.Clear();
+            _shownPlain = 0;
+            _queue.Clear();
+            _completed.Clear();
+            _completedOrder.Clear();
         }
 
         /// <summary>
@@ -135,6 +160,12 @@ namespace Multipleer.Network.Sync.State
         /// </summary>
         public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false, bool oneWindow = false)
         {
+            // DEDUP (transport double-send): a raise for an occurrence already shown, already queued, or already
+            // terminally resolved is an idempotent no-op — never a second dialog. (_pending is intentionally NOT in
+            // this set: a buffered out-of-order dismiss is resolved by the FIRST matching raise in the block below.)
+            if (_open.ContainsKey(occurrenceId) || _queue.ContainsKey(occurrenceId) || _completed.Contains(occurrenceId))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, -1);
+
             if (_pending.TryGetValue(occurrenceId, out var buffered))
             {
                 // The dismiss for this occurrence already arrived (out of order). Resolve it now.
@@ -150,13 +181,17 @@ namespace Multipleer.Network.Sync.State
                         if (oneWindow)
                         {
                             RemovePendingAdvance(occurrenceId);
+                            MarkCompleted(occurrenceId);
                             return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                         }
                         // SINGLE-CHOICE prompt-mirror (gate ON, 2-window: non-empty outcome text). If the host already advanced to its result page
                         // (advance beat this raise — the same-frame SetClosingEncounter of an empty-outcome
                         // single-choice), jump straight to the result page; the host is already on window 2.
                         if (RemovePendingAdvance(occurrenceId))
+                        {
+                            MarkCompleted(occurrenceId);
                             return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
+                        }
                         // Otherwise mirror the host's window-1 PROMPT page and wait for Advanced(). Track it open
                         // + awaiting-advance; the reward stays stashed by the caller (ShowDialog never drains it)
                         // until the advance resolves it. ChoiceIndex>=0 distinguishes this mirror from a plain
@@ -169,13 +204,24 @@ namespace Multipleer.Network.Sync.State
                     // resolve STRAIGHT to the result page (host advanced to window 2 on the click). Whether a
                     // window 2 actually renders is decided DOWNSTREAM (SyncEngine.ResolveToResultPage →
                     // EventReflection.BuildResultEvent): a buildable page → show it; a null page → clean close.
+                    MarkCompleted(occurrenceId);
                     return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                 }
                 // Close-only dismiss that beat its raise: the player never saw the dialog → nothing to show.
+                MarkCompleted(occurrenceId);
                 return new Decision(ActionKind.DropNoop, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
             }
 
-            // Normal in-order raise: show + track as open.
+            // Normal in-order raise. Single-slot client display (the native view-switch query serializes one dialog
+            // at a time): if a plain dialog is ALREADY shown, DEFER this raise into the occId-ordered queue (released
+            // on the current dialog's dismiss via TryDequeueNext) rather than pushing it in arrival order; else show
+            // it now and mark the slot occupied.
+            if (_shownPlain != 0)
+            {
+                _queue[occurrenceId] = eventId;
+                return new Decision(ActionKind.Enqueue, occurrenceId, eventId, -1);
+            }
+            _shownPlain = occurrenceId;
             _open[occurrenceId] = eventId;
             return new Decision(ActionKind.ShowDialog, occurrenceId, eventId, -1);
         }
@@ -195,6 +241,8 @@ namespace Multipleer.Network.Sync.State
             if (_promptMirror.Remove(occurrenceId))
             {
                 _open.Remove(occurrenceId);   // the result page replaces the mirrored prompt
+                if (_shownPlain == occurrenceId) _shownPlain = 0;
+                MarkCompleted(occurrenceId);
                 return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId, choiceIndex);
             }
             // Advance beat the prompt mirror → buffer it (bounded) until Raised() lands and consumes it.
@@ -209,10 +257,29 @@ namespace Multipleer.Network.Sync.State
         /// </summary>
         public Decision Dismissed(ushort occurrenceId, string eventId, int choiceIndex)
         {
+            // DEDUP (transport double-send): a dismiss for an occurrence already terminally resolved is an idempotent
+            // no-op — it must NOT re-buffer as a phantom out-of-order dismiss that a later duplicate raise resolves.
+            if (_completed.Contains(occurrenceId))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
+
+            // Dismiss of an occurrence still DEFERRED in the queue (its raise arrived but the single slot was busy, so
+            // its prompt was never shown). The host already applied the answer → drop it from the queue and resolve it
+            // terminally: a picked choice still surfaces its result page (so the player sees the outcome); a close-only
+            // one has nothing to show. Never leave it in the queue (it would later pop as an orphan dialog).
+            if (_queue.Remove(occurrenceId))
+            {
+                MarkCompleted(occurrenceId);
+                if (choiceIndex >= 0)
+                    return new Decision(ActionKind.ShowResultInPlace, occurrenceId, eventId, choiceIndex);
+                return new Decision(ActionKind.CloseDialog, occurrenceId, eventId, choiceIndex);
+            }
+
             if (_open.ContainsKey(occurrenceId))
             {
                 _open.Remove(occurrenceId);
                 _promptMirror.Remove(occurrenceId);   // a real dismiss closes a mirrored prompt too (keep the set clean)
+                if (_shownPlain == occurrenceId) _shownPlain = 0;   // single slot freed → TryDequeueNext can release the next
+                MarkCompleted(occurrenceId);
                 if (choiceIndex >= 0)
                     return new Decision(ActionKind.ShowResultInPlace, occurrenceId, eventId, choiceIndex);
                 return new Decision(ActionKind.CloseDialog, occurrenceId, eventId, choiceIndex);
@@ -221,6 +288,39 @@ namespace Multipleer.Network.Sync.State
             // Dismiss arrived before its raise → buffer (bounded) and wait for the raise to resolve it.
             BufferPending(occurrenceId, new PendingDismiss(eventId, choiceIndex));
             return new Decision(ActionKind.BufferDismiss, occurrenceId, eventId, choiceIndex);
+        }
+
+        /// <summary>
+        /// Pop the next deferred plain raise (lowest host-monotonic occId = earliest emitted) when the single-slot
+        /// client display is free, recording it as now-shown. Returns false when the slot is still occupied or the
+        /// queue is empty. The (Unity-bound) caller looks up the stashed raise payload for the returned occId and
+        /// shows it — so deferred events are released to the native view-switch queue ONE AT A TIME, in occId order.
+        /// </summary>
+        public bool TryDequeueNext(out Decision next)
+        {
+            next = default(Decision);
+            if (_shownPlain != 0) return false;   // single slot still occupied → keep waiting
+            if (_queue.Count == 0) return false;
+            // SortedDictionary enumerates by ascending key → the lowest occId (earliest host emission) pops first.
+            ushort occId = 0; string eventId = null;
+            foreach (var kv in _queue) { occId = kv.Key; eventId = kv.Value; break; }
+            _queue.Remove(occId);
+            _shownPlain = occId;
+            _open[occId] = eventId;
+            next = new Decision(ActionKind.ShowDialog, occId, eventId, -1);
+            return true;
+        }
+
+        // Record an occurrence as terminally resolved for idempotent dedup of transport-duplicated raises/dismisses.
+        // Hard-bounded FIFO: the oldest tracked id is evicted past capacity so this can never leak.
+        private void MarkCompleted(ushort occurrenceId)
+        {
+            if (_completed.Add(occurrenceId))
+            {
+                _completedOrder.Enqueue(occurrenceId);
+                while (_completedOrder.Count > MaxCompletedTracked)
+                    _completed.Remove(_completedOrder.Dequeue());
+            }
         }
 
         private void BufferPending(ushort occurrenceId, PendingDismiss dismiss)
