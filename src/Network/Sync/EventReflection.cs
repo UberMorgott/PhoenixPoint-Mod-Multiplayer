@@ -503,6 +503,93 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// HOST: a CLIENT OK'd its single-choice PROMPT mirror (EventAdvanceRequest 0x6B) — advance the host's
+        /// OWN open prompt exactly as a local host click would. The event auto-completed at trigger
+        /// (GeoscapeEventSystem.cs:651-655), so <see cref="TryHostNativeResolve"/> is useless here (it
+        /// early-returns on IsCompleted without touching the UI) and NOTHING may be re-completed (native
+        /// CompleteEvent throws on IsCompleted). Drives the native <c>OnChoiceSelected(Choices[0])</c>:
+        /// SelectChoice sees IsCompleted → no CompleteEvent → SetClosingEncounter renders the result page →
+        /// <c>SingleChoiceAdvancePatch</c> broadcasts EventAdvanceResult to everyone.
+        ///
+        /// Idempotent first-wins via <see cref="SingleChoiceAdvanceGate.ShouldDriveHostAdvance"/> +
+        /// <c>EventOccurrenceIds.MarkAdvanced</c>: the module keeps the SAME <c>_geoEvent</c> on its result page
+        /// (SetClosingEncounter never reassigns it, decompile UIModuleSiteEncounters.cs:324-359), so the
+        /// advanced-occurrence mark — set by SingleChoiceAdvancePatch on the host's own click AND here after a
+        /// driven advance — is what makes a raced host click / duplicate transport delivery a no-op.
+        /// Modal not showing / different occId / not completed / multi-choice / paging → logged no-op (the
+        /// client's own localClose already happened; EventAdvanceResult reaches it whenever the host advances).
+        /// Returns true iff the native advance was driven.
+        /// </summary>
+        public static bool TryHostNativeAdvanceSingleChoice(GeoRuntime rt, ushort occurrenceId, string eventId)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || _encGeoEventField == null || _encOnChoiceSelected == null
+                    || _glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=not-ready/missing-member");
+                    return false;
+                }
+                var geo = rt?.GeoLevel();
+                var view = geo != null ? _glViewField.GetValue(geo) : null;
+                var modules = view != null ? _gvModulesField.GetValue(view) : null;
+                var module = modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
+                if (module == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=module-null (host modal not showing)");
+                    return false;
+                }
+
+                // Must be THIS occurrence's live event on the module (same match as TryHostNativeResolve).
+                var liveEvent = _encGeoEventField.GetValue(module);
+                bool isThisOccurrence;
+                if (liveEvent == null)
+                    isThisOccurrence = false;
+                else if (Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
+                    isThisOccurrence = ReferenceEquals(byId, liveEvent);
+                else
+                    isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
+
+                bool isCompleted = liveEvent != null && _isCompletedProp != null
+                                   && _isCompletedProp.GetValue(liveEvent, null) is bool done && done;
+                int choiceCount = liveEvent != null ? GetChoiceCount(liveEvent) : -1;
+                bool paging = _encPagingField != null && _encPagingField.GetValue(module) is bool p && p;
+                bool alreadyAdvanced = Multipleer.Harmony.Sync.EventOccurrenceIds.WasAdvanced(occurrenceId);
+
+                if (!State.SingleChoiceAdvanceGate.ShouldDriveHostAdvance(
+                        isHost: true, modalShowingThisOccurrence: isThisOccurrence, isCompleted: isCompleted,
+                        choiceCount: choiceCount, paging: paging, alreadyAdvanced: alreadyAdvanced))
+                {
+                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
+                              + " → NO-OP (showingThisOcc=" + isThisOccurrence + " isCompleted=" + isCompleted
+                              + " choiceCount=" + choiceCount + " paging=" + paging
+                              + " alreadyAdvanced=" + alreadyAdvanced + ") liveEventId=" + GetEventId(liveEvent));
+                    return false;
+                }
+
+                // The lone REAL choice off the live event's own EventData.Choices (never a reconstruction).
+                var data = _eventDataProp?.GetValue(liveEvent, null);
+                var choices = _choicesField?.GetValue(data) as IList;
+                object choice = choices != null && choices.Count == 1 ? choices[0] : null;
+                if (choice == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=choice-null");
+                    return false;
+                }
+
+                // EXACT native click path: OnChoiceSelected → SelectChoice (IsCompleted → no CompleteEvent) →
+                // SetClosingEncounter (result page) → SingleChoiceAdvancePatch.Postfix (mark + broadcast).
+                _encOnChoiceSelected.Invoke(module, new[] { choice });
+                Multipleer.Harmony.Sync.EventOccurrenceIds.MarkAdvanced(occurrenceId);   // belt: patch postfix marks too
+                Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
+                          + " → drove native OnChoiceSelected (client-requested prompt→result advance)");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.TryHostNativeAdvanceSingleChoice failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
         /// HOST: resolve a choice CLAIM against the LIVE GeoscapeEvent keyed to <paramref name="occurrenceId"/>
         /// (via EventOccurrenceIds) and run the authoritative native CompleteEvent. Mutates the real event so
         /// CompleteEventDismissPatch.Postfix broadcasts the real reward/occId. <paramref name="choiceIndex"/>

@@ -45,6 +45,14 @@ namespace Multipleer.Harmony.Sync
         private static readonly HashSet<ushort> _dismissed = new HashSet<ushort>();
         private static readonly Queue<ushort> _dismissedOrder = new Queue<ushort>();
 
+        // Occurrence ids whose single-choice PROMPT already advanced to its RESULT page on the host
+        // (SetClosingEncounter ran → SingleChoiceAdvancePatch marked + broadcast). The module keeps the SAME
+        // _geoEvent on the result page, so this mark is the ONLY prompt-vs-result discriminator — it makes the
+        // EventAdvanceRequest handler idempotent (host-click-vs-client-click race, transport double-send).
+        // Same bounded-FIFO shape as the dismissed tracking.
+        private static readonly HashSet<ushort> _advanced = new HashSet<ushort>();
+        private static readonly Queue<ushort> _advancedOrder = new Queue<ushort>();
+
         // Reverse lookup occId → live event (WeakReference so it never roots the GeoscapeEvent). Bounded FIFO so
         // it can't leak across a session; an evicted/collected entry simply returns false (host falls back to a
         // close-only resolution, never stuck). Only the HOST populates this (it owns id assignment).
@@ -96,6 +104,29 @@ namespace Multipleer.Harmony.Sync
             lock (_lock) { return _dismissed.Contains(occurrenceId); }
         }
 
+        /// <summary>Host: record that this occurrence's single-choice PROMPT advanced to its RESULT page
+        /// (SetClosingEncounter ran — host click or a driven client advance-request; first wins).</summary>
+        public static void MarkAdvanced(ushort occurrenceId)
+        {
+            if (occurrenceId == 0) return;
+            lock (_lock)
+            {
+                if (_advanced.Add(occurrenceId))
+                {
+                    _advancedOrder.Enqueue(occurrenceId);
+                    while (_advancedOrder.Count > MaxDismissedTracked)
+                        _advanced.Remove(_advancedOrder.Dequeue());
+                }
+            }
+        }
+
+        /// <summary>Host: true iff this occurrence's prompt already advanced to its result page.</summary>
+        public static bool WasAdvanced(ushort occurrenceId)
+        {
+            if (occurrenceId == 0) return false;
+            lock (_lock) { return _advanced.Contains(occurrenceId); }
+        }
+
         /// <summary>
         /// Host: the live event keyed to <paramref name="occurrenceId"/>, or null if unknown/collected. Used by
         /// the choice arbiter to resolve a claim against the REAL authoritative GeoscapeEvent instance.
@@ -119,7 +150,7 @@ namespace Multipleer.Harmony.Sync
         /// <summary>Test/teardown hook: reset the counter + dismissed tracking (the CWT self-empties as events GC).</summary>
         public static void ResetForTests()
         {
-            lock (_lock) { _counter = 0; _dismissed.Clear(); _dismissedOrder.Clear(); _byId.Clear(); _byIdOrder.Clear(); }
+            lock (_lock) { _counter = 0; _dismissed.Clear(); _dismissedOrder.Clear(); _advanced.Clear(); _advancedOrder.Clear(); _byId.Clear(); _byIdOrder.Clear(); }
         }
 
         // Monotonic next id. Skips 0 so 0 stays the "null/none" sentinel used on a null event; wraps

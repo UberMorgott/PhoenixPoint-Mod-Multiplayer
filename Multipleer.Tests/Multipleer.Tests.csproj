@@ -115,6 +115,10 @@
     <Compile Include="..\src\Network\Sync\State\RewardPendingSlots.cs"><Link>Sync\State\RewardPendingSlots.cs</Link></Compile>
     <!-- Host-side first-claim-wins choice arbiter (pure, Unity-free). -->
     <Compile Include="..\src\Network\Sync\State\ChoiceArbiter.cs"><Link>Sync\State\ChoiceArbiter.cs</Link></Compile>
+    <!-- Client→host single-choice PROMPT advance-request decision gates (pure, Unity-free). The glue
+         (EncounterChoiceClientPatch send / EventReflection.TryHostNativeAdvanceSingleChoice /
+         SyncEngine.OnEventAdvanceRequest) binds game types and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\SingleChoiceAdvanceGate.cs"><Link>Sync\State\SingleChoiceAdvanceGate.cs</Link></Compile>
     <!-- WalletWatcher rebind decision (pure, Unity-free): no-op / first-bind / rebind-on-fresh-instance.
          Fixes the post-reload stale-wallet binding (dead `if (_bound) return;` gate). The live WalletWatcher
          glue (GeoRuntime.Wallet reflection + WalletReflection subscribe) binds game types and is NOT linked. -->

@@ -67,6 +67,11 @@ namespace Multipleer.Harmony.Sync
                 ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);   // SAME instance → SAME id as raise/dismiss
                 int choiceIndex = EventReflection.GetSelectedChoiceIndex(geoEvent);
                 int siteId = EventReflection.GetSiteId(geoEvent);
+                // Mark the prompt→result advance BEFORE broadcasting: the module keeps the SAME _geoEvent on its
+                // result page, so this mark is the only prompt-vs-result discriminator — it turns a later client
+                // EventAdvanceRequest (raced click / transport double-send) into a first-wins no-op
+                // (SingleChoiceAdvanceGate.ShouldDriveHostAdvance via TryHostNativeAdvanceSingleChoice).
+                EventOccurrenceIds.MarkAdvanced(occId);
                 Debug.Log("[Multipleer] HOST BroadcastEventAdvanceResult (single-choice prompt→result) occId=" + occId +
                           " eventId=" + eventId + " choiceIndex=" + choiceIndex + " siteId=" + siteId);
                 engine.Sync?.BroadcastEventAdvanceResult(occId, eventId, choiceIndex, siteId);

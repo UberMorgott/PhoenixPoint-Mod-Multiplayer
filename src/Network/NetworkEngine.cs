@@ -568,6 +568,12 @@ namespace Multipleer.Network
                     Sync?.OnEventAdvanceResult(msg.Payload);
                     break;
 
+                case PacketType.EventAdvanceRequest:
+                    // Client->host: a client OK'd its single-choice prompt mirror — drive the host's own open
+                    // prompt to its result page as if the host clicked (first wins; idempotent no-op otherwise).
+                    Sync?.OnEventAdvanceRequest(msg.Payload);
+                    break;
+
                 case PacketType.ReportModalShow:
                     // Host->all report window opened. Clients reconstruct + show the same modal (Phase-A mirror).
                     Sync?.OnReportModalShow(msg.Payload);

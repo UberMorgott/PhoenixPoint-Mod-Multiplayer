@@ -239,6 +239,22 @@ namespace Multipleer.Harmony.Sync
                 // this is a pure UI hide, no host call.
                 if (choiceCount == 1)
                 {
+                    // Co-op UX fix (in-game confirmed bug): the local close alone left the HOST's prompt open
+                    // until the host clicked. Relay an advance-request so EITHER side's OK advances the host's
+                    // native prompt→result (host drives OnChoiceSelected → SetClosingEncounter →
+                    // SingleChoiceAdvancePatch broadcasts EventAdvanceResult → both sides show the result).
+                    // The event auto-completed on the host at trigger, so AnswerEventAction can't do this
+                    // (TryHostNativeResolve no-ops on IsCompleted). First-wins/idempotent host-side; occId 0
+                    // (no recorded open occurrence) or gate OFF → no relay, localClose only (legacy behavior).
+                    ushort advOccId = Multipleer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    if (Multipleer.Network.Sync.State.SingleChoiceAdvanceGate.ShouldRelayClientAdvance(
+                            isClient: true, gateEnabled: EventMirrorFixGate.Enabled,
+                            eventId: eventId, choiceCount: choiceCount, occurrenceId: advOccId))
+                    {
+                        Debug.Log("[Multipleer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + advOccId +
+                                  " eventId=" + eventId + " (advance the host's single-choice prompt)");
+                        NetworkEngine.Instance?.Sync?.SendEventAdvanceRequest(advOccId, eventId);
+                    }
                     Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");
                     _finishEncounter?.Invoke(__instance, null);
                     return false;

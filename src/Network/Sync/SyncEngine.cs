@@ -690,6 +690,45 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// Client: this player OK'd a SINGLE-CHOICE prompt mirror — ask the host to advance ITS prompt too
+        /// (<c>PacketType.EventAdvanceRequest</c> 0x6B, EventDismiss codec, occId+eventId only). The event
+        /// auto-completed on the host at trigger, so the AnswerEventAction relay cannot advance the host UI
+        /// (TryHostNativeResolve no-ops on IsCompleted); this dedicated signal drives the host's native click
+        /// path instead. The client's own modal already closed locally (unchanged localClose); the result page
+        /// arrives via the host's EventAdvanceResult broadcast as before. Sent only when
+        /// <see cref="State.SingleChoiceAdvanceGate.ShouldRelayClientAdvance"/> said so (caller-side). No-op on host.
+        /// </summary>
+        public void SendEventAdvanceRequest(ushort occurrenceId, string eventId)
+        {
+            if (_engine.IsHost) return;
+            _engine.SendToHost(new NetworkMessage(PacketType.EventAdvanceRequest,
+                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId)));
+        }
+
+        /// <summary>
+        /// Host: a client OK'd its single-choice prompt mirror — drive OUR open native prompt to its result page
+        /// exactly as a local host click would (<see cref="EventReflection.TryHostNativeAdvanceSingleChoice"/>:
+        /// native OnChoiceSelected → SetClosingEncounter → SingleChoiceAdvancePatch broadcasts EventAdvanceResult
+        /// to everyone). First-wins idempotent: the advanced-occurrence mark (set by the host's own click OR an
+        /// earlier driven advance) plus the modal/occurrence/completed/single-choice guards make a raced host
+        /// click, a duplicate transport delivery, or a stale/foreign occId a logged no-op — the requesting
+        /// client's modal already closed locally either way. Never completes/re-completes any event and never
+        /// touches the multi-choice AnswerEventAction path.
+        /// </summary>
+        public void OnEventAdvanceRequest(byte[] data)
+        {
+            if (!_engine.IsHost) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out _)) return;
+            try
+            {
+                bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);
+                Debug.Log("[Multipleer] HOST OnEventAdvanceRequest occId=" + occId + " eventId=" + eventId +
+                          " → " + (drove ? "drove native prompt→result advance" : "no-op (not showing / already advanced)"));
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventAdvanceRequest failed: " + ex.Message); }
+        }
+
+        /// <summary>
         /// Client: rebuild the chosen choice's RESULT/OUTCOME page and replace the (possibly already-resolved)
         /// dialog with it, arming the reward render keyed to THIS synthetic event instance right before the show
         /// so the ReferenceEquals-correlated RewardRenderPatch lands on the correct page exactly once. Falls back
