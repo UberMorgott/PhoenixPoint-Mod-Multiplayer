@@ -411,16 +411,37 @@ namespace Multipleer.Network.Sync
                 Ensure();
                 if (!_ready || _encGeoEventField == null || _encOnChoiceSelected == null
                     || _glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null)
+                {
+                    // DIAG (host modal-close fallback): which of the ~6 runtime guards tripped, so ONE in-game
+                    // click pins why TryHostNativeResolve returned false (→ SyncEngine model-only fallback, host
+                    // choice modal never closes). No behavior change.
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=not-ready/missing-member"
+                              + " ready=" + _ready + " geoEventField=" + (_encGeoEventField != null) + " onChoiceSelected=" + (_encOnChoiceSelected != null)
+                              + " viewField=" + (_glViewField != null) + " modulesField=" + (_gvModulesField != null) + " siteEncField=" + (_gmSiteEncModuleField != null));
                     return false;
+                }
                 var geo = rt?.GeoLevel();
-                if (geo == null) return false;
+                if (geo == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=geoLevel-null");
+                    return false;
+                }
                 var view = _glViewField.GetValue(geo);
                 var modules = view != null ? _gvModulesField.GetValue(view) : null;
                 var module = modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
-                if (module == null) return false;
+                if (module == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=module-null"
+                              + " view=" + (view != null) + " modules=" + (modules != null));
+                    return false;
+                }
 
                 var liveEvent = _encGeoEventField.GetValue(module);
-                if (liveEvent == null) return false;   // host modal not showing an event → fall back
+                if (liveEvent == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=liveEvent-null (host modal not showing an event)");
+                    return false;   // host modal not showing an event → fall back
+                }
 
                 // Must be THIS occurrence: prefer exact instance identity via the occId reverse-lookup, else match
                 // the def-name. A mismatch means the host is on a different/closed event → fall back (model-only).
@@ -429,7 +450,13 @@ namespace Multipleer.Network.Sync
                     isThisOccurrence = ReferenceEquals(byId, liveEvent);
                 else
                     isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
-                if (!isThisOccurrence) return false;
+                if (!isThisOccurrence)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
+                              + " → FALLBACK guard=not-this-occurrence (host on a different/closed event) liveEventId=" + GetEventId(liveEvent)
+                              + " byIdMapped=" + (byId != null));
+                    return false;
+                }
 
                 // Already resolved (a prior click won the last-write race) → native no-op; treat as handled.
                 if (_isCompletedProp != null && _isCompletedProp.GetValue(liveEvent, null) is bool done && done)
@@ -440,14 +467,26 @@ namespace Multipleer.Network.Sync
                 // Still paging multi-page description text → OnChoiceSelected would only advance a page, not select.
                 // Fall back to model-only so state converges; the host stays on its (paging) modal.
                 if (_encPagingField != null && _encPagingField.GetValue(module) is bool paging && paging)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=paging (host still paging description text; OnChoiceSelected would only page)");
                     return false;
+                }
 
                 // Pick the GeoEventChoice at the client's index off the LIVE event's own Choices.
                 var data = _eventDataProp?.GetValue(liveEvent, null);
                 var choices = _choicesField?.GetValue(data) as IList;
-                if (choices == null || choiceIndex < 0 || choiceIndex >= choices.Count) return false;   // invalid index → fall back
+                if (choices == null || choiceIndex < 0 || choiceIndex >= choices.Count)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choiceIndex-out-of-range"
+                              + " choiceIndex=" + choiceIndex + " choiceCount=" + (choices == null ? -1 : choices.Count));
+                    return false;   // invalid index → fall back
+                }
                 object choice = choices[choiceIndex];
-                if (choice == null) return false;
+                if (choice == null)
+                {
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choice-null choiceIndex=" + choiceIndex);
+                    return false;
+                }
 
                 // Drive the EXACT native click handler (handles SelectChoice→CompleteEvent→SetClosingEncounter
                 // result+rewards→broadcast). Same entry a real host button click hits.
