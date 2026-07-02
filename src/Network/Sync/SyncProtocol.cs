@@ -217,6 +217,14 @@ namespace Multipleer.Network.Sync
         private const byte RaiseFlagIdentity = 0x01;
         private const byte RaiseFlagSingleChoice = 0x02;
         private const byte RaiseFlagOneWindow = 0x04;
+        //   bit3 (0x08) = host-resolved WIRE TEXTS follow (AFTER the identity block): [u16len+UTF8 title]
+        //   [u16len+UTF8 narrative]. Host-authoritative display text for defs whose title/description keys are
+        //   EMPTY and whose narrative exists only as a HOST-side runtime def mutation (TFTV VoidOmen_{0..19}:
+        //   TFTVODIandVoidOmenRoll.GenerateVoidOmenEvent sets literal LocalizedTextBind(text, true) on the def)
+        //   — the client's local def resolves "" → blank window, so the host ships what it actually rendered:
+        //   Title.Localize() + Description.Last().GetText(context). Emitted ONLY when at least one string is
+        //   non-empty, so the no-text wire stays byte-identical (keeps EventRaised_WireBytes_AreStable pinned).
+        private const byte RaiseFlagWireTexts = 0x08;
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
             => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null, false);
@@ -228,7 +236,11 @@ namespace Multipleer.Network.Sync
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice)
             => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, false);
 
+        // texts-less shim: callers that don't ship host-resolved wire texts.
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow)
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, null, null);
+
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow, string wireTitle, string wireNarrative)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -239,14 +251,22 @@ namespace Multipleer.Network.Sync
                 w.Write(vehicleId);
                 // Build the bitmask; emit the flag byte (+ optional identity block) ONLY when any bit is set so a
                 // plain multi-choice no-identity raise stays byte-identical to the legacy wire.
+                bool hasTexts = !string.IsNullOrEmpty(wireTitle) || !string.IsNullOrEmpty(wireNarrative);
                 byte flag = 0;
                 if (identity.HasValue) flag |= RaiseFlagIdentity;
                 if (singleChoice) flag |= RaiseFlagSingleChoice;
                 if (oneWindow) flag |= RaiseFlagOneWindow;
+                if (hasTexts) flag |= RaiseFlagWireTexts;
                 if (flag != 0)
                 {
                     w.Write(flag);
                     if (identity.HasValue) WriteSiteIdentity(w, identity.Value);   // block follows the flag iff bit0 set
+                    if (hasTexts)
+                    {
+                        // Texts go AFTER the identity block (new fields at END of payload).
+                        WriteWireStr(w, wireTitle);
+                        WriteWireStr(w, wireNarrative);
+                    }
                 }
                 return ms.ToArray();
             }
@@ -264,10 +284,15 @@ namespace Multipleer.Network.Sync
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice)
             => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out singleChoice, out _);
 
+        // 8-out shim: callers/tests that ignore the host-resolved wire texts.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow)
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out singleChoice, out oneWindow, out _, out _);
+
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow, out string wireTitle, out string wireNarrative)
         {
             occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1; hasIdentity = false;
             identity = default(GeoSiteState); singleChoice = false; oneWindow = false;
+            wireTitle = ""; wireNarrative = "";
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -288,6 +313,12 @@ namespace Multipleer.Network.Sync
                         {
                             identity = ReadSiteIdentity(r);
                             hasIdentity = true;
+                        }
+                        if ((flag & RaiseFlagWireTexts) != 0)
+                        {
+                            // Host-resolved display texts (title + raise narrative), AFTER the identity block.
+                            wireTitle = ReadWireStr(r);
+                            wireNarrative = ReadWireStr(r);
                         }
                     }
                     return true;
@@ -342,10 +373,22 @@ namespace Multipleer.Network.Sync
         // (no trailing length) — keeps the no-reward/no-site wire stable. When a siteId follows a MISSING reward,
         // the u16 rewardLen is still written as 0 so the trailing siteId is unambiguous on decode. rewardBlob is
         // a RewardDisplaySnapshot-encoded payload; siteId is GeoSite.SiteId (-1 = none, the SAME id the raise uses).
+        // texts-less shim: callers that don't ship host-resolved wire texts (advance / fallback close).
         public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex, byte[] rewardBlob, int siteId = -1)
+            => EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId, null, null);
+
+        // Wire-text overload: appends [u16len+UTF8 wireOutcome][u16len+UTF8 wireNarrative] at the END, ONLY when
+        // at least one string is non-empty (keeps every no-text wire byte-identical). Because the texts trail the
+        // OPTIONAL reward blob + siteId, their presence forces BOTH preceding optionals onto the wire (rewardLen 0
+        // marker when no reward; siteId even when -1) so the trailing strings are unambiguous on decode.
+        // wireOutcome = host-resolved SelectedChoice.Outcome.OutcomeText.GetText(context); wireNarrative =
+        // host-resolved Description.Last().GetText(context) (the native SetClosingEncounter :332-336 pair) — the
+        // client prefers these over local-def resolution, which is EMPTY for runtime-narrative defs (TFTV VoidOmen).
+        public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex, byte[] rewardBlob, int siteId, string wireOutcome, string wireNarrative)
         {
             bool hasReward = rewardBlob != null && rewardBlob.Length > 0;
-            bool hasSite = siteId >= 0;
+            bool hasTexts = !string.IsNullOrEmpty(wireOutcome) || !string.IsNullOrEmpty(wireNarrative);
+            bool hasSite = siteId >= 0 || hasTexts;   // texts force the siteId slot (unambiguous trailing reads)
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
@@ -371,6 +414,12 @@ namespace Multipleer.Network.Sync
                     }
                 }
                 if (hasSite) w.Write(siteId);
+                if (hasTexts)
+                {
+                    // Host-resolved result texts at the END of the payload.
+                    WriteWireStr(w, wireOutcome);
+                    WriteWireStr(w, wireNarrative);
+                }
                 return ms.ToArray();
             }
         }
@@ -383,9 +432,14 @@ namespace Multipleer.Network.Sync
         public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob)
             => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out rewardBlob, out _);
 
+        // 5-out overload (… siteId) — kept for callers/tests that ignore the trailing wire texts.
         public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob, out int siteId)
+            => TryDecodeEventDismiss(data, out occurrenceId, out eventId, out choiceIndex, out rewardBlob, out siteId, out _, out _);
+
+        public static bool TryDecodeEventDismiss(byte[] data, out ushort occurrenceId, out string eventId, out int choiceIndex, out byte[] rewardBlob, out int siteId, out string wireOutcome, out string wireNarrative)
         {
             occurrenceId = 0; eventId = null; choiceIndex = -1; rewardBlob = new byte[0]; siteId = -1;
+            wireOutcome = ""; wireNarrative = "";
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -408,10 +462,25 @@ namespace Multipleer.Network.Sync
                     // Optional trailing siteId: absent in an old payload → leave siteId = -1 (no site → the
                     // result card falls back to StartingBase). Mirrors EventRaised's trailing-optional fields.
                     if (ms.Length - ms.Position >= sizeof(int)) siteId = r.ReadInt32();
+                    // Optional trailing wire texts: [u16len+UTF8 wireOutcome][u16len+UTF8 wireNarrative]. Absent
+                    // → empty strings (client keeps its local-def fallback). Guarded reads (never partial-accept,
+                    // never throw) so a truncated text block still yields the leading fields.
+                    wireOutcome = TryReadWireStr(r, ms);
+                    wireNarrative = TryReadWireStr(r, ms);
                     return true;
                 }
             }
             catch { return false; }
+        }
+
+        // Length-guarded optional wire string: "" when absent/truncated (never throws, never partial-accepts).
+        private static string TryReadWireStr(BinaryReader r, MemoryStream ms)
+        {
+            if (ms.Length - ms.Position < sizeof(ushort)) return "";
+            int len = r.ReadUInt16();
+            if (len == 0) return "";
+            if (ms.Length - ms.Position < len) return "";
+            return Encoding.UTF8.GetString(r.ReadBytes(len));
         }
 
         // The bespoke geoscape event CHOICE CLAIM codec (client->host [occId:u16][choiceIndex:i32]) was retired:

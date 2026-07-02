@@ -114,10 +114,17 @@ namespace Multipleer.Harmony.Sync
                 // it so the client skips the phantom reward-less prompt and resolves straight to the result page. A
                 // 2-window single-choice-WITH-outcome (oneWindow=false) keeps the prompt-mirror+advance lockstep.
                 bool oneWindow = EventReflection.IsOneWindowSingleChoice(geoEvent);
+                // Host-resolved WIRE TEXTS (title + raise narrative, the strings the native window actually
+                // renders: Title.Localize() / Description.Last().GetText(context)). Runtime-narrative defs
+                // (TFTV VoidOmen_{0..19}: empty loc keys, text exists only as a HOST-side def mutation) resolve
+                // to "" on the client, so the client prefers these non-empty wire strings over its local def.
+                string wireTitle = EventReflection.ResolveLiveTitle(geoEvent);
+                string wireNarrative = EventReflection.ResolveLiveNarrative(geoEvent);
                 Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue +
-                          " singleChoice=" + singleChoice + " oneWindow=" + oneWindow);
-                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow);
+                          " singleChoice=" + singleChoice + " oneWindow=" + oneWindow +
+                          " titleLen=" + (wireTitle?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0));
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }
@@ -182,10 +189,17 @@ namespace Multipleer.Harmony.Sync
                 // The live event's real site id (GeoSite.SiteId, -1 = none) — the SAME site the raise resolved.
                 // Stamped on the dismiss wire so the client result card shows the real site, not StartingBase.
                 int siteId = EventReflection.GetSiteId(__instance);
+                // Host-resolved RESULT texts, the exact native SetClosingEncounter pair (:332-336): the picked
+                // choice's outcome text + the raise narrative it falls back to when empty (one-window events).
+                // Shipped so a client whose local def resolves EMPTY (TFTV VoidOmen runtime narrative) still
+                // renders the host's text instead of a blank result parchment.
+                string wireOutcome = EventReflection.ResolveLiveOutcomeText(__instance);
+                string wireNarrative = EventReflection.ResolveLiveNarrative(__instance);
                 Debug.Log("[Multipleer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
                           " selectedChoiceIndex=" + choiceIndex + " siteId=" + siteId +
-                          " rewardBytes=" + (rewardBlob?.Length ?? 0));
-                engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob, siteId);
+                          " rewardBytes=" + (rewardBlob?.Length ?? 0) +
+                          " outLen=" + (wireOutcome?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0));
+                engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob, siteId, wireOutcome, wireNarrative);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
         }

@@ -94,6 +94,7 @@ namespace Multipleer.Network.Sync
         private static FieldInfo _edEventIdField;      // GeoscapeEventData.EventID
         private static FieldInfo _edFlavourField;      // GeoscapeEventData.Flavour
         private static FieldInfo _edLeaderField;       // GeoscapeEventData.Leader
+        private static FieldInfo _edTitleField;        // GeoscapeEventData.Title (LocalizedTextBind, GeoscapeEventData.cs:43)
         private static FieldInfo _edDescriptionField;  // GeoscapeEventData.Description (List<EventTextVariation>)
         private static Type _textVariationType;        // EventTextVariation
         private static FieldInfo _tvGeneralField;      // EventTextVariation.General (LocalizedTextBind)
@@ -101,6 +102,7 @@ namespace Multipleer.Network.Sync
         private static Type _localizedTextType;        // Base.UI.LocalizedTextBind
         private static ConstructorInfo _localizedTextCtor2; // LocalizedTextBind(string, bool doNotLocalize)
         private static FieldInfo _localizedKeyField;   // LocalizedTextBind.LocalizationKey (for empty-check)
+        private static MethodInfo _localizeMethod;     // LocalizedTextBind.Localize(string language = null) (LocalizedTextBind.cs:35)
         private static Type _choiceType2;              // GeoEventChoice (for synthetic OK button)
         private static FieldInfo _choiceTextField;     // GeoEventChoice.Text (LocalizedTextBind)
         private static FieldInfo _choiceOutcomeField;  // GeoEventChoice.Outcome (GeoEventChoiceOutcome)
@@ -194,6 +196,7 @@ namespace Multipleer.Network.Sync
             _edEventIdField = AccessTools.Field(_eventDataType, "EventID");
             _edFlavourField = AccessTools.Field(_eventDataType, "Flavour");
             _edLeaderField = AccessTools.Field(_eventDataType, "Leader");
+            _edTitleField = AccessTools.Field(_eventDataType, "Title");
             _edDescriptionField = AccessTools.Field(_eventDataType, "Description");
             _eventDataCtor = AccessTools.Constructor(_eventDataType, Type.EmptyTypes);
             _textVariationType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.EventTextVariation");
@@ -207,6 +210,7 @@ namespace Multipleer.Network.Sync
             {
                 _localizedTextCtor2 = AccessTools.Constructor(_localizedTextType, new[] { typeof(string), typeof(bool) });
                 _localizedKeyField = AccessTools.Field(_localizedTextType, "LocalizationKey");
+                _localizeMethod = AccessTools.Method(_localizedTextType, "Localize", new[] { typeof(string) });
             }
             _choiceType2 = choiceType;
             _choiceTextField = AccessTools.Field(choiceType, "Text");
@@ -630,7 +634,7 @@ namespace Multipleer.Network.Sync
         /// instead of throwing into the prefab-placeholder state. Falls back to the 2-arg ctor otherwise.
         /// Returns null on any failure (caller best-effort no-ops).
         /// </summary>
-        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId, int vehicleId = -1, GeoSiteState? identity = null)
+        public static object BuildEvent(GeoRuntime rt, string eventId, int siteId, int vehicleId = -1, GeoSiteState? identity = null, string wireTitle = null, string wireNarrative = null)
         {
             try
             {
@@ -642,6 +646,14 @@ namespace Multipleer.Network.Sync
 
                 object eventData = ResolveEventData(rt, eventId);
                 if (eventData == null) return null;
+
+                // HOST-authoritative wire texts (non-empty → preferred over local-def resolution): stamp the
+                // host-resolved title / raise narrative onto the def data as literal binds — the SAME mutation
+                // TFTV performs host-side for its runtime-narrative events (VoidOmen: Title/Description[0].General
+                // = LocalizedTextBind(text, true), TFTVODIandVoidOmenRoll.cs:638-639), whose keys are "" on the
+                // client so local resolution renders a BLANK window. Empty/absent wire text → def untouched
+                // (existing local path, SDI_07 etc. byte-identical).
+                ApplyWireTexts(eventData, wireTitle, wireNarrative);
 
                 object resolvedSite = ResolveSiteById(rt, siteId);
                 bool siteless = UsesSitelessContext(resolvedSite != null, siteId);
@@ -724,6 +736,98 @@ namespace Multipleer.Network.Sync
                           " name=" + identity.SiteName + " enc=" + identity.EncounterID);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ApplySitelessIdentity failed: " + ex.Message); }
+        }
+
+        // ─── HOST-authoritative wire texts (blank-window fix for runtime-narrative defs) ──────────
+
+        // Client: stamp NON-EMPTY host-resolved texts onto the def data as literal binds (doNotLocalize:true).
+        //   • Title → data.Title = LocalizedTextBind(wireTitle, true) (native reads Title?.Localize(),
+        //     UIModuleSiteEncounters.ShowEncounter :199 — a literal bind returns the string as-is).
+        //   • Narrative → Description.LAST variation's .General only (the exact entry the host resolved via
+        //     Description.Last().GetText). The variation OBJECT is kept (its Voiceover stays wired); earlier
+        //     pages of a multi-page def are untouched so paging still resolves locally. Tokens are NOT baked:
+        //     the wire text is the GetText output, and the native render still runs ReplaceEventTokens on it.
+        // Best-effort: any failure leaves the local def as-is (never throws into BuildEvent).
+        private static void ApplyWireTexts(object eventData, string wireTitle, string wireNarrative)
+        {
+            try
+            {
+                if (eventData == null || _localizedTextCtor2 == null) return;
+                if (UseWireText(wireTitle) && _edTitleField != null)
+                    _edTitleField.SetValue(eventData, _localizedTextCtor2.Invoke(new object[] { wireTitle, true }));
+                if (UseWireText(wireNarrative) && _edDescriptionField != null && _tvGeneralField != null)
+                {
+                    var descList = _edDescriptionField.GetValue(eventData) as IList;
+                    if (descList != null && descList.Count > 0)
+                    {
+                        var lastVariation = descList[descList.Count - 1];
+                        if (lastVariation != null)
+                            _tvGeneralField.SetValue(lastVariation, _localizedTextCtor2.Invoke(new object[] { wireNarrative, true }));
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ApplyWireTexts failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Host: the raise title exactly as the native header renders it — <c>EventData.Title?.Localize() ?? ""</c>
+        /// (UIModuleSiteEncounters.ShowEncounter :199). For a TFTV runtime-narrative def (VoidOmen) Title is a
+        /// literal bind set by the host-side def mutation, so Localize() returns the runtime text. Returns "" on
+        /// any failure (client keeps its local fallback).
+        /// </summary>
+        public static string ResolveLiveTitle(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return "";
+            try
+            {
+                Ensure();
+                var data = _eventDataProp?.GetValue(geoscapeEvent, null);
+                var title = data != null ? _edTitleField?.GetValue(data) : null;
+                if (title == null || _localizeMethod == null) return "";
+                return _localizeMethod.Invoke(title, new object[] { null }) as string ?? "";
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveTitle failed: " + ex.Message); return ""; }
+        }
+
+        /// <summary>
+        /// Host: the raise narrative exactly as the native one-window/result fallback resolves it —
+        /// <c>EventData.Description.Last().GetText(Context)</c> (UIModuleSiteEncounters.SetClosingEncounter :335).
+        /// Tokens are NOT replaced here (the client render runs ReplaceEventTokens itself). Returns "" on any
+        /// failure (client keeps its local fallback).
+        /// </summary>
+        public static string ResolveLiveNarrative(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return "";
+            try
+            {
+                Ensure();
+                var data = _eventDataProp?.GetValue(geoscapeEvent, null);
+                if (data == null) return "";
+                var context = _ctxField?.GetValue(geoscapeEvent);
+                return ResolveDescriptionText(data, context);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveNarrative failed: " + ex.Message); return ""; }
+        }
+
+        /// <summary>
+        /// Host: the picked choice's outcome text exactly as the native result page resolves it —
+        /// <c>SelectedChoice.Outcome.OutcomeText.GetText(Context)</c> (UIModuleSiteEncounters.SetClosingEncounter
+        /// :332). Empty for a one-window single-choice event (that is what triggers the native narrative
+        /// fallback). Returns "" on any failure (client keeps its local fallback).
+        /// </summary>
+        public static string ResolveLiveOutcomeText(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return "";
+            try
+            {
+                Ensure();
+                var selProp = AccessTools.Property(geoscapeEvent.GetType(), "SelectedChoice"); // public get (GeoscapeEvent.cs:34)
+                var choice = selProp?.GetValue(geoscapeEvent, null);
+                if (choice == null) return "";
+                var context = _ctxField?.GetValue(geoscapeEvent);
+                return ResolveOutcomeText(choice, context);
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveOutcomeText failed: " + ex.Message); return ""; }
         }
 
         // ─── RESULT/OUTCOME follow-up page (host index → client text-only render) ──────────
@@ -854,6 +958,29 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
+        /// PURE: wire-text-aware body picker. The HOST resolves the result texts natively at broadcast time
+        /// (SelectedChoice.Outcome.OutcomeText.GetText + Description.Last().GetText) and ships them on the
+        /// EventDismiss wire; a NON-EMPTY wire string is preferred over the client's local-def resolution —
+        /// which is EMPTY for runtime-narrative defs (TFTV VoidOmen_{0..19}: keys created "" and the narrative
+        /// exists only as a HOST-side def mutation, so client-side resolution CANNOT work). Empty/absent wire
+        /// text degrades to the local value, keeping the legacy 3-param picker's behavior byte-identical
+        /// (SDI_07 etc.). Unit-tested (no Unity types).
+        /// </summary>
+        public static string ChooseResultBodyText(string wireOutcomeText, string wireNarrativeText, string outcomeText, string narrativeText, bool singleChoiceOneWindow)
+        {
+            string outcome = UseWireText(wireOutcomeText) ? wireOutcomeText : outcomeText;
+            string narrative = UseWireText(wireNarrativeText) ? wireNarrativeText : narrativeText;
+            return ChooseResultBodyText(outcome, narrative, singleChoiceOneWindow);
+        }
+
+        /// <summary>
+        /// PURE: the wire-text preference gate shared by the raise-window override (<see cref="BuildEvent"/>)
+        /// and the result-body picker — only a NON-EMPTY host-resolved string overrides local-def resolution;
+        /// null/empty leaves the existing local path untouched. Unit-tested (no Unity types).
+        /// </summary>
+        public static bool UseWireText(string wireText) => !string.IsNullOrEmpty(wireText);
+
+        /// <summary>
         /// Read the live module's native OK-button LocalizationKey (GeoLevelController.View → GeoscapeView.
         /// GeoscapeModules → SiteEncountersModule → OKTextKey.LocalizationKey), or null if any link is missing.
         /// Lets the synthetic result page reuse the SAME localized dismiss label the native result page uses.
@@ -878,7 +1005,7 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
         }
 
-        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1)
+        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null)
         {
             try
             {
@@ -933,8 +1060,17 @@ namespace Multipleer.Network.Sync
                 string outcomeText = ResolveOutcomeText(choice, context);
                 bool singleChoiceOneWindow = srcChoices.Count == 1 && !ChoiceHasOutcomeText(choice);
                 string narrativeText = singleChoiceOneWindow ? ResolveDescriptionText(srcData, context) : null;
-                string text = ChooseResultBodyText(outcomeText, narrativeText, singleChoiceOneWindow);
+                // Wire-text preference: NON-EMPTY host-resolved outcome/narrative (shipped on the dismiss/raise
+                // wire) beats the local-def resolution — which is EMPTY for runtime-narrative defs (VoidOmen).
+                string text = ChooseResultBodyText(wireOutcome, wireNarrative, outcomeText, narrativeText, singleChoiceOneWindow);
                 string text2 = ReplaceTokens(context, text);
+                // DIAG (blank-result-page visibility): local-def desc entries + resolved lengths on every path.
+                var srcDescList = _edDescriptionField.GetValue(srcData) as IList;
+                Debug.Log("[Multipleer] BuildResultEvent texts eventId=" + eventId
+                          + " descCount=" + (srcDescList == null ? -1 : srcDescList.Count)
+                          + " outLen=" + (outcomeText?.Length ?? 0) + " narrLen=" + (narrativeText?.Length ?? 0)
+                          + " wireOutLen=" + (wireOutcome?.Length ?? 0) + " wireNarrLen=" + (wireNarrative?.Length ?? 0)
+                          + " bodyLen=" + (text2?.Length ?? 0) + " oneWindow=" + singleChoiceOneWindow);
 
                 // Synthetic closing data: EventID="" (so it is never re-broadcast / re-keyed), one OK button.
                 object data = _eventDataCtor.Invoke(null);

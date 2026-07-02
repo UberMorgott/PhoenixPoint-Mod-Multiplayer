@@ -372,7 +372,7 @@ namespace Multipleer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
-            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice, out var oneWindow)) return;
+            if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice, out var oneWindow, out var wireTitle, out var wireNarrative)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
             {
@@ -412,7 +412,7 @@ namespace Multipleer.Network.Sync
                         if (decision.ChoiceIndex >= 0)
                             Debug.Log("[Multipleer] CLIENT singleChoice prompt-mirror occId=" + occId + " eventId=" + eventId +
                                       " choiceIndex=" + decision.ChoiceIndex + " → showing PROMPT, awaiting host advance (reward stashed)");
-                        ShowRaisedDialog(rt, occId, eventId, siteId, vehicleId, hasIdentity, identity);
+                        ShowRaisedDialog(rt, occId, eventId, siteId, vehicleId, hasIdentity, identity, wireTitle, wireNarrative);
                         break;
                     }
                     case State.EventCorrelator.ActionKind.Enqueue:
@@ -420,7 +420,7 @@ namespace Multipleer.Network.Sync
                         // queued it in occId order). Stash its build payload; it is released + shown when the current
                         // dialog is dismissed (DrainQueuedRaises), so bursts/transport-reorders never overwrite the
                         // shown dialog or display out of host emission order.
-                        _queuedRaises[occId] = new QueuedRaise(eventId, siteId, vehicleId, hasIdentity, identity);
+                        _queuedRaises[occId] = new QueuedRaise(eventId, siteId, vehicleId, hasIdentity, identity, wireTitle, wireNarrative);
                         Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                                   " → ENQUEUED behind shown dialog (queued=" + _eventCorrelator.QueuedCount + ")");
                         break;
@@ -431,10 +431,16 @@ namespace Multipleer.Network.Sync
                         Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate raise)");
                         break;
                     case State.EventCorrelator.ActionKind.ShowResultPage:
+                    {
                         // Out-of-order dismiss already buffered for this occurrence → jump straight to its
-                        // result page. The reward lines were carried on the dismiss and stashed at buffer time.
-                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, TakeBufferedReward(occId), siteId);
+                        // result page. The reward lines + wire texts were carried on the dismiss and stashed at
+                        // buffer time; THIS raise's narrative backfills a text-less dismiss (VoidOmen: the
+                        // result body IS the raise narrative).
+                        var buffered = TakeBufferedDismiss(occId);
+                        string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : wireNarrative;
+                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, buffered.Reward, siteId, buffered.WireOutcome, narrative);
                         break;
+                    }
                     case State.EventCorrelator.ActionKind.DropNoop:
                         // A close-only dismiss beat its raise → nothing to display; drop any stashed reward.
                         DropBufferedReward(occId);
@@ -444,16 +450,27 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
         }
 
-        // ─── Out-of-order reward stash (keyed by occurrence id) ─────────────────────────────
-        // When a dismiss arrives BEFORE its raise the reward snapshot must be held until the raise builds the
-        // result page (so the ReferenceEquals-armed render still lands). Bounded by the correlator's own pending
-        // buffer cap (we only stash for buffered dismisses), pruned on resolve/drop.
-        private readonly Dictionary<ushort, RewardDisplaySnapshot> _bufferedRewards = new Dictionary<ushort, RewardDisplaySnapshot>();
-
-        private void StashBufferedReward(ushort occId, RewardDisplaySnapshot reward)
+        // ─── Out-of-order dismiss stash (keyed by occurrence id) ─────────────────────────────
+        // When a dismiss arrives BEFORE its raise its reward snapshot AND host-resolved wire texts must be held
+        // until the raise builds the result page (so the ReferenceEquals-armed render still lands and a
+        // runtime-narrative def still gets its host text). Bounded by the correlator's own pending buffer cap
+        // (we only stash for buffered dismisses), pruned on resolve/drop.
+        private readonly struct BufferedDismiss
         {
-            if (reward == null || reward.IsEmpty) { _bufferedRewards.Remove(occId); return; }
-            _bufferedRewards[occId] = reward;
+            public readonly RewardDisplaySnapshot Reward;
+            public readonly string WireOutcome;
+            public readonly string WireNarrative;
+            public BufferedDismiss(RewardDisplaySnapshot reward, string wireOutcome, string wireNarrative)
+            { Reward = reward; WireOutcome = wireOutcome; WireNarrative = wireNarrative; }
+        }
+        private readonly Dictionary<ushort, BufferedDismiss> _bufferedRewards = new Dictionary<ushort, BufferedDismiss>();
+
+        private void StashBufferedReward(ushort occId, RewardDisplaySnapshot reward, string wireOutcome = null, string wireNarrative = null)
+        {
+            bool hasReward = reward != null && !reward.IsEmpty;
+            bool hasTexts = !string.IsNullOrEmpty(wireOutcome) || !string.IsNullOrEmpty(wireNarrative);
+            if (!hasReward && !hasTexts) { _bufferedRewards.Remove(occId); return; }
+            _bufferedRewards[occId] = new BufferedDismiss(hasReward ? reward : null, wireOutcome, wireNarrative);
             // Hard cap mirrors the correlator's pending-dismiss buffer: a stash whose buffered dismiss got
             // evicted (its raise never came) would otherwise linger. Drop the excess (arbitrary entry) so this
             // map can never outgrow the bounded correlator state.
@@ -466,10 +483,10 @@ namespace Multipleer.Network.Sync
                 }
             }
         }
-        private RewardDisplaySnapshot TakeBufferedReward(ushort occId)
+        private BufferedDismiss TakeBufferedDismiss(ushort occId)
         {
-            if (_bufferedRewards.TryGetValue(occId, out var r)) { _bufferedRewards.Remove(occId); return r; }
-            return null;
+            if (_bufferedRewards.TryGetValue(occId, out var d)) { _bufferedRewards.Remove(occId); return d; }
+            return default(BufferedDismiss);
         }
         private void DropBufferedReward(ushort occId) => _bufferedRewards.Remove(occId);
 
@@ -483,9 +500,12 @@ namespace Multipleer.Network.Sync
             public readonly int VehicleId;
             public readonly bool HasIdentity;
             public readonly GeoSiteState Identity;
-            public QueuedRaise(string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity)
+            public readonly string WireTitle;
+            public readonly string WireNarrative;
+            public QueuedRaise(string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity, string wireTitle, string wireNarrative)
             {
                 EventId = eventId; SiteId = siteId; VehicleId = vehicleId; HasIdentity = hasIdentity; Identity = identity;
+                WireTitle = wireTitle; WireNarrative = wireNarrative;
             }
         }
         private readonly Dictionary<ushort, QueuedRaise> _queuedRaises = new Dictionary<ushort, QueuedRaise>();
@@ -511,13 +531,13 @@ namespace Multipleer.Network.Sync
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
         // deferred path). Spawns an inert mirror site first when the in-play site is absent on this sim-frozen client
         // so BuildEvent renders the correct backdrop/subtitle (not StartingBase).
-        private void ShowRaisedDialog(GeoRuntime rt, ushort occId, string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity)
+        private void ShowRaisedDialog(GeoRuntime rt, ushort occId, string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity, string wireTitle = null, string wireNarrative = null)
         {
             if (hasIdentity && EventReflection.ShouldSpawnMirror(
                     hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
                 State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
             var geoEvent = EventReflection.BuildEvent(rt, eventId, siteId, vehicleId,
-                hasIdentity ? (GeoSiteState?)identity : null);
+                hasIdentity ? (GeoSiteState?)identity : null, wireTitle, wireNarrative);
             if (geoEvent != null) State.EventDisplay.Show(rt, geoEvent, occId, eventId);
         }
 
@@ -541,13 +561,18 @@ namespace Multipleer.Network.Sync
                     case State.EventCorrelator.ActionKind.ShowDialog:
                         // Plain in-order OR single-choice prompt mirror (ChoiceIndex>=0 → the reward stays stashed for
                         // the host's later advance). Build + show; occupies the slot → the loop ends next iteration.
-                        ShowRaisedDialog(rt, occId, q.EventId, q.SiteId, q.VehicleId, q.HasIdentity, q.Identity);
+                        ShowRaisedDialog(rt, occId, q.EventId, q.SiteId, q.VehicleId, q.HasIdentity, q.Identity, q.WireTitle, q.WireNarrative);
                         break;
                     case State.EventCorrelator.ActionKind.ShowResultPage:
-                        // Buffered-dismiss single-choice released straight to its result page (reusing the reward
-                        // stashed at the earlier out-of-order dismiss). Terminal → slot stays free, drain continues.
-                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, TakeBufferedReward(occId), q.SiteId);
+                    {
+                        // Buffered-dismiss single-choice released straight to its result page (reusing the reward +
+                        // wire texts stashed at the earlier out-of-order dismiss; the deferred raise's narrative
+                        // backfills a text-less dismiss). Terminal → slot stays free, drain continues.
+                        var buffered = TakeBufferedDismiss(occId);
+                        string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : q.WireNarrative;
+                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, buffered.Reward, q.SiteId, buffered.WireOutcome, narrative);
                         break;
+                    }
                     case State.EventCorrelator.ActionKind.DropNoop:
                         // Close-only buffered dismiss released → nothing to show; drop any stashed reward.
                         DropBufferedReward(occId);
@@ -566,7 +591,7 @@ namespace Multipleer.Network.Sync
         public void OnEventDismiss(byte[] data)
         {
             if (_engine.IsHost) return;
-            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out var rewardBlob, out var siteId)) return;
+            if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out var choiceIndex, out var rewardBlob, out var siteId, out var wireOutcome, out var wireNarrative)) return;
             try
             {
                 var rt = GeoRuntime.Instance;
@@ -586,15 +611,16 @@ namespace Multipleer.Network.Sync
                 {
                     case State.EventCorrelator.ActionKind.ShowResultInPlace:
                         _queuedRaises.Remove(occId);   // if this dismiss resolved a still-deferred raise, drop its stash
-                        ResolveToResultPage(rt, occId, eventId, choiceIndex, reward, siteId);
+                        ResolveToResultPage(rt, occId, eventId, choiceIndex, reward, siteId, wireOutcome, wireNarrative);
                         break;
                     case State.EventCorrelator.ActionKind.CloseDialog:
                         _queuedRaises.Remove(occId);   // ditto for a close-only resolution of a deferred raise
                         State.EventDisplay.Dismiss(rt, occId, eventId);   // close-only
                         break;
                     case State.EventCorrelator.ActionKind.BufferDismiss:
-                        // Raise hasn't arrived yet → hold the reward until OnEventRaised resolves this occurrence.
-                        StashBufferedReward(occId, reward);
+                        // Raise hasn't arrived yet → hold the reward + wire texts until OnEventRaised resolves
+                        // this occurrence.
+                        StashBufferedReward(occId, reward, wireOutcome, wireNarrative);
                         break;
                     case State.EventCorrelator.ActionKind.Ignore:
                         // Transport double-send of an already-resolved dismiss → idempotent no-op.
@@ -629,11 +655,14 @@ namespace Multipleer.Network.Sync
                           " choiceIndex=" + choiceIndex + " siteId=" + siteId + " decision=" + decision.Kind +
                           " promptMirror=" + _eventCorrelator.PromptMirrorCount +
                           " pendingAdvance=" + _eventCorrelator.PendingAdvanceCount);
-                // Mirroring the prompt → advance to the result page (reward = the one stashed at the earlier
-                // out-of-order dismiss). Otherwise the advance was BUFFERED (it beat the raise) → no-op now; the
-                // upcoming raise resolves it straight to the result page.
+                // Mirroring the prompt → advance to the result page (reward + wire texts = the ones stashed at
+                // the earlier out-of-order dismiss). Otherwise the advance was BUFFERED (it beat the raise) →
+                // no-op now; the upcoming raise resolves it straight to the result page.
                 if (decision.Kind == State.EventCorrelator.ActionKind.ShowResultPage)
-                    ResolveToResultPage(rt, occId, eventId, choiceIndex, TakeBufferedReward(occId), siteId);
+                {
+                    var buffered = TakeBufferedDismiss(occId);
+                    ResolveToResultPage(rt, occId, eventId, choiceIndex, buffered.Reward, siteId, buffered.WireOutcome, buffered.WireNarrative);
+                }
                 // An advance that resolved a prompt mirror just FREED the single slot (EventCorrelator.Advanced
                 // cleared _shownSlot) → release the next deferred raise in occId order, exactly as a dismiss does.
                 // (A buffered/no-op advance leaves the slot busy → TryDequeueNext is a no-op — harmless.)
@@ -649,9 +678,9 @@ namespace Multipleer.Network.Sync
         /// to a plain close when the page can't be rebuilt. Shared by the in-order (ShowResultInPlace) and the
         /// buffered-then-raised (ShowResultPage) paths.
         /// </summary>
-        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1)
+        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null)
         {
-            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId);
+            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative);
             Debug.Log("[Multipleer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
                       " rewardEmpty=" + (reward == null || reward.IsEmpty) +
@@ -673,13 +702,15 @@ namespace Multipleer.Network.Sync
             State.EventDisplay.Dismiss(rt, occId, eventId);
         }
 
-        /// <summary>Host: broadcast a show event-dialog packet to all peers, carrying the occurrence id and an
-        /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase).</summary>
-        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false, bool oneWindow = false)
+        /// <summary>Host: broadcast a show event-dialog packet to all peers, carrying the occurrence id, an
+        /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase)
+        /// and the host-resolved wire texts (title + raise narrative) so a runtime-narrative def (TFTV VoidOmen,
+        /// empty loc keys) still renders on a client whose local def resolution yields a BLANK window.</summary>
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false, bool oneWindow = false, string wireTitle = null, string wireNarrative = null)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative)));
         }
 
         /// <summary>
@@ -689,13 +720,16 @@ namespace Multipleer.Network.Sync
         /// natively; -1 → close-only, for a pure-INFO host-OK / decline). The reward STATE itself rides the
         /// wallet/research/items/diplomacy channels — this carries only the UI index + the display blob.
         /// <paramref name="siteId"/> is the event's GeoSite.SiteId (-1 = none) so the client result card resolves
-        /// the REAL event site instead of falling back to StartingBase.
+        /// the REAL event site instead of falling back to StartingBase. <paramref name="wireOutcome"/> /
+        /// <paramref name="wireNarrative"/> are the host-resolved result texts (SelectedChoice outcome +
+        /// Description.Last narrative) — non-empty wire text beats the client's local-def resolution, which is
+        /// EMPTY for runtime-narrative defs (TFTV VoidOmen).
         /// </summary>
-        public void BroadcastEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1, byte[] rewardBlob = null, int siteId = -1)
+        public void BroadcastEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1, byte[] rewardBlob = null, int siteId = -1, string wireOutcome = null, string wireNarrative = null)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventDismiss,
-                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId)));
+                SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, rewardBlob, siteId, wireOutcome, wireNarrative)));
         }
 
         /// <summary>
