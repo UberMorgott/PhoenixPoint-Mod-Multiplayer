@@ -2,7 +2,7 @@ namespace Multipleer.Network.Sync
 {
     /// <summary>
     /// Default-OFF rollout gate for the client geoscape EVENT-WINDOW desync fixes (additive-first, mirrors
-    /// <see cref="GeoRailGate"/> / <see cref="ReportMirrorGate"/>). It guards two coupled fixes to the host->client
+    /// <see cref="ReportMirrorGate"/>). It guards two coupled fixes to the host->client
     /// event-dialog mirror:
     ///   • <b>Symptom 2 (burst / wrong-page):</b> the synthetic RESULT page is pushed WITH its occurrence id (not
     ///     the legacy forced 0) so <c>EventDisplay.Dismiss</c>'s occId close-guard keeps a DIFFERENT occurrence's

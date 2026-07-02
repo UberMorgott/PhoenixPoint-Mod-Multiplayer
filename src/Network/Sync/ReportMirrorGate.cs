@@ -6,7 +6,7 @@ namespace Multipleer.Network.Sync
     /// the host broadcasts NOTHING on the new <c>PacketType.ReportModalShow</c> (0x69) surface and the client
     /// Prefix suppresses NOTHING, so behavior is byte-for-byte unchanged — the existing GeoscapeEvent-dialog
     /// replication path (0x65/0x66) is untouched. Flip to true (a one-line dev edit + recompile) only after
-    /// in-game verification, mirroring <see cref="GeoRailGate"/> slice-1.
+    /// in-game verification, mirroring the earlier geoscape rail-unify slice-1 rollout.
     /// </summary>
     public static class ReportMirrorGate
     {

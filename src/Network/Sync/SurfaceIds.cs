@@ -30,7 +30,8 @@ namespace Multipleer.Network.Sync
         // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───
         // Migrated geoscape host→all messages ride the SAME 0x67 SurfaceRouter chokepoint as tactical, on ids
         // in the geoscape partition (non-overlapping with tactical 0x80-0x9F and the legacy action/channel
-        // ids 1-30 above). Emitted only behind GeoRailGate; the legacy raw packet stays the primary path.
+        // ids 1-30 above). Emitted UNCONDITIONALLY as the SOLE geoscape wallet/state rail; the legacy raw
+        // packets (0x63 WalletSync / 0x64 StateSync) were retired a4781ae.
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
         public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
     }

@@ -101,8 +101,9 @@ public class SurfaceRouterGeoStateTests
 
     // Rail-unify phase 1: the legacy 0x64 StateSync send is RETIRED — the per-channel state echo now rides the
     // unified 0x67 envelope under the GeoState (0xA1) surface as the SOLE rail, emitted UNCONDITIONALLY (the
-    // former `if (GeoRailGate.Enabled)` guard was removed from SyncEngine.FlushChannel; the gate is left intact
-    // for other surfaces). This pins that the sole rail carries the SAME per-channel StateSync bytes the retired
+    // former `if (GeoRailGate.Enabled)` send-guard was removed from SyncEngine.FlushChannel, and the gate itself
+    // has since been deleted — rail unification is complete). This pins that the sole rail carries the SAME
+    // per-channel StateSync bytes the retired
     // 0x64 used to, so the wire payload is byte-for-byte preserved regardless of any gate state.
     [Fact]
     public void GeoStateEnvelope_IsSoleRail_CarriesLegacyStateSyncBytesVerbatim()

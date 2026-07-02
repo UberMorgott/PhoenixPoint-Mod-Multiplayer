@@ -55,10 +55,9 @@
     <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Sync\SyncedActionRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SequenceTracker.cs"><Link>Sync\SequenceTracker.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\RequestDedup.cs"><Link>Sync\RequestDedup.cs</Link></Compile>
-    <!-- Inc1 rail-unify: shared domain-agnostic seq/dedup primitives + the geoscape envelope-rail gate (pure). -->
+    <!-- Inc1 rail-unify: shared domain-agnostic seq/dedup primitives (pure). -->
     <Compile Include="..\src\Network\Sync\SurfaceSeq.cs"><Link>Sync\SurfaceSeq.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\IntentDedup.cs"><Link>Sync\IntentDedup.cs</Link></Compile>
-    <Compile Include="..\src\Network\Sync\GeoRailGate.cs"><Link>Sync\GeoRailGate.cs</Link></Compile>
     <!-- Default-OFF gate for the client geoscape event-window desync fixes (occId-keyed result page + burst-safe
          reward arming). Pure; linked for the default-OFF pin test. The fixes themselves live in EventDisplay /
          SyncEngine / RewardDisplayReflection (game-bound, unlinked). -->
