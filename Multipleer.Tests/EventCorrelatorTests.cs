@@ -106,8 +106,11 @@ public class EventCorrelatorTests
         Assert.Equal(0, c.PendingCount);                  // dismiss buffer drained
 
         // The host's empty-outcome SetClosingEncounter also emits an advance; arriving AFTER the result page is
-        // already shown it is a harmless no-op (no prompt mirror to advance).
-        Assert.Equal(Kind.DropNoop, c.Advanced(3, "EX1W", choiceIndex: 0).Kind);
+        // already shown (occurrence terminally resolved) it is DEDUPED to an idempotent Ignore — previously it
+        // was DropNoop but silently buffered a phantom _pendingAdvance entry for an occurrence that will never
+        // be raised again.
+        Assert.Equal(Kind.Ignore, c.Advanced(3, "EX1W", choiceIndex: 0).Kind);
+        Assert.Equal(0, c.PendingAdvanceCount);
     }
 
     [Fact]
@@ -537,5 +540,52 @@ public class EventCorrelatorTests
         Assert.Equal(3, second.OccurrenceId);
         Assert.Equal(Kind.ShowResultPage, second.Kind);
         Assert.Equal(0, c.QueuedCount);
+    }
+
+    [Fact]
+    public void Advanced_DuplicateAfterResultShown_IsIgnored_NeverReshows()
+    {
+        var c = new EventCorrelator();
+
+        // Normal 2-window single-choice lockstep (in-game run 2026-07-03, occ2/EX75): result-bearing
+        // dismiss beats the raise → prompt mirror → the host's advance shows the result page ONCE.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(2, "EX75", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.ShowDialog, c.Raised(2, "EX75", singleChoice: true).Kind);
+        Assert.Equal(Kind.ShowResultPage, c.Advanced(2, "EX75", choiceIndex: 0).Kind);   // FIRST advance → show (never deduped)
+
+        // A duplicate/late EventAdvanceResult for the SAME occurrence (transport double-send / raced host
+        // click) after the client already resolved it: logged no-op — NOT a re-shown result page and NOT a
+        // phantom _pendingAdvance entry (which could later pair with a duplicate raise into an orphan dialog
+        // no host signal would ever close).
+        Assert.Equal(Kind.Ignore, c.Advanced(2, "EX75", choiceIndex: 0).Kind);
+        Assert.Equal(0, c.PendingAdvanceCount);
+        Assert.Equal(0, c.PromptMirrorCount);
+        Assert.Equal(0, c.OpenCount);
+    }
+
+    [Fact]
+    public void Advanced_AfterInPlaceDismissResolved_IsIgnored()
+    {
+        var c = new EventCorrelator();
+
+        // The client already resolved this occurrence via an IN-PLACE dismiss (result page shown+closed
+        // through the EventDismiss rail). A late advance for it must be an idempotent no-op — never a
+        // second result page, never a buffered phantom.
+        Assert.Equal(Kind.ShowDialog, c.Raised(6, "EX20").Kind);
+        Assert.Equal(Kind.ShowResultInPlace, c.Dismissed(6, "EX20", choiceIndex: 0).Kind);
+
+        Assert.Equal(Kind.Ignore, c.Advanced(6, "EX20", choiceIndex: 0).Kind);
+        Assert.Equal(0, c.PendingAdvanceCount);
+    }
+
+    [Fact]
+    public void Advanced_BeforeRaise_StillBuffers_NotDeduped()
+    {
+        var c = new EventCorrelator();
+
+        // Guard the guard: an advance that merely BEAT its raise (occurrence NOT yet terminally resolved)
+        // must still buffer exactly as before — the dedup keys on terminal completion only.
+        Assert.Equal(Kind.DropNoop, c.Advanced(8, "EXF", choiceIndex: 0).Kind);
+        Assert.Equal(1, c.PendingAdvanceCount);
     }
 }

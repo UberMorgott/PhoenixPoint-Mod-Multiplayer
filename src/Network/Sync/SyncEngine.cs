@@ -774,6 +774,15 @@ namespace Multipleer.Network.Sync
                     var buffered = TakeBufferedDismiss(occId);
                     ResolveToResultPage(rt, occId, eventId, choiceIndex, buffered.Reward, siteId, buffered.WireOutcome, buffered.WireNarrative);
                 }
+                else if (decision.Kind == State.EventCorrelator.ActionKind.Ignore)
+                {
+                    // Terminal-occId dedup: this occurrence was already resolved-and-closed on this client (its
+                    // result page shown via a prior advance, or an in-place/buffered dismiss). A duplicate/late
+                    // EventAdvanceResult (transport double-send / raced host click) must never re-open the
+                    // window. The FIRST advance for a live prompt mirror is never deduped (ShowResultPage above).
+                    Debug.Log("[Multipleer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
+                              " → IGNORED (duplicate/late advance for an already-resolved occurrence)");
+                }
                 // An advance that resolved a prompt mirror just FREED the single slot (EventCorrelator.Advanced
                 // cleared _shownSlot) → release the next deferred raise in occId order, exactly as a dismiss does.
                 // (A buffered/no-op advance leaves the slot busy → TryDequeueNext is a no-op — harmless.)

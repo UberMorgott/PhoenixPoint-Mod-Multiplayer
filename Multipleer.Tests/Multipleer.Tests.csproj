@@ -119,6 +119,9 @@
          (EncounterChoiceClientPatch send / EventReflection.TryHostNativeAdvanceSingleChoice /
          SyncEngine.OnEventAdvanceRequest) binds game types and is NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\SingleChoiceAdvanceGate.cs"><Link>Sync\State\SingleChoiceAdvanceGate.cs</Link></Compile>
+    <!-- Host native-drive reflection-gate missing-member tagging (pure, Unity-free): one greppable tag per
+         failed lookup instead of the blanket not-ready/missing-member (2026-07-03 false-negative). -->
+    <Compile Include="..\src\Network\Sync\State\NativeDriveGuard.cs"><Link>Sync\State\NativeDriveGuard.cs</Link></Compile>
     <!-- WalletWatcher rebind decision (pure, Unity-free): no-op / first-bind / rebind-on-fresh-instance.
          Fixes the post-reload stale-wallet binding (dead `if (_bound) return;` gate). The live WalletWatcher
          glue (GeoRuntime.Wallet reflection + WalletReflection subscribe) binds game types and is NOT linked. -->

@@ -278,6 +278,16 @@ namespace Multipleer.Network.Sync.State
         /// </summary>
         public Decision Advanced(ushort occurrenceId, string eventId, int choiceIndex)
         {
+            // DEDUP (duplicate/late advance): an advance for an occurrence ALREADY terminally resolved — the
+            // client showed (and closed) its result page via a prior advance, or resolved it via an in-place /
+            // buffered dismiss — is an idempotent no-op, mirroring the same _completed guard in Dismissed().
+            // It must NOT fall through to BufferAdvance: that phantom _pendingAdvance entry could later pair
+            // with a duplicate raise (after _completed FIFO eviction) into an orphan dialog no host signal
+            // would ever close. The FIRST advance for a live prompt mirror is untouched (occurrence not yet
+            // completed) — the normal click→advance→result flow always shows its result page once.
+            if (_completed.Contains(occurrenceId))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
+
             if (_promptMirror.Remove(occurrenceId))
             {
                 _open.Remove(occurrenceId);   // the result page replaces the mirrored prompt

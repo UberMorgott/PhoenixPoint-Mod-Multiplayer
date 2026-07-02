@@ -223,7 +223,16 @@ namespace Multipleer.Network.Sync
             _glViewField = AccessTools.Field(geoLevelType, "View");
             var geoscapeViewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
             if (geoscapeViewType != null) _gvModulesField = AccessTools.Field(geoscapeViewType, "GeoscapeModules");
-            var geoModulesDataType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeModulesData");
+            // ROOT CAUSE (in-game false-negative, run 2026-07-03 00:27): GeoscapeModulesData lives in namespace
+            // Base.UI (decompile Base.UI/GeoscapeModulesData.cs:7; SiteEncountersModule field :32) — NOT
+            // PhoenixPoint.Geoscape.View. The old wrong-namespace TypeByName returned null → _gmSiteEncModuleField
+            // stayed null forever → TryHostNativeResolve AND TryHostNativeAdvanceSingleChoice always tripped
+            // guard=not-ready/missing-member and the host never drove a client-requested prompt→result advance.
+            // Self-grounding fix: take the type straight off the verified GeoscapeView.GeoscapeModules field
+            // (its FieldType IS GeoscapeModulesData), with the CORRECT literal name as fallback.
+            var geoModulesDataType = _gvModulesField != null
+                ? _gvModulesField.FieldType
+                : AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
             if (geoModulesDataType != null) _gmSiteEncModuleField = AccessTools.Field(geoModulesDataType, "SiteEncountersModule");
             var siteEncModuleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
             if (siteEncModuleType != null)
@@ -239,7 +248,47 @@ namespace Multipleer.Network.Sync
 
             _ready = _completeEvent != null && _eventIdField != null && _eventDataProp != null
                      && _choicesField != null;
+
+            LogLookupAuditOnce();
         }
+
+        private static bool _lookupAuditLogged;
+
+        // One-shot startup validation: name every reflection lookup the native-drive / core paths depend on
+        // that resolved NULL, so a silently unbound member (the guard=missing-* family) is visible from the
+        // log alone — no in-game repro click needed. Logged once per process at the first Ensure().
+        private static void LogLookupAuditOnce()
+        {
+            if (_lookupAuditLogged) return;
+            _lookupAuditLogged = true;
+            var missing = new System.Collections.Generic.List<string>();
+            if (_completeEvent == null) missing.Add("GeoscapeEvent.CompleteEvent");
+            if (_eventIdField == null) missing.Add("GeoscapeEvent.EventID");
+            if (_eventDataProp == null) missing.Add("GeoscapeEvent.EventData");
+            if (_isCompletedProp == null) missing.Add("GeoscapeEvent.IsCompleted");
+            if (_choicesField == null) missing.Add("GeoscapeEventData.Choices");
+            if (_glViewField == null) missing.Add("GeoLevelController.View");
+            if (_gvModulesField == null) missing.Add("GeoscapeView.GeoscapeModules");
+            if (_gmSiteEncModuleField == null) missing.Add("GeoscapeModulesData.SiteEncountersModule");
+            if (_encGeoEventField == null) missing.Add("UIModuleSiteEncounters._geoEvent");
+            if (_encPagingField == null) missing.Add("UIModuleSiteEncounters._pagingEvent");
+            if (_encOnChoiceSelected == null) missing.Add("UIModuleSiteEncounters.OnChoiceSelected");
+            if (_encOkTextKeyField == null) missing.Add("UIModuleSiteEncounters.OKTextKey");
+            Debug.Log("[Multipleer] EventReflection lookup audit: " + (missing.Count == 0
+                ? "all resolved"
+                : "MISSING " + string.Join(",", missing.ToArray())));
+        }
+
+        // Shared reflection-member gate for the two host native-drive entry points. Returns the FIRST failing
+        // member's distinct greppable tag (State.NativeDriveGuard), or null when the drive may proceed.
+        private static string NativeDriveMissingMemberTag()
+            => State.NativeDriveGuard.MissingMemberTag(
+                ready: _ready,
+                hasViewField: _glViewField != null,
+                hasModulesField: _gvModulesField != null,
+                hasSiteEncModuleField: _gmSiteEncModuleField != null,
+                hasGeoEventField: _encGeoEventField != null,
+                hasOnChoiceSelected: _encOnChoiceSelected != null);
 
         // ─── interceptor-side getters (off the live GeoscapeEvent) ────────
 
@@ -413,15 +462,12 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure();
-                if (!_ready || _encGeoEventField == null || _encOnChoiceSelected == null
-                    || _glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null)
+                // Distinct tag per failed reflection lookup (NativeDriveGuard) — the old combined
+                // not-ready/missing-member tag hid the 2026-07-03 wrong-namespace root cause.
+                string missingMember = NativeDriveMissingMemberTag();
+                if (missingMember != null)
                 {
-                    // DIAG (host modal-close fallback): which of the ~6 runtime guards tripped, so ONE in-game
-                    // click pins why TryHostNativeResolve returned false (→ SyncEngine model-only fallback, host
-                    // choice modal never closes). No behavior change.
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=not-ready/missing-member"
-                              + " ready=" + _ready + " geoEventField=" + (_encGeoEventField != null) + " onChoiceSelected=" + (_encOnChoiceSelected != null)
-                              + " viewField=" + (_glViewField != null) + " modulesField=" + (_gvModulesField != null) + " siteEncField=" + (_gmSiteEncModuleField != null));
+                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=" + missingMember);
                     return false;
                 }
                 var geo = rt?.GeoLevel();
@@ -525,10 +571,13 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure();
-                if (!_ready || _encGeoEventField == null || _encOnChoiceSelected == null
-                    || _glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null)
+                // Distinct tag per failed reflection lookup (NativeDriveGuard) — the old combined
+                // not-ready/missing-member tag hid the 2026-07-03 wrong-namespace root cause
+                // (missing-GeoscapeModulesData.SiteEncountersModule) behind a blanket false-negative.
+                string missingMember = NativeDriveMissingMemberTag();
+                if (missingMember != null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=not-ready/missing-member");
+                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=" + missingMember);
                     return false;
                 }
                 var geo = rt?.GeoLevel();
