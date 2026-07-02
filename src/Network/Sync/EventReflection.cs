@@ -798,6 +798,23 @@ namespace Multipleer.Network.Sync
             => string.IsNullOrEmpty(nativeOkKey) ? "OK" : nativeOkKey;
 
         /// <summary>
+        /// PURE: pick the synthetic result page's BODY text. Mirrors native
+        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:332-336): the body is the chosen choice's
+        /// outcome text, but the SINGLE-CHOICE combined window (built with <c>useEventTexts:true</c>) falls
+        /// back to the RAISE NARRATIVE (<c>Description.Last().GetText(context)</c>) when that outcome text is
+        /// empty — so a one-window reward-less event (VoidOmen-style) renders the narrative the host saw
+        /// instead of a blank parchment. A MULTI-choice close (useEventTexts:false) NEVER falls back: an
+        /// empty-outcome multi-choice click <c>FinishEncounter()</c>s with no page, so <paramref name="narrativeText"/>
+        /// is used ONLY when <paramref name="singleChoiceOneWindow"/> is true. Unit-tested (no Unity types).
+        /// </summary>
+        public static string ChooseResultBodyText(string outcomeText, string narrativeText, bool singleChoiceOneWindow)
+        {
+            if (string.IsNullOrEmpty(outcomeText) && singleChoiceOneWindow)
+                return narrativeText ?? "";
+            return outcomeText ?? "";
+        }
+
+        /// <summary>
         /// Read the live module's native OK-button LocalizationKey (GeoLevelController.View → GeoscapeView.
         /// GeoscapeModules → SiteEncountersModule → OKTextKey.LocalizationKey), or null if any link is missing.
         /// Lets the synthetic result page reuse the SAME localized dismiss label the native result page uses.
@@ -868,9 +885,16 @@ namespace Multipleer.Network.Sync
                     return null;
                 }
 
-                // text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), tokens replaced.
-                string text = ResolveOutcomeText(choice, context);
-                if (text == null) text = "";
+                // Body text = choice.Outcome.OutcomeText.GetText(context) (UIModuleSiteEncounters.cs:334), but a
+                // SINGLE-CHOICE one-window event (Choices.Count==1 + empty outcome text = native IsSingleChoiceEncounter)
+                // falls back to the RAISE NARRATIVE (Description.Last) exactly as native SetClosingEncounter's
+                // useEventTexts:true branch (:333-335) — otherwise a reward-less VoidOmen-style event renders a BLANK
+                // parchment on the client while the host showed the narrative. A multi-choice empty outcome keeps ""
+                // (host FinishEncounters with no page — OnChoiceSelected :584-591). Then tokens replaced.
+                string outcomeText = ResolveOutcomeText(choice, context);
+                bool singleChoiceOneWindow = srcChoices.Count == 1 && !ChoiceHasOutcomeText(choice);
+                string narrativeText = singleChoiceOneWindow ? ResolveDescriptionText(srcData, context) : null;
+                string text = ChooseResultBodyText(outcomeText, narrativeText, singleChoiceOneWindow);
                 string text2 = ReplaceTokens(context, text);
 
                 // Synthetic closing data: EventID="" (so it is never re-broadcast / re-keyed), one OK button.
@@ -924,6 +948,23 @@ namespace Multipleer.Network.Sync
                 // Fallback: General.Localize() via reflection if GetText is unavailable.
                 var general = _tvGeneralField?.GetValue(outcomeText);
                 return general?.ToString() ?? "";
+            }
+            catch { return ""; }
+        }
+
+        // Raise NARRATIVE for the single-choice one-window fallback: mirrors native
+        // UIModuleSiteEncounters.SetClosingEncounter (:335) `geoEvent.EventData.Description.Last().GetText(context)`.
+        // Reads the source def's Description (List<EventTextVariation>), takes its LAST variation and resolves it
+        // against the rebuilt context. Returns "" on null/empty/unreadable (caller degrades to a blank body).
+        private static string ResolveDescriptionText(object srcData, object context)
+        {
+            try
+            {
+                var descList = _edDescriptionField?.GetValue(srcData) as IList;
+                if (descList == null || descList.Count == 0) return "";
+                var lastVariation = descList[descList.Count - 1];
+                if (lastVariation == null || _tvGetTextMethod == null) return "";
+                return _tvGetTextMethod.Invoke(lastVariation, new[] { context }) as string ?? "";
             }
             catch { return ""; }
         }
