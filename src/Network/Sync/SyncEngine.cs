@@ -490,6 +490,24 @@ namespace Multipleer.Network.Sync
         }
         private readonly Dictionary<ushort, QueuedRaise> _queuedRaises = new Dictionary<ushort, QueuedRaise>();
 
+        /// <summary>
+        /// Save-load / co-op save-transfer boundary reset for the CLIENT event-mirror — the sibling of the host-side
+        /// <see cref="Arbiter"/>.Reset() (both are driven from <c>SaveTransferCoordinator.PrepareEntryFromBlobCrt</c>).
+        /// The SyncEngine — hence its <see cref="State.EventCorrelator"/> and the two Unity-side stashes it drives —
+        /// is NOT recreated on a mid-session reload (only on full session teardown), and the host REUSES occurrence
+        /// ids across the reload. Without this the stale busy single slot (<c>_shownSlot</c>), deferred-raise queue,
+        /// and completed-dedup set would STARVE every post-reload client raise (busy slot → defer forever; reused
+        /// occId → dedup-Ignore), so the client stops showing ALL geoscape events. Clears the pure correlator plus
+        /// the two build/reward stashes it drives. No-op on the host (it never populates the client mirror), exactly
+        /// as Arbiter.Reset() is a no-op on a client.
+        /// </summary>
+        public void ResetEventMirror()
+        {
+            _eventCorrelator.Reset();
+            _queuedRaises.Clear();
+            _bufferedRewards.Clear();
+        }
+
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
         // deferred path). Spawns an inert mirror site first when the in-play site is absent on this sim-frozen client
         // so BuildEvent renders the correct backdrop/subtitle (not StartingBase).

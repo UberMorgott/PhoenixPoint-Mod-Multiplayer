@@ -262,6 +262,39 @@ public class EventCorrelatorTests
         Assert.Equal(0, c.PendingCount);
     }
 
+    [Fact]
+    public void Reset_OnSaveLoad_ClearsStarvedSlotQueueAndCompleted_LetsReusedOccIdShowAgain()
+    {
+        // Regression (mid-session save/load starvation): the client SyncEngine — hence this correlator — is NOT
+        // recreated on a mid-session reload (only on full session teardown), and the host REUSES occurrence ids
+        // across the reload. Reproduce the exact stale state a reload would leave behind — a BUSY single slot (a
+        // shown dialog), a raise DEFERRED behind it, and a COMPLETED (dedup) occId — and prove the boundary
+        // Reset() (what SyncEngine.ResetEventMirror drives) clears all three so post-reload raises are no longer
+        // starved. Mirrors the ChoiceArbiter save-load reset precedent (ChoiceArbiterTests.Reset_OnSaveLoad_...).
+        var c = new EventCorrelator();
+
+        c.Raised(10, "A");                                                            // shown → occupies the single slot
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(10, "A", choiceIndex: -1).Kind);   // resolved → occId 10 COMPLETED, slot freed
+        Assert.Equal(Kind.ShowDialog, c.Raised(20, "B").Kind);                        // shown again → single slot BUSY
+        Assert.Equal(Kind.Enqueue, c.Raised(30, "C").Kind);                           // deferred behind the busy slot
+        Assert.Equal(1, c.QueuedCount);
+
+        // The starvation, with the STALE (un-reset) state: the reused occId 10 is dedup-Ignored (stale _completed),
+        // and every fresh raise defers forever behind the still-busy slot (stale _shownSlot) — the client shows nothing.
+        Assert.Equal(Kind.Ignore, c.Raised(10, "A").Kind);    // reused occId → silently dropped (completed dedup)
+        Assert.Equal(Kind.Enqueue, c.Raised(40, "D").Kind);   // busy slot → deferred (never shows)
+
+        // Mid-session save/load boundary reset.
+        c.Reset();
+
+        // Post-reload: slot free, queue empty, dedup set forgot the reused occIds → a fresh raise for the REUSED
+        // occId 10 shows IMMEDIATELY (not Ignore, not Enqueue).
+        Assert.Equal(0, c.QueuedCount);
+        Assert.Equal(0, c.OpenCount);
+        Assert.Equal(Kind.ShowDialog, c.Raised(10, "A").Kind);
+        Assert.Equal(1, c.OpenCount);
+    }
+
     // ─── DEDUP + client FIFO-order mirror (transport double-send + burst out-of-order) ───────────
 
     [Fact]  // (a) duplicate Raised for the same occId → only ONE show decision (transport double-send dedup)

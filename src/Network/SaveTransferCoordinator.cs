@@ -645,6 +645,13 @@ namespace Multipleer.Network
             // per-load _tracker.Reset() already done on this boundary. No-op on a client (it never claims).
             _engine.Sync?.Arbiter?.Reset();
 
+            // Same reload boundary, CLIENT side: the SyncEngine's event-mirror (occId EventCorrelator + the
+            // deferred-raise build stash + the buffered-reward stash) is likewise NOT recreated on a mid-session
+            // reload, and occIds are REUSED across it. Without this the stale busy single slot / deferred-raise
+            // queue / completed-dedup set would STARVE every post-reload client geoscape-event raise (defer forever
+            // / dedup-Ignore) → the client stops showing ALL events. Mirror the Arbiter reset. No-op on the host.
+            _engine.Sync?.ResetEventMirror();
+
             var serializer = game.SaveManager.Serializer;
             var slice = new TimeSlice(serializer.SerializeTimeSlice);
 
