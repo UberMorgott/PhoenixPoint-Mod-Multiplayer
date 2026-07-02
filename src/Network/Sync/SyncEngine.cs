@@ -254,6 +254,10 @@ namespace Multipleer.Network.Sync
         /// <summary>Host: WalletWatcher callback when the player wallet changes (coalesced in Tick).</summary>
         public void MarkWalletDirty()
         {
+            // DIAG (wallet rail): log the clean→dirty transition only — ResourcesChanged can fire several
+            // times inside one flush window; the Tick flush logs the amounts actually shipped. No behavior change.
+            if (!_walletDirty)
+                Debug.Log("[Multipleer] Wallet marked dirty (ResourcesChanged echo) — coalesced flush next Tick");
             _walletDirty = true;
             // Host BAR repaint kick (cosmetic): the host's persistent top resource bar (UIModuleInfoBar) repaints
             // ONLY off the native View.FactionResourcesChanged event and lags while an event modal is open — so
@@ -269,12 +273,34 @@ namespace Multipleer.Network.Sync
 
         public void OnWalletSync(byte[] data)
         {
-            if (_engine.IsHost) return;   // host is the authority; never applies an echo
-            if (!SyncProtocol.TryDecodeWalletSync(data, out var ver, out var slots)) return;
-            if (!_tracker.ShouldApplyWallet(ver)) return;
+            // DIAG (wallet rail): every silent drop below gets one distinguishable guard= line, and every
+            // apply logs received amounts + local before→after — all rare (one inbound per host broadcast).
+            // No behavior change.
+            if (_engine.IsHost)
+            {
+                Debug.Log("[Multipleer] Wallet sync dropped guard=is-host (authority never applies an echo)");
+                return;   // host is the authority; never applies an echo
+            }
+            if (!SyncProtocol.TryDecodeWalletSync(data, out var ver, out var slots))
+            {
+                Debug.Log("[Multipleer] Wallet sync dropped guard=decode-failed len=" + (data == null ? -1 : data.Length));
+                return;
+            }
+            if (!_tracker.ShouldApplyWallet(ver))
+            {
+                Debug.Log("[Multipleer] Wallet sync dropped guard=stale-version ver=" + ver);
+                return;
+            }
             _tracker.MarkWallet(ver);
+            var before = WalletApplier.Snapshot(GeoRuntime.Instance);
             try { using (SyncApplyScope.Enter()) WalletApplier.Apply(GeoRuntime.Instance, slots); }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnWalletSync failed: " + ex.Message); }
+            if (before == null)
+                Debug.Log("[Multipleer] Wallet sync apply no-op guard=wallet-null ver=" + ver
+                          + " recv=" + WalletSlotsString(slots) + " (client wallet not live yet; version already marked)");
+            else
+                Debug.Log("[Multipleer] Wallet sync applied ver=" + ver + " recv=" + WalletSlotsString(slots)
+                          + " localΔ=" + WalletDiffString(before, WalletApplier.Snapshot(GeoRuntime.Instance)));
             // The persistent top resource bar (UIModuleInfoBar) repaints only from native Wallet model
             // events, which the reflective WalletApplier.Apply write doesn't trip — so the synced money sat
             // stale until the client's next local action. Re-drive the native repaint now (no-op if no view).
@@ -284,9 +310,19 @@ namespace Multipleer.Network.Sync
         /// <summary>Host: push a full versioned wallet snapshot (geoscape became active / late joiner ready).</summary>
         public void BroadcastFullWallet()
         {
-            if (!_engine.IsHost) return;
+            // DIAG (wallet rail): guard= lines for the silent drops + one line per actual push (all rare:
+            // watcher (re)bind seed + session ready re-broadcast). No behavior change.
+            if (!_engine.IsHost)
+            {
+                Debug.Log("[Multipleer] Wallet full-broadcast skipped guard=not-host");
+                return;
+            }
             var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
-            if (slots == null) return;
+            if (slots == null)
+            {
+                Debug.Log("[Multipleer] Wallet full-broadcast skipped guard=wallet-null (geoscape wallet not live yet)");
+                return;
+            }
             ulong ver = ++_walletVersion;
             // Rail-unify phase 1: the legacy 0x63 WalletSync send is RETIRED — the versioned full-wallet snapshot
             // now rides ONLY the unified 0x67 envelope rail under the GeoWallet (0xA0) surface. The inner bytes are
@@ -295,8 +331,65 @@ namespace Multipleer.Network.Sync
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                 SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                     SyncProtocol.EncodeWalletSync(ver, slots))));
+            Debug.Log("[Multipleer] Wallet full-broadcast ver=" + ver + " slots=" + WalletSlotsString(slots));
             // Baseline = what we just sent, so the Tick snapshot-diff poll won't re-fire this push.
             _lastWalletBroadcast = slots;
+        }
+
+        // ─── Wallet diag formatting (pure string helpers for the rail logs above/below) ───
+
+        /// <summary>Human name for a vanilla ResourceType flag value (see <see cref="WalletApplier"/>).</summary>
+        private static string WalletResName(int type)
+        {
+            switch (type)
+            {
+                case 1: return "Supplies";
+                case 2: return "Materials";
+                case 4: return "Tech";
+                case 8: return "AICore1";
+                case 0x10: return "AICore2";
+                case 0x20: return "AICore3";
+                case 0x40: return "Research";
+                case 0x80: return "Production";
+                case 0x100: return "Mutagen";
+                case 0x200: return "LivingCrystals";
+                case 0x400: return "Orichalcum";
+                case 0x800: return "ProteanMutane";
+                default: return "Res" + type;
+            }
+        }
+
+        /// <summary>All slots as "[Supplies=120 Materials=45 …]"; "(null)" when no snapshot.</summary>
+        private static string WalletSlotsString(List<(int type, float value)> slots)
+        {
+            if (slots == null) return "(null)";
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < slots.Count; i++)
+            {
+                if (i > 0) sb.Append(' ');
+                sb.Append(WalletResName(slots[i].type)).Append('=').Append(slots[i].value.ToString("0.##"));
+            }
+            return sb.Append(']').ToString();
+        }
+
+        /// <summary>Only the slots that moved, as "Supplies=100→120"; "(none)" when equal; explicit
+        /// seed marker when there is no baseline yet. Eps mirrors <see cref="WalletSnapshotDiff"/>.</summary>
+        private static string WalletDiffString(List<(int type, float value)> from, List<(int type, float value)> to)
+        {
+            if (to == null) return "(to=null)";
+            if (from == null) return "seed(no-baseline) now=" + WalletSlotsString(to);
+            var old = new Dictionary<int, float>(from.Count);
+            foreach (var (t, v) in from) old[t] = v;
+            var sb = new StringBuilder();
+            foreach (var (t, v) in to)
+            {
+                if (old.TryGetValue(t, out float ov) && Math.Abs(v - ov) <= 0.0001f) continue;
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(WalletResName(t)).Append('=')
+                  .Append(old.TryGetValue(t, out float o) ? o.ToString("0.##") : "?")
+                  .Append('→').Append(v.ToString("0.##"));
+            }
+            return sb.Length == 0 ? "(none)" : sb.ToString();
         }
 
         // ─── Generic state-channel echo (mechanism C) ────────────────────
@@ -895,7 +988,14 @@ namespace Multipleer.Network.Sync
                 _walletPollTick = 0;
                 var polled = WalletApplier.Snapshot(GeoRuntime.Instance);
                 if (polled != null && WalletSnapshotDiff.Changed(_lastWalletBroadcast, polled))
+                {
                     _walletDirty = true;
+                    // DIAG (wallet rail): fires ONLY on drift, i.e. the ResourcesChanged event path missed
+                    // this change (or no baseline was ever broadcast). The dirty-flush below logs the
+                    // resulting broadcast. No behavior change, no per-tick spam.
+                    Debug.Log("[Multipleer] Wallet poll drift detected (event path missed it) Δ="
+                              + WalletDiffString(_lastWalletBroadcast, polled) + " — arming dirty-flush");
+                }
             }
 
             // Host: bind every state channel's change-event the same way (idempotent per channel).
@@ -914,9 +1014,19 @@ namespace Multipleer.Network.Sync
                     _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                         SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                             SyncProtocol.EncodeWalletSync(ver, slots))));
+                    // DIAG (wallet rail): one line per coalesced flush (event path or poll backstop).
+                    Debug.Log("[Multipleer] Wallet dirty-flush broadcast ver=" + ver
+                              + " slots=" + WalletSlotsString(slots)
+                              + " Δvs-last=" + WalletDiffString(_lastWalletBroadcast, slots));
                     // Baseline = exactly what we just sent, so the poll won't immediately re-fire it (covers both
                     // the event-path and poll-path dirty, regardless of whether the poll ran this tick).
                     _lastWalletBroadcast = slots;
+                }
+                else
+                {
+                    // DIAG (wallet rail): the dirty flag is consumed but nothing shipped — the wallet vanished
+                    // (left geoscape / mid-load). The poll or watcher rebind re-arms once it returns.
+                    Debug.Log("[Multipleer] Wallet dirty-flush skipped guard=wallet-null (dirty flag dropped; poll/rebind re-arms when wallet returns)");
                 }
             }
 

@@ -35,6 +35,13 @@ namespace Multipleer.Network.Sync
             _wallet = wallet;
             _handler = WalletReflection.SubscribeResourcesChanged(
                 wallet, () => NetworkEngine.Instance?.Sync?.MarkWalletDirty());
+            // DIAG (wallet rail): a (re)bind is rare — log which action ran and whether the ResourcesChanged
+            // subscribe actually landed. A null handler = event path DEAD (poll backstop only). No behavior change.
+            UnityEngine.Debug.Log("[Multipleer] Wallet watcher " + action
+                + (_handler == null
+                    ? " guard=subscribe-failed (ResourcesChanged event path DEAD; poll backstop only)"
+                    : " — ResourcesChanged subscribed")
+                + "; seeding full-wallet broadcast");
             // Seed clients with the authoritative wallet the moment we (re)bind.
             engine.Sync?.BroadcastFullWallet();
         }

@@ -32,6 +32,19 @@ namespace Multipleer.Network.Sync
         private static MethodInfo _applyMethod;       // Wallet.Apply(ResourceUnit, OperationReason)
         private static EventInfo _resourcesChangedEvt;// Wallet.ResourcesChanged
         private static object _reasonNone;            // boxed OperationReason.None
+        private static bool _warnedNotReady;          // one-shot diag for the silent !_ready no-op path
+
+        /// <summary>DIAG (wallet rail): the silent <c>!_ready</c> no-op path (reflection miss) logged ONCE —
+        /// GetAmount/ApplyDiff run 11× per snapshot, so per-call logging would spam. No behavior change.</summary>
+        private static void WarnNotReadyOnce(string site)
+        {
+            if (_warnedNotReady) return;
+            _warnedNotReady = true;
+            Debug.Log("[Multipleer] WalletReflection guard=not-ready at " + site
+                + " getItem=" + (_getItem != null) + " valueField=" + (_ruValueField != null)
+                + " ruCtor=" + (_ruCtor != null) + " apply=" + (_applyMethod != null)
+                + " (wallet reads/writes no-op; logged once)");
+        }
 
         private static void Ensure(object wallet)
         {
@@ -65,7 +78,7 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure(wallet);
-                if (!_ready) return 0f;
+                if (!_ready) { WarnNotReadyOnce("GetAmount"); return 0f; }
                 object enumVal = Enum.ToObject(_resourceType, type);
                 object unit = _getItem.Invoke(wallet, new[] { enumVal }); // boxed ResourceUnit
                 return (float)_ruValueField.GetValue(unit);
@@ -84,7 +97,7 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure(wallet);
-                if (!_ready) return;
+                if (!_ready) { WarnNotReadyOnce("ApplyDiff"); return; }
                 object enumVal = Enum.ToObject(_resourceType, type);
                 object unit = _ruCtor.Invoke(new[] { enumVal, (object)diff }); // ResourceUnit(type, diff)
                 _applyMethod.Invoke(wallet, new[] { unit, _reasonNone });
@@ -109,10 +122,20 @@ namespace Multipleer.Network.Sync
             try
             {
                 Ensure(wallet);
-                if (_resourcesChangedEvt == null) return null;
+                // DIAG (wallet rail): distinguish the two silent reflection-miss returns — either kills the
+                // ResourcesChanged event path (poll backstop only). Rare (bind-time only). No behavior change.
+                if (_resourcesChangedEvt == null)
+                {
+                    Debug.Log("[Multipleer] Wallet ResourcesChanged subscribe guard=event-missing (reflection miss)");
+                    return null;
+                }
                 Type handlerType = _resourcesChangedEvt.EventHandlerType;
                 MethodInfo invoke = handlerType.GetMethod("Invoke");
-                if (invoke == null) return null;
+                if (invoke == null)
+                {
+                    Debug.Log("[Multipleer] Wallet ResourcesChanged subscribe guard=invoke-missing on " + handlerType.Name);
+                    return null;
+                }
 
                 ParameterInfo[] ps = invoke.GetParameters();
                 Type[] sig = new Type[ps.Length];
