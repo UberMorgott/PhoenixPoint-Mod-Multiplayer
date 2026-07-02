@@ -9,8 +9,11 @@ namespace Multipleer.Network
     // flag; the legacy producer-table + event-suppress path stays until S4 so flag-OFF = known-good rollback.
     public static class ClientSimFreeze
     {
-        // Default-OFF. Flip only for the S1 in-game gate (a separate, revertable commit).
-        public static bool Enabled = false;
+        // Default-OFF by design. FLIPPED ON here for the Inc4 S1 in-game gate — this is the single,
+        // revertable "enable" commit (rollback = `git revert` it → back to default-OFF → legacy suppress
+        // path fully restored, no behaviour change). Do NOT treat flag-ON as permanent; S3 makes it the
+        // committed default only after the S1+S2 gates pass.
+        public static bool Enabled = true;
 
         // Pure, Unity-free freeze-decision gate (mirrors ClientTftvAircraftFreezeGate.ShouldRunTftvNormally
         // so the truth table is unit-testable without NetworkEngine or game types). Freeze the client

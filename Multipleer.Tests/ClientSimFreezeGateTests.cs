@@ -44,10 +44,13 @@ public class ClientSimFreezeGateTests
     }
 
     [Fact]
-    public void FlagDefaultsOff()
+    public void FlagEnabledForS1InGameGate()
     {
-        // S0 ships inert: the flag is default-OFF so the scaffolding is byte-unchanged in-game.
-        Assert.False(ClientSimFreeze.Enabled);
+        // The flag is DESIGNED default-OFF (inert scaffolding), but it is FLIPPED ON for the Inc4 S1 in-game
+        // gate by the single revertable "enable" commit. This test pins that live state: `git revert` of that
+        // commit restores `Enabled = false` AND this assertion (back to `Assert.False`) together — clean
+        // rollback. It flips back to the committed default at S3 only after the S1+S2 gates pass.
+        Assert.True(ClientSimFreeze.Enabled);
     }
 
     // ─── Inc4 S1 (§3.2) — DISPLAY-clock vs SIM-clock split (WriteClock paused-field selection) ───
