@@ -2,6 +2,8 @@
 
 Living roadmap + status tracker for the PhoenixPoint co-op multiplayer sync. NEW SESSION: read the STATUS table + CURRENT POSITION first — they say which sub-project is active and the next action.
 
+> **Last verified against code: 2026-07-02** — HEAD `b0e20a0` (2026-06-30); 926 tests green (919 unit + 7 bridge).
+
 ## Vision
 
 - PhoenixPoint co-op multiplayer, host-authoritative, up to ~10 players
@@ -85,7 +87,7 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
   - T4 pure SurfaceRouter+ISyncSink (7 router tests, host-auth chokepoint, security-reviewed APPROVED) `8068c89`
   - T5 RegisterSurfaces (9 action surfaces) `85e402b`
   - T6 wire into SyncEngine (ADDITIVE — legacy path still primary, envelope receive DORMANT, build 0err/0warn) `0ed4937`
-- **Tests:** 196 -> 215 green. Mod build 0 err / 0 warn. Each task reviewed (spec+quality), fixes looped.
+- **Tests:** 196 -> 215 green at Phase-1 merge (926 green now = 919 unit + 7 bridge). Mod build 0 err / 0 warn. Each task reviewed (spec+quality), fixes looped.
 - **IN-GAME STATUS:** UNVERIFIED. Tasks 1-6 are additive so in-game behavior is byte-unchanged (nothing emits SyncEnvelope yet; `SendActionRequest` still legacy).
 - **Task 7 DEFERRED** (flip `SendActionRequest`->envelope + DELETE legacy `OnActionRequest`/`OnActionApply`/route cases): requires IN-GAME GATE #1 first (user verifies envelope path host+client DirectIP, same DLL). After gate #1 OK -> execute Task 7 from the plan -> IN-GAME GATE #2 = Phase-1 acceptance.
 - **Phase-2 carryovers (noted during impl):**
@@ -101,7 +103,7 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 
 > **2026-06-17:** per-surface piecemeal replaced by Inc1-Inc5 (see ARCHITECTURE DECISION above). The per-domain channels below are the interim baseline to RETIRE (Inc4), not extend.
 
-- **Interim baseline (working, deployed):** research (ResearchChannel ch2), manufacture, facility, geoscape-events (answer), wallet echo, time-sync (anchor-rate clock)
+- **Interim baseline (working, deployed):** research (ResearchChannel ch2), manufacture, facility, geoscape-events (answer), wallet echo, time-sync (anchor-rate clock) — wallet/state echo now ride the unified `0x67` envelope (`0xA0 GeoWallet`/`0xA1 GeoState`) as the SOLE rail; legacy `0x63`/`0x64` retired `a4781ae` (2026-06-26)
 - **Full-replication replaces:** pause (subsumed by sim-freeze Inc1), aircraft control (discrete StartTravel Inc2), equipment/customization/recruitment (GeoFaction InstanceData-diff Inc3), quests/events (host-only fire + EventSystemInstanceData Inc2/Inc3)
 - Base-building completeness carries forward as a discrete `ISyncedAction` surface
 
@@ -123,34 +125,33 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 |---|---|---|
 | **ARCHITECTURE** | **DECIDED 2026-06-17** | Full host→client geoscape state replication adopted as spine; per-domain channels = interim baseline to retire; see ARCHITECTURE DECISION section |
 | #0 Feasibility recon | **DONE** | all 4 items feasible, no hard blockers; see #0 Result block |
-| #1 Core skeleton | **IN PROGRESS — Phase 1 code-complete (Tasks 1-6), Task 7 pending in-game gate** | spec+plan written; 6/7 tasks merged to inner main; 215 tests green; in-game UNVERIFIED (additive, behavior-unchanged) |
+| #1 Core skeleton | **IN PROGRESS — Phase 1 code-complete (Tasks 1-6), Task 7 pending in-game gate** | spec+plan written; 6/7 tasks merged to inner main; 926 tests green (919 unit + 7 bridge); in-game UNVERIFIED (additive, behavior-unchanged) |
 | #2 Migrate existing + in-game gate | IN PROGRESS | surfaces below already work & deployed; skeleton consolidation pending; in-game verification ongoing |
 | #3 Geoscape surfaces | **REFRAMED → Inc1-Inc5** | interim baseline DONE: research, manufacture, facility, geoscape-events(answer), wallet, time/anchor-rate. Full-replication increments replace per-surface piecemeal |
 | Inc1 sim-freeze | **CODE-COMPLETE @ `546dcca`** | 13-producer freeze + TFTV maintenance guard + snapshot-on-join; build clean, unit tests green; **in-game verification pending** (acceptance gate not yet run) |
-| Inc2 discrete deltas | NOT STARTED | entity-op + travel + events via SurfaceRouter |
+| Inc2 discrete deltas | **PARTIALLY STARTED** | host-only geoscape event fire + EventSystem work landed (`576b585`, `e09915f`, `8a05616`); entity-op + travel NOT landed |
 | Inc3 InstanceData-diff | NOT STARTED | generic per-entity diff; retire per-domain channels starts here |
 | Inc4 retire channels | NOT STARTED | surface-by-surface; each in-game-gated |
 | Inc5 CRC + reconnect | NOT STARTED | divergence detection + reconnect (folds old #5) |
+| Rail unification (geoscape) | **DONE @ `a4781ae` (2026-06-26)** | legacy `0x63`/`0x64` retired; `0xA0 GeoWallet`/`0xA1 GeoState` on the `0x67` envelope = SOLE geoscape wallet/state rail; `GeoRailGate` flag dead + removed |
 | Tac Inc1 position (0x0008) | **BUILT** | delta pos in `tac.actorstate` 0x8F; in-game pending |
-| Tac Inc2 facing (0x0010) | **CODE-COMPLETE @ `74b462c`** | `feat(tactical): wire actor facing 0x0010 into actor-state delta`; build 0 err / 0 warn, 888 tests green (+6 new); **in-game acceptance gate pending**; plan: `docs/superpowers/plans/2026-06-25-multipleer-tactical-fullstate-spine-roadmap.md` §4 |
-| Tac Inc3 combat outcome + VFX | NEXT | enemy-turn camera + explosion VFX from damage-state |
+| Tac Inc2 facing (0x0010) | **CODE-COMPLETE @ `74b462c`** | `feat(tactical): wire actor facing 0x0010 into actor-state delta`; build 0 err / 0 warn, 926 tests green; **in-game acceptance gate pending**; plan: `docs/superpowers/plans/2026-06-25-multipleer-tactical-fullstate-spine-roadmap.md` §4 |
+| Tac Inc3 combat outcome + VFX | **IN PROGRESS** | enemy-turn camera chase landed (`4b561b8`, `8b78360`, `3fbfef6`, `ebca1b9`); explosion VFX from damage-state pending |
 | #4 10-player efficiency | NOT STARTED | property of #1/Inc3 |
 | OUT | — | host-migration, network obfuscation — excluded by decision |
 
 ## CURRENT POSITION (update each session)
 
 - **Shipped (pre-skeleton):** inner main HEAD `60f45a2` (NOT pushed), DLL signature `829DA4F5`, deployed to `D:\Steam\steamapps\common\Phoenix Point\Mods\Multipleer`, 196 tests green
-- **#1 skeleton Phase 1:** inner main HEAD `74b462c` (NOT pushed), 888 tests green, build 0err/0warn. Tasks 1-6 merged (see #1 Phase 1 progress block above). In-game UNVERIFIED (additive, behavior-unchanged). Tactical Inc2 (facing 0x0010) code-complete at `74b462c`.
+- **HEAD = `b0e20a0` (2026-06-30), NOT pushed.** 926 tests green (919 unit + 7 bridge), build 0err/0warn. Tasks 1-6 merged (see #1 Phase 1 progress block above); in-game UNVERIFIED (additive, behavior-unchanged). Tactical Inc2 (facing 0x0010) code-complete; **Tac Inc3** (enemy-turn camera chase) IN PROGRESS (`4b561b8`, `8b78360`, `3fbfef6`, `ebca1b9`). **Geo Inc2** partially started (host-only event fire + EventSystem: `576b585`, `e09915f`, `8a05616`; entity-op/travel NOT landed). Geoscape rail unified — legacy `0x63`/`0x64` retired `a4781ae` (2026-06-26); `0xA0 GeoWallet`/`0xA1 GeoState` on the `0x67` envelope are the SOLE geoscape wallet/state rail; `GeoRailGate` flag dead + removed.
 - **Working & deployed:**
   - Host-authoritative sync engine
-  - Synced surfaces = research (single-source-of-truth via `ResearchChannel` ch2), manufacture, facility, geoscape events (answer), wallet echo, time-sync (anchor-rate clock)
+  - Synced surfaces = research (single-source-of-truth via `ResearchChannel` ch2), manufacture, facility, geoscape events (answer), wallet echo (`0xA0`/`0xA1` sole rail on the `0x67` envelope), time-sync (anchor-rate clock)
   - Universal UI reactivity (`GeoUiRefresh.RefreshNeedsKick`: Research / Manufacturing / BaseLayout; wallet/events/time self-update)
   - Client->host unblocked via `PermissionManager` seeding in `HandlePeerList`
 - **NEXT ACTIONS (resume here):**
-  1. Build + deploy mod DLL (inner main HEAD `0ed4937`)
-  2. **IN-GAME GATE #1:** host+client DirectIP, confirm research/manufacture/facility/events sync unchanged (skeleton is additive/dormant — expect zero behavior delta)
-  3. On GATE #1 pass -> execute **Task 7** from plan (`docs/superpowers/plans/2026-06-17-multipleer-core-skeleton.md`): flip `SendActionRequest`->envelope + DELETE legacy `OnActionRequest`/`OnActionApply`/route cases
-  4. **IN-GAME GATE #2** = Phase-1 acceptance (envelope path end-to-end host+client)
-  5. On GATE #2 pass -> begin **Inc1** (client sim-freeze + TFTV maintenance guard + snapshot-on-join verification) — the first full-replication increment
+  1. **Burn down the in-game-verify backlog** — 7 deployed-not-verified fixes: `b0e20a0` event dedup+FIFO, `34cca92` aim relay, `b8e50ec`+`dd47ad1` status magnitude, `3eaf77c` invis-targeting, `f005acc` wallet poll, `cda982c` camera-steal, `09bf9ce`+`1878aa8` host-bind/arbiter
+  2. **Inc4 client sim-freeze design review**
+  3. **Action-relay `0x60`-`0x62` envelope cutover design review**
 - **Architecture spine (2026-06-17):** full host→client geoscape state replication; per-domain channels = interim baseline → retire at Inc4. Design doc: `docs/superpowers/specs/2026-06-17-multipleer-full-geoscape-replication-feasibility.md`
 - **Note:** per-sub-project design specs go to `E:\DEV\PhoenixPoint\docs\superpowers\specs\YYYY-MM-DD-<topic>-design.md` when each is brainstormed; this file is the higher-level living tracker

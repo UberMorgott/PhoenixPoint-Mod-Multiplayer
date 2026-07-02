@@ -1,3 +1,9 @@
+> **⚠ ANCESTOR VISION (2026-06-08).** The high-level co-op concept below still holds, but this
+> document's ARCHITECTURE is SUPERSEDED by the unified `0x67` sync backbone + sync canon
+> (see `../../CLAUDE.md` "Multiplayer sync canon" + `../COOP-SYNC-ROADMAP.md`). Known-stale patch
+> names herein: the real hooks are `Research.AddResearchToQueue` and
+> `ItemManufacturing.ManufactureItem`. Read as design lineage, not as-built.
+
 # Multipleer — Cooperative Multiplayer Mod Design
 
 > This is the action-sync core design. Session/lobby/identity/persistence design → [02-session-lifecycle-and-player-management](02-session-lifecycle-and-player-management.md); SDK unknowns backlog → [03-open-questions-sdk](03-open-questions-sdk.md). Decompiled source-dive findings live under [../research/](../research/); as-built implementation under [../engine/](../engine/).

@@ -1,3 +1,8 @@
+> **⚠ SUPERSEDED 2026-07-02.** This note describes the THIN-CLIENT vehicle-sync pivot era
+> (2026-06-14, 193 tests) and is kept for lineage only. **Current truth = `../COOP-SYNC-ROADMAP.md`**
+> (unified `0x67` sync backbone, HEAD `b0e20a0`, 926 tests). The co-op **loading-screen internals**
+> section below is still accurate; treat everything else as historical.
+
 # Multipleer — Current State (status note)
 
 > Single-glance "where are we now" for the co-op mod. Updated as the as-built state moves.
