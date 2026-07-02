@@ -514,18 +514,22 @@ namespace Multipleer.Network.Sync
         /// Save-load / co-op save-transfer boundary reset for the CLIENT event-mirror — the sibling of the host-side
         /// <see cref="Arbiter"/>.Reset() (both are driven from <c>SaveTransferCoordinator.PrepareEntryFromBlobCrt</c>).
         /// The SyncEngine — hence its <see cref="State.EventCorrelator"/> and the two Unity-side stashes it drives —
-        /// is NOT recreated on a mid-session reload (only on full session teardown), and the host REUSES occurrence
-        /// ids across the reload. Without this the stale busy single slot (<c>_shownSlot</c>), deferred-raise queue,
-        /// and completed-dedup set would STARVE every post-reload client raise (busy slot → defer forever; reused
-        /// occId → dedup-Ignore), so the client stops showing ALL geoscape events. Clears the pure correlator plus
-        /// the two build/reward stashes it drives. No-op on the host (it never populates the client mirror), exactly
-        /// as Arbiter.Reset() is a no-op on a client.
+        /// is NOT recreated on a mid-session reload (only on full session teardown). Occurrence ids are
+        /// process-lifetime MONOTONIC (<c>EventOccurrenceIds._counter</c> never resets in production; ResetForTests
+        /// has no production callers), so ids are NOT reused across a reload — the real hazard is STALE IN-FLIGHT
+        /// display state: a busy single slot (<c>_shownSlot</c>) and deferred-raise queue whose dismisses/advances
+        /// will NEVER arrive after the reload (the pre-reload host occurrences are gone). Without this reset every
+        /// post-reload raise would defer behind the wedged slot forever and the client stops showing ALL geoscape
+        /// events. Clears the pure correlator, the two build/reward stashes it drives, and the EventDisplay
+        /// open-occurrence record. No-op on the host (it never populates the client mirror), exactly as
+        /// Arbiter.Reset() is a no-op on a client.
         /// </summary>
         public void ResetEventMirror()
         {
             _eventCorrelator.Reset();
             _queuedRaises.Clear();
             _bufferedRewards.Clear();
+            State.EventDisplay.ResetOpenOccurrence();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -552,7 +556,21 @@ namespace Multipleer.Network.Sync
             while (_eventCorrelator.TryDequeueNext(out var next))
             {
                 ushort occId = next.OccurrenceId;
-                _queuedRaises.TryGetValue(occId, out var q);
+                if (!_queuedRaises.TryGetValue(occId, out var q))
+                {
+                    // DEFENSIVE (should never happen: the stash is written at Enqueue and dropped only on
+                    // resolve/reset): a released raise with NO build stash cannot be shown — a default
+                    // QueuedRaise (null eventId) would occupy the correlator slot with a dialog that never
+                    // renders and whose dismiss the host never re-sends → slot wedged, all later dialogs
+                    // starved. Log + skip; for a slot-occupying ShowDialog also abort it in the correlator
+                    // (frees the slot + terminal dedup) so the drain can continue.
+                    Debug.LogError("[Multipleer] CLIENT released queued event occId=" + occId + " decision=" + next.Kind +
+                                   " but its build stash is MISSING → skipped (slot freed)");
+                    if (next.Kind == State.EventCorrelator.ActionKind.ShowDialog)
+                        _eventCorrelator.AbortShow(occId);
+                    DropBufferedReward(occId);
+                    continue;
+                }
                 _queuedRaises.Remove(occId);
                 Debug.Log("[Multipleer] CLIENT releasing queued event occId=" + occId + " eventId=" + q.EventId +
                           " decision=" + next.Kind + " (remaining queued=" + _eventCorrelator.QueuedCount + ")");

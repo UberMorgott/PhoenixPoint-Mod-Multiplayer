@@ -105,6 +105,10 @@
     <!-- Client raise/dismiss correlation + ordering brain (pure, Unity-free): occurrence-id keyed open map +
          out-of-order dismiss buffer. Fixes the same-def-id collision / Dismiss-before-Raise bug. -->
     <Compile Include="..\src\Network\Sync\State\EventCorrelator.cs"><Link>Sync\State\EventCorrelator.cs</Link></Compile>
+    <!-- EventDisplay binds game types lazily (AccessTools inside try/catch, like GeoUiRefresh/EventReflection
+         above) and never runs reflection in tests; linked so the pure open-occurrence record + its boundary
+         reset (ResetOpenOccurrence, driven by SyncEngine.ResetEventMirror) are unit-testable. -->
+    <Compile Include="..\src\Network\Sync\State\EventDisplay.cs"><Link>Sync\State\EventDisplay.cs</Link></Compile>
     <!-- Burst-safe keyed reward-render pending slots (pure, Unity-free): replaces the single reference-identity
          slot under EventMirrorFixGate so a 2nd result page (or empty-reward ClearPending) can't clobber a live
          reward. RewardDisplayReflection (game-bound) delegates to it; linked here for direct unit tests. -->

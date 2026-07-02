@@ -410,6 +410,102 @@ public class EventCorrelatorTests
         Assert.Equal(Kind.ShowResultPage, next3.Kind);
     }
 
+    // ─── pending-dismiss eviction must never starve a DEFERRED raise (slot-wedge hardening) ─────────
+
+    [Fact]  // eviction skips an occId whose raise is deferred in the queue; its release still resolves to the result
+    public void PendingEviction_SkipsQueuedOccId_ReleasedRaiseStillResolvesToResult()
+    {
+        var c = new EventCorrelator();
+
+        // A dialog is shown (slot busy); event 50's result-bearing dismiss lands, then its raise is DEFERRED.
+        Assert.Equal(Kind.ShowDialog, c.Raised(100, "SHOWN").Kind);
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(50, "Q", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.Enqueue, c.Raised(50, "Q").Kind);
+
+        // Flood the pending buffer to capacity with unrelated out-of-order dismisses. Eviction must SKIP
+        // occ 50 (its raise is queued — evicting its dismiss would make the released raise pop as a plain
+        // ShowDialog for an event the host ALREADY resolved → its dismiss never comes again → slot wedged
+        // forever, all later dialogs starved) and evict the oldest NON-queued entry instead.
+        for (int i = 0; i < EventCorrelator.MaxPendingDismiss; i++)
+            Assert.Equal(Kind.BufferDismiss, c.Dismissed((ushort)(200 + i), "F", choiceIndex: 0).Kind);
+        Assert.Equal(EventCorrelator.MaxPendingDismiss, c.PendingCount);   // still hard-bounded
+
+        // Shown dialog closes → slot frees → occ 50 is released and MUST resolve to its result page
+        // (its buffered dismiss survived eviction), not pop as an orphan ShowDialog.
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(100, "SHOWN", choiceIndex: -1).Kind);
+        Assert.True(c.TryDequeueNext(out var released));
+        Assert.Equal(50, released.OccurrenceId);
+        Assert.Equal(Kind.ShowResultPage, released.Kind);
+        Assert.Equal(0, released.ChoiceIndex);
+
+        // The evicted entry was the oldest NON-queued flood id (200): its late raise finds no buffered
+        // dismiss → plain ShowDialog (slot free — occ 50's release above was terminal).
+        Assert.Equal(Kind.ShowDialog, c.Raised(200, "F").Kind);
+    }
+
+    [Fact]  // every buffered dismiss is queued-linked → eviction is refused (transient overshoot) and self-drains
+    public void PendingEviction_AllCandidatesQueued_RefusesEviction_AndOvershootSelfDrains()
+    {
+        var c = new EventCorrelator();
+
+        Assert.Equal(Kind.ShowDialog, c.Raised(1, "SHOWN").Kind);   // slot busy
+
+        // Fill the buffer to capacity where EVERY pending dismiss belongs to a raise deferred in the queue.
+        for (int i = 0; i < EventCorrelator.MaxPendingDismiss; i++)
+        {
+            ushort occ = (ushort)(10 + i);
+            Assert.Equal(Kind.BufferDismiss, c.Dismissed(occ, "E", choiceIndex: 0).Kind);
+            Assert.Equal(Kind.Enqueue, c.Raised(occ, "E").Kind);
+        }
+        Assert.Equal(EventCorrelator.MaxPendingDismiss, c.PendingCount);
+
+        // One more unrelated out-of-order dismiss: every eviction candidate is queued-linked → REFUSE
+        // eviction (evicting any would wedge the slot); the buffer exceeds the cap transiently.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(999, "X", choiceIndex: 0).Kind);
+        Assert.Equal(EventCorrelator.MaxPendingDismiss + 1, c.PendingCount);
+
+        // The overshoot self-drains: closing the shown dialog releases each deferred raise terminally
+        // (ShowResultPage consumes its pending entry; terminal → slot stays free → the drain continues).
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(1, "SHOWN", choiceIndex: -1).Kind);
+        for (int i = 0; i < EventCorrelator.MaxPendingDismiss; i++)
+        {
+            Assert.True(c.TryDequeueNext(out var released));
+            Assert.Equal(10 + i, released.OccurrenceId);
+            Assert.Equal(Kind.ShowResultPage, released.Kind);
+        }
+        Assert.False(c.TryDequeueNext(out _));
+        Assert.Equal(0, c.QueuedCount);
+        Assert.Equal(1, c.PendingCount);   // only the unrelated 999 remains buffered — back under the cap
+    }
+
+    // ─── released raise whose build stash is missing (defensive): abort the show, never wedge the slot ────
+
+    [Fact]
+    public void AbortShow_OnReleasedRaiseWithMissingStash_FreesSlotAndDedups()
+    {
+        var c = new EventCorrelator();
+
+        Assert.Equal(Kind.ShowDialog, c.Raised(1, "A").Kind);
+        Assert.Equal(Kind.Enqueue, c.Raised(2, "B").Kind);
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(1, "A", choiceIndex: -1).Kind);
+
+        // Occ 2 is released and decided ShowDialog → the slot is occupied for it...
+        Assert.True(c.TryDequeueNext(out var released));
+        Assert.Equal(Kind.ShowDialog, released.Kind);
+        Assert.Equal(2, released.OccurrenceId);
+        Assert.Equal(1, c.OpenCount);
+
+        // ...but the (Unity-bound) caller finds NO build stash for it (defensive: should never happen) →
+        // it must NOT show a null dialog; aborting frees the slot instead of wedging it forever.
+        c.AbortShow(2);
+        Assert.Equal(0, c.OpenCount);
+
+        // Slot is free: the next raise shows immediately (no starvation)…
+        Assert.Equal(Kind.ShowDialog, c.Raised(3, "C").Kind);
+        // …and the aborted occurrence is terminally deduped (a late duplicate raise can't resurrect it).
+        Assert.Equal(Kind.Ignore, c.Raised(2, "B").Kind);
+    }
+
     [Fact]  // a burst mixing a plain raise and single-choice raises all route through the ONE slot, in occId order
     public void MixedPlainAndSingleChoiceBurst_ReleasedInOccIdOrder()
     {

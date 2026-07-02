@@ -647,9 +647,10 @@ namespace Multipleer.Network
 
             // Same reload boundary, CLIENT side: the SyncEngine's event-mirror (occId EventCorrelator + the
             // deferred-raise build stash + the buffered-reward stash) is likewise NOT recreated on a mid-session
-            // reload, and occIds are REUSED across it. Without this the stale busy single slot / deferred-raise
-            // queue / completed-dedup set would STARVE every post-reload client geoscape-event raise (defer forever
-            // / dedup-Ignore) → the client stops showing ALL events. Mirror the Arbiter reset. No-op on the host.
+            // reload. occIds are process-lifetime MONOTONIC (never reused — EventOccurrenceIds._counter never
+            // resets in production), so the hazard is NOT id collision but STALE IN-FLIGHT display state: a busy
+            // single slot / deferred-raise queue whose dismisses will never arrive post-reload → every post-reload
+            // raise defers forever → the client stops showing ALL events. Mirror the Arbiter reset. No-op on the host.
             _engine.Sync?.ResetEventMirror();
 
             var serializer = game.SaveManager.Serializer;

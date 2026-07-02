@@ -354,6 +354,21 @@ namespace Multipleer.Network.Sync.State
             return true;
         }
 
+        /// <summary>
+        /// The (Unity-bound) caller could NOT execute a ShowDialog decision for <paramref name="occurrenceId"/>
+        /// (its build payload is missing — defensive, should never happen): un-show the occurrence — drop it from
+        /// open/prompt tracking, free the single slot, and mark it terminally completed (dedup) so a late duplicate
+        /// raise/dismiss can't resurrect it. Without this the slot would stay occupied by a dialog that never
+        /// rendered (and whose dismiss the host will never re-send) → every later raise defers forever.
+        /// </summary>
+        public void AbortShow(ushort occurrenceId)
+        {
+            _open.Remove(occurrenceId);
+            _promptMirror.Remove(occurrenceId);
+            if (_shownSlot == occurrenceId) _shownSlot = 0;
+            MarkCompleted(occurrenceId);
+        }
+
         // Record an occurrence as terminally resolved for idempotent dedup of transport-duplicated raises/dismisses.
         // Hard-bounded FIFO: the oldest tracked id is evicted past capacity so this can never leak.
         private void MarkCompleted(ushort occurrenceId)
@@ -370,11 +385,30 @@ namespace Multipleer.Network.Sync.State
         {
             if (!_pending.ContainsKey(occurrenceId))
             {
-                // Evict the oldest buffered dismiss once at capacity so the buffer is hard-bounded.
-                while (_pendingOrder.Count >= MaxPendingDismiss && _pendingOrder.Count > 0)
+                // Evict the oldest buffered dismiss once at capacity so the buffer is hard-bounded — but NEVER
+                // one whose raise is currently DEFERRED in _queue: that dismiss IS the queued raise's resolution,
+                // and evicting it would make the released raise (TryDequeueNext → DecideForRaise) find no pending
+                // → plain ShowDialog for an occurrence the host ALREADY resolved → its dismiss never comes again
+                // → _shownSlot wedges forever and every later dialog starves. Evict the oldest NON-queued entry
+                // instead; if EVERY buffered dismiss is queued-linked, REFUSE eviction and let the buffer exceed
+                // the cap transiently: _queue is itself bounded by real host emissions and each released raise
+                // consumes its pending entry, so the overshoot self-drains — a wedged slot never does. One full
+                // FIFO rotation per insert keeps the eviction order intact for the surviving entries.
+                if (_pendingOrder.Count >= MaxPendingDismiss)
                 {
-                    var oldest = _pendingOrder.Dequeue();
-                    _pending.Remove(oldest);
+                    int n = _pendingOrder.Count;
+                    int toEvict = n - (MaxPendingDismiss - 1);   // room for the new entry (usually 1)
+                    for (int i = 0; i < n; i++)
+                    {
+                        var oldest = _pendingOrder.Dequeue();
+                        if (toEvict > 0 && !_queue.ContainsKey(oldest))
+                        {
+                            _pending.Remove(oldest);
+                            toEvict--;
+                            continue;   // evicted — its FIFO token is not re-enqueued
+                        }
+                        _pendingOrder.Enqueue(oldest);
+                    }
                 }
                 _pendingOrder.Enqueue(occurrenceId);
             }

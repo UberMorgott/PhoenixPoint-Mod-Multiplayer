@@ -53,6 +53,19 @@ namespace Multipleer.Network.Sync.State
         /// <summary>The occurrence id of the dialog this client currently has open (0 = none / synthetic page).</summary>
         public static ushort OpenOccurrenceId => _openOccurrenceId;
 
+        /// <summary>
+        /// Forget the recorded open occurrence — save-load / session boundary reset (driven by
+        /// <c>SyncEngine.ResetEventMirror</c>). Self-heals on the next Show anyway, but a stale non-zero record
+        /// could make one post-boundary Dismiss for a NEW occurrence be refused by the occId close-guard.
+        /// </summary>
+        public static void ResetOpenOccurrence()
+        {
+            _openOccurrenceId = 0;
+        }
+
+        /// <summary>Test-only seed (mirrors EventOccurrenceIds.ResetForTests): the production setter is Show(), which is game-bound.</summary>
+        public static void SetOpenOccurrenceForTests(ushort occurrenceId) => _openOccurrenceId = occurrenceId;
+
         private static void Ensure()
         {
             if (_ready) return;
