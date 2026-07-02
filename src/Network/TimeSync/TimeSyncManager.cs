@@ -127,6 +127,12 @@ namespace Multipleer.Network.TimeSync
         private static MethodInfo _tcSelectTimePresetMethod; // UIModuleTimeControl.SelectTimePreset(int)
         private static FieldInfo _tidPausedField, _tidScaleField, _tidStartTimeField,
             _tidStartFixedTimeField, _tidOwnNowField, _tidOwnFixedNowField;
+        // Review fix BUG 2 — private Base.Core.Timing.RescheduleUpdateables(Timing) →
+        // GetSchedulerInHierarchy().RescheduleForTiming(timing) (Timing.cs:356-358). NOTE: the geoscape
+        // Timing's own public Scheduler FIELD is NULL (GeoLevelController.cs:346-350 sets only ParentTime);
+        // the scheduler lives on the root game Timing, reached only by this method's hierarchy walk — so we
+        // reflect-call the private method rather than the Scheduler field.
+        private static MethodInfo _timingRescheduleMethod;   // Timing.RescheduleUpdateables(Timing)
 
         // Cached live geoscape time-control widget (avoids per-frame FindObjectOfType). A destroyed
         // UnityEngine.Object compares == null, so the helper transparently re-resolves on scene change.
@@ -182,6 +188,7 @@ namespace Multipleer.Network.TimeSync
                 _processInstanceDataMethod = _timingInstanceDataType != null
                     ? AccessTools.Method(timingType, "ProcessInstanceData", new[] { _timingInstanceDataType })
                     : null;
+                _timingRescheduleMethod = AccessTools.Method(timingType, "RescheduleUpdateables", new[] { timingType });
             }
             if (_timeControlType != null)
             {
@@ -270,8 +277,18 @@ namespace Multipleer.Network.TimeSync
                     GlyphHostPaused = _clientAnchor.Paused;
                     GlyphHostSpeedIndex = _clientAnchor.SpeedIndex;
                 }
-                _timingPausedProp.SetValue(timing, true, null); // setter → RescheduleForTiming → Max all producers
-                Debug.Log("[Multipleer] ClientGeoSimFreeze re-asserted: geoscape Timing.Paused = true (sim frozen)");
+                // Review fix BUG 2: the Paused setter SHORT-CIRCUITS when value==_paused (Timing.cs:112) —
+                // no RescheduleForTiming. WriteClock field-pins _paused=true every frame via
+                // ProcessInstanceData (no reschedule); if that pin landed before this re-assert, the setter
+                // no-ops and producers Started while unpaused keep live times (each fires ONE stale tick —
+                // TimingScheduler.CallUpdateable defers only frame-based updateables when paused). So after
+                // committing Paused=true, ALWAYS fire the explicit reschedule (hierarchy walk → root
+                // scheduler → RescheduleForTiming → every producer re-Max's under the paused timing).
+                var t = timing;
+                ClientSimFreeze.ReassertFreeze(
+                    v => _timingPausedProp.SetValue(t, v, null),
+                    () => _timingRescheduleMethod?.Invoke(t, new object[] { t }));
+                Debug.Log("[Multipleer] ClientGeoSimFreeze re-asserted: geoscape Timing.Paused = true + rescheduled (sim frozen)");
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] FreezeClientGeoSim failed: " + ex.Message); }
         }
@@ -797,12 +814,27 @@ namespace Multipleer.Network.TimeSync
         /// <summary>Current geoscape SelectedPresetTime index (for building a pause request payload).</summary>
         public int CurrentSpeedIndex() => GetSpeedIndex();
 
-        /// <summary>Current geoscape paused state (for building a speed request payload); false if unknown.</summary>
+        /// <summary>
+        /// Current geoscape paused state (for building a speed request payload); false if unknown.
+        /// Review fix BUG 1a: under the client sim-freeze the local <c>Timing.Paused</c> is PINNED true,
+        /// so a speed click would relay {Paused=true} and PAUSE the host — when the freeze is active and
+        /// a host anchor exists, read the ANCHOR's paused instead. Host / flag-OFF / pre-anchor: local
+        /// read, byte-identical to the pre-fix behavior.
+        /// </summary>
         public bool CurrentPaused()
         {
+            bool localPaused = false;
             var t = GetTiming();
-            if (t == null) return false;
-            try { return GetPaused(t); } catch { return false; }
+            if (t != null)
+            {
+                try { localPaused = GetPaused(t); } catch { localPaused = false; }
+            }
+            bool freeze = ClientSimFreeze.ShouldFreeze(
+                ClientSimFreeze.Enabled,
+                _engine != null,
+                _engine != null && _engine.IsActiveSession,
+                _engine != null && _engine.IsHost);
+            return ClientSimFreeze.RelayCurrentPaused(freeze, _clientHaveAnchor, _clientAnchor.Paused, localPaused);
         }
     }
 }

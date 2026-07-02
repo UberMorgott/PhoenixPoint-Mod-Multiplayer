@@ -45,7 +45,15 @@ namespace Multipleer.Harmony
             {
                 var ts = engine.TimeSync;
                 if (ts == null) return true;
-                bool relayed = ts.RelayTimeRequest(pause, ts.CurrentSpeedIndex());
+                // Review fix BUG 1b: under the client sim-freeze the widget computed pause =
+                // !_timing.Paused (UIModuleTimeControl.cs:178) off the PINNED-true local Timing → always
+                // false, so the client could only ever UNPAUSE the host. The user's toggle intent is
+                // against the HOST state: relay !GlyphHostPaused instead. Freeze inactive (host /
+                // flag-OFF): the widget's computed arg passes through byte-identical.
+                bool freeze = ClientSimFreeze.ShouldFreeze(
+                    ClientSimFreeze.Enabled, true, engine.IsActiveSession, engine.IsHost);
+                bool requestPaused = ClientSimFreeze.PauseRelayArg(freeze, pause, TimeSyncManager.GlyphHostPaused);
+                bool relayed = ts.RelayTimeRequest(requestPaused, ts.CurrentSpeedIndex());
                 return !relayed; // relayed → block local; otherwise fall through
             }
             catch (Exception ex)

@@ -1,3 +1,5 @@
+using System;
+
 namespace Multipleer.Network
 {
     // Inc4 S0: feature flag + pure gate for the CLIENT geoscape sim-freeze. Design spec:
@@ -44,6 +46,39 @@ namespace Multipleer.Network
         public static bool SimPaused(bool freeze, bool hostPaused)
         {
             return freeze || hostPaused;
+        }
+
+        // Inc4 S1 review fix (BUG 1a) — which "current paused" the client time-control relay reads.
+        // Under the freeze the local Timing.Paused is PINNED true, so relaying it poisons the host
+        // (a speed click would relay {Paused=true} → host pauses). The relayed value must be the HOST
+        // anchor's paused when the freeze is active and an anchor exists; local otherwise (host /
+        // flag-OFF / pre-anchor behavior byte-identical).
+        public static bool RelayCurrentPaused(bool freeze, bool haveAnchor, bool anchorPaused, bool localPaused)
+        {
+            return freeze && haveAnchor ? anchorPaused : localPaused;
+        }
+
+        // Inc4 S1 review fix (BUG 1b) — the paused arg the pause-button relay sends to the host.
+        // The widget computes OnPauseTime(!_timing.Paused) (UIModuleTimeControl.cs:178); with local
+        // Paused pinned true the computed arg is ALWAYS false → the client could only ever unpause.
+        // Under the freeze the user's toggle intent is against the HOST state: send !glyphHostPaused.
+        // No freeze → the widget's computed arg unchanged (host / flag-OFF byte-identical).
+        public static bool PauseRelayArg(bool freeze, bool widgetPauseArg, bool glyphHostPaused)
+        {
+            return freeze ? !glyphHostPaused : widgetPauseArg;
+        }
+
+        // Inc4 S1 review fix (BUG 2) — freeze re-assert must reschedule UNCONDITIONALLY.
+        // Timing.Paused's setter short-circuits when value==_paused (Timing.cs:112) → no
+        // RescheduleForTiming. WriteClock field-pins _paused=true every frame via ProcessInstanceData
+        // (no reschedule); if that pin lands before the re-assert, the setter no-ops and producers
+        // Started while unpaused keep live times (each fires ONE stale tick). Contract: set Paused=true
+        // via the setter, THEN always fire the explicit reschedule (delegate seam = the reflection
+        // call in TimeSyncManager.FreezeClientGeoSim; pure + fakeable here).
+        public static void ReassertFreeze(Action<bool> setPaused, Action rescheduleForTiming)
+        {
+            setPaused(true);            // commit Paused=true FIRST (reschedule must read a paused timing)
+            rescheduleForTiming();      // then ALWAYS reschedule — even when the setter short-circuited
         }
     }
 }
