@@ -2,7 +2,7 @@
 
 Living roadmap + status tracker for the PhoenixPoint co-op multiplayer sync. NEW SESSION: read the STATUS table + CURRENT POSITION first — they say which sub-project is active and the next action.
 
-> **Last verified against code: 2026-07-02** — HEAD `b0e20a0` (2026-06-30); 925 tests green (918 unit + 7 bridge).
+> **Last verified against code: 2026-07-02** — HEAD `b0e20a0` (2026-06-30) + Inc4-S0 scaffolding; 931 tests green (924 unit + 7 bridge).
 
 ## Vision
 
@@ -132,6 +132,7 @@ Each sub-project gets its own spec -> plan -> impl when started. Order: #0 (read
 | Inc2 discrete deltas | **PARTIALLY STARTED** | host-only geoscape event fire + EventSystem work landed (`576b585`, `e09915f`, `8a05616`); entity-op + travel NOT landed |
 | Inc3 InstanceData-diff | NOT STARTED | generic per-entity diff; retire per-domain channels starts here |
 | Inc4 retire channels | NOT STARTED | surface-by-surface; each in-game-gated |
+| **Inc4 client sim-freeze — S0** | **CODE-COMPLETE + DEPLOYED (2026-07-02), awaiting in-game gate** | ROOT fix (reframes Inc1): pause the client geoscape sim CLOCK so ZERO producer fires — one engine-native `Timing.Paused` freeze replacing the producer-table + event-suppress pile. S0 = INERT scaffolding: `ClientSimFreeze.Enabled` flag (default-OFF) + empty guarded `ClientGeoSimFreezePatch` re-assert hook (postfix on `GeoscapeEventSystem.OnLevelStart`, client-only telemetry); byte-unchanged in-game; legacy suppress path kept for flag-OFF rollback. 931 tests green (924 unit + 7 bridge). Spec: `docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md`. S1 wires the actual clock-pause + WriteClock pin + glyph decouple behind the flag. |
 | Inc5 CRC + reconnect | NOT STARTED | divergence detection + reconnect (folds old #5) |
 | Rail unification (geoscape) | **DONE @ `a4781ae` (2026-06-26)** | legacy `0x63`/`0x64` retired; `0xA0 GeoWallet`/`0xA1 GeoState` on the `0x67` envelope = SOLE geoscape wallet/state rail; `GeoRailGate` flag dead + removed |
 | Tac Inc1 position (0x0008) | **BUILT** | delta pos in `tac.actorstate` 0x8F; in-game pending |
