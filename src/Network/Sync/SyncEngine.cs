@@ -507,13 +507,34 @@ namespace Multipleer.Network.Sync
         // emission) and show it — one at a time, so a burst is mirrored in host order without overwriting a dialog.
         private void DrainQueuedRaises(GeoRuntime rt)
         {
-            if (!_eventCorrelator.TryDequeueNext(out var next)) return;
-            if (_queuedRaises.TryGetValue(next.OccurrenceId, out var q))
+            // Release deferred raises while the single client slot is free. LOOP: a TERMINAL resolution (a
+            // buffered-dismiss single-choice → ShowResultPage / DropNoop) does NOT re-occupy the slot, so the next
+            // deferred raise can surface in the SAME drain; a plain / single-choice-prompt ShowDialog DOES occupy it,
+            // so TryDequeueNext returns false the next iteration and the loop stops. Released in occId (host) order.
+            while (_eventCorrelator.TryDequeueNext(out var next))
             {
-                _queuedRaises.Remove(next.OccurrenceId);
-                Debug.Log("[Multipleer] CLIENT releasing queued event occId=" + next.OccurrenceId + " eventId=" + q.EventId +
-                          " (remaining queued=" + _eventCorrelator.QueuedCount + ")");
-                ShowRaisedDialog(rt, next.OccurrenceId, q.EventId, q.SiteId, q.VehicleId, q.HasIdentity, q.Identity);
+                ushort occId = next.OccurrenceId;
+                _queuedRaises.TryGetValue(occId, out var q);
+                _queuedRaises.Remove(occId);
+                Debug.Log("[Multipleer] CLIENT releasing queued event occId=" + occId + " eventId=" + q.EventId +
+                          " decision=" + next.Kind + " (remaining queued=" + _eventCorrelator.QueuedCount + ")");
+                switch (next.Kind)
+                {
+                    case State.EventCorrelator.ActionKind.ShowDialog:
+                        // Plain in-order OR single-choice prompt mirror (ChoiceIndex>=0 → the reward stays stashed for
+                        // the host's later advance). Build + show; occupies the slot → the loop ends next iteration.
+                        ShowRaisedDialog(rt, occId, q.EventId, q.SiteId, q.VehicleId, q.HasIdentity, q.Identity);
+                        break;
+                    case State.EventCorrelator.ActionKind.ShowResultPage:
+                        // Buffered-dismiss single-choice released straight to its result page (reusing the reward
+                        // stashed at the earlier out-of-order dismiss). Terminal → slot stays free, drain continues.
+                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, TakeBufferedReward(occId), q.SiteId);
+                        break;
+                    case State.EventCorrelator.ActionKind.DropNoop:
+                        // Close-only buffered dismiss released → nothing to show; drop any stashed reward.
+                        DropBufferedReward(occId);
+                        break;
+                }
             }
         }
 
@@ -595,6 +616,10 @@ namespace Multipleer.Network.Sync
                 // upcoming raise resolves it straight to the result page.
                 if (decision.Kind == State.EventCorrelator.ActionKind.ShowResultPage)
                     ResolveToResultPage(rt, occId, eventId, choiceIndex, TakeBufferedReward(occId), siteId);
+                // An advance that resolved a prompt mirror just FREED the single slot (EventCorrelator.Advanced
+                // cleared _shownSlot) → release the next deferred raise in occId order, exactly as a dismiss does.
+                // (A buffered/no-op advance leaves the slot busy → TryDequeueNext is a no-op — harmless.)
+                DrainQueuedRaises(rt);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventAdvanceResult failed: " + ex.Message); }
         }

@@ -237,14 +237,16 @@ public class EventCorrelatorTests
 
         Assert.Equal(EventCorrelator.MaxPendingDismiss, c.PendingCount);   // hard-bounded
 
-        // The OLDEST (occ=1) was evicted: its late raise finds no buffered dismiss → plain ShowDialog.
-        var raisedOldest = c.Raised(1, "EX_X");
-        Assert.Equal(Kind.ShowDialog, raisedOldest.Kind);
-
-        // A still-buffered recent one (the last inserted) resolves to its result page.
+        // A still-buffered recent one (the last inserted) resolves straight to its result page. Raised FIRST while
+        // the single slot is free: a buffered-dismiss ShowResultPage is TERMINAL and does NOT occupy the slot.
         ushort recent = (ushort)(EventCorrelator.MaxPendingDismiss + overflow);
         var raisedRecent = c.Raised(recent, "EX_X");
         Assert.Equal(Kind.ShowResultPage, raisedRecent.Kind);
+
+        // The OLDEST (occ=1) was evicted: its late raise finds no buffered dismiss → plain ShowDialog (slot still
+        // free — the recent ShowResultPage above was terminal).
+        var raisedOldest = c.Raised(1, "EX_X");
+        Assert.Equal(Kind.ShowDialog, raisedOldest.Kind);
     }
 
     [Fact]
@@ -342,5 +344,69 @@ public class EventCorrelatorTests
         Assert.Equal(Kind.Ignore, c.Dismissed(1, "A", choiceIndex: -1).Kind);
         Assert.Equal(0, c.PendingCount);
         Assert.Equal(0, c.OpenCount);
+    }
+
+    // ─── single-slot serialization must cover ALL raise kinds (single-choice bypass fix) ─────────
+
+    [Fact]  // single-choice raise arriving while a dialog is shown MUST defer through the ONE slot (was: bypassed)
+    public void SingleChoiceRaise_WhileOneShown_IsQueued_NotShownSimultaneously()
+    {
+        var c = new EventCorrelator();
+
+        // Event #2 (2-window single-choice): its result-bearing dismiss beat the raise → a prompt mirror is shown,
+        // which now OCCUPIES the single client slot (awaiting the host's advance).
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(2, "SDI_07", choiceIndex: 0).Kind);
+        var r2 = c.Raised(2, "SDI_07", singleChoice: true, oneWindow: false);
+        Assert.Equal(Kind.ShowDialog, r2.Kind);   // prompt mirror shown → slot busy
+        Assert.Equal(1, c.OpenCount);
+
+        // Event #3 (1-window single-choice) arrives while #2's prompt is up. TODAY it takes the buffered-dismiss
+        // branch (which never consults the slot) and returns ShowResultPage → a SECOND window opens simultaneously
+        // and the two resolve in advance-arrival order (host order 2,3 seen as 3,2 — THE BUG). It must DEFER instead.
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(3, "VoidOmen_7", choiceIndex: 0).Kind);
+        var r3 = c.Raised(3, "VoidOmen_7", singleChoice: true, oneWindow: true);
+        Assert.Equal(Kind.Enqueue, r3.Kind);      // ← FAILS today (returns ShowResultPage)
+        Assert.Equal(1, c.OpenCount);             // still only #2 shown
+        Assert.Equal(1, c.QueuedCount);           // #3 deferred behind the slot
+
+        // Host advances #2 to its result page → slot frees → #3 is released in occId order, resolving straight to
+        // its own result page (1-window). The two never coexist and surface in host emission order (2 then 3).
+        Assert.Equal(Kind.ShowResultPage, c.Advanced(2, "SDI_07", choiceIndex: 0).Kind);
+        Assert.True(c.TryDequeueNext(out var next3));
+        Assert.Equal(3, next3.OccurrenceId);
+        Assert.Equal(Kind.ShowResultPage, next3.Kind);
+    }
+
+    [Fact]  // a burst mixing a plain raise and single-choice raises all route through the ONE slot, in occId order
+    public void MixedPlainAndSingleChoiceBurst_ReleasedInOccIdOrder()
+    {
+        var c = new EventCorrelator();
+
+        // #1 plain shows first and occupies the slot. #2 (2-window single-choice) and #3 (1-window single-choice)
+        // arrive while #1 is up — their result-bearing dismisses beat their raises, but the busy slot DEFERS both.
+        Assert.Equal(Kind.ShowDialog, c.Raised(1, "A").Kind);
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(2, "B", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.Enqueue, c.Raised(2, "B", singleChoice: true, oneWindow: false).Kind);
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(3, "C", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.Enqueue, c.Raised(3, "C", singleChoice: true, oneWindow: true).Kind);
+        Assert.Equal(1, c.OpenCount);
+        Assert.Equal(2, c.QueuedCount);
+
+        // Close #1 → slot frees → the LOWEST occId (2) is released first, as its 2-window prompt mirror, which
+        // re-occupies the slot; #3 stays deferred (draining stops behind the busy slot).
+        Assert.Equal(Kind.CloseDialog, c.Dismissed(1, "A", choiceIndex: -1).Kind);
+        Assert.True(c.TryDequeueNext(out var first));
+        Assert.Equal(2, first.OccurrenceId);
+        Assert.Equal(Kind.ShowDialog, first.Kind);        // #2 prompt mirror (occupies the slot)
+        Assert.Equal(1, c.QueuedCount);                   // #3 still deferred
+        Assert.False(c.TryDequeueNext(out _));            // slot busy again → #3 held back
+
+        // Advance #2 → slot frees → #3 released (1-window → straight to its result page). Host order 2 → 3 preserved,
+        // and the two never coexisted on screen.
+        Assert.Equal(Kind.ShowResultPage, c.Advanced(2, "B", choiceIndex: 0).Kind);
+        Assert.True(c.TryDequeueNext(out var second));
+        Assert.Equal(3, second.OccurrenceId);
+        Assert.Equal(Kind.ShowResultPage, second.Kind);
+        Assert.Equal(0, c.QueuedCount);
     }
 }

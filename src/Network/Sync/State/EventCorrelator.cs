@@ -76,20 +76,40 @@ namespace Multipleer.Network.Sync.State
             }
         }
 
+        // A raise DEFERRED behind the busy single slot. Carries the single-choice context (singleChoice/oneWindow)
+        // that arrived WITH the raise so a released raise re-runs the SAME branch it would have taken had the slot
+        // been free (DecideForRaise) — the buffered-dismiss linkage stays in _pending and is re-consulted on release.
+        private readonly struct QueuedRaiseInfo
+        {
+            public readonly string EventId;
+            public readonly bool SingleChoice;
+            public readonly bool OneWindow;
+            public QueuedRaiseInfo(string eventId, bool singleChoice, bool oneWindow)
+            {
+                EventId = eventId;
+                SingleChoice = singleChoice;
+                OneWindow = oneWindow;
+            }
+        }
+
         /// <summary>Max buffered out-of-order dismisses; oldest is evicted past this so the buffer can't leak.</summary>
         public const int MaxPendingDismiss = 16;
 
         // occId → def-name of the currently-shown dialog (def-name is informational; the key is the occ id).
         private readonly Dictionary<ushort, string> _open = new Dictionary<ushort, string>();
 
-        // Single-slot client display model: occId of the currently-SHOWN PLAIN event dialog (0 = none). The native
-        // GeoscapeViewSwitchQuery serializes display one-at-a-time, so a NEW plain raise arriving while this is
-        // non-zero is DEFERRED into _queue (occId-ordered) instead of being pushed in arrival order — the upcoming
-        // raise/dismiss can then be released to the native queue in host emission order.
-        private ushort _shownPlain;
-        // Plain raises deferred while a dialog is shown, keyed+ORDERED by host-monotonic occId (lowest = earliest
-        // emitted). SortedDictionary keeps the FIFO in occId order so transport reordering can't swap display order.
-        private readonly SortedDictionary<ushort, string> _queue = new SortedDictionary<ushort, string>();
+        // Single-slot client display model: occId of the dialog that currently OCCUPIES the client's one modal slot
+        // (0 = none) — a plain in-order dialog OR a single-choice prompt mirror, i.e. ANY raise still awaiting a
+        // future host signal (Dismissed/Advanced) to resolve. The native GeoscapeViewSwitchQuery serializes display
+        // one-at-a-time, so ANY raise arriving while this is non-zero is DEFERRED into _queue (occId-ordered) instead
+        // of being pushed in arrival order — the queued raises are released in host emission order on the current
+        // dialog's dismiss/advance. A TERMINAL resolution (buffered-dismiss ShowResultPage / DropNoop) does NOT
+        // occupy the slot: it is completed at once and the native view-switch query serializes its actual display.
+        private ushort _shownSlot;
+        // Raises deferred while the slot is busy, keyed+ORDERED by host-monotonic occId (lowest = earliest emitted).
+        // SortedDictionary keeps the FIFO in occId order so transport reordering can't swap display order. The value
+        // carries the raise's single-choice context so a released raise re-runs the CORRECT branch (DecideForRaise).
+        private readonly SortedDictionary<ushort, QueuedRaiseInfo> _queue = new SortedDictionary<ushort, QueuedRaiseInfo>();
         // Occurrences that reached a TERMINAL resolved state (shown+dismissed, or buffered-dismiss-then-resolved), for
         // idempotent dedup of transport-duplicated raises/dismisses. Hard-bounded FIFO so it can never leak; the
         // counter is host-monotonic and wraps only after 65535 occurrences, so an evicted id can never alias a live one.
@@ -128,7 +148,7 @@ namespace Multipleer.Network.Sync.State
             _promptMirror.Clear();
             _pendingAdvance.Clear();
             _pendingAdvanceOrder.Clear();
-            _shownPlain = 0;
+            _shownSlot = 0;
             _queue.Clear();
             _completed.Clear();
             _completedOrder.Clear();
@@ -162,10 +182,34 @@ namespace Multipleer.Network.Sync.State
         {
             // DEDUP (transport double-send): a raise for an occurrence already shown, already queued, or already
             // terminally resolved is an idempotent no-op — never a second dialog. (_pending is intentionally NOT in
-            // this set: a buffered out-of-order dismiss is resolved by the FIRST matching raise in the block below.)
+            // this set: a buffered out-of-order dismiss is resolved by the FIRST matching raise in DecideForRaise.)
             if (_open.ContainsKey(occurrenceId) || _queue.ContainsKey(occurrenceId) || _completed.Contains(occurrenceId))
                 return new Decision(ActionKind.Ignore, occurrenceId, eventId, -1);
 
+            // SINGLE-SLOT gate — now covering ALL raise kinds (moved ABOVE the buffered-dismiss branch). The native
+            // view-switch query shows one modal at a time, so if the slot is busy DEFER this raise in occId order,
+            // carrying its single-choice context so the release re-runs the CORRECT branch (DecideForRaise). This
+            // completes b0e20a0's invariant: previously only the plain in-order tail consulted the slot, so a
+            // single-choice raise took the buffered-dismiss branch and opened a SECOND dialog simultaneously — the
+            // two then resolved in advance-arrival order (host order 2,3 seen as 3,2).
+            if (_shownSlot != 0)
+            {
+                _queue[occurrenceId] = new QueuedRaiseInfo(eventId, singleChoice, oneWindow);
+                return new Decision(ActionKind.Enqueue, occurrenceId, eventId, -1);
+            }
+
+            return DecideForRaise(occurrenceId, eventId, singleChoice, oneWindow);
+        }
+
+        /// <summary>
+        /// Decide the UI action for a raise WHEN THE SINGLE SLOT IS FREE — guaranteed by every caller: <see cref="Raised"/>
+        /// after its busy-check, and <see cref="TryDequeueNext"/> when it releases a deferred raise. Consults a buffered
+        /// out-of-order dismiss (<c>_pending</c>) exactly as before. A slot-OCCUPYING outcome (plain dialog or single-choice
+        /// prompt mirror) marks the slot busy so the next raise defers behind it; a TERMINAL outcome (ShowResultPage /
+        /// DropNoop) leaves the slot free (the native view-switch query serializes its actual on-screen display).
+        /// </summary>
+        private Decision DecideForRaise(ushort occurrenceId, string eventId, bool singleChoice, bool oneWindow)
+        {
             if (_pending.TryGetValue(occurrenceId, out var buffered))
             {
                 // The dismiss for this occurrence already arrived (out of order). Resolve it now.
@@ -193,11 +237,14 @@ namespace Multipleer.Network.Sync.State
                             return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                         }
                         // Otherwise mirror the host's window-1 PROMPT page and wait for Advanced(). Track it open
-                        // + awaiting-advance; the reward stays stashed by the caller (ShowDialog never drains it)
-                        // until the advance resolves it. ChoiceIndex>=0 distinguishes this mirror from a plain
-                        // in-order raise (ChoiceIndex==-1) for the caller.
+                        // + awaiting-advance and OCCUPY the single slot (this is a shown dialog awaiting a future host
+                        // signal, so the next raise must defer behind it — the missing gate that let two single-choice
+                        // dialogs coexist). The reward stays stashed by the caller (ShowDialog never drains it) until
+                        // the advance resolves it. ChoiceIndex>=0 distinguishes this mirror from a plain in-order raise
+                        // (ChoiceIndex==-1) for the caller.
                         _open[occurrenceId] = eventId ?? buffered.EventId;
                         _promptMirror.Add(occurrenceId);
+                        _shownSlot = occurrenceId;
                         return new Decision(ActionKind.ShowDialog, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                     }
                     // Multi-choice / gate-OFF: a completed event whose result-bearing dismiss beat its raise →
@@ -212,16 +259,9 @@ namespace Multipleer.Network.Sync.State
                 return new Decision(ActionKind.DropNoop, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
             }
 
-            // Normal in-order raise. Single-slot client display (the native view-switch query serializes one dialog
-            // at a time): if a plain dialog is ALREADY shown, DEFER this raise into the occId-ordered queue (released
-            // on the current dialog's dismiss via TryDequeueNext) rather than pushing it in arrival order; else show
-            // it now and mark the slot occupied.
-            if (_shownPlain != 0)
-            {
-                _queue[occurrenceId] = eventId;
-                return new Decision(ActionKind.Enqueue, occurrenceId, eventId, -1);
-            }
-            _shownPlain = occurrenceId;
+            // Normal in-order raise, slot guaranteed free here (Raised gated the busy case above) → show it now and
+            // mark the single slot occupied so the next raise defers behind it (released on this dialog's dismiss).
+            _shownSlot = occurrenceId;
             _open[occurrenceId] = eventId;
             return new Decision(ActionKind.ShowDialog, occurrenceId, eventId, -1);
         }
@@ -241,7 +281,7 @@ namespace Multipleer.Network.Sync.State
             if (_promptMirror.Remove(occurrenceId))
             {
                 _open.Remove(occurrenceId);   // the result page replaces the mirrored prompt
-                if (_shownPlain == occurrenceId) _shownPlain = 0;
+                if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
                 MarkCompleted(occurrenceId);
                 return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId, choiceIndex);
             }
@@ -278,7 +318,7 @@ namespace Multipleer.Network.Sync.State
             {
                 _open.Remove(occurrenceId);
                 _promptMirror.Remove(occurrenceId);   // a real dismiss closes a mirrored prompt too (keep the set clean)
-                if (_shownPlain == occurrenceId) _shownPlain = 0;   // single slot freed → TryDequeueNext can release the next
+                if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
                 MarkCompleted(occurrenceId);
                 if (choiceIndex >= 0)
                     return new Decision(ActionKind.ShowResultInPlace, occurrenceId, eventId, choiceIndex);
@@ -291,23 +331,26 @@ namespace Multipleer.Network.Sync.State
         }
 
         /// <summary>
-        /// Pop the next deferred plain raise (lowest host-monotonic occId = earliest emitted) when the single-slot
-        /// client display is free, recording it as now-shown. Returns false when the slot is still occupied or the
-        /// queue is empty. The (Unity-bound) caller looks up the stashed raise payload for the returned occId and
-        /// shows it — so deferred events are released to the native view-switch queue ONE AT A TIME, in occId order.
+        /// Pop the next deferred raise (lowest host-monotonic occId = earliest emitted) when the single client slot is
+        /// free, and re-decide its UI action via <see cref="DecideForRaise"/> using the single-choice context stashed
+        /// at defer time. Returns false when the slot is still occupied or the queue is empty. The returned Decision can
+        /// be ShowDialog (plain OR single-choice prompt mirror — re-occupies the slot, so the caller stops draining),
+        /// or a TERMINAL ShowResultPage/DropNoop (buffered-dismiss single-choice — does NOT occupy the slot, so the
+        /// caller keeps draining the next deferred raise). The (Unity-bound) caller looks up the stashed raise payload
+        /// for the returned occId to build/show it — deferred events surface in occId (host emission) order.
         /// </summary>
         public bool TryDequeueNext(out Decision next)
         {
             next = default(Decision);
-            if (_shownPlain != 0) return false;   // single slot still occupied → keep waiting
+            if (_shownSlot != 0) return false;   // single slot still occupied → keep waiting
             if (_queue.Count == 0) return false;
             // SortedDictionary enumerates by ascending key → the lowest occId (earliest host emission) pops first.
-            ushort occId = 0; string eventId = null;
-            foreach (var kv in _queue) { occId = kv.Key; eventId = kv.Value; break; }
+            ushort occId = 0; QueuedRaiseInfo info = default(QueuedRaiseInfo);
+            foreach (var kv in _queue) { occId = kv.Key; info = kv.Value; break; }
             _queue.Remove(occId);
-            _shownPlain = occId;
-            _open[occId] = eventId;
-            next = new Decision(ActionKind.ShowDialog, occId, eventId, -1);
+            // Re-run the SAME branch this raise would have taken had the slot been free when it arrived. DecideForRaise
+            // sets _shownSlot for a slot-occupying show (plain/prompt-mirror) and leaves it clear for a terminal result.
+            next = DecideForRaise(occId, info.EventId, info.SingleChoice, info.OneWindow);
             return true;
         }
 
