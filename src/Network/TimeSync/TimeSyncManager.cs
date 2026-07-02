@@ -139,6 +139,14 @@ namespace Multipleer.Network.TimeSync
         // Client: last speed index we pushed into the widget (gate MirrorSpeedUi on-change, like pause).
         private int _uiSpeedShown = int.MinValue;
 
+        // Inc4 S1 (§3.3) — host COSMETIC glyph state, republished each client frame in WriteClock (and at the
+        // load-time freeze re-assert). Under the sim-freeze the sim _paused is pinned true, so the pause/speed
+        // widget can no longer read _timing.Paused for its glyph; ClientTimeGlyphFreezePatch reads THESE (the
+        // host anchor's paused/speed) instead. Ignored entirely when ClientSimFreeze.Enabled is OFF (the patch
+        // is inert), so they are inert scaffolding under flag-OFF.
+        internal static bool GlyphHostPaused;
+        internal static int GlyphHostSpeedIndex = 1;
+
         public TimeSyncManager(NetworkEngine engine)
         {
             _engine = engine;
@@ -223,6 +231,49 @@ namespace Multipleer.Network.TimeSync
                 return _geoTimingProp?.GetValue(geo, null);
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Inc4 S1 (§3.1) — CLIENT geoscape sim-freeze RE-ASSERT. Sets the live geoscape
+        /// <c>Timing.Paused = true</c> via the SETTER (Timing.cs:110), whose <c>RescheduleForTiming</c> Max's
+        /// every already-Started geoscape producer (a paused source ⇒ <c>NextUpdate.ConvertToTiming</c> returns
+        /// Max, NextUpdate.cs:199 — engine-native TOTAL sim freeze). Called from
+        /// <see cref="Multipleer.Harmony.ClientGeoSimFreezePatch"/>'s postfix on
+        /// <c>GeoscapeEventSystem.OnLevelStart()</c>, which runs on EVERY (re)load AFTER
+        /// <c>GeoLevelController.LevelCrt</c>'s <c>Timing.ProcessInstanceData(host, Paused=false)</c> (:515)
+        /// reset and BEFORE the hourly producer is Started (:761) — so the already-scheduled producers (via the
+        /// reschedule) AND the yet-to-Start <c>LevelHourlyUpdateCrt</c> (auto-Max under the now-true
+        /// <c>_paused</c>) are all frozen. <see cref="WriteClock"/> then pins <c>_paused=true</c> every frame
+        /// (via ProcessInstanceData, no reschedule) between re-asserts, so any new producer auto-Max's and any
+        /// later reschedule (host speed-change → <c>set_Scale</c>) RE-Max's rather than un-freezing.
+        ///
+        /// The setter fires <c>OnPausedEvent</c>/<c>EffectiveScaleChangedEvent</c> once per load (spec §9 Q2
+        /// accepted default); the widget's <c>TimingOnPausedEvent</c> re-render is corrected to the host
+        /// cosmetic glyph by <c>ClientTimeGlyphFreezePatch</c>. Reflection-only; best-effort try/catch — never
+        /// throws into game code. Self-gated to a client-in-session (defensive belt on top of the patch's gate);
+        /// no-op on the host / outside geoscape.
+        /// </summary>
+        public void FreezeClientGeoSim()
+        {
+            if (_engine == null || _engine.IsHost || !_engine.IsActiveSession) return; // client-in-session only
+            var timing = GetTiming();
+            if (timing == null) return; // not in geoscape yet — next (re)load's postfix re-asserts
+            EnsureReflection();
+            if (_timingPausedProp == null) return;
+            try
+            {
+                // Refresh the cosmetic glyph anchor so the widget re-render triggered by the setter's
+                // OnPausedEvent this same load shows the HOST state immediately (WriteClock also republishes
+                // it every frame). No-op until the first host anchor has arrived.
+                if (_clientHaveAnchor)
+                {
+                    GlyphHostPaused = _clientAnchor.Paused;
+                    GlyphHostSpeedIndex = _clientAnchor.SpeedIndex;
+                }
+                _timingPausedProp.SetValue(timing, true, null); // setter → RescheduleForTiming → Max all producers
+                Debug.Log("[Multipleer] ClientGeoSimFreeze re-asserted: geoscape Timing.Paused = true (sim frozen)");
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer] FreezeClientGeoSim failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -511,6 +562,19 @@ namespace Multipleer.Network.TimeSync
             if (_timingInstanceDataType == null || _fromTimeSpanMethod == null || _timeUnitZero == null
                 || _processInstanceDataMethod == null || _tidStartTimeField == null) return;
 
+            // Inc4 S1 (§3.2/§3.3): DISPLAY-clock vs SIM-clock split. Under the freeze the sim _paused is pinned
+            // true (so producers stay Max'd — see ClientSimFreeze.SimPaused / FreezeClientGeoSim); the host's
+            // real paused/speed drive ONLY the cosmetic widget glyph, published here for the glyph-decouple
+            // patch. Flag-OFF: SimPaused(false,paused)==paused and the glyph statics are unread → byte-unchanged.
+            bool freeze = ClientSimFreeze.ShouldFreeze(
+                ClientSimFreeze.Enabled,
+                _engine != null,
+                _engine != null && _engine.IsActiveSession,
+                _engine != null && _engine.IsHost);
+            bool simPaused = ClientSimFreeze.SimPaused(freeze, paused);
+            GlyphHostPaused = paused;
+            GlyphHostSpeedIndex = _clientAnchor.SpeedIndex;
+
             IsApplyingRemote = true;
             try
             {
@@ -523,7 +587,7 @@ namespace Multipleer.Network.TimeSync
                 _arg1[0] = TimeSpan.FromSeconds(displayGameSeconds);
                 object startTime = _fromTimeSpanMethod.Invoke(null, _arg1);
 
-                _tidPausedField.SetValue(tid, paused);
+                _tidPausedField.SetValue(tid, simPaused);
                 _tidScaleField.SetValue(tid, scale);
                 _tidStartTimeField.SetValue(tid, startTime);
                 // INTENTIONAL / verified-inert: the fixed clock (StartFixedTime/OwnFixedNow → FixedNow) is

@@ -7,21 +7,25 @@ using UnityEngine;
 namespace Multipleer.Harmony
 {
     /// <summary>
-    /// Inc4 S0 — SCAFFOLDING (inert): the CLIENT geoscape sim-freeze re-assert hook. Design spec:
+    /// Inc4 S1 — the CLIENT geoscape sim-freeze RE-ASSERT hook (active behind the flag). Design spec:
     /// docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md §3.1.
     ///
     /// Mirrors the re-assert precedent <see cref="Multipleer.Harmony.Sync.EventSuppressClientGeoscapePatch"/>
     /// (postfix on <c>GeoscapeEventSystem.OnLevelStart()</c>) — the same load-completion hook that runs AFTER
     /// the level's InstanceData is (re)applied on EVERY (re)load / save-blob apply
-    /// (<c>GeoLevelController.LevelCrt</c> drives <c>EventSystem.InstanceData = ...</c> then
-    /// <c>EventSystem.OnLevelStart()</c>). It is therefore the correct point to RE-ASSERT a freeze that the
-    /// per-load <c>Timing.ProcessInstanceData(host data, Paused=false)</c> would otherwise reset.
+    /// (<c>GeoLevelController.LevelCrt</c> drives <c>Timing.ProcessInstanceData(host, Paused=false)</c> :515,
+    /// then <c>EventSystem.OnLevelStart()</c> :655, then <c>Timing.Start(LevelHourlyUpdateCrt)</c> :761). It is
+    /// therefore the correct point to RE-ASSERT a freeze the per-load reset would otherwise clear: our postfix
+    /// runs at :655 — AFTER the host-data reset and BEFORE the hourly producer is Started — so the already-
+    /// scheduled producers are Max'd by the setter's reschedule and the yet-to-Start hourly producer auto-Max's
+    /// under the now-true <c>_paused</c>.
     ///
-    /// S0 body is INERT: gated on <see cref="ClientSimFreeze.ShouldFreeze"/> (flag default-OFF) it never
-    /// mutates the geoscape clock — byte-unchanged in-game. It emits client-only telemetry so the re-assert
-    /// hook is OBSERVABLE for the S0 in-game gate. S1 fills the body: on the client, set the live geoscape
-    /// <c>Timing.Paused = true</c> via the setter (<c>RescheduleForTiming</c> Max's every already-Started
-    /// producer) — the freeze mechanism itself (see spec §3.1-3.3).
+    /// Body (S1): on the client, <see cref="Multipleer.Network.TimeSync.TimeSyncManager.FreezeClientGeoSim"/>
+    /// sets the live geoscape <c>Timing.Paused = true</c> via the setter (<c>RescheduleForTiming</c> Max's every
+    /// already-Started producer; a paused source ⇒ <c>NextUpdate.ConvertToTiming</c> returns Max). Gated on
+    /// <see cref="ClientSimFreeze.ShouldFreeze"/> (flag default-OFF) — when OFF it early-returns before any clock
+    /// mutation, so the class is byte-unchanged in-game (the legacy producer-table + event-suppress path stays
+    /// as the flag-OFF rollback until S4). Rollback = flip <c>ClientSimFreeze.Enabled=false</c>.
     ///
     /// Verified vs decompile (2026-07-02): <c>GeoscapeEventSystem.OnLevelStart()</c> parameterless
     /// (GeoscapeEventSystem.cs:118) — the same target the precedent resolves. Reflection target so an engine
@@ -43,7 +47,7 @@ namespace Multipleer.Harmony
 
         public static MethodBase TargetMethod() => _target;
 
-        // Runs after every geoscape (re)load. S0: INERT — no clock mutation while the flag is OFF.
+        // Runs after every geoscape (re)load. Flag-OFF (default): early-returns before any clock mutation.
         public static void Postfix()
         {
             try
@@ -56,18 +60,17 @@ namespace Multipleer.Harmony
                     engine != null && engine.IsActiveSession,
                     engine != null && engine.IsHost);
 
-                // S0 telemetry (client only, flag-independent) — proves the re-assert hook fires each load.
-                // Strip before publish (spec §8). Host / single-player: silent, untouched.
+                // Telemetry (client only) — proves the re-assert hook fires each load. Strip before publish
+                // (spec §8). Host / single-player: silent, untouched.
                 if (onActiveClient)
                     Debug.Log("[Multipleer] ClientGeoSimFreezePatch reached (client geoscape load); "
-                        + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze
-                        + " (S0 inert — clock pause lands in S1)");
+                        + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze);
 
-                if (!freeze) return; // S0: flag default-OFF -> always here -> byte-unchanged, no clock pause
+                if (!freeze) return; // flag OFF -> byte-unchanged, no clock pause (legacy suppress path stands)
 
-                // S1 TODO (spec §3.1): resolve the live GeoLevelController.Timing and set Timing.Paused = true
-                // via the setter so RescheduleForTiming Max's every already-Started geoscape producer
-                // (re-asserted on EVERY load). Kept out of S0 to ship inert scaffolding first.
+                // S1 (spec §3.1): re-assert the sim freeze — set the live geoscape Timing.Paused = true via the
+                // setter so RescheduleForTiming Max's every already-Started producer, re-asserted on EVERY load.
+                engine.TimeSync?.FreezeClientGeoSim();
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] ClientGeoSimFreezePatch failed: " + ex.Message); }
         }

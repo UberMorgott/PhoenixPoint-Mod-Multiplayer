@@ -37,6 +37,10 @@
       <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(GameManaged)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
       <HintPath>$(GameManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>

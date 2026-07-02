@@ -26,5 +26,21 @@ namespace Multipleer.Network
             if (isHost) return false;                      // host is the sole authoritative simulator
             return true;                                   // active-session client: freeze local sim
         }
+
+        // Inc4 S1 (§3.2) — DISPLAY-clock vs SIM-clock split, pure + unit-testable. The client's per-frame
+        // TimeSyncManager.WriteClock overwrites the geoscape Timing via ProcessInstanceData. This picks the
+        // value written to TimingInstanceData.Paused (the sim _paused field):
+        //   * freeze ON  -> ALWAYS true — pins _paused=true every frame so any newly-Started geoscape
+        //                   producer auto-Max's (NextUpdate.ConvertToTiming reads the live _paused) and any
+        //                   reschedule (e.g. host speed-change → set_Scale) RE-Max's instead of un-freezing.
+        //                   The host's real paused value is IRRELEVANT to the sim clock under the freeze; it
+        //                   drives only the cosmetic pause/speed GLYPH (§3.3), never the sim.
+        //   * freeze OFF -> the host's paused value (pre-S1 behaviour: the client clock mirrors host pause).
+        // Note the display READOUT still tracks the host regardless — WriteClock hard-sets StartTime=display
+        // (OwnNow=0 ⇒ Now==display), independent of this paused flag.
+        public static bool SimPaused(bool freeze, bool hostPaused)
+        {
+            return freeze || hostPaused;
+        }
     }
 }
