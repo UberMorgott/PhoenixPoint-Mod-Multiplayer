@@ -3,11 +3,12 @@ using Xunit;
 
 public class ReportMirrorGateTests
 {
-    // Pins the SHIPPED default OFF: Phase-A report-window mirror is additive and must be byte-for-byte
-    // unchanged until in-game-validated. Mirrors the other rollout-gate pin tests; flips to a DefaultsOn pin after validation.
+    // Pins the report-window mirror ON (2026-07-05): flipped after the research-complete report was confirmed
+    // missing on the client. The host now broadcasts the whitelisted report modals on 0x69 and the client
+    // reconstructs + shows them. Rollback = flip ReportMirrorGate.Enabled back to false.
     [Fact]
-    public void Enabled_DefaultsOff()
+    public void Enabled_DefaultsOn()
     {
-        Assert.False(ReportMirrorGate.Enabled);
+        Assert.True(ReportMirrorGate.Enabled);
     }
 }
