@@ -58,6 +58,16 @@ namespace Multipleer.Network.Sync
         // (zero senders) and has been removed.
         private readonly SurfaceRouter _router = new SurfaceRouter();
 
+        // ─── Inc4 S2 host-driven travel mirror (GeoVehiclePos 0xA5) ─────────
+        // Shared per-surface seq for the geoscape LIVE host→all mirror surfaces (host authors Next, client
+        // guards ShouldApply/Mark). Instance-scoped → a fresh session (new SyncEngine) resets it. Today it
+        // carries only the vehicle-position mirror; other live geoscape surfaces can share it.
+        private readonly SurfaceSeq _geoLiveSeq = new SurfaceSeq();
+        private int _vehiclePollTick;   // host: frame counter throttling the vehicle-placement poll
+        // Poll moving-vehicle placements every Nth Tick (matches the wallet-poll cadence, ~4 Hz at 60 fps).
+        // The per-vehicle signature skip makes a parked-vehicle tick ~free; only moving vehicles ship bytes.
+        private const int VehiclePollTickInterval = 15;
+
         // ─── Client geoscape-event raise/dismiss correlation (occurrence-id keyed) ─────────
         // Pure, Unity-free ordering brain: keys raise/dismiss on the host-synthesized per-occurrence id so two
         // occurrences of the same reusable EventID def-name never collide, and a Dismiss that arrives before its
@@ -1049,6 +1059,17 @@ namespace Multipleer.Network.Sync
                 }
                 _channelDirty.Clear();
             }
+
+            // Inc4 S2 — host-driven travel mirror. Throttled poll of every MOVING vehicle's world placement,
+            // broadcast on the GeoVehiclePos (0xA5) surface so a sim-frozen client (S1) still sees vehicles
+            // travel (it applies the absolute position; it never re-navigates). Gated on the SAME sim-freeze
+            // feature flag as S1 so flag-OFF rollback = ZERO new traffic (the client then simulates travel
+            // locally, legacy path). Idle vehicles ship 0 bytes (per-vehicle signature skip in GeoVehicleMirror).
+            if (ClientSimFreeze.Enabled && ++_vehiclePollTick >= VehiclePollTickInterval)
+            {
+                _vehiclePollTick = 0;
+                State.GeoVehicleMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
+            }
         }
 
         // ─── Unified 0x67 envelope inbound (LIVE tactical fast-path) ─────────────────
@@ -1079,6 +1100,15 @@ namespace Multipleer.Network.Sync
                 // idempotent — a same-version duplicate from the legacy packet (or a re-send) drops.
                 try { OnStateSync(payload); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo state envelope failed: " + ex.Message); }
+                return true;
+            }
+            if (surfaceId == SurfaceIds.GeoVehiclePos)
+            {
+                // Inc4 S2 host-driven travel mirror: the client applies each moving vehicle's absolute world
+                // placement (Surface.position/rotation) ONLY while its sim is frozen (GeoVehicleMirror gates on
+                // ClientSimFreeze.ShouldFreeze); the host never receives its own broadcast. Seq-guarded (dup/stale drop).
+                try { State.GeoVehicleMirror.HandleVehiclePos(payload, _geoLiveSeq); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehiclepos envelope failed: " + ex.Message); }
                 return true;
             }
             return false;

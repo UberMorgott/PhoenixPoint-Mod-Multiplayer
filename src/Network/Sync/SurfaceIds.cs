@@ -34,5 +34,8 @@ namespace Multipleer.Network.Sync
         // packets (0x63 WalletSync / 0x64 StateSync) were retired a4781ae.
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
         public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
+        // 0xA2-0xA4 RESERVED for the geoscape action-relay → envelope cutover (GeoIntent/GeoOutcome/GeoReject,
+        // spec 2026-07-02-multipleer-action-relay-envelope-cutover-design) — do NOT reuse.
+        public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
     }
 }
