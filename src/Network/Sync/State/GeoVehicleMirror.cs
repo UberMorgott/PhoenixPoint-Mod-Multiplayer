@@ -77,7 +77,16 @@ namespace Multiplayer.Network.Sync.State
         // Purge a key not refreshed within this window (destroyed/despawned vehicle, or one that stopped travelling
         // so the host no longer ships it) — many missed polls, far below a real gap.
         private const double StaleTtlSeconds = 5.0;
-        private static readonly VehicleInterpolator _interp = new VehicleInterpolator(InterpDelaySeconds, StaleTtlSeconds);
+        // Don't INTERPOLATE across an inter-frame gap wider than this — a continuously-travelling vehicle ships every
+        // host poll (~10 Hz), so a much larger gap means it was idle/parked/arrived between the two frames and
+        // blending them would render a physically-wrong intermediate (the "departs from the opposite side at start"
+        // artifact when the first departure frame is blended against a stale parked frame — Symptom A). 8 emit
+        // intervals (~0.8 s @ 6/60) bridges a few dropped polls but is far below any real idle gap; on a wider gap
+        // the interpolator steps to the fresh frame instead. Derived from the same emit cadence as the render delay.
+        private const double MaxBlendGapEmitMultiplier = 8.0;
+        private static readonly double MaxBlendGapSeconds = VehicleInterpolator.DeriveDelaySeconds(
+            VehicleEmitScheduler.EmitTickInterval, VehicleEmitScheduler.NominalFps, MaxBlendGapEmitMultiplier);
+        private static readonly VehicleInterpolator _interp = new VehicleInterpolator(InterpDelaySeconds, StaleTtlSeconds, MaxBlendGapSeconds);
         // Per composite key → the live vehicle Component to write each frame. Refreshed on every inbound batch (so a
         // re-created/rebound vehicle re-resolves); pruned in lock-step with the interpolator on stale/destroy.
         private static readonly Dictionary<long, Component> _clientTargets = new Dictionary<long, Component>();
@@ -397,6 +406,19 @@ namespace Multiplayer.Network.Sync.State
         private static string DiagV3(Vector3 v)
             => "(" + v.x.ToString("F2") + "," + v.y.ToString("F2") + "," + v.z.ToString("F2") + ")";
 
+        /// <summary>Resolve a vehicle's heading transform (<c>Surface</c> = the "GlobeOffset" pivot child) for the
+        /// DIAG probes. Heading lives in <c>Surface.localEulerAngles</c> and the model nose faces <c>Surface.forward</c>
+        /// (world) — logging BOTH the local euler (what the mirror ships/applies) and the composed WORLD forward pins
+        /// whether a facing mismatch is in the shipped value or in the frame it composes against (Symptoms A/D).</summary>
+        private static Transform DiagSurface(Component comp)
+        {
+            try { EnsureVehicleReflection(comp.GetType()); return _surfaceProp?.GetValue(comp, null) as Transform; }
+            catch { return null; }
+        }
+
+        private static string DiagSurf(Transform surf)
+            => surf != null ? "euler=" + DiagV3(surf.localEulerAngles) + " fwd=" + DiagV3(surf.forward) : "none";
+
         private static string DiagParentChain(Transform t)
         {
             if (t == null) return "none";
@@ -437,7 +459,9 @@ namespace Multiplayer.Network.Sync.State
                 float ang = Quaternion.Angle(parked, firstShip);
                 Debug.Log("[Multiplayer][geo][DIAG-START] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
                     + " parked=" + DiagQuat(parked) + " firstShip=" + DiagQuat(firstShip)
-                    + " angle=" + ang.ToString("F1") + (ang > 90f ? " OPPOSITE" : ""));
+                    + " angle=" + ang.ToString("F1") + (ang > 90f ? " OPPOSITE" : "")
+                    + " parkedSurf=" + DiagSurf(DiagSurface(comp))
+                    + " shipSurfEuler=" + DiagV3(new Vector3(rec.X, rec.Y, rec.Z)));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][geo][DIAG-START] " + ex.Message); }
         }
@@ -461,6 +485,7 @@ namespace Multiplayer.Network.Sync.State
                     Debug.Log("[Multiplayer][geo][DIAG-H] key=" + DiagKey(ownerId, id) + " name=" + comp.name
                         + " active=" + comp.gameObject.activeInHierarchy
                         + " ship=" + DiagQuat(pivot.localRotation)
+                        + " shipSurf=" + DiagSurf(DiagSurface(comp))
                         + " worldPos=" + DiagV3(pivot.position)
                         + " parent=" + DiagParentChain(pivot.parent)
                         + " parentWRot=" + (pivot.parent != null ? DiagQuat(pivot.parent.rotation) : "none")
@@ -505,6 +530,8 @@ namespace Multiplayer.Network.Sync.State
                             + " active=" + comp.gameObject.activeInHierarchy
                             + " held=" + held
                             + " willWrite=" + DiagQuat(willWrite)
+                            + " curSurf=" + DiagSurf(DiagSurface(comp))
+                            + " willSurfEuler=" + DiagV3(new Vector3(rec.X, rec.Y, rec.Z))
                             + " worldPos=" + DiagV3(pivot.position)
                             + " parent=" + DiagParentChain(pivot.parent)
                             + " parentWRot=" + (pivot.parent != null ? DiagQuat(pivot.parent.rotation) : "none")

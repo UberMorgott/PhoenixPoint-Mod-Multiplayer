@@ -113,6 +113,51 @@ public class VehicleInterpolatorTests
         Assert.Equal(0.70710678f, s.QY, 5);
     }
 
+    // ── discontinuity guard: a gap far wider than the poll cadence (vehicle idled / re-departed between the two
+    //    frames) must NOT blend — it renders a spurious intermediate placement (the "departs from the opposite side
+    //    at start" artifact when a fresh departure frame is straddled against a stale parked frame). Clamp to newer. ──
+    [Fact]
+    public void BlendGapGuard_WideGap_ClampsToNewer_NoBlend()
+    {
+        var interp = new VehicleInterpolator(Delay, Ttl, maxBlendGapSeconds: 0.5);
+        long key = GeoVehiclePos.MakeKey(1, 1);
+        interp.Push(key, 1, Rec(0f, 0f, 0f, 0f, 1f), 0.0);                          // parked/old frame at t=0
+        interp.Push(key, 2, Rec(90f, 0f, 0.70710678f, 0f, 0.70710678f), 2.0);      // fresh departure at t=2 (gap 2.0)
+
+        // renderTime = 1.0 straddles the pair, but span 2.0 > 0.5 → step to the NEWER frame, never a mid-globe blend.
+        Assert.True(interp.TrySample(key, 1.0 + Delay, out var s));
+        Assert.Equal(90f, s.Z, 4);
+        Assert.Equal(0.70710678f, s.QY, 5);
+        Assert.Equal(0.70710678f, s.QW, 5);
+    }
+
+    [Fact]
+    public void BlendGapGuard_NarrowGap_StillBlends()
+    {
+        var interp = new VehicleInterpolator(Delay, Ttl, maxBlendGapSeconds: 0.5);
+        long key = GeoVehiclePos.MakeKey(1, 1);
+        interp.Push(key, 1, Rec(0f, 0f, 0f, 0f, 1f), 0.0);
+        interp.Push(key, 2, Rec(90f, 0f, 0.70710678f, 0f, 0.70710678f), 0.2);      // gap 0.2 < 0.5 → normal blend
+
+        Assert.True(interp.TrySample(key, 0.1 + Delay, out var s));                 // renderTime = 0.1 = halfway
+        Assert.Equal(45f, s.Z, 3);
+        Assert.Equal(0.38268343f, s.QY, 4);
+    }
+
+    [Fact]
+    public void BlendGap_DefaultIsInfinite_AlwaysBlends()
+    {
+        // The 2-arg constructor leaves the guard disabled (+Inf) so the base interpolation contract is unchanged.
+        var interp = new VehicleInterpolator(Delay, Ttl);
+        long key = GeoVehiclePos.MakeKey(1, 1);
+        interp.Push(key, 1, Rec(0f, 0f, 0f, 0f, 1f), 0.0);
+        interp.Push(key, 2, Rec(90f, 0f, 0.70710678f, 0f, 0.70710678f), 2.0);      // wide gap, but guard disabled
+
+        Assert.True(interp.TrySample(key, 1.0 + Delay, out var s));                 // still blends halfway
+        Assert.Equal(45f, s.Z, 3);
+        Assert.Equal(0.38268343f, s.QY, 4);
+    }
+
     // ── managed slerp reproduces Unity's SHORTEST-arc semantics (negative dot → flip) ──
     [Fact]
     public void Slerp_TakesShortestArc_OnNegativeDot()

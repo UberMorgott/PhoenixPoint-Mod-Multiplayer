@@ -53,12 +53,24 @@ namespace Multiplayer.Network.Sync.State
 
         private readonly double _delaySeconds;
         private readonly double _staleTtlSeconds;
+        // Max time gap (s) between the two straddling frames across which we still BLEND. A vehicle in continuous
+        // travel is shipped every host poll (~10 Hz), so any inter-frame gap far larger than the poll interval means
+        // the vehicle STOPPED (was idle / parked / arrived) between those two frames — blending across it would draw a
+        // physically-wrong intermediate: e.g. seeding the FIRST departure frame against a stale parked/old-flight
+        // frame renders a spurious point BETWEEN two unrelated globe placements (can read as the vehicle briefly
+        // "departing from the opposite side" — Symptom A). When the gap exceeds this, we CLAMP to the newer frame
+        // (a faithful discrete step to the fresh departure) instead of interpolating across the discontinuity.
+        // +Infinity ⇒ disabled (always blend) — the default, so the pure interpolation contract is unchanged unless a
+        // caller opts in with a finite cadence-derived value.
+        private readonly double _maxBlendGapSeconds;
         private readonly Dictionary<long, Buffer> _buffers = new Dictionary<long, Buffer>();
 
-        public VehicleInterpolator(double delaySeconds, double staleTtlSeconds)
+        public VehicleInterpolator(double delaySeconds, double staleTtlSeconds,
+                                   double maxBlendGapSeconds = double.PositiveInfinity)
         {
             _delaySeconds = delaySeconds;
             _staleTtlSeconds = staleTtlSeconds;
+            _maxBlendGapSeconds = maxBlendGapSeconds;
         }
 
         /// <summary>The render latency: samples are rendered at <c>now - DelaySeconds</c>.</summary>
@@ -119,6 +131,9 @@ namespace Multiplayer.Network.Sync.State
                 {
                     Frame lo = frames[i - 1], hi = frames[i];
                     double span = hi.Time - lo.Time;
+                    // Discontinuity guard: the two frames straddle an idle/re-departure gap (vehicle wasn't moving
+                    // between them) → don't render a spurious mid-point across it; step to the fresh (newer) frame.
+                    if (span > _maxBlendGapSeconds) { sample = ToSample(hi); return true; }
                     float t = span > 1e-9 ? (float)((renderTime - lo.Time) / span) : 0f;
                     sample = Blend(lo, hi, t);
                     return true;
