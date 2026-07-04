@@ -44,4 +44,25 @@ public class OneWindowResultNarrativeTests
     public void OneWindowEmptyOutcome_NullNarrative_DegradesToEmpty_NoThrow()
         => Assert.Equal("",
             EventReflection.ChooseResultBodyText(outcomeText: "", narrativeText: null, singleChoiceOneWindow: true));
+
+    // ─── VoidOmen never-blank narrative fallback (ChooseWireNarrative) ─────────────────
+    // A runtime-narrative def (TFTV VoidOmen_{0..19}) can reach the host broadcast with an EMPTY
+    // Description (base def key ""; the flavor literal-bind mutation is absent after a save/load or a
+    // non-GenerateVoidOmenEvent re-raise) while its Title still resolves. Description.Last().GetText → ""
+    // would ship a blank narrative → blank mirrored window. The host degrades to the resolved Title.
+
+    [Fact]
+    public void WireNarrative_DescriptionPresent_UsesDescription()
+        => Assert.Equal("The Void whispers.",
+            EventReflection.ChooseWireNarrative(descriptionText: "The Void whispers.", titleText: "Void Omen I"));
+
+    [Fact]
+    public void WireNarrative_EmptyDescription_FallsBackToTitle()
+        => Assert.Equal("Void Omen I",
+            EventReflection.ChooseWireNarrative(descriptionText: "", titleText: "Void Omen I"));
+
+    [Fact]
+    public void WireNarrative_BothEmpty_DegradesToEmpty_NoThrow()
+        => Assert.Equal("",
+            EventReflection.ChooseWireNarrative(descriptionText: "", titleText: null));
 }

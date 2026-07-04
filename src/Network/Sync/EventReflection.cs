@@ -927,9 +927,11 @@ namespace Multipleer.Network.Sync
 
         /// <summary>
         /// Host: the raise narrative exactly as the native one-window/result fallback resolves it —
-        /// <c>EventData.Description.Last().GetText(Context)</c> (UIModuleSiteEncounters.SetClosingEncounter :335).
-        /// Tokens are NOT replaced here (the client render runs ReplaceEventTokens itself). Returns "" on any
-        /// failure (client keeps its local fallback).
+        /// <c>EventData.Description.Last().GetText(Context)</c> (UIModuleSiteEncounters.SetClosingEncounter :335) —
+        /// with a never-blank fallback to the resolved Title when the Description resolves EMPTY (a TFTV runtime-
+        /// narrative def whose flavor mutation is absent; see <see cref="ChooseWireNarrative"/>). Tokens are NOT
+        /// replaced here (the client render runs ReplaceEventTokens itself). Returns "" on any failure (client keeps
+        /// its local fallback).
         /// </summary>
         public static string ResolveLiveNarrative(object geoscapeEvent)
         {
@@ -940,7 +942,10 @@ namespace Multipleer.Network.Sync
                 var data = _eventDataProp?.GetValue(geoscapeEvent, null);
                 if (data == null) return "";
                 var context = _ctxField?.GetValue(geoscapeEvent);
-                return ResolveDescriptionText(data, context);
+                string narrative = ResolveDescriptionText(data, context);
+                // VoidOmen (and any runtime-narrative def) can broadcast with an EMPTY Description while the Title
+                // still resolves → mirrored window would be blank. Fall back to the event's own Title text.
+                return ChooseWireNarrative(narrative, ResolveLiveTitle(geoscapeEvent));
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveNarrative failed: " + ex.Message); return ""; }
         }
@@ -1115,6 +1120,21 @@ namespace Multipleer.Network.Sync
         /// null/empty leaves the existing local path untouched. Unit-tested (no Unity types).
         /// </summary>
         public static bool UseWireText(string wireText) => !string.IsNullOrEmpty(wireText);
+
+        /// <summary>
+        /// PURE: the host-authoritative RAISE/RESULT narrative shipped on the wire — the resolved Description
+        /// body text, or (when it is EMPTY) the resolved Title as a never-blank fallback. A TFTV runtime-narrative
+        /// def can reach the broadcast with an EMPTY Description while its Title still resolves: the base
+        /// <c>VoidOmen_{0..19}</c> def keeps <c>Description[0].General.LocalizationKey == ""</c> (TFTVDefsInjected
+        /// OnlyOnce.Create_VoidOmen_Events → CreateNewEvent description arg ""), and the flavor text is a runtime-only
+        /// literal-bind mutation (TFTVODIandVoidOmenRoll.GenerateVoidOmenEvent :639) that does NOT survive a
+        /// save/load or a non-GenerateVoidOmenEvent re-raise — so <c>Description.Last().GetText</c> returns "" and the
+        /// mirrored client window renders BLANK. Degrade to the event's own Title (the RCA-identified VOID_OMEN_TITLE_n
+        /// text — a REAL text source, NOT invented placeholder) so the window is never empty. A normal event always
+        /// carries a non-empty Description, so its wire narrative is returned unchanged. Unit-tested (no Unity types).
+        /// </summary>
+        public static string ChooseWireNarrative(string descriptionText, string titleText)
+            => !string.IsNullOrEmpty(descriptionText) ? descriptionText : (titleText ?? "");
 
         /// <summary>
         /// Read the live module's native OK-button LocalizationKey (GeoLevelController.View → GeoscapeView.
