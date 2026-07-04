@@ -50,12 +50,35 @@ namespace Multipleer.Network.Sync.State
     /// (owner faction def asset name hashed via <see cref="GeoVehiclePos.StableOwnerKey"/> — identical assets on
     /// both instances — plus VehicleID).
     ///
+    /// SMOOTHING 2026-07-04 (Inc4 S2 travel-mirror gate #4): the ~4 Hz poll cadence made the client STEP — raw
+    /// snapshots were written straight to the transform, so between polls the vehicle sat still then jumped. The
+    /// client now BUFFERS each inbound snapshot into <see cref="VehicleInterpolator"/> (keyed by the same composite
+    /// key) and a per-frame driver (<see cref="ClientInterpolateTick"/>, reusing the existing
+    /// <c>NetworkEngine.Update → SyncEngine.Tick</c> hook — no new MonoBehaviour) renders a point
+    /// <see cref="InterpDelaySeconds"/> behind the newest snapshot, slerping the pivot rotation + shortest-arc-
+    /// lerping the heading between the two straddling snapshots (clamp-and-hold on a starved buffer, never
+    /// extrapolate). Motion is native-smooth regardless of the emit rate; the wire/host side is unchanged.
+    ///
     /// This is the reflection boundary (game types resolved by name via <c>AccessTools</c>); the pure wire codec
-    /// + change-detection signature live in <see cref="GeoVehicleSnapshot"/> / <see cref="GeoVehiclePos"/>
-    /// (unit-tested).
+    /// + change-detection signature live in <see cref="GeoVehicleSnapshot"/> / <see cref="GeoVehiclePos"/>, and the
+    /// pure snapshot-interpolation math in <see cref="VehicleInterpolator"/> (all unit-tested).
     /// </summary>
     public static class GeoVehicleMirror
     {
+        // ─── CLIENT: snapshot interpolation (Inc4 S2 smoothing) ──────────────────────────────────────────────
+        // Render latency behind the newest snapshot: ~1.5 × the nominal ~0.25 s (4 Hz, VehiclePollTickInterval=15
+        // @60fps) emit interval, so the two snapshots straddling the render clock are always in the buffer and the
+        // client interpolates between them (rather than extrapolating past the newest). Slow geoscape travel makes
+        // this ~0.375 s of visual latency imperceptible.
+        private const double InterpDelaySeconds = 0.375;
+        // Purge a key not refreshed within this window (destroyed/despawned vehicle, or one that stopped travelling
+        // so the host no longer ships it) — many missed polls, far below a real gap.
+        private const double StaleTtlSeconds = 5.0;
+        private static readonly VehicleInterpolator _interp = new VehicleInterpolator(InterpDelaySeconds, StaleTtlSeconds);
+        // Per composite key → the live vehicle Component to write each frame. Refreshed on every inbound batch (so a
+        // re-created/rebound vehicle re-resolves); pruned in lock-step with the interpolator on stale/destroy.
+        private static readonly Dictionary<long, Component> _clientTargets = new Dictionary<long, Component>();
+        private static readonly List<long> _purgeScratch = new List<long>();
         // Bind-once reflection cache (mirrors GeoRuntime / EventReflection). Game types are stable per session.
         private static FieldInfo _mapField;        // GeoLevelController.Map  (public GeoMap field)
         private static PropertyInfo _vehiclesProp;  // GeoMap.Vehicles         (IList<GeoVehicle>)
@@ -84,6 +107,20 @@ namespace Multipleer.Network.Sync.State
         private static int _diagClientApply;
         private static readonly Dictionary<long, Quaternion> _diagClientPrevWritten = new Dictionary<long, Quaternion>();
         private static PropertyInfo _pIsVisible, _pOwnedByViewer, _pTravelling, _pCurrentSite;
+
+        /// <summary>Drop all per-session state (host signature cache + client interpolation buffers + live-object
+        /// cache + diag caches). Called from the <see cref="Multipleer.Network.Sync.SyncEngine"/> constructor, which
+        /// is recreated per session — so a new session never inherits a previous one's buffered snapshots (whose
+        /// stale seq/placement would otherwise reject or misplace the fresh vehicles until the TTL purge).</summary>
+        public static void ResetForNewSession()
+        {
+            _lastSig.Clear();
+            _interp.Clear();
+            _clientTargets.Clear();
+            _diagClientPrevWritten.Clear();
+            _diagHostPoll = 0;
+            _diagClientApply = 0;
+        }
 
         // ─── HOST: poll every moving vehicle + broadcast the changed batch ─────────────────────────────────
 
@@ -139,10 +176,12 @@ namespace Multipleer.Network.Sync.State
         // ─── CLIENT: apply a host vehicle-placement batch ──────────────────────────────────────────────────
 
         /// <summary>CLIENT inbound (<c>GeoVehiclePos</c>): seq-guard, resolve each composite (OwnerId, VehicleID)
-        /// key against the live map, and replay its <c>PivotTransform.localRotation</c> (globe position) + <c>Surface.localEulerAngles</c>
-        /// (heading) from the host-absolute values under <see cref="SyncApplyScope"/>. Applies ONLY when the client
-        /// sim is FROZEN (S1): otherwise the client runs its OWN native travel and overwriting it would fight the
-        /// local navigate. No-op on host.</summary>
+        /// key against the live map, and BUFFER its host-absolute placement (<c>PivotTransform.localRotation</c> +
+        /// <c>Surface.localEulerAngles</c>) into <see cref="_interp"/> stamped with the arrival time — it is NOT
+        /// written to the transform here (that would step at the ~4 Hz poll rate). <see cref="ClientInterpolateTick"/>
+        /// replays it smoothly every frame. Also caches the live vehicle Component per key for that per-frame write.
+        /// Buffers ONLY when the client sim is FROZEN (S1): otherwise the client runs its OWN native travel and
+        /// mirroring would fight the local navigate. No-op on host.</summary>
         public static void HandleVehiclePos(byte[] payload, SurfaceSeq seq)
         {
             if (seq == null) return;
@@ -170,22 +209,70 @@ namespace Multipleer.Network.Sync.State
                             byKey[GeoVehiclePos.MakeKey(ownerId, id)] = v;
                     }
 
-                DiagClient(byKey, vehicles);   // DIAG: read pre-write pivot + held-check BEFORE the apply loop
+                DiagClient(byKey, vehicles);   // DIAG: read current pivot + newest-target held-check BEFORE buffering
 
-                int applied = 0;
-                using (SyncApplyScope.Enter())
+                // BUFFER (don't write): stamp each snapshot with the arrival time into the interpolator and cache the
+                // live Component so the per-frame driver can write it. The transform is moved by ClientInterpolateTick.
+                double arrival = Time.unscaledTime;
+                int buffered = 0;
+                foreach (var rec in vehicles)
                 {
-                    foreach (var rec in vehicles)
-                    {
-                        if (!byKey.TryGetValue(rec.Key, out var vehicle) || vehicle == null) continue;
-                        if (ApplyPlacement(vehicle, rec)) applied++;
-                    }
+                    if (!byKey.TryGetValue(rec.Key, out var vehicle) || !(vehicle is Component comp) || comp == null) continue;
+                    _clientTargets[rec.Key] = comp;
+                    _interp.Push(rec.Key, s, rec, arrival);
+                    buffered++;
                 }
                 seq.Mark(SurfaceIds.GeoVehiclePos, s);
-                if (applied > 0)
-                    Debug.Log("[Multipleer][geo] CLIENT applied geo.vehiclepos seq=" + s + " vehicles=" + applied);
+                if (buffered > 0)
+                    Debug.Log("[Multipleer][geo] CLIENT buffered geo.vehiclepos seq=" + s + " vehicles=" + buffered);
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][geo] HandleVehiclePos failed: " + ex.Message); }
+        }
+
+        // ─── CLIENT: per-frame interpolation driver ──────────────────────────────────────────────────────────
+
+        /// <summary>CLIENT per-frame (driven from <c>SyncEngine.Tick</c> on the non-host — the SAME
+        /// <c>NetworkEngine.Update</c> hook the sim-freeze clock-pin rides, so no new MonoBehaviour): render every
+        /// buffered vehicle at <c>now - InterpDelaySeconds</c>, slerping the pivot rotation + shortest-arc-lerping
+        /// the heading between the two straddling snapshots and writing the result to the live pivot/Surface
+        /// transforms. Purges stale keys (and destroyed Components) so the buffers/live-object cache stay bounded and
+        /// in-sync. Self-gated on the SAME <see cref="ClientSimFreeze.ShouldFreeze"/> gate as the buffering: host /
+        /// flag-OFF / no session → clears state and no-ops (so a flag-OFF rollback leaves ZERO behaviour). Fully
+        /// try/caught: never throws into the frame loop.</summary>
+        public static void ClientInterpolateTick(NetworkEngine engine)
+        {
+            if (!ClientSimFreeze.ShouldFreeze(ClientSimFreeze.Enabled,
+                    engine != null, engine != null && engine.IsActive, engine != null && engine.IsHost))
+            {
+                if (_clientTargets.Count > 0) _clientTargets.Clear();
+                if (_interp.Count > 0) _interp.Clear();
+                return;
+            }
+            if (_clientTargets.Count == 0) return;   // nothing mirrored yet
+
+            try
+            {
+                double now = Time.unscaledTime;
+
+                // Purge keys not refreshed within the stale TTL, keeping the live-object cache in lock-step.
+                _purgeScratch.Clear();
+                if (_interp.PurgeStale(now, _purgeScratch) > 0)
+                    foreach (var k in _purgeScratch) _clientTargets.Remove(k);
+
+                using (SyncApplyScope.Enter())
+                {
+                    _purgeScratch.Clear();   // reused for destroyed-Component pruning this frame
+                    foreach (var kv in _clientTargets)
+                    {
+                        Component comp = kv.Value;
+                        if (comp == null) { _purgeScratch.Add(kv.Key); continue; }   // vehicle destroyed → prune
+                        if (_interp.TrySample(kv.Key, now, out var sample))
+                            WritePlacement(comp, sample);
+                    }
+                    foreach (var k in _purgeScratch) { _clientTargets.Remove(k); _interp.Remove(k); }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][geo] ClientInterpolateTick failed: " + ex.Message); }
         }
 
         // ─── Reflection helpers ─────────────────────────────────────────────────────────────────────────────
@@ -263,18 +350,19 @@ namespace Multipleer.Network.Sync.State
             return true;
         }
 
-        /// <summary>Replay the host's globe placement on the client: set <c>PivotTransform.localRotation</c> (the
-        /// SOLE position determinant — moves the GlobeMarker + mesh exactly as <c>NavigateRoutine</c> does) and
-        /// <c>Surface.localEulerAngles</c> (heading). Idempotent; returns true when the pivot rotation was set.</summary>
-        private static bool ApplyPlacement(object vehicle, GeoVehiclePos rec)
+        /// <summary>Write one interpolated placement to a vehicle's transforms: set <c>PivotTransform.localRotation</c>
+        /// (the SOLE position determinant — moves the GlobeMarker + mesh exactly as <c>NavigateRoutine</c> does) and
+        /// <c>Surface.localEulerAngles</c> (heading) from the blended <see cref="VehicleInterpolator.Sample"/>.
+        /// Idempotent; returns true when the pivot rotation was set.</summary>
+        private static bool WritePlacement(Component comp, VehicleInterpolator.Sample s)
         {
-            if (!(vehicle is Component comp) || comp == null) return false;
+            if (comp == null) return false;
             Transform pivot = comp.transform;                                 // == GeoActor.PivotTransform
             if (pivot == null) return false;
-            pivot.localRotation = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
-            EnsureVehicleReflection(vehicle.GetType());
-            if (_surfaceProp != null && _surfaceProp.GetValue(vehicle, null) is Transform surface && surface != null)
-                surface.localEulerAngles = new Vector3(rec.X, rec.Y, rec.Z);
+            pivot.localRotation = new Quaternion(s.QX, s.QY, s.QZ, s.QW);
+            EnsureVehicleReflection(comp.GetType());
+            if (_surfaceProp != null && _surfaceProp.GetValue(comp, null) is Transform surface && surface != null)
+                surface.localEulerAngles = new Vector3(s.X, s.Y, s.Z);
             return true;
         }
 

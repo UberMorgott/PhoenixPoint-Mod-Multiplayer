@@ -88,6 +88,9 @@ namespace Multipleer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
+            // Fresh session → drop any travel-mirror state carried in GeoVehicleMirror's static caches (host
+            // signature + client interpolation buffers), so a new session never inherits a prior one's snapshots.
+            State.GeoVehicleMirror.ResetForNewSession();
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
             // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
             // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
@@ -987,7 +990,14 @@ namespace Multipleer.Network.Sync
         public void Tick()
         {
             if (_engine == null || !_engine.IsActive) return;
-            if (!_engine.IsHost) return;
+            if (!_engine.IsHost)
+            {
+                // CLIENT per-frame: drive the geoscape vehicle travel-mirror INTERPOLATION (Inc4 S2 smoothing).
+                // Reuses this existing per-frame hook (NetworkEngine.Update → Sync.Tick) — no new MonoBehaviour.
+                // Self-gated on ClientSimFreeze inside; flag-OFF / not-frozen = no-op (clears any stale buffers).
+                State.GeoVehicleMirror.ClientInterpolateTick(_engine);
+                return;
+            }
 
             // Host: bind the wallet watcher once the geoscape (and its wallet) is live. Attach is
             // idempotent — it early-returns until the wallet exists, then once it is bound. Mirrors the

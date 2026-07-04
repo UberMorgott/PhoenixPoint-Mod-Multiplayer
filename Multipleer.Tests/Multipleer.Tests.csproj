@@ -96,6 +96,10 @@
          signature (host→client GeoVehiclePos 0xA5). The engine glue (GeoVehicleMirror host-read/client-apply)
          binds game types via reflection and is NOT linked (mirrors GeoSiteSnapshot vs GeoSiteReflection). -->
     <Compile Include="..\src\Network\Sync\State\GeoVehicleSnapshot.cs"><Link>Sync\State\GeoVehicleSnapshot.cs</Link></Compile>
+    <!-- Inc4 S2 travel-mirror SMOOTHING: pure, Unity-free snapshot-interpolation core (per-key buffer + managed
+         quaternion slerp / 360°-wrap angle lerp). The game glue (GeoVehicleMirror per-frame driver) writes the
+         blended samples to the live transforms and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\VehicleInterpolator.cs"><Link>Sync\State\VehicleInterpolator.cs</Link></Compile>
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
