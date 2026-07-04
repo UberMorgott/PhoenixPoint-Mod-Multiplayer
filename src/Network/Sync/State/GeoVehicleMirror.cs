@@ -31,16 +31,24 @@ namespace Multipleer.Network.Sync.State
     /// MOST-NATIVE placement: it mirrors exactly what <c>NavigateRoutine</c> itself writes each travel tick —
     /// <c>PivotTransform.localRotation</c> (the SOLE globe-position determinant; the GlobeMarker icon + 3D mesh
     /// both hang off the pivot — GeoNavComponent.cs:111) plus <c>Surface.localEulerAngles</c> (heading —
-    /// GeoNavComponent.cs:213) — keyed by the save-persisted <c>GeoVehicle.VehicleID</c>. Mirroring the LOCAL
-    /// pivot rotation is frame-of-reference-robust across the two instances' globe hierarchies. Idle vehicle =
-    /// 0 bytes (per-vehicle signature skip), so the surface is free at rest and light in motion (mirrors the
-    /// tactical actor-state position mirror <c>TacticalActorStateSync</c>).
+    /// GeoNavComponent.cs:213) — keyed by the COMPOSITE (owner-faction def-name hash, VehicleID). Mirroring the
+    /// LOCAL pivot rotation is frame-of-reference-robust across the two instances' globe hierarchies. Idle
+    /// vehicle = 0 bytes (per-vehicle signature skip), so the surface is free at rest and light in motion
+    /// (mirrors the tactical actor-state position mirror <c>TacticalActorStateSync</c>).
     ///
-    /// FIX 2026-07-04: the original mirrored <c>Surface.position</c>/<c>Surface.rotation</c> — a DERIVED world
-    /// value of the GlobeOffset child. Writing it on the frozen client left the pivot rotation untouched, so the
-    /// pivot-parented GlobeMarker never moved and every vehicle mismatched the host (in-game gate: pipeline
-    /// shipped+applied 25-27 vehicles/poll yet nothing moved). Confirmed via decompile: travel writes only the
-    /// pivot rotation, never Surface.position.
+    /// FIX 2026-07-04 (#2): the original mirrored <c>Surface.position</c>/<c>Surface.rotation</c> — a DERIVED
+    /// world value of the GlobeOffset child. Writing it on the frozen client left the pivot rotation untouched,
+    /// so the pivot-parented GlobeMarker never moved (pipeline shipped+applied 25-27 vehicles/poll yet nothing
+    /// moved). Confirmed via decompile: travel writes only the pivot rotation, never Surface.position.
+    ///
+    /// FIX 2026-07-04 (#3, DIAG-proven): <c>VehicleID</c> is only per-FACTION unique
+    /// (<c>GeoFaction.cs:2008 ++_lastVehicleIndex</c>) — the in-game DIAG showed the host shipping FIVE different
+    /// vehicles (PX_Mantis/DA_Blimp/NJ_Rhino/SYN_Icarus…) all as "id=1" and the client applying ALL of them to
+    /// ONE vehicle (its id-keyed lookup is last-writer-wins), which landed back on its own parked rotation each
+    /// batch → zero visible movement; the host's per-id signature slot churned identically → all 25 vehicles
+    /// re-shipped every poll. Mirror keys are now the composite <see cref="GeoVehiclePos.Key"/>
+    /// (owner faction def asset name hashed via <see cref="GeoVehiclePos.StableOwnerKey"/> — identical assets on
+    /// both instances — plus VehicleID).
     ///
     /// This is the reflection boundary (game types resolved by name via <c>AccessTools</c>); the pure wire codec
     /// + change-detection signature live in <see cref="GeoVehicleSnapshot"/> / <see cref="GeoVehiclePos"/>
@@ -53,10 +61,12 @@ namespace Multipleer.Network.Sync.State
         private static PropertyInfo _vehiclesProp;  // GeoMap.Vehicles         (IList<GeoVehicle>)
         private static FieldInfo _vehicleIdField;    // GeoVehicle.VehicleID    (public int field)
         private static PropertyInfo _surfaceProp;    // GeoVehicle.Surface      (GlobeOffset child Transform; heading source)
+        private static PropertyInfo _ownerProp;      // GeoVehicle.Owner        (GeoFaction — owner identity for the composite key)
+        private static PropertyInfo _factionDefProp; // GeoFaction.Def          (GeoFactionDef : BaseDef : ScriptableObject → .name)
 
-        // HOST: last-broadcast signature per VehicleID — skip a vehicle whose placement is unchanged since the
-        // last flush so a PARKED vehicle produces ZERO bytes (only genuinely-moving vehicles are shipped).
-        private static readonly Dictionary<int, string> _lastSig = new Dictionary<int, string>();
+        // HOST: last-broadcast signature per composite (OwnerId, VehicleID) key — skip a vehicle whose placement
+        // is unchanged since the last flush so a PARKED vehicle produces ZERO bytes.
+        private static readonly Dictionary<long, string> _lastSig = new Dictionary<long, string>();
 
         // ─── DIAGNOSTICS (Inc4 S2 travel-mirror gate #3, 2026-07-04) — pure logging, ZERO behaviour change ──
         // The pipeline ships+applies 25 vehicles/poll yet the client shows no movement; the decompile has
@@ -69,10 +79,10 @@ namespace Multipleer.Network.Sync.State
         // Throttled to 1 sample / DIAG_EVERY polls for the lowest-N VehicleIDs in the batch (host+client pick
         // the SAME ids from the SAME batch, so lines pair up 1:1). Remove once the break is localized (spec §8).
         private const int DIAG_EVERY = 8;                 // ~1 log burst / 2 s at the ~4 Hz poll
-        private const int DIAG_TRACK = 3;                 // lowest-3 ids in the batch
+        private const int DIAG_TRACK = 3;                 // lowest-3 composite keys in the batch
         private static int _diagHostPoll;
         private static int _diagClientApply;
-        private static readonly Dictionary<int, Quaternion> _diagClientPrevWritten = new Dictionary<int, Quaternion>();
+        private static readonly Dictionary<long, Quaternion> _diagClientPrevWritten = new Dictionary<long, Quaternion>();
         private static PropertyInfo _pIsVisible, _pOwnedByViewer, _pTravelling, _pCurrentSite;
 
         // ─── HOST: poll every moving vehicle + broadcast the changed batch ─────────────────────────────────
@@ -90,27 +100,27 @@ namespace Multipleer.Network.Sync.State
                 if (vehicles == null) { _lastSig.Clear(); return; }   // left geoscape / mid-load → reset guard
 
                 var changed = new List<GeoVehiclePos>();
-                var liveIds = new HashSet<int>();
+                var liveKeys = new HashSet<long>();
                 foreach (var v in vehicles)
                 {
                     if (v == null) continue;
                     // heading = Surface.localEulerAngles (X/Y/Z); pivotRot = PivotTransform.localRotation (QX..QW).
-                    if (!TryReadPlacement(v, out int id, out Vector3 heading, out Quaternion pivotRot)) continue;
-                    liveIds.Add(id);
-                    var rec = new GeoVehiclePos(id, heading.x, heading.y, heading.z,
+                    if (!TryReadPlacement(v, out int ownerId, out int id, out Vector3 heading, out Quaternion pivotRot)) continue;
+                    var rec = new GeoVehiclePos(ownerId, id, heading.x, heading.y, heading.z,
                                                 pivotRot.x, pivotRot.y, pivotRot.z, pivotRot.w);
+                    liveKeys.Add(rec.Key);
                     string sig = GeoVehiclePos.Signature(rec);
-                    if (_lastSig.TryGetValue(id, out var prev) && prev == sig) continue;   // unchanged → skip (idle = 0 bytes)
-                    _lastSig[id] = sig;
+                    if (_lastSig.TryGetValue(rec.Key, out var prev) && prev == sig) continue;   // unchanged → skip (idle = 0 bytes)
+                    _lastSig[rec.Key] = sig;
                     changed.Add(rec);
                 }
 
-                // Drop signatures for vehicles that left the map (destroyed/despawned) so a re-created VehicleID
+                // Drop signatures for vehicles that left the map (destroyed/despawned) so a re-created key
                 // re-ships from scratch.
-                if (_lastSig.Count > liveIds.Count)
+                if (_lastSig.Count > liveKeys.Count)
                 {
-                    var stale = new List<int>();
-                    foreach (var k in _lastSig.Keys) if (!liveIds.Contains(k)) stale.Add(k);
+                    var stale = new List<long>();
+                    foreach (var k in _lastSig.Keys) if (!liveKeys.Contains(k)) stale.Add(k);
                     foreach (var k in stale) _lastSig.Remove(k);
                 }
 
@@ -128,8 +138,8 @@ namespace Multipleer.Network.Sync.State
 
         // ─── CLIENT: apply a host vehicle-placement batch ──────────────────────────────────────────────────
 
-        /// <summary>CLIENT inbound (<c>GeoVehiclePos</c>): seq-guard, resolve each <c>VehicleID</c> against the
-        /// live map, and replay its <c>PivotTransform.localRotation</c> (globe position) + <c>Surface.localEulerAngles</c>
+        /// <summary>CLIENT inbound (<c>GeoVehiclePos</c>): seq-guard, resolve each composite (OwnerId, VehicleID)
+        /// key against the live map, and replay its <c>PivotTransform.localRotation</c> (globe position) + <c>Surface.localEulerAngles</c>
         /// (heading) from the host-absolute values under <see cref="SyncApplyScope"/>. Applies ONLY when the client
         /// sim is FROZEN (S1): otherwise the client runs its OWN native travel and overwriting it would fight the
         /// local navigate. No-op on host.</summary>
@@ -148,24 +158,26 @@ namespace Multipleer.Network.Sync.State
 
             try
             {
-                // Build the client's VehicleID → live vehicle lookup once (the map is small).
-                var byId = new Dictionary<int, object>();
+                // Build the client's composite-key → live vehicle lookup once (the map is small).
+                // KEY = (OwnerId, VehicleID): VehicleID alone is per-faction and COLLIDES across factions.
+                var byKey = new Dictionary<long, object>();
                 var live = ResolveVehicles();
                 if (live != null)
                     foreach (var v in live)
                     {
                         if (v == null) continue;
-                        if (TryReadId(v, out int id)) byId[id] = v;
+                        if (TryReadId(v, out int id) && TryReadOwnerKey(v, out int ownerId))
+                            byKey[GeoVehiclePos.MakeKey(ownerId, id)] = v;
                     }
 
-                DiagClient(byId, vehicles);   // DIAG: read pre-write pivot + held-check BEFORE the apply loop
+                DiagClient(byKey, vehicles);   // DIAG: read pre-write pivot + held-check BEFORE the apply loop
 
                 int applied = 0;
                 using (SyncApplyScope.Enter())
                 {
                     foreach (var rec in vehicles)
                     {
-                        if (!byId.TryGetValue(rec.VehicleId, out var vehicle) || vehicle == null) continue;
+                        if (!byKey.TryGetValue(rec.Key, out var vehicle) || vehicle == null) continue;
                         if (ApplyPlacement(vehicle, rec)) applied++;
                     }
                 }
@@ -209,14 +221,36 @@ namespace Multipleer.Network.Sync.State
             catch { return false; }
         }
 
-        /// <summary>Read a vehicle's {VehicleID, Surface.localEulerAngles (heading), PivotTransform.localRotation
-        /// (globe placement)} — the exact state <c>NavigateRoutine</c> writes each travel tick. The pivot is the
-        /// vehicle's own transform (<c>GeoActor.PivotTransform => base.transform</c>), reached by casting the
-        /// component. Returns false when the id / Surface / pivot is unreadable, or the pivot rotation is NaN.</summary>
-        private static bool TryReadPlacement(object vehicle, out int id, out Vector3 heading, out Quaternion pivotRot)
+        /// <summary>Stable owner-faction key: <c>GeoVehicle.Owner</c> (GeoFaction) → <c>Def</c> (GeoFactionDef :
+        /// BaseDef : ScriptableObject) → asset <c>name</c> → FNV-1a hash. Def asset names are identical across
+        /// the two instances (same build, host-replicated state), so host and client derive the SAME key for the
+        /// same faction. Unresolvable owner → key 0 (symmetric on both ends).</summary>
+        private static bool TryReadOwnerKey(object vehicle, out int ownerId)
         {
-            id = 0; heading = Vector3.zero; pivotRot = Quaternion.identity;
+            ownerId = 0;
+            try
+            {
+                if (_ownerProp == null) _ownerProp = AccessTools.Property(vehicle.GetType(), "Owner");
+                object owner = _ownerProp?.GetValue(vehicle, null);
+                if (owner == null) return true;   // key 0 fallback — still resolvable, symmetric host/client
+                if (_factionDefProp == null) _factionDefProp = AccessTools.Property(owner.GetType(), "Def");
+                var def = _factionDefProp?.GetValue(owner, null) as UnityEngine.Object;
+                ownerId = GeoVehiclePos.StableOwnerKey(def != null ? def.name : null);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Read a vehicle's {OwnerId, VehicleID, Surface.localEulerAngles (heading),
+        /// PivotTransform.localRotation (globe placement)} — the exact state <c>NavigateRoutine</c> writes each
+        /// travel tick, plus the composite-key owner half. The pivot is the vehicle's own transform
+        /// (<c>GeoActor.PivotTransform => base.transform</c>), reached by casting the component. Returns false
+        /// when the id / owner / pivot is unreadable, or the pivot rotation is NaN.</summary>
+        private static bool TryReadPlacement(object vehicle, out int ownerId, out int id, out Vector3 heading, out Quaternion pivotRot)
+        {
+            ownerId = 0; id = 0; heading = Vector3.zero; pivotRot = Quaternion.identity;
             if (!TryReadId(vehicle, out id)) return false;
+            if (!TryReadOwnerKey(vehicle, out ownerId)) return false;
             if (!(vehicle is Component comp) || comp == null) return false;   // GeoVehicle is a UnityEngine.Component
             Transform pivot = comp.transform;                                 // == GeoActor.PivotTransform (base.transform)
             if (pivot == null) return false;
@@ -278,17 +312,20 @@ namespace Multipleer.Network.Sync.State
             return sb.ToString();
         }
 
-        // The n lowest VehicleIDs in the batch — host & client compute this identically so their DIAG lines pair up.
-        private static HashSet<int> LowestIds(IList<GeoVehiclePos> batch, int n)
+        // The n lowest composite keys in the batch — host & client compute this identically so DIAG lines pair up.
+        private static HashSet<long> LowestKeys(IList<GeoVehiclePos> batch, int n)
         {
-            var ids = new List<int>(batch.Count);
-            foreach (var b in batch) ids.Add(b.VehicleId);
-            ids.Sort();
-            if (ids.Count > n) ids.RemoveRange(n, ids.Count - n);
-            return new HashSet<int>(ids);
+            var keys = new List<long>(batch.Count);
+            foreach (var b in batch) keys.Add(b.Key);
+            keys.Sort();
+            if (keys.Count > n) keys.RemoveRange(n, keys.Count - n);
+            return new HashSet<long>(keys);
         }
 
-        /// <summary>HOST probe: for the lowest-N shipped ids, log the pivot quat being shipped + its WORLD pos +
+        private static string DiagKey(int ownerId, int vehicleId)
+            => ownerId.ToString("X8") + ":" + vehicleId;
+
+        /// <summary>HOST probe: for the lowest-N shipped keys, log the pivot quat being shipped + its WORLD pos +
         /// parent frame + visibility/owner/travel/site, so the client's paired line can be compared 1:1.</summary>
         private static void DiagHost(IEnumerable vehicles, List<GeoVehiclePos> changed)
         {
@@ -296,14 +333,15 @@ namespace Multipleer.Network.Sync.State
             {
                 if (changed == null || changed.Count == 0) return;
                 if ((++_diagHostPoll % DIAG_EVERY) != 0) return;
-                var tracked = LowestIds(changed, DIAG_TRACK);
+                var tracked = LowestKeys(changed, DIAG_TRACK);
                 foreach (var v in vehicles)
                 {
-                    if (v == null || !TryReadId(v, out int id) || !tracked.Contains(id)) continue;
+                    if (v == null || !TryReadId(v, out int id) || !TryReadOwnerKey(v, out int ownerId)) continue;
+                    if (!tracked.Contains(GeoVehiclePos.MakeKey(ownerId, id))) continue;
                     if (!(v is Component comp) || comp == null) continue;
                     Transform pivot = comp.transform;
                     EnsureDiagReflection(v.GetType());
-                    Debug.Log("[Multipleer][geo][DIAG-H] id=" + id + " name=" + comp.name
+                    Debug.Log("[Multipleer][geo][DIAG-H] key=" + DiagKey(ownerId, id) + " name=" + comp.name
                         + " active=" + comp.gameObject.activeInHierarchy
                         + " ship=" + DiagQuat(pivot.localRotation)
                         + " worldPos=" + DiagV3(pivot.position)
@@ -319,34 +357,34 @@ namespace Multipleer.Network.Sync.State
         }
 
         /// <summary>CLIENT probe (called BEFORE the apply loop, so localRotation is the pre-write value):
-        /// for the lowest-N ids, compare the CURRENT pivot rotation to the value we wrote LAST poll —
+        /// for the lowest-N composite keys, compare the CURRENT pivot rotation to the value we wrote LAST poll —
         /// HELD ⇒ the write survived (no stomp); REVERTED ⇒ something reset the pivot between polls. Also logs
         /// the value about to be written, world pos, parent frame, active state and visibility so it pairs 1:1
-        /// with DIAG-H for the same id. Updates the per-id prev-written cache every poll (accurate held-check).</summary>
-        private static void DiagClient(Dictionary<int, object> byId, List<GeoVehiclePos> batch)
+        /// with DIAG-H for the same key. Updates the per-key prev-written cache every poll (accurate held-check).</summary>
+        private static void DiagClient(Dictionary<long, object> byKey, List<GeoVehiclePos> batch)
         {
             try
             {
                 if (batch == null || batch.Count == 0) return;
                 bool fire = (++_diagClientApply % DIAG_EVERY) == 0;
-                var tracked = LowestIds(batch, DIAG_TRACK);
+                var tracked = LowestKeys(batch, DIAG_TRACK);
                 foreach (var rec in batch)
                 {
-                    if (!tracked.Contains(rec.VehicleId)) continue;
-                    if (!byId.TryGetValue(rec.VehicleId, out var vo) || !(vo is Component comp) || comp == null) continue;
+                    if (!tracked.Contains(rec.Key)) continue;
+                    if (!byKey.TryGetValue(rec.Key, out var vo) || !(vo is Component comp) || comp == null) continue;
                     Transform pivot = comp.transform;
                     Quaternion before = pivot.localRotation;                                 // pre-write (this poll)
                     Quaternion willWrite = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
                     string held = "n/a(first)";
-                    if (_diagClientPrevWritten.TryGetValue(rec.VehicleId, out var prev))
+                    if (_diagClientPrevWritten.TryGetValue(rec.Key, out var prev))
                         held = Quaternion.Angle(before, prev) < 0.05f
                             ? "HELD"
                             : "REVERTED(before=" + DiagQuat(before) + " prevWrote=" + DiagQuat(prev) + ")";
-                    _diagClientPrevWritten[rec.VehicleId] = willWrite;
+                    _diagClientPrevWritten[rec.Key] = willWrite;
                     if (fire)
                     {
                         EnsureDiagReflection(vo.GetType());
-                        Debug.Log("[Multipleer][geo][DIAG-C] id=" + rec.VehicleId + " name=" + comp.name
+                        Debug.Log("[Multipleer][geo][DIAG-C] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
                             + " active=" + comp.gameObject.activeInHierarchy
                             + " held=" + held
                             + " willWrite=" + DiagQuat(willWrite)
