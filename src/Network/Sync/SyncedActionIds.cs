@@ -20,5 +20,8 @@ namespace Multipleer.Network.Sync
 
         // Events 30-39
         public const ushort AnswerEvent = 30;
+
+        // Vehicles / geoscape travel 40-49
+        public const ushort MoveVehicle = 40;
     }
 }

@@ -91,6 +91,7 @@ namespace Multipleer.Network.Sync
             // Fresh session → drop any travel-mirror state carried in GeoVehicleMirror's static caches (host
             // signature + client interpolation buffers), so a new session never inherits a prior one's snapshots.
             State.GeoVehicleMirror.ResetForNewSession();
+            State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
             // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
             // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
@@ -1079,6 +1080,10 @@ namespace Multipleer.Network.Sync
             {
                 _vehiclePollTick = 0;
                 State.GeoVehicleMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
+                // Inc4 S2 — travel-METADATA mirror (0xA6): same throttle/gate as the 0xA5 position poll. Ships only
+                // on a genuine travel transition (signature-skip), so it is near-silent; it feeds the native yellow
+                // route line on the frozen client (Symptom B). Client never simulates — display-only mirror.
+                State.GeoVehicleTravelMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
             }
         }
 
@@ -1119,6 +1124,15 @@ namespace Multipleer.Network.Sync
                 // ClientSimFreeze.ShouldFreeze); the host never receives its own broadcast. Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleMirror.HandleVehiclePos(payload, _geoLiveSeq); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehiclepos envelope failed: " + ex.Message); }
+                return true;
+            }
+            if (surfaceId == SurfaceIds.GeoVehicleTravel)
+            {
+                // Inc4 S2 route-line metadata mirror: the frozen client writes each vehicle's display-only travel
+                // state (Travelling/CurrentSite/DestinationSites) so the native yellow route line renders correctly
+                // (GeoVehicleTravelMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
+                try { State.GeoVehicleTravelMirror.HandleTravelMeta(payload, _geoLiveSeq); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehicletravel envelope failed: " + ex.Message); }
                 return true;
             }
             return false;

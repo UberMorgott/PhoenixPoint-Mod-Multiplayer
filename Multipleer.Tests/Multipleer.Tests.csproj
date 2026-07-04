@@ -79,6 +79,11 @@
     <Compile Include="..\src\Network\Sync\ManufactureReflection.cs"><Link>Sync\ManufactureReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\BaseReflection.cs"><Link>Sync\BaseReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\EventReflection.cs"><Link>Sync\EventReflection.cs</Link></Compile>
+    <!-- Inc4 S2 travel intent relay + route-line metadata: game-bound vehicle/site reflection (AccessTools +
+         GeoRuntime only, no SyncEngine/NetworkEngine) — linked so MoveVehicleAction's round-trip test compiles.
+         The engine glue (GeoVehicleTravelMirror host-poll/broadcast, MoveVehiclePatch) touches NetworkEngine and
+         is NOT linked (mirrors GeoVehicleMirror). -->
+    <Compile Include="..\src\Network\Sync\VehicleTravelReflection.cs"><Link>Sync\VehicleTravelReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\StartResearchAction.cs"><Link>Sync\Actions\StartResearchAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\ResearchCompletedAction.cs"><Link>Sync\Actions\ResearchCompletedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\CancelResearchAction.cs"><Link>Sync\Actions\CancelResearchAction.cs</Link></Compile>
@@ -100,6 +105,10 @@
          quaternion slerp / 360°-wrap angle lerp). The game glue (GeoVehicleMirror per-frame driver) writes the
          blended samples to the live transforms and is NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\VehicleInterpolator.cs"><Link>Sync\State\VehicleInterpolator.cs</Link></Compile>
+    <!-- Inc4 S2 route-line metadata mirror (0xA6): pure, Unity-free travel-meta DTO + wire codec + change
+         signature. The game glue (GeoVehicleTravelMirror host-read/client-apply) binds game types and is NOT
+         linked (mirrors GeoVehicleSnapshot vs GeoVehicleMirror). -->
+    <Compile Include="..\src\Network\Sync\State\GeoVehicleTravelMeta.cs"><Link>Sync\State\GeoVehicleTravelMeta.cs</Link></Compile>
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
@@ -146,6 +155,7 @@
     <Compile Include="..\src\Network\Sync\Actions\RepairFacilityAction.cs"><Link>Sync\Actions\RepairFacilityAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\FacilityCompletedAction.cs"><Link>Sync\Actions\FacilityCompletedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\AnswerEventAction.cs"><Link>Sync\Actions\AnswerEventAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\MoveVehicleAction.cs"><Link>Sync\Actions\MoveVehicleAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Sync\SyncRegistration.cs</Link></Compile>
     <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
     <Compile Include="..\src\Network\ClientIdentity.cs"><Link>ClientIdentity.cs</Link></Compile>

@@ -14,7 +14,8 @@ namespace Multipleer.Network.Sync
         Recruitment,
         Equip,
         Dialogs,
-        TimeControl
+        TimeControl,
+        VehicleTravel
     }
 
     /// <summary>

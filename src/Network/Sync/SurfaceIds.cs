@@ -37,5 +37,6 @@ namespace Multipleer.Network.Sync
         // 0xA2-0xA4 RESERVED for the geoscape action-relay → envelope cutover (GeoIntent/GeoOutcome/GeoReject,
         // spec 2026-07-02-multipleer-action-relay-envelope-cutover-design) — do NOT reuse.
         public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
+        public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
     }
 }
