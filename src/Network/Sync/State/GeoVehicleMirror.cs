@@ -15,22 +15,31 @@ namespace Multipleer.Network.Sync.State
     ///
     /// S1 froze the client geoscape sim CLOCK (<c>Timing.Paused=true</c>), so the client's
     /// <c>GeoNavComponent.NavigateRoutine</c> — a frame-updateable on the now-paused geo Timing — is DEFERRED
-    /// and local vehicle travel stops advancing. S2 restores visible travel WITHOUT unfreezing the sim: the
-    /// HOST periodically broadcasts each MOVING vehicle's ABSOLUTE world placement and the client applies it as
-    /// a pure display. The client never re-navigates, never integrates its own motion (canon: client = pure
-    /// mirror; host-authoritative).
+    /// (TimingScheduler.CallUpdateable skips a paused NextFrame updateable) and local vehicle travel stops
+    /// advancing: the client's <c>PivotTransform.localRotation</c> is never touched. S2 restores visible travel
+    /// WITHOUT unfreezing the sim: the HOST periodically broadcasts each MOVING vehicle's ABSOLUTE globe
+    /// placement and the client replays it as a pure display. The client never re-navigates, never integrates
+    /// its own motion (canon: client = pure mirror; host-authoritative).
     ///
-    /// WHY a position mirror, not a relayed <c>StartTravel</c> (spec §2/§4, roadmap Inc2): under the frozen
+    /// WHY a placement mirror, not a relayed <c>StartTravel</c> (spec §2/§4, roadmap Inc2): under the frozen
     /// clock, replaying a <c>StartTravel{path}</c> via <c>NavigateRoutine</c> can't render (the routine is a
     /// deferred frame-updateable) without a parallel slaved clock, AND path-replay is client-side motion
     /// integration — the exact "client never simulates" violation. The absolute mirror is drift-free by
     /// construction (absolute values + last-writer-wins <see cref="SurfaceSeq"/>) and path/speed/TFTV-agnostic.
     ///
-    /// MOST-NATIVE placement: it mirrors exactly the pair the game's own <c>GeoVehicle.RecordInstanceData</c>/
-    /// <c>ProcessInstanceData</c> round-trips to persist/restore a vehicle — <c>Surface.position</c> +
-    /// <c>Surface.rotation</c> — keyed by the save-persisted <c>GeoVehicle.VehicleID</c>. Idle vehicle = 0 bytes
-    /// (per-vehicle signature skip), so the surface is free at rest and light in motion (mirrors the tactical
-    /// actor-state position mirror <c>TacticalActorStateSync</c>).
+    /// MOST-NATIVE placement: it mirrors exactly what <c>NavigateRoutine</c> itself writes each travel tick —
+    /// <c>PivotTransform.localRotation</c> (the SOLE globe-position determinant; the GlobeMarker icon + 3D mesh
+    /// both hang off the pivot — GeoNavComponent.cs:111) plus <c>Surface.localEulerAngles</c> (heading —
+    /// GeoNavComponent.cs:213) — keyed by the save-persisted <c>GeoVehicle.VehicleID</c>. Mirroring the LOCAL
+    /// pivot rotation is frame-of-reference-robust across the two instances' globe hierarchies. Idle vehicle =
+    /// 0 bytes (per-vehicle signature skip), so the surface is free at rest and light in motion (mirrors the
+    /// tactical actor-state position mirror <c>TacticalActorStateSync</c>).
+    ///
+    /// FIX 2026-07-04: the original mirrored <c>Surface.position</c>/<c>Surface.rotation</c> — a DERIVED world
+    /// value of the GlobeOffset child. Writing it on the frozen client left the pivot rotation untouched, so the
+    /// pivot-parented GlobeMarker never moved and every vehicle mismatched the host (in-game gate: pipeline
+    /// shipped+applied 25-27 vehicles/poll yet nothing moved). Confirmed via decompile: travel writes only the
+    /// pivot rotation, never Surface.position.
     ///
     /// This is the reflection boundary (game types resolved by name via <c>AccessTools</c>); the pure wire codec
     /// + change-detection signature live in <see cref="GeoVehicleSnapshot"/> / <see cref="GeoVehiclePos"/>
@@ -42,7 +51,7 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _mapField;        // GeoLevelController.Map  (public GeoMap field)
         private static PropertyInfo _vehiclesProp;  // GeoMap.Vehicles         (IList<GeoVehicle>)
         private static FieldInfo _vehicleIdField;    // GeoVehicle.VehicleID    (public int field)
-        private static PropertyInfo _surfaceProp;    // GeoVehicle.Surface      (Transform, world placement)
+        private static PropertyInfo _surfaceProp;    // GeoVehicle.Surface      (GlobeOffset child Transform; heading source)
 
         // HOST: last-broadcast signature per VehicleID — skip a vehicle whose placement is unchanged since the
         // last flush so a PARKED vehicle produces ZERO bytes (only genuinely-moving vehicles are shipped).
@@ -50,9 +59,10 @@ namespace Multipleer.Network.Sync.State
 
         // ─── HOST: poll every moving vehicle + broadcast the changed batch ─────────────────────────────────
 
-        /// <summary>HOST (throttled from <c>SyncEngine.Tick</c>): read each map vehicle's world placement,
-        /// signature-skip unchanged vehicles, and broadcast the moving ones on the <c>GeoVehiclePos</c> surface
-        /// with a fresh <see cref="SurfaceSeq"/> value. No-op off-host / not in geoscape (guard reset then).</summary>
+        /// <summary>HOST (throttled from <c>SyncEngine.Tick</c>): read each map vehicle's globe placement (pivot
+        /// <c>localRotation</c> + heading euler), signature-skip unchanged vehicles, and broadcast the moving ones
+        /// on the <c>GeoVehiclePos</c> surface with a fresh <see cref="SurfaceSeq"/> value. No-op off-host / not in
+        /// geoscape (guard reset then).</summary>
         public static void HostPollAndBroadcast(NetworkEngine engine, SurfaceSeq seq)
         {
             if (engine == null || !engine.IsActive || !engine.IsHost || seq == null) return;
@@ -66,9 +76,11 @@ namespace Multipleer.Network.Sync.State
                 foreach (var v in vehicles)
                 {
                     if (v == null) continue;
-                    if (!TryReadPlacement(v, out int id, out Vector3 p, out Quaternion q)) continue;
+                    // heading = Surface.localEulerAngles (X/Y/Z); pivotRot = PivotTransform.localRotation (QX..QW).
+                    if (!TryReadPlacement(v, out int id, out Vector3 heading, out Quaternion pivotRot)) continue;
                     liveIds.Add(id);
-                    var rec = new GeoVehiclePos(id, p.x, p.y, p.z, q.x, q.y, q.z, q.w);
+                    var rec = new GeoVehiclePos(id, heading.x, heading.y, heading.z,
+                                                pivotRot.x, pivotRot.y, pivotRot.z, pivotRot.w);
                     string sig = GeoVehiclePos.Signature(rec);
                     if (_lastSig.TryGetValue(id, out var prev) && prev == sig) continue;   // unchanged → skip (idle = 0 bytes)
                     _lastSig[id] = sig;
@@ -98,9 +110,10 @@ namespace Multipleer.Network.Sync.State
         // ─── CLIENT: apply a host vehicle-placement batch ──────────────────────────────────────────────────
 
         /// <summary>CLIENT inbound (<c>GeoVehiclePos</c>): seq-guard, resolve each <c>VehicleID</c> against the
-        /// live map, and set its <c>Surface.position</c>/<c>rotation</c> to the host-absolute values under
-        /// <see cref="SyncApplyScope"/>. Applies ONLY when the client sim is FROZEN (S1): otherwise the client
-        /// runs its OWN native travel and overwriting it would fight the local navigate. No-op on host.</summary>
+        /// live map, and replay its <c>PivotTransform.localRotation</c> (globe position) + <c>Surface.localEulerAngles</c>
+        /// (heading) from the host-absolute values under <see cref="SyncApplyScope"/>. Applies ONLY when the client
+        /// sim is FROZEN (S1): otherwise the client runs its OWN native travel and overwriting it would fight the
+        /// local navigate. No-op on host.</summary>
         public static void HandleVehiclePos(byte[] payload, SurfaceSeq seq)
         {
             if (seq == null) return;
@@ -175,29 +188,38 @@ namespace Multipleer.Network.Sync.State
             catch { return false; }
         }
 
-        /// <summary>Read a vehicle's {VehicleID, Surface.position, Surface.rotation}. Returns false when the id
-        /// or the Surface transform is unreadable, or the position is NaN (a half-initialized transform).</summary>
-        private static bool TryReadPlacement(object vehicle, out int id, out Vector3 pos, out Quaternion rot)
+        /// <summary>Read a vehicle's {VehicleID, Surface.localEulerAngles (heading), PivotTransform.localRotation
+        /// (globe placement)} — the exact state <c>NavigateRoutine</c> writes each travel tick. The pivot is the
+        /// vehicle's own transform (<c>GeoActor.PivotTransform => base.transform</c>), reached by casting the
+        /// component. Returns false when the id / Surface / pivot is unreadable, or the pivot rotation is NaN.</summary>
+        private static bool TryReadPlacement(object vehicle, out int id, out Vector3 heading, out Quaternion pivotRot)
         {
-            id = 0; pos = Vector3.zero; rot = Quaternion.identity;
+            id = 0; heading = Vector3.zero; pivotRot = Quaternion.identity;
             if (!TryReadId(vehicle, out id)) return false;
-            if (_surfaceProp == null) return false;
-            if (!(_surfaceProp.GetValue(vehicle, null) is Transform surface) || surface == null) return false;
-            pos = surface.position;
-            rot = surface.rotation;
-            if (float.IsNaN(pos.x) || float.IsNaN(pos.y) || float.IsNaN(pos.z)) return false;
+            if (!(vehicle is Component comp) || comp == null) return false;   // GeoVehicle is a UnityEngine.Component
+            Transform pivot = comp.transform;                                 // == GeoActor.PivotTransform (base.transform)
+            if (pivot == null) return false;
+            pivotRot = pivot.localRotation;
+            if (float.IsNaN(pivotRot.x) || float.IsNaN(pivotRot.y) || float.IsNaN(pivotRot.z) || float.IsNaN(pivotRot.w))
+                return false;
+            EnsureVehicleReflection(vehicle.GetType());
+            if (_surfaceProp != null && _surfaceProp.GetValue(vehicle, null) is Transform surface && surface != null)
+                heading = surface.localEulerAngles;   // facing; absent-Surface tolerated (heading stays zero)
             return true;
         }
 
-        /// <summary>Set the client vehicle's world placement to the host-absolute values (the same fields native
-        /// <c>ProcessInstanceData</c> restores). Idempotent; returns true when the Surface transform was set.</summary>
+        /// <summary>Replay the host's globe placement on the client: set <c>PivotTransform.localRotation</c> (the
+        /// SOLE position determinant — moves the GlobeMarker + mesh exactly as <c>NavigateRoutine</c> does) and
+        /// <c>Surface.localEulerAngles</c> (heading). Idempotent; returns true when the pivot rotation was set.</summary>
         private static bool ApplyPlacement(object vehicle, GeoVehiclePos rec)
         {
+            if (!(vehicle is Component comp) || comp == null) return false;
+            Transform pivot = comp.transform;                                 // == GeoActor.PivotTransform
+            if (pivot == null) return false;
+            pivot.localRotation = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
             EnsureVehicleReflection(vehicle.GetType());
-            if (_surfaceProp == null) return false;
-            if (!(_surfaceProp.GetValue(vehicle, null) is Transform surface) || surface == null) return false;
-            surface.position = new Vector3(rec.X, rec.Y, rec.Z);
-            surface.rotation = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
+            if (_surfaceProp != null && _surfaceProp.GetValue(vehicle, null) is Transform surface && surface != null)
+                surface.localEulerAngles = new Vector3(rec.X, rec.Y, rec.Z);
             return true;
         }
     }

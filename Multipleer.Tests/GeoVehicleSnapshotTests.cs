@@ -60,27 +60,43 @@ public class GeoVehicleSnapshotTests
     public void TryDecode_Null_ReturnsFalse()
         => Assert.False(GeoVehicleSnapshot.TryDecode(null, out _, out _));
 
+    // Field semantics (Inc4 S2 fix 2026-07-04): QX..QW = PivotTransform.localRotation (globe placement —
+    // the quaternion NavigateRoutine writes; the SOLE position determinant), X,Y,Z = Surface.localEulerAngles
+    // (heading/facing). Signature rounds the pivot quaternion FINE (F6) since it is the primary travel signal,
+    // and the heading euler at F2 (0.01°).
+
     [Fact]
-    public void Signature_SkipsSubHundredthPositionJitter()
+    public void Signature_SkipsSubHundredthHeadingJitter()
     {
         var a = new GeoVehiclePos(1, 10.000f, 20.000f, 30.000f, 0f, 0f, 0f, 1f);
-        var b = new GeoVehiclePos(1, 10.004f, 20.003f, 30.002f, 0f, 0f, 0f, 1f);   // < 0.01 drift on each axis
+        var b = new GeoVehiclePos(1, 10.004f, 20.003f, 30.002f, 0f, 0f, 0f, 1f);   // < 0.01° heading drift on each axis
         Assert.Equal(GeoVehiclePos.Signature(a), GeoVehiclePos.Signature(b));       // parked → same sig → 0 bytes
     }
 
     [Fact]
-    public void Signature_ChangesOnRealTravelStep()
+    public void Signature_ChangesOnPivotRotationStep()
     {
-        var a = new GeoVehiclePos(1, 10.00f, 20.00f, 30.00f, 0f, 0f, 0f, 1f);
-        var moved = new GeoVehiclePos(1, 10.50f, 20.00f, 30.00f, 0f, 0f, 0f, 1f);   // a real position step
+        var a = new GeoVehiclePos(1, 10f, 20f, 30f, 0.000f, 0.000f, 0.000f, 1.000f);
+        var moved = new GeoVehiclePos(1, 10f, 20f, 30f, 0.000f, 0.383f, 0.000f, 0.924f); // pivot rotated → new globe pos
         Assert.NotEqual(GeoVehiclePos.Signature(a), GeoVehiclePos.Signature(moved));
     }
 
     [Fact]
     public void Signature_ChangesOnHeadingTurn()
     {
-        var a = new GeoVehiclePos(1, 10f, 20f, 30f, 0.000f, 0.000f, 0.000f, 1.000f);
-        var turned = new GeoVehiclePos(1, 10f, 20f, 30f, 0.000f, 0.383f, 0.000f, 0.924f); // pos same, rotation changed
+        var a = new GeoVehiclePos(1, 0f, 0f, 0.00f, 0f, 0f, 0f, 1f);
+        var turned = new GeoVehiclePos(1, 0f, 0f, 15.00f, 0f, 0f, 0f, 1f);   // pivot (pos) same, heading euler.z turned 15°
         Assert.NotEqual(GeoVehiclePos.Signature(a), GeoVehiclePos.Signature(turned));
+    }
+
+    [Fact]
+    public void Signature_DetectsSlowPivotTravelStep()
+    {
+        // A slow craft advances the pivot quaternion by a sub-milli amount per ~0.25s poll. The signature MUST
+        // detect it (else slow travel is silently skipped → the client vehicle freezes). Guards the F6 pivot
+        // rounding — this FAILS under the old F3 rounding (0.0003 → "0.000" both) and passes under F6.
+        var a = new GeoVehiclePos(1, 0f, 0f, 0f, 0.000000f, 0.000000f, 0f, 1f);
+        var stepped = new GeoVehiclePos(1, 0f, 0f, 0f, 0.000000f, 0.000300f, 0f, 1f);
+        Assert.NotEqual(GeoVehiclePos.Signature(a), GeoVehiclePos.Signature(stepped));
     }
 }

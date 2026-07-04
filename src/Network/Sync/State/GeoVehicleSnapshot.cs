@@ -7,19 +7,25 @@ using System.Text;
 namespace Multipleer.Network.Sync.State
 {
     /// <summary>
-    /// One vehicle's mirrored WORLD PLACEMENT: the exact pair the native
-    /// <c>GeoVehicle.RecordInstanceData</c>/<c>ProcessInstanceData</c> round-trips to persist/restore a
-    /// vehicle — its <c>Surface.position</c> (world Vector3, carried as x/y/z) and <c>Surface.rotation</c>
-    /// (world Quaternion, carried as qx/qy/qz/qw). Keyed by the stable, save-persisted
-    /// <c>GeoVehicle.VehicleID</c> so the client resolves the SAME vehicle host-side. A pure value type
-    /// (float-only, no UnityEngine dependency) with structural equality so the codec round-trip is directly
-    /// assertable in unit tests (mirrors <see cref="GeoSiteState"/>).
+    /// One vehicle's mirrored GLOBE PLACEMENT — the EXACT state the native <c>GeoNavComponent.NavigateRoutine</c>
+    /// writes each travel tick, so a sim-frozen client reproduces travel by replaying it:
+    ///   * <c>QX/QY/QZ/QW</c> = <c>PivotTransform.localRotation</c> (the parent-pivot quaternion — the SOLE
+    ///     determinant of the vehicle's position on the globe; NavigateRoutine writes ONLY this to move a
+    ///     vehicle, and the on-globe GlobeMarker + 3D mesh both hang off the pivot, GeoNavComponent.cs:111).
+    ///   * <c>X/Y/Z</c> = <c>Surface.localEulerAngles</c> (the vehicle's heading/facing, GeoNavComponent.cs:213).
+    /// (Inc4 S2 fix 2026-07-04 — the original mirrored <c>Surface.position</c>/<c>Surface.rotation</c>, a
+    /// DERIVED world value of the GlobeOffset child; writing it left the pivot untouched so the frozen client's
+    /// marker never moved and every vehicle mismatched the host. Mirroring the LOCAL pivot rotation is also
+    /// frame-of-reference-robust across the two instances' globe hierarchies.)
+    /// Keyed by the stable, save-persisted <c>GeoVehicle.VehicleID</c> so the client resolves the SAME vehicle
+    /// host-side. A pure value type (float-only, no UnityEngine dependency) with structural equality so the
+    /// codec round-trip is directly assertable in unit tests (mirrors <see cref="GeoSiteState"/>).
     /// </summary>
     public readonly struct GeoVehiclePos : IEquatable<GeoVehiclePos>
     {
         public readonly int VehicleId;
-        public readonly float X, Y, Z;        // Surface.position
-        public readonly float QX, QY, QZ, QW; // Surface.rotation
+        public readonly float X, Y, Z;        // Surface.localEulerAngles (heading, degrees)
+        public readonly float QX, QY, QZ, QW; // PivotTransform.localRotation (globe placement quaternion)
 
         public GeoVehiclePos(int vehicleId, float x, float y, float z, float qx, float qy, float qz, float qw)
         {
@@ -51,32 +57,34 @@ namespace Multipleer.Network.Sync.State
             }
         }
 
-        /// <summary>Order-stable change-detection signature (F2 position, F3 rotation): the HOST skips a
-        /// vehicle whose signature is unchanged since the last flush, so a PARKED vehicle produces ZERO bytes
-        /// and only genuinely-moving vehicles are broadcast (mirrors the tactical actor-state pos signature).
-        /// Rounding dedups sub-0.01 render jitter while re-broadcasting any real travel step.</summary>
+        /// <summary>Order-stable change-detection signature: the HOST skips a vehicle whose signature is
+        /// unchanged since the last flush, so a PARKED vehicle produces ZERO bytes and only genuinely-moving
+        /// vehicles are broadcast (mirrors the tactical actor-state pos signature). The pivot quaternion is the
+        /// PRIMARY travel signal (position on the globe) so it is rounded FINE (F6 ≈ 0.0001° pivot) to catch even
+        /// slow craft; a parked pivot is a stored constant (bit-stable per poll) so F6 never false-triggers. The
+        /// heading euler rounds at F2 (0.01°), dedupping sub-0.01° facing jitter.</summary>
         public static string Signature(GeoVehiclePos v)
         {
             var c = CultureInfo.InvariantCulture;
             return v.X.ToString("F2", c) + "," + v.Y.ToString("F2", c) + "," + v.Z.ToString("F2", c) + "|"
-                 + v.QX.ToString("F3", c) + "," + v.QY.ToString("F3", c) + ","
-                 + v.QZ.ToString("F3", c) + "," + v.QW.ToString("F3", c);
+                 + v.QX.ToString("F6", c) + "," + v.QY.ToString("F6", c) + ","
+                 + v.QZ.ToString("F6", c) + "," + v.QW.ToString("F6", c);
         }
     }
 
     /// <summary>
-    /// Decoded GeoVehicle position-mirror batch (Inc4 S2 host-driven travel mirror): the world placement of
-    /// each CHANGED vehicle, pushed host→all so a client whose geoscape sim CLOCK is frozen (S1) still sees
-    /// vehicles travel — the client applies the host's ABSOLUTE position/rotation and never simulates or
-    /// integrates its own vehicle motion (canon: client = pure mirror). Drift-free by construction (absolute
-    /// values + last-writer-wins seq), path/speed/TFTV-agnostic.
+    /// Decoded GeoVehicle placement-mirror batch (Inc4 S2 host-driven travel mirror): the ABSOLUTE globe
+    /// placement of each CHANGED vehicle (pivot <c>localRotation</c> + heading euler — see <see cref="GeoVehiclePos"/>),
+    /// pushed host→all so a client whose geoscape sim CLOCK is frozen (S1) still sees vehicles travel — the client
+    /// replays the host's pivot rotation and never simulates or integrates its own vehicle motion (canon: client =
+    /// pure mirror). Drift-free by construction (absolute values + last-writer-wins seq), path/speed/TFTV-agnostic.
     ///
     /// Pure data + wire codec — free of any <c>SyncEngine</c>/Unity dependency so it is directly unit-testable
     /// (mirrors <see cref="GeoSiteSnapshot"/>). The engine glue (host read + client apply) lives in
     /// <c>GeoVehicleMirror</c> (game-bound reflection, NOT linked into the test project).
     ///
-    /// Wire payload (inside the 0x67 envelope, surface <c>GeoVehiclePos</c>):
-    ///   [u32 seq][u16 count]{[i32 VehicleId][f32 x][f32 y][f32 z][f32 qx][f32 qy][f32 qz][f32 qw]}*
+    /// Wire payload (inside the 0x67 envelope, surface <c>GeoVehiclePos</c>) — 32 bytes/vehicle, unchanged:
+    ///   [u32 seq][u16 count]{[i32 VehicleId][f32 headingX][f32 headingY][f32 headingZ][f32 pivotQx][f32 pivotQy][f32 pivotQz][f32 pivotQw]}*
     /// The leading seq is the host's per-surface <see cref="SurfaceSeq"/> value (client drops a stale/dup seq).
     /// </summary>
     public static class GeoVehicleSnapshot
