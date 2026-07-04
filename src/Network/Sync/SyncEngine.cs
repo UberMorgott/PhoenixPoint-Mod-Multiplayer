@@ -564,7 +564,7 @@ namespace Multipleer.Network.Sync
                         // result body IS the raise narrative).
                         var buffered = TakeBufferedDismiss(occId);
                         string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : wireNarrative;
-                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, buffered.Reward, siteId, buffered.WireOutcome, narrative);
+                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, buffered.Reward, siteId, buffered.WireOutcome, narrative, wireTitle);
                         break;
                     }
                     case State.EventCorrelator.ActionKind.DropNoop:
@@ -714,7 +714,7 @@ namespace Multipleer.Network.Sync
                         // backfills a text-less dismiss). Terminal → slot stays free, drain continues.
                         var buffered = TakeBufferedDismiss(occId);
                         string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : q.WireNarrative;
-                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, buffered.Reward, q.SiteId, buffered.WireOutcome, narrative);
+                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, buffered.Reward, q.SiteId, buffered.WireOutcome, narrative, q.WireTitle);
                         break;
                     }
                     case State.EventCorrelator.ActionKind.DropNoop:
@@ -870,9 +870,9 @@ namespace Multipleer.Network.Sync
         /// to a plain close when the page can't be rebuilt. Shared by the in-order (ShowResultInPlace) and the
         /// buffered-then-raised (ShowResultPage) paths.
         /// </summary>
-        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null)
+        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
         {
-            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative);
+            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative, wireTitle);
             Debug.Log("[Multipleer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
                       " rewardEmpty=" + (reward == null || reward.IsEmpty) +

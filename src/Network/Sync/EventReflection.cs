@@ -1062,9 +1062,11 @@ namespace Multipleer.Network.Sync
         }
 
         /// <summary>
-        /// Client: build a synthetic closing <c>GeoscapeEvent{EventID=""}</c> carrying ONLY the chosen choice's
-        /// outcome text + a single OK button — mirroring the TEXT half of
-        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:326-358). It deliberately does NOT touch
+        /// Client: build a synthetic closing <c>GeoscapeEvent{EventID=""}</c> carrying the chosen choice's
+        /// outcome text + a single OK button + the raise Title header — mirroring the TEXT half of
+        /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:326-358) while preserving the EncounterTitle the
+        /// host keeps across the closing page (host-authoritative <paramref name="wireTitle"/> when supplied, else
+        /// the source def's own Title). It deliberately does NOT touch
         /// <c>ChoiceReward</c> / <c>ShowReward</c> / <c>GeoFactionReward.Apply</c>: the reward STATE already
         /// converged via the wallet/research/items/diplomacy channels, and re-applying here would double-mutate.
         /// The synthetic event has EventID=""/no real Outcome (single choice) → <c>IsClientChoiceLocked==false</c>
@@ -1137,6 +1139,18 @@ namespace Multipleer.Network.Sync
             => !string.IsNullOrEmpty(descriptionText) ? descriptionText : (titleText ?? "");
 
         /// <summary>
+        /// PURE: pick the client RESULT page's EncounterTitle. The host keeps the raise title across its closing
+        /// page (<c>ShowEncounter</c> sets <c>EncounterTitle</c> once at :217; <c>SetClosingEncounter</c> never
+        /// clears it), so the mirrored result page must carry it too — omitting it dropped the whole yellow
+        /// НОВОЕ:/ЗАВЕРШЕНО: header for TFTV runtime-narrative defs (VoidOmen). Prefer the HOST-resolved
+        /// <paramref name="wireTitle"/> (VoidOmen's Title is a runtime host-side def mutation → <paramref name="defTitleText"/>
+        /// resolves EMPTY on the client's own def); else the local def's own title (a normal event's real loc key,
+        /// or the literal <see cref="ApplyWireTexts"/> stamped in the raise-first path). Unit-tested (no Unity types).
+        /// </summary>
+        public static string ChooseResultTitle(string wireTitle, string defTitleText)
+            => UseWireText(wireTitle) ? wireTitle : (defTitleText ?? "");
+
+        /// <summary>
         /// Read the live module's native OK-button LocalizationKey (GeoLevelController.View → GeoscapeView.
         /// GeoscapeModules → SiteEncountersModule → OKTextKey.LocalizationKey), or null if any link is missing.
         /// Lets the synthetic result page reuse the SAME localized dismiss label the native result page uses.
@@ -1161,7 +1175,7 @@ namespace Multipleer.Network.Sync
             catch (Exception ex) { Debug.LogWarning("[Multipleer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
         }
 
-        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null)
+        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
         {
             try
             {
@@ -1234,6 +1248,19 @@ namespace Multipleer.Network.Sync
                 if (_edFlavourField != null) _edFlavourField.SetValue(data, GetEventDataString(srcData, _edFlavourField));
                 if (_edLeaderField != null) _edLeaderField.SetValue(data, GetEventDataString(srcData, _edLeaderField));
 
+                // Title (the yellow NEW/COMPLETED header): ShowEncounter renders EncounterTitle =
+                // EventData.Title?.Localize() (UIModuleSiteEncounters:199/217) and SetClosingEncounter never clears
+                // it, so the host's result page keeps the raise title — but this synthetic closing data used to omit
+                // Title, so the client result page dropped the whole header block (TFTV VoidOmen: the yellow
+                // НОВОЕ:/ЗАВЕРШЕНО: lines). Prefer the HOST wire title (VoidOmen's Title is a runtime host-side def
+                // mutation, "" on the client's own def, so local resolution can't recover it); else the source def's
+                // own title — a real loc key for a normal event, or the literal ApplyWireTexts already stamped onto
+                // the shared client def in the raise-first path. Stamped as a doNotLocalize literal bind exactly like
+                // native SetClosingEncounter's resolved-text bind (:342). Best-effort: null field/ctor leaves it blank.
+                string titleText = ChooseResultTitle(wireTitle, ResolveTitleText(srcData));
+                if (_edTitleField != null && _localizedTextCtor2 != null && !string.IsNullOrEmpty(titleText))
+                    _edTitleField.SetValue(data, _localizedTextCtor2.Invoke(new object[] { titleText, true }));
+
                 // Description = [ EventTextVariation{ General = LocalizedTextBind(text2, doNotLocalize:true) } ].
                 object general = _localizedTextCtor2.Invoke(new object[] { text2, true });
                 object variation = Activator.CreateInstance(_textVariationType);
@@ -1287,6 +1314,21 @@ namespace Multipleer.Network.Sync
         // UIModuleSiteEncounters.SetClosingEncounter (:335) `geoEvent.EventData.Description.Last().GetText(context)`.
         // Reads the source def's Description (List<EventTextVariation>), takes its LAST variation and resolves it
         // against the rebuilt context. Returns "" on null/empty/unreadable (caller degrades to a blank body).
+        // Result-page title fallback source: the source def's own Title text, mirroring the native header read
+        // `EventData.Title?.Localize()` (UIModuleSiteEncounters:199). Resolves a real loc key (normal event) OR
+        // the literal doNotLocalize bind ApplyWireTexts stamped on the shared client def in the raise-first path.
+        // Returns "" on null/unreadable (caller then relies on the host wire title). Best-effort, never throws.
+        private static string ResolveTitleText(object srcData)
+        {
+            try
+            {
+                var title = srcData != null ? _edTitleField?.GetValue(srcData) : null;
+                if (title == null || _localizeMethod == null) return "";
+                return _localizeMethod.Invoke(title, new object[] { null }) as string ?? "";
+            }
+            catch { return ""; }
+        }
+
         private static string ResolveDescriptionText(object srcData, object context)
         {
             try

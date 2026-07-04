@@ -65,4 +65,31 @@ public class OneWindowResultNarrativeTests
     public void WireNarrative_BothEmpty_DegradesToEmpty_NoThrow()
         => Assert.Equal("",
             EventReflection.ChooseWireNarrative(descriptionText: "", titleText: null));
+
+    // ─── Result-page title carry (ChooseResultTitle) ─────────────────────────────────
+    // The host keeps the raise title across its closing page (ShowEncounter :217 sets EncounterTitle once;
+    // SetClosingEncounter never clears it). The client's synthetic result event used to omit Title → the whole
+    // yellow НОВОЕ:/ЗАВЕРШЕНО: header vanished for TFTV VoidOmen. The result page now carries it: prefer the
+    // host wire title (VoidOmen's Title is a host-side runtime mutation → empty on the client's own def), else
+    // the local def title (a normal event's real loc key, or the literal stamped in the raise-first path).
+
+    [Fact]
+    public void ResultTitle_WireTitlePresent_PreferredOverDefTitle()
+        => Assert.Equal("НОВОЕ: Негатив ...",
+            EventReflection.ChooseResultTitle(wireTitle: "НОВОЕ: Негатив ...", defTitleText: ""));
+
+    [Fact]
+    public void ResultTitle_EmptyWire_FallsBackToDefTitle()
+        => Assert.Equal("Ambush!",
+            EventReflection.ChooseResultTitle(wireTitle: "", defTitleText: "Ambush!"));
+
+    [Fact]
+    public void ResultTitle_WirePresent_StillWinsWhenDefAlsoSet()
+        => Assert.Equal("Void Omen VI",
+            EventReflection.ChooseResultTitle(wireTitle: "Void Omen VI", defTitleText: "Ambush!"));
+
+    [Fact]
+    public void ResultTitle_BothEmpty_DegradesToEmpty_NoThrow()
+        => Assert.Equal("",
+            EventReflection.ChooseResultTitle(wireTitle: "", defTitleText: null));
 }
