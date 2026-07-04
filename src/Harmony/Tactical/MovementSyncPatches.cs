@@ -1,9 +1,9 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE soldier-MOVE replication patches (spec §3.4, Inc 2). Two Harmony patches on
@@ -37,7 +37,7 @@ namespace Multipleer.Harmony.Tactical
             try { return TacticalMoveSync.ClientInterceptMove(__instance, parameter); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] MoveAbilityActivatePatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] MoveAbilityActivatePatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native move on an unexpected error
             }
         }
@@ -69,7 +69,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalMoveSync.HostBroadcastMoveOutcome(__instance); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] MoveAbilityEndPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] MoveAbilityEndPatch.Postfix failed: " + ex);
             }
         }
     }

@@ -1,6 +1,6 @@
-# Multipleer Co-op Lobby — Responsive "Rubber" Layout Refactor Plan
+# Multiplayer Co-op Lobby — Responsive "Rubber" Layout Refactor Plan
 
-**Scope:** `E:\DEV\PhoenixPoint\Multipleer\src\UI\LobbyPanel.cs` (primary) + `src\UI\NativeWidgetFactory.cs` (no edit strictly required; one toggle note). Design only.
+**Scope:** `E:\DEV\PhoenixPoint\Multiplayer\src\UI\LobbyPanel.cs` (primary) + `src\UI\NativeWidgetFactory.cs` (no edit strictly required; one toggle note). Design only.
 
 **Core insight (grounding):** responsiveness comes from the **layout tree**, not the scaler. The current code is correct at the canvas level but lays out every zone with **fractional anchors + hardcoded pixel offsets** and stacks rows with **manual `anchoredPosition` Y math**. Replacing those with nested `LayoutGroup`s makes the whole overlay reflow on any resolution/aspect with zero pixel coordinates.
 
@@ -195,8 +195,8 @@ General rule under a `LayoutGroup` with `childControl* = true`: the **group driv
 
 ## Files referenced
 
-- `E:\DEV\PhoenixPoint\Multipleer\src\UI\LobbyPanel.cs` (all line numbers above)
-- `E:\DEV\PhoenixPoint\Multipleer\src\UI\NativeWidgetFactory.cs` (clone methods 195-398)
-- `E:\DEV\PhoenixPoint\Multipleer\src\UI\UiToolkit.cs` (factories 35-119)
-- `E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj` (SDK paths 14-15, refs 23-48)
+- `E:\DEV\PhoenixPoint\Multiplayer\src\UI\LobbyPanel.cs` (all line numbers above)
+- `E:\DEV\PhoenixPoint\Multiplayer\src\UI\NativeWidgetFactory.cs` (clone methods 195-398)
+- `E:\DEV\PhoenixPoint\Multiplayer\src\UI\UiToolkit.cs` (factories 35-119)
+- `E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj` (SDK paths 14-15, refs 23-48)
 - uGUI API verified against `D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed\UnityEngine.UI.dll`

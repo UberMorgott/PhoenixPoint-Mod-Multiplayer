@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Default-OFF rollout gate for the client geoscape EVENT-WINDOW desync fixes (additive-first, mirrors

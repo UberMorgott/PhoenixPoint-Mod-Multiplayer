@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Relays a geoscape EXPLORE-SITE order (the "Разведать точки интереса" / Explore point-of-interest button →
@@ -15,7 +15,7 @@ namespace Multipleer.Network.Sync.Actions
     ///   <item>Wire payload: <c>i32 ownerId, i32 vehicleId</c> — NO site id. StartExploringCurrentSite explores the
     ///   vehicle's OWN <c>CurrentSite</c>, and the host's vehicle is the authoritative position (it arrived at the
     ///   site via the mirrored travel), so the host needs only the vehicle identity.</item>
-    ///   <item><c>ownerId</c> = <see cref="Multipleer.Network.Sync.State.GeoVehiclePos.StableOwnerKey"/> of the owner
+    ///   <item><c>ownerId</c> = <see cref="Multiplayer.Network.Sync.State.GeoVehiclePos.StableOwnerKey"/> of the owner
     ///   faction def asset name; <c>vehicleId</c> = <c>GeoVehicle.VehicleID</c> — the SAME composite key the travel
     ///   relay + 0xA5 position mirror use, so the host resolves the SAME live vehicle.</item>
     /// </list>

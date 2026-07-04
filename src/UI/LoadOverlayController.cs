@@ -1,12 +1,12 @@
 using System.Collections.Generic;
 using Base.Core;
 using Base.Levels;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Co-op loading overlay: a mod-owned ScreenSpaceOverlay canvas (sortingOrder 7000) drawn over
@@ -45,7 +45,7 @@ namespace Multipleer.UI
         private void EnsureCanvas()
         {
             if (_canvas != null) return;
-            var go = new GameObject("MultipleerLoadOverlay");
+            var go = new GameObject("MultiplayerLoadOverlay");
             go.transform.SetParent(transform, false); // under ModGO (persistent root)
 
             _canvas = go.AddComponent<Canvas>();

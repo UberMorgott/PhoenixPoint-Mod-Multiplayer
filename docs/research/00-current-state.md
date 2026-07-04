@@ -3,7 +3,7 @@
 > (unified `0x67` sync backbone, HEAD `b0e20a0`, 926 tests). The co-op **loading-screen internals**
 > section below is still accurate; treat everything else as historical.
 
-# Multipleer — Current State (status note)
+# Multiplayer — Current State (status note)
 
 > Single-glance "where are we now" for the co-op mod. Updated as the as-built state moves.
 > **Active arc = SD-AIDR state replication → THIN-CLIENT vehicle sync pivot** (spec
@@ -92,7 +92,7 @@
 
 ### EXACT NEXT STEPS (numbered)
 
-1. User runs 2-instance, moves aircraft host→client AND client→host, captures `multipleer.log` + `multipleer-2.log` IMMEDIATELY (don't relaunch — logs rotate/clobber).
+1. User runs 2-instance, moves aircraft host→client AND client→host, captures `multiplayer.log` + `multiplayer-2.log` IMMEDIATELY (don't relaunch — logs rotate/clobber).
 2. Grep `DIAG2`: compare `DIAG2 host vehicles[N]` vs `DIAG2 client vehicles[N]`; is `requestedVehicleId` in the client set? `AT LOAD` vs apply-time distinguishes under-restore vs post-load-loss vs host-extra.
 3. **DECIDED → build INC-3a (`0x35 GeoStateDiff`).** Chosen option (ii) generalized: the generic host→client state mirror SUBSUMES the live blocker (also covers base-attack progress / ownership / prices / faction-traffic / arrival authority + SiteCreated in later slices). Root cause is keyed on the Phoenix-only `FindVehicleById` + faction-less payload — INC-3a's `(factionGuid,VehicleID)` resolver + all-faction snapshot fixes it directly without a separate per-action relay. Spec `docs/superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md`, plan `docs/superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md` (14 tasks; Task 0 = all-factions `DescribeVehicles` DIAG now to capture pre-fix evidence; Task 13 = revert `b753111`+`fbfb3f9` after in-game GATE).
 4. After root cause confirmed: REMOVE DIAG/DIAG2 temp logging — revert `b753111` + `fbfb3f9`, delete `DiagDeployLogPatch.cs`, strip DIAG blocks.
@@ -158,7 +158,7 @@
 
 **NOT done yet:** time-sync flight A (host-authoritative clock) — plan `docs/superpowers/plans/2026-06-13-time-sync-stage2-increment1.md`; time-sync increments 2-3; per-player permission menu.
 
-**MultipleerLog:** client (2nd same-machine instance) falls back to `multipleer-2.log`..`-5.log` on IOException → its own dedicated log instead of Player.log. Instrumentation: `[Multipleer]` lines at the show predicate, phase-2 pump tick (pct), RosterProgress SEND/RECV, OnReachedPlaying/PerformDeferredLift/AllDone→RevealAll.
+**MultiplayerLog:** client (2nd same-machine instance) falls back to `multiplayer-2.log`..`-5.log` on IOException → its own dedicated log instead of Player.log. Instrumentation: `[Multiplayer]` lines at the show predicate, phase-2 pump tick (pct), RosterProgress SEND/RECV, OnReachedPlaying/PerformDeferredLift/AllDone→RevealAll.
 
 **Tests: 85/85 green** (`InPhase2_*` in `RosterProgressTrackerTests.cs`, `RevealAll_RoundTrips` in `RosterProgressSerializerTests.cs`). Only the **native-font nickname label** is in-game-pending (the font only); the rest of the flow is in-game-CONFIRMED over DirectIP.
 
@@ -175,7 +175,7 @@
 
 ### In-game verification status (2-instance)
 
-- **Pending / to re-test** (per `multipleer-second-instance-setup`):
+- **Pending / to re-test** (per `multiplayer-second-instance-setup`):
   - host→client `StartTravel` mirror ✓ (first proof committed); client→host `StartTravel` after FullCommander grant — **re-test pending** (the grant is uncommitted).
   - Lobby `Escape` / RMB-`Cancel` guard — in-game pending.
   - DirectTransport connect-fail logging — surfaces the real socket error in `Player.log`, pending live confirm.

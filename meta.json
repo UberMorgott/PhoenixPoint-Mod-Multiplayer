@@ -1,13 +1,13 @@
 {
-  "ID": "Morgott.Multipleer",
-  "AssemblyName": "Multipleer.dll",
+  "ID": "Morgott.Multiplayer",
+  "AssemblyName": "Multiplayer.dll",
   "Author": [
     { "Key": "English", "Value": "Morgott" }
   ],
   "Version": "0.0.1",
   "Name": [
-    { "Key": "English", "Value": "Multipleer — Cooperative Multiplayer" },
-    { "Key": "Russian", "Value": "Multipleer — Кооперативная мультиплеер" }
+    { "Key": "English", "Value": "Multiplayer — Cooperative Multiplayer" },
+    { "Key": "Russian", "Value": "Multiplayer — Кооперативная мультиплеер" }
   ],
   "Description": [
     { "Key": "English", "Value": "Cooperative campaign multiplayer mod. Share your Phoenix Point campaign with friends. Supports Steam P2P, direct IP, and STUN NAT traversal." },

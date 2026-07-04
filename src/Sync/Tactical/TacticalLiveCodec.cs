@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE (engine-free) wire codecs + seq/dedup for the LIVE tactical outcome rail (spec §5, Inc 2/4):

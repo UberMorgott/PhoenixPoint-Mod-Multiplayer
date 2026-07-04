@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE (engine-free, unit-tested) de-dup ledger for CLIENT-PREDICTED fire animations (combat concurrency fix).

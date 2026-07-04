@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Network.TimeSync
+namespace Multiplayer.Network.TimeSync
 {
     /// <summary>
     /// Pure, Unity-FREE NTP-style clock-offset estimator (unit-testable). Reconciles the two machines'

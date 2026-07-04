@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Stable wire ids for every synced SURFACE (action or state channel) on the unified
@@ -35,7 +35,7 @@ namespace Multipleer.Network.Sync
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
         public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
         // 0xA2-0xA4 RESERVED for the geoscape action-relay → envelope cutover (GeoIntent/GeoOutcome/GeoReject,
-        // spec 2026-07-02-multipleer-action-relay-envelope-cutover-design) — do NOT reuse.
+        // spec 2026-07-02-multiplayer-action-relay-envelope-cutover-design) — do NOT reuse.
         public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
         public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
         public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)

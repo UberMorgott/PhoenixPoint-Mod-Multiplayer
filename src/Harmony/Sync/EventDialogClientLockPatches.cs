@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Two-class CLIENT-side geoscape-event dialog handling (host-authoritative outcomes, client never NREs
@@ -92,7 +92,7 @@ namespace Multipleer.Harmony.Sync
                 __result = false;                                  // client: never the auto-select render path
                 return false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterSingleChoiceClientPatch failed: " + ex.Message); return true; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterSingleChoiceClientPatch failed: " + ex.Message); return true; }
         }
     }
 
@@ -161,7 +161,7 @@ namespace Multipleer.Harmony.Sync
                 cg.blocksRaycasts = enabled;
                 cg.alpha = enabled ? 1f : 0.4f;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterChoiceClientPatch SetChoiceButtonsEnabled failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterChoiceClientPatch SetChoiceButtonsEnabled failed: " + ex.Message); }
         }
 
         public static MethodBase TargetMethod() => _target;
@@ -198,7 +198,7 @@ namespace Multipleer.Harmony.Sync
                 if (EventDialogClientGuard.ShouldLocalClose(eventId))
                 {
                     // Synthetic CLIENT-owned result/info page (EventID == "") → close LOCALLY (the player OKs it).
-                    Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (synthetic result page, EventID==\"\")");
+                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch localClose=true (synthetic result page, EventID==\"\")");
                     _finishEncounter?.Invoke(__instance, null);
                     return false;
                 }
@@ -216,11 +216,11 @@ namespace Multipleer.Harmony.Sync
                     // (int.MinValue) when it can't introspect — normalize the failure to -1 (decline) so the host
                     // still resolves the occurrence (close-only) and the modal is never left stuck.
                     if (claimIndex == EventReflection.ChoiceLookupFailed) claimIndex = -1;
-                    ushort occId = Multipleer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
-                    Debug.Log("[Multipleer] EncounterChoiceClientPatch CLAIM eventId=" + eventId +
+                    ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch CLAIM eventId=" + eventId +
                               " occId=" + occId + " choiceIndex=" + claimIndex + " → SendActionRequest(AnswerEventAction) (modal stays open)");
                     NetworkEngine.Instance?.Sync?.SendActionRequest(
-                        new Multipleer.Network.Sync.Actions.AnswerEventAction(occId, eventId, claimIndex));
+                        new Multiplayer.Network.Sync.Actions.AnswerEventAction(occId, eventId, claimIndex));
                     // Immediate local feedback that the click registered: grey + block the choice buttons so the
                     // player sees it took and can't double-fire. NOT an outcome/close — the authoritative result
                     // still arrives via the host's EventDismiss (8f9452f path) which rebuilds the result page.
@@ -246,28 +246,28 @@ namespace Multipleer.Harmony.Sync
                     // The event auto-completed on the host at trigger, so AnswerEventAction can't do this
                     // (TryHostNativeResolve no-ops on IsCompleted). First-wins/idempotent host-side; occId 0
                     // (no recorded open occurrence) or gate OFF → no relay, localClose only (legacy behavior).
-                    ushort advOccId = Multipleer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
-                    if (Multipleer.Network.Sync.State.SingleChoiceAdvanceGate.ShouldRelayClientAdvance(
+                    ushort advOccId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    if (Multiplayer.Network.Sync.State.SingleChoiceAdvanceGate.ShouldRelayClientAdvance(
                             isClient: true, gateEnabled: EventMirrorFixGate.Enabled,
                             eventId: eventId, choiceCount: choiceCount, occurrenceId: advOccId))
                     {
-                        Debug.Log("[Multipleer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + advOccId +
+                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + advOccId +
                                   " eventId=" + eventId + " (advance the host's single-choice prompt)");
                         NetworkEngine.Instance?.Sync?.SendEventAdvanceRequest(advOccId, eventId);
                     }
-                    Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");
+                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");
                     _finishEncounter?.Invoke(__instance, null);
                     return false;
                 }
                 // Unreadable / zero-choice (ambiguous) real host event: fail SAFE — swallow-and-wait for a host
                 // dismiss rather than locally closing an event we couldn't classify (unchanged behavior).
-                Debug.Log("[Multipleer] EncounterChoiceClientPatch localClose=false swallow eventId=" + eventId +
+                Debug.Log("[Multiplayer] EncounterChoiceClientPatch localClose=false swallow eventId=" + eventId +
                           " choiceCount=" + choiceCount + " (ambiguous host event → wait for host dismiss)");
                 return false;
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] EncounterChoiceClientPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] EncounterChoiceClientPatch failed: " + ex.Message);
                 // On any failure fail SAFE: swallow the click (never let the native body NRE / apply locally).
                 return false;
             }
@@ -311,7 +311,7 @@ namespace Multipleer.Harmony.Sync
                 if (!EventDialogClientGuard.IsClient) return;   // host: buttons are never greyed → nothing to reset
                 EncounterChoiceClientPatch.SetChoiceButtonsEnabled(__instance, true);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterResetButtonsClientPatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterResetButtonsClientPatch failed: " + ex.Message); }
         }
     }
 
@@ -345,7 +345,7 @@ namespace Multipleer.Harmony.Sync
                 __result = false;                                  // client: no CompleteEvent, no mission launch
                 return false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EncounterSelectChoiceClientPatch failed: " + ex.Message); return true; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterSelectChoiceClientPatch failed: " + ex.Message); return true; }
         }
     }
 
@@ -383,7 +383,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] EventCancelClientLockPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] EventCancelClientLockPatch failed: " + ex.Message);
                 return false; // fail SAFE: block the close on any failure (never locally branch an outcome)
             }
         }
@@ -438,15 +438,15 @@ namespace Multipleer.Harmony.Sync
                 ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);
                 if (EventOccurrenceIds.WasDismissed(occId))
                 {
-                    Debug.Log("[Multipleer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
+                    Debug.Log("[Multiplayer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
                               " skip=alreadyDismissed (result-bearing dismiss already broadcast → no double-dismiss)");
                     return;
                 }
-                Debug.Log("[Multipleer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] FinishEncounterHostDismissPatch occId=" + occId + " eventId=" + eventId +
                           " → BroadcastEventDismiss (fallback close-only)");
                 engine.Sync?.BroadcastEventDismiss(occId, eventId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] FinishEncounterHostDismissPatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] FinishEncounterHostDismissPatch failed: " + ex.Message); }
         }
     }
 }

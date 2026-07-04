@@ -4,7 +4,7 @@
 > names herein: the real hooks are `Research.AddResearchToQueue` and
 > `ItemManufacturing.ManufactureItem`. Read as design lineage, not as-built.
 
-# Multipleer — Cooperative Multiplayer Mod Design
+# Multiplayer — Cooperative Multiplayer Mod Design
 
 > This is the action-sync core design. Session/lobby/identity/persistence design → [02-session-lifecycle-and-player-management](02-session-lifecycle-and-player-management.md); SDK unknowns backlog → [03-open-questions-sdk](03-open-questions-sdk.md). Decompiled source-dive findings live under [../research/](../research/); as-built implementation under [../engine/](../engine/).
 
@@ -550,7 +550,7 @@ Tactical maps use Unity navmeshes (`TacticalNav`). For movement to be reproducib
 
 ```
 Phase 0: Foundation (Week 1-2)
-├── Project setup (Multipleer .csproj, ModSDK references, meta.json)
+├── Project setup (Multiplayer .csproj, ModSDK references, meta.json)
 ├── NetworkManager stub (initialization, packet send/recv)
 ├── Steam P2P connection test (two game instances can exchange packets)
 └── Basic message types and serialization
@@ -627,7 +627,7 @@ A working PoC that can be demonstrated and tested should have:
 
 | Step | What | Key File(s) |
 |------|------|-------------|
-| 1 | Project scaffolding | `Multipleer.csproj`, `meta.json` |
+| 1 | Project scaffolding | `Multiplayer.csproj`, `meta.json` |
 | 2 | `NetworkManager` with Steam P2P | P2P send/recv, lobby create/join |
 | 3 | `MessageSerializer` | `NetworkedAction`, `ActionResult` structs |
 | 4 | `TacticalViewState.ActivateAbility` Prefix | Client intercept → serialize → send |

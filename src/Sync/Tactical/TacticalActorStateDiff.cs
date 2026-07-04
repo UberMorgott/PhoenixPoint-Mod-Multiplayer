@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE (engine-free) core for the generic per-actor STATE-DELTA spine (surface <c>tac.actorstate</c>

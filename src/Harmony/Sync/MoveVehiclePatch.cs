@@ -2,12 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Relay interceptor for geoscape vehicle TRAVEL: <c>GeoVehicle.StartTravel(List&lt;GeoSite&gt;)</c>
@@ -71,7 +71,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] MoveVehiclePatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] MoveVehiclePatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -81,7 +81,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] MoveVehiclePatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] MoveVehiclePatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

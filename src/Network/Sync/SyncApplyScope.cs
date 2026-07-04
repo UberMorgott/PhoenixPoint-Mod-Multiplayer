@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Re-entrancy guard: <see cref="IsApplying"/> is true while the engine is replaying a

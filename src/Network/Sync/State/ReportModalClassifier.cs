@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Host-side whitelist + variant map for the report-window mirror (Phase-A). PURE (Unity-free) so it links

@@ -4,7 +4,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Stops the dev/debug console hotkey from firing while the player is typing into a text field
@@ -35,7 +35,7 @@ namespace Multipleer.Harmony
     ///       InputField / TMP_InputField currently has focus and it is not the console's own field.
     ///   Suppressing the open whenever ANY text box is focused is the correct general UX (a focused
     ///   text box should eat the key), and it transparently covers our chat input, the native JOIN/
-    ///   RENAME prompt, and the lobby — no Multipleer-specific flag needed.
+    ///   RENAME prompt, and the lobby — no Multiplayer-specific flag needed.
     ///
     /// SAFETY: the console still opens normally whenever no text field is focused; the prefix is fully
     /// guarded and on ANY exception falls through to the original (return true), so it can never break
@@ -94,7 +94,7 @@ namespace Multipleer.Harmony
             catch (Exception e)
             {
                 // Must never throw — a throwing prefix could break the console permanently.
-                Debug.LogError("[Multipleer] ConsoleHotkeySuppressPatch error: " + e.Message);
+                Debug.LogError("[Multiplayer] ConsoleHotkeySuppressPatch error: " + e.Message);
                 return true; // fall through to the original toggle
             }
         }

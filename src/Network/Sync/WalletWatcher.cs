@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Host-only: subscribes to the player <c>Wallet.ResourcesChanged</c> and marks the
@@ -37,7 +37,7 @@ namespace Multipleer.Network.Sync
                 wallet, () => NetworkEngine.Instance?.Sync?.MarkWalletDirty());
             // DIAG (wallet rail): a (re)bind is rare — log which action ran and whether the ResourcesChanged
             // subscribe actually landed. A null handler = event path DEAD (poll backstop only). No behavior change.
-            UnityEngine.Debug.Log("[Multipleer] Wallet watcher " + action
+            UnityEngine.Debug.Log("[Multiplayer] Wallet watcher " + action
                 + (_handler == null
                     ? " guard=subscribe-failed (ResourcesChanged event path DEAD; poll backstop only)"
                     : " — ResourcesChanged subscribed")

@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Client-side reflection bridge that SHOWS a geoscape REPORT modal the way the game itself does, mirroring
@@ -104,10 +104,10 @@ namespace Multipleer.Network.Sync.State
                 // pause arrives via time-sync; do NOT pause here (avoids a pause-relay loop).
                 _requestPauseField?.SetValue(request, false);
                 _queryStateSwitch.Invoke(query, new[] { request });
-                Debug.Log("[Multipleer] GeoModalDisplay.Show modalType=" + modalType + " persistent=" + persistent +
+                Debug.Log("[Multiplayer] GeoModalDisplay.Show modalType=" + modalType + " persistent=" + persistent +
                           " priority=" + priority + " hasData=" + (modalData != null) + " → queued");
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] GeoModalDisplay.Show best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.Show best-effort failed: " + ex.Message); }
         }
     }
 }

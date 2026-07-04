@@ -33,10 +33,10 @@ if not exist "%GBBAK%" (
     if /i not "!GO!"=="y" ( echo Aborted. & exit /b 1 )
 )
 
-REM --- throwaway Multipleer identity for the client (process-scoped) ------------
-set "MULTIPLEER_IDENTITY="
-for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "[guid]::NewGuid().ToString()"`) do set "MULTIPLEER_IDENTITY=%%i"
-echo MULTIPLEER_IDENTITY=!MULTIPLEER_IDENTITY!
+REM --- throwaway Multiplayer identity for the client (process-scoped) ------------
+set "MULTIPLAYER_IDENTITY="
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "[guid]::NewGuid().ToString()"`) do set "MULTIPLAYER_IDENTITY=%%i"
+echo MULTIPLAYER_IDENTITY=!MULTIPLAYER_IDENTITY!
 
 REM --- -mods is MANDATORY: PP gates ALL mod support on this launch arg ---------
 REM  PhoenixGame.HandleCommandLineArg("mods") sets ModManager.CanUseMods=true
@@ -50,8 +50,8 @@ REM --- separate Unity Player.log for this 2nd instance ------------------------
 REM  Unity keys its default log dir on company/product (NOT install path), so both
 REM  instances otherwise clobber the SAME %USERPROFILE%\AppData\LocalLow\Snapshot
 REM  Games Inc\Phoenix Point\Player.log. -logFile redirects THIS instance's engine
-REM  log to its own file so the client's traces (incl. [Multipleer] event-sync) are
-REM  not overwritten by the host. (The mod's own multipleer.log already splits via
+REM  log to its own file so the client's traces (incl. [Multiplayer] event-sync) are
+REM  not overwritten by the host. (The mod's own multiplayer.log already splits via
 REM  the locked-file suffix fallback; this splits the raw engine log too.)
 set "CLIENTLOG=%DEST%\client.log"
 echo Launching INSTANCE #2 (CLIENT, Goldberg copy)...  log: "%CLIENTLOG%"

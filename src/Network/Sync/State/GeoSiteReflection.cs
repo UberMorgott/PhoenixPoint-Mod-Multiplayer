@@ -6,7 +6,7 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge for the host-authoritative GeoSite IDENTITY state channel (channel #5). The mod has
@@ -147,7 +147,7 @@ namespace Multipleer.Network.Sync.State
                 if (spawnActorOpen != null && spawnActorOpen.IsGenericMethodDefinition)
                 {
                     try { _spawnActorGeoSite = spawnActorOpen.MakeGenericMethod(_geoSiteType); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection: SpawnActor<GeoSite> bind failed (Case-B spawn disabled): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection: SpawnActor<GeoSite> bind failed (Case-B spawn disabled): " + ex.Message); }
                 }
             }
             var siteMappingDefType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoSiteTypeMappingDef");
@@ -243,10 +243,10 @@ namespace Multipleer.Network.Sync.State
                     var site = ResolveSiteById(rt, id);
                     if (site == null) continue; // removed / not yet present → nothing to mirror
                     try { list.Add(ReadSite(site, id, viewerFaction)); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SnapshotDirty read '" + id + "' failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.SnapshotDirty read '" + id + "' failed (skipped): " + ex.Message); }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SnapshotDirty failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.SnapshotDirty failed: " + ex.Message); }
             return list;
         }
 
@@ -344,21 +344,21 @@ namespace Multipleer.Network.Sync.State
                         var fac = ResolveFactionByGuid(rt, dto.OwnerFactionDefGuid);
                         if (fac != null) _ownerBackingField.SetValue(site, fac);
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity owner failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity owner failed (skipped): " + ex.Message); }
                 }
 
                 // Type (raw enum value → enum).
                 if (_typeBackingField != null && _siteTypeEnum != null)
                 {
                     try { _typeBackingField.SetValue(site, Enum.ToObject(_siteTypeEnum, dto.SiteType)); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity type failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity type failed (skipped): " + ex.Message); }
                 }
 
                 // State (private setter — write the backing field directly).
                 if (_stateBackingField != null && _siteStateEnum != null)
                 {
                     try { _stateBackingField.SetValue(site, Enum.ToObject(_siteStateEnum, dto.State)); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity state failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity state failed (skipped): " + ex.Message); }
                 }
 
                 // SiteName loc-key (overwrite the live bind's LocalizationKey; skip if no key carried).
@@ -369,14 +369,14 @@ namespace Multipleer.Network.Sync.State
                         var bind = _siteNameProp.GetValue(site, null);
                         if (bind != null) _locKeyField.SetValue(bind, dto.SiteName);
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity name failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity name failed (skipped): " + ex.Message); }
                 }
 
                 // EncounterID (public field; always written — "" clears a consumed encounter).
                 if (_encounterIdField != null)
                 {
                     try { _encounterIdField.SetValue(site, dto.EncounterID ?? ""); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity encounter failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity encounter failed (skipped): " + ex.Message); }
                 }
 
                 // Per-faction REVEAL (exploration outcome). Drive the NATIVE SetInspected(ViewerFaction, value) so
@@ -391,10 +391,10 @@ namespace Multipleer.Network.Sync.State
                         var viewer = GetViewerFaction(rt);
                         if (viewer != null) _setInspectedMethod.Invoke(site, new object[] { viewer, dto.Inspected });
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -429,7 +429,7 @@ namespace Multipleer.Network.Sync.State
                     || _getSiteTemplateMethod == null || _siteTypeEnum == null
                     || _siteIdField == null || _allSitesProp == null)
                 {
-                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: spawn members unresolved (Case-B skipped, siteless fallback)");
+                    Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: spawn members unresolved (Case-B skipped, siteless fallback)");
                     return null;
                 }
 
@@ -438,13 +438,13 @@ namespace Multipleer.Network.Sync.State
                 object mappingInstance = _siteMappingInstanceProp.GetValue(null, null);
                 if (mappingInstance == null)
                 {
-                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: GeoSiteTypeMappingDef.Instance null (Case-B skipped)");
+                    Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: GeoSiteTypeMappingDef.Instance null (Case-B skipped)");
                     return null;
                 }
                 object template = _getSiteTemplateMethod.Invoke(mappingInstance, new[] { siteTypeEnum });
                 if (template == null)
                 {
-                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: no site template for type " + identity.SiteType + " (Case-B skipped, siteless fallback)");
+                    Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: no site template for type " + identity.SiteType + " (Case-B skipped, siteless fallback)");
                     return null;
                 }
 
@@ -452,13 +452,13 @@ namespace Multipleer.Network.Sync.State
                 object site = _spawnActorGeoSite.Invoke(null, new object[] { template, null, false });
                 if (site == null)
                 {
-                    Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: SpawnActor<GeoSite> returned null (Case-B skipped)");
+                    Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: SpawnActor<GeoSite> returned null (Case-B skipped)");
                     return null;
                 }
 
                 // Stamp the site id (resolve-by-id key) BEFORE registration.
                 try { _siteIdField.SetValue(site, identity.SiteId); }
-                catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: stamp SiteId failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: stamp SiteId failed: " + ex.Message); }
 
                 // Register WITHOUT cascade: add directly to GeoMap.AllSites (bypasses RegisterSite — pure mirror).
                 try
@@ -467,18 +467,18 @@ namespace Multipleer.Network.Sync.State
                     if (map != null && _allSitesProp.GetValue(map, null) is IList allSites)
                         allSites.Add(site);
                     else
-                        Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: GeoMap.AllSites not an IList (Case-B site not registered)");
+                        Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: GeoMap.AllSites not an IList (Case-B site not registered)");
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite: AllSites.Add failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: AllSites.Add failed: " + ex.Message); }
 
                 // Stamp Owner/Type/State/Name/EncounterID onto the fresh mirror (reuses the Case-A writer).
                 ApplyIdentity(rt, site, identity);
 
-                Debug.Log("[Multipleer] GeoSiteReflection.SpawnMirrorSite: spawned inert mirror site " + identity.SiteId +
+                Debug.Log("[Multiplayer] GeoSiteReflection.SpawnMirrorSite: spawned inert mirror site " + identity.SiteId +
                           " type=" + identity.SiteType + " owner=" + identity.OwnerFactionDefGuid + " name=" + identity.SiteName);
                 return site;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SpawnMirrorSite failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.SpawnMirrorSite failed: " + ex.Message); return null; }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>
@@ -527,11 +527,11 @@ namespace Multipleer.Network.Sync.State
                         evt.AddEventHandler(map, handler);
                         token.Handlers.Add((evt, handler));
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
                 }
                 return token.Handlers.Count > 0 ? token : null;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.Subscribe failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe failed: " + ex.Message); return null; }
         }
 
         public static void Unsubscribe(object token)
@@ -540,7 +540,7 @@ namespace Multipleer.Network.Sync.State
             foreach (var (evt, handler) in t.Handlers)
             {
                 try { evt.RemoveEventHandler(t.Map, handler); }
-                catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.Unsubscribe remove failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Unsubscribe remove failed: " + ex.Message); }
             }
             t.Handlers.Clear();
         }
@@ -595,7 +595,7 @@ namespace Multipleer.Network.Sync.State
 
                 return dm.CreateDelegate(handlerType, onSiteChanged);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.MakeSiteAdapter failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.MakeSiteAdapter failed: " + ex.Message); return null; }
         }
     }
 }

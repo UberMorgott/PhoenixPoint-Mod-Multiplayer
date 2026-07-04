@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Default-OFF rollout gate for the host->client geoscape REPORT-WINDOW mirror (Phase-A of the

@@ -39,7 +39,7 @@ All file:line below are in `decompiled\AssemblyCSharp\Assembly-CSharp\src\`.
 - `CreateResultData` (`:59-64`) returns `_inputField.text.Trim()` as `InputTextResult`.
 - `CloseModal` (`:36-48`) resets `_inputField.text = ""` and deactivates — so the field is reusable.
 
-## Mod usage (Multipleer)
+## Mod usage (Multiplayer)
 - `src\UI\MultiplayerUI.cs` — `TryUpgradePromptInput(string placeholderHint)` (helper inserted after
   `OnLobbyRenamePrompt`): finds the field via `GetComponentInChildren<InputField>(true)`, clears `.text`,
   sets `placeholder as Text` `.text`+`.color = new Color(1,1,1,0.4f)` (translucent grey), then

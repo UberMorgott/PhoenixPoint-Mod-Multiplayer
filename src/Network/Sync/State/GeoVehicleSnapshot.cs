@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// One vehicle's mirrored GLOBE PLACEMENT — the EXACT state the native <c>GeoNavComponent.NavigateRoutine</c>

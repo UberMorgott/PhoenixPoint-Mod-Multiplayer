@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// END-TURN relay (Inc 4), repointed onto the live tactical rail. On a mirroring CLIENT this sends
@@ -34,10 +34,10 @@ namespace Multipleer.Harmony
         // mirroring client it ALSO relays the intent to the host first.
         public static bool Prefix()
         {
-            try { return Multipleer.Sync.Tactical.TacticalTurnSync.ClientRelayEndTurn(); }
+            try { return Multiplayer.Sync.Tactical.TacticalTurnSync.ClientRelayEndTurn(); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] RequestEndTurnPatch relay failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] RequestEndTurnPatch relay failed: " + ex.Message);
                 return true;
             }
         }
@@ -75,12 +75,12 @@ namespace Multipleer.Harmony
                 // (the whole burst loops inside this single coroutine); covers host-OWN shots, host-executed
                 // client intents, AND overwatch/return-fire reactions. Host-gated so the client never re-broadcasts;
                 // the per-attack-type gate inside also rejects the client's own Synced replay. Fail-open.
-                Multipleer.Sync.Tactical.TacticalFireAnimSync.HostBroadcastFireStart(shootAbility, abilityTarget);
+                Multiplayer.Sync.Tactical.TacticalFireAnimSync.HostBroadcastFireStart(shootAbility, abilityTarget);
                 return true;
             }
             // Feature C: when the client is deliberately REPLAYING this coroutine to play the attack ANIMATION
             // (projectile-free, camera-silent), let it run — otherwise this prefix would suppress our own replay.
-            if (Multipleer.Sync.Tactical.TacticalFireAnimSync.ReplayActive) return true;
+            if (Multiplayer.Sync.Tactical.TacticalFireAnimSync.ReplayActive) return true;
             return false;
         }
     }

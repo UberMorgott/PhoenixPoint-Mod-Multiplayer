@@ -1,9 +1,9 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Inc Vision — HOST vision-push trigger. Postfix on
@@ -43,7 +43,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalVisionSync.HostOnFactionKnowledgeChanged(faction); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] VisionBroadcastPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] VisionBroadcastPatch.Postfix failed: " + ex);
             }
         }
     }

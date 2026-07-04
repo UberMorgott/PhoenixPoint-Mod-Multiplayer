@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE (engine-free) reconcile diff for host→client VISION replication (surface <c>tac.vision</c>). Given

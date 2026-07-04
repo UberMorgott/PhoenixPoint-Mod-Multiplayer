@@ -1,4 +1,4 @@
-# Multipleer Networking Core (as-built)
+# Multiplayer Networking Core (as-built)
 
 > Describes the implemented networking core: the `NetworkEngine` singleton, message routing, packet format, and `SessionManager`. Design rationale → [specs/01-design](../specs/01-design.md); transport layer → [02-transport-layer](02-transport-layer.md).
 

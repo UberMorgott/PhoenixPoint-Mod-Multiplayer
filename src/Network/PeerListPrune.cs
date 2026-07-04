@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Pure, Unity-free decision for pruning the client-side <c>_clients</c> map against a freshly

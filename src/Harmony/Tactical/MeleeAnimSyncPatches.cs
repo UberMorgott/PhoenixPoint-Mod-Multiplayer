@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Sync.Tactical;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Feature C (melee) — client-only guards active ONLY for the duration of a

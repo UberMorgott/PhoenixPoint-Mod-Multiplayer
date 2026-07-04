@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Pure, Unity-free decision for HOW the CLIENT must drive its deploy hydrate.

@@ -6,13 +6,13 @@
 
 **Architecture:** Host-authoritative entity lifecycle replication, extending the existing CommandSync transport exactly like the time-sync `0x34` packet and the `StartTravel` codec. A NEW reliable, ordered packet `0x36 GeoEntityOp` carries a small op `{OpType, defGuid, ownerFactionGuid, siteId, posX/Y/Z, vehicleId}`. (A) A pure, TDD-able `GeoEntityOpCodec` encodes/decodes it. (B) A client-only Harmony patch `HostEntityOpBroadcastPatch` postfixes the native birth/death seams — `GeoFaction.CreateVehicle`, `GeoFaction.CreateVehicleAtPosition`, `GeoFaction.UnregisterVehicle`, `GeoSite.DestroySite` — and (host-only) broadcasts the op, mirroring `StartTravelInterceptPatch.Postfix`. (C) A `ClientEntityOpApplier` applies each op under a new `[ThreadStatic] IsApplying` replication scope by running the NATIVE entity lifecycle: `VehicleCreated` → `GeoFaction.CreateVehicle(GeoSite, ComponentSetDef)` (which runs `Instantiate`→`DoEnterPlay`→`OnLevelStart`→`TeleportToSite`→fires `VehicleAdded`, so the marker comes from the lifecycle — per C18 we do NOT gate `VehicleAdded`), then reconciles `VehicleID`/`_lastVehicleIndex` to the host's authoritative value so the id is collision-free and `FindVehicleById` resolves; `VehicleRemoved` → `GeoVehicle.Destroy()`; `SiteRemoved` → `GeoSite.DestroySite()`. (D) An in-game 2-instance checkpoint confirms the host-created aircraft appears AND flies on the client.
 
-**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic type/method/field resolution + `TargetMethods()` multi-target single-postfix; the mod NEVER hard-references game types — all injected params typed `object`), xUnit 2.9.2 (`Multipleer.Tests`, pure codec TDD-first like `TimeStateCodecTests`), existing `NetworkEngine` (reliable `BroadcastToAll`, `RouteMessage`, `PacketType` enum), existing `MessageSerializer`/`CommandCodec` `BinaryWriter` layout conventions, existing `GeoBridge` id↔entity resolution, existing `CommandRelay.IsApplying` `[ThreadStatic]` guard pattern (a new sibling guard is added for replication apply).
+**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic type/method/field resolution + `TargetMethods()` multi-target single-postfix; the mod NEVER hard-references game types — all injected params typed `object`), xUnit 2.9.2 (`Multiplayer.Tests`, pure codec TDD-first like `TimeStateCodecTests`), existing `NetworkEngine` (reliable `BroadcastToAll`, `RouteMessage`, `PacketType` enum), existing `MessageSerializer`/`CommandCodec` `BinaryWriter` layout conventions, existing `GeoBridge` id↔entity resolution, existing `CommandRelay.IsApplying` `[ThreadStatic]` guard pattern (a new sibling guard is added for replication apply).
 
 ---
 
 ## Grounding notes (decompile-verified — read before coding)
 
-> Decompile root: `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src` (gitignored — verified via Bash grep + Read on real files). Mod source: `E:\DEV\PhoenixPoint\Multipleer\src`.
+> Decompile root: `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src` (gitignored — verified via Bash grep + Read on real files). Mod source: `E:\DEV\PhoenixPoint\Multiplayer\src`.
 
 ### Verified entity-lifecycle seams (file:line)
 
@@ -46,8 +46,8 @@
 - **Codec layout:** `BinaryWriter`/`BinaryReader` over a `MemoryStream`, exactly like `CommandCodec.EncodeStartTravel` `CommandCodec.cs:33-44` (`bw.Write(string)`, `bw.Write(int)`, `bw.Write(float)`). Strings use the length-prefixed `BinaryWriter.Write(string)`; NEVER write a null string (`?? ""`).
 - **Host-postfix broadcast pattern:** `StartTravelInterceptPatch.Postfix` `StartTravelInterceptPatch.cs:61-81` — gate `engine != null && engine.IsActive && engine.IsHost`, bail if `CommandRelay.IsApplying` (do not re-broadcast a relayed apply); here also bail if `EntityReplicationScope.IsApplying` (do not re-broadcast a client-side replay). Then build payload + `engine.BroadcastGeoEntityOp(op)`.
 - **Replication apply scope:** new `EntityReplicationScope` mirrors `CommandRelay`'s `[System.ThreadStatic] private static bool _applying; public static bool IsApplying => _applying;` (`CommandRelay.cs:26-27`). The client applier sets it around the native lifecycle call so the very create/destroy postfixes that the replay triggers do NOT re-broadcast (host) and are recognized as replication (no recursion).
-- **Auto-registration:** `MultipleerMain.OnModEnabled` does `harmony.PatchAll(...)` — new `[HarmonyPatch]` classes auto-discover; NO manual registration. New `src/` files need NO `Multipleer.csproj` edit (SDK globs `src/**/*.cs`).
-- **Test linking:** `Multipleer.Tests/Multipleer.Tests.csproj` has `EnableDefaultCompileItems=false` `:7`; pure cores are linked individually (`CommandCodec.cs` link `:26`). A new pure file under unit test MUST get its own `<Compile Include="..\src\..."><Link>X.cs</Link></Compile>` line.
+- **Auto-registration:** `MultiplayerMain.OnModEnabled` does `harmony.PatchAll(...)` — new `[HarmonyPatch]` classes auto-discover; NO manual registration. New `src/` files need NO `Multiplayer.csproj` edit (SDK globs `src/**/*.cs`).
+- **Test linking:** `Multiplayer.Tests/Multiplayer.Tests.csproj` has `EnableDefaultCompileItems=false` `:7`; pure cores are linked individually (`CommandCodec.cs` link `:26`). A new pure file under unit test MUST get its own `<Compile Include="..\src\..."><Link>X.cs</Link></Compile>` line.
 
 ### `0x36 GeoEntityOp` payload layout (chosen)
 
@@ -81,8 +81,8 @@ Rationale: a single flat record keeps the codec pure and trivially round-trippab
 | `src/Network/CommandSync/EntityReplicationScope.cs` | Pure: `[ThreadStatic]` re-entrancy guard (`IsApplying`) + `using`-friendly enter/exit, mirroring `CommandRelay`'s guard. Lets the client run the native create/destroy lifecycle without its own birth/death postfixes re-broadcasting. | **Pure → unit-tested** |
 | `src/Network/CommandSync/ClientEntityOpApplier.cs` | Client-only apply: decode-side dispatcher. `VehicleCreated` → resolve def+owner+site/pos via `GeoBridge`/reflection → `GeoFaction.CreateVehicle(...)` native lifecycle → reconcile `VehicleID`/`_lastVehicleIndex`. `VehicleRemoved` → find vehicle → `Destroy()`. `SiteRemoved` → find site → `DestroySite()`. All wrapped in `EntityReplicationScope`. | Engine/reflection — build + 2-instance |
 | `src/Harmony/HostEntityOpBroadcastPatch.cs` | Client-only-import multi-target Harmony patch: `TargetMethods()` yields `GeoFaction.CreateVehicle`, `CreateVehicleAtPosition`, `UnregisterVehicle`, `GeoSite.DestroySite`. One `Postfix` (host-only gate) builds the matching `GeoEntityOp` and `engine.BroadcastGeoEntityOp(op)`. | Engine/Harmony — build + 2-instance |
-| `Multipleer.Tests/GeoEntityOpCodecTests.cs` | xUnit: round-trip each op-type (all fields), op-type byte stability, null-string safety. | Test |
-| `Multipleer.Tests/EntityReplicationScopeTests.cs` | xUnit: default false, true inside `using`, restored after dispose, nested restore. | Test |
+| `Multiplayer.Tests/GeoEntityOpCodecTests.cs` | xUnit: round-trip each op-type (all fields), op-type byte stability, null-string safety. | Test |
+| `Multiplayer.Tests/EntityReplicationScopeTests.cs` | xUnit: default false, true inside `using`, restored after dispose, nested restore. | Test |
 
 ### Modified files
 
@@ -90,11 +90,11 @@ Rationale: a single flat record keeps the codec pure and trivially round-trippab
 |------|--------|
 | `src/Network/MessageLayer/PacketType.cs` | Add `GeoEntityOp = 0x36` after `CampaignStateUpdate = 0x34` (`:49`). |
 | `src/Network/NetworkEngine.cs` | Add `BroadcastGeoEntityOp(GeoEntityOp)` send helper (after `BroadcastTimingState` `:314`); add `case PacketType.GeoEntityOp:` to `RouteMessage` (after the `CampaignStateUpdate` case `:563`). |
-| `Multipleer.Tests/Multipleer.Tests.csproj` | Add `<Compile>` link lines for `GeoEntityOpCodec.cs` and `EntityReplicationScope.cs`. |
+| `Multiplayer.Tests/Multiplayer.Tests.csproj` | Add `<Compile>` link lines for `GeoEntityOpCodec.cs` and `EntityReplicationScope.cs`. |
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-**In-game (2-instance):** per `multipleer-second-instance-setup` (Goldberg-emu second copy + `mklink /J` junctions); see Task 8 checkpoint.
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+**In-game (2-instance):** per `multiplayer-second-instance-setup` (Goldberg-emu second copy + `mklink /J` junctions); see Task 8 checkpoint.
 
 ---
 
@@ -102,13 +102,13 @@ Rationale: a single flat record keeps the codec pure and trivially round-trippab
 
 **Files:**
 - Create: `src/Network/CommandSync/GeoEntityOpCodec.cs`
-- Modify: `Multipleer.Tests/Multipleer.Tests.csproj` (add the `<Compile>` link)
-- Test: `Multipleer.Tests/GeoEntityOpCodecTests.cs` (Create)
+- Modify: `Multiplayer.Tests/Multiplayer.Tests.csproj` (add the `<Compile>` link)
+- Test: `Multiplayer.Tests/GeoEntityOpCodecTests.cs` (Create)
 
-- [ ] **Step 1: Write the failing test** — Create `Multipleer.Tests/GeoEntityOpCodecTests.cs`:
+- [ ] **Step 1: Write the failing test** — Create `Multiplayer.Tests/GeoEntityOpCodecTests.cs`:
 
 ```csharp
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network.CommandSync;
 using Xunit;
 
 public class GeoEntityOpCodecTests
@@ -176,7 +176,7 @@ public class GeoEntityOpCodecTests
 ```
 
 - [ ] **Step 2: Run test to verify it fails** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter GeoEntityOpCodecTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter GeoEntityOpCodecTests`
   Expected: FAIL — compile error (`GeoEntityOp` / `GeoEntityOpType` / `GeoEntityOpCodec` do not exist).
 
 - [ ] **Step 3: Create the pure codec** — Create `src/Network/CommandSync/GeoEntityOpCodec.cs`:
@@ -184,7 +184,7 @@ public class GeoEntityOpCodecTests
 ```csharp
 using System.IO;
 
-namespace Multipleer.Network.CommandSync
+namespace Multiplayer.Network.CommandSync
 {
     // SD-AIDR INC-2: the wire op-types for 0x36 GeoEntityOp. Byte values are STABLE (serialized on the
     // wire) — never renumber. SiteCreated (3) is reserved/forward-compat only; INC-2 neither broadcasts
@@ -254,20 +254,20 @@ namespace Multipleer.Network.CommandSync
 }
 ```
 
-- [ ] **Step 4: Link the pure codec into the test assembly** — In `Multipleer.Tests/Multipleer.Tests.csproj`, immediately after the `GeoSimProducerTable.cs` link line (`:30`), add:
+- [ ] **Step 4: Link the pure codec into the test assembly** — In `Multiplayer.Tests/Multiplayer.Tests.csproj`, immediately after the `GeoSimProducerTable.cs` link line (`:30`), add:
 
 ```xml
     <Compile Include="..\src\Network\CommandSync\GeoEntityOpCodec.cs"><Link>GeoEntityOpCodec.cs</Link></Compile>
 ```
 
 - [ ] **Step 5: Run test to verify it passes** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter GeoEntityOpCodecTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter GeoEntityOpCodecTests`
   Expected: PASS (all 5 cases).
 
 - [ ] **Step 6: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): pure GeoEntityOp codec for 0x36 (4 op-types, TDD)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): pure GeoEntityOp codec for 0x36 (4 op-types, TDD)"
 ```
 
 ---
@@ -276,13 +276,13 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 
 **Files:**
 - Create: `src/Network/CommandSync/EntityReplicationScope.cs`
-- Modify: `Multipleer.Tests/Multipleer.Tests.csproj` (add the `<Compile>` link)
-- Test: `Multipleer.Tests/EntityReplicationScopeTests.cs` (Create)
+- Modify: `Multiplayer.Tests/Multiplayer.Tests.csproj` (add the `<Compile>` link)
+- Test: `Multiplayer.Tests/EntityReplicationScopeTests.cs` (Create)
 
-- [ ] **Step 1: Write the failing test** — Create `Multipleer.Tests/EntityReplicationScopeTests.cs`:
+- [ ] **Step 1: Write the failing test** — Create `Multiplayer.Tests/EntityReplicationScopeTests.cs`:
 
 ```csharp
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network.CommandSync;
 using Xunit;
 
 public class EntityReplicationScopeTests
@@ -322,7 +322,7 @@ public class EntityReplicationScopeTests
 ```
 
 - [ ] **Step 2: Run test to verify it fails** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter EntityReplicationScopeTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter EntityReplicationScopeTests`
   Expected: FAIL — compile error (`EntityReplicationScope` does not exist).
 
 - [ ] **Step 3: Create the pure scope** — Create `src/Network/CommandSync/EntityReplicationScope.cs`:
@@ -330,7 +330,7 @@ public class EntityReplicationScopeTests
 ```csharp
 using System;
 
-namespace Multipleer.Network.CommandSync
+namespace Multiplayer.Network.CommandSync
 {
     // SD-AIDR INC-2: [ThreadStatic] re-entrancy guard for client-side entity-op replay. Mirrors
     // CommandRelay's IsApplying guard (CommandRelay.cs:26-27). The ClientEntityOpApplier wraps the
@@ -354,20 +354,20 @@ namespace Multipleer.Network.CommandSync
 }
 ```
 
-- [ ] **Step 4: Link the pure scope into the test assembly** — In `Multipleer.Tests/Multipleer.Tests.csproj`, immediately after the `GeoEntityOpCodec.cs` link line added in Task 1, add:
+- [ ] **Step 4: Link the pure scope into the test assembly** — In `Multiplayer.Tests/Multiplayer.Tests.csproj`, immediately after the `GeoEntityOpCodec.cs` link line added in Task 1, add:
 
 ```xml
     <Compile Include="..\src\Network\CommandSync\EntityReplicationScope.cs"><Link>EntityReplicationScope.cs</Link></Compile>
 ```
 
 - [ ] **Step 5: Run test to verify it passes** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter EntityReplicationScopeTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter EntityReplicationScopeTests`
   Expected: PASS (all 3 cases).
 
 - [ ] **Step 6: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): EntityReplicationScope [ThreadStatic] guard for entity-op replay (TDD)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): EntityReplicationScope [ThreadStatic] guard for entity-op replay (TDD)"
 ```
 
 ---
@@ -399,9 +399,9 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
         // Host -> all: authoritative entity create/destroy op (0x36 GeoEntityOp). RELIABLE + ordered
         // (BroadcastToAll). The body is the pure GeoEntityOpCodec image; clients decode + apply via
         // ClientEntityOpApplier under EntityReplicationScope. Mirrors BroadcastTimingState.
-        public void BroadcastGeoEntityOp(Multipleer.Network.CommandSync.GeoEntityOp op)
+        public void BroadcastGeoEntityOp(Multiplayer.Network.CommandSync.GeoEntityOp op)
         {
-            var body = Multipleer.Network.CommandSync.GeoEntityOpCodec.Encode(op);
+            var body = Multiplayer.Network.CommandSync.GeoEntityOpCodec.Encode(op);
             var msg = new NetworkMessage(PacketType.GeoEntityOp, body);
             BroadcastToAll(msg);
         }
@@ -411,21 +411,21 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 
 ```csharp
                 case PacketType.GeoEntityOp:
-                    var entityOp = Multipleer.Network.CommandSync.GeoEntityOpCodec.Decode(msg.Payload);
-                    Multipleer.Network.CommandSync.ClientEntityOpApplier.Apply(entityOp);
+                    var entityOp = Multiplayer.Network.CommandSync.GeoEntityOpCodec.Decode(msg.Payload);
+                    Multiplayer.Network.CommandSync.ClientEntityOpApplier.Apply(entityOp);
                     break;
 ```
 
 > NOTE: `ClientEntityOpApplier` is created in Task 5. To keep THIS task building in isolation, Task 5 must land before a full build; sequence Tasks 3→4→5 then build. If you build after Step 3 alone it will fail on `ClientEntityOpApplier` — that is expected; the Step-4 build below is the first green checkpoint and assumes Task 5 is also applied. If executing strictly one task at a time, add a temporary no-op `ClientEntityOpApplier.Apply` stub here and replace it in Task 5; the cleaner path is to do Tasks 3–5 as a unit before building.
 
 - [ ] **Step 4: Build to verify it compiles (after Task 5 lands)** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 5: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): wire 0x36 GeoEntityOp packet + BroadcastGeoEntityOp + route"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): wire 0x36 GeoEntityOp packet + BroadcastGeoEntityOp + route"
 ```
 
 ---
@@ -539,13 +539,13 @@ using UnityEngine;
 ```
 
 - [ ] **Step 3: Build to verify it compiles (after Task 5 lands)** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 4: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): GeoBridge entity-op resolvers (def/faction/site + native create + id reconcile)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): GeoBridge entity-op resolvers (def/faction/site + native create + id reconcile)"
 ```
 
 ---
@@ -563,7 +563,7 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.CommandSync
+namespace Multiplayer.Network.CommandSync
 {
     // SD-AIDR INC-2 (C): client-only apply of a host 0x36 GeoEntityOp. Runs the NATIVE entity lifecycle
     // (no hand-built visuals) under EntityReplicationScope so the birth/death postfixes the replay
@@ -583,7 +583,7 @@ namespace Multipleer.Network.CommandSync
             if (engine == null || !engine.IsActive || engine.IsHost) return; // client-only
 
             var geoLevel = GeoBridge.GetGeoLevelController();
-            if (geoLevel == null) { Debug.LogWarning("[Multipleer] EntityOp apply: no GeoLevelController."); return; }
+            if (geoLevel == null) { Debug.LogWarning("[Multiplayer] EntityOp apply: no GeoLevelController."); return; }
 
             using (EntityReplicationScope.Enter())
             {
@@ -593,7 +593,7 @@ namespace Multipleer.Network.CommandSync
                     case GeoEntityOpType.VehicleRemoved: ApplyVehicleRemoved(geoLevel, op); break;
                     case GeoEntityOpType.SiteRemoved:    ApplySiteRemoved(geoLevel, op); break;
                     case GeoEntityOpType.SiteCreated:
-                        Debug.Log("[Multipleer] EntityOp: SiteCreated deferred to INC-3 (needs site InstanceData).");
+                        Debug.Log("[Multiplayer] EntityOp: SiteCreated deferred to INC-3 (needs site InstanceData).");
                         break;
                 }
             }
@@ -604,21 +604,21 @@ namespace Multipleer.Network.CommandSync
             // Idempotency: if the vehicle id already exists (duplicate op / reload race), skip.
             if (GeoBridge.FindVehicleById(geoLevel, op.EntityId.ToString()) != null)
             {
-                Debug.Log($"[Multipleer] EntityOp VehicleCreated: id {op.EntityId} already present, skip.");
+                Debug.Log($"[Multiplayer] EntityOp VehicleCreated: id {op.EntityId} already present, skip.");
                 return;
             }
 
             var def = GeoBridge.FindDefByGuid(op.DefGuid);
-            if (def == null) { Debug.LogWarning($"[Multipleer] VehicleCreated: def {op.DefGuid} not resolved."); return; }
+            if (def == null) { Debug.LogWarning($"[Multiplayer] VehicleCreated: def {op.DefGuid} not resolved."); return; }
 
             var faction = GeoBridge.FindFactionByGuid(geoLevel, op.OwnerFactionGuid);
-            if (faction == null) { Debug.LogWarning("[Multipleer] VehicleCreated: owner faction not resolved."); return; }
+            if (faction == null) { Debug.LogWarning("[Multiplayer] VehicleCreated: owner faction not resolved."); return; }
 
             object vehicle;
             if (op.SiteId >= 0)
             {
                 var site = GeoBridge.FindSiteById(geoLevel, op.SiteId);
-                if (site == null) { Debug.LogWarning($"[Multipleer] VehicleCreated: anchor site {op.SiteId} not found."); return; }
+                if (site == null) { Debug.LogWarning($"[Multiplayer] VehicleCreated: anchor site {op.SiteId} not found."); return; }
                 vehicle = GeoBridge.CreateVehicleAtSite(faction, site, def);
             }
             else
@@ -626,42 +626,42 @@ namespace Multipleer.Network.CommandSync
                 vehicle = GeoBridge.CreateVehicleAtPosition(faction, new Vector3(op.PosX, op.PosY, op.PosZ), def);
             }
 
-            if (vehicle == null) { Debug.LogError("[Multipleer] VehicleCreated: native CreateVehicle returned null."); return; }
+            if (vehicle == null) { Debug.LogError("[Multiplayer] VehicleCreated: native CreateVehicle returned null."); return; }
             GeoBridge.ReconcileVehicleId(faction, vehicle, op.EntityId);
-            Debug.Log($"[Multipleer] EntityOp VehicleCreated: spawned + reconciled VehicleID {op.EntityId}.");
+            Debug.Log($"[Multiplayer] EntityOp VehicleCreated: spawned + reconciled VehicleID {op.EntityId}.");
         }
 
         private static void ApplyVehicleRemoved(object geoLevel, GeoEntityOp op)
         {
             var vehicle = GeoBridge.FindVehicleById(geoLevel, op.EntityId.ToString());
-            if (vehicle == null) { Debug.Log($"[Multipleer] VehicleRemoved: id {op.EntityId} absent, nothing to remove."); return; }
+            if (vehicle == null) { Debug.Log($"[Multiplayer] VehicleRemoved: id {op.EntityId} absent, nothing to remove."); return; }
             AccessTools.Method(vehicle.GetType(), "Destroy")?.Invoke(vehicle, null);
-            Debug.Log($"[Multipleer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
+            Debug.Log($"[Multiplayer] EntityOp VehicleRemoved: destroyed VehicleID {op.EntityId}.");
         }
 
         private static void ApplySiteRemoved(object geoLevel, GeoEntityOp op)
         {
             var site = GeoBridge.FindSiteById(geoLevel, op.SiteId);
-            if (site == null) { Debug.Log($"[Multipleer] SiteRemoved: site {op.SiteId} absent."); return; }
+            if (site == null) { Debug.Log($"[Multiplayer] SiteRemoved: site {op.SiteId} absent."); return; }
             AccessTools.Method(site.GetType(), "DestroySite")?.Invoke(site, null);
-            Debug.Log($"[Multipleer] EntityOp SiteRemoved: destroyed SiteId {op.SiteId}.");
+            Debug.Log($"[Multiplayer] EntityOp SiteRemoved: destroyed SiteId {op.SiteId}.");
         }
     }
 }
 ```
 
 - [ ] **Step 2: Build to verify it compiles** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`. (This is the first green build for Tasks 3–5 combined.)
 
 - [ ] **Step 3: Run full suite to verify no regression** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
   Expected: all tests PASS (Task 1+2 cases + every pre-existing test green).
 
 - [ ] **Step 4: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): ClientEntityOpApplier - native lifecycle replay + VehicleID reconcile (client-only)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): ClientEntityOpApplier - native lifecycle replay + VehicleID reconcile (client-only)"
 ```
 
 ---
@@ -680,11 +680,11 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network;
+using Multiplayer.Network.CommandSync;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // SD-AIDR INC-2 (B): on the HOST, broadcast an entity create/destroy op (0x36) whenever the native
     // birth/death seams fire, so clients replicate the entity. Mirrors StartTravelInterceptPatch.Postfix:
@@ -788,7 +788,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[Multipleer] HostEntityOpBroadcastPatch ({name}) failed: {ex}");
+                Debug.LogError($"[Multiplayer] HostEntityOpBroadcastPatch ({name}) failed: {ex}");
             }
         }
 
@@ -812,17 +812,17 @@ namespace Multipleer.Harmony
 ```
 
 - [ ] **Step 2: Build to verify it compiles** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 3: Run full suite to verify no regression** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
   Expected: all tests PASS.
 
 - [ ] **Step 4: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): HostEntityOpBroadcastPatch - broadcast 0x36 on create/remove seams (host-only)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): HostEntityOpBroadcastPatch - broadcast 0x36 on create/remove seams (host-only)"
 ```
 
 ---
@@ -832,14 +832,14 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 **Files:** none (verification only).
 
 - [ ] **Step 1: Clean build** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 2: Full test suite** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
   Expected: ALL tests PASS — the 5 `GeoEntityOpCodecTests` + 3 `EntityReplicationScopeTests` + every pre-existing test (CommandCodec, GeoSimProducerTable, InterceptRegistry, transport, roster, chat, etc.). No failures, no skips beyond pre-existing.
 
-- [ ] **Step 3: Deploy the built DLL to BOTH instances** — Per `multipleer-second-instance-setup`: the DLL output (`Multipleer.csproj` build) reaches the live mod folder; with `mklink /J` junctions the second Goldberg-emu copy shares it. Confirm both instances will load the NEW build (check the DLL timestamp under each instance's mod folder). No commit (build/deploy only).
+- [ ] **Step 3: Deploy the built DLL to BOTH instances** — Per `multiplayer-second-instance-setup`: the DLL output (`Multiplayer.csproj` build) reaches the live mod folder; with `mklink /J` junctions the second Goldberg-emu copy shares it. Confirm both instances will load the NEW build (check the DLL timestamp under each instance's mod folder). No commit (build/deploy only).
 
 ---
 
@@ -847,7 +847,7 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 
 **Files:** none (integration verification only).
 
-> Harmony/Unity patches are not unit-testable. Final verification is a 2-instance in-game run per the `multipleer-second-instance-setup` memory (Goldberg-emu second copy + `mklink /J` junctions). The USER performs this; the agent records the outcome.
+> Harmony/Unity patches are not unit-testable. Final verification is a 2-instance in-game run per the `multiplayer-second-instance-setup` memory (Goldberg-emu second copy + `mklink /J` junctions). The USER performs this; the agent records the outcome.
 
 - [ ] **Step 1: Launch two instances + reach geoscape** — Start the host instance + the Goldberg-emu second instance. Host loads a geoscape campaign; the second instance joins (lobby → ready → host picks save → transfer → barrier → play). Confirm BOTH reach the geoscape and the INC-1 baseline holds (existing vehicles fly in sync, client clock ticks).
 

@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Relay interceptor for geoscape SITE EXPLORATION: <c>GeoVehicle.StartExploringCurrentSite()</c>
@@ -66,7 +66,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] ExploreSitePatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] ExploreSitePatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -76,7 +76,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ExploreSitePatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ExploreSitePatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Decoded faction DIPLOMACY snapshot: the per-relation reputation integer for every

@@ -1,7 +1,7 @@
 using System;
 using System.Reflection;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Tiny, Unity-free reflection helper for disambiguating overloaded methods that

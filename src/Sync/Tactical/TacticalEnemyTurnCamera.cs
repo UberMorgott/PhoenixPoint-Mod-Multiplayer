@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Client-side enemy-turn cinematic camera. On the co-op mirror the enemy replay coroutines
@@ -52,7 +52,7 @@ namespace Multipleer.Sync.Tactical
             catch (Exception e)
             {
                 _resolveFailed = true;
-                Debug.LogWarning("[Multipleer][tac] enemy-turn camera resolve failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer][tac] enemy-turn camera resolve failed: " + e.Message);
             }
         }
 
@@ -87,7 +87,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer][tac] enemy-turn camera chase failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer][tac] enemy-turn camera chase failed: " + e.Message);
             }
         }
 

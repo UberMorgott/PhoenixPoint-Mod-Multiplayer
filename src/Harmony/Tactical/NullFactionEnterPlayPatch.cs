@@ -1,9 +1,9 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Deploy NULL-FACTION guard. Prefix on <c>TacticalFactionVision.OnActorEnteredPlay(TacticalActorBase)</c>
@@ -25,7 +25,7 @@ namespace Multipleer.Harmony.Tactical
     ///     ArgumentException can never fire. Skipping is correct: the native body would only add the actor to
     ///     this faction's vision and then throw — a faction-less actor has no meaningful vision relation.
     ///
-    /// Auto-registers via <c>MultipleerMain.PatchAll(GetExecutingAssembly())</c>. Reflection-target lazily.
+    /// Auto-registers via <c>MultiplayerMain.PatchAll(GetExecutingAssembly())</c>. Reflection-target lazily.
     /// </summary>
     [HarmonyPatch]
     public static class NullFactionEnterPlayPatch
@@ -58,7 +58,7 @@ namespace Multipleer.Harmony.Tactical
             }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] NullFactionEnterPlayPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] NullFactionEnterPlayPatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native vision handler on an unexpected error
             }
         }

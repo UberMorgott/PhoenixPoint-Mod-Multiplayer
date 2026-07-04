@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Adds a research element to the player faction's research queue.

@@ -2,10 +2,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Host deploy-snapshot NULL-FACTION guard (the real fix for the "HostOnLevelReady failed … null faction"
@@ -59,7 +59,7 @@ namespace Multipleer.Harmony.Tactical
             }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] NullFactionKnownActorsScrubPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] NullFactionKnownActorsScrubPatch.Prefix failed: " + ex);
             }
             return true;   // always let the native run (now throw-free); never wedge the snapshot
         }
@@ -91,7 +91,7 @@ namespace Multipleer.Harmony.Tactical
 
             if (toRemove.Count == 0) return;
             foreach (var k in toRemove) dict.Remove(k);
-            Debug.Log("[Multipleer][tac] scrubbed " + toRemove.Count +
+            Debug.Log("[Multiplayer][tac] scrubbed " + toRemove.Count +
                       " null-faction KnownActor(s) before snapshot RecordInstanceData");
         }
     }

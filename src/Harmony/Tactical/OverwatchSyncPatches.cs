@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative OVERWATCH-ARM replication patches (Inc Overwatch). Two Harmony patches,
@@ -44,7 +44,7 @@ namespace Multipleer.Harmony.Tactical
             try { return TacticalOverwatchSync.ClientInterceptArm(__instance, parameter); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] OverwatchAbilityActivatePatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] OverwatchAbilityActivatePatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native arm on an unexpected error
             }
         }
@@ -83,7 +83,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalOverwatchSync.OnHostSetCone(__instance, __0); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] OverwatchStatusSetConePatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] OverwatchStatusSetConePatch.Postfix failed: " + ex);
             }
         }
     }

@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Which client-side rebuild path a mirrored report modal takes. The host classifier maps a whitelisted

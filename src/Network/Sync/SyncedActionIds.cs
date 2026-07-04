@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>Stable wire ids for every synced action. Never reuse a retired id.</summary>
     public static class SyncedActionIds

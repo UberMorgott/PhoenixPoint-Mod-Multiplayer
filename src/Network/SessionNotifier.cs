@@ -2,7 +2,7 @@ using System;
 using UnityEngine;
 using PhoenixPoint.Common.View.ViewControllers;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// F1 — peer connect/disconnect notification. A single subscriber wired ONCE per engine init
@@ -67,7 +67,7 @@ namespace Multipleer.Network
             // client, so they all see the drop, not just the host). Fills the crash/timeout gap so the
             // disconnect line is uniform with the graceful-leave line.
             try { _attached?.Session?.SystemChat(line); }
-            catch (Exception e) { Debug.LogError("[Multipleer] SessionNotifier chat failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] SessionNotifier chat failed: " + e.Message); }
 
             // Transient toast on THIS peer where a NotificationController is live (geoscape/menu).
             ShowToast(line);
@@ -88,7 +88,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] SessionNotifier toast failed: " + e.Message);
+                Debug.LogError("[Multiplayer] SessionNotifier toast failed: " + e.Message);
             }
         }
     }

@@ -1,10 +1,10 @@
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative COMBAT/DAMAGE replication patches (spec §3, Inc 3a; generalized in Inc T2).
@@ -30,10 +30,10 @@ namespace Multipleer.Harmony.Tactical
             foreach (var name in TacticalAbilityRelay.RelayableAbilityTypeNames)
             {
                 var t = AccessTools.TypeByName(ns + name);
-                if (t == null) { Debug.LogError("[Multipleer][tac] relay: ability type not found: " + ns + name); continue; }
+                if (t == null) { Debug.LogError("[Multiplayer][tac] relay: ability type not found: " + ns + name); continue; }
                 // public override void Activate(object parameter) — EXACT (object) param match per subclass.
                 var m = AccessTools.Method(t, "Activate", new[] { typeof(object) });
-                if (m == null) { Debug.LogError("[Multipleer][tac] relay: Activate(object) not found on " + name); continue; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] relay: Activate(object) not found on " + name); continue; }
                 yield return m;
             }
         }
@@ -45,7 +45,7 @@ namespace Multipleer.Harmony.Tactical
             try { return TacticalCombatSync.ClientInterceptAbility(__instance, parameter); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] AbilityActivateRelayPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] AbilityActivateRelayPatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native ability on an unexpected error
             }
         }
@@ -82,7 +82,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalCombatSync.OnHostApplyDamage(__instance, __0); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ApplyDamagePatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ApplyDamagePatch.Postfix failed: " + ex);
             }
         }
     }

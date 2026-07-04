@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// CLIENT-ONLY suppression of LOCAL geoscape-event raising AT THE SOURCE (primary, clean reducer).
@@ -65,9 +65,9 @@ namespace Multipleer.Harmony.Sync
                 if (engine == null || !engine.IsActiveSession || engine.IsHost) return; // host/non-session: untouched
                 if (__instance == null || _suppressEventsProp == null) return;
                 _suppressEventsProp.SetValue(__instance, true, null);
-                Debug.Log("[Multipleer] client GeoscapeEventSystem.SuppressEvents = true (no local event raises)");
+                Debug.Log("[Multiplayer] client GeoscapeEventSystem.SuppressEvents = true (no local event raises)");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventSuppressClientGeoscapePatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventSuppressClientGeoscapePatch failed: " + ex.Message); }
         }
     }
 }

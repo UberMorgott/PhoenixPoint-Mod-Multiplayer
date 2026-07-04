@@ -5,7 +5,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge for the host-authoritative faction-DIPLOMACY state channel (#4). The mod has NO
@@ -115,7 +115,7 @@ namespace Multipleer.Network.Sync.State
                 }
                 return snap;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] DiplomacyReflection.Snapshot failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] DiplomacyReflection.Snapshot failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -157,12 +157,12 @@ namespace Multipleer.Network.Sync.State
                         string g = DefReflection.GetGuid(withKey);
                         if (g != withGuid) continue;
                         try { _relationDiploField.SetValue(rel, value); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer] DiplomacyReflection.Apply set failed: " + ex.Message); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] DiplomacyReflection.Apply set failed: " + ex.Message); }
                         break; // one relation per (owner, with) pair
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] DiplomacyReflection.Apply failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] DiplomacyReflection.Apply failed: " + ex.Message); }
         }
     }
 }

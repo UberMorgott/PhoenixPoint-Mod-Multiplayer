@@ -1,8 +1,8 @@
 using System;
-using Multipleer.Network;
-using Multipleer.Validation;
+using Multiplayer.Network;
+using Multiplayer.Validation;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>Action categories that map to <see cref="CampaignPermission"/> bits.</summary>
     public enum ActionCategory

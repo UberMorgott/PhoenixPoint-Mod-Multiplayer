@@ -1,7 +1,7 @@
-# Multipleer — project rules
+# Multiplayer — project rules
 
 ## Multiplayer sync canon  [coding]
-> ONE pattern for ALL host↔client sync. No new one-off rails. Full design: `docs/superpowers/specs/2026-06-27-multipleer-sync-canon-design.md`
+> ONE pattern for ALL host↔client sync. No new one-off rails. Full design: `docs/superpowers/specs/2026-06-27-multiplayer-sync-canon-design.md`
 - **Host-authoritative:** client NEVER simulates — local action = suppress + send nonce-deduped intent; client is display-only.
 - **One writer per field:** no parallel rails, no split-by-direction. New state rides the ONE generic versioned actor-state record (0x8F-style spine) on the 0x67 rail — adding a buff/field = zero new surface.
 - **Statuses = inert display-only by contract:** pre-set `Applied=true`, seed null `[SerializeMember]` fields (atomicity), guard StartTurn/EndTurn/ApplyEffect/OnUnapply, per-status try/catch, HARD-exclude faction-flippers (MindControl/Zombified) + surface-owned. Never live-apply; no allowlist.

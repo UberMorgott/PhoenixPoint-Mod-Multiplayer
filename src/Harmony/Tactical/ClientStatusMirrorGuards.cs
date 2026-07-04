@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// FEATURE B — CLIENT-ONLY guards that keep a host-mirrored status INERT on the co-op mirror (no gameplay
@@ -103,7 +103,7 @@ namespace Multipleer.Harmony.Tactical
         {
             var seen = new HashSet<MethodBase>();
             var baseType = AccessTools.TypeByName(baseTypeName);
-            if (baseType == null) { Debug.LogError("[Multipleer][tac] mirror-guard: base type not found: " + baseTypeName); yield break; }
+            if (baseType == null) { Debug.LogError("[Multiplayer][tac] mirror-guard: base type not found: " + baseTypeName); yield break; }
             foreach (var t in EnumerateSubtypes(baseType))
             {
                 var m = DeclaredMethod(t, method, args);

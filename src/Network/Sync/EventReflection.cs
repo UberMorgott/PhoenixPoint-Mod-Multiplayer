@@ -2,10 +2,10 @@ using System;
 using System.Collections;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge for geoscape event-choice resolution.
@@ -274,7 +274,7 @@ namespace Multipleer.Network.Sync
             if (_encPagingField == null) missing.Add("UIModuleSiteEncounters._pagingEvent");
             if (_encOnChoiceSelected == null) missing.Add("UIModuleSiteEncounters.OnChoiceSelected");
             if (_encOkTextKeyField == null) missing.Add("UIModuleSiteEncounters.OKTextKey");
-            Debug.Log("[Multipleer] EventReflection lookup audit: " + (missing.Count == 0
+            Debug.Log("[Multiplayer] EventReflection lookup audit: " + (missing.Count == 0
                 ? "all resolved"
                 : "MISSING " + string.Join(",", missing.ToArray())));
         }
@@ -297,7 +297,7 @@ namespace Multipleer.Network.Sync
         {
             if (geoscapeEvent == null) return null;
             try { Ensure(); return _eventIdField?.GetValue(geoscapeEvent) as string; }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetEventId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetEventId failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -352,7 +352,7 @@ namespace Multipleer.Network.Sync
                 var choices = _choicesField?.GetValue(data) as IList;
                 return choices?.Count ?? -1;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceCount failed: " + ex.Message); return -1; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetChoiceCount failed: " + ex.Message); return -1; }
         }
 
         /// <summary>
@@ -384,7 +384,7 @@ namespace Multipleer.Network.Sync
                 _recordStateField.SetValue(record, RecordStateCompleted);
                 _recordProp.SetValue(geoscapeEvent, record, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.AttachCompletedRecord failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.AttachCompletedRecord failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -406,7 +406,7 @@ namespace Multipleer.Network.Sync
                 int idx = choices.IndexOf(choice);
                 return idx >= 0 ? idx : ChoiceLookupFailed;     // not found ≠ decline
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceIndex failed: " + ex.Message); return ChoiceLookupFailed; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetChoiceIndex failed: " + ex.Message); return ChoiceLookupFailed; }
         }
 
         // ─── apply (Apply side) ───────────────────────────────────────────
@@ -444,7 +444,7 @@ namespace Multipleer.Network.Sync
                 }
                 _completeEvent.Invoke(geoEvent, new[] { choice, fac });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.CompleteEvent failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.CompleteEvent failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -467,13 +467,13 @@ namespace Multipleer.Network.Sync
                 string missingMember = NativeDriveMissingMemberTag();
                 if (missingMember != null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=" + missingMember);
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=" + missingMember);
                     return false;
                 }
                 var geo = rt?.GeoLevel();
                 if (geo == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=geoLevel-null");
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=geoLevel-null");
                     return false;
                 }
                 var view = _glViewField.GetValue(geo);
@@ -481,7 +481,7 @@ namespace Multipleer.Network.Sync
                 var module = modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
                 if (module == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=module-null"
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=module-null"
                               + " view=" + (view != null) + " modules=" + (modules != null));
                     return false;
                 }
@@ -489,20 +489,20 @@ namespace Multipleer.Network.Sync
                 var liveEvent = _encGeoEventField.GetValue(module);
                 if (liveEvent == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=liveEvent-null (host modal not showing an event)");
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=liveEvent-null (host modal not showing an event)");
                     return false;   // host modal not showing an event → fall back
                 }
 
                 // Must be THIS occurrence: prefer exact instance identity via the occId reverse-lookup, else match
                 // the def-name. A mismatch means the host is on a different/closed event → fall back (model-only).
                 bool isThisOccurrence;
-                if (Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
+                if (Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
                     isThisOccurrence = ReferenceEquals(byId, liveEvent);
                 else
                     isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
                 if (!isThisOccurrence)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
                               + " → FALLBACK guard=not-this-occurrence (host on a different/closed event) liveEventId=" + GetEventId(liveEvent)
                               + " byIdMapped=" + (byId != null));
                     return false;
@@ -511,14 +511,14 @@ namespace Multipleer.Network.Sync
                 // Already resolved (a prior click won the last-write race) → native no-op; treat as handled.
                 if (_isCompletedProp != null && _isCompletedProp.GetValue(liveEvent, null) is bool done && done)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → already IsCompleted (no-op)");
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → already IsCompleted (no-op)");
                     return true;
                 }
                 // Still paging multi-page description text → OnChoiceSelected would only advance a page, not select.
                 // Fall back to model-only so state converges; the host stays on its (paging) modal.
                 if (_encPagingField != null && _encPagingField.GetValue(module) is bool paging && paging)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=paging (host still paging description text; OnChoiceSelected would only page)");
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=paging (host still paging description text; OnChoiceSelected would only page)");
                     return false;
                 }
 
@@ -527,25 +527,25 @@ namespace Multipleer.Network.Sync
                 var choices = _choicesField?.GetValue(data) as IList;
                 if (choices == null || choiceIndex < 0 || choiceIndex >= choices.Count)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choiceIndex-out-of-range"
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choiceIndex-out-of-range"
                               + " choiceIndex=" + choiceIndex + " choiceCount=" + (choices == null ? -1 : choices.Count));
                     return false;   // invalid index → fall back
                 }
                 object choice = choices[choiceIndex];
                 if (choice == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choice-null choiceIndex=" + choiceIndex);
+                    Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " → FALLBACK guard=choice-null choiceIndex=" + choiceIndex);
                     return false;
                 }
 
                 // Drive the EXACT native click handler (handles SelectChoice→CompleteEvent→SetClosingEncounter
                 // result+rewards→broadcast). Same entry a real host button click hits.
                 _encOnChoiceSelected.Invoke(module, new[] { choice });
-                Debug.Log("[Multipleer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
+                Debug.Log("[Multiplayer] TryHostNativeResolve occId=" + occurrenceId + " eventId=" + eventId
                           + " choiceIndex=" + choiceIndex + " → drove native OnChoiceSelected (host result page + broadcast)");
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.TryHostNativeResolve failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.TryHostNativeResolve failed: " + ex.Message); return false; }
         }
 
         /// <summary>
@@ -577,7 +577,7 @@ namespace Multipleer.Network.Sync
                 string missingMember = NativeDriveMissingMemberTag();
                 if (missingMember != null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=" + missingMember);
+                    Debug.Log("[Multiplayer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=" + missingMember);
                     return false;
                 }
                 var geo = rt?.GeoLevel();
@@ -586,7 +586,7 @@ namespace Multipleer.Network.Sync
                 var module = modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
                 if (module == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=module-null (host modal not showing)");
+                    Debug.Log("[Multiplayer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=module-null (host modal not showing)");
                     return false;
                 }
 
@@ -595,7 +595,7 @@ namespace Multipleer.Network.Sync
                 bool isThisOccurrence;
                 if (liveEvent == null)
                     isThisOccurrence = false;
-                else if (Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
+                else if (Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
                     isThisOccurrence = ReferenceEquals(byId, liveEvent);
                 else
                     isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
@@ -604,13 +604,13 @@ namespace Multipleer.Network.Sync
                                    && _isCompletedProp.GetValue(liveEvent, null) is bool done && done;
                 int choiceCount = liveEvent != null ? GetChoiceCount(liveEvent) : -1;
                 bool paging = _encPagingField != null && _encPagingField.GetValue(module) is bool p && p;
-                bool alreadyAdvanced = Multipleer.Harmony.Sync.EventOccurrenceIds.WasAdvanced(occurrenceId);
+                bool alreadyAdvanced = Multiplayer.Harmony.Sync.EventOccurrenceIds.WasAdvanced(occurrenceId);
 
                 if (!State.SingleChoiceAdvanceGate.ShouldDriveHostAdvance(
                         isHost: true, modalShowingThisOccurrence: isThisOccurrence, isCompleted: isCompleted,
                         choiceCount: choiceCount, paging: paging, alreadyAdvanced: alreadyAdvanced))
                 {
-                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
+                    Debug.Log("[Multiplayer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
                               + " → NO-OP (showingThisOcc=" + isThisOccurrence + " isCompleted=" + isCompleted
                               + " choiceCount=" + choiceCount + " paging=" + paging
                               + " alreadyAdvanced=" + alreadyAdvanced + ") liveEventId=" + GetEventId(liveEvent));
@@ -623,19 +623,19 @@ namespace Multipleer.Network.Sync
                 object choice = choices != null && choices.Count == 1 ? choices[0] : null;
                 if (choice == null)
                 {
-                    Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=choice-null");
+                    Debug.Log("[Multiplayer] TryHostNativeAdvance occId=" + occurrenceId + " → NO-OP guard=choice-null");
                     return false;
                 }
 
                 // EXACT native click path: OnChoiceSelected → SelectChoice (IsCompleted → no CompleteEvent) →
                 // SetClosingEncounter (result page) → SingleChoiceAdvancePatch.Postfix (mark + broadcast).
                 _encOnChoiceSelected.Invoke(module, new[] { choice });
-                Multipleer.Harmony.Sync.EventOccurrenceIds.MarkAdvanced(occurrenceId);   // belt: patch postfix marks too
-                Debug.Log("[Multipleer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
+                Multiplayer.Harmony.Sync.EventOccurrenceIds.MarkAdvanced(occurrenceId);   // belt: patch postfix marks too
+                Debug.Log("[Multiplayer] TryHostNativeAdvance occId=" + occurrenceId + " eventId=" + eventId
                           + " → drove native OnChoiceSelected (client-requested prompt→result advance)");
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.TryHostNativeAdvanceSingleChoice failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.TryHostNativeAdvanceSingleChoice failed: " + ex.Message); return false; }
         }
 
         /// <summary>
@@ -653,9 +653,9 @@ namespace Multipleer.Network.Sync
                 if (!_ready) return;
                 var fac = rt?.PhoenixFaction();
                 if (fac == null) return;
-                if (!Multipleer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var geoEvent) || geoEvent == null)
+                if (!Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var geoEvent) || geoEvent == null)
                 {
-                    Debug.Log("[Multipleer] CompleteEventByOccurrence occId=" + occurrenceId + " → live event not found (claim dropped)");
+                    Debug.Log("[Multiplayer] CompleteEventByOccurrence occId=" + occurrenceId + " → live event not found (claim dropped)");
                     return;
                 }
                 // Resolve the choice by index off the live event's own EventData.Choices (null when index < 0).
@@ -668,7 +668,7 @@ namespace Multipleer.Network.Sync
                 }
                 _completeEvent.Invoke(geoEvent, new[] { choice, fac });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.CompleteEventByOccurrence failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.CompleteEventByOccurrence failed: " + ex.Message); }
         }
 
         private static object ResolveEventData(GeoRuntime rt, string eventId)
@@ -683,7 +683,7 @@ namespace Multipleer.Network.Sync
                 if (def == null) return null;
                 return _defDataField.GetValue(def);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveEventData failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ResolveEventData failed: " + ex.Message); return null; }
         }
 
         private static object GetStartingBase(object phoenixFaction)
@@ -718,7 +718,7 @@ namespace Multipleer.Network.Sync
                 if (site == null || _siteIdField == null) return -1;
                 return (int)(_siteIdField.GetValue(site) ?? -1);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSiteId failed: " + ex.Message); return -1; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetSiteId failed: " + ex.Message); return -1; }
         }
 
         /// <summary>Host: the live <c>GeoSite</c> off <c>GeoscapeEvent.Context.Site</c>, or null. Used to snapshot
@@ -735,7 +735,7 @@ namespace Multipleer.Network.Sync
                 var siteField = AccessTools.Field(ctx.GetType(), "Site");
                 return siteField?.GetValue(ctx);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSite failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetSite failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -758,7 +758,7 @@ namespace Multipleer.Network.Sync
                 if (vehicle == null || _vehicleIdField == null) return -1;
                 return (int)(_vehicleIdField.GetValue(vehicle) ?? -1);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetVehicleId failed: " + ex.Message); return -1; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetVehicleId failed: " + ex.Message); return -1; }
         }
 
         /// <summary>
@@ -799,7 +799,7 @@ namespace Multipleer.Network.Sync
                 // resolved site → null. A siteless context never carries a vehicle.
                 object vehicle = siteless ? null : (ResolveVehicleById(rt, vehicleId) ?? ResolveVehicleAtSite(resolvedSite));
 
-                Debug.Log("[Multipleer] BuildEvent eventId=" + eventId + " siteId=" + siteId +
+                Debug.Log("[Multiplayer] BuildEvent eventId=" + eventId + " siteId=" + siteId +
                           " siteResolved=" + (resolvedSite != null) + " siteless=" + siteless +
                           " hasIdentity=" + identity.HasValue +
                           " vehicleId=" + vehicleId + " vehicleResolved=" + (vehicle != null));
@@ -833,7 +833,7 @@ namespace Multipleer.Network.Sync
                 AttachCompletedRecord(geoEvent);
                 return geoEvent;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.BuildEvent failed: " + ex.Message); return null; }
         }
 
         // Diagnostics-only, fully guarded: a short "owner=… type=…" tag for a resolved GeoSite. Reads
@@ -867,11 +867,11 @@ namespace Multipleer.Network.Sync
                 // we do NOT fabricate a GeoSite (it is a MonoBehaviour and cannot be synthesized). The native
                 // subtitle path keys off Context.Site (null here → title-only), which is the correct host-
                 // matching render for an absent site; the identity is logged for diagnosis.
-                Debug.Log("[Multipleer] BuildEvent siteless-identity owner=" + identity.OwnerFactionDefGuid +
+                Debug.Log("[Multiplayer] BuildEvent siteless-identity owner=" + identity.OwnerFactionDefGuid +
                           " type=" + identity.SiteType + " state=" + identity.State +
                           " name=" + identity.SiteName + " enc=" + identity.EncounterID);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ApplySitelessIdentity failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ApplySitelessIdentity failed: " + ex.Message); }
         }
 
         // ─── HOST-authoritative wire texts (blank-window fix for runtime-narrative defs) ──────────
@@ -902,7 +902,7 @@ namespace Multipleer.Network.Sync
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ApplyWireTexts failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ApplyWireTexts failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -922,7 +922,7 @@ namespace Multipleer.Network.Sync
                 if (title == null || _localizeMethod == null) return "";
                 return _localizeMethod.Invoke(title, new object[] { null }) as string ?? "";
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveTitle failed: " + ex.Message); return ""; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ResolveLiveTitle failed: " + ex.Message); return ""; }
         }
 
         /// <summary>
@@ -947,7 +947,7 @@ namespace Multipleer.Network.Sync
                 // still resolves → mirrored window would be blank. Fall back to the event's own Title text.
                 return ChooseWireNarrative(narrative, ResolveLiveTitle(geoscapeEvent));
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveNarrative failed: " + ex.Message); return ""; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ResolveLiveNarrative failed: " + ex.Message); return ""; }
         }
 
         /// <summary>
@@ -968,7 +968,7 @@ namespace Multipleer.Network.Sync
                 var context = _ctxField?.GetValue(geoscapeEvent);
                 return ResolveOutcomeText(choice, context);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ResolveLiveOutcomeText failed: " + ex.Message); return ""; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ResolveLiveOutcomeText failed: " + ex.Message); return ""; }
         }
 
         // ─── RESULT/OUTCOME follow-up page (host index → client text-only render) ──────────
@@ -991,7 +991,7 @@ namespace Multipleer.Network.Sync
                 int idx = GetChoiceIndex(geoscapeEvent, choice);
                 return idx >= 0 ? idx : -1;   // decline / lookup-failed → close-only
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetSelectedChoiceIndex failed: " + ex.Message); return -1; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetSelectedChoiceIndex failed: " + ex.Message); return -1; }
         }
 
         /// <summary>
@@ -1008,7 +1008,7 @@ namespace Multipleer.Network.Sync
                 var prop = AccessTools.Property(geoscapeEvent.GetType(), "ChoiceReward"); // public get
                 return prop?.GetValue(geoscapeEvent, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.GetChoiceReward failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetChoiceReward failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -1034,7 +1034,7 @@ namespace Multipleer.Network.Sync
                 var key = _localizedKeyField?.GetValue(general) as string;
                 return !string.IsNullOrEmpty(key);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.ChoiceHasOutcomeText failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ChoiceHasOutcomeText failed: " + ex.Message); return false; }
         }
 
         /// <summary>
@@ -1058,7 +1058,7 @@ namespace Multipleer.Network.Sync
                 if (choices == null || choices.Count != 1) return false;   // native requires Choices.Count == 1 exactly
                 return !ChoiceHasOutcomeText(choices[0]);                   // empty outcome text → ONE combined window
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.IsOneWindowSingleChoice failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.IsOneWindowSingleChoice failed: " + ex.Message); return false; }
         }
 
         /// <summary>
@@ -1172,7 +1172,7 @@ namespace Multipleer.Network.Sync
                 if (okBind == null) return null;
                 return _localizedKeyField.GetValue(okBind) as string;
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
         }
 
         public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
@@ -1181,27 +1181,27 @@ namespace Multipleer.Network.Sync
             {
                 Ensure();
                 if (!_ready || string.IsNullOrEmpty(eventId) || choiceIndex < 0)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=not-ready/empty-id/neg-index eventId=" + eventId + " choiceIndex=" + choiceIndex + " ready=" + _ready); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=not-ready/empty-id/neg-index eventId=" + eventId + " choiceIndex=" + choiceIndex + " ready=" + _ready); return null; }
                 if (_eventDataCtor == null || _eventCtor == null || _contextCtor == null
                     || _edDescriptionField == null || _choicesField == null || _tvGeneralField == null
                     || _localizedTextCtor2 == null || _textVariationType == null || _choiceType2 == null
                     || _choiceTextField == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=missing-reflection-member eventId=" + eventId); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=missing-reflection-member eventId=" + eventId); return null; }
 
                 var fac = rt?.PhoenixFaction();
                 if (fac == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=faction-null eventId=" + eventId); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=faction-null eventId=" + eventId); return null; }
 
                 object srcData = ResolveEventData(rt, eventId);
                 if (srcData == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=def-not-found eventId=" + eventId); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=def-not-found eventId=" + eventId); return null; }
 
                 var srcChoices = _choicesField.GetValue(srcData) as IList;
                 if (srcChoices == null || choiceIndex >= srcChoices.Count)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choiceIndex-out-of-range eventId=" + eventId + " choiceIndex=" + choiceIndex + " choiceCount=" + (srcChoices == null ? -1 : srcChoices.Count)); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=choiceIndex-out-of-range eventId=" + eventId + " choiceIndex=" + choiceIndex + " choiceCount=" + (srcChoices == null ? -1 : srcChoices.Count)); return null; }
                 object choice = srcChoices[choiceIndex];
                 if (choice == null)
-                { Debug.Log("[Multipleer] BuildResultEvent NULL guard=choice-null eventId=" + eventId + " choiceIndex=" + choiceIndex); return null; }
+                { Debug.Log("[Multiplayer] BuildResultEvent NULL guard=choice-null eventId=" + eventId + " choiceIndex=" + choiceIndex); return null; }
 
                 // Result page: resolve the real site, else a SITELESS context (NEVER StartingBase). The outcome
                 // text usually needs only faction/site tokens; a missing site degrades to title-only text.
@@ -1217,7 +1217,7 @@ namespace Multipleer.Network.Sync
                 }
                 else
                 {
-                    Debug.Log("[Multipleer] BuildResultEvent NULL guard=no-context eventId=" + eventId + " siteId=" + siteId);
+                    Debug.Log("[Multiplayer] BuildResultEvent NULL guard=no-context eventId=" + eventId + " siteId=" + siteId);
                     return null;
                 }
 
@@ -1236,7 +1236,7 @@ namespace Multipleer.Network.Sync
                 string text2 = ReplaceTokens(context, text);
                 // DIAG (blank-result-page visibility): local-def desc entries + resolved lengths on every path.
                 var srcDescList = _edDescriptionField.GetValue(srcData) as IList;
-                Debug.Log("[Multipleer] BuildResultEvent texts eventId=" + eventId
+                Debug.Log("[Multiplayer] BuildResultEvent texts eventId=" + eventId
                           + " descCount=" + (srcDescList == null ? -1 : srcDescList.Count)
                           + " outLen=" + (outcomeText?.Length ?? 0) + " narrLen=" + (narrativeText?.Length ?? 0)
                           + " wireOutLen=" + (wireOutcome?.Length ?? 0) + " wireNarrLen=" + (wireNarrative?.Length ?? 0)
@@ -1287,10 +1287,10 @@ namespace Multipleer.Network.Sync
                 object geoEvent = _eventCtor.Invoke(new[] { data, context });
                 // Stamp a Completed record so the local OK dismiss does not NRE / force-complete (same as BuildEvent).
                 AttachCompletedRecord(geoEvent);
-                Debug.Log("[Multipleer] BuildResultEvent ok eventId=" + eventId + " choiceIndex=" + choiceIndex);
+                Debug.Log("[Multiplayer] BuildResultEvent ok eventId=" + eventId + " choiceIndex=" + choiceIndex);
                 return geoEvent;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventReflection.BuildResultEvent failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.BuildResultEvent failed: " + ex.Message); return null; }
         }
 
         private static string ResolveOutcomeText(object choice, object context)

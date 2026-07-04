@@ -1,4 +1,4 @@
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Inc1 Task C: pure, Unity-free gate decision behind ClientTftvAircraftFreezePatch. Extracted from
     // the Harmony Prefix so the four cases (no engine / inactive / host / active-client) are unit-testable

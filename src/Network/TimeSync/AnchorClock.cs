@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Network.TimeSync
+namespace Multiplayer.Network.TimeSync
 {
     /// <summary>
     /// Pure, Unity-FREE math for the anchor+rate authoritative geoscape clock (unit-testable).

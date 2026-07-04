@@ -3,10 +3,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE host→client VISION replication (surface <c>tac.vision</c> 0x89). Vision in PP is per-faction,
@@ -63,7 +63,7 @@ namespace Multipleer.Sync.Tactical
                 if (!ToBool(GetProp(faction, "IsControlledByPlayer"))) return;   // only the shared player faction
                 HostBroadcastVision();
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnFactionKnowledgeChanged failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnFactionKnowledgeChanged failed: " + ex); }
         }
 
         // ─── HOST: snapshot the player faction's KnownActors → broadcast tac.vision ──────────────────
@@ -78,14 +78,14 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 object tlc = TacticalDeploySync.LiveTlc;
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] vision: no live TLC to snapshot"); return; }
+                if (tlc == null) { Debug.LogError("[Multiplayer][tac] vision: no live TLC to snapshot"); return; }
                 object playerFaction = ResolvePlayerFaction(tlc, out int factionIndex);
-                if (playerFaction == null || factionIndex < 0) { Debug.LogError("[Multipleer][tac] vision: no player faction"); return; }
+                if (playerFaction == null || factionIndex < 0) { Debug.LogError("[Multiplayer][tac] vision: no player faction"); return; }
 
                 object vision = GetProp(playerFaction, "Vision");
-                if (vision == null) { Debug.LogError("[Multipleer][tac] vision: player faction has no Vision"); return; }
+                if (vision == null) { Debug.LogError("[Multiplayer][tac] vision: player faction has no Vision"); return; }
                 var knownActors = GetKnownActorsDict(vision);
-                if (knownActors == null) { Debug.LogError("[Multipleer][tac] vision: KnownActors unreadable"); return; }
+                if (knownActors == null) { Debug.LogError("[Multiplayer][tac] vision: KnownActors unreadable"); return; }
 
                 var entries = new List<TacticalLiveCodec.VisionEntry>(knownActors.Count);
                 foreach (DictionaryEntry e in knownActors)
@@ -105,7 +105,7 @@ namespace Multipleer.Sync.Tactical
                 string sig = BuildSignature(factionIndex, entries);
                 if (sig == _lastBroadcastSig)
                 {
-                    Debug.Log("[Multipleer][tac] HOST vision unchanged (count=" + entries.Count + ") — skip broadcast");
+                    Debug.Log("[Multiplayer][tac] HOST vision unchanged (count=" + entries.Count + ") — skip broadcast");
                     return;
                 }
 
@@ -113,10 +113,10 @@ namespace Multipleer.Sync.Tactical
                 byte[] payload = TacticalLiveCodec.EncodeVision(seq, factionIndex, entries);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacVision, payload);
                 _lastBroadcastSig = sig;
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.vision seq=" + seq + " factionIdx=" + factionIndex +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.vision seq=" + seq + " factionIdx=" + factionIndex +
                           " count=" + entries.Count);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastVision failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastVision failed: " + ex); }
         }
 
         // ─── CLIENT: apply the host vision snapshot → reconcile KnownActors ──────────────────────────
@@ -127,20 +127,20 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeVision(payload, out var snap)) { Debug.LogError("[Multipleer][tac] tac.vision decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeVision(payload, out var snap)) { Debug.LogError("[Multiplayer][tac] tac.vision decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacVision, snap.Seq)) return;
 
             object tlc = TacticalDeploySync.LiveTlc;
-            if (tlc == null) { Debug.LogError("[Multipleer][tac] tac.vision: no live TLC — dropping"); return; }
+            if (tlc == null) { Debug.LogError("[Multiplayer][tac] tac.vision: no live TLC — dropping"); return; }
 
             try
             {
                 object faction = ResolveFactionByIndex(tlc, snap.ViewerFactionIndex);
-                if (faction == null) { Debug.LogError("[Multipleer][tac] tac.vision: faction idx " + snap.ViewerFactionIndex + " not found"); return; }
+                if (faction == null) { Debug.LogError("[Multiplayer][tac] tac.vision: faction idx " + snap.ViewerFactionIndex + " not found"); return; }
                 object vision = GetProp(faction, "Vision");
-                if (vision == null) { Debug.LogError("[Multipleer][tac] tac.vision: faction has no Vision"); return; }
+                if (vision == null) { Debug.LogError("[Multiplayer][tac] tac.vision: faction has no Vision"); return; }
                 var knownActors = GetKnownActorsDict(vision);
-                if (knownActors == null) { Debug.LogError("[Multipleer][tac] tac.vision: KnownActors unreadable"); return; }
+                if (knownActors == null) { Debug.LogError("[Multiplayer][tac] tac.vision: KnownActors unreadable"); return; }
 
                 // Current {netId→state} on the client (only entries we can map back to a netId participate).
                 var current = new Dictionary<int, int>();
@@ -163,7 +163,7 @@ namespace Multipleer.Sync.Tactical
                 if (!diff.HasChanges)
                 {
                     TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacVision, snap.Seq);
-                    Debug.Log("[Multipleer][tac] CLIENT applied tac.vision seq=" + snap.Seq + " (no change, idempotent)");
+                    Debug.Log("[Multiplayer][tac] CLIENT applied tac.vision seq=" + snap.Seq + " (no change, idempotent)");
                     return;
                 }
 
@@ -186,11 +186,11 @@ namespace Multipleer.Sync.Tactical
                 FireFactionKnowledgeChanged(tlc, faction);
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacVision, snap.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT applied tac.vision seq=" + snap.Seq + " factionIdx=" +
+                Debug.Log("[Multiplayer][tac] CLIENT applied tac.vision seq=" + snap.Seq + " factionIdx=" +
                           snap.ViewerFactionIndex + " set=" + setN + " forget=" + forgetN +
                           " (snapshotCount=" + snap.Entries.Count + ")");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleVision failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleVision failed: " + ex); }
         }
 
         // ─── KnownActors engine helpers ─────────────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ namespace Multipleer.Sync.Tactical
                 if (InvokeBool(vision, "IsRevealed", actor)) return TacticalLiveCodec.VisionStateRevealed;   // 2
                 if (InvokeBool(vision, "IsLocated", actor)) return TacticalLiveCodec.VisionStateLocated;     // 1
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] VisionStateForActor failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] VisionStateForActor failed: " + ex); }
             return 0;
         }
 
@@ -255,7 +255,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetActorState failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SetActorState failed: " + ex); return false; }
         }
 
         /// <summary>Forget an actor on the client: remove it from KnownActors (mirrors the native
@@ -269,7 +269,7 @@ namespace Multipleer.Sync.Tactical
                 knownActors.Remove(actor);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ForgetActor failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ForgetActor failed: " + ex); return false; }
         }
 
         // KnownCounters reflection: the nested public class TacticalFactionVision+KnownCounters with public
@@ -292,7 +292,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 return _knownCountersType != null ? Activator.CreateInstance(_knownCountersType) : null;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] NewKnownCounters failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] NewKnownCounters failed: " + ex); return null; }
         }
 
         private static object KnownStateValue(string name)
@@ -355,9 +355,9 @@ namespace Multipleer.Sync.Tactical
             {
                 var m = AccessTools.Method(tlc.GetType(), "FactionKnowledgeChanged");
                 if (m != null) m.Invoke(tlc, new[] { faction });
-                else Debug.LogError("[Multipleer][tac] vision: FactionKnowledgeChanged not found");
+                else Debug.LogError("[Multiplayer][tac] vision: FactionKnowledgeChanged not found");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FireFactionKnowledgeChanged failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] FireFactionKnowledgeChanged failed: " + ex); }
         }
 
         /// <summary>Order-stable content signature of a snapshot (factionIndex + sorted netId:state pairs) so two

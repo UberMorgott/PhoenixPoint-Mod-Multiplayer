@@ -1,6 +1,6 @@
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network.Sync.Actions;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Registers every <see cref="ISyncedAction"/> reader into <see cref="SyncedActionRegistry"/>.

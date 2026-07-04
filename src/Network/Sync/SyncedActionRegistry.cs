@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>Maps a stable action id to the reader that reconstructs it from payload bytes.</summary>
     public static class SyncedActionRegistry

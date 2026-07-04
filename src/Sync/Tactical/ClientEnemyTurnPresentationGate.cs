@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind the CLIENT enemy-turn presentation (Feature A). Extracted from

@@ -4,7 +4,7 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge to <c>PhoenixPoint.Common.Core.Wallet</c>. The mod has NO compile-time
@@ -40,7 +40,7 @@ namespace Multipleer.Network.Sync
         {
             if (_warnedNotReady) return;
             _warnedNotReady = true;
-            Debug.Log("[Multipleer] WalletReflection guard=not-ready at " + site
+            Debug.Log("[Multiplayer] WalletReflection guard=not-ready at " + site
                 + " getItem=" + (_getItem != null) + " valueField=" + (_ruValueField != null)
                 + " ruCtor=" + (_ruCtor != null) + " apply=" + (_applyMethod != null)
                 + " (wallet reads/writes no-op; logged once)");
@@ -85,7 +85,7 @@ namespace Multipleer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] WalletReflection.GetAmount failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] WalletReflection.GetAmount failed: " + ex.Message);
                 return 0f;
             }
         }
@@ -104,7 +104,7 @@ namespace Multipleer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] WalletReflection.ApplyDiff failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] WalletReflection.ApplyDiff failed: " + ex.Message);
             }
         }
 
@@ -126,14 +126,14 @@ namespace Multipleer.Network.Sync
                 // ResourcesChanged event path (poll backstop only). Rare (bind-time only). No behavior change.
                 if (_resourcesChangedEvt == null)
                 {
-                    Debug.Log("[Multipleer] Wallet ResourcesChanged subscribe guard=event-missing (reflection miss)");
+                    Debug.Log("[Multiplayer] Wallet ResourcesChanged subscribe guard=event-missing (reflection miss)");
                     return null;
                 }
                 Type handlerType = _resourcesChangedEvt.EventHandlerType;
                 MethodInfo invoke = handlerType.GetMethod("Invoke");
                 if (invoke == null)
                 {
-                    Debug.Log("[Multipleer] Wallet ResourcesChanged subscribe guard=invoke-missing on " + handlerType.Name);
+                    Debug.Log("[Multiplayer] Wallet ResourcesChanged subscribe guard=invoke-missing on " + handlerType.Name);
                     return null;
                 }
 
@@ -161,7 +161,7 @@ namespace Multipleer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] WalletReflection.SubscribeResourcesChanged failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] WalletReflection.SubscribeResourcesChanged failed: " + ex.Message);
                 return null;
             }
         }
@@ -172,7 +172,7 @@ namespace Multipleer.Network.Sync
             try { _resourcesChangedEvt.RemoveEventHandler(wallet, handler); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] WalletReflection.UnsubscribeResourcesChanged failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] WalletReflection.UnsubscribeResourcesChanged failed: " + ex.Message);
             }
         }
     }

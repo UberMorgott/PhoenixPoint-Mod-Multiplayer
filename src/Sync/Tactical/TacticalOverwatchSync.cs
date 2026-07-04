@@ -1,11 +1,11 @@
 using System;
 using System.Collections;
 using HarmonyLib;
-using Multipleer.Harmony.Tactical;
-using Multipleer.Network;
+using Multiplayer.Harmony.Tactical;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative OVERWATCH-ARM replication (Inc Overwatch). In co-op a client putting a soldier
@@ -65,26 +65,26 @@ namespace Multipleer.Sync.Tactical
                 object actor = GetProp(overwatchAbility, "TacticalActorBase") ?? GetProp(overwatchAbility, "TacticalActor");
                 if (actor == null)
                 {
-                    Debug.LogError("[Multipleer][tac] overwatch intent: no actor on ability — suppressing local arm");
+                    Debug.LogError("[Multiplayer][tac] overwatch intent: no actor on ability — suppressing local arm");
                     return false;
                 }
                 int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
                 if (actorNetId < 0)
                 {
-                    Debug.LogError("[Multipleer][tac] overwatch intent: unknown actor netId — suppressing local arm");
+                    Debug.LogError("[Multiplayer][tac] overwatch intent: unknown actor netId — suppressing local arm");
                     return false;
                 }
 
                 if (!ReadConeFromTarget(parameter, out var c))
                 {
-                    Debug.LogError("[Multipleer][tac] overwatch intent: could not read cone from target — suppressing local arm");
+                    Debug.LogError("[Multiplayer][tac] overwatch intent: could not read cone from target — suppressing local arm");
                     return false;
                 }
 
                 byte[] payload = TacticalLiveCodec.EncodeOverwatchIntent(
                     actorNetId, NextNonce(), c.TipX, c.TipY, c.TipZ, c.Height, c.Radius, c.FwdX, c.FwdY, c.FwdZ);
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentOverwatch, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.overwatch actorNetId=" + actorNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.overwatch actorNetId=" + actorNetId +
                           " coneH=" + c.Height.ToString("0.0") + " coneR=" + c.Radius.ToString("0.0"));
 
                 // The suppressed-arm view freeze (the native ActivateAbility ClearStackAndPush wedge) is now PREVENTED
@@ -94,7 +94,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientInterceptArm failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ClientInterceptArm failed: " + ex);
                 return false;   // a mirroring client must not arm a local-only overwatch even on error
             }
         }
@@ -108,21 +108,21 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeOverwatchIntent(payload, out var intent)) { Debug.LogError("[Multipleer][tac] overwatch intent decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeOverwatchIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] overwatch intent decode failed"); return; }
             if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentOverwatch, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
-            Debug.Log("[Multipleer][tac][DIAG] HOSTINTENT decoded overwatch actorNetId=" + intent.ActorNetId +
+            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded overwatch actorNetId=" + intent.ActorNetId +
                       " actorResolved=" + (actor != null));
-            if (actor == null) { Debug.LogError("[Multipleer][tac] overwatch intent: no actor for netId " + intent.ActorNetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] overwatch intent: no actor for netId " + intent.ActorNetId); return; }
 
             try
             {
                 object overwatchAbility = ResolveOverwatchAbility(actor);
-                if (overwatchAbility == null) { Debug.LogError("[Multipleer][tac] overwatch intent: actor " + intent.ActorNetId + " has no OverwatchAbility"); return; }
+                if (overwatchAbility == null) { Debug.LogError("[Multiplayer][tac] overwatch intent: actor " + intent.ActorNetId + " has no OverwatchAbility"); return; }
 
                 object cone = BuildCone(intent.TipX, intent.TipY, intent.TipZ, intent.Height, intent.Radius, intent.FwdX, intent.FwdY, intent.FwdZ);
-                if (cone == null) { Debug.LogError("[Multipleer][tac] overwatch intent: could not build cone"); return; }
+                if (cone == null) { Debug.LogError("[Multiplayer][tac] overwatch intent: could not build cone"); return; }
 
                 // RE-ANCHOR the cone Tip to the HOST actor's own authoritative eye point. The client built the
                 // cone in CLIENT space (Cone.Tip = the CLIENT actor's TacticalActor.VisionPoint — same as the
@@ -141,30 +141,30 @@ namespace Multipleer.Sync.Tactical
                 {
                     SetField(ConeType, ref cone, "Tip", hostVision);
                     float delta = (hostVision - intentTip).magnitude;
-                    Debug.Log("[Multipleer][tac] overwatch arm: intent.Tip=(" +
+                    Debug.Log("[Multiplayer][tac] overwatch arm: intent.Tip=(" +
                               intentTip.x.ToString("0.00") + "," + intentTip.y.ToString("0.00") + "," + intentTip.z.ToString("0.00") +
                               ") hostVisionPoint=(" +
                               hostVision.x.ToString("0.00") + "," + hostVision.y.ToString("0.00") + "," + hostVision.z.ToString("0.00") +
                               ") delta=" + delta.ToString("0.000"));
                 }
-                else Debug.LogError("[Multipleer][tac] overwatch arm: could not read host actor VisionPoint — arming with client-space Tip (cone may miss)");
+                else Debug.LogError("[Multiplayer][tac] overwatch arm: could not read host actor VisionPoint — arming with client-space Tip (cone may miss)");
 
                 object target = BuildOverwatchTarget(cone);
-                if (target == null) { Debug.LogError("[Multipleer][tac] overwatch intent: could not build TacticalAbilityTarget"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] overwatch intent: could not build TacticalAbilityTarget"); return; }
 
                 // public override void Activate(object parameter) — runs the real arm (StartOverwatch applies
                 // OverwatchStatus + SetCone → the SetCone postfix broadcasts the state). The host is now
                 // authoritatively armed → TriggerOverwatch fires the reaction shot on enemy moves.
                 var activate = AccessTools.Method(overwatchAbility.GetType(), "Activate", new[] { typeof(object) });
-                if (activate == null) { Debug.LogError("[Multipleer][tac] overwatch intent: Activate(object) not found"); return; }
+                if (activate == null) { Debug.LogError("[Multiplayer][tac] overwatch intent: Activate(object) not found"); return; }
                 // BUG2: hold the host camera-follow guard across the relayed client OVERWATCH arm so the synchronous
                 // Activate camera hint can't fly the host camera to the client's soldier. try/finally pops on throw.
                 FireReplayGate.EnterHostApply();
                 try { activate.Invoke(overwatchAbility, new[] { target }); }
                 finally { FireReplayGate.ExitHostApply(); }
-                Debug.Log("[Multipleer][tac] HOST armed overwatch actorNetId=" + intent.ActorNetId);
+                Debug.Log("[Multiplayer][tac] HOST armed overwatch actorNetId=" + intent.ActorNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnArmIntent exec failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnArmIntent exec failed: " + ex); }
         }
 
         // ─── HOST: SetCone ran → broadcast the now-armed/cleared overwatch state ────────────────────
@@ -194,10 +194,10 @@ namespace Multipleer.Sync.Tactical
                     ? TacticalLiveCodec.EncodeOverwatchState(seq, actorNetId, true, c.TipX, c.TipY, c.TipZ, c.Height, c.Radius, c.FwdX, c.FwdY, c.FwdZ)
                     : TacticalLiveCodec.EncodeOverwatchClear(seq, actorNetId);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacOverwatchState, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.overwatch.state seq=" + seq + " actorNetId=" + actorNetId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.overwatch.state seq=" + seq + " actorNetId=" + actorNetId +
                           " armed=" + armed);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] OnHostSetCone failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnHostSetCone failed: " + ex); }
         }
 
         // ─── CLIENT: apply the host overwatch state (COSMETIC cone only) ────────────────────────────
@@ -211,11 +211,11 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeOverwatchState(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.overwatch.state decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeOverwatchState(payload, out var s)) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacOverwatchState, s.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(s.ActorNetId);
-            if (actor == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: no actor for netId " + s.ActorNetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: no actor for netId " + s.ActorNetId); return; }
 
             try
             {
@@ -228,14 +228,14 @@ namespace Multipleer.Sync.Tactical
                 finally { _applyingRemote = false; }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacOverwatchState, s.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT applied tac.overwatch.state seq=" + s.Seq + " actorNetId=" + s.ActorNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT applied tac.overwatch.state seq=" + s.Seq + " actorNetId=" + s.ActorNetId +
                           " armed=" + s.Armed);
 
                 // NOTE: the client view-freeze is now PREVENTED up-front by SuppressedAbilityViewClearPatch (a CLIENT
                 // prefix on TacticalViewState.ActivateAbility that skips the wedging ClearStackAndPush for suppressed
                 // non-shoot abilities incl. OverwatchAbility), so no after-the-fact control-view recovery is needed here.
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleOverwatchState failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleOverwatchState failed: " + ex); }
         }
 
         // ─── CLIENT cosmetic apply helpers ──────────────────────────────────────────────────────────
@@ -247,26 +247,26 @@ namespace Multipleer.Sync.Tactical
         private static void ApplyCosmeticArm(object actor, TacticalLiveCodec.OverwatchState s)
         {
             object cone = BuildCone(s.TipX, s.TipY, s.TipZ, s.Height, s.Radius, s.FwdX, s.FwdY, s.FwdZ);
-            if (cone == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: could not build client cone"); return; }
+            if (cone == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: could not build client cone"); return; }
 
             object statusComponent = GetProp(actor, "Status");
-            if (statusComponent == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: actor has no Status component"); return; }
+            if (statusComponent == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: actor has no Status component"); return; }
 
             // Re-aim an existing cosmetic overwatch in place (avoid stacking duplicates on re-broadcast).
             object existing = FindOverwatchStatus(statusComponent);
             if (existing != null) { InvokeSetCone(existing, cone); return; }
 
             object overwatchAbility = ResolveOverwatchAbility(actor);
-            if (overwatchAbility == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: actor has no OverwatchAbility to derive defs"); return; }
+            if (overwatchAbility == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: actor has no OverwatchAbility to derive defs"); return; }
             object abilityDef = GetProp(overwatchAbility, "OverwatchAbilityDef") ?? GetProp(overwatchAbility, "Def");
             object statusDef = GetProp(abilityDef, "OverwatchStatus");
-            if (statusDef == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: OverwatchAbilityDef.OverwatchStatus null"); return; }
+            if (statusDef == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: OverwatchAbilityDef.OverwatchStatus null"); return; }
             object weapon = GetProp(overwatchAbility, "OverwatchWeapon");
             object weaponItemDef = weapon != null ? GetProp(weapon, "ItemDef") : null;
 
             // public Status ApplyStatus(StatusDef def, object source = null, object target = null)
             object applied = InvokeApplyStatus(statusComponent, statusDef, weaponItemDef);
-            if (applied == null) { Debug.LogError("[Multipleer][tac] tac.overwatch.state: ApplyStatus returned null"); return; }
+            if (applied == null) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state: ApplyStatus returned null"); return; }
             InvokeSetCone(applied, cone);
         }
 
@@ -343,7 +343,7 @@ namespace Multipleer.Sync.Tactical
                 };
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FlattenConeStruct failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] FlattenConeStruct failed: " + ex); return false; }
         }
 
         /// <summary>Rebuild a boxed <c>Cone</c> struct from flattened fields: set Tip/Height/Radius fields and
@@ -351,7 +351,7 @@ namespace Multipleer.Sync.Tactical
         private static object BuildCone(float tipX, float tipY, float tipZ, float height, float radius, float fwdX, float fwdY, float fwdZ)
         {
             var t = ConeType;
-            if (t == null) { Debug.LogError("[Multipleer][tac] Cone type not found"); return null; }
+            if (t == null) { Debug.LogError("[Multiplayer][tac] Cone type not found"); return null; }
             try
             {
                 object cone = Activator.CreateInstance(t);   // struct default
@@ -364,23 +364,23 @@ namespace Multipleer.Sync.Tactical
                 else SetField(t, ref cone, "_forward", new Vector3(fwdX, fwdY, fwdZ));
                 return cone;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildCone failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildCone failed: " + ex); return null; }
         }
 
         /// <summary>Wrap a cone in a fresh <c>TacticalAbilityTarget</c> (its public <c>Cone Cone</c> field).</summary>
         private static object BuildOverwatchTarget(object cone)
         {
             var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
-            if (targetType == null) { Debug.LogError("[Multipleer][tac] TacticalAbilityTarget type not found"); return null; }
+            if (targetType == null) { Debug.LogError("[Multiplayer][tac] TacticalAbilityTarget type not found"); return null; }
             try
             {
                 object target = Activator.CreateInstance(targetType);
                 var coneField = AccessTools.Field(targetType, "Cone");
-                if (coneField == null) { Debug.LogError("[Multipleer][tac] TacticalAbilityTarget.Cone field not found"); return null; }
+                if (coneField == null) { Debug.LogError("[Multiplayer][tac] TacticalAbilityTarget.Cone field not found"); return null; }
                 coneField.SetValue(target, cone);
                 return target;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildOverwatchTarget failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildOverwatchTarget failed: " + ex); return null; }
         }
 
         /// <summary>Resolve a <c>TacticalActor</c>'s <c>OverwatchAbility</c> by enumerating
@@ -404,7 +404,7 @@ namespace Multipleer.Sync.Tactical
                     if (a != null && owType.IsInstanceOfType(a)) return a;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveOverwatchAbility failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveOverwatchAbility failed: " + ex); }
             return null;
         }
 
@@ -420,7 +420,7 @@ namespace Multipleer.Sync.Tactical
                 foreach (var s in statuses)
                     if (s != null && owStatusType.IsInstanceOfType(s)) return s;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FindOverwatchStatus failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] FindOverwatchStatus failed: " + ex); }
             return null;
         }
 
@@ -432,10 +432,10 @@ namespace Multipleer.Sync.Tactical
                 if (statusDefType == null) return null;
                 // public Status ApplyStatus(StatusDef def, object source = null, object target = null)
                 var m = AccessTools.Method(statusComponent.GetType(), "ApplyStatus", new[] { statusDefType, typeof(object), typeof(object) });
-                if (m == null) { Debug.LogError("[Multipleer][tac] ApplyStatus(StatusDef,object,object) not found"); return null; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] ApplyStatus(StatusDef,object,object) not found"); return null; }
                 return m.Invoke(statusComponent, new[] { statusDef, source, null });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeApplyStatus failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeApplyStatus failed: " + ex); return null; }
         }
 
         private static void InvokeUnapplyStatus(object statusComponent, object status)
@@ -445,10 +445,10 @@ namespace Multipleer.Sync.Tactical
                 var statusType = AccessTools.TypeByName("Base.Entities.Statuses.Status");
                 if (statusType == null) return;
                 var m = AccessTools.Method(statusComponent.GetType(), "UnapplyStatus", new[] { statusType });
-                if (m == null) { Debug.LogError("[Multipleer][tac] UnapplyStatus(Status) not found"); return; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] UnapplyStatus(Status) not found"); return; }
                 m.Invoke(statusComponent, new[] { status });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeUnapplyStatus failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeUnapplyStatus failed: " + ex); }
         }
 
         private static void InvokeSetCone(object overwatchStatus, object cone)
@@ -459,10 +459,10 @@ namespace Multipleer.Sync.Tactical
                 if (coneType == null) return;
                 var nullableConeType = typeof(Nullable<>).MakeGenericType(coneType);
                 var m = AccessTools.Method(overwatchStatus.GetType(), "SetCone", new[] { nullableConeType });
-                if (m == null) { Debug.LogError("[Multipleer][tac] SetCone(Cone?) not found"); return; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] SetCone(Cone?) not found"); return; }
                 m.Invoke(overwatchStatus, new[] { cone });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeSetCone failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeSetCone failed: " + ex); }
         }
 
         private static Vector3 ToVec3(object o) => o is Vector3 v ? v : Vector3.zero;
@@ -491,7 +491,7 @@ namespace Multipleer.Sync.Tactical
         {
             var f = AccessTools.Field(type, name);
             if (f != null) f.SetValue(boxed, value);
-            else Debug.LogError("[Multipleer][tac] Cone field not found: " + name);
+            else Debug.LogError("[Multiplayer][tac] Cone field not found: " + name);
         }
     }
 }

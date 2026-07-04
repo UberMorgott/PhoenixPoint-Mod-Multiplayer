@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// CLIENT view-freeze ROOT FIX (replaces the fragile after-the-fact ClientControlViewRecovery). PREVENTS the
@@ -152,7 +152,7 @@ namespace Multipleer.Harmony.Tactical
                         // View.SelectedActor and DoCameraChases it (cameraChase:true un-sticks the DoCameraChaseParam camera
                         // left by SetInitialTargetPosition:135-141) + re-runs SetAbilities (re-grey). Mirrors native cancel.
                         bool driven = DriveFullStackRecovery(view);
-                        Debug.Log("[Multipleer][tac] CLIENT full-stack recovery@activate fired=" + driven +
+                        Debug.Log("[Multiplayer][tac] CLIENT full-stack recovery@activate fired=" + driven +
                                   " (exited aim sub-state " + stateName + ") actorNet=" + actorNet);
                     }
                     else
@@ -160,19 +160,19 @@ namespace Multipleer.Harmony.Tactical
                         // Bare control state (e.g. a Move confirm from UIStateCharacterSelected): the guarded re-grey works
                         // in place — re-push CharacterSelected so the ability bar re-evaluates live AP. (Unchanged path.)
                         var reset = _resetCharSelected ?? (_resetCharSelected = AccessTools.Method(view.GetType(), "ResetCharacterSelectedState"));
-                        Debug.Log("[Multipleer][tac] CLIENT re-grey@activate fired=" + (reset != null) +
+                        Debug.Log("[Multiplayer][tac] CLIENT re-grey@activate fired=" + (reset != null) +
                                   " state=" + stateName + " actorNet=" + actorNet);
                         reset?.Invoke(view, null);
                     }
                 }
 
-                Debug.Log("[Multipleer][tac] CLIENT skipped view-clear for suppressed " + __0.GetType().Name +
+                Debug.Log("[Multiplayer][tac] CLIENT skipped view-clear for suppressed " + __0.GetType().Name +
                           " (kept UIStateCharacterSelected; intent relayed once)");
                 return false;   // SKIP native → no SwitchToState(UIStateWaiting, ClearStackAndPush) → control preserved
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] SuppressedAbilityViewClearPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] SuppressedAbilityViewClearPatch.Prefix failed: " + ex);
                 return true;    // fail-open: never wedge the native path on an unexpected error
             }
         }

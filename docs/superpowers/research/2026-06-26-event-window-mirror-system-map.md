@@ -1,8 +1,8 @@
 # Geoscape EVENT-WINDOW mirror — system map (research, 2026-06-26)
 
-Grounding for redesigning host→client geoscape EVENT-window mirroring (Multipleer co-op).
+Grounding for redesigning host→client geoscape EVENT-window mirroring (Multiplayer co-op).
 Read-only map; cites `Class.Method file:line`. Decompile root `decompiled\AssemblyCSharp`;
-mod src `Multipleer\src`. NOTE: two distinct mirror RAILS exist — (1) the **GeoscapeEvent
+mod src `Multiplayer\src`. NOTE: two distinct mirror RAILS exist — (1) the **GeoscapeEvent
 dialog** rail (POI/encounter popups, packets 0x65/0x66 + EventAdvanceResult — SHIPPED, partly
 gated) and (2) the newer **report-window** rail (mission/research/base outcome modals, packet
 0x69 — Phase-A, fully gated OFF). The "тяп-ляп client jumps to final window" bug lives on rail (1).
@@ -35,7 +35,7 @@ gated) and (2) the newer **report-window** rail (mission/research/base outcome m
 
 ---
 
-## B. EXISTING Multipleer event-mirror implementation
+## B. EXISTING Multiplayer event-mirror implementation
 
 **B4. Gates (both shipped `false`).**
 - `EventMirrorFixGate.Enabled` (Network\Sync\EventMirrorFixGate.cs:22) — gates the single-choice
@@ -69,7 +69,7 @@ gated) and (2) the newer **report-window** rail (mission/research/base outcome m
 - Host Postfix + client Prefix on `GeoscapeView.OpenModalPersistent(ModalType,object,int)` (GeoscapeView.cs:849) and `OpenModal(...)` (:868) — `ReportModalMirrorPatches`. Host → `ReportModalClassifier.TryBuild` → `SyncEngine.BroadcastReportModal` (SyncEngine.cs:592, PacketType.ReportModalShow 0x69).
 - Client `SyncEngine.OnReportModalShow` (:605) → reconstruct `modalData` by `ReportModalVariant` (NullData/SiteOnly/Research/Diplomacy via `ReportModalReflection`; **MissionOutcome NOT wired — returns at default :630**) → `GeoModalDisplay.Show` under `SyncApplyScope.Enter()` (:637).
 
-**B6. Plan doc** (`docs\superpowers\plans\2026-06-26-multipleer-event-window-mirror.md`):
+**B6. Plan doc** (`docs\superpowers\plans\2026-06-26-multiplayer-event-window-mirror.md`):
 mirror the proven EventRaised chokepoint shape for the REPORT/outcome modals — host Postfix on
 `OpenModalPersistent`/`OpenModal` broadcasts a `ReportModalShow` (0x69) packet; client reconstructs
 modalData by id and replays the native modal under `SyncApplyScope` (read-only, host-authoritative);

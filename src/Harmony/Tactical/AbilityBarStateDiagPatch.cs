@@ -3,11 +3,11 @@ using System.Collections;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// HOST-only DIAGNOSTIC (no behaviour change). The host shows the SAME stale ability-bar symptom as the client
@@ -40,7 +40,7 @@ namespace Multipleer.Harmony.Tactical
             // bound at PatchAll time (independent of whether SetAbilities is later invoked under the host gate).
             if (module == null || actor == null || input == null)
             {
-                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch NOT bound (type resolve failed): " +
+                Debug.LogWarning("[Multiplayer][tac] AbilityBarStateDiagPatch NOT bound (type resolve failed): " +
                                  "UIModuleAbilities=" + (module != null) + " TacticalActor=" + (actor != null) +
                                  " InputController=" + (input != null));
                 return false;
@@ -50,7 +50,7 @@ namespace Multipleer.Harmony.Tactical
             _target = AccessTools.Method(module, "SetAbilities", new[] { actor, input });
             if (_target == null)
             {
-                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch NOT bound: SetAbilities(TacticalActor,InputController) not found");
+                Debug.LogWarning("[Multiplayer][tac] AbilityBarStateDiagPatch NOT bound: SetAbilities(TacticalActor,InputController) not found");
                 return false;
             }
 
@@ -67,7 +67,7 @@ namespace Multipleer.Harmony.Tactical
                     }
                 }
             }
-            Debug.Log("[Multipleer][tac] AbilityBarStateDiagPatch BOUND to UIModuleAbilities.SetAbilities (getAbilities=" +
+            Debug.Log("[Multiplayer][tac] AbilityBarStateDiagPatch BOUND to UIModuleAbilities.SetAbilities (getAbilities=" +
                       (_getAbilities != null) + ")");
             return true;
         }
@@ -77,7 +77,7 @@ namespace Multipleer.Harmony.Tactical
         public static MethodBase TargetMethod()
         {
             if (_target == null)
-                Debug.LogWarning("[Multipleer][tac] AbilityBarStateDiagPatch.TargetMethod returned null — patch will not bind");
+                Debug.LogWarning("[Multiplayer][tac] AbilityBarStateDiagPatch.TargetMethod returned null — patch will not bind");
             return _target;
         }
 
@@ -94,7 +94,7 @@ namespace Multipleer.Harmony.Tactical
                 float ap = ReadActionPoints(__0);
 
                 var sb = new StringBuilder();
-                sb.Append("[Multipleer][tac] HOST ability-bar rebuilt net=").Append(netId)
+                sb.Append("[Multiplayer][tac] HOST ability-bar rebuilt net=").Append(netId)
                   .Append(" ap=").Append(ap.ToString("0.##")).Append(" [");
                 if (_getAbilities != null)
                 {
@@ -116,7 +116,7 @@ namespace Multipleer.Harmony.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] AbilityBarStateDiagPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] AbilityBarStateDiagPatch.Postfix failed: " + ex);
             }
         }
 

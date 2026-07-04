@@ -4,7 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge for Phoenix base construction / repair / facility completion.
@@ -87,7 +87,7 @@ namespace Multipleer.Network.Sync
                 object idVal = _siteIdField?.GetValue(site);
                 return idVal != null ? Convert.ToInt32(idVal).ToString() : null;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.GetBaseId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetBaseId failed: " + ex.Message); return null; }
         }
 
         /// <summary>Read the stable facility id (<c>FacilityId</c>) off a <c>GeoPhoenixFacility</c>, as string.</summary>
@@ -100,7 +100,7 @@ namespace Multipleer.Network.Sync
                 object idVal = _facilityIdField?.GetValue(facility);
                 return idVal != null ? Convert.ToUInt32(idVal).ToString() : null;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.GetFacilityId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetFacilityId failed: " + ex.Message); return null; }
         }
 
         /// <summary>Read the grid position (<c>GridPosition</c>) off a <c>GeoPhoenixFacility</c>.</summary>
@@ -113,7 +113,7 @@ namespace Multipleer.Network.Sync
                 var v = _gridPosProp?.GetValue(facility, null);
                 return v is Vector2Int vi ? vi : default(Vector2Int);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.GetGridPosition failed: " + ex.Message); return default(Vector2Int); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetGridPosition failed: " + ex.Message); return default(Vector2Int); }
         }
 
         /// <summary>Read the facility def GUID off a <c>GeoPhoenixFacility</c>.</summary>
@@ -126,7 +126,7 @@ namespace Multipleer.Network.Sync
                 var def = _facDefProp?.GetValue(facility, null);
                 return DefReflection.GetGuid(def);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.GetFacilityDefId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetFacilityDefId failed: " + ex.Message); return null; }
         }
 
         /// <summary>The <c>GeoPhoenixBase</c> that owns a facility, found by scanning faction bases.</summary>
@@ -142,7 +142,7 @@ namespace Multipleer.Network.Sync
                         if (ReferenceEquals(f, facility)) return b;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.FindBaseOfFacility failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.FindBaseOfFacility failed: " + ex.Message); }
             return null;
         }
 
@@ -180,7 +180,7 @@ namespace Multipleer.Network.Sync
                 foreach (var b in EnumerateBases(rt))
                     if (GetBaseId(b) == baseId) return b;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.ResolveBase failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.ResolveBase failed: " + ex.Message); }
             return null;
         }
 
@@ -203,7 +203,7 @@ namespace Multipleer.Network.Sync
                         return _getFacAtPos.Invoke(layout, new object[] { new Vector2Int(gridX, gridY) });
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.ResolveFacility failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.ResolveFacility failed: " + ex.Message); }
             return null;
         }
 
@@ -222,7 +222,7 @@ namespace Multipleer.Network.Sync
                 object rotation = Enum.ToObject(_rotationType, rot);
                 _construct.Invoke(geoBase, new object[] { def, new Vector2Int(x, y), rotation });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.Construct failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.Construct failed: " + ex.Message); }
         }
 
         public static void Repair(GeoRuntime rt, string baseId, string facilityId, int x, int y)
@@ -237,7 +237,7 @@ namespace Multipleer.Network.Sync
                 if (facility == null) return;
                 _repair.Invoke(geoBase, new[] { facility });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.Repair failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.Repair failed: " + ex.Message); }
         }
 
         public static void Complete(GeoRuntime rt, string baseId, string facilityId, int x, int y)
@@ -252,7 +252,7 @@ namespace Multipleer.Network.Sync
                 if (facility == null) return;
                 _complete.Invoke(facility, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] BaseReflection.Complete failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.Complete failed: " + ex.Message); }
         }
     }
 }

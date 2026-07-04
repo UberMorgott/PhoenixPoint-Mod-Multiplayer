@@ -114,4 +114,4 @@ Deploy (`deploy.ps1`), restart both instances (DirectIP 127.0.0.1). Verify:
 
 - Build: 0 err / 0 warn; full test suite green incl. new pure-gate tests.
 - In-game 2-instance: all WS4 checks pass; camera follows enemy actions; grenade explosion VFX shows; animation precedes damage; no regression.
-- Roadmap updated (Inc3 DONE) + memory `multipleer-mod-status.md` updated.
+- Roadmap updated (Inc3 DONE) + memory `multiplayer-mod-status.md` updated.

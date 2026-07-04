@@ -8,7 +8,7 @@
 
 **Architecture:** Host assigns a stable `slotIndex` (byte, arrival order, host=0) echoed in PEER_LIST; ALL progress is keyed by `slotIndex`. Each client reports its own phase-1 (download) and phase-2 (native load) percent to the host via the existing `LoadProgress` packet; the host aggregates into a compact `RosterProgress` snapshot broadcast UNRELIABLE at ≤5 Hz, and clients merge it monotonic-max per (slot,phase). Done is event-driven via a RELIABLE `LoadComplete`; the host broadcasts snapshots until all slots are done. A mod-owned `ScreenSpaceOverlay` canvas (sortingOrder 7000) renders one bar+label+% per player over an early-dropped native curtain.
 
-**Tech Stack:** C#, Harmony (HarmonyLib), Unity uGUI (`Canvas`/`CanvasScaler`/`Image`/`Text`), xUnit 2.9.2 on net472 (`Multipleer.Tests`, pure Unity-free cores linked via `<Compile Include="..\src\..."><Link>`).
+**Tech Stack:** C#, Harmony (HarmonyLib), Unity uGUI (`Canvas`/`CanvasScaler`/`Image`/`Text`), xUnit 2.9.2 on net472 (`Multiplayer.Tests`, pure Unity-free cores linked via `<Compile Include="..\src\..."><Link>`).
 
 ---
 
@@ -20,9 +20,9 @@
 - `src\Network\RosterProgressTracker.cs` — pure-logic: receiver-side state. Monotonic-max merge per (slot,phase), `LoadComplete` done-set, `AllDone(expectedSlots)` gate, snapshot accessor for the UI. Unity-free; linked into tests.
 - `src\UI\LoadOverlayController.cs` — MonoBehaviour: owns the `ScreenSpaceOverlay` canvas (sortingOrder 7000), builds/refreshes one row per slot, drives phase-2 read+broadcast each `Update`, SHOW/HIDE.
 - `src\Harmony\CurtainShowPatch.cs` — Harmony Postfix on `LevelSwitchCurtainController.OnLevelStateChanged` that SHOWs the overlay when `newState == Level.State.Loading`.
-- `Multipleer.Tests\SlotAllocatorTests.cs` — xUnit tests for `SlotAllocator`.
-- `Multipleer.Tests\RosterProgressTrackerTests.cs` — xUnit tests for `RosterProgressTracker` + the phase-2 percent conversion helper.
-- `Multipleer.Tests\RosterProgressSerializerTests.cs` — xUnit roundtrip tests for the new serializer methods + PEER_LIST `SlotIndex`.
+- `Multiplayer.Tests\SlotAllocatorTests.cs` — xUnit tests for `SlotAllocator`.
+- `Multiplayer.Tests\RosterProgressTrackerTests.cs` — xUnit tests for `RosterProgressTracker` + the phase-2 percent conversion helper.
+- `Multiplayer.Tests\RosterProgressSerializerTests.cs` — xUnit roundtrip tests for the new serializer methods + PEER_LIST `SlotIndex`.
 
 **Modified files**
 
@@ -47,8 +47,8 @@
 - **Native progress**: `GameUtl.CurrentLevel()?.LoadingProgress?.Progress` (float 0..1, may be null at load end) — read each frame, null-guard.
 - **Overlay canvas pattern** (`MultiplayerUI.EnsureBarCanvas :92-112`, `LobbyPanel :120-137`): `go.AddComponent<Canvas>()`, `renderMode = ScreenSpaceOverlay`, `sortingOrder = N`; `CanvasScaler` `ScaleWithScreenSize`, `referenceResolution = new Vector2(1920,1080)`, `ScreenMatchMode.MatchWidthOrHeight`, `matchWidthOrHeight = 0.5f`. Parent under the mod component's `transform` (which lives under `ModGO`, the mod's persistent root). Display-only overlay → NO `GraphicRaycaster`, set `overrideSorting = true`.
 - **Harmony patch style** (`SaveLoadPatches.cs`): `[HarmonyPatch]` on a `static` class, dynamic `Prepare()`/`TargetMethod()` using `AccessTools.TypeByName(...)` + `AccessTools.Method(...)`, all patch bodies wrapped in `try/catch` that logs and degrades safely.
-- **Tests** (`Multipleer.Tests.csproj`): xUnit `[Fact]`, `Assert.Equal/True/False`. Add each new pure core as `<Compile Include="..\src\...\X.cs"><Link>X.cs</Link></Compile>`. `MessageSerializer.cs` is ALREADY linked.
-- **Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`. **Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj`. **Deploy (manual in-game):** `pwsh E:\DEV\PhoenixPoint\Multipleer\deploy.ps1`.
+- **Tests** (`Multiplayer.Tests.csproj`): xUnit `[Fact]`, `Assert.Equal/True/False`. Add each new pure core as `<Compile Include="..\src\...\X.cs"><Link>X.cs</Link></Compile>`. `MessageSerializer.cs` is ALREADY linked.
+- **Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`. **Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj`. **Deploy (manual in-game):** `pwsh E:\DEV\PhoenixPoint\Multiplayer\deploy.ps1`.
 
 ---
 
@@ -58,20 +58,20 @@ Implements spec "Identity — stable slotIndex": host=slot 0, clients in arrival
 
 **Files:**
 - Create: `src\Network\SlotAllocator.cs`
-- Create: `Multipleer.Tests\SlotAllocatorTests.cs`
-- Modify: `Multipleer.Tests\Multipleer.Tests.csproj` (link the new core)
+- Create: `Multiplayer.Tests\SlotAllocatorTests.cs`
+- Modify: `Multiplayer.Tests\Multiplayer.Tests.csproj` (link the new core)
 
-- [ ] Add the link line under the `<!-- Pure ... cores -->` group in `Multipleer.Tests\Multipleer.Tests.csproj` (after the `MessageSerializer.cs` line):
+- [ ] Add the link line under the `<!-- Pure ... cores -->` group in `Multiplayer.Tests\Multiplayer.Tests.csproj` (after the `MessageSerializer.cs` line):
   ```xml
       <Compile Include="..\src\Network\SlotAllocator.cs"><Link>SlotAllocator.cs</Link></Compile>
   ```
-- [ ] Write failing test file `Multipleer.Tests\SlotAllocatorTests.cs`:
+- [ ] Write failing test file `Multiplayer.Tests\SlotAllocatorTests.cs`:
   ```csharp
   using System;
-  using Multipleer.Network;
+  using Multiplayer.Network;
   using Xunit;
 
-  namespace Multipleer.Tests
+  namespace Multiplayer.Tests
   {
       public class SlotAllocatorTests
       {
@@ -117,13 +117,13 @@ Implements spec "Identity — stable slotIndex": host=slot 0, clients in arrival
   }
   ```
 - [ ] Run (expected FAIL — `SlotAllocator` does not exist):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~SlotAllocatorTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~SlotAllocatorTests`
 - [ ] Create `src\Network\SlotAllocator.cs` (minimal impl):
   ```csharp
   using System;
   using System.Collections.Generic;
 
-  namespace Multipleer.Network
+  namespace Multiplayer.Network
   {
       /// <summary>
       /// Host-side stable slotIndex allocation. Host is always slot 0. Clients are assigned
@@ -156,9 +156,9 @@ Implements spec "Identity — stable slotIndex": host=slot 0, clients in arrival
   }
   ```
 - [ ] Run (expected PASS):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~SlotAllocatorTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~SlotAllocatorTests`
 - [ ] Commit:
-  `git add src/Network/SlotAllocator.cs Multipleer.Tests/SlotAllocatorTests.cs Multipleer.Tests/Multipleer.Tests.csproj`
+  `git add src/Network/SlotAllocator.cs Multiplayer.Tests/SlotAllocatorTests.cs Multiplayer.Tests/Multiplayer.Tests.csproj`
   `git commit -m "feat(coop-load): SlotAllocator host-assigned stable slotIndex + reconnect reuse"`
 
 ---
@@ -169,16 +169,16 @@ Implements spec "Mapping echoed in PEER_LIST (slotIndex → displayName + steamI
 
 **Files:**
 - Modify: `src\Network\MessageLayer\MessageSerializer.cs` (`PeerListEntry` class `:515-523`; `SerializePeerList :161-178`; `DeserializePeerList :180-201`)
-- Create: `Multipleer.Tests\RosterProgressSerializerTests.cs`
+- Create: `Multiplayer.Tests\RosterProgressSerializerTests.cs`
 
-- [ ] Write failing test `Multipleer.Tests\RosterProgressSerializerTests.cs` (PEER_LIST slot portion first):
+- [ ] Write failing test `Multiplayer.Tests\RosterProgressSerializerTests.cs` (PEER_LIST slot portion first):
   ```csharp
   using System;
   using System.Collections.Generic;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network.MessageLayer;
   using Xunit;
 
-  namespace Multipleer.Tests
+  namespace Multiplayer.Tests
   {
       public class RosterProgressSerializerTests
       {
@@ -202,7 +202,7 @@ Implements spec "Mapping echoed in PEER_LIST (slotIndex → displayName + steamI
   }
   ```
 - [ ] Run (expected FAIL — `PeerListEntry.SlotIndex` does not exist; will not compile):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
 - [ ] Add `SlotIndex` to `PeerListEntry` (`MessageSerializer.cs`), after the `IsHost` property:
   ```csharp
           public byte SlotIndex { get; set; }   // host-assigned stable slot; 0 = host
@@ -217,9 +217,9 @@ Implements spec "Mapping echoed in PEER_LIST (slotIndex → displayName + steamI
   ```
   (i.e. the initializer becomes `... IsHost = br.ReadByte() != 0, SlotIndex = br.ReadByte()`)
 - [ ] Run (expected PASS):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
 - [ ] Commit:
-  `git add src/Network/MessageLayer/MessageSerializer.cs Multipleer.Tests/RosterProgressSerializerTests.cs`
+  `git add src/Network/MessageLayer/MessageSerializer.cs Multiplayer.Tests/RosterProgressSerializerTests.cs`
   `git commit -m "feat(coop-load): echo slotIndex in PEER_LIST (PeerListEntry.SlotIndex)"`
 
 ---
@@ -231,7 +231,7 @@ Implements spec "host-aggregated snapshot" wire format (`RosterProgress`: N × {
 **Files:**
 - Modify: `src\Network\MessageLayer\PacketType.cs` (`:29-30`, after `SessionBegin = 0x1C`)
 - Modify: `src\Network\MessageLayer\MessageSerializer.cs` (add `ProgressRow` struct + methods)
-- Modify: `Multipleer.Tests\RosterProgressSerializerTests.cs` (add cases)
+- Modify: `Multiplayer.Tests\RosterProgressSerializerTests.cs` (add cases)
 
 - [ ] Add the failing tests to `RosterProgressSerializerTests.cs`:
   ```csharp
@@ -263,7 +263,7 @@ Implements spec "host-aggregated snapshot" wire format (`RosterProgress`: N × {
           }
   ```
 - [ ] Run (expected FAIL — `ProgressRow`, `SerializeRosterProgress`, `SerializeLoadComplete` do not exist):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
 - [ ] In `PacketType.cs`, after `SessionBegin = 0x1C,` add:
   ```csharp
           RosterProgress = 0x1D,
@@ -340,9 +340,9 @@ Implements spec "host-aggregated snapshot" wire format (`RosterProgress`: N × {
           }
   ```
 - [ ] Run (expected PASS):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressSerializerTests`
 - [ ] Commit:
-  `git add src/Network/MessageLayer/PacketType.cs src/Network/MessageLayer/MessageSerializer.cs Multipleer.Tests/RosterProgressSerializerTests.cs`
+  `git add src/Network/MessageLayer/PacketType.cs src/Network/MessageLayer/MessageSerializer.cs Multiplayer.Tests/RosterProgressSerializerTests.cs`
   `git commit -m "feat(coop-load): RosterProgress + LoadComplete packets (ser/deser + PacketType)"`
 
 ---
@@ -353,19 +353,19 @@ Implements spec "Receiver merge: monotonic-max per (slot, phase)" — phase only
 
 **Files:**
 - Create: `src\Network\RosterProgressTracker.cs`
-- Create: `Multipleer.Tests\RosterProgressTrackerTests.cs`
-- Modify: `Multipleer.Tests\Multipleer.Tests.csproj` (link the new core)
+- Create: `Multiplayer.Tests\RosterProgressTrackerTests.cs`
+- Modify: `Multiplayer.Tests\Multiplayer.Tests.csproj` (link the new core)
 
-- [ ] Add the link line in `Multipleer.Tests\Multipleer.Tests.csproj` (after the `SlotAllocator.cs` line):
+- [ ] Add the link line in `Multiplayer.Tests\Multiplayer.Tests.csproj` (after the `SlotAllocator.cs` line):
   ```xml
       <Compile Include="..\src\Network\RosterProgressTracker.cs"><Link>RosterProgressTracker.cs</Link></Compile>
   ```
-- [ ] Write failing test `Multipleer.Tests\RosterProgressTrackerTests.cs`:
+- [ ] Write failing test `Multiplayer.Tests\RosterProgressTrackerTests.cs`:
   ```csharp
-  using Multipleer.Network;
+  using Multiplayer.Network;
   using Xunit;
 
-  namespace Multipleer.Tests
+  namespace Multiplayer.Tests
   {
       public class RosterProgressTrackerTests
       {
@@ -406,12 +406,12 @@ Implements spec "Receiver merge: monotonic-max per (slot, phase)" — phase only
   }
   ```
 - [ ] Run (expected FAIL — `RosterProgressTracker` does not exist):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
 - [ ] Create `src\Network\RosterProgressTracker.cs`:
   ```csharp
   using System.Collections.Generic;
 
-  namespace Multipleer.Network
+  namespace Multiplayer.Network
   {
       /// <summary>
       /// Receiver-side co-op load state. Merges RosterProgress rows monotonic-max per slot:
@@ -458,9 +458,9 @@ Implements spec "Receiver merge: monotonic-max per (slot, phase)" — phase only
   }
   ```
 - [ ] Run (expected PASS):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
 - [ ] Commit:
-  `git add src/Network/RosterProgressTracker.cs Multipleer.Tests/RosterProgressTrackerTests.cs Multipleer.Tests/Multipleer.Tests.csproj`
+  `git add src/Network/RosterProgressTracker.cs Multiplayer.Tests/RosterProgressTrackerTests.cs Multiplayer.Tests/Multiplayer.Tests.csproj`
   `git commit -m "feat(coop-load): RosterProgressTracker monotonic-max merge per (slot,phase)"`
 
 ---
@@ -470,7 +470,7 @@ Implements spec "Receiver merge: monotonic-max per (slot, phase)" — phase only
 Implements spec "Done — event-driven, never threshold": host keeps broadcasting until ALL slots are done. Extends `RosterProgressTracker` done-tracking with explicit tests for the gate (the methods exist from Task 4; this task verifies the all-done semantics in isolation, mirroring the spec's "done-tracking barrier" test).
 
 **Files:**
-- Modify: `Multipleer.Tests\RosterProgressTrackerTests.cs` (add gate tests)
+- Modify: `Multiplayer.Tests\RosterProgressTrackerTests.cs` (add gate tests)
 
 - [ ] Add failing tests to `RosterProgressTrackerTests.cs`:
   ```csharp
@@ -506,10 +506,10 @@ Implements spec "Done — event-driven, never threshold": host keeps broadcastin
           }
   ```
 - [ ] Run (expected PASS immediately — methods exist from Task 4; this codifies the gate contract):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
   > Note: if any assertion FAILS, fix `AllDone`/`MarkDone`/`IsDone` in `RosterProgressTracker.cs` until green before committing.
 - [ ] Commit:
-  `git add Multipleer.Tests/RosterProgressTrackerTests.cs`
+  `git add Multiplayer.Tests/RosterProgressTrackerTests.cs`
   `git commit -m "test(coop-load): all-slots-done gate contract for RosterProgressTracker"`
 
 ---
@@ -531,7 +531,7 @@ Implements spec slotIndex propagation: host allocates on join, stamps `BuildPeer
           /// <summary>This peer's own host-assigned slot (host = 0; clients learn it from PEER_LIST).</summary>
           public byte LocalSlotIndex { get; private set; }
   ```
-  Add `using` if needed (`SlotAllocator` is in the same `Multipleer.Network` namespace — no extra using).
+  Add `using` if needed (`SlotAllocator` is in the same `Multiplayer.Network` namespace — no extra using).
 - [ ] In `AddClient`, inside the `if (!_clients.ContainsKey(steamId))` block, assign a slot using the client's persistent identity. The host allocator is keyed by `PlayerGuid`; `AddClient` currently has only `steamId`+`endpoint`, so assign at PEER_LIST build time instead where `PlayerGuid` is known. Replace the slot wiring by initialising the allocator in `BuildPeerList` (next step) — leave `AddClient` unchanged except a comment:
   ```csharp
                   // SlotIndex is assigned in BuildPeerList (host), keyed by the client's persistent
@@ -587,7 +587,7 @@ Implements spec slotIndex propagation: host allocates on join, stamps `BuildPeer
           }
   ```
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Manual in-game verification note: deploy (`pwsh deploy.ps1`), host + 1 client (`tools\launch-coop-test.ps1`), open the lobby; confirm host log shows the client assigned slot 1 and the client's `LocalSlotIndex == 1` (add a temporary `Debug.Log` if needed, remove before final). No automated test — slot wiring runs through the live transport/roster.
 - [ ] Commit:
   `git add src/Network/SessionManager.cs`
@@ -601,7 +601,7 @@ Implements spec "DRIVE phase-2 … converts 0..1→byte". The float→byte clamp
 
 **Files:**
 - Modify: `src\Network\RosterProgressTracker.cs` (add a static `ProgressByte` helper — keeps it in a Unity-free, already-linked core)
-- Modify: `Multipleer.Tests\RosterProgressTrackerTests.cs` (add conversion tests)
+- Modify: `Multiplayer.Tests\RosterProgressTrackerTests.cs` (add conversion tests)
 
 - [ ] Add failing tests to `RosterProgressTrackerTests.cs`:
   ```csharp
@@ -618,7 +618,7 @@ Implements spec "DRIVE phase-2 … converts 0..1→byte". The float→byte clamp
           }
   ```
 - [ ] Run (expected FAIL — `ProgressByte` does not exist):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
 - [ ] Add the static helper to `RosterProgressTracker` (no UnityEngine — use `System.Math`):
   ```csharp
           /// <summary>Convert a native 0..1 load progress to a clamped, floored 0..100 byte.</summary>
@@ -630,9 +630,9 @@ Implements spec "DRIVE phase-2 … converts 0..1→byte". The float→byte clamp
           }
   ```
 - [ ] Run (expected PASS):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~RosterProgressTrackerTests`
 - [ ] Commit:
-  `git add src/Network/RosterProgressTracker.cs Multipleer.Tests/RosterProgressTrackerTests.cs`
+  `git add src/Network/RosterProgressTracker.cs Multiplayer.Tests/RosterProgressTrackerTests.cs`
   `git commit -m "feat(coop-load): ProgressByte clamp+floor helper (phase-2 0..1->byte)"`
 
 ---
@@ -727,7 +727,7 @@ Implements spec "Progress propagation" (host aggregates → `RosterProgress` sna
               }
   ```
   > Note: the early `return;` statements at the top of `Update` (`!_engine.IsHost || !_barrierOpen`) gate the WHOLE method — move this snapshot block ABOVE the timeout's `return`-guards is unnecessary because both require `_barrierOpen`; keep the existing guards and append this block (it re-checks `_barrierOpen`).
-- [ ] Add `using System.Collections.Generic;` is already present in `SaveTransferCoordinator.cs` (HashSet/Dictionary used). Confirm `ProgressRow`/`RosterProgressTracker` resolve (same `Multipleer.Network` / `Multipleer.Network.MessageLayer` namespaces already imported).
+- [ ] Add `using System.Collections.Generic;` is already present in `SaveTransferCoordinator.cs` (HashSet/Dictionary used). Confirm `ProgressRow`/`RosterProgressTracker` resolve (same `Multiplayer.Network` / `Multiplayer.Network.MessageLayer` namespaces already imported).
 - [ ] Add `LoadComplete` send + host done-tracking + client snapshot merge. Add these methods near the barrier section:
   ```csharp
           /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
@@ -765,7 +765,7 @@ Implements spec "Progress propagation" (host aggregates → `RosterProgress` sna
               _loadCompleteSent = false;
   ```
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Manual in-game verification note: after Task 9 routing lands, 2-instance run; host log should show snapshots broadcasting and both slots eventually `MarkDone` releasing the barrier. (Cannot unit-test: depends on live transport + roster + barrier.)
 - [ ] Commit:
   `git add src/Network/NetworkEngine.cs src/Network/SaveTransferCoordinator.cs src/Network/SessionManager.cs`
@@ -791,7 +791,7 @@ Implements spec routing for `RosterProgress` + `LoadComplete`. Pure wiring → b
                       break;
   ```
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Manual note: routing has no isolated unit test; exercised by the 2-instance run in Tasks 8/10.
 - [ ] Commit:
   `git add src/Network/NetworkEngine.cs`
@@ -812,11 +812,11 @@ Implements spec "Screen + overlay" and "DRIVE phase-2". UI/engine seam (UnityEng
   using System.Collections.Generic;
   using Base.Core;
   using Base.Levels;
-  using Multipleer.Network;
+  using Multiplayer.Network;
   using UnityEngine;
   using UnityEngine.UI;
 
-  namespace Multipleer.UI
+  namespace Multiplayer.UI
   {
       /// <summary>
       /// Co-op loading overlay: a mod-owned ScreenSpaceOverlay canvas (sortingOrder 7000) drawn over
@@ -843,7 +843,7 @@ Implements spec "Screen + overlay" and "DRIVE phase-2". UI/engine seam (UnityEng
           private void EnsureCanvas()
           {
               if (_canvas != null) return;
-              var go = new GameObject("MultipleerLoadOverlay");
+              var go = new GameObject("MultiplayerLoadOverlay");
               go.transform.SetParent(transform, false); // under ModGO (persistent root)
 
               _canvas = go.AddComponent<Canvas>();
@@ -1014,7 +1014,7 @@ Implements spec "Screen + overlay" and "DRIVE phase-2". UI/engine seam (UnityEng
           }
   ```
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Manual in-game verification note: overlay render + phase-2 read are engine seams — verify in a 2-instance run after Task 11 wires SHOW: confirm both player rows appear top-right, bars advance during download then reset+advance during load, % text matches the vanilla bar. Resolve open item #1 (does sortingOrder 7000 render above the native curtain). No automated test.
 - [ ] Commit:
   `git add src/UI/LoadOverlayController.cs src/UI/MultiplayerUI.cs src/Network/SessionManager.cs`
@@ -1035,11 +1035,11 @@ Implements spec "On Play: drop the native curtain EARLY" + "SHOW: Postfix `Level
   using System;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
-  using Multipleer.UI;
+  using Multiplayer.Network;
+  using Multiplayer.UI;
   using UnityEngine;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       /// <summary>
       /// SHOW seam: after the native curtain drops for a level load (OnLevelStateChanged →
@@ -1080,7 +1080,7 @@ Implements spec "On Play: drop the native curtain EARLY" + "SHOW: Postfix `Level
               }
               catch (Exception e)
               {
-                  Debug.LogError("[Multipleer] CurtainShowPatch failed: " + e.Message);
+                  Debug.LogError("[Multiplayer] CurtainShowPatch failed: " + e.Message);
               }
           }
       }
@@ -1094,7 +1094,7 @@ Implements spec "On Play: drop the native curtain EARLY" + "SHOW: Postfix `Level
           public void ShowLoadOverlay() => EnsureLoadOverlay().Show();
           public void HideLoadOverlay() => _loadOverlay?.Hide();
   ```
-  > If `MultiplayerUI` has no `Awake`, add one that sets `Instance = this;` (does not disturb existing init, which runs from `MultipleerMain.OnModEnabled` via `AddComponent`).
+  > If `MultiplayerUI` has no `Awake`, add one that sets `Instance = this;` (does not disturb existing init, which runs from `MultiplayerMain.OnModEnabled` via `AddComponent`).
 - [ ] In `OnLobbyPlay`, drop the curtain EARLY and show the overlay before starting the transfer, with a fallback if the controller is unavailable. Replace the `if (_pendingChosenSave != null) { ... }` branch body's first line region:
   ```csharp
               if (_pendingChosenSave != null)
@@ -1124,12 +1124,12 @@ Implements spec "On Play: drop the native curtain EARLY" + "SHOW: Postfix `Level
               }
               catch (System.Exception e)
               {
-                  UnityEngine.Debug.LogWarning("[Multipleer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
+                  UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
               }
           }
   ```
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Manual in-game verification note (open item #2): 2-instance run; press Play; confirm the curtain drops immediately and the overlay appears over it without state desync (geoscape still enters correctly at BEGIN). If `DropCurtainInstant` misbehaves, the overlay's dark panel backdrop must still cover the screen — verify the fallback. No automated test.
 - [ ] Commit:
   `git add src/Harmony/CurtainShowPatch.cs src/UI/MultiplayerUI.cs`
@@ -1148,7 +1148,7 @@ Implements spec "HIDE … keep overlay up until the mod BEGIN barrier fires (all
 - [ ] In `SaveTransferCoordinator.EnterLevel`, after `_begun = true;` send this peer's `LoadComplete` (so the host's done-gate sees every slot) — but EnterLevel is the convergence AFTER the barrier already released, so instead signal local-done at the right point: this peer reports complete when its native load reaches the barrier, which the mod models as the LOADED/BEGIN handshake. Wire HIDE on BEGIN by hooking `EnterLevel`'s tail. Append to `EnterLevel`, after `_pendingResult = null;`:
   ```csharp
               // All peers enter together at BEGIN → the shared load is over; hide the overlay.
-              Multipleer.UI.MultiplayerUI.Instance?.HideLoadOverlay();
+              Multiplayer.UI.MultiplayerUI.Instance?.HideLoadOverlay();
   ```
 - [ ] Ensure this peer's `LoadComplete` is actually emitted. The mod's existing `SendLoaded`/`OnClientLoaded` LOADED handshake already gates BEGIN; the co-op `LoadComplete` (Task 8) is the OVERLAY's done signal. Emit it where the local load truly finishes — when `LoadingProgress` goes null (load end, `Level.cs:148-149`) the overlay's `Update` can no longer read progress, so trigger it there. In `LoadOverlayController.Update`, replace the `if (lp != null) { ... }` else-path to fire once:
   ```csharp
@@ -1170,9 +1170,9 @@ Implements spec "HIDE … keep overlay up until the mod BEGIN barrier fires (all
   ```
   > `SendLoadComplete` is idempotent (`_loadCompleteSent` guard from Task 8), so repeated null frames send only once.
 - [ ] Build (expected PASS):
-  `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Run the FULL test suite (no regressions in the pure cores):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj`
 - [ ] Manual in-game verification note: 2-instance run end-to-end — both players see the overlay through download + load; when both finish, the host releases BEGIN and BOTH overlays hide as gameplay starts simultaneously. Confirm no overlay lingers and no peer enters early. No automated test (full barrier + scene transition).
 - [ ] Commit:
   `git add src/Network/SaveTransferCoordinator.cs src/UI/LoadOverlayController.cs`

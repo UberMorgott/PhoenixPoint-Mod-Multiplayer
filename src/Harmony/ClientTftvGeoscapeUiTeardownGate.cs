@@ -1,4 +1,4 @@
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Save-load robustness (TFTV compat): pure, Unity-free gate decision behind the teardown guard patches.
     // Any geoscape teardown / level transition (co-op client applying a host save, the HOST's own save-load,

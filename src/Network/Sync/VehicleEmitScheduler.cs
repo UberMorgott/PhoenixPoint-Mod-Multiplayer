@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Pure, Unity-free scheduling helper for the HOST's geoscape vehicle-mirror poll (0xA5 position + 0xA6

@@ -1,4 +1,4 @@
-namespace Multipleer.Network.MessageLayer
+namespace Multiplayer.Network.MessageLayer
 {
     public enum PacketType : byte
     {

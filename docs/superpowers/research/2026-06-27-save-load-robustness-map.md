@@ -1,14 +1,14 @@
-# Multipleer save/load robustness map — 2026-06-27
+# Multiplayer save/load robustness map — 2026-06-27
 
-GOAL: load saves at ANY moment with NO errors, both with Multipleer active and without it
+GOAL: load saves at ANY moment with NO errors, both with Multiplayer active and without it
 (saves must stay valid whether or not the mod is present). Read-only research; TFTV (workshop
 2872311902) ALWAYS installed → must stay TFTV-compatible. All file:line below are real-source
-(`Multipleer\src\...`, `refs\TFTV-src\...`) unless marked decompile.
+(`Multiplayer\src\...`, `refs\TFTV-src\...`) unless marked decompile.
 
-## 1. Save-data compat ("без мода") — does Multipleer poison the save graph?
+## 1. Save-data compat ("без мода") — does Multiplayer poison the save graph?
 
-- **VERDICT: NO. A save written WITH Multipleer is a plain PP/TFTV save and loads cleanly
-  WITHOUT the mod.** Multipleer serializes NOTHING into the savegame graph.
+- **VERDICT: NO. A save written WITH Multiplayer is a plain PP/TFTV save and loads cleanly
+  WITHOUT the mod.** Multiplayer serializes NOTHING into the savegame graph.
 - The ONLY savegame serialization is read-only on the host: `SaveTransferCoordinator
   .HostSerializeAndSendCrt` → `game.SaveManager.Serializer.ReadSavegameBinary(metaData, result)`
   (`SaveTransferCoordinator.cs:403`) — reads the host's EXISTING vanilla save to a `byte[]` for
@@ -30,7 +30,7 @@ GOAL: load saves at ANY moment with NO errors, both with Multipleer active and w
   save mid-session its live `SuppressEvents=true` could bleed into that file — but clients are
   BLOCKED from loading and there is no client save path in co-op; host is authoritative writer.)
 
-## 2. Load-gate & "anytime" — what Multipleer does on LOAD
+## 2. Load-gate & "anytime" — what Multiplayer does on LOAD
 
 Gate stack (commit 8cf7286 + UI intercept):
 - `LoadGameConvergenceGatePatch` — Prefix on `PhoenixSaveManager.LoadGame(PPSavegameMetaData)`
@@ -76,9 +76,9 @@ Behavior matrix (who can load WHEN):
     .UpdatePopulation`, `TopInforBar.cs:128-353`) — `____context.Level`/`populationBar.Find(...)`
     null → NRE; it self-catches (`:349-352`, NO rethrow) so the popup here is from `TFTVLogger
     .Error(e)` LOGGING the NRE, not an unhandled throw. Benign to game state (UI-only) but noisy.
-  - No Multipleer frame in the stack; Multipleer is only the TRIGGER (forces the rebuild) and did
+  - No Multiplayer frame in the stack; Multiplayer is only the TRIGGER (forces the rebuild) and did
     not unload.
-- **Multipleer-side load exceptions: all BENIGN (caught + logged, fail-safe).** Every load-path
+- **Multiplayer-side load exceptions: all BENIGN (caught + logged, fail-safe).** Every load-path
   member is wrapped: `FinishLevelBarrierPatch.Prefix` try/catch→true (`SaveLoadPatches.cs:56`),
   the whole intercept gate try/catch (`SaveLoadInterceptPatch.cs:202,436`), `ApplyPrepareLoadGame
   State` reflection try/catch (`SaveTransferCoordinator.cs:1141`), `PrepareEntryFromBlobCrt`
@@ -125,7 +125,7 @@ finalizer.**
 - **Mid-TACTICAL host load = highest risk.** The gate does not distinguish tactical vs geoscape; a
   host load mid-tactical reroutes through `HostStartSessionInGame` and clients tear down tactical
   and reload. Full host→client TACTICAL state replication is still incomplete (memory:
-  multipleer-full-state-replication / the pending tactical full-state spine), so loading into/within
+  multiplayer-full-state-replication / the pending tactical full-state spine), so loading into/within
   a tactical co-op mission is the least-proven "anytime" case. Geoscape-anytime is safe now.
 - **Cross-campaign / roster-mismatch host load**: no campaign-identity check — clients follow the
   host's chosen save unconditionally. The full blob carries the host campaign so clients mirror it;

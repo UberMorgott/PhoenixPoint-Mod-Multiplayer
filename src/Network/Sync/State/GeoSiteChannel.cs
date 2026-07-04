@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// State channel #5 — GeoSite IDENTITY mirror (fixes stale client sites → wrong geoscape-event

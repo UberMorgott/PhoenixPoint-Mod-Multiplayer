@@ -2,10 +2,10 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative WEAPON / EQUIPMENT-SWAP replication (Inc Equip). Mirrors
@@ -66,13 +66,13 @@ namespace Multipleer.Sync.Tactical
                 object actor = ResolveActor(equipmentComponent);
                 if (actor == null)
                 {
-                    Debug.LogError("[Multipleer][tac] equip intent: no actor on EquipmentComponent — suppressing local swap");
+                    Debug.LogError("[Multiplayer][tac] equip intent: no actor on EquipmentComponent — suppressing local swap");
                     return false;
                 }
                 int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
                 if (actorNetId < 0)
                 {
-                    Debug.LogError("[Multipleer][tac] equip intent: unknown actor netId — suppressing local swap");
+                    Debug.LogError("[Multiplayer][tac] equip intent: unknown actor netId — suppressing local swap");
                     return false;
                 }
 
@@ -80,13 +80,13 @@ namespace Multipleer.Sync.Tactical
 
                 byte[] payload = TacticalLiveCodec.EncodeEquipIntent(actorNetId, equipIndex, NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentEquip, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.equip actorNetId=" + actorNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.equip actorNetId=" + actorNetId +
                           " equipIndex=" + equipIndex);
                 return false;   // suppress local swap
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientInterceptEquip failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ClientInterceptEquip failed: " + ex);
                 return false;   // a mirroring client must not run a local swap even on error
             }
         }
@@ -100,34 +100,34 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeEquipIntent(payload, out var intent)) { Debug.LogError("[Multipleer][tac] equip intent decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeEquipIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] equip intent decode failed"); return; }
             if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentEquip, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
-            Debug.Log("[Multipleer][tac][DIAG] HOSTINTENT decoded equip actorNetId=" + intent.ActorNetId +
+            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded equip actorNetId=" + intent.ActorNetId +
                       " equipIndex=" + intent.EquipIndex + " actorResolved=" + (actor != null));
-            if (actor == null) { Debug.LogError("[Multipleer][tac] equip intent: no actor for netId " + intent.ActorNetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] equip intent: no actor for netId " + intent.ActorNetId); return; }
 
             try
             {
                 object ec = ResolveEquipmentComponent(actor);
-                if (ec == null) { Debug.LogError("[Multipleer][tac] equip intent: actor has no EquipmentComponent"); return; }
+                if (ec == null) { Debug.LogError("[Multiplayer][tac] equip intent: actor has no EquipmentComponent"); return; }
 
                 if (!TryResolveEquipmentByIndex(ec, intent.EquipIndex, out object equipment))
                 {
-                    Debug.LogError("[Multipleer][tac] equip intent: index " + intent.EquipIndex + " not applicable to actor " + intent.ActorNetId);
+                    Debug.LogError("[Multiplayer][tac] equip intent: index " + intent.EquipIndex + " not applicable to actor " + intent.ActorNetId);
                     return;
                 }
 
                 // The host re-invokes the real swap; its postfix (OnHostEquipChanged) then broadcasts tac.equip.
                 if (!InvokeSetSelectedEquipment(ec, equipment))
                 {
-                    Debug.LogError("[Multipleer][tac] equip intent: SetSelectedEquipment invoke failed for actor " + intent.ActorNetId);
+                    Debug.LogError("[Multiplayer][tac] equip intent: SetSelectedEquipment invoke failed for actor " + intent.ActorNetId);
                     return;
                 }
-                Debug.Log("[Multipleer][tac] HOST executed equip swap actorNetId=" + intent.ActorNetId + " equipIndex=" + intent.EquipIndex);
+                Debug.Log("[Multiplayer][tac] HOST executed equip swap actorNetId=" + intent.ActorNetId + " equipIndex=" + intent.EquipIndex);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnEquipIntent exec failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnEquipIntent exec failed: " + ex); }
         }
 
         // ─── HOST: SetSelectedEquipment ran → broadcast the now-selected equipment ─────────────────
@@ -155,10 +155,10 @@ namespace Multipleer.Sync.Tactical
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacEquip);
                 byte[] payload = TacticalLiveCodec.EncodeEquip(seq, actorNetId, equipIndex);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacEquip, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.equip seq=" + seq + " actorNetId=" + actorNetId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.equip seq=" + seq + " actorNetId=" + actorNetId +
                           " equipIndex=" + equipIndex);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] OnHostEquipChanged failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnHostEquipChanged failed: " + ex); }
         }
 
         // ─── CLIENT: apply the host equip outcome ──────────────────────────────────────────────────
@@ -170,20 +170,20 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeEquip(payload, out var o)) { Debug.LogError("[Multipleer][tac] tac.equip decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeEquip(payload, out var o)) { Debug.LogError("[Multiplayer][tac] tac.equip decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacEquip, o.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(o.ActorNetId);
-            if (actor == null) { Debug.LogError("[Multipleer][tac] tac.equip: no actor for netId " + o.ActorNetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.equip: no actor for netId " + o.ActorNetId); return; }
 
             try
             {
                 object ec = ResolveEquipmentComponent(actor);
-                if (ec == null) { Debug.LogError("[Multipleer][tac] tac.equip: actor has no EquipmentComponent"); return; }
+                if (ec == null) { Debug.LogError("[Multiplayer][tac] tac.equip: actor has no EquipmentComponent"); return; }
 
                 if (!TryResolveEquipmentByIndex(ec, o.EquipIndex, out object equipment))
                 {
-                    Debug.LogError("[Multipleer][tac] tac.equip: index " + o.EquipIndex + " not applicable to actor " + o.ActorNetId);
+                    Debug.LogError("[Multiplayer][tac] tac.equip: index " + o.EquipIndex + " not applicable to actor " + o.ActorNetId);
                     return;
                 }
 
@@ -191,13 +191,13 @@ namespace Multipleer.Sync.Tactical
                 bool ok;
                 try { ok = InvokeSetSelectedEquipment(ec, equipment); }
                 finally { _applyingRemote = false; }
-                if (!ok) { Debug.LogError("[Multipleer][tac] tac.equip: SetSelectedEquipment invoke failed for actor " + o.ActorNetId); return; }
+                if (!ok) { Debug.LogError("[Multiplayer][tac] tac.equip: SetSelectedEquipment invoke failed for actor " + o.ActorNetId); return; }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacEquip, o.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT applied tac.equip seq=" + o.Seq + " actorNetId=" + o.ActorNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT applied tac.equip seq=" + o.Seq + " actorNetId=" + o.ActorNetId +
                           " equipIndex=" + o.EquipIndex);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleEquip failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleEquip failed: " + ex); }
         }
 
         // ─── Engine reflection helpers ──────────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ namespace Multipleer.Sync.Tactical
         private static bool InvokeSetSelectedEquipment(object equipmentComponent, object equipment)
         {
             var m = ResolveSetSelected(equipmentComponent);
-            if (m == null) { Debug.LogError("[Multipleer][tac] SetSelectedEquipment(Equipment) not found"); return false; }
+            if (m == null) { Debug.LogError("[Multiplayer][tac] SetSelectedEquipment(Equipment) not found"); return false; }
             m.Invoke(equipmentComponent, new[] { equipment });
             return true;
         }

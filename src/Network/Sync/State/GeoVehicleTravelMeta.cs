@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 — one vehicle's mirrored TRAVEL METADATA: the display-feeding native nav state the sim-frozen

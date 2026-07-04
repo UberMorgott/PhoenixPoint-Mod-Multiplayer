@@ -2,7 +2,7 @@ diff --git a/src/Harmony/ClientTravelEmitterSuppressPatch.cs b/src/Harmony/Clien
 index f9fdf2d..c7cf49b 100644
 --- a/src/Harmony/ClientTravelEmitterSuppressPatch.cs
 +++ b/src/Harmony/ClientTravelEmitterSuppressPatch.cs
-@@ -81,11 +81,23 @@ namespace Multipleer.Harmony
+@@ -81,11 +81,23 @@ namespace Multiplayer.Harmony
              var engine = NetworkEngine.Instance;
              if (engine == null || !engine.IsActive) return true; // single player
              if (engine.IsHost) return true;                      // host emits authoritatively
@@ -35,12 +35,12 @@ index 62fb54e..9eac0bc 100644
 --- a/src/Harmony/StartTravelInterceptPatch.cs
 +++ b/src/Harmony/StartTravelInterceptPatch.cs
 @@ -5,13 +5,16 @@ using HarmonyLib;
- using Multipleer.Network;
- using Multipleer.Network.CommandSync;
- using Multipleer.Network.MessageLayer;
+ using Multiplayer.Network;
+ using Multiplayer.Network.CommandSync;
+ using Multiplayer.Network.MessageLayer;
 +using UnityEngine; // DIAG-A1 TEMP (strip after RCA) — Debug.Log for the host->client travel-order trace
  
- namespace Multipleer.Harmony
+ namespace Multiplayer.Harmony
  {
 -    // C7 vertical proof: GeoVehicle.StartTravel(List<GeoSite>). Client -> encode + relay to host +
 -    // block local exec. Host (own action) -> execute locally, then postfix broadcasts the result to
@@ -55,7 +55,7 @@ index 62fb54e..9eac0bc 100644
      [HarmonyPatch]
      public static class StartTravelInterceptPatch
      {
-@@ -65,11 +68,64 @@ namespace Multipleer.Harmony
+@@ -65,11 +68,64 @@ namespace Multiplayer.Harmony
              return false;
          }
  
@@ -86,13 +86,13 @@ index 62fb54e..9eac0bc 100644
 +            // frozen client tells us exactly which condition blocked the host-origin broadcast.
 +            if (engine == null || !engine.IsActive || !engine.IsHost)
 +            {
-+                Debug.Log($"[Multipleer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard1) " +
++                Debug.Log($"[Multiplayer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard1) " +
 +                          $"engineNull={engine == null} isActive={(engine != null && engine.IsActive)} isHost={(engine != null && engine.IsHost)}"); // DIAG-A1 TEMP (strip after RCA)
 +                return;  // SP + client: never broadcast
 +            }
 +            if (CommandRelay.IsApplying)
 +            {
-+                Debug.Log("[Multipleer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard2 CommandRelay.IsApplying=true: client-relayed apply, HostArbiter broadcasts it)"); // DIAG-A1 TEMP (strip after RCA)
++                Debug.Log("[Multiplayer] DIAG-A1 host-origin StartTravel Postfix SKIP (guard2 CommandRelay.IsApplying=true: client-relayed apply, HostArbiter broadcasts it)"); // DIAG-A1 TEMP (strip after RCA)
 +                return;                               // client-relayed apply: HostArbiter already broadcasts -> no double-fire
 +            }
 +
@@ -116,7 +116,7 @@ index 62fb54e..9eac0bc 100644
 +            };
 +            // DIAG-A1 TEMP (strip after RCA) — boundary (a): the host-origin order IS being broadcast. veh + site
 +            // count + the guard state that let us through, so we know the Postfix reached the wire.
-+            Debug.Log($"[Multipleer] DIAG-A1 host-origin StartTravel broadcast veh={payload.VehicleId} " +
++            Debug.Log($"[Multiplayer] DIAG-A1 host-origin StartTravel broadcast veh={payload.VehicleId} " +
 +                      $"owner={(string.IsNullOrEmpty(payload.OwnerFactionGuid) ? "EMPTY" : payload.OwnerFactionGuid)} " +
 +                      $"sites={(payload.SiteIds != null ? payload.SiteIds.Length : -1)} isHost={engine.IsHost} " +
 +                      $"isActive={engine.IsActive} isApplying={CommandRelay.IsApplying}"); // DIAG-A1 TEMP (strip after RCA)
@@ -129,16 +129,16 @@ diff --git a/src/Network/CommandSync/ClientApplier.cs b/src/Network/CommandSync/
 index 71ccda6..5147e17 100644
 --- a/src/Network/CommandSync/ClientApplier.cs
 +++ b/src/Network/CommandSync/ClientApplier.cs
-@@ -25,17 +25,29 @@ namespace Multipleer.Network.CommandSync
+@@ -25,17 +25,29 @@ namespace Multiplayer.Network.CommandSync
  
          public void HandleResult(CampaignActionMessage action)
          {
 -            if (_engine.IsHost) return; // host already applied in HostArbiter
 +            // DIAG-A1 TEMP (strip after RCA) — boundary (d): client routing. isHost gate decides if we apply.
-+            Debug.Log($"[Multipleer] DIAG-A1 HandleResult action={action.ActionType} target={action.TargetId} isHost={_engine.IsHost}"); // DIAG-A1 TEMP (strip after RCA)
++            Debug.Log($"[Multiplayer] DIAG-A1 HandleResult action={action.ActionType} target={action.TargetId} isHost={_engine.IsHost}"); // DIAG-A1 TEMP (strip after RCA)
 +            if (_engine.IsHost)
 +            {
-+                Debug.Log("[Multipleer] DIAG-A1 HandleResult SKIP (isHost=true: host already applied in HostArbiter)"); // DIAG-A1 TEMP (strip after RCA)
++                Debug.Log("[Multiplayer] DIAG-A1 HandleResult SKIP (isHost=true: host already applied in HostArbiter)"); // DIAG-A1 TEMP (strip after RCA)
 +                return; // host already applied in HostArbiter
 +            }
  
@@ -162,7 +162,7 @@ index 71ccda6..5147e17 100644
              {
 +                // DIAG-A1 TEMP (strip after RCA) — boundary (d): about to dispatch into CommandRelay.ApplyResult
 +                // -> CommandExecutor.Execute -> ApplyStartTravel. If we reach here the client WILL try to apply.
-+                Debug.Log($"[Multipleer] DIAG-A1 HandleResult -> _relay.ApplyResult action={action.ActionType}"); // DIAG-A1 TEMP (strip after RCA)
++                Debug.Log($"[Multiplayer] DIAG-A1 HandleResult -> _relay.ApplyResult action={action.ActionType}"); // DIAG-A1 TEMP (strip after RCA)
                  _relay.ApplyResult(action);
              }
              catch (Exception ex)
@@ -170,7 +170,7 @@ diff --git a/src/Network/CommandSync/ClientTimeMirror.cs b/src/Network/CommandSy
 index 8a828f7..8952e87 100644
 --- a/src/Network/CommandSync/ClientTimeMirror.cs
 +++ b/src/Network/CommandSync/ClientTimeMirror.cs
-@@ -6,14 +6,76 @@ namespace Multipleer.Network.CommandSync
+@@ -6,14 +6,76 @@ namespace Multiplayer.Network.CommandSync
      // host via Timing.ProcessInstanceData (TimeBridge.ApplyTimeState) -> displayed Now/Scale/Paused match
      // host, frame-drift corrected. Host ignores (it owns the clock). ProcessInstanceData fires no events
      // and reschedules nothing, so no re-intercept and no SetGamePauseState TimeLimit guard.
@@ -199,7 +199,7 @@ index 8a828f7..8952e87 100644
 +            _hostPaused = payload.Paused;
 +            _hasState = true;
              try { TimeBridge.ApplyTimeState(payload); }
-             catch (System.Exception ex) { Debug.LogError($"[Multipleer] ClientTimeMirror apply failed: {ex}"); }
+             catch (System.Exception ex) { Debug.LogError($"[Multiplayer] ClientTimeMirror apply failed: {ex}"); }
          }
 +
 +        // Pure helper (unit-testable): given the cached host state, whether a host stamp has been seen,
@@ -240,10 +240,10 @@ index 8a828f7..8952e87 100644
 +                if (corrected)
 +                {
 +                    // DIAG-A1 TEMP — confirms a divergence existed between stamps and parity closed it.
-+                    Debug.Log($"[Multipleer] DIAG-A1 time-parity correct: Paused host={_hostPaused} client(was)={wasPaused} Scale host={_hostScale} was={wasScale}");
++                    Debug.Log($"[Multiplayer] DIAG-A1 time-parity correct: Paused host={_hostPaused} client(was)={wasPaused} Scale host={_hostScale} was={wasScale}");
 +                }
 +            }
-+            catch (System.Exception ex) { Debug.LogError($"[Multipleer] ClientTimeMirror parity tick failed: {ex}"); }
++            catch (System.Exception ex) { Debug.LogError($"[Multiplayer] ClientTimeMirror parity tick failed: {ex}"); }
 +        }
      }
  }
@@ -251,14 +251,14 @@ diff --git a/src/Network/CommandSync/CommandExecutor.cs b/src/Network/CommandSyn
 index 9547736..fdbdb49 100644
 --- a/src/Network/CommandSync/CommandExecutor.cs
 +++ b/src/Network/CommandSync/CommandExecutor.cs
-@@ -67,6 +67,10 @@ namespace Multipleer.Network.CommandSync
+@@ -67,6 +67,10 @@ namespace Multiplayer.Network.CommandSync
              var listType = typeof(List<>).MakeGenericType(geoSiteType);
              var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
-             if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
+             if (method == null) { Debug.LogError("[Multiplayer] StartTravel apply: method not resolved."); return; }
 +            // DIAG-A1 TEMP (strip after RCA) — boundary (e): the client is about to call native StartTravel.
 +            // resolvedVehicle / site count confirm the payload mapped onto a live craft + route on the client.
 +            int sitesResolved = (path is System.Collections.ICollection pc) ? pc.Count : -1;
-+            Debug.Log($"[Multipleer] DIAG-A1 apply StartTravel veh={p.VehicleId} resolvedVehicle={(vehicle == null ? "NULL" : "ok")} sitesResolved={sitesResolved} -> invoking native StartTravel"); // DIAG-A1 TEMP (strip after RCA)
++            Debug.Log($"[Multiplayer] DIAG-A1 apply StartTravel veh={p.VehicleId} resolvedVehicle={(vehicle == null ? "NULL" : "ok")} sitesResolved={sitesResolved} -> invoking native StartTravel"); // DIAG-A1 TEMP (strip after RCA)
              method.Invoke(vehicle, new object[] { path });
  
              // [DIAGB] TEMPORARY (logging only, no behavior change). Read back the RESOLVED vehicle's identity +
@@ -266,7 +266,7 @@ diff --git a/src/Network/CommandSync/CommandRelay.cs b/src/Network/CommandSync/C
 index 52940d2..ef71d06 100644
 --- a/src/Network/CommandSync/CommandRelay.cs
 +++ b/src/Network/CommandSync/CommandRelay.cs
-@@ -26,6 +26,23 @@ namespace Multipleer.Network.CommandSync
+@@ -26,6 +26,23 @@ namespace Multiplayer.Network.CommandSync
          [System.ThreadStatic] private static bool _applying;
          public static bool IsApplying => _applying;
  
@@ -294,7 +294,7 @@ diff --git a/src/Network/CommandSync/GeoBridge.cs b/src/Network/CommandSync/GeoB
 index d517a8c..f49eb98 100644
 --- a/src/Network/CommandSync/GeoBridge.cs
 +++ b/src/Network/CommandSync/GeoBridge.cs
-@@ -350,28 +350,42 @@ namespace Multipleer.Network.CommandSync
+@@ -350,28 +350,42 @@ namespace Multiplayer.Network.CommandSync
              }
  
              // 3) SurfacePos / SurfaceRot on the Transform (public getter, public Transform members).
@@ -309,7 +309,7 @@ index d517a8c..f49eb98 100644
 +            // off when !USE_TRANSFORM_STREAM. Discrete state (Travelling/CurrentSite/DestinationSites/HitPoints)
 +            // above + below STILL applies — only the position fight is removed. Flip USE_TRANSFORM_STREAM=true to
 +            // restore the legacy transform-stream mirror.
-+            if (Multipleer.Network.NetworkEngine.USE_TRANSFORM_STREAM)
++            if (Multiplayer.Network.NetworkEngine.USE_TRANSFORM_STREAM)
              {
 -                if ((mask & GeoStateMask.SurfacePos) != 0)
 -                    surface.position = new Vector3(r.PosX, r.PosY, r.PosZ);
@@ -360,7 +360,7 @@ diff --git a/src/Network/CommandSync/TimeBridge.cs b/src/Network/CommandSync/Tim
 index 0a57a2e..135e49e 100644
 --- a/src/Network/CommandSync/TimeBridge.cs
 +++ b/src/Network/CommandSync/TimeBridge.cs
-@@ -121,6 +121,37 @@ namespace Multipleer.Network.CommandSync
+@@ -121,6 +121,37 @@ namespace Multiplayer.Network.CommandSync
                         ?.Invoke(timing, new[] { data });
          }
  
@@ -402,28 +402,28 @@ diff --git a/src/Network/NetworkEngine.cs b/src/Network/NetworkEngine.cs
 index b7eb71c..fa78dae 100644
 --- a/src/Network/NetworkEngine.cs
 +++ b/src/Network/NetworkEngine.cs
-@@ -116,6 +116,10 @@ namespace Multipleer.Network
+@@ -116,6 +116,10 @@ namespace Multiplayer.Network
              // host/join/leave cycle and place a destroyed icon on the next session.
-             Multipleer.Network.CommandSync.ClientVehicleInterpolator.Reset();
+             Multiplayer.Network.CommandSync.ClientVehicleInterpolator.Reset();
  
 +            // DIAG-A1 fix: drop the cached host time-state so the per-frame parity tick can't re-assert a
 +            // stale Scale/Paused onto the next session's geoscape before its first stamp arrives.
-+            Multipleer.Network.CommandSync.ClientTimeMirror.Reset();
++            Multiplayer.Network.CommandSync.ClientTimeMirror.Reset();
 +
              // Singleton persists across host/join/leave cycles (Instance is never nulled),
              // so clear UI-facing subscriptions here to prevent handler stacking on reconnect.
              OnConnectionFailed = null;
-@@ -300,6 +304,9 @@ namespace Multipleer.Network
+@@ -300,6 +304,9 @@ namespace Multiplayer.Network
          {
              var payload = MessageSerializer.SerializeCampaignAction(action);
              var msg = new NetworkMessage(PacketType.CampaignActionApproved, payload);
 +            // DIAG-A1 TEMP (strip after RCA) — boundary (b): host send. Confirms the 0x31 result envelope
 +            // actually leaves the host toward peers (after the Postfix/HostArbiter built it).
-+            Debug.Log($"[Multipleer] DIAG-A1 broadcast result type={action.ActionType} target={action.TargetId} -> peers"); // DIAG-A1 TEMP (strip after RCA)
++            Debug.Log($"[Multiplayer] DIAG-A1 broadcast result type={action.ActionType} target={action.TargetId} -> peers"); // DIAG-A1 TEMP (strip after RCA)
              BroadcastToAll(msg);
          }
  
-@@ -360,17 +367,38 @@ namespace Multipleer.Network
+@@ -360,17 +367,38 @@ namespace Multiplayer.Network
  
          // ─── Update Loop (call every frame) ──────────────────────────────
  
@@ -443,35 +443,35 @@ index b7eb71c..fa78dae 100644
              Transport?.Update();
              Session?.Update();
              SaveTransfer?.Update();
-             Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
+             Multiplayer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
 -            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick.
 +            // DIAG-A1 fix: client-only per-frame parity mirror of host Scale/Paused. Re-asserts the
 +            // cached host time-state EVERY frame so the client clock can't locally auto-pause / go
 +            // stale-Scale between the ~0.5s host stamps (which would freeze + then jump the client's
 +            // NavigateRoutine craft motion). Host-driven, self-guarded equality; no-op on host / before
 +            // the first stamp (gated inside ParityTick via NetworkEngine.IsActive/IsHost + _hasState).
-+            Multipleer.Network.CommandSync.ClientTimeMirror.ParityTick();
++            Multiplayer.Network.CommandSync.ClientTimeMirror.ParityTick();
 +            // INC-3a: host all-faction vehicle state mirror (0x35 GeoStateDiff). Host-only inside Tick. Kept ON so
 +            // the DISCRETE state (CurrentSite/DestinationSites/Travelling/HitPoints) still mirrors; the per-tick
 +            // POSITION write is gated off inside GeoBridge.ApplyVehicleState when !USE_TRANSFORM_STREAM.
-             Multipleer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
+             Multiplayer.Network.CommandSync.GeoStateSyncBroadcaster.Tick(this, Time.deltaTime);
              // INC-3a render smoothing: CLIENT-only per-frame ease of mirrored vehicle icons between the ~10Hz
 -            // host snapshots (pure render — no extrapolation, no sim). Self-gates to client inside Tick (host skips).
--            Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
+-            Multiplayer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
 +            // host snapshots (pure render). PIVOT Step A: OFF when command-replication drives motion — the client's
 +            // own NavigateRoutine now positions the icon; an interpolator tick would overwrite it. Gated for fast revert.
 +            if (USE_TRANSFORM_STREAM)
-+                Multipleer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
++                Multiplayer.Network.CommandSync.ClientVehicleInterpolator.Tick(Time.deltaTime);
          }
  
          // ─── Internal Handlers ────────────────────────────────────────────
-@@ -491,6 +519,9 @@ namespace Multipleer.Network
+@@ -491,6 +519,9 @@ namespace Multiplayer.Network
  
                  case PacketType.CampaignActionApproved:
                      var campResult = MessageSerializer.DeserializeCampaignAction(msg.Payload);
 +                    // DIAG-A1 TEMP (strip after RCA) — boundary (c): client received the host result on 0x31.
 +                    // hasSubscriber tells us if HandleResult is wired (CommandRelay.Attach); if 0 the edge is dead here.
-+                    Debug.Log($"[Multipleer] DIAG-A1 client recv host action result type={campResult.ActionType} target={campResult.TargetId} subscribers={(OnHostCampaignActionResult != null ? OnHostCampaignActionResult.GetInvocationList().Length : 0)}"); // DIAG-A1 TEMP (strip after RCA)
++                    Debug.Log($"[Multiplayer] DIAG-A1 client recv host action result type={campResult.ActionType} target={campResult.TargetId} subscribers={(OnHostCampaignActionResult != null ? OnHostCampaignActionResult.GetInvocationList().Length : 0)}"); // DIAG-A1 TEMP (strip after RCA)
                      OnHostCampaignActionResult?.Invoke(campResult);
                      break;
  

@@ -2,21 +2,21 @@ using System;
 using System.IO;
 using UnityEngine;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Persistent per-user identity for the local player.
     /// The playerGUID is generated once on first run and reused across sessions; it is the
     /// stable key for permissions/ownership (independent of the per-session transport peerID).
     ///
-    /// Storage: &lt;Application.persistentDataPath&gt;/Multipleer/identity.json — INTERIM location.
+    /// Storage: &lt;Application.persistentDataPath&gt;/Multiplayer/identity.json — INTERIM location.
     /// NOTE (OPEN SDK Q): the PP per-user config dir that survives a mod update is unconfirmed
     /// (docs/specs/03-open-questions-sdk.md → "Persistent Config Location"). persistentDataPath is
     /// the grounded always-available Unity default; revisit before release.
     /// </summary>
     public static class ClientIdentity
     {
-        private const string DirName = "Multipleer";
+        private const string DirName = "Multiplayer";
         private const string FileName = "identity.json";
         private const string GuidPrefix = "\"playerGUID\":\"";
 
@@ -42,12 +42,12 @@ namespace Multipleer.Network
             _loaded = true;
 
             // Local 2-instance test seam: a distinct GUID can be injected via the
-            // MULTIPLEER_IDENTITY env var so a 2nd instance on the same machine (which
+            // MULTIPLAYER_IDENTITY env var so a 2nd instance on the same machine (which
             // shares persistentDataPath/identity.json) gets its own player identity.
             // The override is process-scoped only; it is never persisted to identity.json.
             try
             {
-                var envOverride = System.Environment.GetEnvironmentVariable("MULTIPLEER_IDENTITY");
+                var envOverride = System.Environment.GetEnvironmentVariable("MULTIPLAYER_IDENTITY");
                 if (!string.IsNullOrEmpty(envOverride) &&
                     Guid.TryParse(envOverride, out var fromEnv) && fromEnv != Guid.Empty)
                 {
@@ -57,7 +57,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer] ClientIdentity env override failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] ClientIdentity env override failed: " + e.Message);
             }
 
             try
@@ -74,7 +74,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer] ClientIdentity load failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] ClientIdentity load failed: " + e.Message);
             }
 
             // First run (or unreadable/empty file): generate once and persist.
@@ -92,7 +92,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer] ClientIdentity save failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] ClientIdentity save failed: " + e.Message);
             }
         }
 

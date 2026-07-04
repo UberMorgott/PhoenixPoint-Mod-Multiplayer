@@ -28,7 +28,7 @@ change is consuming pos+rot via a timestamped buffer instead of re-running nativ
 > strip DIAG (`b753111`+`fbfb3f9`+DIAG/INC-C lines), remove dead `InterpolationMath.cs` (+ tests), re-tune.
 
 **Tech stack:** C# net472, HarmonyLib (`AccessTools`; mod NEVER hard-references game types — params typed
-`object`), xUnit 2.9.2 (`Multipleer.Tests`, pure cores TDD-first), existing `NetworkEngine`
+`object`), xUnit 2.9.2 (`Multiplayer.Tests`, pure cores TDD-first), existing `NetworkEngine`
 (`BroadcastUnreliable:207`/`BroadcastToAll`, `RouteMessage` `0x35` case `:625`, `Update` tick `:373`),
 existing `GeoStateDiffCodec`/`GeoVehicleStateDiffer` (wire — KEEP), `GeoBridge` (`PlaceGlobeIconAt:534`,
 `NowSeconds:551`, `ApplyVehicleStateFull:466`, `FindVehicleByFactionAndId:175`), the slaved clock
@@ -38,7 +38,7 @@ existing `GeoStateDiffCodec`/`GeoVehicleStateDiffer` (wire — KEEP), `GeoBridge
 
 ## In-game checkpoint (the GATE)
 
-2-instance co-op (`multipleer-second-instance-setup`: Goldberg-emu 2nd copy + `mklink /J` junctions;
+2-instance co-op (`multiplayer-second-instance-setup`: Goldberg-emu 2nd copy + `mklink /J` junctions;
 deploy the Release DLL to BOTH copies). HOST + CLIENT, shared campaign, client joined past load (geo-sim
 inert). **Precondition:** a Phoenix Manticore AND a non-Phoenix (NJ Thunderbird) craft on the geoscape.
 Each increment has its own PASS criteria below; do NOT advance on a fail (`superpowers:systematic-debugging`).
@@ -47,11 +47,11 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ## Build / Test / Deploy
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-**In-game (2-instance):** per `multipleer-second-instance-setup`.
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+**In-game (2-instance):** per `multiplayer-second-instance-setup`.
 
-> **Test linking:** `Multipleer.Tests/Multipleer.Tests.csproj` has `EnableDefaultCompileItems=false`;
+> **Test linking:** `Multiplayer.Tests/Multiplayer.Tests.csproj` has `EnableDefaultCompileItems=false`;
 > pure cores are linked individually (`InterpolationMath.cs` link already present). Any new PURE file
 > under test needs its own `<Compile Include="..\src\..."><Link>X.cs</Link></Compile>` line.
 
@@ -236,7 +236,7 @@ Each increment has its own PASS criteria below; do NOT advance on a fail (`super
 
 ### Task C1 — Pure `SnapshotBuffer` / alpha+bracket math + tests  *(pure → TDD)*
 
-- [ ] FAILING TESTS FIRST in `Multipleer.Tests/SnapshotBufferTests.cs`:
+- [ ] FAILING TESTS FIRST in `Multiplayer.Tests/SnapshotBufferTests.cs`:
   - (a) `Alpha(rt, t0, t1)` = `clamp01((rt−t0)/(t1−t0))`; endpoints → 0 / 1; rt outside → clamped;
         `t1==t0` → defined (return 1, no div-by-zero).
   - (b) bracket selection over a ring: given samples at increasing T, find `s0,s1` with `s0.T ≤ rt ≤ s1.T`;

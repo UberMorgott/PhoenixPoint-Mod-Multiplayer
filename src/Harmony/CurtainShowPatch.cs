@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.UI;
+using Multiplayer.Network;
+using Multiplayer.UI;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// SHOW + HIDE seam on the native curtain (OnLevelStateChanged). SHOW the co-op load overlay
@@ -45,10 +45,10 @@ namespace Multipleer.Harmony
                 var coord = engine.SaveTransfer;
                 if (coord == null || !coord.SessionStarted) return true;   // non-co-op: native lift as normal
                 if (coord.Revealed) return true;                            // already revealed: let it lift
-                Debug.Log("[Multipleer] curtain Loaded→Playing: SUPPRESS auto-lift (co-op hold)");
+                Debug.Log("[Multiplayer] curtain Loaded→Playing: SUPPRESS auto-lift (co-op hold)");
                 return false; // skip native LiftCurtain; deferred lift happens on RevealAll
             }
-            catch (Exception e) { Debug.LogError("[Multipleer] CurtainShowPatch.Prefix failed: " + e.Message); return true; }
+            catch (Exception e) { Debug.LogError("[Multiplayer] CurtainShowPatch.Prefix failed: " + e.Message); return true; }
         }
 
         // Signature: OnLevelStateChanged(Level level, Level.State prevState, Level.State newState).
@@ -99,18 +99,18 @@ namespace Multipleer.Harmony
                 // so InPhase2 (begun && !loadComplete) is what makes the client show its overlay.
                 if (!(coord.TransferActive || coord.InPhase2))
                 {
-                    Debug.Log($"[Multipleer] curtain Loading: TransferActive={coord.TransferActive} " +
+                    Debug.Log($"[Multiplayer] curtain Loading: TransferActive={coord.TransferActive} " +
                               $"InPhase2={coord.InPhase2} → skip ShowLoadOverlay");
                     return;
                 }
 
-                Debug.Log($"[Multipleer] curtain Loading: TransferActive={coord.TransferActive} " +
+                Debug.Log($"[Multiplayer] curtain Loading: TransferActive={coord.TransferActive} " +
                           $"InPhase2={coord.InPhase2} → ShowLoadOverlay");
                 MultiplayerUI.Instance?.ShowLoadOverlay();
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] CurtainShowPatch failed: " + e.Message);
+                Debug.LogError("[Multiplayer] CurtainShowPatch failed: " + e.Message);
             }
         }
     }

@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Host-driven facility completion (construction/repair finished). Wire payload:

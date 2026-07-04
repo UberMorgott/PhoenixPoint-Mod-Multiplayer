@@ -1,4 +1,4 @@
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// The co-op lobby lifecycle states. <c>Starting</c> / <c>InGame</c> internals are out of axis

@@ -6,13 +6,13 @@
 
 **Architecture:** Host-authoritative thin-client (fixed; not re-litigated — PP is non-deterministic so lockstep is unviable). Extends the existing Stage-1 CommandSync pipeline unchanged: a new `CampaignActionType.SetTimeState` flows through the SAME `Harmony prefix → CampaignActionRequest 0x30 → HostArbiter (PermissionGate ControlTime) → CommandRelay.ApplyResult → BroadcastCampaignActionResult 0x31` path used by `StartTravel`. On top of the discrete command path, a continuous **clock mirror** runs: the host periodically (and on every time change / auto-pause) broadcasts its `Timing.RecordInstanceData()` over `0x34 CampaignStateUpdate`; the client applies it via `Timing.ProcessInstanceData`, forcing displayed `Now`/`Scale`/`Paused` to the host and correcting frame-rate drift (R2). The client's own hourly authoritative sim is hard-suppressed by a Harmony prefix on `GeoLevelController.LevelHourlyUpdateCrt` that skips the body but keeps the coroutine rescheduling so the displayed clock still advances.
 
-**Tech Stack:** C# (net472), HarmonyLib (`AccessTools`/`Traverse` dynamic resolution — mod never hard-references game types), xUnit 2.9.2 (`Multipleer.Tests`), existing `CampaignAction` packet skeleton (`0x30/0x31/0x32`) + `0x34 CampaignStateUpdate` (stub, implemented here), `NetworkEngine` campaign events + per-frame `Update()` driver (`MultipleerMain.Update → NetworkEngine.Update`), `PermissionManager` per-GUID `ControlTime = 1<<7`.
+**Tech Stack:** C# (net472), HarmonyLib (`AccessTools`/`Traverse` dynamic resolution — mod never hard-references game types), xUnit 2.9.2 (`Multiplayer.Tests`), existing `CampaignAction` packet skeleton (`0x30/0x31/0x32`) + `0x34 CampaignStateUpdate` (stub, implemented here), `NetworkEngine` campaign events + per-frame `Update()` driver (`MultiplayerMain.Update → NetworkEngine.Update`), `PermissionManager` per-GUID `ControlTime = 1<<7`.
 
 ---
 
 ## Grounding notes (verified against real source + decompile — read before coding)
 
-### Mod (extend, don't reinvent) — `E:\DEV\PhoenixPoint\Multipleer\src`
+### Mod (extend, don't reinvent) — `E:\DEV\PhoenixPoint\Multiplayer\src`
 - **`CampaignActionType` enum** `src/Network/MessageLayer/MessageSerializer.cs:533-549` currently `0..13` (`StartTravel = 13`). Append **`SetTimeState = 14`**.
 - **`CampaignActionMessage`** `:561-568` = `ActionId(Guid)`, `ActionType`, `TargetId(string)`, `Payload(byte[])`, `Timestamp(long)` — **no `ActorId`**. `SerializeCampaignAction`/`DeserializeCampaignAction` `:48-78` round-trip it; reused unchanged (time payload rides in `Payload`, `TargetId=""`).
 - **Stage-1 pipeline to mirror:**
@@ -28,12 +28,12 @@
 - **`NetworkEngine`** `src/Network/NetworkEngine.cs`:
   - `BroadcastCampaignActionResult` `:288-293` (0x31 fan-out) reused unchanged.
   - `BroadcastCampaignState(byte[])` `:295-300` wraps `SerializeGameState("campaign",...)` into `0x34` — **NOT reused** (its framing is generic; this increment defines a typed timing path). `0x34 CampaignStateUpdate` **receive-case is a TODO** `:534-536` — implemented here.
-  - `Update()` `:304-308` (`Transport/Session/SaveTransfer`) — host clock-mirror broadcaster ticked here; called every frame by `MultipleerMain.Update():55-58`.
+  - `Update()` `:304-308` (`Transport/Session/SaveTransfer`) — host clock-mirror broadcaster ticked here; called every frame by `MultiplayerMain.Update():55-58`.
   - `RouteMessage` `0x34` case `:534` currently empty.
 - **`CampaignPermission.ControlTime = 1<<7`** `src/Validation/PermissionManager.cs:18`; `HasCampaignPermission(Guid, perm)` honours `FullCommander` override `:88-97`. Unity-free → unit-linkable.
-- **Patch registration:** `MultipleerMain.OnModEnabled` `:24-25` does `harmony.PatchAll(Assembly.GetExecutingAssembly())` → **new Harmony patch classes auto-discover; no manual registration**.
-- **Test linkage** `Multipleer.Tests/Multipleer.Tests.csproj` — `EnableDefaultCompileItems=false`; pure cores linked via `<Compile Include="..\src\...\X.cs"><Link>`. `MessageSerializer.cs`, `CommandCodec.cs`, `PermissionManager.cs`, `PermissionGate.cs`, `InterceptRegistry.cs` already linked. New pure codec types live in `CommandCodec.cs` (already linked → no csproj edit for the codec).
-- **Main `Multipleer.csproj`** has no `EnableDefaultCompileItems=false` / no explicit `<Compile>` → SDK globs `src/**/*.cs`. **New src files need no csproj edit.**
+- **Patch registration:** `MultiplayerMain.OnModEnabled` `:24-25` does `harmony.PatchAll(Assembly.GetExecutingAssembly())` → **new Harmony patch classes auto-discover; no manual registration**.
+- **Test linkage** `Multiplayer.Tests/Multiplayer.Tests.csproj` — `EnableDefaultCompileItems=false`; pure cores linked via `<Compile Include="..\src\...\X.cs"><Link>`. `MessageSerializer.cs`, `CommandCodec.cs`, `PermissionManager.cs`, `PermissionGate.cs`, `InterceptRegistry.cs` already linked. New pure codec types live in `CommandCodec.cs` (already linked → no csproj edit for the codec).
+- **Main `Multiplayer.csproj`** has no `EnableDefaultCompileItems=false` / no explicit `<Compile>` → SDK globs `src/**/*.cs`. **New src files need no csproj edit.**
 
 ### Decompile signatures (verified `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src`)
 
@@ -98,11 +98,11 @@
 | `src/Validation/ActionValidator.cs` | `GetRequiredPermission`: `case SetTimeState: return ControlTime;`. |
 | `src/Network/CommandSync/CommandExecutor.cs` | `case SetTimeState: ApplySetTime(action);` + `ApplySetTime` (via `TimeBridge`). |
 | `src/Network/NetworkEngine.cs` | Add `BroadcastTimingState(TimeStatePayload)` (→ `0x34`, subtype `0x01`); implement `0x34` receive-case → decode subtype `0x01` → `ClientTimeMirror.Apply`; tick `TimeSyncBroadcaster` from `Update()` (host-only). |
-| `Multipleer.Tests/Multipleer.Tests.csproj` | No new links needed — `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs`, `MessageSerializer.cs` already linked. (Verify before assuming; if a future split moves a pure type out, link it.) |
+| `Multiplayer.Tests/Multiplayer.Tests.csproj` | No new links needed — `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs`, `MessageSerializer.cs` already linked. (Verify before assuming; if a future split moves a pure type out, link it.) |
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-**In-game (integration, 2-instance):** per `multipleer-second-instance-setup` — launch host + Goldberg-emu second instance; one hosts a geoscape campaign, the other joins with `ControlTime` granted; verify pause/resume/speed from EITHER peer mirrors on BOTH, the client clock follows the host with no independent hour-tick, and host auto-pause (aircraft arrival) pauses both.
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+**In-game (integration, 2-instance):** per `multiplayer-second-instance-setup` — launch host + Goldberg-emu second instance; one hosts a geoscape campaign, the other joins with `ControlTime` granted; verify pause/resume/speed from EITHER peer mirrors on BOTH, the client clock follows the host with no independent hour-tick, and host auto-pause (aircraft arrival) pauses both.
 
 ---
 
@@ -111,12 +111,12 @@
 **Files:**
 - Modify `src/Network/MessageLayer/MessageSerializer.cs` (enum, `:548`)
 - Modify `src/Network/CommandSync/CommandCodec.cs` (add `SetTimePayload` + codec)
-- Test: `Multipleer.Tests/SetTimeCodecTests.cs` (Create)
+- Test: `Multiplayer.Tests/SetTimeCodecTests.cs` (Create)
 
 **Steps:**
 - [ ] Write failing test `SetTimeCodecTests.cs`:
   ```csharp
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network.CommandSync;
   using Xunit;
 
   public class SetTimeCodecTests
@@ -141,13 +141,13 @@
   }
   ```
 - [ ] Run — expect FAIL (compile error: `SetTimePayload`/`EncodeSetTime` missing):
-  `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter SetTimeCodecTests`
+  `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter SetTimeCodecTests`
 - [ ] Add enum value — `MessageSerializer.cs`, change the last line of `CampaignActionType`:
   ```csharp
           StartTravel = 13,
           SetTimeState = 14
   ```
-- [ ] Implement codec in `CommandCodec.cs` (append inside the `Multipleer.Network.CommandSync` namespace):
+- [ ] Implement codec in `CommandCodec.cs` (append inside the `Multiplayer.Network.CommandSync` namespace):
   ```csharp
   public struct SetTimePayload
   {
@@ -179,7 +179,7 @@
   ```
 - [ ] Run — expect PASS: `dotnet test … --filter SetTimeCodecTests`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): SetTimeState action type + SetTime payload codec"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): SetTimeState action type + SetTime payload codec"`
 
 ---
 
@@ -187,12 +187,12 @@
 
 **Files:**
 - Modify `src/Network/CommandSync/CommandCodec.cs` (add `TimeStatePayload` + codec)
-- Test: `Multipleer.Tests/TimeStateCodecTests.cs` (Create)
+- Test: `Multiplayer.Tests/TimeStateCodecTests.cs` (Create)
 
 **Steps:**
 - [ ] Write failing test `TimeStateCodecTests.cs`:
   ```csharp
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network.CommandSync;
   using Xunit;
 
   public class TimeStateCodecTests
@@ -268,7 +268,7 @@
   ```
 - [ ] Run — expect PASS: `dotnet test … --filter TimeStateCodecTests`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): TimeState clock-mirror payload codec (TimeUnit ticks)"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): TimeState clock-mirror payload codec (TimeUnit ticks)"`
 
 ---
 
@@ -277,7 +277,7 @@
 **Files:**
 - Modify `src/Network/CommandSync/PermissionGate.cs` (`RequiredPermission` switch)
 - Modify `src/Validation/ActionValidator.cs` (`GetRequiredPermission` switch — keep the two in sync)
-- Test: `Multipleer.Tests/PermissionGateTests.cs` (Modify — add cases)
+- Test: `Multiplayer.Tests/PermissionGateTests.cs` (Modify — add cases)
 
 **Steps:**
 - [ ] Add failing tests to `PermissionGateTests.cs`:
@@ -318,7 +318,7 @@
   ```
 - [ ] Run — expect PASS: `dotnet test … --filter PermissionGateTests`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): gate SetTimeState on ControlTime in PermissionGate + ActionValidator"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): gate SetTimeState on ControlTime in PermissionGate + ActionValidator"`
 
 ---
 
@@ -326,7 +326,7 @@
 
 **Files:**
 - Modify `src/Network/CommandSync/InterceptRegistry.cs` (`_entries`)
-- Test: `Multipleer.Tests/InterceptRegistryTests.cs` (Modify — add case)
+- Test: `Multiplayer.Tests/InterceptRegistryTests.cs` (Modify — add case)
 
 **Steps:**
 - [ ] Add failing test to `InterceptRegistryTests.cs`:
@@ -357,7 +357,7 @@
   ```
 - [ ] Run — expect PASS: `dotnet test … --filter InterceptRegistryTests`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): register SetTimeState intercept entry (ControlTime, confirmed)"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): register SetTimeState intercept entry (ControlTime, confirmed)"`
 
 ---
 
@@ -373,9 +373,9 @@
   ```csharp
   using System;
   using HarmonyLib;
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network.CommandSync;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Unity-side id<->engine bridge for time sync. AccessTools/Traverse only — the mod never
       // hard-references game types (matches GeoBridge). Reaches the live UIModuleTimeControl via
@@ -514,9 +514,9 @@
   }
   ```
   > NOTE — verify against the live DLL at implementation time (R8): `GeoLevelController.View` (the `GeoscapeView` accessor used here) — doc-12 cites `GeoscapeView` reached via the level; confirm the property name `View` on `GeoLevelController` (or substitute the real accessor) before relying on `GetGeoscapeView`. If `View` is absent, fall back to `UnityEngine.Object.FindObjectOfType(UIModuleTimeControl)` in `GetTimeControlModule`. (Build will compile either way — it's reflection — so this is an in-game check.)
-- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): TimeBridge reflection accessors (module + clock record/apply)"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): TimeBridge reflection accessors (module + clock record/apply)"`
 
 ---
 
@@ -546,10 +546,10 @@
               TimeBridge.ApplySetTime(p);
           }
   ```
-- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-- [ ] Run full suite — expect PASS (no regression): `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+- [ ] Run full suite — expect PASS (no regression): `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): CommandExecutor.ApplySetTime drives live time module under IsApplying"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): CommandExecutor.ApplySetTime drives live time module under IsApplying"`
 
 ---
 
@@ -567,11 +567,11 @@
   using System;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
-  using Multipleer.Network.CommandSync;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network;
+  using Multiplayer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       // Client intercept of the pause funnel UIModuleTimeControl.OnPauseTime(bool). Client -> encode a
       // SetTimeState{Paused=arg, PresetIndex=current} + relay to host + block local write (return false).
@@ -621,11 +621,11 @@
   using System;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
-  using Multipleer.Network.CommandSync;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network;
+  using Multiplayer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       // Client intercept of the speed funnel UIModuleTimeControl.SelectTimePreset(int). Client -> encode a
       // SetTimeState{Paused=current, PresetIndex=arg} + relay + block local write. Host re-applies via the
@@ -671,9 +671,9 @@
   }
   ```
   > Host-origin note: unlike `StartTravel`, the host time path needs **no postfix broadcast of the discrete action** — the host's authoritative clock change is propagated by the continuous `TimeSyncBroadcaster` (Task 8) which catches the host's own `SetGamePauseState`/scale change and pushes `0x34`. So the host simply executes its own UI write (`return true`) and the mirror fans out. (Keeping no postfix avoids a redundant 0x31 round-trip for time.)
-- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): client intercept prefixes for pause + speed -> SetTimeState to host"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): client intercept prefixes for pause + speed -> SetTimeState to host"`
 
 ---
 
@@ -691,7 +691,7 @@
   ```csharp
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Host-only continuous clock mirror. Ticked from NetworkEngine.Update() every frame; throttles a
       // 0x34 TimingState broadcast to ~0.5s of real time, plus BroadcastNow() for immediate push after a
@@ -727,7 +727,7 @@
   ```csharp
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Client-only apply of a host clock snapshot (0x34, subtype TimingState). Forces the local clock to
       // host via Timing.ProcessInstanceData (TimeBridge.ApplyTimeState) -> displayed Now/Scale/Paused match
@@ -740,7 +740,7 @@
               var engine = NetworkEngine.Instance;
               if (engine == null || !engine.IsActive || engine.IsHost) return;
               try { TimeBridge.ApplyTimeState(payload); }
-              catch (System.Exception ex) { Debug.LogError($"[Multipleer] ClientTimeMirror apply failed: {ex}"); }
+              catch (System.Exception ex) { Debug.LogError($"[Multiplayer] ClientTimeMirror apply failed: {ex}"); }
           }
       }
   }
@@ -749,9 +749,9 @@
   ```csharp
           // Host -> all: authoritative geoscape clock snapshot. 0x34 payload = [subtype:byte][body];
           // subtype 0x01 = TimingState (Increment-1). Future increments add 0x02 = WorldDelta.
-          public void BroadcastTimingState(Multipleer.Network.CommandSync.TimeStatePayload payload)
+          public void BroadcastTimingState(Multiplayer.Network.CommandSync.TimeStatePayload payload)
           {
-              var body = Multipleer.Network.CommandSync.CommandCodec.EncodeTimeState(payload);
+              var body = Multiplayer.Network.CommandSync.CommandCodec.EncodeTimeState(payload);
               var buf = new byte[body.Length + 1];
               buf[0] = 0x01; // TimingState subtype
               System.Array.Copy(body, 0, buf, 1, body.Length);
@@ -766,8 +766,8 @@
                       {
                           var body = new byte[msg.Payload.Length - 1];
                           System.Array.Copy(msg.Payload, 1, body, 0, body.Length);
-                          var ts = Multipleer.Network.CommandSync.CommandCodec.DecodeTimeState(body);
-                          Multipleer.Network.CommandSync.ClientTimeMirror.Apply(ts);
+                          var ts = Multiplayer.Network.CommandSync.CommandCodec.DecodeTimeState(body);
+                          Multiplayer.Network.CommandSync.ClientTimeMirror.Apply(ts);
                       }
                       break;
   ```
@@ -778,14 +778,14 @@
               Transport?.Update();
               Session?.Update();
               SaveTransfer?.Update();
-              Multipleer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
+              Multiplayer.Network.CommandSync.TimeSyncBroadcaster.Tick(this, Time.deltaTime);
           }
   ```
   (`Time` is `UnityEngine.Time`; `NetworkEngine.cs` already `using UnityEngine;` — confirm the using at the top; add if missing.)
-- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-- [ ] Run full suite — expect PASS: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+- [ ] Run full suite — expect PASS: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
 - [ ] Commit:
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): host clock-mirror broadcaster + client 0x34 TimingState apply"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): host clock-mirror broadcaster + client 0x34 TimingState apply"`
 
 ---
 
@@ -803,9 +803,9 @@
   using System;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
+  using Multiplayer.Network;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       // R1 fix: on the CLIENT, skip GeoLevelController.LevelHourlyUpdateCrt's heavy authoritative body
       // (income/research/manufacture/recruits/faction AI/interception) so it never double-simulates. The
@@ -858,10 +858,10 @@
   ```csharp
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network;
+  using Multiplayer.Network.CommandSync;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       // Auto-pause sync at the single funnel GeoscapeView.SetGamePauseState(bool) — every auto-pause
       // (vehicle arrival, event popup, mission launch via RequestGamePause->RequestPauseCrt) flips
@@ -903,16 +903,16 @@
   }
   ```
   > Verify (R5/R8) in-game: the host's `SetGamePauseState` TimeLimit guard still works host-side (unaffected — we only postfix). The client never calls the guard (prefix-blocked) and is driven by `ProcessInstanceData`, which bypasses it — confirm the client does not get stuck paused at `TimeLimit` while host runs.
-- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-- [ ] Run full suite — expect PASS (no regression): `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-- [ ] **In-game 2-instance verification** (replaces unit tests for this task; per `multipleer-second-instance-setup`):
+- [ ] Build — expect SUCCESS: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+- [ ] Run full suite — expect PASS (no regression): `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+- [ ] **In-game 2-instance verification** (replaces unit tests for this task; per `multiplayer-second-instance-setup`):
   - [ ] Host a campaign; client joins with `ControlTime` granted. Client presses pause → BOTH pause; client increases speed → BOTH change speed; host pause/speed → BOTH mirror. (D1/D2/D3 + Task 7.)
   - [ ] Let time run several in-game hours: confirm the **client clock advances** (display) but client-side resource income / research progress do NOT tick independently (only host's do). (R1 / D4 — `ClientHourlySimSuppressPatch`.)
   - [ ] Send a host aircraft to a site; on arrival the host auto-pauses → the **client auto-pauses too**; the client does NOT independently auto-pause on its own UI events. (D6 — `AutoPauseSyncPatch`.)
   - [ ] Force a brief FPS gap on the client; confirm the clock snaps back to host within ~0.5s (the periodic `0x34` mirror corrects drift). (R2.)
   - [ ] Revoke `ControlTime` from the client; client pause/speed inputs are rejected (no effect), host-only time control. (Permission gate.)
 - [ ] Commit (after in-game pass):
-  `git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(time-sync): freeze client hourly sim (R1) + host auto-pause propagation"`
+  `git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(time-sync): freeze client hourly sim (R1) + host auto-pause propagation"`
 
 ---
 

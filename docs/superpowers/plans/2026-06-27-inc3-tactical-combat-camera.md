@@ -10,9 +10,9 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-27-inc3-tactical-combat-camera-design.md`
 
-**Pre-req:** Inc2 (Facing) is committed (`74b462c`), tree clean. Build/test from repo root `E:\DEV\PhoenixPoint\Multipleer`:
-- Build: `dotnet build Multipleer.csproj`
-- Test: `dotnet test Multipleer.Tests\Multipleer.Tests.csproj`
+**Pre-req:** Inc2 (Facing) is committed (`74b462c`), tree clean. Build/test from repo root `E:\DEV\PhoenixPoint\Multiplayer`:
+- Build: `dotnet build Multiplayer.csproj`
+- Test: `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj`
 
 **Shared-tree discipline:** A parallel session may touch tactical files. Before each commit run `git status --short`; stage ONLY the files named in the task, BY NAME (never `git add -A`). If build/test fails in files you did not touch, that is a concurrent edit — report, do not fix.
 
@@ -21,7 +21,7 @@
 ## File Structure
 
 - `src/Sync/Tactical/ClientEnemyTurnCameraGate.cs` — NEW. Pure Unity-free policy: chase only on enemy turn + resolved actor. Mirrors `ClientEnemyTurnPresentationGate`.
-- `Multipleer.Tests/ClientEnemyTurnCameraGateTests.cs` — NEW. xUnit tests for the gate.
+- `Multiplayer.Tests/ClientEnemyTurnCameraGateTests.cs` — NEW. xUnit tests for the gate.
 - `src/Sync/Tactical/TacticalEnemyTurnCamera.cs` — NEW. Reflective engine helper: push `CameraHint.ChaseTarget` for an actor (follow transform or snap to pos). One responsibility: the chase call.
 - `src/Sync/Tactical/TacticalTurnSync.cs` — MODIFY. Add `IsClientEnemyTurn` static flag, set in `ClientOnTurn`.
 - `src/Sync/Tactical/TacticalDeploySync.cs` — MODIFY. Clear the flag in `OnMissionExit`.
@@ -29,7 +29,7 @@
 - `src/Sync/Tactical/TacticalMeleeAnimSync.cs` — MODIFY. Inject chase (attacker) in `ClientOnMeleeStart`.
 - `src/Sync/Tactical/TacticalMoveSync.cs` — MODIFY. Inject chase (follow actor) in `ClientOnMoveStart`.
 - (Conditional) explosion-VFX + ordering patches — only if Task 5 proves them broken.
-- (Finalize) `docs/COOP-SYNC-ROADMAP.md`, memory `multipleer-mod-status.md`, stale "stub" comments.
+- (Finalize) `docs/COOP-SYNC-ROADMAP.md`, memory `multiplayer-mod-status.md`, stale "stub" comments.
 
 > Line numbers below are post-Inc2-commit anchors from grounding. RE-CONFIRM each by reading the file before editing — a concurrent session may have shifted them. Locate by the quoted surrounding code, not the bare number.
 
@@ -78,7 +78,7 @@ try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }
 
 - [ ] **Step 4: Build**
 
-Run: `dotnet build Multipleer.csproj`
+Run: `dotnet build Multiplayer.csproj`
 Expected: Build succeeded, 0 Error, 0 Warning.
 
 - [ ] **Step 5: Commit**
@@ -86,7 +86,7 @@ Expected: Build succeeded, 0 Error, 0 Warning.
 ```bash
 git status --short
 git add "src/Sync/Tactical/TacticalTurnSync.cs" "src/Sync/Tactical/TacticalDeploySync.cs"
-git commit -m "feat(multipleer-tac): client enemy-turn flag for cinematic camera [Inc3]"
+git commit -m "feat(multiplayer-tac): client enemy-turn flag for cinematic camera [Inc3]"
 ```
 
 ---
@@ -95,13 +95,13 @@ git commit -m "feat(multipleer-tac): client enemy-turn flag for cinematic camera
 
 **Files:**
 - Create: `src/Sync/Tactical/ClientEnemyTurnCameraGate.cs`
-- Test: `Multipleer.Tests/ClientEnemyTurnCameraGateTests.cs`
+- Test: `Multiplayer.Tests/ClientEnemyTurnCameraGateTests.cs`
 
 Model EXACTLY on the sibling `ClientEnemyTurnPresentationGate.cs` + `ClientEnemyTurnPresentationGateTests.cs` (same namespace, usings, doc-comment style).
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `Multipleer.Tests/ClientEnemyTurnCameraGateTests.cs`. Match the `using`/`namespace` header of `ClientEnemyTurnPresentationGateTests.cs` exactly, then:
+Create `Multiplayer.Tests/ClientEnemyTurnCameraGateTests.cs`. Match the `using`/`namespace` header of `ClientEnemyTurnPresentationGateTests.cs` exactly, then:
 
 ```csharp
 public class ClientEnemyTurnCameraGateTests
@@ -122,15 +122,15 @@ public class ClientEnemyTurnCameraGateTests
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `dotnet test Multipleer.Tests\Multipleer.Tests.csproj`
+Run: `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj`
 Expected: FAIL — `ClientEnemyTurnCameraGate` does not exist (compile error).
 
 - [ ] **Step 3: Write the gate**
 
-Create `src/Sync/Tactical/ClientEnemyTurnCameraGate.cs` (use the namespace from the sibling gate, i.e. `Multipleer.Sync.Tactical`):
+Create `src/Sync/Tactical/ClientEnemyTurnCameraGate.cs` (use the namespace from the sibling gate, i.e. `Multiplayer.Sync.Tactical`):
 
 ```csharp
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Pure policy for the client enemy-turn cinematic camera: chase an actor only when the
@@ -147,15 +147,15 @@ namespace Multipleer.Sync.Tactical
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `dotnet test Multipleer.Tests\Multipleer.Tests.csproj`
+Run: `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj`
 Expected: PASS — all existing tests + 3 new green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status --short
-git add "src/Sync/Tactical/ClientEnemyTurnCameraGate.cs" "Multipleer.Tests/ClientEnemyTurnCameraGateTests.cs"
-git commit -m "feat(multipleer-tac): pure ClientEnemyTurnCameraGate.ShouldChaseEnemyAction [Inc3]"
+git add "src/Sync/Tactical/ClientEnemyTurnCameraGate.cs" "Multiplayer.Tests/ClientEnemyTurnCameraGateTests.cs"
+git commit -m "feat(multiplayer-tac): pure ClientEnemyTurnCameraGate.ShouldChaseEnemyAction [Inc3]"
 ```
 
 ---
@@ -177,7 +177,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Client-side enemy-turn cinematic camera. On the co-op mirror the enemy replay coroutines
@@ -226,7 +226,7 @@ namespace Multipleer.Sync.Tactical
             catch (Exception e)
             {
                 _resolveFailed = true;
-                Debug.LogWarning("[Multipleer][tac] enemy-turn camera resolve failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer][tac] enemy-turn camera resolve failed: " + e.Message);
             }
         }
 
@@ -261,7 +261,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer][tac] enemy-turn camera chase failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer][tac] enemy-turn camera chase failed: " + e.Message);
             }
         }
 
@@ -285,12 +285,12 @@ namespace Multipleer.Sync.Tactical
 
 - [ ] **Step 2: Build**
 
-Run: `dotnet build Multipleer.csproj`
+Run: `dotnet build Multiplayer.csproj`
 Expected: Build succeeded, 0 Error, 0 Warning. (If `Base.Cameras.*` type names mismatch, re-confirm against `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src\Base.Cameras\` and fix the `TypeByName` strings.)
 
 - [ ] **Step 3: Run tests (no regression)**
 
-Run: `dotnet test Multipleer.Tests\Multipleer.Tests.csproj`
+Run: `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj`
 Expected: PASS — full suite green.
 
 - [ ] **Step 4: Commit**
@@ -298,7 +298,7 @@ Expected: PASS — full suite green.
 ```bash
 git status --short
 git add "src/Sync/Tactical/TacticalEnemyTurnCamera.cs"
-git commit -m "feat(multipleer-tac): reflective enemy-turn camera chase helper [Inc3]"
+git commit -m "feat(multiplayer-tac): reflective enemy-turn camera chase helper [Inc3]"
 ```
 
 ---
@@ -347,9 +347,9 @@ if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEn
 
 - [ ] **Step 4: Build + test**
 
-Run: `dotnet build Multipleer.csproj`
+Run: `dotnet build Multiplayer.csproj`
 Expected: Build succeeded, 0 Error, 0 Warning.
-Run: `dotnet test Multipleer.Tests\Multipleer.Tests.csproj`
+Run: `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj`
 Expected: PASS — full suite green.
 
 - [ ] **Step 5: Commit**
@@ -357,7 +357,7 @@ Expected: PASS — full suite green.
 ```bash
 git status --short
 git add "src/Sync/Tactical/TacticalFireAnimSync.cs" "src/Sync/Tactical/TacticalMeleeAnimSync.cs" "src/Sync/Tactical/TacticalMoveSync.cs"
-git commit -m "feat(multipleer-tac): chase camera on enemy move/fire/melee replay [Inc3]"
+git commit -m "feat(multiplayer-tac): chase camera on enemy move/fire/melee replay [Inc3]"
 ```
 
 ---
@@ -372,7 +372,7 @@ Run: `.\deploy.ps1` (deploys to the game Mods dir; junction covers the 2nd insta
 
 - [ ] **Step 2: Camera checks (WS1)**
 
-Watch `[Multipleer][tac]` logs. On the ENEMY turn, the CLIENT camera must:
+Watch `[Multiplayer][tac]` logs. On the ENEMY turn, the CLIENT camera must:
 - Follow an enemy that MOVES (camera tracks the walk).
 - Snap to an enemy that SHOOTS (before/at the shot animation).
 - Snap to an enemy that MELEES.
@@ -411,14 +411,14 @@ Adjust the neuter so the VFX spawn runs while damage stays suppressed: narrow `P
 
 - [ ] **Step 3: Build, deploy, re-verify in-game**
 
-Run: `dotnet build Multipleer.csproj` → 0/0. Re-run Task 5 Step 4: explosion VFX now shows, damage still single, no double-apply.
+Run: `dotnet build Multiplayer.csproj` → 0/0. Re-run Task 5 Step 4: explosion VFX now shows, damage still single, no double-apply.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git status --short
 git add "src/Harmony/Tactical/FireAnimSyncPatches.cs"  # + any new patch file
-git commit -m "fix(multipleer-tac): replay grenade explosion VFX on client without damage [Inc3]"
+git commit -m "fix(multiplayer-tac): replay grenade explosion VFX on client without damage [Inc3]"
 ```
 
 ---
@@ -430,7 +430,7 @@ git commit -m "fix(multipleer-tac): replay grenade explosion VFX on client witho
 
 - [ ] **Step 1: Confirm the mis-ordering**
 
-From the in-game observation + `[Multipleer][tac]` logs, confirm a target's HP/impact applies before its incoming `tac.fire.start` animation begins (the roadmap-flagged `fire-start vs damage-delta` race).
+From the in-game observation + `[Multiplayer][tac]` logs, confirm a target's HP/impact applies before its incoming `tac.fire.start` animation begins (the roadmap-flagged `fire-start vs damage-delta` race).
 
 - [ ] **Step 2: Defer the damage delta until anim start**
 
@@ -438,14 +438,14 @@ Add an apply-order guard: when a `tac.fire.start` for a target is pending/active
 
 - [ ] **Step 3: Build, deploy, re-verify**
 
-Run: `dotnet build Multipleer.csproj` → 0/0; `dotnet test Multipleer.Tests\Multipleer.Tests.csproj` → green. Re-run Task 5: animation precedes damage.
+Run: `dotnet build Multiplayer.csproj` → 0/0; `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj` → green. Re-run Task 5: animation precedes damage.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git status --short
 git add "src/Sync/Tactical/TacticalFireAnimSync.cs" "src/Sync/Tactical/TacticalActorStateSync.cs"
-git commit -m "fix(multipleer-tac): order fire animation before damage delta on client [Inc3]"
+git commit -m "fix(multiplayer-tac): order fire animation before damage delta on client [Inc3]"
 ```
 
 ---
@@ -454,7 +454,7 @@ git commit -m "fix(multipleer-tac): order fire animation before damage delta on 
 
 **Files:**
 - Modify: `docs/COOP-SYNC-ROADMAP.md` (mark Inc3 status)
-- Modify (memory): `multipleer-mod-status.md`
+- Modify (memory): `multiplayer-mod-status.md`
 - Modify: `src/Sync/Tactical/TacticalLiveCodec.cs:458`, `src/Sync/Tactical/TacticalSyncSurfaces.cs:110` (drop stale melee "STUB" wording — melee is code-complete)
 
 - [ ] **Step 1: Update the roadmap**
@@ -467,16 +467,16 @@ At `TacticalLiveCodec.cs:458` and `TacticalSyncSurfaces.cs:110`, replace the mel
 
 - [ ] **Step 3: Update memory status**
 
-Update the `multipleer-mod-status.md` memory: Inc3 DONE, list what shipped (enemy-turn camera; melee in-game verified; explosion-VFX/ordering verified or fixed).
+Update the `multiplayer-mod-status.md` memory: Inc3 DONE, list what shipped (enemy-turn camera; melee in-game verified; explosion-VFX/ordering verified or fixed).
 
 - [ ] **Step 4: Build + test + commit**
 
-Run: `dotnet build Multipleer.csproj` → 0/0; `dotnet test Multipleer.Tests\Multipleer.Tests.csproj` → green.
+Run: `dotnet build Multiplayer.csproj` → 0/0; `dotnet test Multiplayer.Tests\Multiplayer.Tests.csproj` → green.
 
 ```bash
 git status --short
 git add "docs/COOP-SYNC-ROADMAP.md" "src/Sync/Tactical/TacticalLiveCodec.cs" "src/Sync/Tactical/TacticalSyncSurfaces.cs"
-git commit -m "docs(multipleer-tac): mark Inc3 done + drop stale melee stub comments [Inc3]"
+git commit -m "docs(multiplayer-tac): mark Inc3 done + drop stale melee stub comments [Inc3]"
 ```
 
 ---

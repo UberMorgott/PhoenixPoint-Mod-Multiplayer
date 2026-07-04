@@ -1,8 +1,8 @@
-# Multipleer Harmony Patches (as-built)
+# Multiplayer Harmony Patches (as-built)
 
 > The mod uses **Harmony** to intercept key methods of the original game. All gameplay patches are **Prefix** (run before the original method); returning `false` blocks the original, `true` lets it run. Patch-site research → [research/01-tactical-action-pipeline](../research/01-tactical-action-pipeline.md), [research/03-campaign-layer](../research/03-campaign-layer.md); reusable patch patterns → [research/06-harmony-patterns](../research/06-harmony-patterns.md).
 >
-> Lifecycle: `MultipleerMain.OnModEnabled()` calls `harmony.PatchAll(Assembly.GetExecutingAssembly())` — Harmony scans the assembly, finds every class with a `[HarmonyPatch]` attribute, and applies the patches automatically.
+> Lifecycle: `MultiplayerMain.OnModEnabled()` calls `harmony.PatchAll(Assembly.GetExecutingAssembly())` — Harmony scans the assembly, finds every class with a `[HarmonyPatch]` attribute, and applies the patches automatically.
 
 ## Patch Table
 

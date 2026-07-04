@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// CLIENT-ONLY HARD CHOKEPOINT that blocks EVERY client-LOCAL geoscape-event RAISE at the single
@@ -80,7 +80,7 @@ namespace Multipleer.Harmony.Sync
                 if (engine != null && engine.IsActiveSession && !engine.IsHost)
                     return false;                             // client: no local event raise ever
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ClientEventRaiseChokepointPatch.Prefix failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ClientEventRaiseChokepointPatch.Prefix failed: " + ex.Message); }
             return true;                                       // host (and any failure): native runs
         }
     }

@@ -14,7 +14,7 @@ using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Captures + clones NATIVE Phoenix Point UI widgets so the lobby and save-picker
@@ -97,7 +97,7 @@ namespace Multipleer.UI
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError("[Multipleer] CaptureFromMainMenu (menu font) failed: " + e.Message);
+                    Debug.LogError("[Multiplayer] CaptureFromMainMenu (menu font) failed: " + e.Message);
                 }
             }
         }
@@ -118,7 +118,7 @@ namespace Multipleer.UI
         ///     only disabled root canvases CONTAINING a UIModuleBehavior, left the logo's canvas
         ///     visible behind the lobby.
         /// So we now BROADEN the sweep: disable EVERY active root Canvas EXCEPT our own (the lobby
-        /// canvas and the Multipleer status-bar canvas — both children of ModGO). This is safe because
+        /// canvas and the Multiplayer status-bar canvas — both children of ModGO). This is safe because
         /// we record each canvas's prior enabled value and RestoreMenuChrome() puts every one back
         /// exactly, and because our own buttons render on the (excluded) lobby canvas and route input
         /// through the EventSystem (not a separate canvas), so disabling the rest cannot break them.
@@ -147,7 +147,7 @@ namespace Multipleer.UI
                 {
                     if (c == null || !c.isRootCanvas) continue;
                     if (c == lobbyCanvas) continue;                         // never disable the lobby's own canvas
-                    if (modRoot != null && c.transform.IsChildOf(modRoot))  // never disable any Multipleer canvas
+                    if (modRoot != null && c.transform.IsChildOf(modRoot))  // never disable any Multiplayer canvas
                         continue;                                           // (status bar lives under the same ModGO)
 
                     _hiddenCanvases.Add(new HiddenCanvas { Canvas = c, WasEnabled = c.enabled });
@@ -156,7 +156,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
+                Debug.LogError("[Multiplayer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
             }
 
             _chromeHidden = true;
@@ -266,7 +266,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] CloneScroller failed: " + e.Message);
+                Debug.LogError("[Multiplayer] CloneScroller failed: " + e.Message);
                 return null;
             }
         }
@@ -317,10 +317,10 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] CaptureLoadingBarTemplate failed: " + e.Message);
+                Debug.LogError("[Multiplayer] CaptureLoadingBarTemplate failed: " + e.Message);
                 result = null;
             }
-            Debug.Log("[Multipleer] loading-bar template " + (result != null ? "captured" : "NOT found"));
+            Debug.Log("[Multiplayer] loading-bar template " + (result != null ? "captured" : "NOT found"));
             return result;
         }
 
@@ -343,10 +343,10 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] CaptureLiveProgressBar failed: " + e.Message);
+                Debug.LogError("[Multiplayer] CaptureLiveProgressBar failed: " + e.Message);
                 result = null;
             }
-            Debug.Log("[Multipleer] live progress bar " + (result != null ? "captured" : "NOT found"));
+            Debug.Log("[Multiplayer] live progress bar " + (result != null ? "captured" : "NOT found"));
             return result;
         }
 
@@ -402,7 +402,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] TryGetPanelBackgroundSprite failed: " + e.Message);
+                Debug.LogError("[Multiplayer] TryGetPanelBackgroundSprite failed: " + e.Message);
                 return null;
             }
         }

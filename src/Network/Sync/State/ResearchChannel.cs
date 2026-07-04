@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// State channel #2 — Phoenix faction <c>Research</c> (fixes host cancel/switch not reaching the

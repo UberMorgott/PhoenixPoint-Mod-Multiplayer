@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Network.Sync;
-using Multipleer.Network.TimeSync;
-using Multipleer.Transport;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.TimeSync;
+using Multiplayer.Transport;
 using UnityEngine;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     public class NetworkEngine
     {
@@ -88,14 +88,14 @@ namespace Multipleer.Network
             SessionNotifier.AttachTo(this);
             // F3: wire the host-leave handler (client drops to menu on host quit/crash); re-arms its latch.
             HostLeaveHandler.AttachTo(this);
-            Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
+            Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
         }
 
         /// <summary>
         /// Host-side overload: bind the engine to a pre-constructed transport (e.g. a
-        /// <see cref="Multipleer.Transport.CompositeTransport"/> that listens on Direct +
+        /// <see cref="Multiplayer.Transport.CompositeTransport"/> that listens on Direct +
         /// STUN + Steam at once). Mirrors <see cref="Initialize(TransportType)"/> exactly,
         /// only the transport source differs — clients keep using Initialize(TransportType).
         /// </summary>
@@ -122,7 +122,7 @@ namespace Multipleer.Network
             SessionNotifier.AttachTo(this);
             // F3: wire the host-leave handler (inert on the host; arms for the client crash/quit path).
             HostLeaveHandler.AttachTo(this);
-            Debug.Log($"[Multipleer] transport initialized: {Transport?.TransportType}");
+            Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
         }
@@ -230,7 +230,7 @@ namespace Multipleer.Network
             if (Transport.State == ConnectionState.Failed)
             {
                 Debug.LogError(
-                    $"[Multipleer] HOST BIND FAILED on ALL transports (port {port}). This instance is NOT " +
+                    $"[Multiplayer] HOST BIND FAILED on ALL transports (port {port}). This instance is NOT " +
                     "hosting — it did NOT silently become a client. Most likely another PhoenixPoint instance " +
                     "on this machine already holds the port. Close the other instance (or free the port), then " +
                     "host again. Do NOT keep playing here expecting host/reward authority.");
@@ -398,7 +398,7 @@ namespace Multipleer.Network
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[Multipleer] Failed to deserialize packet: {ex.Message}");
+                Debug.LogError($"[Multiplayer] Failed to deserialize packet: {ex.Message}");
             }
         }
 
@@ -480,7 +480,7 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.SaveDone:
-                    Debug.Log("[Multipleer] route: SaveDone");
+                    Debug.Log("[Multiplayer] route: SaveDone");
                     SaveTransfer?.OnSaveDone(msg);
                     break;
 
@@ -489,7 +489,7 @@ namespace Multipleer.Network
                     break;
 
                 case PacketType.ClientLoaded:
-                    Debug.Log("[Multipleer] route: ClientLoaded");
+                    Debug.Log("[Multiplayer] route: ClientLoaded");
                     SaveTransfer?.OnClientLoaded(msg);
                     break;
 
@@ -596,7 +596,7 @@ namespace Multipleer.Network
                     break;
 
                 default:
-                    Debug.LogWarning($"[Multipleer] Unrouted packet type: {msg.Type}");
+                    Debug.LogWarning($"[Multiplayer] Unrouted packet type: {msg.Type}");
                     break;
             }
         }

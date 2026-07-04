@@ -8,7 +8,7 @@
 
 **Architecture:** Generalize the proven `0x34` clock mirror (`TimeBridge.RecordHostState`→wire→`ApplyTimeState`, `ClientTimeMirror` host-skip+try/catch) from ONE Timing object to N vehicles over a single scope-keyed packet `PacketType.GeoStateDiff = 0x35` (already reserved at `src/Network/MessageLayer/PacketType.cs:50`). Host walks all factions × vehicles each frame, snapshots via native `RecordInstanceData`, diffs vs last-sent, broadcasts only CHANGED records (UNRELIABLE for continuous pos/rot/range, RELIABLE for discrete transitions). Client is a PURE mirror: resolve by `(factionGuid,VehicleID)`, seq-guard stale packets, apply light reflected setters (heavy `ProcessInstanceData` for first mirror + CRC-heal only), all under `EntityReplicationScope.Enter()`. The per-action `StartTravel` host→client command-REPLAY is RETIRED; only the client→host `StartTravel` INPUT relay is kept. See spec `docs/superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md`.
 
-**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic type/method/field resolution; mod NEVER hard-references game types — injected params typed `object`), xUnit 2.9.2 (`Multipleer.Tests`, pure cores TDD-first like `GeoEntityOpCodecTests`/`TimeStateCodecTests`), existing `NetworkEngine` (reliable `BroadcastToAll` `:185` + `BroadcastUnreliable` `:195`, `RouteMessage`, `PacketType` enum), existing `MessageSerializer`/`CommandCodec`/`GeoEntityOpCodec` `BinaryWriter` layout conventions, existing `GeoBridge` id↔entity resolution, existing `EntityReplicationScope` `[ThreadStatic]` guard, existing `TimeSyncBroadcaster` per-frame tick from `NetworkEngine.Update`, existing `SaveTransferCoordinator.Crc32(byte[])` `:978`.
+**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic type/method/field resolution; mod NEVER hard-references game types — injected params typed `object`), xUnit 2.9.2 (`Multiplayer.Tests`, pure cores TDD-first like `GeoEntityOpCodecTests`/`TimeStateCodecTests`), existing `NetworkEngine` (reliable `BroadcastToAll` `:185` + `BroadcastUnreliable` `:195`, `RouteMessage`, `PacketType` enum), existing `MessageSerializer`/`CommandCodec`/`GeoEntityOpCodec` `BinaryWriter` layout conventions, existing `GeoBridge` id↔entity resolution, existing `EntityReplicationScope` `[ThreadStatic]` guard, existing `TimeSyncBroadcaster` per-frame tick from `NetworkEngine.Update`, existing `SaveTransferCoordinator.Crc32(byte[])` `:978`.
 
 ---
 
@@ -19,7 +19,7 @@
 ### PHASE A — DO NOW, before any INC-3a code (Task 0 + a one-shot nav diag in Task 9)
 
 1. **Fix `GeoBridge.DescribeVehicles` (`GeoBridge.cs:83-109`)** — today it walks ONLY `geoLevel.PhoenixFaction.Vehicles`, so the non-Phoenix Thunderbird never prints and the host/client vehicle-set diff is blind to the real bug. Change it to iterate `geoLevel.Factions` (the public `IList<GeoFaction>` field already read by `FindFactionByGuid` at `GeoBridge.cs:160`) → per faction `GeoFaction.Vehicles`, and prefix each entry with `FactionGuid(faction)` so the printed token is `"factionGuid#id:defname"` (the real `(factionGuid,VehicleID)` identity). Keep fully null-guarded/try-catch (never throws, logging-only). This makes the EXISTING DIAG2 logs in `StartTravelInterceptPatch.Postfix` (`cs:84-91`) + `CommandExecutor.ApplyStartTravel` (`cs:40-46`) immediately show that the host moves a faction-keyed id the client Phoenix-only resolver can never find — confirming the locked bug pre-fix.
-2. **Add a one-shot post-apply nav diag in the NEW `ClientGeoStateApplier` (Task 9)** — right AFTER applying a Vehicle record, log once per `(factionGuid,vehicleID)` resolved-vs-not + post-apply `Surface.position`/`Travelling`/`CurrentSite` so we see the mirror actually wrote (vs `NavigateRoutine` fighting it). Tag new lines `"[Multipleer] DIAG3 ..."` to grep distinctly from `DIAG`/`DIAG2`.
+2. **Add a one-shot post-apply nav diag in the NEW `ClientGeoStateApplier` (Task 9)** — right AFTER applying a Vehicle record, log once per `(factionGuid,vehicleID)` resolved-vs-not + post-apply `Surface.position`/`Travelling`/`CurrentSite` so we see the mirror actually wrote (vs `NavigateRoutine` fighting it). Tag new lines `"[Multiplayer] DIAG3 ..."` to grep distinctly from `DIAG`/`DIAG2`.
 
 ### PHASE B — AFTER INC-3a in-game-verified (final Task 13)
 
@@ -31,7 +31,7 @@
 
 ## In-game checkpoint (the GATE)
 
-2-instance co-op verification (per `multipleer-second-instance-setup`: Goldberg-emu second copy + `mklink /J` junctions; deploy the Release DLL to BOTH copies' mod folder). HOST instance + CLIENT instance, shared campaign loaded, client joined and past load (INC-1 makes client geo-sim inert).
+2-instance co-op verification (per `multiplayer-second-instance-setup`: Goldberg-emu second copy + `mklink /J` junctions; deploy the Release DLL to BOTH copies' mod folder). HOST instance + CLIENT instance, shared campaign loaded, client joined and past load (INC-1 makes client geo-sim inert).
 
 **PRECONDITION:** a Phoenix Manticore AND a non-Phoenix (New Jericho Thunderbird) vehicle exist on the geoscape; if no NJ craft is naturally present, spawn/observe one via a host faction-traffic event (or pick any non-Phoenix faction aircraft).
 
@@ -49,11 +49,11 @@
 
 ## Build / Test / Deploy
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-**In-game (2-instance):** per `multipleer-second-instance-setup` (Goldberg-emu second copy + `mklink /J` junctions); see Task 12.
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+**In-game (2-instance):** per `multiplayer-second-instance-setup` (Goldberg-emu second copy + `mklink /J` junctions); see Task 12.
 
-> **Test linking:** `Multipleer.Tests/Multipleer.Tests.csproj` has `EnableDefaultCompileItems=false`; pure cores are linked individually (`EntityReplicationScope` link at `csproj:33`). Each new PURE file under unit test MUST get its own `<Compile Include="..\src\..."><Link>X.cs</Link></Compile>` line.
+> **Test linking:** `Multiplayer.Tests/Multiplayer.Tests.csproj` has `EnableDefaultCompileItems=false`; pure cores are linked individually (`EntityReplicationScope` link at `csproj:33`). Each new PURE file under unit test MUST get its own `<Compile Include="..\src\..."><Link>X.cs</Link></Compile>` line.
 
 ---
 
@@ -69,9 +69,9 @@ DO FIRST (no INC-3a code yet) so the existing DIAG2 logs expose the live bug wit
 
 ### Task 1 — Pure `GeoStateScope` enum (stable bytes) + test  *(pure → TDD)*
 
-- [ ] FAILING TEST FIRST: create `Multipleer.Tests/GeoStateScopeTests.cs` asserting stable bytes `Vehicle=1`, `Site=2`, `MarketPrice=3`, `FactionTraffic=4`, `FactionState=5`, `Checksum=255` (mirror `GeoEntityOpCodecTests.OpTypeBytes_AreStable` at `cs:48-54`). Run filtered → FAIL.
+- [ ] FAILING TEST FIRST: create `Multiplayer.Tests/GeoStateScopeTests.cs` asserting stable bytes `Vehicle=1`, `Site=2`, `MarketPrice=3`, `FactionTraffic=4`, `FactionState=5`, `Checksum=255` (mirror `GeoEntityOpCodecTests.OpTypeBytes_AreStable` at `cs:48-54`). Run filtered → FAIL.
 - [ ] IMPL: create `src/Network/CommandSync/GeoStateScope.cs` — `public enum GeoStateScope : byte { Vehicle=1, Site=2, MarketPrice=3, FactionTraffic=4, FactionState=5, Checksum=255 }` with the STABLE-never-renumber comment discipline of `GeoEntityOpType` (`GeoEntityOpCodec.cs:5-14`). Only `Vehicle` is produced/applied in INC-3a; the rest are reserved INC-3b/c forward-compat (self-delimited records let the reader skip unknown scopes).
-- [ ] Link into `Multipleer.Tests.csproj` after the `EntityReplicationScope` link (`csproj:33`). Test PASS.
+- [ ] Link into `Multiplayer.Tests.csproj` after the `EntityReplicationScope` link (`csproj:33`). Test PASS.
 - [ ] Commit `feat(replication): GeoStateScope enum (stable bytes, INC-3 scopes)`.
 
 ### Task 2 — Pure `GeoVehicleStateRecord` + `GeoStateDiff` structs + `changedMask` bit consts + test  *(pure → TDD)*
@@ -184,7 +184,7 @@ NO new unit test (behavior-removal over live patch + executor; verified by Task 
 
 ### Task 12 — IN-GAME 2-instance acceptance checkpoint (USER runs this)  *(impure; integration)*
 
-Deploy the Release DLL to BOTH copies (`multipleer-second-instance-setup`).
+Deploy the Release DLL to BOTH copies (`multiplayer-second-instance-setup`).
 
 - [ ] Run the full checkpoint above: host moves a Phoenix Manticore AND a non-Phoenix New Jericho Thunderbird → BOTH mirror on the client resolved by `(factionGuid,VehicleID)`; departure/arrival mirror exactly; client→host StartTravel input still works; no double-integration; no console errors. Use DIAG3 to confirm the NJ faction resolved by non-empty guid (not Phoenix fallback). This is the GATE proving the locked movement bug is fixed.
 - [ ] Record the outcome (PASS/FAIL per step) to `docs/research/00-current-state.md` via SCRIBE.

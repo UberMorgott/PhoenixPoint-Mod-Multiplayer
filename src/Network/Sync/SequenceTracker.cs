@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Last-writer-wins ordering for the action relay + currency echo + per-channel state echo.

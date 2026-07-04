@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Stable NetId &lt;-&gt; actor mapping for tactical replication, identical on host + client.

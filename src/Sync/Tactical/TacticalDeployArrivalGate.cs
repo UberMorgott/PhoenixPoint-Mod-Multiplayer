@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Pure, Unity-free decision for HOW a CLIENT applies a just-received <c>tac.deploy</c>.

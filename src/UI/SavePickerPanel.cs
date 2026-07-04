@@ -8,7 +8,7 @@ using PhoenixPoint.Common.Saves;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Minimal mod-drawn uGUI save picker over PhoenixSaveManager.GetSaves() (decompile:
@@ -53,9 +53,9 @@ namespace Multipleer.UI
             // under ANOTHER canvas is NESTED → Unity ignores its CanvasScaler and won't drive its
             // RectTransform to the screen rect (the lobby's documented cramping/scaler bug). ModGO is a
             // plain GameObject (no Canvas ancestor), so this is a ROOT canvas: scaler honoured, overlay
-            // fills the screen, overrideSorting decisively wins. Mirrors MultipleerBarCanvas /
-            // MultipleerLobbyCanvas exactly.
-            _canvasGo = new GameObject("MultipleerSavePickerCanvas");
+            // fills the screen, overrideSorting decisively wins. Mirrors MultiplayerBarCanvas /
+            // MultiplayerLobbyCanvas exactly.
+            _canvasGo = new GameObject("MultiplayerSavePickerCanvas");
             // Hide from the very first frame — the canvas is the SINGLE visibility lever; while
             // inactive its whole subtree is hidden even if a Build sub-step throws (swallowed by the
             // OnMenuReady try/catch), so a half-built picker can never leak onto the menu.
@@ -256,7 +256,7 @@ namespace Multipleer.UI
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"[Multipleer] SavePicker: skipped save '{SafeName(meta)}' — " +
+                    Debug.LogError($"[Multiplayer] SavePicker: skipped save '{SafeName(meta)}' — " +
                                    $"row build threw: {e}");
                 }
             }
@@ -287,7 +287,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] SavePicker: layout rebuild failed: " + e.Message);
+                Debug.LogError("[Multiplayer] SavePicker: layout rebuild failed: " + e.Message);
             }
         }
 
@@ -550,7 +550,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] Failed to enumerate saves: " + e.Message);
+                Debug.LogError("[Multiplayer] Failed to enumerate saves: " + e.Message);
             }
             return result;
         }

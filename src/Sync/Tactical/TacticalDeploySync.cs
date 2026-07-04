@@ -5,11 +5,11 @@ using System.IO;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Increment-1 tactical DEPLOY-SYNC orchestrator (spec §8). One static facade that:
@@ -134,10 +134,10 @@ namespace Multipleer.Sync.Tactical
                     int netId = reg.AssignHost(adapter);   // GeoUnitId for soldiers, minted id for Pandorans
                     known.Add(actor);
                     added++;
-                    Debug.Log("[Multipleer][tac] lazy-registered netId=" + netId + " geoUnitId=" + adapter.GeoUnitId);
+                    Debug.Log("[Multiplayer][tac] lazy-registered netId=" + netId + " geoUnitId=" + adapter.GeoUnitId);
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostEnsureLiveActorsRegistered failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostEnsureLiveActorsRegistered failed: " + ex); }
             return added;
         }
 
@@ -174,11 +174,11 @@ namespace Multipleer.Sync.Tactical
                 if (!reg.TryLazyRebind(netId, hasPos, new ActorPos(px, py, pz), candidates)) return null;
                 object bound = ResolveLiveActor(netId);
                 if (bound != null)
-                    Debug.Log("[Multipleer][tac] lazy-rebound netId=" + netId +
+                    Debug.Log("[Multiplayer][tac] lazy-rebound netId=" + netId +
                               " via " + (netId < TacticalActorRegistry.MintBase ? "GeoUnitId" : "pos"));
                 return bound;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientTryLazyRebind failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientTryLazyRebind failed: " + ex); return null; }
         }
 
         // Client re-entrancy: true only while OUR own ClientLaunchMission is driving the native
@@ -226,9 +226,9 @@ namespace Multipleer.Sync.Tactical
                 object site = GetProp(geoMission, "Site");
                 var f = site != null ? AccessTools.Field(site.GetType(), "SiteId") : null;
                 _launchingSiteId = f != null ? (int)f.GetValue(site) : -1;
-                Debug.Log("[Multipleer][tac] OnTacticalLaunch site=" + _launchingSiteId);
+                Debug.Log("[Multiplayer][tac] OnTacticalLaunch site=" + _launchingSiteId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] OnTacticalLaunch failed: " + ex); _launchingSiteId = -1; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnTacticalLaunch failed: " + ex); _launchingSiteId = -1; }
         }
 
         // ─── HOST: capture + broadcast (called from DeployLaunchPatches level-ready postfix) ──
@@ -251,7 +251,7 @@ namespace Multipleer.Sync.Tactical
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (tacticalLevelController == null) return;
             EnsureReflection();
-            if (!_reflectionReady) { Debug.LogError("[Multipleer][tac] HostOnLevelReady: reflection not ready"); return; }
+            if (!_reflectionReady) { Debug.LogError("[Multiplayer][tac] HostOnLevelReady: reflection not ready"); return; }
 
             try
             {
@@ -264,13 +264,13 @@ namespace Multipleer.Sync.Tactical
                 if (!StartDeferredCapture(tacticalLevelController))
                 {
                     // Could not start a coroutine (no Timing) → fall back to an immediate best-effort capture.
-                    Debug.LogError("[Multipleer][tac] HostOnLevelReady: could not schedule deferred capture — capturing immediately (may be early)");
+                    Debug.LogError("[Multiplayer][tac] HostOnLevelReady: could not schedule deferred capture — capturing immediately (may be early)");
                     HostCaptureAndBroadcast(tacticalLevelController);
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] HostOnLevelReady failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] HostOnLevelReady failed: " + ex);
             }
         }
 
@@ -312,17 +312,17 @@ namespace Multipleer.Sync.Tactical
             {
                 bool ready = false;
                 try { ready = ToBool(GetProp(tacticalLevelController, "HasAnyTurnStarted")); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DeferredCaptureCrt: read HasAnyTurnStarted failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DeferredCaptureCrt: read HasAnyTurnStarted failed: " + ex); }
 
                 var decision = TacticalDeployReadinessGate.Decide(ready, frames, CaptureReadyMaxFrames);
                 if (decision == TacticalDeployReadinessGate.Decision.CaptureReady ||
                     decision == TacticalDeployReadinessGate.Decision.CaptureTimeout)
                 {
                     if (decision == TacticalDeployReadinessGate.Decision.CaptureTimeout)
-                        Debug.LogError("[Multipleer][tac] DeferredCaptureCrt: readiness gate timed out after " +
+                        Debug.LogError("[Multiplayer][tac] DeferredCaptureCrt: readiness gate timed out after " +
                                        frames + " frames — capturing anyway (fail-safe)");
                     else
-                        Debug.Log("[Multipleer][tac] DeferredCaptureCrt: level ready after " + frames +
+                        Debug.Log("[Multiplayer][tac] DeferredCaptureCrt: level ready after " + frames +
                                   " frame(s) → capturing deploy");
                     HostCaptureAndBroadcast(tacticalLevelController);
                     yield break;
@@ -351,7 +351,7 @@ namespace Multipleer.Sync.Tactical
                     if (!restOptional) continue;
                     if (best == null || pars.Length < best.GetParameters().Length) best = m;
                 }
-                if (best == null) { Debug.LogError("[Multipleer][tac] InvokeTimingStart: no Start overload found"); return false; }
+                if (best == null) { Debug.LogError("[Multiplayer][tac] InvokeTimingStart: no Start overload found"); return false; }
                 var bp = best.GetParameters();
                 var args = new object[bp.Length];
                 args[0] = crt;
@@ -359,7 +359,7 @@ namespace Multipleer.Sync.Tactical
                 best.Invoke(timing, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeTimingStart failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeTimingStart failed: " + ex); return false; }
         }
 
         /// <summary>
@@ -373,7 +373,7 @@ namespace Multipleer.Sync.Tactical
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (tacticalLevelController == null) return;
             EnsureReflection();
-            if (!_reflectionReady) { Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: reflection not ready"); return; }
+            if (!_reflectionReady) { Debug.LogError("[Multiplayer][tac] HostCaptureAndBroadcast: reflection not ready"); return; }
 
             try
             {
@@ -387,7 +387,7 @@ namespace Multipleer.Sync.Tactical
                 object snapshot = Invoke(tacticalLevelController, "RecordInstanceData"); // public TacLevelInstanceData
                 if (gameParams == null || snapshot == null)
                 {
-                    Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: null gameParams/snapshot — skipping deploy");
+                    Debug.LogError("[Multiplayer][tac] HostCaptureAndBroadcast: null gameParams/snapshot — skipping deploy");
                     return;
                 }
 
@@ -395,7 +395,7 @@ namespace Multipleer.Sync.Tactical
                 byte[] snapBytes = SerializeGraph(new[] { snapshot });
                 if (gpBytes == null || snapBytes == null)
                 {
-                    Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast: native serialize failed — skipping deploy");
+                    Debug.LogError("[Multiplayer][tac] HostCaptureAndBroadcast: native serialize failed — skipping deploy");
                     return;
                 }
 
@@ -429,14 +429,14 @@ namespace Multipleer.Sync.Tactical
                 // statuses → all peers). Self-terminates at mission exit (it watches LiveTlc). Additive — runs
                 // ALONGSIDE the existing per-action surfaces as a redundant convergence layer.
                 TacticalActorStateSync.HostStartFlush(tacticalLevelController);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.deploy site=" + siteId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.deploy site=" + siteId +
                           " gpBytes=" + gpBytes.Length + " snapBytes=" + snapBytes.Length +
                           " actors=" + table.Count);
                 DumpActorTable("HOST", table);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] HostCaptureAndBroadcast failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] HostCaptureAndBroadcast failed: " + ex);
             }
         }
 
@@ -453,7 +453,7 @@ namespace Multipleer.Sync.Tactical
             if (engine == null || !engine.IsActive || engine.IsHost) return;   // clients only
             if (!TacticalDeployCodec.TryDecode(payload, out var p))
             {
-                Debug.LogError("[Multipleer][tac] OnDeployReceived: decode failed (" + (payload?.Length ?? 0) + " bytes)");
+                Debug.LogError("[Multiplayer][tac] OnDeployReceived: decode failed (" + (payload?.Length ?? 0) + " bytes)");
                 return;
             }
             if (p.MissionSiteId == _hydratedSiteId) return;   // duplicate reliable double-send → ignore
@@ -462,11 +462,11 @@ namespace Multipleer.Sync.Tactical
             // previous one before a new mission's deploy arrived. Surface it, then keep the newest (matching
             // the existing latest-wins overwrite intent — same-site double-sends are already dropped above).
             if (_pendingClientDeploy != null && _pendingClientDeploy.MissionSiteId != p.MissionSiteId)
-                Debug.LogWarning("[Multipleer][tac] overwriting pending deploy site " +
+                Debug.LogWarning("[Multiplayer][tac] overwriting pending deploy site " +
                                  _pendingClientDeploy.MissionSiteId + " with " + p.MissionSiteId);
 
             _pendingClientDeploy = p;
-            Debug.Log("[Multipleer][tac] CLIENT received tac.deploy site=" + p.MissionSiteId +
+            Debug.Log("[Multiplayer][tac] CLIENT received tac.deploy site=" + p.MissionSiteId +
                       " gpBytes=" + p.GameParamsBytes.Length + " snapBytes=" + p.SnapshotBytes.Length +
                       " actors=" + p.ActorTable.Count);
 
@@ -489,11 +489,11 @@ namespace Multipleer.Sync.Tactical
                 // FactionEffects. So on THIS path we skip the snapshot ProcessInstanceData and only rebuild
                 // the NetId registry + reconcile + arm mirror (the deploy snapshot's actual job — the actor
                 // set/positions ride the registry + tac.move rail, NOT ProcessInstanceData). (RCA 2026-06-18.)
-                Debug.Log("[Multipleer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch, skip redundant ProcessInstanceData)");
+                Debug.Log("[Multiplayer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch, skip redundant ProcessInstanceData)");
                 // alreadyLoaded=true travels WITH this call (formerly the free _hydrateLevelAlreadyLoaded static):
                 // the level was natively loaded ⇒ ClientHydrateNow skips the redundant snapshot ProcessInstanceData.
                 try { ClientOnLevelReady(liveTlc, alreadyLoaded: true); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
             }
             else
             {
@@ -502,7 +502,7 @@ namespace Multipleer.Sync.Tactical
                 // exactly like the game's own save-load at TacticalLevelController BeforePlaying:550). The
                 // deferred Playing-transition postfix later calls ClientOnLevelReady(level, alreadyLoaded: false).
                 try { ClientLaunchMission(p); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientLaunchMission failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientLaunchMission failed: " + ex); }
             }
         }
 
@@ -522,12 +522,12 @@ namespace Multipleer.Sync.Tactical
         {
             EnsureReflection();
             var geo = GeoLevelController();
-            if (geo == null) { Debug.LogError("[Multipleer][tac] ClientLaunchMission: no GeoLevelController"); return; }
+            if (geo == null) { Debug.LogError("[Multiplayer][tac] ClientLaunchMission: no GeoLevelController"); return; }
 
             object mission = ResolveGeoMissionBySiteId(geo, p.MissionSiteId);
             if (mission == null)
             {
-                Debug.LogError("[Multipleer][tac] ClientLaunchMission: no GeoMission for site " + p.MissionSiteId +
+                Debug.LogError("[Multiplayer][tac] ClientLaunchMission: no GeoMission for site " + p.MissionSiteId +
                                " — the client may not yet see this mission. Will rely on its own launch path.");
                 return;
             }
@@ -540,24 +540,24 @@ namespace Multipleer.Sync.Tactical
             object squad = ResolveClientSquad(mission, site);
             if (squad == null)
             {
-                Debug.LogError("[Multipleer][tac] ClientLaunchMission: could not resolve a GeoSquad for site " +
+                Debug.LogError("[Multiplayer][tac] ClientLaunchMission: could not resolve a GeoSquad for site " +
                                p.MissionSiteId + " — aborting client launch (would NRE in PrepareTacticalGame)");
                 return;
             }
             object gameParams = InvokePrepareTacticalGame(mission, site, squad);
             if (gameParams == null)
             {
-                Debug.LogError("[Multipleer][tac] ClientLaunchMission: PrepareTacticalGame returned null");
+                Debug.LogError("[Multiplayer][tac] ClientLaunchMission: PrepareTacticalGame returned null");
                 return;
             }
             // LaunchTacticalGame(GeoMission, PlayTacticalGameLevelResult). Flag this as OUR deploy-driven
             // launch so the gate prefix lets it through (a spontaneous client launch is blocked).
             var launch = AccessTools.Method(geo.GetType(), "LaunchTacticalGame");
-            if (launch == null) { Debug.LogError("[Multipleer][tac] ClientLaunchMission: LaunchTacticalGame not found"); return; }
+            if (launch == null) { Debug.LogError("[Multiplayer][tac] ClientLaunchMission: LaunchTacticalGame not found"); return; }
             _clientLaunchInProgress = true;
             try { launch.Invoke(geo, new[] { mission, gameParams }); }
             finally { _clientLaunchInProgress = false; }
-            Debug.Log("[Multipleer][tac] CLIENT launched tactical mission for site " + p.MissionSiteId);
+            Debug.Log("[Multiplayer][tac] CLIENT launched tactical mission for site " + p.MissionSiteId);
         }
 
         /// <summary>
@@ -586,13 +586,13 @@ namespace Multipleer.Sync.Tactical
             var decision = TacticalHydrateSchedulingGate.Decide(timing != null);
             if (decision == TacticalHydrateSchedulingGate.Decision.DeferOnTiming)
             {
-                Debug.Log("[Multipleer][tac] CLIENT hydrate → deferring onto level Timing (serializer needs a running IUpdateable)");
+                Debug.Log("[Multiplayer][tac] CLIENT hydrate → deferring onto level Timing (serializer needs a running IUpdateable)");
                 if (InvokeTimingStart(timing, ClientHydrateCrt(tacticalLevelController, alreadyLoaded))) return;
-                Debug.LogError("[Multipleer][tac] CLIENT hydrate: Timing.Start failed — hydrating inline (may throw on serializer)");
+                Debug.LogError("[Multiplayer][tac] CLIENT hydrate: Timing.Start failed — hydrating inline (may throw on serializer)");
             }
             else
             {
-                Debug.LogError("[Multipleer][tac] CLIENT hydrate: no Timing resolvable — hydrating inline (may throw on serializer)");
+                Debug.LogError("[Multiplayer][tac] CLIENT hydrate: no Timing resolvable — hydrating inline (may throw on serializer)");
             }
             ClientHydrateNow(tacticalLevelController, alreadyLoaded);
         }
@@ -651,19 +651,19 @@ namespace Multipleer.Sync.Tactical
                 //    ProcessInstanceData exactly once on a freshly-created level — TacticalLevelController:550.)
                 if (alreadyLoaded)
                 {
-                    Debug.Log("[Multipleer][tac] ClientHydrateNow: level already natively loaded → skipping redundant snapshot ProcessInstanceData (registry rebuild only)");
+                    Debug.Log("[Multiplayer][tac] ClientHydrateNow: level already natively loaded → skipping redundant snapshot ProcessInstanceData (registry rebuild only)");
                 }
                 else
                 {
                     object snapshotObj = DeserializeGraph(p.SnapshotBytes, _tacLevelInstType);
                     if (snapshotObj == null)
                     {
-                        Debug.LogError("[Multipleer][tac] ClientHydrateNow: snapshot deserialize failed");
+                        Debug.LogError("[Multiplayer][tac] ClientHydrateNow: snapshot deserialize failed");
                         return;
                     }
                     // ProcessInstanceData is private → AccessTools method invoke.
                     var process = AccessTools.Method(_tlcType, "ProcessInstanceData", new[] { _tacLevelInstType });
-                    if (process == null) { Debug.LogError("[Multipleer][tac] ClientHydrateNow: ProcessInstanceData not found"); return; }
+                    if (process == null) { Debug.LogError("[Multiplayer][tac] ClientHydrateNow: ProcessInstanceData not found"); return; }
                     process.Invoke(tacticalLevelController, new[] { snapshotObj });
                 }
 
@@ -694,16 +694,16 @@ namespace Multipleer.Sync.Tactical
                 //    its player turn now — a host tac.turn for turn 0 may have been broadcast before this
                 //    client finished hydrating (it has no LiveTlc yet → dropped), so we self-enter here.
                 try { TacticalTurnSync.ClientEnterInitialTurn(tacticalLevelController); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientEnterInitialTurn failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientEnterInitialTurn failed: " + ex); }
 
-                Debug.Log("[Multipleer][tac] CLIENT hydrated tac.deploy site=" + p.MissionSiteId +
+                Debug.Log("[Multiplayer][tac] CLIENT hydrated tac.deploy site=" + p.MissionSiteId +
                           " matched=" + matched + "/" + p.ActorTable.Count + " removedExtras=" + removed +
                           " mirror=ARMED");
                 DumpActorTable("CLIENT", p.ActorTable);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientHydrateNow failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ClientHydrateNow failed: " + ex);
             }
         }
 
@@ -729,15 +729,15 @@ namespace Multipleer.Sync.Tactical
             //     others (the lifecycle statics above already reset, so a throw here can no longer leak the
             //     flush coroutine). (N1.)
             try { TacticalVisionSync.HostResetBroadcastGuard(); }                  // Inc Vision: clear the per-mission chattiness guard
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalActorStateSync.HostResetFlushGuard(); }                  // Inc T1: clear the per-actor state-delta signatures
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
-            try { Multipleer.Harmony.Tactical.ClientStatusMirrorGuards.Reset(); }  // Feature B: drop inert-mirror tracking
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { Multiplayer.Harmony.Tactical.ClientStatusMirrorGuards.Reset(); }  // Feature B: drop inert-mirror tracking
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalFireAnimSync.Reset(); }                                  // Feature C: drop any stuck replay-guard depth
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalMeleeAnimSync.Reset(); }                                 // Feature C (melee): symmetry (Phase 1 stateless)
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit external reset failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
@@ -769,7 +769,7 @@ namespace Multipleer.Sync.Tactical
         {
             if (surfaceId == (byte)TacticalSurfaceIds.TacDeploy)
             {
-                try { OnDeployReceived(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] inbound failed: " + ex); }
+                try { OnDeployReceived(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] inbound failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacDeployChunk)
@@ -781,15 +781,15 @@ namespace Multipleer.Sync.Tactical
                         byte[] full = _chunkReassembler.Accept(frag);
                         if (full != null)
                         {
-                            Debug.Log("[Multipleer][tac] CLIENT reassembled tac.deploy site=" + frag.SiteId +
+                            Debug.Log("[Multiplayer][tac] CLIENT reassembled tac.deploy site=" + frag.SiteId +
                                       " gen=" + frag.DeployGeneration + " chunks=" + frag.ChunkCount +
                                       " totalLen=" + full.Length);
                             OnDeployReceived(full);
                         }
                     }
-                    else Debug.LogError("[Multipleer][tac] inbound chunk decode failed (" + (payload?.Length ?? 0) + " bytes)");
+                    else Debug.LogError("[Multiplayer][tac] inbound chunk decode failed (" + (payload?.Length ?? 0) + " bytes)");
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] inbound chunk failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] inbound chunk failed: " + ex); }
                 return true;
             }
 
@@ -798,39 +798,39 @@ namespace Multipleer.Sync.Tactical
             // is side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentMove)
             {
-                try { TacticalMoveSync.HostOnMoveIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.move failed: " + ex); }
+                try { TacticalMoveSync.HostOnMoveIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.move failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacMoveStart)
             {
-                try { TacticalMoveSync.ClientOnMoveStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.move.start failed: " + ex); }
+                try { TacticalMoveSync.ClientOnMoveStart(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.move.start failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacMove)
             {
-                try { TacticalMoveSync.ClientOnMove(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.move failed: " + ex); }
+                try { TacticalMoveSync.ClientOnMove(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.move failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentEndTurn)
             {
-                try { TacticalTurnSync.HostOnEndTurnIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.endturn failed: " + ex); }
+                try { TacticalTurnSync.HostOnEndTurnIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.endturn failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacTurn)
             {
-                try { TacticalTurnSync.ClientOnTurn(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.turn failed: " + ex); }
+                try { TacticalTurnSync.ClientOnTurn(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.turn failed: " + ex); }
                 return true;
             }
 
             // ─── LIVE combat/damage rail (Inc 3a) ─────────────────────────────────────────────────
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentAbility)
             {
-                try { TacticalCombatSync.HostOnAbilityIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.ability failed: " + ex); }
+                try { TacticalCombatSync.HostOnAbilityIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.ability failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacDamage)
             {
-                try { TacticalCombatSync.HandleDamage(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.damage failed: " + ex); }
+                try { TacticalCombatSync.HandleDamage(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.damage failed: " + ex); }
                 return true;
             }
 
@@ -839,7 +839,7 @@ namespace Multipleer.Sync.Tactical
             // envelope on the host is a clean no-op). DAMAGE stays on tac.damage (0x88).
             if (surfaceId == (byte)TacticalSurfaceIds.TacFireStart)
             {
-                try { TacticalFireAnimSync.ClientOnFireStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.fire.start failed: " + ex); }
+                try { TacticalFireAnimSync.ClientOnFireStart(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.fire.start failed: " + ex); }
                 return true;
             }
 
@@ -848,14 +848,14 @@ namespace Multipleer.Sync.Tactical
             // tac.damage (0x88). Side-gated internally, so a stray envelope on the host is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacMeleeStart)
             {
-                try { TacticalMeleeAnimSync.ClientOnMeleeStart(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.melee.start failed: " + ex); }
+                try { TacticalMeleeAnimSync.ClientOnMeleeStart(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.melee.start failed: " + ex); }
                 return true;
             }
 
             // ─── LIVE vision rail (Inc Vision) ────────────────────────────────────────────────────
             if (surfaceId == (byte)TacticalSurfaceIds.TacVision)
             {
-                try { TacticalVisionSync.HandleVision(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.vision failed: " + ex); }
+                try { TacticalVisionSync.HandleVision(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.vision failed: " + ex); }
                 return true;
             }
 
@@ -864,12 +864,12 @@ namespace Multipleer.Sync.Tactical
             // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentEquip)
             {
-                try { TacticalEquipSync.HostOnEquipIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.equip failed: " + ex); }
+                try { TacticalEquipSync.HostOnEquipIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.equip failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacEquip)
             {
-                try { TacticalEquipSync.HandleEquip(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.equip failed: " + ex); }
+                try { TacticalEquipSync.HandleEquip(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.equip failed: " + ex); }
                 return true;
             }
 
@@ -878,12 +878,12 @@ namespace Multipleer.Sync.Tactical
             // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentOverwatch)
             {
-                try { TacticalOverwatchSync.HostOnArmIntent(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.intent.overwatch failed: " + ex); }
+                try { TacticalOverwatchSync.HostOnArmIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.overwatch failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacOverwatchState)
             {
-                try { TacticalOverwatchSync.HandleOverwatchState(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.overwatch.state failed: " + ex); }
+                try { TacticalOverwatchSync.HandleOverwatchState(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.overwatch.state failed: " + ex); }
                 return true;
             }
 
@@ -892,7 +892,7 @@ namespace Multipleer.Sync.Tactical
             // internally, so a stray envelope on the host is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacActorState)
             {
-                try { TacticalActorStateSync.HandleActorState(payload); } catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.actorstate failed: " + ex); }
+                try { TacticalActorStateSync.HandleActorState(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.actorstate failed: " + ex); }
                 return true;
             }
             return false;
@@ -931,7 +931,7 @@ namespace Multipleer.Sync.Tactical
                 // StateSnapshot) -> SyncEnvelope (byte-identical wire to the prior inline encode).
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacDeployChunk, chunkPayload);
             }
-            Debug.Log("[Multipleer][tac] HOST chunked tac.deploy site=" + siteId + " gen=" + generation +
+            Debug.Log("[Multiplayer][tac] HOST chunked tac.deploy site=" + siteId + " gen=" + generation +
                       " totalLen=" + payload.Length + " chunks=" + chunks.Count);
         }
 
@@ -1008,7 +1008,7 @@ namespace Multipleer.Sync.Tactical
                     var gameUtlType = AccessTools.TypeByName("Base.Core.GameUtl");
                     if (serCompType == null || gameUtlType == null)
                     {
-                        Debug.LogError("[Multipleer][tac] ResolveGameSerializer: SerializationComponent/GameUtl type not found");
+                        Debug.LogError("[Multiplayer][tac] ResolveGameSerializer: SerializationComponent/GameUtl type not found");
                         return null;
                     }
                     var gc = AccessTools.Method(gameUtlType, "GameComponent");
@@ -1017,16 +1017,16 @@ namespace Multipleer.Sync.Tactical
                 }
                 if (_gameComponentSerComp == null || _serCompSerializerProp == null)
                 {
-                    Debug.LogError("[Multipleer][tac] ResolveGameSerializer: GameComponent<>/Serializer accessor not found");
+                    Debug.LogError("[Multiplayer][tac] ResolveGameSerializer: GameComponent<>/Serializer accessor not found");
                     return null;
                 }
                 object serComp = _gameComponentSerComp.Invoke(null, null);
                 object serializer = serComp != null ? _serCompSerializerProp.GetValue(serComp, null) : null;
                 if (serializer == null)
-                    Debug.LogError("[Multipleer][tac] ResolveGameSerializer: SerializationComponent/Serializer is null (not initialized yet?)");
+                    Debug.LogError("[Multiplayer][tac] ResolveGameSerializer: SerializationComponent/Serializer is null (not initialized yet?)");
                 return serializer;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveGameSerializer failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveGameSerializer failed: " + ex); return null; }
         }
 
         private static byte[] SerializeGraph(object[] graph)
@@ -1036,13 +1036,13 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 // PROBE: host input graph (element count + concrete type names).
-                Debug.Log("[Multipleer][tac] Write input graph count=" + (graph?.Length ?? -1) +
+                Debug.Log("[Multiplayer][tac] Write input graph count=" + (graph?.Length ?? -1) +
                           " types=[" + GraphTypeNames(graph) + "]");
                 // Use the engine's configured Serializer (Context = SerializationComponent) — see
                 // ResolveGameSerializer. A `new Serializer(null)` writes Def refs that the paired Read can
                 // never reconstruct (null Context → NRE in BaseDef.ResolveOrCreateBaseDef → empty graph).
                 object serializer = ResolveGameSerializer();
-                if (serializer == null) { Debug.LogError("[Multipleer][tac] SerializeGraph: no game Serializer — skipping"); return null; }
+                if (serializer == null) { Debug.LogError("[Multiplayer][tac] SerializeGraph: no game Serializer — skipping"); return null; }
                 // ByRef<byte[]> dest. Base.Utils.ByRef<T> has a SINGLE ctor `ByRef(T value = default)` —
                 // an optional param, NO parameterless ctor — so Activator.CreateInstance(Type) (no args)
                 // throws MissingMethodException (RCA 2026-06-18 — this aborted the whole host deploy). Pass
@@ -1055,7 +1055,7 @@ namespace Multipleer.Sync.Tactical
 
                 var write = AccessTools.Method(_serializerType, "Write",
                     new[] { typeof(IEnumerable<object>), typeof(string), byRefBytes, _timeSliceType });
-                if (write == null) { Debug.LogError("[Multipleer][tac] Serializer.Write(byte[]) overload not found"); return null; }
+                if (write == null) { Debug.LogError("[Multiplayer][tac] Serializer.Write(byte[]) overload not found"); return null; }
 
                 IEnumerable<object> objects = graph;
                 // Drive the native serializer coroutine via the engine's own synchronous runner
@@ -1071,7 +1071,7 @@ namespace Multipleer.Sync.Tactical
                 byte[] outBytes = valueField?.GetValue(dest) as byte[];
 
                 // PROBE: output length + checksum (host-sent bytes, compare to client-received bytesHash).
-                Debug.Log("[Multipleer][tac] Write output destLen=" + (outBytes?.Length ?? -1) +
+                Debug.Log("[Multiplayer][tac] Write output destLen=" + (outBytes?.Length ?? -1) +
                           " bytesHash " + BytesHash(outBytes));
 
                 // PROBE: in-process host self-roundtrip. Read our OWN bytes right back. If this returns a
@@ -1085,17 +1085,17 @@ namespace Multipleer.Sync.Tactical
                     {
                         Type elemType = (graph != null && graph.Length > 0 && graph[0] != null) ? graph[0].GetType() : null;
                         object self = DeserializeGraph(outBytes, elemType);
-                        Debug.Log("[Multipleer][tac] HOST self-roundtrip result=" +
+                        Debug.Log("[Multiplayer][tac] HOST self-roundtrip result=" +
                                   (self == null ? "NULL" : self.GetType().Name) + " expectedType=" +
                                   (elemType?.Name ?? "any"));
                     }
-                    catch (Exception sx) { Debug.LogError("[Multipleer][tac] HOST self-roundtrip threw: " + sx); }
+                    catch (Exception sx) { Debug.LogError("[Multiplayer][tac] HOST self-roundtrip threw: " + sx); }
                     finally { _inSelfRoundtrip = false; }
                 }
 
                 return outBytes;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SerializeGraph failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SerializeGraph failed: " + ex); return null; }
         }
 
         private static object DeserializeGraph(byte[] bytes, Type expectedType)
@@ -1107,13 +1107,13 @@ namespace Multipleer.Sync.Tactical
             {
                 // PROBE: checksum of the bytes handed to Read (client-received OR host self-test input).
                 // Compare to the host "Write output bytesHash" to confirm byte-identity end-to-end.
-                Debug.Log("[Multipleer][tac] Read input bytesHash " + BytesHash(bytes) +
+                Debug.Log("[Multiplayer][tac] Read input bytesHash " + BytesHash(bytes) +
                           " expectedType=" + (expectedType?.Name ?? "any"));
                 // MUST be the same engine-configured Serializer the host wrote with (Context =
                 // SerializationComponent). A null-Context Serializer NREs in BaseDef.ResolveOrCreateBaseDef
                 // while reconstructing any Def ref → silent abort → empty graph. See ResolveGameSerializer.
                 object serializer = ResolveGameSerializer();
-                if (serializer == null) { Debug.LogError("[Multipleer][tac] DeserializeGraph: no game Serializer — returning null"); return null; }
+                if (serializer == null) { Debug.LogError("[Multiplayer][tac] DeserializeGraph: no game Serializer — returning null"); return null; }
                 // ByRef<IEnumerable<object>> outRef — same single-optional-ctor trap as SerializeGraph's
                 // ByRef<byte[]>: pass the arg explicitly (default == null), else Activator.CreateInstance
                 // throws MissingMethodException. (Would have blown up on the CLIENT right after the host
@@ -1125,7 +1125,7 @@ namespace Multipleer.Sync.Tactical
                 // Read(ByRef<IEnumerable<object>> objects, TimeSlice slice, string formatExt, byte[] srcData, string section=null)
                 var read = AccessTools.Method(_serializerType, "Read",
                     new[] { byRefEnum, _timeSliceType, typeof(string), typeof(byte[]), typeof(string) });
-                if (read == null) { Debug.LogError("[Multipleer][tac] Serializer.Read(byte[]) overload not found"); return null; }
+                if (read == null) { Debug.LogError("[Multiplayer][tac] Serializer.Read(byte[]) overload not found"); return null; }
 
                 // Same engine-synchronous driver as the host Write path (see SerializeGraph): the native
                 // Read coroutine yields nested Timing.Current.Call(...) work that needs a live scheduler.
@@ -1138,7 +1138,7 @@ namespace Multipleer.Sync.Tactical
                 // PROBE (moved BEFORE the null-guard so it ALWAYS fires): distinguish empty-graph (Value==null)
                 // from a typed-but-mismatched graph. Materialize once when non-null; reuse below.
                 List<object> graphList = result == null ? null : new List<object>(result);
-                Debug.Log("[Multipleer][tac] Read graph " +
+                Debug.Log("[Multiplayer][tac] Read graph " +
                           (result == null ? "NULL (ByRef.Value==null → empty graph)"
                                           : ("count=" + graphList.Count + " types=[" +
                                              string.Join(",", graphList.ConvertAll(o => o?.GetType().Name).ToArray()) + "]")));
@@ -1147,7 +1147,7 @@ namespace Multipleer.Sync.Tactical
                     if (o != null && (expectedType == null || expectedType.IsInstanceOfType(o))) return o;
                 return null;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] DeserializeGraph failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DeserializeGraph failed: " + ex); return null; }
         }
 
         // ─── Actor enumeration + identity helpers ──────────────────────────
@@ -1161,7 +1161,7 @@ namespace Multipleer.Sync.Tactical
             if (map == null) return list;
             // TacticalMap.GetActors<TacticalActorBase>() (inherited from BaseMap).
             var getActors = AccessTools.Method(map.GetType(), "GetActors", null, new[] { _tacActorBaseType });
-            if (getActors == null) { Debug.LogError("[Multipleer][tac] GetActors<TacticalActorBase> not found"); return list; }
+            if (getActors == null) { Debug.LogError("[Multiplayer][tac] GetActors<TacticalActorBase> not found"); return list; }
             var actors = getActors.Invoke(map, new object[] { null }) as IEnumerable;
             if (actors == null) return list;
             foreach (var a in actors)
@@ -1191,11 +1191,11 @@ namespace Multipleer.Sync.Tactical
                 try
                 {
                     if (destroy != null) { destroy.Invoke(null, new[] { actor }); removed++; }
-                    else Debug.LogError("[Multipleer][tac] ReconcileUnmatchedActors: ActorSpawner.DestroyActor not found — extra actor left in place");
+                    else Debug.LogError("[Multiplayer][tac] ReconcileUnmatchedActors: ActorSpawner.DestroyActor not found — extra actor left in place");
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileUnmatchedActors: destroy failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReconcileUnmatchedActors: destroy failed: " + ex); }
             }
-            if (removed > 0) Debug.Log("[Multipleer][tac] CLIENT removed " + removed + " unmatched (client-rolled) actor(s)");
+            if (removed > 0) Debug.Log("[Multiplayer][tac] CLIENT removed " + removed + " unmatched (client-rolled) actor(s)");
             return removed;
         }
 
@@ -1223,7 +1223,7 @@ namespace Multipleer.Sync.Tactical
                 object mission = FindActiveMissionSite(out int siteId);
                 if (mission != null) return siteId;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveMissionSiteId failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveMissionSiteId failed: " + ex); }
             return -1;
         }
 
@@ -1239,7 +1239,7 @@ namespace Multipleer.Sync.Tactical
                         return GetProp(site, "ActiveMission");
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveGeoMissionBySiteId failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveGeoMissionBySiteId failed: " + ex); }
             return null;
         }
 
@@ -1299,13 +1299,13 @@ namespace Multipleer.Sync.Tactical
             {
                 // 1) Mission already carries a squad (locally launched / primed) → use it.
                 object existing = GetProp(mission, "Squad");
-                if (existing != null) { Debug.Log("[Multipleer][tac] ResolveClientSquad: using mission.Squad"); return existing; }
+                if (existing != null) { Debug.Log("[Multiplayer][tac] ResolveClientSquad: using mission.Squad"); return existing; }
 
                 // 2) Build the default deployment squad from a viewer-owned vehicle at the site.
                 object vehicle = FindViewerVehicleAtSite(site);
                 if (vehicle == null)
                 {
-                    Debug.LogError("[Multipleer][tac] ResolveClientSquad: no viewer-owned vehicle at site");
+                    Debug.LogError("[Multiplayer][tac] ResolveClientSquad: no viewer-owned vehicle at site");
                     return null;
                 }
                 object owner = GetProp(vehicle, "Owner");
@@ -1313,20 +1313,20 @@ namespace Multipleer.Sync.Tactical
                 // GetDefaultDeploymentSetup(GeoFaction faction, IGeoCharacterContainer priorityContainer=null)
                 // → IEnumerable<GeoCharacter>; the vehicle is the priority container.
                 var getSetup = ResolveGetDefaultDeploymentSetup(mission.GetType());
-                if (getSetup == null) { Debug.LogError("[Multipleer][tac] ResolveClientSquad: GetDefaultDeploymentSetup(GeoFaction,…) not found"); return null; }
+                if (getSetup == null) { Debug.LogError("[Multiplayer][tac] ResolveClientSquad: GetDefaultDeploymentSetup(GeoFaction,…) not found"); return null; }
                 var setupPars = getSetup.GetParameters();
                 object[] setupArgs = setupPars.Length >= 2 ? new[] { owner, vehicle } : new[] { owner };
                 object deployment = getSetup.Invoke(mission, setupArgs);
-                if (deployment == null) { Debug.LogError("[Multipleer][tac] ResolveClientSquad: deployment set is null"); return null; }
+                if (deployment == null) { Debug.LogError("[Multiplayer][tac] ResolveClientSquad: deployment set is null"); return null; }
 
                 // new GeoSquad(IEnumerable<GeoCharacter>)
                 var squadType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSquad");
-                if (squadType == null) { Debug.LogError("[Multipleer][tac] ResolveClientSquad: GeoSquad type not found"); return null; }
+                if (squadType == null) { Debug.LogError("[Multiplayer][tac] ResolveClientSquad: GeoSquad type not found"); return null; }
                 object squad = Activator.CreateInstance(squadType, new[] { deployment });
-                Debug.Log("[Multipleer][tac] ResolveClientSquad: built squad from vehicle deployment setup");
+                Debug.Log("[Multiplayer][tac] ResolveClientSquad: built squad from vehicle deployment setup");
                 return squad;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveClientSquad failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveClientSquad failed: " + ex); return null; }
         }
 
         /// <summary>Pick the <c>GetDefaultDeploymentSetup(GeoFaction, IGeoCharacterContainer)</c> overload
@@ -1365,7 +1365,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 return fallback;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FindViewerVehicleAtSite failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] FindViewerVehicleAtSite failed: " + ex); return null; }
         }
 
         private static bool ToBool(object o) => o is bool b && b;
@@ -1415,7 +1415,7 @@ namespace Multipleer.Sync.Tactical
             // Inc-1 runtime-verification (spec §4/§8): dump GeoUnitId→NetId so the 2-instance test can
             // confirm a 1:1 identical mapping on host + client.
             var sb = new System.Text.StringBuilder();
-            sb.Append("[Multipleer][tac] ").Append(side).Append(" actorTable:");
+            sb.Append("[Multiplayer][tac] ").Append(side).Append(" actorTable:");
             foreach (var r in table)
                 sb.Append(" {net=").Append(r.NetId).Append(",geo=").Append(r.GeoUnitId)
                   .Append(",pos=(").Append(r.X.ToString("0.0")).Append(',').Append(r.Y.ToString("0.0"))

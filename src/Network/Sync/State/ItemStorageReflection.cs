@@ -5,7 +5,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge to <c>PhoenixPoint.Geoscape.Entities.ItemStorage</c> (the Phoenix faction's
@@ -83,7 +83,7 @@ namespace Multipleer.Network.Sync.State
                     _factionStorageField = AccessTools.Field(fac.GetType(), "ItemStorage");
                 return _factionStorageField?.GetValue(fac);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ItemStorageReflection.GetStorage failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.GetStorage failed: " + ex.Message); return null; }
         }
 
         /// <summary>Host: enumerate the storage as (def guid, count) pairs, aggregated per def. Null if unavailable.</summary>
@@ -111,7 +111,7 @@ namespace Multipleer.Network.Sync.State
                 }
                 return list;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ItemStorageReflection.Snapshot failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.Snapshot failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -151,7 +151,7 @@ namespace Multipleer.Network.Sync.State
                     _addItemMethod.Invoke(storage, new[] { geoItem });
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ItemStorageReflection.Apply failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.Apply failed: " + ex.Message); }
         }
 
         /// <summary>Subscribe a callback to <c>ItemStorage.StorageChanged</c> (plain Action field).
@@ -168,7 +168,7 @@ namespace Multipleer.Network.Sync.State
                 _storageChangedField.SetValue(storage, combined);
                 return onChanged;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ItemStorageReflection.SubscribeStorageChanged failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.SubscribeStorageChanged failed: " + ex.Message); return null; }
         }
 
         public static void Unsubscribe(object storage, Delegate handler)
@@ -180,7 +180,7 @@ namespace Multipleer.Network.Sync.State
                 var reduced = Delegate.Remove(existing, handler);
                 _storageChangedField.SetValue(storage, reduced);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ItemStorageReflection.Unsubscribe failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.Unsubscribe failed: " + ex.Message); }
         }
 
         // ─── helpers ──────────────────────────────────────────────────────

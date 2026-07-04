@@ -3,14 +3,14 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge for GeoVehicle TRAVEL — shared by the travel-intent relay
-    /// (<see cref="Multipleer.Network.Sync.Actions.MoveVehicleAction"/> +
+    /// (<see cref="Multiplayer.Network.Sync.Actions.MoveVehicleAction"/> +
     /// <c>MoveVehiclePatch</c>) and the route-line metadata mirror (<c>GeoVehicleTravelMirror</c>). The mod has
     /// NO compile-time game references, so every member is resolved by name via <see cref="AccessTools"/> and
     /// cached (bind-once per session; mirrors <see cref="GeoSiteReflection"/> / <see cref="GeoRuntime"/>).
@@ -221,7 +221,7 @@ namespace Multipleer.Network.Sync
                 _startTravelMethod.Invoke(vehicle, new object[] { typedList });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.StartTravel failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] VehicleTravelReflection.StartTravel failed: " + ex.Message); return false; }
         }
 
         /// <summary>HOST: resolve the vehicle for the composite (OwnerId, VehicleId) key and run the authoritative
@@ -240,7 +240,7 @@ namespace Multipleer.Network.Sync
                 object vehicle = ResolveVehicle(rt, ownerId, vehicleId);
                 if (vehicle == null)
                 {
-                    Debug.Log("[Multipleer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId + " UNRESOLVED (no-op)");
+                    Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId + " UNRESOLVED (no-op)");
                     return false;
                 }
                 // DIAG (Symptom A): confirm the host actually resolves the relayed vehicle and that its CurrentSite
@@ -254,11 +254,11 @@ namespace Multipleer.Network.Sync
                 }
                 catch { csId = -1; }
                 _startExploringMethod.Invoke(vehicle, null);
-                Debug.Log("[Multipleer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
+                Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
                     + " currentSite=" + csId + " → StartExploringCurrentSite invoked");
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.StartExploringCurrentSite failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] VehicleTravelReflection.StartExploringCurrentSite failed: " + ex.Message); return false; }
         }
 
         // ─── host read / client write: travel METADATA (route-line mirror) ────────────────────────────────────
@@ -331,14 +331,14 @@ namespace Multipleer.Network.Sync
                                 if (site != null) destList.Add(site);
                             }
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][geo] ApplyTravelMeta dests failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta dests failed (skipped): " + ex.Message); }
                 }
 
                 // CurrentSite (backing field — no setter cascade). -1 / unresolved → null (in transit).
                 if (_currentSiteBacking != null)
                 {
                     try { _currentSiteBacking.SetValue(vehicle, meta.CurrentSiteId >= 0 ? ResolveSite(rt, meta.CurrentSiteId) : null); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][geo] ApplyTravelMeta currentSite failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta currentSite failed (skipped): " + ex.Message); }
                 }
 
                 // Travelling flag (backing field — avoids VehicleLeft side-effect). Set LAST so the line-draw gate
@@ -346,11 +346,11 @@ namespace Multipleer.Network.Sync
                 if (_travelingField != null)
                 {
                     try { _travelingField.SetValue(vehicle, meta.Travelling); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][geo] ApplyTravelMeta travelling failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta travelling failed (skipped): " + ex.Message); }
                 }
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.ApplyTravelMeta failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] VehicleTravelReflection.ApplyTravelMeta failed: " + ex.Message); return false; }
         }
 
         /// <summary>Enumerate every live map vehicle (all factions) for the host poll, or null if not in geoscape.</summary>

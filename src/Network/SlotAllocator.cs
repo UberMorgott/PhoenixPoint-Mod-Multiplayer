@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Host-side stable slotIndex allocation. Host is always slot 0. Clients are assigned

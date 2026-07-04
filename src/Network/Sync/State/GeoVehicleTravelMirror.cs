@@ -1,11 +1,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 — HOST-DRIVEN TRAVEL-METADATA MIRROR (surface <see cref="SurfaceIds.GeoVehicleTravel"/> 0xA6).
@@ -78,9 +78,9 @@ namespace Multipleer.Network.Sync.State
                 byte[] payload = GeoVehicleTravelSnapshot.Encode(s, changed);
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoVehicleTravel, SyncKind.StateSnapshot, payload)));
-                Debug.Log("[Multipleer][geo] HOST broadcast geo.vehicletravel seq=" + s + " vehicles=" + changed.Count);
+                Debug.Log("[Multiplayer][geo] HOST broadcast geo.vehicletravel seq=" + s + " vehicles=" + changed.Count);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] GeoVehicleTravelMirror.HostPollAndBroadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleTravelMirror.HostPollAndBroadcast failed: " + ex.Message); }
         }
 
         // ─── CLIENT: apply a host travel-metadata batch (display-only) ───────────────────────────────────────
@@ -95,7 +95,7 @@ namespace Multipleer.Network.Sync.State
                     engine != null, engine != null && engine.IsActive, engine != null && engine.IsHost))
                 return;
             if (!GeoVehicleTravelSnapshot.TryDecode(payload, out uint s, out var vehicles))
-            { Debug.LogError("[Multipleer][geo] geo.vehicletravel decode failed"); return; }
+            { Debug.LogError("[Multiplayer][geo] geo.vehicletravel decode failed"); return; }
             if (!seq.ShouldApply(SurfaceIds.GeoVehicleTravel, s)) return;   // stale/dup seq → drop
 
             try
@@ -107,9 +107,9 @@ namespace Multipleer.Network.Sync.State
                         if (VehicleTravelReflection.ApplyTravelMeta(rt, meta)) applied++;
                 seq.Mark(SurfaceIds.GeoVehicleTravel, s);
                 if (applied > 0)
-                    Debug.Log("[Multipleer][geo] CLIENT applied geo.vehicletravel seq=" + s + " vehicles=" + applied);
+                    Debug.Log("[Multiplayer][geo] CLIENT applied geo.vehicletravel seq=" + s + " vehicles=" + applied);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] GeoVehicleTravelMirror.HandleTravelMeta failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleTravelMirror.HandleTravelMeta failed: " + ex.Message); }
         }
     }
 }

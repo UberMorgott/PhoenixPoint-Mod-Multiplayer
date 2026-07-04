@@ -1,11 +1,11 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-    Launch TWO windowed Phoenix Point instances side-by-side for local Multipleer co-op testing.
+    Launch TWO windowed Phoenix Point instances side-by-side for local Multiplayer co-op testing.
 
 .DESCRIPTION
-    Instance #1 = HOST (uses the real Multipleer\identity.json).
-    Instance #2 = CLIENT (gets a throwaway GUID via the MULTIPLEER_IDENTITY env-var seam,
+    Instance #1 = HOST (uses the real Multiplayer\identity.json).
+    Instance #2 = CLIENT (gets a throwaway GUID via the MULTIPLAYER_IDENTITY env-var seam,
     set ONLY for that child process so the two instances do not share a player identity).
 
     Steam client MUST already be running. This script does not start Steam.
@@ -57,8 +57,8 @@ Write-Host "  [#1 HOST]   launched (real identity.json)."
 # --- INSTANCE #2: CLIENT (throwaway identity via env-var seam) ----------------
 $clientGuid = [guid]::NewGuid().ToString()
 Start-Process -FilePath $exe -ArgumentList $winArgs -WorkingDirectory $game `
-    -Environment @{ MULTIPLEER_IDENTITY = $clientGuid }
-Write-Host "  [#2 CLIENT] launched with MULTIPLEER_IDENTITY=$clientGuid"
+    -Environment @{ MULTIPLAYER_IDENTITY = $clientGuid }
+Write-Host "  [#2 CLIENT] launched with MULTIPLAYER_IDENTITY=$clientGuid"
 
 # --- Manual post-launch steps -------------------------------------------------
 Write-Host ""

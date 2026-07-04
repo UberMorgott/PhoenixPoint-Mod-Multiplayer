@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge to <c>PhoenixPoint.Geoscape.Entities.Research.Research</c>. The mod has NO
@@ -48,7 +48,7 @@ namespace Multipleer.Network.Sync
         {
             if (researchElement == null) return null;
             try { Ensure(); return _researchIdField?.GetValue(researchElement) as string; }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.GetId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchReflection.GetId failed: " + ex.Message); return null; }
         }
 
         /// <summary>The live player-faction <c>Research</c> instance, or null.</summary>
@@ -66,7 +66,7 @@ namespace Multipleer.Network.Sync
                     _factionResearchField = AccessTools.Field(fac.GetType(), "Research");
                 return _factionResearchField?.GetValue(fac);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.GetFactionResearch failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchReflection.GetFactionResearch failed: " + ex.Message); return null; }
         }
 
         private static object Resolve(object research, string id)
@@ -88,7 +88,7 @@ namespace Multipleer.Network.Sync
                 if (!_ready) return null;
                 return Resolve(GetFactionResearch(rt), researchId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.ResolveElement failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchReflection.ResolveElement failed: " + ex.Message); return null; }
         }
 
         /// <summary>Resolve <paramref name="researchId"/> → ResearchElement and queue it (Apply side).</summary>
@@ -103,7 +103,7 @@ namespace Multipleer.Network.Sync
                 if (element == null) return;
                 _addToQueue.Invoke(research, new[] { element });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.AddToQueue failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchReflection.AddToQueue failed: " + ex.Message); }
         }
 
         /// <summary>Resolve <paramref name="researchId"/> → ResearchElement and complete it (Apply side).</summary>
@@ -118,7 +118,7 @@ namespace Multipleer.Network.Sync
                 if (element == null) return;
                 _complete.Invoke(research, new[] { element });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchReflection.Complete failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchReflection.Complete failed: " + ex.Message); }
         }
     }
 }

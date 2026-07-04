@@ -1,4 +1,4 @@
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Pure, Unity-free decision for whether the co-op load overlay should be visible THIS frame.

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE (engine-free) policy for the generic ability-INTENT relay (state-spine §3, Inc T2).

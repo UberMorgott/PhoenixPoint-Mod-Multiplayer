@@ -2,7 +2,7 @@ using System;
 using System.Net;
 using System.Net.Sockets;
 
-namespace Multipleer.Util
+namespace Multiplayer.Util
 {
     /// <summary>
     /// Resolves the host's advertisable LAN IPv4 by connecting a UDP socket to a public address

@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using Multipleer.Network;
+using Multiplayer.Network;
 
-namespace Multipleer.Validation
+namespace Multiplayer.Validation
 {
     [Flags]
     public enum CampaignPermission

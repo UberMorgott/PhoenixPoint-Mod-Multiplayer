@@ -4,7 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// HOST read + CLIENT render bridge for the geoscape-event REWARD DISPLAY (the structured delta lines the
@@ -178,7 +178,7 @@ namespace Multipleer.Network.Sync.State
                 // RevealedSites — native renders geoEvent.ChoiceReward.RevealedSites (List<GeoSite>); carry ids.
                 TryReadSiteIds(_frRevealedSites?.GetValue(choiceReward) as IEnumerable, snap);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] RewardDisplayReflection.BuildFromReward failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RewardDisplayReflection.BuildFromReward failed: " + ex.Message); }
             return snap;
         }
 
@@ -191,7 +191,7 @@ namespace Multipleer.Network.Sync.State
                 {
                     // Promoted from a silent return (BUG-B): a missing reflection bind here zeroes ALL reward
                     // resource lines on the client, so make it loud instead of invisible.
-                    Debug.LogWarning("[Multipleer] reward.Resources SKIPPED: ResourceUnit reflection unbound (_resType="
+                    Debug.LogWarning("[Multiplayer] reward.Resources SKIPPED: ResourceUnit reflection unbound (_resType="
                                      + (_resType != null) + " _resRounded=" + (_resRounded != null) + ")");
                     return;
                 }
@@ -203,7 +203,7 @@ namespace Multipleer.Network.Sync.State
                     snap.Resources.Add(new RewardResourceLine(type, rounded));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.Resources read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.Resources read failed: " + ex.Message); }
         }
 
         private static void TryReadDiplomacy(IEnumerable diplomacy, RewardDisplaySnapshot snap)
@@ -222,7 +222,7 @@ namespace Multipleer.Network.Sync.State
                     snap.Diplomacy.Add(new RewardDiplomacyLine(pk, pName, tk, tName, value));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.Diplomacy read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.Diplomacy read failed: " + ex.Message); }
         }
 
         // kind 0 = GeoFaction (name = ToString()), 1 = GeoHavenLeader (name = GetName()), 2 = none/unknown.
@@ -271,7 +271,7 @@ namespace Multipleer.Network.Sync.State
                     if (!string.IsNullOrEmpty(guid)) snap.Items.Add(new RewardItemLine(guid, count));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.Items read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.Items read failed: " + ex.Message); }
         }
 
         private static void TryReadUnitNames(IEnumerable units, RewardDisplaySnapshot snap)
@@ -287,7 +287,7 @@ namespace Multipleer.Network.Sync.State
                     snap.Units.Add(name);
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.Units read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.Units read failed: " + ex.Message); }
         }
 
         private static void TryReadSiteIds(IEnumerable sites, RewardDisplaySnapshot snap)
@@ -302,7 +302,7 @@ namespace Multipleer.Network.Sync.State
                     if (id is int i) snap.RevealedSites.Add(i);
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.RevealedSites read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.RevealedSites read failed: " + ex.Message); }
         }
 
         private static void TryReadHavenPop(IEnumerable changeHavenPop, RewardDisplaySnapshot snap)
@@ -319,7 +319,7 @@ namespace Multipleer.Network.Sync.State
                     snap.HavenPopulation.Add(new RewardHavenPopLine(siteId, delta));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.ChangeHavenPopulation read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.ChangeHavenPopulation read failed: " + ex.Message); }
         }
 
         private static int HavenSiteId(object haven)
@@ -350,7 +350,7 @@ namespace Multipleer.Network.Sync.State
                     if (!string.IsNullOrEmpty(viewGuid)) snap.DamageZones.Add(new RewardZoneLine(havenSiteId, viewGuid, dmg));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.DamageZones read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.DamageZones read failed: " + ex.Message); }
         }
 
         private static string ZoneViewDefGuid(object zone)
@@ -390,7 +390,7 @@ namespace Multipleer.Network.Sync.State
                     snap.MaxDiplomacyFactionGuids.Add(fac?.ToString() ?? "");
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] reward.ChangeMaxDiplomacyState read failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.ChangeMaxDiplomacyState read failed: " + ex.Message); }
         }
 
         private static int NewBaseSiteId(object newBase)
@@ -546,7 +546,7 @@ namespace Multipleer.Network.Sync.State
             try
             {
                 EnsureClient(rt);
-                if (!_clientReady) { Debug.Log("[Multipleer] RewardDisplayRender SKIP (reflection not ready)"); return; }
+                if (!_clientReady) { Debug.Log("[Multiplayer] RewardDisplayRender SKIP (reflection not ready)"); return; }
 
                 string pos = _posPattern?.GetValue(module, null) as string ?? "{0}";
                 string neg = _negPattern?.GetValue(module, null) as string ?? "{0}";
@@ -562,7 +562,7 @@ namespace Multipleer.Network.Sync.State
                     else if (d.PartyKind == 0) // faction party → 3-arg key (partyName, targetName, valTxt)
                         text = FormatKey(module, _kFactionDiplo, d.PartyKey, d.TargetKey, valTxt);
                     else // unknown PartyKind → don't drop it silently (visibility for an unmapped diplomacy line)
-                        Debug.LogWarning("[Multipleer] reward.Diplomacy line with unmapped PartyKind=" + d.PartyKind
+                        Debug.LogWarning("[Multiplayer] reward.Diplomacy line with unmapped PartyKind=" + d.PartyKind
                                          + " (target=" + d.TargetKey + " value=" + d.Value + ") — not rendered");
                     if (Add(module, text)) lines++;
                 }
@@ -571,7 +571,7 @@ namespace Multipleer.Network.Sync.State
                 foreach (var it in snap.Items)
                 {
                     string display = ItemDisplayName(it.ItemDefGuid);
-                    if (string.IsNullOrEmpty(display)) { Debug.Log("[Multipleer] reward item dropped (unresolved def " + it.ItemDefGuid + ")"); continue; }
+                    if (string.IsNullOrEmpty(display)) { Debug.Log("[Multiplayer] reward item dropped (unresolved def " + it.ItemDefGuid + ")"); continue; }
                     string text = display + " x " + string.Format(pos, it.Count.ToString()) + " ";
                     if (Add(module, text)) lines++;
                 }
@@ -584,7 +584,7 @@ namespace Multipleer.Network.Sync.State
                 foreach (var r in snap.Resources)
                 {
                     string resName = ResourceDisplayName(module, r.ResourceType);
-                    if (string.IsNullOrEmpty(resName)) { Debug.Log("[Multipleer] reward resource dropped (unresolved type " + r.ResourceType + ")"); continue; }
+                    if (string.IsNullOrEmpty(resName)) { Debug.Log("[Multiplayer] reward resource dropped (unresolved type " + r.ResourceType + ")"); continue; }
                     string text = resName + " " + string.Format(pos, r.RoundedValue.ToString("+#;-#"));
                     if (Add(module, text)) lines++;
                 }
@@ -593,7 +593,7 @@ namespace Multipleer.Network.Sync.State
                 foreach (var siteId in snap.RevealedSites)
                 {
                     string siteName = RevealedSiteName(rt, siteId);
-                    if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multipleer] reward revealed-site dropped (unresolved id " + siteId + ")"); continue; }
+                    if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multiplayer] reward revealed-site dropped (unresolved id " + siteId + ")"); continue; }
                     if (Add(module, FormatKey(module, _kSiteRevealed, siteName))) lines++;
                 }
 
@@ -613,7 +613,7 @@ namespace Multipleer.Network.Sync.State
                 foreach (var z in snap.DamageZones)
                 {
                     string zoneName = ViewDefDisplayName(z.ZoneViewDefGuid);
-                    if (string.IsNullOrEmpty(zoneName)) { Debug.Log("[Multipleer] reward zone dropped (unresolved view " + z.ZoneViewDefGuid + ")"); continue; }
+                    if (string.IsNullOrEmpty(zoneName)) { Debug.Log("[Multiplayer] reward zone dropped (unresolved view " + z.ZoneViewDefGuid + ")"); continue; }
                     if (Add(module, FormatKey(module, _kZone, zoneName, z.Damage))) lines++;
                 }
 
@@ -621,7 +621,7 @@ namespace Multipleer.Network.Sync.State
                 foreach (var h in snap.HavenPopulation)
                 {
                     string siteName = RevealedSiteName(rt, h.HavenSiteId);
-                    if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multipleer] reward haven-pop dropped (unresolved id " + h.HavenSiteId + ")"); continue; }
+                    if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multiplayer] reward haven-pop dropped (unresolved id " + h.HavenSiteId + ")"); continue; }
                     if (Add(module, FormatKey(module, _kHavenPop, siteName, h.Delta))) lines++;
                 }
 
@@ -636,9 +636,9 @@ namespace Multipleer.Network.Sync.State
                     if (!string.IsNullOrEmpty(siteName) && Add(module, FormatKey(module, _kNewBase, siteName))) lines++;
                 }
 
-                Debug.Log("[Multipleer] RewardDisplayRender drew " + lines + " reward line(s) via native AddRewardText");
+                Debug.Log("[Multiplayer] RewardDisplayRender drew " + lines + " reward line(s) via native AddRewardText");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] RewardDisplayReflection.Render failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RewardDisplayReflection.Render failed: " + ex.Message); }
         }
 
         private static bool Add(object module, string text)
@@ -649,7 +649,7 @@ namespace Multipleer.Network.Sync.State
                 _addRewardText.Invoke(module, new object[] { text });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] AddRewardText failed (line dropped): " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] AddRewardText failed (line dropped): " + ex.Message); return false; }
         }
 
         private static string LocalizeBind(object bind)
@@ -677,7 +677,7 @@ namespace Multipleer.Network.Sync.State
                 if (string.IsNullOrEmpty(fmt)) return null;
                 return string.Format(fmt, args);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] FormatKey failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] FormatKey failed: " + ex.Message); return null; }
         }
 
         // Resource name like native :417 — ResourcesList.GetDef<ViewElementDef>(type.ToString()).DisplayName1.Localize().
@@ -693,7 +693,7 @@ namespace Multipleer.Network.Sync.State
                 bool diag = EventMirrorFixGate.Enabled;
                 if (_resourcesListField == null || _namedListGetDef == null || _viewDisplayName1 == null)
                 {
-                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve UNBOUND raw=" + resourceTypeRaw
+                    if (diag) Debug.LogWarning("[Multiplayer] reward-type resolve UNBOUND raw=" + resourceTypeRaw
                         + " (_resourcesListField=" + (_resourcesListField != null)
                         + " _namedListGetDef=" + (_namedListGetDef != null)
                         + " _viewDisplayName1=" + (_viewDisplayName1 != null) + ") — resource line drops");
@@ -702,7 +702,7 @@ namespace Multipleer.Network.Sync.State
                 var list = _resourcesListField.GetValue(module);
                 if (list == null)
                 {
-                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " ResourcesList NULL on module — resource line drops");
+                    if (diag) Debug.LogWarning("[Multiplayer] reward-type resolve raw=" + resourceTypeRaw + " ResourcesList NULL on module — resource line drops");
                     return null;
                 }
                 // ResourceType enum name from its raw value via a STABLE compile-time map (FIX #1). The native
@@ -715,21 +715,21 @@ namespace Multipleer.Network.Sync.State
                 string typeName = RewardResourceTypes.NameForRaw(resourceTypeRaw);
                 if (string.IsNullOrEmpty(typeName))
                 {
-                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " UNMAPPED (flag combo / unknown member) — resource line drops");
+                    if (diag) Debug.LogWarning("[Multiplayer] reward-type resolve raw=" + resourceTypeRaw + " UNMAPPED (flag combo / unknown member) — resource line drops");
                     return null;
                 }
                 var viewDef = _namedListGetDef.Invoke(list, new object[] { typeName });
                 if (viewDef == null)
                 {
-                    if (diag) Debug.LogWarning("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' GetDef MISS (no '" + typeName + "' key in live ResourcesList) — resource line drops");
+                    if (diag) Debug.LogWarning("[Multiplayer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' GetDef MISS (no '" + typeName + "' key in live ResourcesList) — resource line drops");
                     return null;
                 }
                 var bind = _viewDisplayName1.GetValue(viewDef);
                 var name = LocalizeBind(bind);
-                if (diag) Debug.Log("[Multipleer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' → display='" + name + "'");
+                if (diag) Debug.Log("[Multiplayer] reward-type resolve raw=" + resourceTypeRaw + " name='" + typeName + "' → display='" + name + "'");
                 return name;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResourceDisplayName failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResourceDisplayName failed: " + ex.Message); return null; }
         }
 
         private static string ItemDisplayName(string itemDefGuid)

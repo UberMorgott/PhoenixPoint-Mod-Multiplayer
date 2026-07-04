@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Feature C — client-only guards active ONLY for the duration of a <see cref="TacticalFireAnimSync"/>

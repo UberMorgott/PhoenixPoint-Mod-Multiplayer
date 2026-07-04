@@ -1,7 +1,7 @@
 using System;
 using System.Text;
 
-namespace Multipleer.Network.MessageLayer
+namespace Multiplayer.Network.MessageLayer
 {
     public class NetworkMessage
     {

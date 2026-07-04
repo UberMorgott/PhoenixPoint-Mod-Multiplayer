@@ -4,7 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge to <c>PhoenixPoint.Common.Entities.Items.ItemManufacturing</c>.
@@ -78,7 +78,7 @@ namespace Multipleer.Network.Sync
                     _factionManufactureProp = AccessTools.Property(fac.GetType(), "Manufacture");
                 return _factionManufactureProp?.GetValue(fac, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.GetFactionManufacture failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.GetFactionManufacture failed: " + ex.Message); return null; }
         }
 
         /// <summary>Read the item def GUID off a <c>ManufacturableItem</c> (interceptor side).</summary>
@@ -91,7 +91,7 @@ namespace Multipleer.Network.Sync
                 var def = _relatedItemDefField?.GetValue(manufacturableItem);
                 return DefReflection.GetGuid(def);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.GetItemId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.GetItemId failed: " + ex.Message); return null; }
         }
 
         /// <summary>Read the item def GUID off a <c>ManufactureQueueItem</c> (completion interceptor side).</summary>
@@ -104,7 +104,7 @@ namespace Multipleer.Network.Sync
                 var mItem = _queueItemMItemField?.GetValue(queueItem);
                 return GetItemId(mItem);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.GetQueueItemId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.GetQueueItemId failed: " + ex.Message); return null; }
         }
 
         /// <summary>Index of a queue item within the live <c>Queue</c> (deterministic completion fallback key).</summary>
@@ -141,7 +141,7 @@ namespace Multipleer.Network.Sync
                 if (item == null) return;
                 _manufactureItem.Invoke(manufacture, new[] { item });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.Queue failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.Queue failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -174,7 +174,7 @@ namespace Multipleer.Network.Sync
                 if (target == null) return;
                 _finishItem.Invoke(manufacture, new[] { target });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.Complete failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.Complete failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -218,7 +218,7 @@ namespace Multipleer.Network.Sync
                 if (target == null) return;
                 queue.Remove(target);   // structural-only: no grant (OnManufacture), no refund (Cancel), no events
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureReflection.RemoveFromQueueEchoOnly failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureReflection.RemoveFromQueueEchoOnly failed: " + ex.Message); }
         }
     }
 }

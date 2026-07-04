@@ -1,8 +1,8 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Inc1 Task C: CLIENT-ONLY, defensive freeze of TFTV's "Aircraft Rework" hourly maintenance.
     //
@@ -18,7 +18,7 @@ namespace Multipleer.Harmony
     //
     // TFTV is NEVER hard-referenced: the type/method resolve via AccessTools reflection. When TFTV is absent
     // Prepare() returns false and Harmony skips the patch entirely (zero impact). Harmony auto-registers this
-    // class through MultipleerMain's PatchAll.
+    // class through MultiplayerMain's PatchAll.
     [HarmonyPatch]
     public static class ClientTftvAircraftFreezePatch
     {

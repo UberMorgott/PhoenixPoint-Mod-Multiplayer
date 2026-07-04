@@ -4,12 +4,12 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Harmony.Tactical;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Harmony.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE soldier-MOVE replication (spec §3.4, §5; Inc 2). Host-authoritative: a client sends a move
@@ -69,7 +69,7 @@ namespace Multipleer.Sync.Tactical
             {
                 // [DIAG] host / single-player / non-mirror path: the native move runs unchanged (PASS).
                 TryGetPositionToApply(parameter, out Vector3 diagPos);
-                Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=" + (diagIsHost ? "HOST" : "CLIENT") +
+                Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=" + (diagIsHost ? "HOST" : "CLIENT") +
                           " mirrorArmed=" + TacticalDeploySync.IsClientMirroring + " netId=<n/a>" +
                           " posToApply=(" + diagPos.x.ToString("0.0") + "," + diagPos.y.ToString("0.0") + "," + diagPos.z.ToString("0.0") + ")" +
                           " action=PASS");
@@ -84,7 +84,7 @@ namespace Multipleer.Sync.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost)
             {
-                Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=" + (diagIsHost ? "HOST" : "CLIENT") +
+                Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=" + (diagIsHost ? "HOST" : "CLIENT") +
                           " mirrorArmed=" + TacticalDeploySync.IsClientMirroring + " netId=<n/a> posToApply=(n/a) action=PASS");
                 return true;
             }
@@ -94,39 +94,39 @@ namespace Multipleer.Sync.Tactical
                 object actor = GetProp(moveAbility, "TacticalActorBase");
                 if (actor == null)
                 {
-                    Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
+                    Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
                               " netId=<no-actor> posToApply=(n/a) action=PASS");
                     return true;
                 }
                 int netId = TacticalDeploySync.NetIdForLiveActor(actor);
                 if (netId < 0)
                 {
-                    Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
+                    Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
                               " netId=" + netId + " posToApply=(n/a) action=SUPPRESS");
-                    Debug.LogError("[Multipleer][tac] move intent: unknown netId for actor"); return false;
+                    Debug.LogError("[Multiplayer][tac] move intent: unknown netId for actor"); return false;
                 }
 
                 if (!TryGetPositionToApply(parameter, out Vector3 pos))
                 {
-                    Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
+                    Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
                               " netId=" + netId + " posToApply=(no-pos) action=SUPPRESS");
-                    Debug.LogError("[Multipleer][tac] move intent: no PositionToApply on target — suppressing local move");
+                    Debug.LogError("[Multiplayer][tac] move intent: no PositionToApply on target — suppressing local move");
                     return false;   // still suppress: a client must never run a local move
                 }
 
-                Debug.Log("[Multipleer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
+                Debug.Log("[Multiplayer][tac][DIAG] CAPTURE role=CLIENT mirrorArmed=" + TacticalDeploySync.IsClientMirroring +
                           " netId=" + netId +
                           " posToApply=(" + pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") + ")" +
                           " action=SUPPRESS");
                 byte[] payload = TacticalLiveCodec.EncodeMoveIntent(netId, pos.x, pos.y, pos.z, NextNonce());
                 SendToHost(engine, TacticalSurfaceIds.TacIntentMove, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.move netId=" + netId +
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.move netId=" + netId +
                           " pos=(" + pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") + ")");
                 return false;   // suppress local move
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientInterceptMove failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ClientInterceptMove failed: " + ex);
                 return false;   // a mirroring client must not run a local move even on error
             }
         }
@@ -139,23 +139,23 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeMoveIntent(payload, out var intent)) { Debug.LogError("[Multipleer][tac] move intent decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeMoveIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] move intent decode failed"); return; }
             // Drop a reliable-transport double-send (a double-applied move would step the actor twice).
             if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentMove, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.NetId);
             // [DIAG] HOST DECODE: decoded destination + whether the netId resolved to a live actor.
-            Debug.Log("[Multipleer][tac][DIAG] HOSTINTENT decoded pos=(" +
+            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded pos=(" +
                       intent.X.ToString("0.0") + "," + intent.Y.ToString("0.0") + "," + intent.Z.ToString("0.0") + ")" +
                       " netId=" + intent.NetId + " actorResolved=" + (actor != null));
-            if (actor == null) { Debug.LogError("[Multipleer][tac] move intent: no actor for netId " + intent.NetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] move intent: no actor for netId " + intent.NetId); return; }
 
             try
             {
                 object moveAbility = ResolveMoveAbility(actor);
-                if (moveAbility == null) { Debug.LogError("[Multipleer][tac] move intent: actor has no MoveAbility"); return; }
+                if (moveAbility == null) { Debug.LogError("[Multiplayer][tac] move intent: actor has no MoveAbility"); return; }
                 object target = BuildMoveTarget(actor, new Vector3(intent.X, intent.Y, intent.Z));
-                if (target == null) { Debug.LogError("[Multipleer][tac] move intent: could not build TacticalAbilityTarget"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] move intent: could not build TacticalAbilityTarget"); return; }
                 // [DIAG] HOST RE-EXEC: read the destination back off the freshly-built target so we can see
                 // whether BuildMoveTarget preserved the requested pos (ctor vs field-set path), then invoke.
                 TryGetPositionToApply(target, out Vector3 builtPos);
@@ -164,7 +164,7 @@ namespace Multipleer.Sync.Tactical
                 // path). The host is NOT mirroring, so ClientInterceptMove passes through; OnPlayingActionEnd
                 // postfix then broadcasts the final pose.
                 var activate = AccessTools.Method(moveAbility.GetType(), "Activate", new[] { typeof(object) });
-                if (activate == null) { Debug.LogError("[Multipleer][tac] move intent: MoveAbility.Activate(object) not found"); return; }
+                if (activate == null) { Debug.LogError("[Multiplayer][tac] move intent: MoveAbility.Activate(object) not found"); return; }
                 string activateExc = "none";
                 bool activateInvoked = false;
                 // BUG2: hold the host camera-follow guard across the relayed client MOVE's activate.Invoke so the
@@ -176,13 +176,13 @@ namespace Multipleer.Sync.Tactical
                 finally
                 {
                     FireReplayGate.ExitHostApply();
-                    Debug.Log("[Multipleer][tac][DIAG] HOSTEXEC builtTarget.PositionToApply=(" +
+                    Debug.Log("[Multiplayer][tac][DIAG] HOSTEXEC builtTarget.PositionToApply=(" +
                               builtPos.x.ToString("0.0") + "," + builtPos.y.ToString("0.0") + "," + builtPos.z.ToString("0.0") + ")" +
                               " ctorPath=" + ctorPath + " activateInvoked=" + activateInvoked + " exception=" + activateExc);
                 }
-                Debug.Log("[Multipleer][tac] HOST executed move for netId " + intent.NetId);
+                Debug.Log("[Multiplayer][tac] HOST executed move for netId " + intent.NetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnMoveIntent exec failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnMoveIntent exec failed: " + ex); }
         }
 
         // ─── HOST: the move finished → broadcast the FINAL landed pose ────────────────────────────
@@ -207,18 +207,18 @@ namespace Multipleer.Sync.Tactical
 
                 // [DIAG] HOST OUTCOME CAPTURE: the actor's final landed Pos + StopReason at the moment the
                 // host commits to broadcast tac.move (broadcast=true since we reached this point).
-                Debug.Log("[Multipleer][tac][DIAG] HOSTOUTCOME finalPos=(" +
+                Debug.Log("[Multiplayer][tac][DIAG] HOSTOUTCOME finalPos=(" +
                           pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") + ")" +
                           " stop=" + stopReason + " broadcast=true");
 
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMove);
                 byte[] payload = TacticalLiveCodec.EncodeMove(seq, netId, pos.x, pos.y, pos.z, stopReason);
                 BroadcastToAll(engine, TacticalSurfaceIds.TacMove, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.move seq=" + seq + " netId=" + netId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.move seq=" + seq + " netId=" + netId +
                           " pos=(" + pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") +
                           ") stop=" + stopReason);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastMoveOutcome failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastMoveOutcome failed: " + ex); }
         }
 
         // ─── HOST: a move is STARTING → broadcast the COMMAND (dst) so clients animate concurrently ──
@@ -243,10 +243,10 @@ namespace Multipleer.Sync.Tactical
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMoveStart);
                 byte[] payload = TacticalLiveCodec.EncodeMoveStart(seq, netId, dst.x, dst.y, dst.z);
                 BroadcastToAll(engine, TacticalSurfaceIds.TacMoveStart, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.move.start seq=" + seq + " netId=" + netId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.move.start seq=" + seq + " netId=" + netId +
                           " dst=(" + dst.x.ToString("0.0") + "," + dst.y.ToString("0.0") + "," + dst.z.ToString("0.0") + ")");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastMoveStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastMoveStart failed: " + ex); }
         }
 
         // ─── CLIENT: a move is STARTING → animate the mirror CONCURRENTLY ──────────────────────────
@@ -259,11 +259,11 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeMoveStart(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.move.start decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeMoveStart(payload, out var s)) { Debug.LogError("[Multiplayer][tac] tac.move.start decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMoveStart, s.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(s.NetId);
-            if (actor == null) { Debug.LogError("[Multipleer][tac] tac.move.start: no actor for netId " + s.NetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move.start: no actor for netId " + s.NetId); return; }
 
             var dst = new Vector3(s.X, s.Y, s.Z);
             // Record the requested dst so the END outcome can distinguish a normal completion from an interrupt.
@@ -298,10 +298,10 @@ namespace Multipleer.Sync.Tactical
                 branch = "start-degenerate";
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMoveStart, s.Seq);
             }
-            Debug.Log("[Multipleer][tac][DIAG] CLIENTSTART dst=(" +
+            Debug.Log("[Multiplayer][tac][DIAG] CLIENTSTART dst=(" +
                       s.X.ToString("0.0") + "," + s.Y.ToString("0.0") + "," + s.Z.ToString("0.0") + ")" +
                       " branch=" + branch + " netId=" + s.NetId);
-            Debug.Log("[Multipleer][tac] CLIENT applied tac.move.start seq=" + s.Seq + " netId=" + s.NetId + " branch=" + branch);
+            Debug.Log("[Multiplayer][tac] CLIENT applied tac.move.start seq=" + s.Seq + " netId=" + s.NetId + " branch=" + branch);
         }
 
         // ─── CLIENT: apply the host move OUTCOME → RECONCILE only (concurrency redesign) ────────────
@@ -321,11 +321,11 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeMove(payload, out var m)) { Debug.LogError("[Multipleer][tac] tac.move decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeMove(payload, out var m)) { Debug.LogError("[Multiplayer][tac] tac.move decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMove, m.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(m.NetId);
-            if (actor == null) { Debug.LogError("[Multipleer][tac] tac.move: no actor for netId " + m.NetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move: no actor for netId " + m.NetId); return; }
 
             var finalPos = new Vector3(m.X, m.Y, m.Z);
             object nav = GetProp(actor, "TacticalNav");
@@ -347,7 +347,7 @@ namespace Multipleer.Sync.Tactical
                 if (placed) TryRederiveCoverPose(actor, finalPos);   // bug A: re-derive cover/stance after the snap
                 branch = placed ? "reconcile-interrupt" : "reconcile-interrupt-failed";
                 if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
-                else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
+                else Debug.LogError("[Multiplayer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
             }
             else if (navigating)
             {
@@ -364,15 +364,15 @@ namespace Multipleer.Sync.Tactical
                 if (placed) TryRederiveCoverPose(actor, finalPos);   // bug A: re-derive cover/stance after the snap
                 branch = placed ? "reconcile-snap" : "reconcile-snap-failed";
                 if (placed) TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMove, m.Seq);
-                else Debug.LogError("[Multipleer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
+                else Debug.LogError("[Multiplayer][tac] tac.move: SetPosition unavailable for actor " + m.NetId + " — position may diverge");
             }
             // [DIAG] CLIENT APPLY: final cell, chosen reconcile branch, and the actor's pos right after dispatch.
             Vector3 posAfter = GetPos(actor);
-            Debug.Log("[Multipleer][tac][DIAG] CLIENTAPPLY finalPos=(" +
+            Debug.Log("[Multiplayer][tac][DIAG] CLIENTAPPLY finalPos=(" +
                       m.X.ToString("0.0") + "," + m.Y.ToString("0.0") + "," + m.Z.ToString("0.0") + ")" +
                       " branch=" + branch + " netId=" + m.NetId + " navigating=" + navigating + " interrupt=" + interrupt +
                       " actorPosAfter=(" + posAfter.x.ToString("0.0") + "," + posAfter.y.ToString("0.0") + "," + posAfter.z.ToString("0.0") + ")");
-            Debug.Log("[Multipleer][tac] CLIENT applied tac.move seq=" + m.Seq + " netId=" + m.NetId + " branch=" + branch);
+            Debug.Log("[Multiplayer][tac] CLIENT applied tac.move seq=" + m.Seq + " netId=" + m.NetId + " branch=" + branch);
 
             // NOTE: the client view-freeze is now PREVENTED up-front by SuppressedAbilityViewClearPatch (a CLIENT
             // prefix on TacticalViewState.ActivateAbility that skips the wedging ClearStackAndPush for suppressed
@@ -468,7 +468,7 @@ namespace Multipleer.Sync.Tactical
                 setPos.Invoke(actor, new object[] { dst });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TrySetPosition failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TrySetPosition failed: " + ex); return false; }
         }
 
         /// <summary>Cancel an in-flight mirror navigation: <c>TacticalNavigationComponent.CancelNavigation()</c>
@@ -481,11 +481,11 @@ namespace Multipleer.Sync.Tactical
             {
                 if (nav == null) return false;
                 var cancel = AccessTools.Method(nav.GetType(), "CancelNavigation", Type.EmptyTypes);
-                if (cancel == null) { Debug.LogError("[Multipleer][tac] CancelNavigation() not found"); return false; }
+                if (cancel == null) { Debug.LogError("[Multiplayer][tac] CancelNavigation() not found"); return false; }
                 cancel.Invoke(nav, null);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryCancelNavigation failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryCancelNavigation failed: " + ex); return false; }
         }
 
         // ─── Inc1 full-state: drive the mirror from an ABSOLUTE position delta (tac.actorstate 0x8F) ──
@@ -532,7 +532,7 @@ namespace Multipleer.Sync.Tactical
                             // MoveAbility.cs:121). Setting it at kickoff would feed the animator cover params mid-walk
                             // (wrong pose blend). Reuses the same Timing.Start launcher as the move rail's reconcile.
                             if (!TryStartOnActorTiming(actor, RederiveCoverPoseAfterNavCrt(actor, nav, dst)))
-                                Debug.LogError("[Multipleer][tac] could not defer cover-pose re-derive — skipped (no mid-walk pose set)");
+                                Debug.LogError("[Multiplayer][tac] could not defer cover-pose re-derive — skipped (no mid-walk pose set)");
                             return true;
                         }
                         // Navigate unavailable / threw → snap so the position still converges (correct cell).
@@ -544,7 +544,7 @@ namespace Multipleer.Sync.Tactical
                         return false;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorPosition failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyMirrorPosition failed: " + ex); return false; }
         }
 
         // ─── Inc2: drive the mirror from an ABSOLUTE facing delta (tac.actorstate 0x8F) ──────────────
@@ -572,7 +572,7 @@ namespace Multipleer.Sync.Tactical
                     return false;   // already converged → no churn
                 return TrySetForward(actor, forward);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ApplyMirrorFacing failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyMirrorFacing failed: " + ex); return false; }
         }
 
         /// <summary>Read the actor's current world forward vector (<c>ActorComponent.Rot</c> * Vector3.forward).
@@ -591,11 +591,11 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 var m = AccessTools.Method(actor.GetType(), "SetForward", new[] { typeof(Vector3) });
-                if (m == null) { Debug.LogError("[Multipleer][tac] SetForward(Vector3) not found"); return false; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] SetForward(Vector3) not found"); return false; }
                 m.Invoke(actor, new object[] { forward });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TrySetForward failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TrySetForward failed: " + ex); return false; }
         }
 
         // ─── CLIENT: re-derive idle cover/stance pose (bug A) ───────────────────────────────────────
@@ -623,19 +623,19 @@ namespace Multipleer.Sync.Tactical
                 if (idle == null || perception == null) return false;
 
                 var getPose = AccessTools.Method(perception.GetType(), "GetBestIdleCoverPoseAt", new[] { typeof(Vector3), typeof(bool) });
-                if (getPose == null) { Debug.LogError("[Multipleer][tac] GetBestIdleCoverPoseAt(Vector3,bool) not found"); return false; }
+                if (getPose == null) { Debug.LogError("[Multiplayer][tac] GetBestIdleCoverPoseAt(Vector3,bool) not found"); return false; }
                 // searchForEnemy:false — the client's vision path is frozen; never trigger the enemy search here.
                 object pose = getPose.Invoke(perception, new object[] { finalPos, false });
                 if (pose == null) return false;
 
                 var setParams = AccessTools.Method(idle.GetType(), "SetIdleParams", new[] { pose.GetType() });
-                if (setParams == null) { Debug.LogError("[Multipleer][tac] SetIdleParams(CoverPose) not found"); return false; }
+                if (setParams == null) { Debug.LogError("[Multiplayer][tac] SetIdleParams(CoverPose) not found"); return false; }
                 setParams.Invoke(idle, new[] { pose });
-                Debug.Log("[Multipleer][tac] CLIENT re-derived cover pose at (" +
+                Debug.Log("[Multiplayer][tac] CLIENT re-derived cover pose at (" +
                           finalPos.x.ToString("0.0") + "," + finalPos.y.ToString("0.0") + "," + finalPos.z.ToString("0.0") + ")");
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryRederiveCoverPose failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryRederiveCoverPose failed: " + ex); return false; }
         }
 
         // ─── CLIENT animated-mirror helpers (FIX B) ────────────────────────────────────────────────
@@ -650,7 +650,7 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 var nsType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.NavigationSettings");
-                if (nsType == null) { Debug.LogError("[Multipleer][tac] NavigationSettings type not found"); return null; }
+                if (nsType == null) { Debug.LogError("[Multiplayer][tac] NavigationSettings type not found"); return null; }
                 object s = Activator.CreateInstance(nsType);
                 SetField(nsType, s, "CostsAPToActor", false);
                 SetField(nsType, s, "TriggerOverwatch", false);
@@ -658,7 +658,7 @@ namespace Multipleer.Sync.Tactical
                 SetField(nsType, s, "SnapToGridOnFinish", true);
                 _mirrorNavSettings = s;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetMirrorNavSettings failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] GetMirrorNavSettings failed: " + ex); }
             return _mirrorNavSettings;
         }
 
@@ -666,7 +666,7 @@ namespace Multipleer.Sync.Tactical
         {
             var f = AccessTools.Field(type, name);
             if (f != null) f.SetValue(obj, value);
-            else Debug.LogError("[Multipleer][tac] NavigationSettings field not found: " + name);
+            else Debug.LogError("[Multiplayer][tac] NavigationSettings field not found: " + name);
         }
 
         /// <summary>Start the animated mirror move: <c>TacticalNavigationComponent.Navigate(Vector3,
@@ -680,11 +680,11 @@ namespace Multipleer.Sync.Tactical
                 var nsType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.NavigationSettings");
                 if (settings == null || nsType == null) return false;
                 var navigate = AccessTools.Method(nav.GetType(), "Navigate", new[] { typeof(Vector3), nsType });
-                if (navigate == null) { Debug.LogError("[Multipleer][tac] Navigate(Vector3,NavigationSettings) not found"); return false; }
+                if (navigate == null) { Debug.LogError("[Multiplayer][tac] Navigate(Vector3,NavigationSettings) not found"); return false; }
                 navigate.Invoke(nav, new[] { (object)dst, settings });
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryAnimatedNavigate failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryAnimatedNavigate failed: " + ex); return false; }
         }
 
         /// <summary>Schedule a deferred reconcile: wait until the actor's nav <c>IsNavigating==false</c>, then
@@ -698,12 +698,12 @@ namespace Multipleer.Sync.Tactical
                 {
                     // Could not defer → reconcile immediately (still correct cell, just not animated-to-stop).
                     TrySetPosition(actor, dst);
-                    Debug.LogError("[Multipleer][tac] tac.move: reconcile could not be deferred — snapped immediately netId=" + netId);
+                    Debug.LogError("[Multiplayer][tac] tac.move: reconcile could not be deferred — snapped immediately netId=" + netId);
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ScheduleReconcile failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ScheduleReconcile failed: " + ex);
                 TrySetPosition(actor, dst);
             }
         }
@@ -730,7 +730,7 @@ namespace Multipleer.Sync.Tactical
             {
                 bool navigating = false;
                 try { navigating = ToBool(GetProp(nav, "IsNavigating")); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileMoveCrt: IsNavigating read failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReconcileMoveCrt: IsNavigating read failed: " + ex); }
                 if (!navigating) break;
                 frames++;
                 yield return NextUpdate.NextFrame;
@@ -740,10 +740,10 @@ namespace Multipleer.Sync.Tactical
                 TrySetPosition(actor, dst);
                 TryRederiveCoverPose(actor, dst);   // bug A: re-derive cover/stance the client move-suppression skipped
                 Vector3 after = GetPos(actor);
-                Debug.Log("[Multipleer][tac] tac.move RECONCILE netId=" + netId + " frames=" + frames +
+                Debug.Log("[Multiplayer][tac] tac.move RECONCILE netId=" + netId + " frames=" + frames +
                           " finalPos=(" + after.x.ToString("0.0") + "," + after.y.ToString("0.0") + "," + after.z.ToString("0.0") + ")");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ReconcileMoveCrt snap failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReconcileMoveCrt snap failed: " + ex); }
         }
 
         /// <summary>CLIENT (mirror): wait until the animated mirror-walk finishes (<c>nav.IsNavigating==false</c>),
@@ -759,7 +759,7 @@ namespace Multipleer.Sync.Tactical
             {
                 bool navigating = false;
                 try { navigating = ToBool(GetProp(nav, "IsNavigating")); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] RederiveCoverPoseAfterNavCrt: IsNavigating read failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] RederiveCoverPoseAfterNavCrt: IsNavigating read failed: " + ex); }
                 if (!navigating) break;
                 frames++;
                 yield return NextUpdate.NextFrame;
@@ -793,7 +793,7 @@ namespace Multipleer.Sync.Tactical
                 best.Invoke(timingInstance, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] InvokeStart failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeStart failed: " + ex); return false; }
         }
 
         private static bool ToBool(object o) => o is bool b && b;

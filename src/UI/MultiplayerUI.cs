@@ -2,16 +2,16 @@ using System.Collections.Generic;
 using Base.Core;
 using Base.Serialization;
 using Base.UI.MessageBox;
-using Multipleer.Harmony;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Transport;
-using Multipleer.Util;
+using Multiplayer.Harmony;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Transport;
+using Multiplayer.Util;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     public class MultiplayerUI : MonoBehaviour
     {
@@ -92,7 +92,7 @@ namespace Multipleer.UI
         {
             if (_barRoot != null) return _barRoot;
 
-            var go = new GameObject("MultipleerBarCanvas");
+            var go = new GameObject("MultiplayerBarCanvas");
             // Parent under ModGO so the Canvas shares the mod's persistent lifetime.
             go.transform.SetParent(transform, false);
 
@@ -142,7 +142,7 @@ namespace Multipleer.UI
             }
             catch (System.Exception e)
             {
-                UnityEngine.Debug.LogWarning("[Multipleer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
+                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
             }
         }
 
@@ -162,7 +162,7 @@ namespace Multipleer.UI
             }
             catch (System.Exception e)
             {
-                UnityEngine.Debug.LogWarning("[Multipleer] Early curtain lift failed: " + e.Message);
+                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain lift failed: " + e.Message);
             }
         }
 
@@ -307,7 +307,7 @@ namespace Multipleer.UI
                     // Without this the exception would escape with the gate stuck false forever → dead
                     // Play button. Run the EXACT SAME reopen sequence as the started==false branch, log
                     // the cause, and swallow (the user is informed via the same warning box).
-                    Debug.LogError("[Multipleer] HostStartSession threw during start: " + e);
+                    Debug.LogError("[Multiplayer] HostStartSession threw during start: " + e);
                     ReopenAfterFailedStart();
                     return;
                 }
@@ -449,7 +449,7 @@ namespace Multipleer.UI
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"[Multipleer] Join attempt failed: {ex}");
+                Debug.LogError($"[Multiplayer] Join attempt failed: {ex}");
                 // Reset any half-open session so a subsequent retry / host still works cleanly.
                 NetworkEngine.Instance?.Shutdown();
                 OnConnectionFailed($"Join failed: {ex.Message}");
@@ -657,7 +657,7 @@ namespace Multipleer.UI
             {
                 SaveLoadInterceptPatch.Disarm();
                 _lobby?.Show();
-                Debug.LogWarning("[Multipleer] Could not open the native Load screen for Choose-Save; try again.");
+                Debug.LogWarning("[Multiplayer] Could not open the native Load screen for Choose-Save; try again.");
             }
         }
 
@@ -753,7 +753,7 @@ namespace Multipleer.UI
             if (!ok) return false;
 
             SaveLoadInterceptPatch.ArmInPrefix(OnInGameLoadPicked);
-            Debug.Log("[Multipleer] F2: armed in-game host load intercept (pause-menu Load).");
+            Debug.Log("[Multiplayer] F2: armed in-game host load intercept (pause-menu Load).");
             return true;
         }
 
@@ -778,7 +778,7 @@ namespace Multipleer.UI
                 transferActive: coord?.TransferActive ?? false);
             if (!ok)
             {
-                Debug.LogWarning("[Multipleer] F2: in-game load guard closed at delivery; ignoring pick.");
+                Debug.LogWarning("[Multiplayer] F2: in-game load guard closed at delivery; ignoring pick.");
                 return;
             }
 
@@ -790,7 +790,7 @@ namespace Multipleer.UI
             if (!started)
             {
                 HideLoadOverlay();
-                Debug.LogWarning("[Multipleer] F2: HostStartSessionInGame did not start (see prior log).");
+                Debug.LogWarning("[Multiplayer] F2: HostStartSessionInGame did not start (see prior log).");
             }
         }
 
@@ -1012,7 +1012,7 @@ namespace Multipleer.UI
 
         private void CreateInGameBar()
         {
-            var bar = new GameObject("MultipleerStatusBar");
+            var bar = new GameObject("MultiplayerStatusBar");
             bar.transform.SetParent(EnsureBarCanvas(), false);
             var rect = bar.AddComponent<RectTransform>();
             rect.anchorMin = new Vector2(0, 0);

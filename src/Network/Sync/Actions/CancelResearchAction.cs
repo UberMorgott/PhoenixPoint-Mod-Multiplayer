@@ -1,8 +1,8 @@
 using System;
 using System.IO;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Client-initiated cancel of a queued research element. The client does NOT simulate, so a local

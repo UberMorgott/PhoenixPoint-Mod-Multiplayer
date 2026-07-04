@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Pure, Unity-free decision gates behind the CLIENT→HOST single-choice PROMPT advance relay

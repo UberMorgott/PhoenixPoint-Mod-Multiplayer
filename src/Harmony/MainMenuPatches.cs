@@ -2,12 +2,12 @@ using System;
 using System.Reflection;
 using Base.Input;
 using HarmonyLib;
-using Multipleer.UI;
+using Multiplayer.UI;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     [HarmonyPatch]
     public static class InjectNetworkButtonPatch
@@ -62,13 +62,13 @@ namespace Multipleer.Harmony
                     try { MultiplayerUI.Instance?.OnMenuReady(menuCanvas); }
                     catch (Exception e)
                     {
-                        Debug.LogError($"[Multipleer] OnMenuReady (panel build) failed: {e.Message}");
+                        Debug.LogError($"[Multiplayer] OnMenuReady (panel build) failed: {e.Message}");
                     }
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Multipleer] InjectNetworkButtonPatch failed: {e.Message}");
+                Debug.LogError($"[Multiplayer] InjectNetworkButtonPatch failed: {e.Message}");
             }
         }
 
@@ -76,25 +76,25 @@ namespace Multipleer.Harmony
         //
         // Init destroys every group child on each (re)entry, but Object.Destroy is DEFERRED to the
         // end of the frame: a being-destroyed child is still found by transform.Find this same
-        // frame. The old dedup `Find("MultipleerNetworkBtn") != null → return` therefore risked
+        // frame. The old dedup `Find("MultiplayerNetworkBtn") != null → return` therefore risked
         // matching a stale, about-to-die button on a same-session re-Init and SKIPPING the re-add —
         // after which the deferred Destroy removed it, leaving no button until the next Init. We fix
-        // that by IMMEDIATELY destroying any pre-existing MultipleerNetworkBtn children (so a stale
+        // that by IMMEDIATELY destroying any pre-existing MultiplayerNetworkBtn children (so a stale
         // one can never be mistaken for a live one) and then always instantiating a fresh button.
         // Net result: exactly one live button after every Init, first load included.
         private static void InjectNetworkButton(GameObject template, GameObject group)
         {
             // Remove any pre-existing instances NOW (immediate, not deferred) so the fresh one we add
-            // below is unambiguously the only MultipleerNetworkBtn in the group this frame.
+            // below is unambiguously the only MultiplayerNetworkBtn in the group this frame.
             for (int i = group.transform.childCount - 1; i >= 0; i--)
             {
                 var child = group.transform.GetChild(i);
-                if (child != null && child.name == "MultipleerNetworkBtn")
+                if (child != null && child.name == "MultiplayerNetworkBtn")
                     UnityEngine.Object.DestroyImmediate(child.gameObject);
             }
 
             var obj = UnityEngine.Object.Instantiate(template, group.transform);
-            obj.name = "MultipleerNetworkBtn";
+            obj.name = "MultiplayerNetworkBtn";
             obj.gameObject.SetActive(true);
 
             var texts = obj.GetComponentsInChildren<Text>(true);
@@ -231,7 +231,7 @@ namespace Multipleer.Harmony
                 // quit-to-menu, game-over), tell every client the session is ending BEFORE we tear the
                 // transport down, so each client drops to its own Main Menu (HostLeaveHandler). Sent
                 // here — the single native return-to-menu chokepoint — so EVERY host exit path covers it.
-                var engine = Multipleer.Network.NetworkEngine.Instance;
+                var engine = Multiplayer.Network.NetworkEngine.Instance;
                 if (engine != null && engine.IsHost && engine.IsActive)
                     engine.Session?.SendHostDisconnected();
 
@@ -239,7 +239,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Multipleer] FinishLevelAndGoToLobby teardown failed: {e.Message}");
+                Debug.LogError($"[Multiplayer] FinishLevelAndGoToLobby teardown failed: {e.Message}");
             }
         }
     }

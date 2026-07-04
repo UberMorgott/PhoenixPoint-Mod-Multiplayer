@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind FIX E: on the CLIENT mirror's turn-start SETUP replay, the per-actor

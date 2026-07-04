@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Wire codecs for the ActionSync packet group. The header/envelope is handled by

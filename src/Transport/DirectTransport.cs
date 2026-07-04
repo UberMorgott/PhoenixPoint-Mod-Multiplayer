@@ -5,7 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 
-namespace Multipleer.Transport
+namespace Multiplayer.Transport
 {
     public class DirectTransport : ITransport
     {
@@ -110,7 +110,7 @@ namespace Multipleer.Transport
                 _listener = null;
                 LocalEndpoint = $"DirectIP(bind failed: {ex.SocketErrorCode})";
                 State = ConnectionState.Failed;
-                LogError($"[Multipleer] DirectTransport host bind failed on port {port}: " +
+                LogError($"[Multiplayer] DirectTransport host bind failed on port {port}: " +
                          $"{ex.Message} (SocketErrorCode={ex.SocketErrorCode})");
                 OnStateChanged?.Invoke(State);
                 return;
@@ -170,8 +170,8 @@ namespace Multipleer.Transport
                 // swallowing it silently. For SocketException include the SocketErrorCode.
                 var sockEx = ex as SocketException;
                 var msg = sockEx != null
-                    ? $"[Multipleer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message} (SocketErrorCode={sockEx.SocketErrorCode})"
-                    : $"[Multipleer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message}";
+                    ? $"[Multiplayer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message} (SocketErrorCode={sockEx.SocketErrorCode})"
+                    : $"[Multiplayer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message}";
                 LogError(msg);
                 try { client?.Close(); } catch { }
                 if (!_connectAborted) QueueConnectResult(false, 0, null, null);

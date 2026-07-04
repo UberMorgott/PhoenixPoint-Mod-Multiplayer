@@ -4,7 +4,7 @@ Base-game decompile tree: `decompiled\AssemblyCSharp\Assembly-CSharp\src\` (see 
 `docs/research/source-provenance.md`). The console is a BASE-GAME feature (not TFTV).
 
 ## Symptom (confirmed in-game)
-- Typing into a Multipleer text field (JOIN IP/STUN prompt, RENAME prompt, CHAT input) and pressing
+- Typing into a Multiplayer text field (JOIN IP/STUN prompt, RENAME prompt, CHAT input) and pressing
   the console-open key OPENS the dev/debug console instead of inserting the character — so you cannot
   type an IPv4 address (dots). The hotkey fires GLOBALLY, ignoring Unity UI focus.
 
@@ -40,7 +40,7 @@ Base-game decompile tree: `decompiled\AssemblyCSharp\Assembly-CSharp\src\` (see 
 
 ## Fix — `src/Harmony/ConsoleHotkeySuppressPatch.cs`
 - `[HarmonyPatch]` + `Prepare()`/`TargetMethod()` resolving `Base.Utils.GameConsole.GameConsoleWindow`
-  ::`ToggleVisibility` by name (skips cleanly if absent). Picked up by `MultipleerMain` `PatchAll`.
+  ::`ToggleVisibility` by name (skips cleanly if absent). Picked up by `MultiplayerMain` `PatchAll`.
 - Prefix `(object __instance)`:
   - `__instance` visible (`((Behaviour)__instance).enabled`) → this toggle is a CLOSE → `return true`
     (always allow; keeps Esc/backquote close working).

@@ -3,13 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Harmony.Tactical;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Network.Sync;
+using Multiplayer.Harmony.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative COMBAT/DAMAGE replication (spec §3, Inc 3a). Mirrors
@@ -72,17 +72,17 @@ namespace Multipleer.Sync.Tactical
                 }
                 if (_playActionCached == null)
                 {
-                    Debug.LogError("[Multipleer][tac] B1: PlayAction not found on " + t.Name + " — relayed shoot stays enqueued");
+                    Debug.LogError("[Multiplayer][tac] B1: PlayAction not found on " + t.Name + " — relayed shoot stays enqueued");
                     return false;   // fail-open: native enqueue runs
                 }
                 // channel = null → PlayAction defaults it to ActorActions internally.
                 _playActionCached.Invoke(ability, new object[] { action, parameter, null });
-                Debug.Log("[Multipleer][tac] B1 relayed shoot ran INLINE via PlayAction (stripped EnqueueAction+camera-blend defer) on " + t.Name);
+                Debug.Log("[Multiplayer][tac] B1 relayed shoot ran INLINE via PlayAction (stripped EnqueueAction+camera-blend defer) on " + t.Name);
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] B1 inline reroute failed (falling back to native enqueue): " + ex);
+                Debug.LogError("[Multiplayer][tac] B1 inline reroute failed (falling back to native enqueue): " + ex);
                 return false;
             }
         }
@@ -142,13 +142,13 @@ namespace Multipleer.Sync.Tactical
                 object actor = GetProp(ability, "TacticalActorBase");
                 if (actor == null)
                 {
-                    Debug.LogError("[Multipleer][tac] ability intent: no actor — suppressing local activation");
+                    Debug.LogError("[Multiplayer][tac] ability intent: no actor — suppressing local activation");
                     return false;
                 }
                 int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
                 if (actorNetId < 0)
                 {
-                    Debug.LogError("[Multipleer][tac] ability intent: unknown actor netId — suppressing local activation");
+                    Debug.LogError("[Multiplayer][tac] ability intent: unknown actor netId — suppressing local activation");
                     return false;
                 }
 
@@ -157,7 +157,7 @@ namespace Multipleer.Sync.Tactical
                 if (string.IsNullOrEmpty(abilityGuid))
                 {
                     // Should never happen now BaseDef is read; kept so we never SILENTLY suppress again.
-                    Debug.LogError("[Multipleer][tac] ability intent: no ability def guid (type=" +
+                    Debug.LogError("[Multiplayer][tac] ability intent: no ability def guid (type=" +
                                    ability.GetType().Name + ") — suppressing local activation");
                     return false;
                 }
@@ -173,7 +173,7 @@ namespace Multipleer.Sync.Tactical
                 byte[] payload = TacticalLiveCodec.EncodeIntentAbility(
                     actorNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, bodyPartId, NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentAbility, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.ability actor=" + actorNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.ability actor=" + actorNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid +
                           " targetNetId=" + targetNetId + " bodyPartId=" + bodyPartId +
                           " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
@@ -190,7 +190,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ClientInterceptAbility failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] ClientInterceptAbility failed: " + ex);
                 return false;   // a mirroring client must not run a local ability even on error
             }
         }
@@ -204,22 +204,22 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeIntentAbility(payload, out var intent)) { Debug.LogError("[Multipleer][tac] shoot intent decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeIntentAbility(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] shoot intent decode failed"); return; }
             if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentAbility, intent.Nonce)) return;
 
             object shooter = TacticalDeploySync.ResolveLiveActor(intent.ShooterNetId);
-            Debug.Log("[Multipleer][tac][DIAG] HOSTINTENT decoded shooter=" + intent.ShooterNetId +
+            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded shooter=" + intent.ShooterNetId +
                       " ability=" + intent.AbilityDefGuid + " targetNetId=" + intent.TargetNetId +
                       " shooterResolved=" + (shooter != null));
-            if (shooter == null) { Debug.LogError("[Multipleer][tac] shoot intent: no shooter for netId " + intent.ShooterNetId); return; }
+            if (shooter == null) { Debug.LogError("[Multiplayer][tac] shoot intent: no shooter for netId " + intent.ShooterNetId); return; }
 
             try
             {
                 object ability = ResolveAbilityByGuid(shooter, intent.AbilityDefGuid);
-                if (ability == null) { Debug.LogError("[Multipleer][tac] shoot intent: shooter has no ability with guid " + intent.AbilityDefGuid); return; }
+                if (ability == null) { Debug.LogError("[Multiplayer][tac] shoot intent: shooter has no ability with guid " + intent.AbilityDefGuid); return; }
 
                 object target = BuildShootTarget(intent);
-                if (target == null) { Debug.LogError("[Multipleer][tac] shoot intent: could not build target"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] shoot intent: could not build target"); return; }
 
                 // BODY-PART SNAP (combat-bug fix, limb-faithful damage matching a host-LOCAL shot). The aim-point seed in
                 // BuildShootTarget already guarantees a non-NaN center-of-mass aim (no more feet/Y=0 ground hit). This
@@ -242,7 +242,7 @@ namespace Multipleer.Sync.Tactical
                 // resulting AP/WP/status). NOTE: heal is deliberately NOT relayed (it uses Health.Add directly,
                 // raising no tac.damage, and no health surface exists yet) — see TacticalAbilityRelay.
                 var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
-                if (activate == null) { Debug.LogError("[Multipleer][tac] ability intent: Activate(object) not found"); return; }
+                if (activate == null) { Debug.LogError("[Multiplayer][tac] ability intent: Activate(object) not found"); return; }
 
                 // FIX B (relayed-shot cosmetic-delay strip): register this CLIENT-ORIGIN shoot so the host runs
                 // it INLINE (B1, read synchronously by the EnqueueAction prefix during Activate) and SKIPS the
@@ -254,7 +254,7 @@ namespace Multipleer.Sync.Tactical
                 if (relayedShoot)
                 {
                     RelayedShots.Begin(ability, shooter);
-                    Debug.Log("[Multipleer][tac] B1/B2 registered relayed shoot (inline+aim-skip) actor=" + intent.ShooterNetId +
+                    Debug.Log("[Multiplayer][tac] B1/B2 registered relayed shoot (inline+aim-skip) actor=" + intent.ShooterNetId +
                               " ability=" + ability.GetType().Name);
                 }
 
@@ -264,7 +264,7 @@ namespace Multipleer.Sync.Tactical
                 FireReplayGate.EnterHostApply();
                 try { activate.Invoke(ability, new[] { target }); }
                 finally { FireReplayGate.ExitHostApply(); }
-                Debug.Log("[Multipleer][tac] HOST executed ability " + ability.GetType().Name +
+                Debug.Log("[Multiplayer][tac] HOST executed ability " + ability.GetType().Name +
                           " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ShooterNetId);
 
                 // TASK 2 (host staleness): the host executed this relayed CLIENT action programmatically and never
@@ -273,7 +273,7 @@ namespace Multipleer.Sync.Tactical
                 // direct, state-independent way as the client. No-op unless the host has THIS actor selected.
                 TacticalActorStateSync.RefreshHostSelectedBarForActor(intent.ShooterNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnAbilityIntent exec failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnAbilityIntent exec failed: " + ex); }
         }
 
         // ─── HOST: ApplyDamage funneled → broadcast the FINAL applied DamageResult ─────────────────
@@ -319,11 +319,11 @@ namespace Multipleer.Sync.Tactical
                 p.Seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacDamage);
                 byte[] payload = TacticalLiveCodec.EncodeDamage(p);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacDamage, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.damage seq=" + p.Seq + " targetNetId=" + targetNetId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.damage seq=" + p.Seq + " targetNetId=" + targetNetId +
                           " sourceNetId=" + p.SourceNetId + " HealthDamage=" + p.HealthDamage.ToString("0.0") +
                           " statuses=" + p.Statuses.Count + " effects=" + p.EffectGuids.Count);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] OnHostApplyDamage failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnHostApplyDamage failed: " + ex); }
         }
 
         // ─── CLIENT: apply the host damage outcome ─────────────────────────────────────────────────
@@ -335,20 +335,20 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeDamage(payload, out var p)) { Debug.LogError("[Multipleer][tac] tac.damage decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeDamage(payload, out var p)) { Debug.LogError("[Multiplayer][tac] tac.damage decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacDamage, p.Seq)) return;
 
             object target = TacticalDeploySync.ResolveLiveActor(p.TargetNetId);
-            if (target == null) { Debug.LogError("[Multipleer][tac] tac.damage: no actor for targetNetId " + p.TargetNetId); return; }
+            if (target == null) { Debug.LogError("[Multiplayer][tac] tac.damage: no actor for targetNetId " + p.TargetNetId); return; }
 
             try
             {
                 object source = p.SourceNetId >= 0 ? TacticalDeploySync.ResolveLiveActor(p.SourceNetId) : null;
                 object damageResult = RebuildDamage(p, source);
-                if (damageResult == null) { Debug.LogError("[Multipleer][tac] tac.damage: could not rebuild DamageResult"); return; }
+                if (damageResult == null) { Debug.LogError("[Multiplayer][tac] tac.damage: could not rebuild DamageResult"); return; }
 
                 var apply = AccessTools.Method(target.GetType(), "ApplyDamage", new[] { _damageResultType });
-                if (apply == null) { Debug.LogError("[Multipleer][tac] tac.damage: ApplyDamage(DamageResult) not found"); return; }
+                if (apply == null) { Debug.LogError("[Multiplayer][tac] tac.damage: ApplyDamage(DamageResult) not found"); return; }
 
                 _applyingRemote = true;
                 try { apply.Invoke(target, new[] { damageResult }); }
@@ -366,10 +366,10 @@ namespace Multipleer.Sync.Tactical
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacDamage, p.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT applied tac.damage seq=" + p.Seq + " targetNetId=" + p.TargetNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT applied tac.damage seq=" + p.Seq + " targetNetId=" + p.TargetNetId +
                           " HealthDamage=" + p.HealthDamage.ToString("0.0"));
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleDamage failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleDamage failed: " + ex); }
         }
 
         // ─── Flatten / rebuild DamageResult ────────────────────────────────────────────────────────
@@ -437,7 +437,7 @@ namespace Multipleer.Sync.Tactical
 
                 return p;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] FlattenDamage failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] FlattenDamage failed: " + ex); return null; }
         }
 
         /// <summary>Rebuild a boxed <c>DamageResult</c> struct from a wire payload: numeric fields + defs
@@ -447,7 +447,7 @@ namespace Multipleer.Sync.Tactical
         private static object RebuildDamage(TacticalLiveCodec.DamagePayload p, object sourceActor)
         {
             var t = DamageResultType;
-            if (t == null) { Debug.LogError("[Multipleer][tac] RebuildDamage: DamageResult type not found"); return null; }
+            if (t == null) { Debug.LogError("[Multiplayer][tac] RebuildDamage: DamageResult type not found"); return null; }
             try
             {
                 object dr = Activator.CreateInstance(t);   // struct default
@@ -519,7 +519,7 @@ namespace Multipleer.Sync.Tactical
 
                 return dr;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] RebuildDamage failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] RebuildDamage failed: " + ex); return null; }
         }
 
         // ─── Engine reflection helpers ──────────────────────────────────────────────────────────────
@@ -540,7 +540,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 if (_getSourceActor != null) return _getSourceActor.Invoke(null, new[] { source });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveSourceActor failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveSourceActor failed: " + ex); }
             return null;
         }
 
@@ -566,7 +566,7 @@ namespace Multipleer.Sync.Tactical
                     if (g == abilityGuid) return a;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ResolveAbilityByGuid failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveAbilityByGuid failed: " + ex); }
             return null;
         }
 
@@ -604,7 +604,7 @@ namespace Multipleer.Sync.Tactical
                 var candidates = BuildBodyPartCandidates(targetActor);
                 if (intent.BodyPartId < candidates.Count) selectedItem = candidates[intent.BodyPartId];
                 if (selectedItem == null)
-                    Debug.LogWarning("[Multipleer][tac] BuildShootTarget: bodyPartId=" + intent.BodyPartId +
+                    Debug.LogWarning("[Multiplayer][tac] BuildShootTarget: bodyPartId=" + intent.BodyPartId +
                                      " unresolved on host (candidates=" + candidates.Count +
                                      ") — falling open to center-of-mass aim");
             }
@@ -641,7 +641,7 @@ namespace Multipleer.Sync.Tactical
                         // SAME item from the aim-point seed in the snap below; pinning it ALSO covers a
                         // SnapToBodyparts-OFF weapon (whose snap leaves TacticalItem untouched).
                         if (selectedItem != null) AccessTools.Field(targetType, "TacticalItem")?.SetValue(t, selectedItem);
-                        Debug.Log("[Multipleer][tac] BuildShootTarget set DamageReceiver=actor" +
+                        Debug.Log("[Multiplayer][tac] BuildShootTarget set DamageReceiver=actor" +
                                   (selectedItem != null ? " + TacticalItem=selectedBodyPart" : "") +
                                   " on actor target (relayed-melee NRE fix)");
                         return t;
@@ -654,7 +654,7 @@ namespace Multipleer.Sync.Tactical
                     if (posCtor != null) return posCtor.Invoke(new object[] { groundPos });
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildShootTarget ctor failed, falling back to field-set: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildShootTarget ctor failed, falling back to field-set: " + ex); }
 
             // Fallback: default-ctor + field assignment (no typed ctor available / ctor threw). For an ACTOR target seed
             // Actor + GameObject + ActorGridPosition + PositionToApply(aim point) so GetWorkingPosition lands on the body
@@ -687,7 +687,7 @@ namespace Multipleer.Sync.Tactical
                 if (getAim != null && getAim.Invoke(targetActor, null) is Transform tr && tr != null)
                     return tr.position;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetActorAimPosition failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] GetActorAimPosition failed: " + ex); }
             return groundFallback;
         }
 
@@ -721,7 +721,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] ComputeBodyPartId failed (sending -1 / center-of-mass): " + ex);
+                Debug.LogError("[Multiplayer][tac] ComputeBodyPartId failed (sending -1 / center-of-mass): " + ex);
                 return TacticalLiveCodec.BodyPartIdNone;
             }
         }
@@ -759,7 +759,7 @@ namespace Multipleer.Sync.Tactical
                         if (GetProp(it, "IsVisible") is bool vis && vis) list.Add(it);
                     }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildBodyPartCandidates failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildBodyPartCandidates failed: " + ex); }
             return list;
         }
 
@@ -775,7 +775,7 @@ namespace Multipleer.Sync.Tactical
                 if (getAim != null && getAim.Invoke(item, null) is Transform tr && tr != null)
                     return tr.position;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] GetItemAimPosition failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] GetItemAimPosition failed: " + ex); }
             return fallbackActor != null ? GetActorAimPosition(fallbackActor, groundFallback) : groundFallback;
         }
 
@@ -819,7 +819,7 @@ namespace Multipleer.Sync.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] GetShootTarget snap failed (using aim-point target): " + ex);
+                Debug.LogError("[Multiplayer][tac] GetShootTarget snap failed (using aim-point target): " + ex);
                 return null;
             }
         }
@@ -835,10 +835,10 @@ namespace Multipleer.Sync.Tactical
                 string itemDesc = item == null ? "noItem" : item.ToString();
                 var getWp = AccessTools.Method(target.GetType(), "GetWorkingPosition");
                 Vector3 v = (getWp != null && getWp.Invoke(target, null) is Vector3 wp) ? wp : Vector3.zero;
-                Debug.Log("[Multipleer][tac] HOST shoot aim item=" + itemDesc +
+                Debug.Log("[Multiplayer][tac] HOST shoot aim item=" + itemDesc +
                           " workingPos=(" + v.x.ToString("0.0") + "," + v.y.ToString("0.0") + "," + v.z.ToString("0.0") + ")");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] LogShootAim failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] LogShootAim failed: " + ex); }
         }
 
         /// <summary>Read {targetNetId, targetPos} from a <c>TacticalAbilityTarget</c>: the actor (if any) →
@@ -887,7 +887,7 @@ namespace Multipleer.Sync.Tactical
                 SetStat(GetField(stats, "ActionPoints"), ap);
                 SetStat(GetField(stats, "WillPoints"), wp);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetApWp failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SetApWp failed: " + ex); }
         }
 
         private static float StatValue(object stat)
@@ -940,7 +940,7 @@ namespace Multipleer.Sync.Tactical
         {
             var f = AccessTools.Field(type, name);
             if (f != null) f.SetValue(boxed, value);
-            else Debug.LogError("[Multipleer][tac] DamageResult field not found: " + name);
+            else Debug.LogError("[Multiplayer][tac] DamageResult field not found: " + name);
         }
     }
 }

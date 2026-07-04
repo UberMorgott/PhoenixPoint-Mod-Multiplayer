@@ -1,9 +1,9 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE host-authoritative WEAPON / EQUIPMENT-SWAP replication patch (Inc Equip). ONE Harmony patch on the
@@ -44,7 +44,7 @@ namespace Multipleer.Harmony.Tactical
             try { return TacticalEquipSync.ClientInterceptEquip(__instance, __0); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] SetSelectedEquipmentPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] SetSelectedEquipmentPatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native swap on an unexpected error
             }
         }
@@ -55,7 +55,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalEquipSync.OnHostEquipChanged(__instance); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] SetSelectedEquipmentPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] SetSelectedEquipmentPatch.Postfix failed: " + ex);
             }
         }
     }

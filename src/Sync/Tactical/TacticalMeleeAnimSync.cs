@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Feature C (melee) — client-side MELEE ATTACK ANIMATION (tac.melee.start, 0x91). The MELEE counterpart
@@ -83,11 +83,11 @@ namespace Multipleer.Sync.Tactical
                 byte[] payload = TacticalLiveCodec.EncodeMeleeStart(
                     seq, attackerNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacMeleeStart, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.melee.start seq=" + seq + " attacker=" + attackerNetId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.melee.start seq=" + seq + " attacker=" + attackerNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid +
                           " targetNetId=" + targetNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastMeleeStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastMeleeStart failed: " + ex); }
         }
 
         // ─── CLIENT: play the melee swing CONCURRENTLY (damage-less, no return-fire, ammo-stable) ─────
@@ -99,19 +99,19 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeMeleeStart(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.melee.start decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeMeleeStart(payload, out var s)) { Debug.LogError("[Multiplayer][tac] tac.melee.start decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMeleeStart, s.Seq)) return;
 
             object attacker = TacticalDeploySync.ResolveLiveActor(s.AttackerNetId);
-            if (attacker == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: no actor for netId " + s.AttackerNetId); return; }
+            if (attacker == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: no actor for netId " + s.AttackerNetId); return; }
 
             try
             {
                 object ability = ResolveAbilityByGuid(attacker, s.AbilityDefGuid);
-                if (ability == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: attacker has no ability with guid " + s.AbilityDefGuid); return; }
+                if (ability == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: attacker has no ability with guid " + s.AbilityDefGuid); return; }
 
                 object target = BuildMeleeTarget(s);
-                if (target == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: could not build target"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: could not build target"); return; }
 
                 // NRE guard: a bare-position target (TargetNetId < 0) is built via the (Vector3) ctor and leaves
                 // DamageReceiver NULL. BashCrt's AimIK block derefs target.DamageReceiver.GetAimPoint() UNGUARDED
@@ -121,7 +121,7 @@ namespace Multipleer.Sync.Tactical
                 // replay would NRE. The host shouldn't legitimately do this; skip the replay rather than crash.
                 if (s.TargetNetId < 0 && GetProp(ability, "MultipleTargetSimulation") is bool mts && !mts)
                 {
-                    Debug.LogError("[Multipleer][tac] melee.start replay SKIP: position-target on non-multitarget bash seq=" + s.Seq +
+                    Debug.LogError("[Multiplayer][tac] melee.start replay SKIP: position-target on non-multitarget bash seq=" + s.Seq +
                                    " attacker=" + s.AttackerNetId + " ability=" + s.AbilityDefGuid);
                     TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMeleeStart, s.Seq);
                     return;
@@ -134,27 +134,27 @@ namespace Multipleer.Sync.Tactical
                 // BashCrt is private: BashAbility.BashCrt(PlayingAction) — drive it directly (NOT via Activate),
                 // exactly like fire drives FireWeaponAtTargetCrt directly. It reads ONLY action.Param (the target).
                 var bash = AccessTools.Method(ability.GetType(), "BashCrt");
-                if (bash == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: BashCrt not found on " + ability.GetType().Name); return; }
+                if (bash == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: BashCrt not found on " + ability.GetType().Name); return; }
 
                 object playingAction = BuildStubPlayingAction(target);
-                if (playingAction == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: could not build PlayingAction"); return; }
+                if (playingAction == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: could not build PlayingAction"); return; }
 
                 object timing = GetTiming(attacker, TacticalDeploySync.LiveTlc);
-                if (timing == null) { Debug.LogError("[Multipleer][tac] tac.melee.start: no Timing to drive the replay"); return; }
+                if (timing == null) { Debug.LogError("[Multiplayer][tac] tac.melee.start: no Timing to drive the replay"); return; }
 
                 // Drive our own wrapper coroutine: it holds the melee replay guard for the WHOLE inner coroutine
                 // (the guard must survive the cross-frame yields), then clears it in finally.
                 var crt = ReplayMeleeCrt(ability, bash, playingAction);
                 if (!InvokeStart(timing, timing.GetType(), crt))
                 {
-                    Debug.LogError("[Multipleer][tac] tac.melee.start: could not start replay coroutine netId=" + s.AttackerNetId);
+                    Debug.LogError("[Multiplayer][tac] tac.melee.start: could not start replay coroutine netId=" + s.AttackerNetId);
                     return;
                 }
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacMeleeStart, s.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT playing tac.melee.start seq=" + s.Seq + " attacker=" + s.AttackerNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT playing tac.melee.start seq=" + s.Seq + " attacker=" + s.AttackerNetId +
                           " type=" + ability.GetType().Name + " targetNetId=" + s.TargetNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnMeleeStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnMeleeStart failed: " + ex); }
         }
 
         /// <summary>Wrapper coroutine: raise the client-only melee replay guard, run the native
@@ -172,7 +172,7 @@ namespace Multipleer.Sync.Tactical
             {
                 object inner = null;
                 try { inner = bash.Invoke(ability, new[] { playingAction }); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.melee.start: BashCrt invoke failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.melee.start: BashCrt invoke failed: " + ex); }
 
                 if (inner is IEnumerator e)
                 {
@@ -181,7 +181,7 @@ namespace Multipleer.Sync.Tactical
                     {
                         bool moved;
                         try { moved = e.MoveNext(); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.melee.start replay step failed: " + ex); break; }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.melee.start replay step failed: " + ex); break; }
                         if (!moved) break;
                         object cur = e.Current;
                         yield return cur is NextUpdate nu ? nu : NextUpdate.NextFrame;
@@ -205,7 +205,7 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 var paType = AccessTools.TypeByName("Base.Entities.PlayingAction");
-                if (paType == null) { Debug.LogError("[Multipleer][tac] melee: PlayingAction type not found"); return null; }
+                if (paType == null) { Debug.LogError("[Multiplayer][tac] melee: PlayingAction type not found"); return null; }
                 var ctors = paType.GetConstructors();
                 if (ctors.Length == 0) return null;
                 var ctor = ctors[0];
@@ -221,10 +221,10 @@ namespace Multipleer.Sync.Tactical
                 // Defensive: if the ctor shape ever drifts and there is no object-typed Param slot, fail loud.
                 bool sawObject = false;
                 foreach (var p in pars) if (p.ParameterType == typeof(object)) { sawObject = true; break; }
-                if (!sawObject) { Debug.LogError("[Multipleer][tac] melee: PlayingAction ctor has no object Param slot"); return null; }
+                if (!sawObject) { Debug.LogError("[Multiplayer][tac] melee: PlayingAction ctor has no object Param slot"); return null; }
                 return ctor.Invoke(args);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildStubPlayingAction failed: " + ex); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildStubPlayingAction failed: " + ex); return null; }
         }
 
         // ─── Build the melee target (mirror TacticalFireAnimSync.BuildSyncedFireTarget) ───────────────
@@ -275,7 +275,7 @@ namespace Multipleer.Sync.Tactical
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildMeleeTarget ctor failed, falling back to field-set: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildMeleeTarget ctor failed, falling back to field-set: " + ex); }
 
             object target = Activator.CreateInstance(targetType);
             if (targetActor != null)
@@ -327,7 +327,7 @@ namespace Multipleer.Sync.Tactical
                     if (g == abilityGuid) return a;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] (melee) ResolveAbilityByGuid failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] (melee) ResolveAbilityByGuid failed: " + ex); }
             return null;
         }
 
@@ -364,7 +364,7 @@ namespace Multipleer.Sync.Tactical
                 best.Invoke(timingInstance, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] (melee) InvokeStart failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] (melee) InvokeStart failed: " + ex); return false; }
         }
 
         // ─── Engine reflection helpers (mirror TacticalFireAnimSync) ────────────────────────────────

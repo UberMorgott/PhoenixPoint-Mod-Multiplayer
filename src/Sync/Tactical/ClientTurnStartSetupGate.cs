@@ -1,8 +1,8 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind the CLIENT mirror's turn-start SETUP replay (Inc1 over-suppression fix).
-    /// Extracted from <see cref="Multipleer.Harmony.Tactical.PlayTurnCrtMirrorFreezePatch"/> so the
+    /// Extracted from <see cref="Multiplayer.Harmony.Tactical.PlayTurnCrtMirrorFreezePatch"/> so the
     /// "which factions replay the turn-start setup" decision is unit-testable without TacticalFaction / Harmony.
     ///
     /// WHY (grounded, decompile file:line): Inc1 replaced the native <c>TacticalFaction.PlayTurnCrt</c>

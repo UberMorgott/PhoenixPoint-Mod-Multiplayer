@@ -458,7 +458,7 @@ Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
 
 ## 8. Test / verification strategy
 
-- **Unit tests (pure, Unity-free — TDD-first, linked per-file into `Multipleer.Tests.csproj` after the
+- **Unit tests (pure, Unity-free — TDD-first, linked per-file into `Multiplayer.Tests.csproj` after the
   existing `InterpolationMath.cs` link):**
   - New `SnapshotBuffer`/alpha math in `InterpolationMath` (repurposed): bracket selection (find `s0,s1`
     spanning `renderTime`), `alpha = clamp01((rt−t0)/(t1−t0))`, underrun→hold-newest, overrun→clamp-oldest,
@@ -468,11 +468,11 @@ Detailed task breakdown lives in the companion plan. Summary + PASS criteria:
   - Keep the existing `GeoStateDiffCodec`/`GeoVehicleStateDiffer` tests green (wire unchanged).
   - REMOVE the obsolete native-equation tests for `SegmentNum`/`SegmentTotalSeconds`/`GreatCircleAngleRad`/
     `CorrectedStartSec` when those members are scrapped.
-- **In-game gate per increment** (2-instance co-op per `multipleer-second-instance-setup`: Goldberg-emu
+- **In-game gate per increment** (2-instance co-op per `multiplayer-second-instance-setup`: Goldberg-emu
   2nd copy + `mklink /J` junctions; deploy the Release DLL to BOTH copies). Each increment's PASS
   criteria in §6 is the gate; do not advance on a fail (use `superpowers:systematic-debugging`).
 - **Temporary DIAGB** stays through INC-A→INC-C (host snapshot summary, per-apply read-back, `0x35`
   boundary log) to prove send/recv/apply flow and single-writer; STRIP in INC-D after the final gate
   (one commit, build 0/0 + suite green after strip).
-- **Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-- **Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+- **Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+- **Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`

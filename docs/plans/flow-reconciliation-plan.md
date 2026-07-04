@@ -1,4 +1,4 @@
-# Multipleer — Flow Reconciliation Plan (corrected to the documented lobby flow)
+# Multiplayer — Flow Reconciliation Plan (corrected to the documented lobby flow)
 
 > Goal: reconcile the EXISTING mod into the **canonical lobby-first flow** the user
 > confirmed and that `docs/specs/02-session-lifecycle-and-player-management.md`

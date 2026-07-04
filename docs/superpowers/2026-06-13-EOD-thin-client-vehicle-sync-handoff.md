@@ -19,7 +19,7 @@
 
 ## Git state at EOD
 
-- Inner repo `E:\DEV\PhoenixPoint\Multipleer`, branch `main`.
+- Inner repo `E:\DEV\PhoenixPoint\Multiplayer`, branch `main`.
 - HEAD = `7636db4` *fix(geosync): INC-D point client craft nose along travel via native heading math*.
 - **Deployed DLL `5F7C2F0F`. 193 xUnit green, build 0/0, wire/codec UNCHANGED.**
 - **PUSHED to `origin/main` this session (EOD) — user-authorized push, no force.** No feature branches
@@ -111,13 +111,13 @@
 
 ## Test rig + workflow
 
-- 2nd Goldberg instance (`Multipleer\tools\` — see memory `multipleer-second-instance-setup`;
+- 2nd Goldberg instance (`Multiplayer\tools\` — see memory `multiplayer-second-instance-setup`;
   copy already provisioned at `D:\PP-Instance2`, launch via `launch-second-copy.bat -mods`). DirectIP
   127.0.0.1 (offline → only DirectIP verifiable). Deploy via `deploy.ps1` to BOTH copies.
 - Commit to inner `main`. NO feature branches. (GitHub push was a one-off EOD authorization this
   session — resume the normal no-push-during-dev default next session unless re-authorized.)
-- Build: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-- Tests: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+- Build: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+- Tests: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
 
 ## Key references (don't re-derive)
 

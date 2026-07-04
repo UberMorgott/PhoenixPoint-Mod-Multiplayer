@@ -3,7 +3,7 @@ using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Tiny runtime-uGUI construction helpers shared by the lobby panel and save picker.

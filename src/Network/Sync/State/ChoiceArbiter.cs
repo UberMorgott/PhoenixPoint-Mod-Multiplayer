@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// HOST-side first-claim-wins arbitration for geoscape-event choices. NOTE: currently NOT wired into the live

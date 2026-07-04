@@ -1,11 +1,11 @@
 using System.Collections.Generic;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Transport;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Transport;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
     /// Runtime uGUI lobby panel (built from code, same proven pattern as MultiplayerUI's in-game
@@ -127,7 +127,7 @@ namespace Multipleer.UI
         {
             if (_root != null || menuCanvas == null) return;
 
-            // Dedicated overlay Canvas (mirrors MultiplayerUI.MultipleerBarCanvas EXACTLY):
+            // Dedicated overlay Canvas (mirrors MultiplayerUI.MultiplayerBarCanvas EXACTLY):
             // ScreenSpaceOverlay + 1920×1080 ScaleWithScreenSize scaler + GraphicRaycaster. Sort order
             // 4000 sits above the menu chrome but BELOW the 5000 in-game status bar.
             //
@@ -140,7 +140,7 @@ namespace Multipleer.UI
             // GameObject, no Canvas ancestor) → it is a ROOT canvas → scaler honoured, overlay fills
             // the screen. We mirror that here. ModGO is persistent, so the lobby canvas now shares the
             // mod's lifetime (the lobby is only Show()n while a session is active, like the bar).
-            var canvasGo = new GameObject("MultipleerLobbyCanvas");
+            var canvasGo = new GameObject("MultiplayerLobbyCanvas");
             canvasGo.transform.SetParent(_owner.transform, false);
             // Hide the lobby canvas GO from the very first frame. The canvas is the SINGLE visibility
             // lever: while inactive, its whole subtree (_root + every zone) is hidden no matter what.
@@ -175,7 +175,7 @@ namespace Multipleer.UI
                 canvasRect.localScale = Vector3.one;
             }
 
-            _root = new GameObject("MultipleerLobbyPanel");
+            _root = new GameObject("MultiplayerLobbyPanel");
             _root.transform.SetParent(_lobbyCanvas.transform, false);
 
             var rect = _root.AddComponent<RectTransform>();
@@ -1089,7 +1089,7 @@ namespace Multipleer.UI
                 try { _playButtonSetInteractable.Invoke(_playButtonCtrl, new object[] { playable }); }
                 catch (System.Exception e)
                 {
-                    UnityEngine.Debug.LogError("[Multipleer] Play button repaint failed: " + e.Message);
+                    UnityEngine.Debug.LogError("[Multiplayer] Play button repaint failed: " + e.Message);
                 }
             }
             else if (_playButton != null)

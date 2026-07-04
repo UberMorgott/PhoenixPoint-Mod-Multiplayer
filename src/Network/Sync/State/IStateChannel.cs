@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// A host-authoritative state echo channel. Generalizes the working wallet echo to any faction

@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind the CLIENT mirror's <c>TacticalLevelController._nextTurnUpdateable</c>
@@ -17,7 +17,7 @@ namespace Multipleer.Sync.Tactical
     /// combat — for player turns AND enemy turns alike; it is NOT a per-faction flag.
     ///
     /// On the client the autonomous turn engine <c>NextTurnCrt</c> is (correctly) suppressed
-    /// (<see cref="Multipleer.Harmony.Tactical.NextTurnCrtSuppressPatch"/>), so the single native updateable that
+    /// (<see cref="Multiplayer.Harmony.Tactical.NextTurnCrtSuppressPatch"/>), so the single native updateable that
     /// would keep <c>TurnIsPlaying</c> true is never a live/meaningful one and the field can read null → the
     /// gate at UIStateInitial.cs:49 dead-spins in <c>UIStateWaiting</c> and the client view never grants control
     /// (nor enemy-turn presentation). The fix mirrors native LOCAL presentation state: while the client mirror

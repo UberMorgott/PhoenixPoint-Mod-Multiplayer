@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Increment-1 deploy-sync entry point (spec §8, plan T4). Postfix on the PUBLIC
@@ -18,7 +18,7 @@ namespace Multipleer.Harmony.Tactical
     ///     mirror mode.
     ///
     /// One hook drives both sides; <see cref="TacticalDeploySync"/> branches on host/client internally.
-    /// This patch auto-registers via <c>MultipleerMain.PatchAll(GetExecutingAssembly())</c> — NO edit to
+    /// This patch auto-registers via <c>MultiplayerMain.PatchAll(GetExecutingAssembly())</c> — NO edit to
     /// the bootstrap. Reflection-target (TypeByName) so it binds lazily, like the existing TacticalPatches.
     /// </summary>
     [HarmonyPatch]
@@ -64,7 +64,7 @@ namespace Multipleer.Harmony.Tactical
             }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] TacticalLevelStateChangedPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] TacticalLevelStateChangedPatch.Postfix failed: " + ex);
             }
         }
     }
@@ -102,13 +102,13 @@ namespace Multipleer.Harmony.Tactical
 
             // Always stamp the launching site id (both sides need it).
             try { TacticalDeploySync.OnTacticalLaunch(mission); }
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnTacticalLaunch failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnTacticalLaunch failed: {ex}"); }
 
             if (engine.IsHost) return true;   // host launches authoritatively
 
             // CLIENT: only the deploy-driven launch is allowed; block any spontaneous self-launch.
             if (TacticalDeploySync.ClientLaunchInProgress) return true;
-            Debug.Log("[Multipleer][tac] CLIENT spontaneous LaunchTacticalGame GATED (awaiting tac.deploy)");
+            Debug.Log("[Multiplayer][tac] CLIENT spontaneous LaunchTacticalGame GATED (awaiting tac.deploy)");
             return false;
         }
     }
@@ -139,7 +139,7 @@ namespace Multipleer.Harmony.Tactical
         public static void Postfix()
         {
             try { TacticalDeploySync.OnMissionExit(); }
-            catch (Exception ex) { Debug.LogError($"[Multipleer][tac] OnMissionExit failed: {ex}"); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit failed: {ex}"); }
         }
     }
 }

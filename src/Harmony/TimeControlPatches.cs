@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.TimeSync;
+using Multiplayer.Network;
+using Multiplayer.Network.TimeSync;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Client-side time-control INPUT intercept: when a NON-host player clicks pause/play on the
@@ -58,7 +58,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] TimeControlPausePatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] TimeControlPausePatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -102,7 +102,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] TimeControlSpeedPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] TimeControlSpeedPatch failed: " + ex.Message);
                 return true;
             }
         }

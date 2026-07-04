@@ -1,4 +1,4 @@
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind the host's shoot-intent target REBUILD (TacticalCombatSync.BuildShootTarget):

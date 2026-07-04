@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network.CommandSync
+namespace Multiplayer.Network.CommandSync
 {
     // Auditable, pure (Unity-free) declarative list of the CLOSED 13-producer geoscape-sim set the
     // CLIENT must suppress so it runs ZERO stochastic/clock-driven authoritative simulation (Inc1 A).

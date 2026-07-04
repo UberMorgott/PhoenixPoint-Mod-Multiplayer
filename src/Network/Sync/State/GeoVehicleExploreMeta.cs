@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 — one vehicle's mirrored SITE-EXPLORATION PROGRESS: the authoritative fraction of the native

@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Pure, Unity-free stable map from the <c>PhoenixPoint.Common.Core.ResourceType</c> integer value to the

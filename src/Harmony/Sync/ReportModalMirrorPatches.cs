@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Host-authoritative geoscape REPORT-WINDOW mirror (Phase-A; additive, behind <see cref="ReportMirrorGate"/>,
@@ -99,7 +99,7 @@ namespace Multipleer.Harmony.Sync
                         return false;                          // client: no local report window for a mirrored type
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalMirror.ClientShouldSuppress failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalMirror.ClientShouldSuppress failed: " + ex.Message); }
             return true;                                        // host (and any failure / gate-off): native runs
         }
 
@@ -120,12 +120,12 @@ namespace Multipleer.Harmony.Sync
                 int modalType = Convert.ToInt32(modalTypeBoxed);
                 if (!ReportModalClassifier.IsReportModal(modalType)) return;
                 if (!ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) return;
-                Debug.Log("[Multipleer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
+                Debug.Log("[Multiplayer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
                           " siteId=" + payload.SiteId + " defId=" + payload.DefId + " extras=" + (payload.ExtraIds?.Count ?? 0) +
                           " shareLevel=" + payload.ShareLevel + " priority=" + payload.Priority);
                 engine.Sync?.BroadcastReportModal(payload);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalMirror.HostBroadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalMirror.HostBroadcast failed: " + ex.Message); }
         }
     }
 }

@@ -1,13 +1,13 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Relay interceptor for research START: <c>Research.AddResearchToQueue(ResearchElement)</c>
@@ -57,7 +57,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] AddResearchToQueuePatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] AddResearchToQueuePatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -77,7 +77,7 @@ namespace Multipleer.Harmony.Sync
                 // every host add echoes via the channel regardless of whether it became Current.
                 sync?.MarkChannelDirty(2);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] AddResearchToQueuePatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] AddResearchToQueuePatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -121,7 +121,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] CompleteResearchPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] CompleteResearchPatch failed: " + ex.Message);
             }
             return true; // host runs the real completion
         }
@@ -131,7 +131,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteResearchPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteResearchPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -188,7 +188,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] CancelResearchPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] CancelResearchPatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -234,7 +234,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] " + patchName + " failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] " + patchName + " failed: " + ex.Message);
                 return true;
             }
         }

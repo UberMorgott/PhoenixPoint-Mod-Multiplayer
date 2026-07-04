@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Host-side broadcast interceptor + FIRST-CLICK-WINS gate for geoscape event choices:
@@ -89,7 +89,7 @@ namespace Multipleer.Harmony.Sync
                     var arbiter = engine.Sync?.Arbiter;
                     if (occId != 0 && arbiter != null && !arbiter.Claim(occId))
                     {
-                        Debug.Log("[Multipleer] CompleteEventPatch first-wins LOST occId=" + occId + " eventId=" + eventId +
+                        Debug.Log("[Multiplayer] CompleteEventPatch first-wins LOST occId=" + occId + " eventId=" + eventId +
                                   " → skip native CompleteEvent (winner already resolved this occurrence)");
                         __state = null;
                         return false;
@@ -104,7 +104,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] CompleteEventPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] CompleteEventPatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -131,7 +131,7 @@ namespace Multipleer.Harmony.Sync
                 // regardless of whether the ResourcesChanged subscription fired. Null-safe; idempotent (coalesced).
                 NetworkEngine.Instance?.Sync?.MarkWalletDirty();
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteEventPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

@@ -1,8 +1,8 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Inc Vision — CLIENT mirror single-writer guard. The host→client vision push (<c>tac.vision</c>,

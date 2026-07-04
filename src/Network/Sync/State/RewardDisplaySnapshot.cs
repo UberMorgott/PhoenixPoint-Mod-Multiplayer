@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>One resource delta line: native <c>ShowReward</c> renders <c>ResourceType</c> + <c>RoundedValue</c>
     /// (UIModuleSiteEncounters.cs:415-418). <c>ResourceType</c> is the raw enum integer value.</summary>
@@ -246,7 +246,7 @@ namespace Multipleer.Network.Sync.State
             }
             // Malformed payload → reject (null). The codec stays PURE/Unity-free (it is linked into the unit
             // tests, which don't ship UnityEngine), so the visibility log lives at the Unity-bound caller
-            // (SyncEngine.OnEventDismiss logs when a NON-empty blob fails to decode) — same [Multipleer] style.
+            // (SyncEngine.OnEventDismiss logs when a NON-empty blob fails to decode) — same [Multiplayer] style.
             catch (Exception) { return null; }
         }
 

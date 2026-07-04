@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Network.TimeSync
+namespace Multiplayer.Network.TimeSync
 {
     /// <summary>
     /// Authoritative geoscape time ANCHOR carried on the wire (host→all, packet 0x37 TimeAnchor).

@@ -1,6 +1,6 @@
 # Geoscape Command Sync — Design (host-authoritative command-result relay)
 
-**Status:** Approved (2026-06-12). **Mod:** Multipleer (Phoenix Point co-op). **Milestone:** runtime geoscape state synchronization.
+**Status:** Approved (2026-06-12). **Mod:** Multiplayer (Phoenix Point co-op). **Milestone:** runtime geoscape state synchronization.
 
 > **Thin spec by design.** The detailed engineering research already lives in `docs/research/03-campaign-layer.md`, `04-serialization.md`, `07-tactical-concurrency.md`, `08-geoscape-concurrency.md` and `docs/specs/01..03`. This document is the ARCHITECTURE INDEX + module map + staging — it references those rather than duplicating them. Each stage gets its OWN implementation plan; do not fold everything into one mega-doc or one mega-file.
 
@@ -56,7 +56,7 @@ Packets `CampaignActionRequest 0x30`/`Approved 0x31`/`Rejected 0x32` + serialize
 - Each intercept's exact method site/signature confirmed against the runtime assembly before hooking (`specs/03`).
 
 ## Testing
-- Pure-logic TDD (no UnityEngine): CommandCodec round-trips, HostArbiter validate/dispatch logic, InterceptRegistry lookup, PermissionGate per-GUID flag checks. Linked into `Multipleer.Tests` (xUnit).
+- Pure-logic TDD (no UnityEngine): CommandCodec round-trips, HostArbiter validate/dispatch logic, InterceptRegistry lookup, PermissionGate per-GUID flag checks. Linked into `Multiplayer.Tests` (xUnit).
 - Engine seams (real Harmony intercepts, real game-method execution, cross-instance apply): manual 2-instance in-game run.
 
 ## Out of scope (this milestone)

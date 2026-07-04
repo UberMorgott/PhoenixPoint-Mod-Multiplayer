@@ -4,7 +4,7 @@ using Base.UI.MessageBox;
 using PhoenixPoint.Common.Game;
 using UnityEngine;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// F3 — the host leaving drops every client to the Main Menu. Wired ONCE per engine init
@@ -90,7 +90,7 @@ namespace Multipleer.Network
         private static void HandleHostLeft()
         {
             if (!_latch.TryHandle()) return; // already handled this session
-            Debug.LogWarning("[Multipleer] F3: host left the session — returning client to main menu.");
+            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu.");
 
             // Session-fatal: a modal prompt is acceptable here (works tactical + geoscape + home).
             try
@@ -101,7 +101,7 @@ namespace Multipleer.Network
                     MessageBoxIcon.Warning, MessageBoxButtons.OK,
                     null, null);
             }
-            catch (Exception e) { Debug.LogError("[Multipleer] F3 prompt failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] F3 prompt failed: " + e.Message); }
 
             // Force the client back to the Main Menu via the native quit-to-menu chokepoint. The
             // existing FinishLevelAndGoToLobbyTearDownPatch postfix auto-runs NetworkEngine.TearDown().
@@ -110,20 +110,20 @@ namespace Multipleer.Network
                 var game = GameUtl.GameComponent<PhoenixGame>();
                 game?.FinishLevelAndGoToLobby();
             }
-            catch (Exception e) { Debug.LogError("[Multipleer] F3 return-to-menu failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] F3 return-to-menu failed: " + e.Message); }
 
             // Defense-in-depth: ensure the network session is torn down even if the native return path
             // did not (e.g. called outside a level). TearDown is idempotent + safe to call twice.
             try { NetworkEngine.Instance?.TearDown(); }
-            catch (Exception e) { Debug.LogError("[Multipleer] F3 TearDown failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] F3 TearDown failed: " + e.Message); }
 
             // Fix #5 (host-left remainder): the network TearDown above does NOT reset the UI lobby FSM
             // or clear the chosen save, so without this the next host/join would inherit a stale
             // ClientLobby/Starting state + a phantom _pendingChosenSave (the same bug LEAVE/cancel/
             // OnConnectionFailed already guard via TeardownLobbyState). Route the host-left trigger
             // through the same single hook. Null-safe (no MultiplayerUI in a headless/edge teardown).
-            try { Multipleer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
-            catch (Exception e) { Debug.LogError("[Multipleer] F3 UI teardown failed: " + e.Message); }
+            try { Multiplayer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] F3 UI teardown failed: " + e.Message); }
         }
     }
 }

@@ -4,9 +4,9 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Harmony.Tactical;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
+using Multiplayer.Harmony.Tactical;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
 // CS0162 (unreachable code): SyncStatuses is a compile-time `const` gate. It is now TRUE (Feature B — visual-
@@ -15,7 +15,7 @@ using UnityEngine;
 // does not break the build on the then-dead branches.
 #pragma warning disable CS0162
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE generic per-actor STATE-DELTA spine (surface <c>tac.actorstate</c> 0x8F, state-spine design §4/§9,
@@ -94,22 +94,22 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 object timing = GetProp(tacticalLevelController, "Timing");
-                if (timing == null) { Debug.LogError("[Multipleer][tac] actorstate: no Timing to start flush"); return; }
+                if (timing == null) { Debug.LogError("[Multiplayer][tac] actorstate: no Timing to start flush"); return; }
 
                 _flushBoundTlc = tacticalLevelController;
                 HostResetFlushGuard();
                 if (InvokeTimingStart(timing, FlushCrt(tacticalLevelController)))
                 {
                     _flushRunning = true;
-                    Debug.Log("[Multipleer][tac] HOST actorstate flush started (every " + FlushFrameInterval + " frames)");
+                    Debug.Log("[Multiplayer][tac] HOST actorstate flush started (every " + FlushFrameInterval + " frames)");
                 }
                 else
                 {
                     _flushBoundTlc = null;
-                    Debug.LogError("[Multipleer][tac] actorstate: Timing.Start failed — flush NOT running");
+                    Debug.LogError("[Multiplayer][tac] actorstate: Timing.Start failed — flush NOT running");
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostStartFlush failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostStartFlush failed: " + ex); }
         }
 
         /// <summary>The flush heartbeat: every <see cref="FlushFrameInterval"/> frames, broadcast the changed
@@ -131,13 +131,13 @@ namespace Multipleer.Sync.Tactical
                 {
                     frame = 0;
                     try { HostFlushOnce(engine); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate flush tick failed: " + ex); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] actorstate flush tick failed: " + ex); }
                 }
                 yield return NextUpdate.NextFrame;
             }
             _flushRunning = false;
             _flushBoundTlc = null;
-            Debug.Log("[Multipleer][tac] HOST actorstate flush stopped");
+            Debug.Log("[Multiplayer][tac] HOST actorstate flush stopped");
         }
 
         /// <summary>HOST: build + broadcast the changed-actor batch ONCE. Walks the registry, reads each actor's
@@ -255,7 +255,7 @@ namespace Multipleer.Sync.Tactical
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorState);
             byte[] payload = TacticalLiveCodec.EncodeActorState(new TacticalLiveCodec.ActorStateBatch(seq, changed));
             TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacActorState, payload);
-            Debug.Log("[Multipleer][tac] HOST broadcast tac.actorstate seq=" + seq + " changedActors=" + changed.Count);
+            Debug.Log("[Multiplayer][tac] HOST broadcast tac.actorstate seq=" + seq + " changedActors=" + changed.Count);
         }
 
         // ─── CLIENT: apply a host state delta ───────────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ namespace Multipleer.Sync.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeActorState(payload, out var batch))
-            { Debug.LogError("[Multipleer][tac] tac.actorstate decode failed"); return; }
+            { Debug.LogError("[Multiplayer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
             int applied = 0, apwp = 0, sAdd = 0, sRem = 0, sRef = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0;
@@ -347,11 +347,11 @@ namespace Multipleer.Sync.Tactical
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
                 if (applied > 0 || sAdd > 0 || sRem > 0 || sRef > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0)
-                    Debug.Log("[Multipleer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
+                    Debug.Log("[Multiplayer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
                               " status~" + sRef + " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HandleActorState failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorState failed: " + ex); }
         }
 
         /// <summary>AP-delta re-grey (CLIENT, re-grey site #2). When the async host AP/WP delta lands for the
@@ -374,7 +374,7 @@ namespace Multipleer.Sync.Tactical
                 if (selNet < 0 || !apAppliedNetIds.Contains(selNet)) return; // selected actor's AP didn't change → nothing to re-grey
                 DoDirectAbilityBarRefresh(view, selected, selNet, "CLIENT@apdelta");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] re-grey@apdelta failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] re-grey@apdelta failed: " + ex); }
         }
 
         /// <summary>TASK 2 (HOST staleness). After the host EXECUTES a relayed CLIENT action programmatically
@@ -392,7 +392,7 @@ namespace Multipleer.Sync.Tactical
                 if (selNet < 0 || selNet != actorNetId) return;   // host has a different (or no) actor selected → nothing stale
                 DoDirectAbilityBarRefresh(view, selected, selNet, "HOST@relay");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] host re-grey failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] host re-grey failed: " + ex); }
         }
 
         /// <summary>FIX B (CLIENT staleness). After a relayed client shot, the host spends the AP and ships
@@ -412,7 +412,7 @@ namespace Multipleer.Sync.Tactical
                 if (selNet < 0 || selNet != actorNetId) return;   // client has a different (or no) actor selected → nothing stale
                 DoDirectAbilityBarRefresh(view, selected, selNet, "CLIENT@relay");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] client re-grey failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] client re-grey failed: " + ex); }
         }
 
         /// <summary>Resolve the live tactical view's currently-SELECTED actor + its netId (-1 when none / unresolved).
@@ -450,7 +450,7 @@ namespace Multipleer.Sync.Tactical
             try { object cs = GetProp(view, "CurrentState"); stateName = cs?.GetType().Name ?? "<null>"; } catch { /* diag only */ }
 
             var setAbilities = AccessTools.Method(abilitiesModule.GetType(), "SetAbilities"); // (TacticalActor, InputController) — single overload
-            Debug.Log("[Multipleer][tac] " + who + " direct SetAbilities found=" + (setAbilities != null) +
+            Debug.Log("[Multiplayer][tac] " + who + " direct SetAbilities found=" + (setAbilities != null) +
                       " state=" + stateName + " actorNet=" + selNet);
             setAbilities?.Invoke(abilitiesModule, new[] { selected, input });
         }
@@ -560,7 +560,7 @@ namespace Multipleer.Sync.Tactical
                     outList.Add(new TacticalActorStateDiff.BodyPartHpRec(slotName, StatValue(healthStat)));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate ReadBodyPartHp failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] actorstate ReadBodyPartHp failed: " + ex); }
         }
 
         /// <summary>Inc1 full-state: read the actor's absolute world position (<c>ActorComponent.Pos</c> =
@@ -730,7 +730,7 @@ namespace Multipleer.Sync.Tactical
             // authoritative AP/WP write so a clean re-test can confirm whether the client actually receives + applies
             // the host's decremented AP (AP-not-greying RCA). Cheap: one line per actor that carried an AP/WP bit.
             if (any)
-                Debug.Log("[Multipleer][tac] SetApWpAbsolute netId=" + rec.NetId +
+                Debug.Log("[Multiplayer][tac] SetApWpAbsolute netId=" + rec.NetId +
                           (rec.HasAp ? (" AP " + apBefore + "->" + apAfter) : "") +
                           (rec.HasWp ? (" WP " + wpBefore + "->" + wpAfter) : ""));
             return any;
@@ -822,7 +822,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multipleer][tac] status mirror failed: " + (r.DefGuid ?? "<null>") +
+                    Debug.LogError("[Multiplayer][tac] status mirror failed: " + (r.DefGuid ?? "<null>") +
                                    " " + ex.GetType().Name + ": " + ex.Message);
                 }
             }
@@ -838,7 +838,7 @@ namespace Multipleer.Sync.Tactical
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multipleer][tac] status mirror failed: " + (a.DefGuid ?? "<null>") +
+                    Debug.LogError("[Multiplayer][tac] status mirror failed: " + (a.DefGuid ?? "<null>") +
                                    " " + ex.GetType().Name + ": " + ex.Message);
                 }
             }
@@ -870,7 +870,7 @@ namespace Multipleer.Sync.Tactical
                 try { if (RefreshMirrorMagnitude(liveStatus, s.Value)) refreshCount++; }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multipleer][tac] status mirror refresh failed: " + (s.DefGuid ?? "<null>") +
+                    Debug.LogError("[Multiplayer][tac] status mirror refresh failed: " + (s.DefGuid ?? "<null>") +
                                    " " + ex.GetType().Name + ": " + ex.Message);
                 }
             }
@@ -896,7 +896,7 @@ namespace Multipleer.Sync.Tactical
             float initialAmount = TacticalActorStateDiff.StatusMagnitudeToInitialAmount(value, dpt);
             AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accum, initialAmount);
             AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accum, initialAmount);
-            Debug.Log("[Multipleer][tac] status mirror magnitude refreshed: " + status.GetType().Name +
+            Debug.Log("[Multiplayer][tac] status mirror magnitude refreshed: " + status.GetType().Name +
                       " value=" + value.ToString("0.##") + " initialAmount=" + initialAmount.ToString("0.##"));
             return true;
         }
@@ -917,18 +917,18 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 object repo = GetField(statusComponent, "Repo");
-                if (repo == null) { Debug.LogError("[Multipleer][tac] actorstate: StatusComponent.Repo null"); return false; }
+                if (repo == null) { Debug.LogError("[Multiplayer][tac] actorstate: StatusComponent.Repo null"); return false; }
 
                 // DefRepository.Instantiate(BaseDef def, …optional) → object (the new Status). Use the non-generic
                 // overload (no MakeGenericMethod needed); optional params → Type.Missing.
                 var inst = FindInstantiate(repo.GetType());
-                if (inst == null) { Debug.LogError("[Multipleer][tac] actorstate: DefRepository.Instantiate(BaseDef,…) not found"); return false; }
+                if (inst == null) { Debug.LogError("[Multiplayer][tac] actorstate: DefRepository.Instantiate(BaseDef,…) not found"); return false; }
                 var ip = inst.GetParameters();
                 var iargs = new object[ip.Length];
                 iargs[0] = statusDef;
                 for (int i = 1; i < ip.Length; i++) iargs[i] = Type.Missing;
                 object status = inst.Invoke(repo, iargs);
-                if (status == null) { Debug.LogError("[Multipleer][tac] actorstate: Instantiate returned null status"); return false; }
+                if (status == null) { Debug.LogError("[Multiplayer][tac] actorstate: Instantiate returned null status"); return false; }
 
                 // Set Source/Target (the engine's ApplyStatus(StatusDef,…) does this) + pre-set Applied=true.
                 SetMember(status, "Source", source);
@@ -938,7 +938,7 @@ namespace Multipleer.Sync.Tactical
                 // inert must NEVER be applied live — drop the mirror entirely (no ApplyStatus, no Mirrored entry).
                 if (!SetApplied(status, true))
                 {
-                    Debug.LogWarning("[Multipleer][tac] mirror-apply ABORTED: SetApplied failed for "
+                    Debug.LogWarning("[Multiplayer][tac] mirror-apply ABORTED: SetApplied failed for "
                         + (DefReflection.GetGuid(statusDef) ?? "<unknown def>"));
                     return false;
                 }
@@ -963,7 +963,7 @@ namespace Multipleer.Sync.Tactical
 
                 var statusType = AccessTools.TypeByName("Base.Entities.Statuses.Status");
                 var apply = AccessTools.Method(statusComponent.GetType(), "ApplyStatus", new[] { statusType });
-                if (apply == null) { Debug.LogError("[Multipleer][tac] actorstate: ApplyStatus(Status) not found"); ClientStatusMirrorGuards.UnregisterMirror(status); return false; }
+                if (apply == null) { Debug.LogError("[Multiplayer][tac] actorstate: ApplyStatus(Status) not found"); ClientStatusMirrorGuards.UnregisterMirror(status); return false; }
                 apply.Invoke(statusComponent, new[] { status });
                 return true;
             }
@@ -973,7 +973,7 @@ namespace Multipleer.Sync.Tactical
                 // null _slotNames that its Applied=true inert branch never populated). Log the status NAME +
                 // exception type/message in the agreed format and return false so ReconcileStatuses CONTINUES with
                 // the remaining statuses + the rest of the actor-state apply. (Proper status-mirror RCA is deferred.)
-                Debug.LogError("[Multipleer][tac] status mirror failed: " + DescribeDef(statusDef) +
+                Debug.LogError("[Multiplayer][tac] status mirror failed: " + DescribeDef(statusDef) +
                                " " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
@@ -1047,7 +1047,7 @@ namespace Multipleer.Sync.Tactical
                 if (f != null && typeof(System.Collections.IList).IsAssignableFrom(f.FieldType) && f.GetValue(status) == null)
                 {
                     f.SetValue(status, Activator.CreateInstance(f.FieldType));
-                    Debug.Log("[Multipleer][tac] status mirror slotNames seeded: " + DescribeDef(statusDef));
+                    Debug.Log("[Multiplayer][tac] status mirror slotNames seeded: " + DescribeDef(statusDef));
                 }
 
                 // BUG3a — BleedStatus._damageAccum (DamageAccumulation): the inert MERGE path derefs it. When a SECOND
@@ -1078,7 +1078,7 @@ namespace Multipleer.Sync.Tactical
                             AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accum, 0f);
                             AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accum, 0f);
                             daF.SetValue(status, accum);
-                            Debug.Log("[Multipleer][tac] status mirror damageAccum seeded: " + DescribeDef(statusDef));
+                            Debug.Log("[Multiplayer][tac] status mirror damageAccum seeded: " + DescribeDef(statusDef));
                         }
                     }
                 }
@@ -1098,7 +1098,7 @@ namespace Multipleer.Sync.Tactical
                     float initialAmount = TacticalActorStateDiff.StatusMagnitudeToInitialAmount(value, dpt);
                     AccessTools.Field(daF.FieldType, "InitialAmount")?.SetValue(accumNow, initialAmount);
                     AccessTools.Field(daF.FieldType, "Amount")?.SetValue(accumNow, initialAmount);
-                    Debug.Log("[Multipleer][tac] status mirror magnitude applied: " + DescribeDef(statusDef) +
+                    Debug.Log("[Multiplayer][tac] status mirror magnitude applied: " + DescribeDef(statusDef) +
                               " value=" + value.ToString("0.##") + " initialAmount=" + initialAmount.ToString("0.##"));
                 }
             }
@@ -1106,7 +1106,7 @@ namespace Multipleer.Sync.Tactical
             {
                 // Fail-open: a seed miss only risks the pre-existing OnApply NRE (still caught by InvokeApplyStatus);
                 // it must never itself abort the mirror.
-                Debug.LogWarning("[Multipleer][tac] status mirror seed skipped: " +
+                Debug.LogWarning("[Multiplayer][tac] status mirror seed skipped: " +
                                  DescribeDef(statusDef) + " " + ex.GetType().Name + ": " + ex.Message);
             }
         }
@@ -1130,7 +1130,7 @@ namespace Multipleer.Sync.Tactical
                 var statusType = AccessTools.TypeByName("Base.Entities.Statuses.Status");
                 if (statusType == null) return false;
                 var m = AccessTools.Method(statusComponent.GetType(), "UnapplyStatus", new[] { statusType });
-                if (m == null) { Debug.LogError("[Multipleer][tac] actorstate: UnapplyStatus(Status) not found"); return false; }
+                if (m == null) { Debug.LogError("[Multiplayer][tac] actorstate: UnapplyStatus(Status) not found"); return false; }
                 ClientStatusMirrorGuards.UnapplyInProgress = true;
                 try { m.Invoke(statusComponent, new[] { status }); }
                 finally { ClientStatusMirrorGuards.UnapplyInProgress = false; }
@@ -1141,7 +1141,7 @@ namespace Multipleer.Sync.Tactical
             {
                 // TASK 3: same isolation for the removal path — log the status type + exception, then return false
                 // so ReconcileStatuses keeps applying the rest of the state.
-                Debug.LogError("[Multipleer][tac] status mirror failed: " + (status?.GetType().Name ?? "<null status>") +
+                Debug.LogError("[Multiplayer][tac] status mirror failed: " + (status?.GetType().Name ?? "<null status>") +
                                " " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
@@ -1187,7 +1187,7 @@ namespace Multipleer.Sync.Tactical
                     if (!restOptional) continue;
                     if (best == null || pars.Length < best.GetParameters().Length) best = mth;
                 }
-                if (best == null) { Debug.LogError("[Multipleer][tac] actorstate: no Timing.Start overload found"); return false; }
+                if (best == null) { Debug.LogError("[Multiplayer][tac] actorstate: no Timing.Start overload found"); return false; }
                 var bp = best.GetParameters();
                 var args = new object[bp.Length];
                 args[0] = crt;
@@ -1195,7 +1195,7 @@ namespace Multipleer.Sync.Tactical
                 best.Invoke(timing, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] actorstate InvokeTimingStart failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] actorstate InvokeTimingStart failed: " + ex); return false; }
         }
 
         private static object GetProp(object obj, string name)

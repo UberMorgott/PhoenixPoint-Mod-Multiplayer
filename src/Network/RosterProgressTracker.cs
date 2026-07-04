@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Receiver-side co-op load state. Merges RosterProgress rows monotonic-max per slot:

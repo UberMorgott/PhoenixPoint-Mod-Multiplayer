@@ -16,7 +16,7 @@
 
 ## Git state at EOD
 
-- Inner repo `E:\DEV\PhoenixPoint\Multipleer`, branch `main`.
+- Inner repo `E:\DEV\PhoenixPoint\Multiplayer`, branch `main`.
 - HEAD = `fbfb3f9` *chore(diag): temporary host/client vehicle-id set logging for movement*.
 - **100 commits ahead of `origin/main`. NOT pushed (dev-only). No feature branches — everything on `main`.**
 - Working tree CLEAN.
@@ -68,7 +68,7 @@
 - **Root cause:** replication keyed on runtime `VehicleID`. The host's `PhoenixFaction.Vehicles`
   is a SUPERSET; the client's is a SUBSET. Host orders e.g. vehicle 3 of 5 → on the client
   `GeoBridge.FindVehicleById` (`GeoBridge.cs:40`, called from `CommandExecutor.cs:48`) cannot
-  resolve it → `"[Multipleer] StartTravel apply: vehicle N not found."` (`CommandExecutor.cs:49`)
+  resolve it → `"[Multiplayer] StartTravel apply: vehicle N not found."` (`CommandExecutor.cs:49`)
   → it aborts BEFORE travel. Client→host works because the client only ever moves vehicles it has;
   the host (superset) always resolves the client's id.
 - **NOT id-divergence** (verified): client co-op load uses NATIVE restore
@@ -97,7 +97,7 @@
 ## EXACT NEXT STEPS (numbered)
 
 1. **User runs the 2-instance rig**, moves an aircraft host→client AND client→host, then captures
-   `multipleer.log` + `multipleer-2.log` IMMEDIATELY. **Do NOT relaunch first** — logs rotate/clobber.
+   `multiplayer.log` + `multiplayer-2.log` IMMEDIATELY. **Do NOT relaunch first** — logs rotate/clobber.
 2. **Grep `DIAG2`** in both logs. Compare `DIAG2 host vehicles[N]` vs `DIAG2 client vehicles[N]`;
    is the host's `requestedVehicleId` present in the client set? `DIAG2 ... AT LOAD` vs apply-time
    distinguishes: under-restore (missing AT LOAD) vs post-load-loss (present AT LOAD, gone later)
@@ -117,7 +117,7 @@
 
 ## Test rig + workflow
 
-- 2nd Goldberg instance (`Multipleer\tools\` — see memory `multipleer-second-instance-setup`;
+- 2nd Goldberg instance (`Multiplayer\tools\` — see memory `multiplayer-second-instance-setup`;
   re-run `make-second-copy.bat` if the copy isn't on disk). DirectIP transport (STUN best-effort).
 - Deploy via `deploy.ps1`.
 - Commit to inner `main`. **NO push to GitHub. NO feature branches.** Tests-green gate before commit.

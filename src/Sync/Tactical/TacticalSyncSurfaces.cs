@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Tactical replication surface ids + wire codecs (spec §5). Increment 1 defines only the
@@ -11,7 +11,7 @@ namespace Multipleer.Sync.Tactical
     ///
     /// RAIL (spec §3.6, with a grounded Inc-1 adaptation): tac.deploy is a host→ALL one-way push of a
     /// large, idempotent snapshot — NOT a request/apply action. It rides the SAME 0x67 SyncEnvelope
-    /// inbound chokepoint the geoscape sync uses (<see cref="Multipleer.Network.Sync.SurfaceRouter"/>),
+    /// inbound chokepoint the geoscape sync uses (<see cref="Multiplayer.Network.Sync.SurfaceRouter"/>),
     /// but via that router's tactical FAST-PATH hook (<c>SurfaceRouter.TacticalInbound</c>) which bypasses
     /// the action relay's shared <c>SequenceTracker</c>. Why not the action-apply path: that path gates on
     /// a SINGLE global monotonic seq shared with geoscape; a request-free host push has no correct fresh

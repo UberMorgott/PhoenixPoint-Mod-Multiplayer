@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>What <see cref="WalletWatcher.Attach"/> must do this frame for the resolved wallet.</summary>
     public enum WalletBindAction

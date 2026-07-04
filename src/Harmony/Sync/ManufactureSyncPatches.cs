@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Relay interceptor for manufacturing START: <c>ItemManufacturing.ManufactureItem(ManufacturableItem)</c>
@@ -55,7 +55,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] ManufactureItemPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] ManufactureItemPatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -65,7 +65,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ManufactureItemPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ManufactureItemPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -113,7 +113,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] FinishManufactureItemPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] FinishManufactureItemPatch failed: " + ex.Message);
             }
             return true;
         }
@@ -125,7 +125,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] FinishManufactureItemPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] FinishManufactureItemPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

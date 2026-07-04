@@ -2,12 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Network.Sync.Actions;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Sync.Actions;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Action-sync subsystem, mirrors <c>TimeSyncManager</c>: created in <c>NetworkEngine.Initialize()</c>,
@@ -196,7 +196,7 @@ namespace Multipleer.Network.Sync
                     if (!EventReflection.TryHostNativeResolve(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
                         action.Apply(rt);   // fallback: model-only reflected resolve (IResolvesOutsideScope → no scope)
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest answer resolve failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnActionRequest answer resolve failed: " + ex.Message); }
             }
             else
             {
@@ -207,7 +207,7 @@ namespace Multipleer.Network.Sync
                     if (action is IResolvesOutsideScope) action.Apply(rt);
                     else using (SyncApplyScope.Enter()) action.Apply(rt);   // host executes authoritative mutation
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionRequest apply failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnActionRequest apply failed: " + ex.Message); }
             }
 
             // Research has no faction-level cancel event: a client-relayed cancel mutates the queue with no
@@ -257,14 +257,14 @@ namespace Multipleer.Network.Sync
             // echoes. We still consume the sequence above so ordering stays correct.
             if (action is IHostOnlyApply)
             {
-                // TODO(multipleer): non-channelled event outcomes (site reveal / mission spawn / faction-
+                // TODO(multiplayer): non-channelled event outcomes (site reveal / mission spawn / faction-
                 // diplomacy flag / direct research unlock) are NOT yet synced to the client — visible gap.
-                Debug.Log("[Multipleer] SyncEngine.OnActionApply: client suppressing host-only-apply action "
-                    + "(id=" + id + "); non-channelled outcomes may be unsynced. TODO(multipleer).");
+                Debug.Log("[Multiplayer] SyncEngine.OnActionApply: client suppressing host-only-apply action "
+                    + "(id=" + id + "); non-channelled outcomes may be unsynced. TODO(multiplayer).");
                 return;
             }
             try { using (SyncApplyScope.Enter()) action.Apply(GeoRuntime.Instance); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnActionApply failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnActionApply failed: " + ex.Message); }
             // The open geoscape UI modules rebuild only on (re)Init, so a model mutation from an applied
             // action (e.g. a host research/manufacture START) is invisible until the player re-enters the
             // screen — unlike the state-channel echoes, which already re-drive the open module in OnStateSync.
@@ -279,7 +279,7 @@ namespace Multipleer.Network.Sync
         {
             if (!SyncProtocol.TryDecodeActionReject(data, out var nonce, out var code, out var reason)) return;
             _pending.Remove(nonce);
-            Debug.Log("[Multipleer] action rejected (" + code + "): " + reason);
+            Debug.Log("[Multiplayer] action rejected (" + code + "): " + reason);
             // v1: log only; UI feedback hook later.
         }
 
@@ -291,7 +291,7 @@ namespace Multipleer.Network.Sync
             // DIAG (wallet rail): log the clean→dirty transition only — ResourcesChanged can fire several
             // times inside one flush window; the Tick flush logs the amounts actually shipped. No behavior change.
             if (!_walletDirty)
-                Debug.Log("[Multipleer] Wallet marked dirty (ResourcesChanged echo) — coalesced flush next Tick");
+                Debug.Log("[Multiplayer] Wallet marked dirty (ResourcesChanged echo) — coalesced flush next Tick");
             _walletDirty = true;
             // Host BAR repaint kick (cosmetic): the host's persistent top resource bar (UIModuleInfoBar) repaints
             // ONLY off the native View.FactionResourcesChanged event and lags while an event modal is open — so
@@ -312,28 +312,28 @@ namespace Multipleer.Network.Sync
             // No behavior change.
             if (_engine.IsHost)
             {
-                Debug.Log("[Multipleer] Wallet sync dropped guard=is-host (authority never applies an echo)");
+                Debug.Log("[Multiplayer] Wallet sync dropped guard=is-host (authority never applies an echo)");
                 return;   // host is the authority; never applies an echo
             }
             if (!SyncProtocol.TryDecodeWalletSync(data, out var ver, out var slots))
             {
-                Debug.Log("[Multipleer] Wallet sync dropped guard=decode-failed len=" + (data == null ? -1 : data.Length));
+                Debug.Log("[Multiplayer] Wallet sync dropped guard=decode-failed len=" + (data == null ? -1 : data.Length));
                 return;
             }
             if (!_tracker.ShouldApplyWallet(ver))
             {
-                Debug.Log("[Multipleer] Wallet sync dropped guard=stale-version ver=" + ver);
+                Debug.Log("[Multiplayer] Wallet sync dropped guard=stale-version ver=" + ver);
                 return;
             }
             _tracker.MarkWallet(ver);
             var before = WalletApplier.Snapshot(GeoRuntime.Instance);
             try { using (SyncApplyScope.Enter()) WalletApplier.Apply(GeoRuntime.Instance, slots); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnWalletSync failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnWalletSync failed: " + ex.Message); }
             if (before == null)
-                Debug.Log("[Multipleer] Wallet sync apply no-op guard=wallet-null ver=" + ver
+                Debug.Log("[Multiplayer] Wallet sync apply no-op guard=wallet-null ver=" + ver
                           + " recv=" + WalletSlotsString(slots) + " (client wallet not live yet; version already marked)");
             else
-                Debug.Log("[Multipleer] Wallet sync applied ver=" + ver + " recv=" + WalletSlotsString(slots)
+                Debug.Log("[Multiplayer] Wallet sync applied ver=" + ver + " recv=" + WalletSlotsString(slots)
                           + " localΔ=" + WalletDiffString(before, WalletApplier.Snapshot(GeoRuntime.Instance)));
             // The persistent top resource bar (UIModuleInfoBar) repaints only from native Wallet model
             // events, which the reflective WalletApplier.Apply write doesn't trip — so the synced money sat
@@ -348,13 +348,13 @@ namespace Multipleer.Network.Sync
             // watcher (re)bind seed + session ready re-broadcast). No behavior change.
             if (!_engine.IsHost)
             {
-                Debug.Log("[Multipleer] Wallet full-broadcast skipped guard=not-host");
+                Debug.Log("[Multiplayer] Wallet full-broadcast skipped guard=not-host");
                 return;
             }
             var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
             if (slots == null)
             {
-                Debug.Log("[Multipleer] Wallet full-broadcast skipped guard=wallet-null (geoscape wallet not live yet)");
+                Debug.Log("[Multiplayer] Wallet full-broadcast skipped guard=wallet-null (geoscape wallet not live yet)");
                 return;
             }
             ulong ver = ++_walletVersion;
@@ -365,7 +365,7 @@ namespace Multipleer.Network.Sync
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                 SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                     SyncProtocol.EncodeWalletSync(ver, slots))));
-            Debug.Log("[Multipleer] Wallet full-broadcast ver=" + ver + " slots=" + WalletSlotsString(slots));
+            Debug.Log("[Multiplayer] Wallet full-broadcast ver=" + ver + " slots=" + WalletSlotsString(slots));
             // Baseline = what we just sent, so the Tick snapshot-diff poll won't re-fire this push.
             _lastWalletBroadcast = slots;
         }
@@ -465,7 +465,7 @@ namespace Multipleer.Network.Sync
             if (!_tracker.ShouldApplyChannel(channelId, ver)) return;   // per-channel last-version drop
             _tracker.MarkChannel(channelId, ver);
             try { using (SyncApplyScope.Enter()) channel.Apply(GeoRuntime.Instance, payload); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
             // Best-effort: rebuild the open UI for this channel's screen. Channels 1/2 map to a single
             // screen (targeted Refresh). The unlock (3) + diplomacy (4) channels span multiple modules (an
             // unlock shows in BOTH the manufacturing list AND the base-layout facility picker; diplomacy has
@@ -513,7 +513,7 @@ namespace Multipleer.Network.Sync
                 // legacy). A 2-window single-choice-WITH-outcome (oneWindow=false) keeps the prompt-mirror+advance.
                 bool oneWindowMirror = EventMirrorFixGate.Enabled && oneWindow;
                 var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice, oneWindowMirror);
-                Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " singleChoice=" + singleChoice +
                           " oneWindow=" + oneWindow + " mirror=" + mirrorSingleChoice + " oneWindowMirror=" + oneWindowMirror +
                           " decision=" + decision.Kind +
@@ -537,7 +537,7 @@ namespace Multipleer.Network.Sync
                         // The reward stashed from the earlier out-of-order dismiss is intentionally LEFT in place
                         // (not dropped above) so the host's later advance (OnEventAdvanceResult) can render it.
                         if (decision.ChoiceIndex >= 0)
-                            Debug.Log("[Multipleer] CLIENT singleChoice prompt-mirror occId=" + occId + " eventId=" + eventId +
+                            Debug.Log("[Multiplayer] CLIENT singleChoice prompt-mirror occId=" + occId + " eventId=" + eventId +
                                       " choiceIndex=" + decision.ChoiceIndex + " → showing PROMPT, awaiting host advance (reward stashed)");
                         ShowRaisedDialog(rt, occId, eventId, siteId, vehicleId, hasIdentity, identity, wireTitle, wireNarrative);
                         break;
@@ -548,14 +548,14 @@ namespace Multipleer.Network.Sync
                         // dialog is dismissed (DrainQueuedRaises), so bursts/transport-reorders never overwrite the
                         // shown dialog or display out of host emission order.
                         _queuedRaises[occId] = new QueuedRaise(eventId, siteId, vehicleId, hasIdentity, identity, wireTitle, wireNarrative);
-                        Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
+                        Debug.Log("[Multiplayer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                                   " → ENQUEUED behind shown dialog (queued=" + _eventCorrelator.QueuedCount + ")");
                         break;
                     case State.EventCorrelator.ActionKind.Ignore:
                         // Transport double-send of an already-shown/queued/resolved raise → idempotent no-op (no
                         // duplicate dialog). Drop any stale stashed reward for this occurrence so it can't leak.
                         DropBufferedReward(occId);
-                        Debug.Log("[Multipleer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate raise)");
+                        Debug.Log("[Multiplayer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate raise)");
                         break;
                     case State.EventCorrelator.ActionKind.ShowResultPage:
                     {
@@ -574,7 +574,7 @@ namespace Multipleer.Network.Sync
                         break;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventRaised failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventRaised failed: " + ex.Message); }
         }
 
         // ─── Out-of-order dismiss stash (keyed by occurrence id) ─────────────────────────────
@@ -691,7 +691,7 @@ namespace Multipleer.Network.Sync
                     // renders and whose dismiss the host never re-sends → slot wedged, all later dialogs
                     // starved. Log + skip; for a slot-occupying ShowDialog also abort it in the correlator
                     // (frees the slot + terminal dedup) so the drain can continue.
-                    Debug.LogError("[Multipleer] CLIENT released queued event occId=" + occId + " decision=" + next.Kind +
+                    Debug.LogError("[Multiplayer] CLIENT released queued event occId=" + occId + " decision=" + next.Kind +
                                    " but its build stash is MISSING → skipped (slot freed)");
                     if (next.Kind == State.EventCorrelator.ActionKind.ShowDialog)
                         _eventCorrelator.AbortShow(occId);
@@ -699,7 +699,7 @@ namespace Multipleer.Network.Sync
                     continue;
                 }
                 _queuedRaises.Remove(occId);
-                Debug.Log("[Multipleer] CLIENT releasing queued event occId=" + occId + " eventId=" + q.EventId +
+                Debug.Log("[Multiplayer] CLIENT releasing queued event occId=" + occId + " eventId=" + q.EventId +
                           " decision=" + next.Kind + " (remaining queued=" + _eventCorrelator.QueuedCount + ")");
                 switch (next.Kind)
                 {
@@ -745,10 +745,10 @@ namespace Multipleer.Network.Sync
                 // pure/Unity-free, so this boundary is where the malformed-blob visibility log belongs).
                 var reward = RewardDisplaySnapshot.Decode(rewardBlob);
                 if (reward == null && rewardBlob != null && rewardBlob.Length > 0)
-                    Debug.LogError("[Multipleer] reward decode failed (malformed blob, " + rewardBlob.Length + " bytes) — result card shown without reward lines");
+                    Debug.LogError("[Multiplayer] reward decode failed (malformed blob, " + rewardBlob.Length + " bytes) — result card shown without reward lines");
 
                 var decision = _eventCorrelator.Dismissed(occId, eventId, choiceIndex);
-                Debug.Log("[Multipleer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId +
                           " choiceIndex=" + choiceIndex + " rewardBytes=" + (rewardBlob?.Length ?? 0) +
                           " rewardEmpty=" + (reward == null || reward.IsEmpty) + " decision=" + decision.Kind +
                           " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
@@ -769,13 +769,13 @@ namespace Multipleer.Network.Sync
                         break;
                     case State.EventCorrelator.ActionKind.Ignore:
                         // Transport double-send of an already-resolved dismiss → idempotent no-op.
-                        Debug.Log("[Multipleer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate dismiss)");
+                        Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate dismiss)");
                         break;
                 }
                 // The shown dialog (if any) just closed → release the next deferred raise in occId order.
                 DrainQueuedRaises(rt);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -796,7 +796,7 @@ namespace Multipleer.Network.Sync
             {
                 var rt = GeoRuntime.Instance;
                 var decision = _eventCorrelator.Advanced(occId, eventId, choiceIndex);
-                Debug.Log("[Multipleer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
                           " choiceIndex=" + choiceIndex + " siteId=" + siteId + " decision=" + decision.Kind +
                           " promptMirror=" + _eventCorrelator.PromptMirrorCount +
                           " pendingAdvance=" + _eventCorrelator.PendingAdvanceCount);
@@ -814,7 +814,7 @@ namespace Multipleer.Network.Sync
                     // result page shown via a prior advance, or an in-place/buffered dismiss). A duplicate/late
                     // EventAdvanceResult (transport double-send / raced host click) must never re-open the
                     // window. The FIRST advance for a live prompt mirror is never deduped (ShowResultPage above).
-                    Debug.Log("[Multipleer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
+                    Debug.Log("[Multiplayer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
                               " → IGNORED (duplicate/late advance for an already-resolved occurrence)");
                 }
                 // An advance that resolved a prompt mirror just FREED the single slot (EventCorrelator.Advanced
@@ -822,7 +822,7 @@ namespace Multipleer.Network.Sync
                 // (A buffered/no-op advance leaves the slot busy → TryDequeueNext is a no-op — harmless.)
                 DrainQueuedRaises(rt);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventAdvanceResult failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventAdvanceResult failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -858,10 +858,10 @@ namespace Multipleer.Network.Sync
             try
             {
                 bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);
-                Debug.Log("[Multipleer] HOST OnEventAdvanceRequest occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] HOST OnEventAdvanceRequest occId=" + occId + " eventId=" + eventId +
                           " → " + (drove ? "drove native prompt→result advance" : "no-op (not showing / already advanced)"));
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnEventAdvanceRequest failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventAdvanceRequest failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -874,7 +874,7 @@ namespace Multipleer.Network.Sync
         private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
         {
             var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative, wireTitle);
-            Debug.Log("[Multipleer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
+            Debug.Log("[Multiplayer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
                       " rewardEmpty=" + (reward == null || reward.IsEmpty) +
                       " branch=" + (resultEvent != null ? "ShowResult" : "fallback-Dismiss"));
@@ -989,14 +989,14 @@ namespace Multipleer.Network.Sync
                         return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
                 }
                 bool persistent = State.ReportModalClassifier.IsPersistent(p.Variant);
-                Debug.Log("[Multipleer] CLIENT OnReportModalShow modalType=" + p.ModalType + " variant=" + p.Variant +
+                Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType + " variant=" + p.Variant +
                           " siteId=" + p.SiteId + " defId=" + p.DefId + " extras=" + (p.ExtraIds?.Count ?? 0) +
                           " shareLevel=" + p.ShareLevel + " priority=" + p.Priority + " persistent=" + persistent +
                           " hasData=" + (modalData != null));
                 using (SyncApplyScope.Enter())
                     State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
         }
 
         // The host's own event-choice click is PURE NATIVE — the click patch lets the native
@@ -1043,7 +1043,7 @@ namespace Multipleer.Network.Sync
                     // DIAG (wallet rail): fires ONLY on drift, i.e. the ResourcesChanged event path missed
                     // this change (or no baseline was ever broadcast). The dirty-flush below logs the
                     // resulting broadcast. No behavior change, no per-tick spam.
-                    Debug.Log("[Multipleer] Wallet poll drift detected (event path missed it) Δ="
+                    Debug.Log("[Multiplayer] Wallet poll drift detected (event path missed it) Δ="
                               + WalletDiffString(_lastWalletBroadcast, polled) + " — arming dirty-flush");
                 }
             }
@@ -1065,7 +1065,7 @@ namespace Multipleer.Network.Sync
                         SyncProtocol.EncodeEnvelope(SurfaceIds.GeoWallet, SyncKind.StateSnapshot,
                             SyncProtocol.EncodeWalletSync(ver, slots))));
                     // DIAG (wallet rail): one line per coalesced flush (event path or poll backstop).
-                    Debug.Log("[Multipleer] Wallet dirty-flush broadcast ver=" + ver
+                    Debug.Log("[Multiplayer] Wallet dirty-flush broadcast ver=" + ver
                               + " slots=" + WalletSlotsString(slots)
                               + " Δvs-last=" + WalletDiffString(_lastWalletBroadcast, slots));
                     // Baseline = exactly what we just sent, so the poll won't immediately re-fire it (covers both
@@ -1076,7 +1076,7 @@ namespace Multipleer.Network.Sync
                 {
                     // DIAG (wallet rail): the dirty flag is consumed but nothing shipped — the wallet vanished
                     // (left geoscape / mid-load). The poll or watcher rebind re-arms once it returns.
-                    Debug.Log("[Multipleer] Wallet dirty-flush skipped guard=wallet-null (dirty flag dropped; poll/rebind re-arms when wallet returns)");
+                    Debug.Log("[Multiplayer] Wallet dirty-flush skipped guard=wallet-null (dirty flag dropped; poll/rebind re-arms when wallet returns)");
                 }
             }
 
@@ -1130,7 +1130,7 @@ namespace Multipleer.Network.Sync
                 // Behavior-identical to the legacy 0x63 path: OnWalletSync is host-guarded + version-guarded, so
                 // applying via the envelope is idempotent (a same-version duplicate from the legacy packet drops).
                 try { OnWalletSync(payload); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo wallet envelope failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo wallet envelope failed: " + ex.Message); }
                 return true;
             }
             if (surfaceId == SurfaceIds.GeoState)
@@ -1139,7 +1139,7 @@ namespace Multipleer.Network.Sync
                 // version-guarded (SequenceTracker.ShouldApplyChannel), so applying via the envelope is
                 // idempotent — a same-version duplicate from the legacy packet (or a re-send) drops.
                 try { OnStateSync(payload); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo state envelope failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo state envelope failed: " + ex.Message); }
                 return true;
             }
             if (surfaceId == SurfaceIds.GeoVehiclePos)
@@ -1148,7 +1148,7 @@ namespace Multipleer.Network.Sync
                 // placement (Surface.position/rotation) ONLY while its sim is frozen (GeoVehicleMirror gates on
                 // ClientSimFreeze.ShouldFreeze); the host never receives its own broadcast. Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleMirror.HandleVehiclePos(payload, _geoLiveSeq); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehiclepos envelope failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo vehiclepos envelope failed: " + ex.Message); }
                 return true;
             }
             if (surfaceId == SurfaceIds.GeoVehicleTravel)
@@ -1157,7 +1157,7 @@ namespace Multipleer.Network.Sync
                 // state (Travelling/CurrentSite/DestinationSites) so the native yellow route line renders correctly
                 // (GeoVehicleTravelMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleTravelMirror.HandleTravelMeta(payload, _geoLiveSeq); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehicletravel envelope failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo vehicletravel envelope failed: " + ex.Message); }
                 return true;
             }
             if (surfaceId == SurfaceIds.GeoVehicleExplore)
@@ -1165,7 +1165,7 @@ namespace Multipleer.Network.Sync
                 // Inc4 S2 exploration-progress mirror: the frozen client renders the native site-exploration bar at
                 // the host fraction (GeoVehicleExploreMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleExploreMirror.HandleExplore(payload, _geoLiveSeq); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehicleexplore envelope failed: " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo vehicleexplore envelope failed: " + ex.Message); }
                 return true;
             }
             return false;

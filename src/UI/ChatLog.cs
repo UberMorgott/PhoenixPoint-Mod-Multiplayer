@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     public struct ChatLine
     {

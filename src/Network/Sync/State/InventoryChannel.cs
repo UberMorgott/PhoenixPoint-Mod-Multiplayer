@@ -4,7 +4,7 @@ using System.IO;
 using System.Text;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// State channel #1 — Phoenix faction global <c>ItemStorage</c> (fixes 8v7 manufacture desync).
@@ -100,7 +100,7 @@ namespace Multipleer.Network.Sync.State
                     return list;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] InventoryChannel.Decode failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] InventoryChannel.Decode failed: " + ex.Message); return null; }
         }
     }
 }

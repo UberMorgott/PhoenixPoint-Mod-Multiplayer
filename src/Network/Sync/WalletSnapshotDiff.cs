@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// PURE (Unity-free) absolute wallet snapshot comparator. Backs the binding-independent

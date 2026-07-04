@@ -2,10 +2,10 @@ using System;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Util;
+using Multiplayer.Util;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Per-instance TFTV log file. The local 2-instance co-op test rig shares the TFTV mod folder via a
     // junction, so BOTH PP instances would otherwise open the single <TFTV>/TFTV.log and clobber each
@@ -20,9 +20,9 @@ namespace Multipleer.Harmony
     // text interpolates (TFTVLogger.cs:70), so the dialog reports the right file too.
     //
     // GATE (stays INERT for single instance AND real cross-machine co-op): the redirect is driven SOLELY
-    // by MultipleerLog.InstanceIndex — the 1-based same-machine index the PROVEN MultipleerLog.Init fallback
-    // loop already computes (multipleer.log => 1, multipleer-2.log => 2, …). MultipleerMain.OnModEnabled
-    // (which runs that loop) sorts before TFTV (mod ID "Morgott.Multipleer" < "phoenixrising.tftv"), so the
+    // by MultiplayerLog.InstanceIndex — the 1-based same-machine index the PROVEN MultiplayerLog.Init fallback
+    // loop already computes (multiplayer.log => 1, multiplayer-2.log => 2, …). MultiplayerMain.OnModEnabled
+    // (which runs that loop) sorts before TFTV (mod ID "Morgott.Multiplayer" < "phoenixrising.tftv"), so the
     // index is set BEFORE TFTVLogger/PRMLogger.Initialize run. index 1 => leave TFTV.log unchanged (solo /
     // first instance = vanilla, no behavior change for normal play); index N>=2 => redirect to TFTV-N.log in
     // the same directory. This is BILATERAL in effect: the two instances get DISTINCT files (TFTV.log vs
@@ -67,7 +67,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer] TFTV log redirect postfix (TFTVMain.LogPath) failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] TFTV log redirect postfix (TFTVMain.LogPath) failed: " + e.Message);
             }
         }
     }
@@ -106,8 +106,8 @@ namespace Multipleer.Harmony
     }
 
     // Shared per-instance gate + redirect step, used identically by BOTH the TFTVLogger and the PRMLogger
-    // prefixes so the decision logic is defined exactly once. The instance signal is MultipleerLog.InstanceIndex
-    // (computed by the proven MultipleerLog.Init fallback loop); pure path math lives in TftvLogRedirect.
+    // prefixes so the decision logic is defined exactly once. The instance signal is MultiplayerLog.InstanceIndex
+    // (computed by the proven MultiplayerLog.Init fallback loop); pure path math lives in TftvLogRedirect.
     internal static class TftvLogInstanceGate
     {
         // Rewrite logPath to the per-instance filename when this is same-machine instance N>=2.
@@ -120,14 +120,14 @@ namespace Multipleer.Harmony
                 if (string.IsNullOrEmpty(logPath))
                     return;
 
-                // Authoritative same-machine index from the proven MultipleerLog.Init fallback loop,
-                // which has already run (Multipleer sorts before TFTV in mod load order).
-                var index = MultipleerLog.InstanceIndex;
+                // Authoritative same-machine index from the proven MultiplayerLog.Init fallback loop,
+                // which has already run (Multiplayer sorts before TFTV in mod load order).
+                var index = MultiplayerLog.InstanceIndex;
 
                 if (index <= 1)
                 {
                     // Solo / first instance: keep vanilla TFTV.log untouched. Confirm what happened.
-                    Debug.Log("[Multipleer] " + label + ": instance 1, no redirect (" +
+                    Debug.Log("[Multiplayer] " + label + ": instance 1, no redirect (" +
                               Path.GetFileName(logPath) + ")");
                     return;
                 }
@@ -136,22 +136,22 @@ namespace Multipleer.Harmony
                 if (!string.Equals(redirected, logPath, StringComparison.Ordinal))
                 {
                     logPath = redirected;
-                    Debug.Log("[Multipleer] " + label + " redirect: instance " + index + " -> " +
+                    Debug.Log("[Multiplayer] " + label + " redirect: instance " + index + " -> " +
                               Path.GetFileName(redirected));
                 }
             }
             catch (Exception e)
             {
                 // Never let a logging redirect break logger init — fall through to original path on any fault.
-                Debug.LogWarning("[Multipleer] " + label + " redirect prefix failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] " + label + " redirect prefix failed: " + e.Message);
             }
         }
     }
 
     // Deferred installer for the TFTV/PRM log redirect.
     //
-    // WHY: Multipleer.OnModEnabled runs harmony.PatchAll BEFORE TFTV is enabled (PP enables mods
-    // sequentially; "Morgott.Multipleer" sorts before "phoenixrising.tftv"). At PatchAll time the
+    // WHY: Multiplayer.OnModEnabled runs harmony.PatchAll BEFORE TFTV is enabled (PP enables mods
+    // sequentially; "Morgott.Multiplayer" sorts before "phoenixrising.tftv"). At PatchAll time the
     // TFTV.TFTVLogger / PRMBetterClasses.PRMLogger types are NOT yet loaded, so the [HarmonyPatch]
     // classes above hit their Prepare()/TargetMethod() null-gate and are SILENTLY skipped forever —
     // TFTV then inits its logger unpatched and both same-machine instances clobber the shared TFTV.log
@@ -174,7 +174,7 @@ namespace Multipleer.Harmony
         private static bool _tftvLogPatched;
         private static bool _prmLogPatched;
 
-        // Called from MultipleerMain.OnModEnabled right after PatchAll, with the mod's Harmony instance.
+        // Called from MultiplayerMain.OnModEnabled right after PatchAll, with the mod's Harmony instance.
         public static void Install(HarmonyLib.Harmony harmony)
         {
             if (harmony == null)
@@ -188,14 +188,14 @@ namespace Multipleer.Harmony
             {
                 _tftvLogPatched = true;
                 _prmLogPatched = true; // PRM (if present) was likewise covered by PatchAll at this point.
-                Debug.Log("[Multipleer] TFTV already loaded at PatchAll time; redirect handled by PatchAll.");
+                Debug.Log("[Multiplayer] TFTV already loaded at PatchAll time; redirect handled by PatchAll.");
                 return;
             }
 
             _handler = (sender, args) => OnAssemblyLoad();
             AppDomain.CurrentDomain.AssemblyLoad += _handler;
-            Debug.Log("[Multipleer] deferred TFTV-log redirect armed (instance " +
-                      MultipleerLog.InstanceIndex + "); waiting for TFTV assembly load.");
+            Debug.Log("[Multiplayer] deferred TFTV-log redirect armed (instance " +
+                      MultiplayerLog.InstanceIndex + "); waiting for TFTV assembly load.");
         }
 
         private static void OnAssemblyLoad()
@@ -214,7 +214,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multipleer] deferred TFTV-log redirect handler failed: " + e.Message);
+                Debug.LogWarning("[Multiplayer] deferred TFTV-log redirect handler failed: " + e.Message);
             }
         }
 
@@ -233,8 +233,8 @@ namespace Multipleer.Harmony
                 postfix: new HarmonyMethod(typeof(TftvLogPerInstancePatch), nameof(TftvLogPerInstancePatch.Postfix)));
 
             _tftvLogPatched = true;
-            Debug.Log("[Multipleer] deferred TFTV-log redirect installed (instance " +
-                      MultipleerLog.InstanceIndex + ").");
+            Debug.Log("[Multiplayer] deferred TFTV-log redirect installed (instance " +
+                      MultiplayerLog.InstanceIndex + ").");
         }
 
         private static void TryPatchPrmLogger()
@@ -251,8 +251,8 @@ namespace Multipleer.Harmony
                 prefix: new HarmonyMethod(typeof(PrmLogPerInstancePatch), nameof(PrmLogPerInstancePatch.Prefix)));
 
             _prmLogPatched = true;
-            Debug.Log("[Multipleer] deferred PRM-log redirect installed (instance " +
-                      MultipleerLog.InstanceIndex + ").");
+            Debug.Log("[Multiplayer] deferred PRM-log redirect installed (instance " +
+                      MultiplayerLog.InstanceIndex + ").");
         }
 
         private static void Unsubscribe()

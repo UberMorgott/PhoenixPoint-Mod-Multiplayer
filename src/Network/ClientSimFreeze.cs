@@ -1,9 +1,9 @@
 using System;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     // Inc4 S0: feature flag + pure gate for the CLIENT geoscape sim-freeze. Design spec:
-    // docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md §3.4.
+    // docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md §3.4.
     // NetworkEngine has no config system, so the flag is a plain static (default-OFF); every freeze
     // injection point reads it. S0 ships THIS flag + the empty guarded freeze-activate patch
     // (ClientGeoSimFreezePatch) — inert while OFF, byte-unchanged in-game. The freeze MECHANISM

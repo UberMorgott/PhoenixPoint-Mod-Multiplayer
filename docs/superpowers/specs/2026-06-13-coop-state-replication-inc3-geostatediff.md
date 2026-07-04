@@ -8,7 +8,7 @@
 - **Parent arc:** SD-AIDR (`docs/superpowers/specs/2026-06-13-coop-state-replication-design.md`).
 - **Builds on:** INC-1 (client geoscape inert — closed 13-producer set returns `NextUpdate.Never` via `ClientGeoSimSuppressPatch`) + INC-2 (`0x36 GeoEntityOp` entity create/destroy).
 - **Companion plan:** `docs/superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md` (INC-3a, the first slice).
-- **Packet slot:** `PacketType.GeoStateDiff = 0x35` (already RESERVED at `Multipleer/src/Network/MessageLayer/PacketType.cs:50`).
+- **Packet slot:** `PacketType.GeoStateDiff = 0x35` (already RESERVED at `Multiplayer/src/Network/MessageLayer/PacketType.cs:50`).
 
 ---
 
@@ -28,7 +28,7 @@
 
 ## 2. `0x35 GeoStateDiff` payload (generic, scope-keyed)
 
-GENERIC envelope (clone the `GeoEntityOpCodec` `MemoryStream`/`BinaryWriter` style at `Multipleer/src/Network/CommandSync/GeoEntityOpCodec.cs:32-69`; add a new `GeoStateDiffCodec`):
+GENERIC envelope (clone the `GeoEntityOpCodec` `MemoryStream`/`BinaryWriter` style at `Multiplayer/src/Network/CommandSync/GeoEntityOpCodec.cs:32-69`; add a new `GeoStateDiffCodec`):
 
 ```
 [byte formatVersion][int recordCount]    # then recordCount records
@@ -139,7 +139,7 @@ INC-3 replaces the Phoenix-only resolver:
 
 INC-3 ships the **DETECTOR + targeted self-heal**; the hard save-reload is INC-5 (as `ClientGeoSimSuppressPatch.cs:15` promises *"self-healed by host diff INC-3 + CRC reload INC-5"*).
 
-- **CRC SOURCE:** do NOT use the native `Base.Serialization` `Serializer.Write` — it is an `IEnumerator<NextUpdate>` coroutine (`Serializer.cs:562`) needing Timing pumping and is exposed to `GeoVehicleInstanceData` `SerializeType Version=3` skew. Instead CRC the **BESPOKE deterministic binary image** of the recorded snapshot (the same bytes `GeoStateDiffCodec` writes for that entity) using the existing mod helper `Crc32(byte[])` at `Multipleer/src/Network/SaveTransferCoordinator.cs:978`.
+- **CRC SOURCE:** do NOT use the native `Base.Serialization` `Serializer.Write` — it is an `IEnumerator<NextUpdate>` coroutine (`Serializer.cs:562`) needing Timing pumping and is exposed to `GeoVehicleInstanceData` `SerializeType Version=3` skew. Instead CRC the **BESPOKE deterministic binary image** of the recorded snapshot (the same bytes `GeoStateDiffCodec` writes for that entity) using the existing mod helper `Crc32(byte[])` at `Multiplayer/src/Network/SaveTransferCoordinator.cs:978`.
 - **WIRE:** host periodically (low cadence, e.g. every few seconds or batched with discrete transitions) emits scope=`Checksum` records: per-vehicle `crc32` over its canonical recorded image. Reliable channel.
 - **CLIENT CHECK:** after applying, client recomputes the same CRC over its local recorded snapshot of that entity (call native `RecordInstanceData` on the client vehicle, encode with the same codec, `Crc32`). Allow an in-flight tolerance window (skip if the entity has an unreliable seq newer than the checksum's basis, to avoid false positives from a pos packet in flight).
 - **ON MISMATCH (INC-3 action):** log the divergence + request/apply a FULL-FIELD correction for that entity via the HEAVY seam (`ApplyVehicleStateFull` / native `ProcessInstanceData`) on the next host push (host can force `changedMask=ALL` for a flagged id). This targeted re-push is the INC-3 backstop and is enough for single-entity drift. A whole-geoscape divergence (many mismatches) escalates to the INC-5 full save resync (out of INC-3 scope) — INC-3 only flags + counts it.

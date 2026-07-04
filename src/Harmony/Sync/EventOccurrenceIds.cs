@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// HOST-side authority that assigns a unique, monotonic per-occurrence id to each <c>GeoscapeEvent</c>

@@ -2,7 +2,7 @@ using System;
 using System.Net;
 using System.Text;
 
-namespace Multipleer.Util
+namespace Multiplayer.Util
 {
     /// <summary>
     /// Deterministic codec turning an IPv4 endpoint (4 octets + 16-bit port = 6 bytes) into a

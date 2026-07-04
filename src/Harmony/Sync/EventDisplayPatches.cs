@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Host-authoritative geoscape EVENT-DIALOG display sync (additive; the answer-relay
@@ -64,7 +64,7 @@ namespace Multipleer.Harmony.Sync
                 if (engine != null && engine.IsActiveSession && !engine.IsHost)
                     return false;                             // client: no local dialog ever
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch.Prefix failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventRaisedDisplayPatch.Prefix failed: " + ex.Message); }
             return true;                                       // host (and any failure): native runs
         }
 
@@ -98,9 +98,9 @@ namespace Multipleer.Harmony.Sync
                     try
                     {
                         object liveSite = EventReflection.GetSite(geoEvent);
-                        identity = Multipleer.Network.Sync.State.GeoSiteReflection.BuildIdentity(GeoRuntime.Instance, liveSite);
+                        identity = Multiplayer.Network.Sync.State.GeoSiteReflection.BuildIdentity(GeoRuntime.Instance, liveSite);
                     }
-                    catch (Exception iex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch identity-snapshot failed: " + iex.Message); }
+                    catch (Exception iex) { Debug.LogError("[Multiplayer] EventRaisedDisplayPatch identity-snapshot failed: " + iex.Message); }
                 }
                 // HasSingleChoice (Choices.Count <= 1, mirrors GeoscapeEventData.HasSingleChoice): such an event is
                 // auto-completed by the host at trigger, so its result-bearing dismiss precedes this raise. Stamp it
@@ -120,13 +120,13 @@ namespace Multipleer.Harmony.Sync
                 // to "" on the client, so the client prefers these non-empty wire strings over its local def.
                 string wireTitle = EventReflection.ResolveLiveTitle(geoEvent);
                 string wireNarrative = EventReflection.ResolveLiveNarrative(geoEvent);
-                Debug.Log("[Multipleer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue +
                           " singleChoice=" + singleChoice + " oneWindow=" + oneWindow +
                           " titleLen=" + (wireTitle?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0));
                 engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] EventRaisedDisplayPatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }
     }
 
@@ -174,12 +174,12 @@ namespace Multipleer.Harmony.Sync
                     var reward = EventReflection.GetChoiceReward(__instance);
                     if (reward != null)
                     {
-                        var snap = Multipleer.Network.Sync.State.RewardDisplayReflection.BuildFromReward(reward);
+                        var snap = Multiplayer.Network.Sync.State.RewardDisplayReflection.BuildFromReward(reward);
                         if (snap != null && !snap.IsEmpty)
-                            rewardBlob = Multipleer.Network.Sync.State.RewardDisplaySnapshot.Encode(snap);
+                            rewardBlob = Multiplayer.Network.Sync.State.RewardDisplaySnapshot.Encode(snap);
                     }
                 }
-                catch (Exception rex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch reward-snapshot failed: " + rex.Message); }
+                catch (Exception rex) { Debug.LogError("[Multiplayer] CompleteEventDismissPatch reward-snapshot failed: " + rex.Message); }
                 // Occurrence id for THIS instance (order-independent GetOrAssign). For a single-choice event this
                 // dismiss fires at trigger time BEFORE the raise, so it may allocate the id first; the raise then
                 // reuses it. This is the AUTHORITATIVE dismiss (carries the real picked index + reward), so mark
@@ -195,13 +195,13 @@ namespace Multipleer.Harmony.Sync
                 // renders the host's text instead of a blank result parchment.
                 string wireOutcome = EventReflection.ResolveLiveOutcomeText(__instance);
                 string wireNarrative = EventReflection.ResolveLiveNarrative(__instance);
-                Debug.Log("[Multipleer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] HOST BroadcastEventDismiss occId=" + occId + " eventId=" + eventId +
                           " selectedChoiceIndex=" + choiceIndex + " siteId=" + siteId +
                           " rewardBytes=" + (rewardBlob?.Length ?? 0) +
                           " outLen=" + (wireOutcome?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0));
                 engine.Sync?.BroadcastEventDismiss(occId, eventId, choiceIndex, rewardBlob, siteId, wireOutcome, wireNarrative);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteEventDismissPatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteEventDismissPatch failed: " + ex.Message); }
         }
     }
 }

@@ -1,16 +1,16 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Inc4 S1 — the CLIENT geoscape sim-freeze RE-ASSERT hook (active behind the flag). Design spec:
-    /// docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md §3.1.
+    /// docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md §3.1.
     ///
-    /// Mirrors the re-assert precedent <see cref="Multipleer.Harmony.Sync.EventSuppressClientGeoscapePatch"/>
+    /// Mirrors the re-assert precedent <see cref="Multiplayer.Harmony.Sync.EventSuppressClientGeoscapePatch"/>
     /// (postfix on <c>GeoscapeEventSystem.OnLevelStart()</c>) — the same load-completion hook that runs AFTER
     /// the level's InstanceData is (re)applied on EVERY (re)load / save-blob apply
     /// (<c>GeoLevelController.LevelCrt</c> drives <c>Timing.ProcessInstanceData(host, Paused=false)</c> :515,
@@ -20,7 +20,7 @@ namespace Multipleer.Harmony
     /// scheduled producers are Max'd by the setter's reschedule and the yet-to-Start hourly producer auto-Max's
     /// under the now-true <c>_paused</c>.
     ///
-    /// Body (S1): on the client, <see cref="Multipleer.Network.TimeSync.TimeSyncManager.FreezeClientGeoSim"/>
+    /// Body (S1): on the client, <see cref="Multiplayer.Network.TimeSync.TimeSyncManager.FreezeClientGeoSim"/>
     /// sets the live geoscape <c>Timing.Paused = true</c> via the setter (<c>RescheduleForTiming</c> Max's every
     /// already-Started producer; a paused source ⇒ <c>NextUpdate.ConvertToTiming</c> returns Max). Gated on
     /// <see cref="ClientSimFreeze.ShouldFreeze"/> (flag default-OFF) — when OFF it early-returns before any clock
@@ -63,7 +63,7 @@ namespace Multipleer.Harmony
                 // Telemetry (client only) — proves the re-assert hook fires each load. Strip before publish
                 // (spec §8). Host / single-player: silent, untouched.
                 if (onActiveClient)
-                    Debug.Log("[Multipleer] ClientGeoSimFreezePatch reached (client geoscape load); "
+                    Debug.Log("[Multiplayer] ClientGeoSimFreezePatch reached (client geoscape load); "
                         + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze);
 
                 if (!freeze) return; // flag OFF -> byte-unchanged, no clock pause (legacy suppress path stands)
@@ -72,7 +72,7 @@ namespace Multipleer.Harmony
                 // setter so RescheduleForTiming Max's every already-Started producer, re-asserted on EVERY load.
                 engine.TimeSync?.FreezeClientGeoSim();
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ClientGeoSimFreezePatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ClientGeoSimFreezePatch failed: " + ex.Message); }
         }
     }
 }

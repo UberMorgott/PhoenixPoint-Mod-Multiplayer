@@ -1,10 +1,10 @@
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Pure, Unity-free session-lifecycle helpers shared by the live wiring (SessionNotifier,
     /// MultiplayerUI, the in-game load intercept, the host-leave handler). Kept here, separate from
     /// the MonoBehaviour/Harmony code, so the message formatting, the F2 host-load guard, and the F3
-    /// idempotency latch can be unit-tested directly (linked into Multipleer.Tests).
+    /// idempotency latch can be unit-tested directly (linked into Multiplayer.Tests).
     /// </summary>
     public static class SessionLifecycle
     {

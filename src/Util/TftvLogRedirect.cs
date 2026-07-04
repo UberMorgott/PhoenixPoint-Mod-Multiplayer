@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Util
+namespace Multiplayer.Util
 {
     /// <summary>
     /// Pure path-decision logic for redirecting TFTV's log FILENAME to a per-instance name when we
@@ -16,14 +16,14 @@ namespace Multipleer.Util
     /// </summary>
     public static class TftvLogRedirect
     {
-        // Mirrors MultipleerLog.MaxInstances: instance 1 = primary (unsuffixed), 2..5 = suffixed.
+        // Mirrors MultiplayerLog.MaxInstances: instance 1 = primary (unsuffixed), 2..5 = suffixed.
         public const int MaxInstances = 5;
 
         /// <summary>
         /// Pure decision: given the original TFTV log path, decide the per-instance path.
         /// Primary (not secondary AND index &lt;= 1) => returned unchanged (shared TFTV.log).
         /// Secondary (isSecondary OR index &gt; 1) => insert "-N" before the extension, where N is the
-        /// instance index (e.g. TFTV.log => TFTV-2.log), consistent with our multipleer-N.log scheme.
+        /// instance index (e.g. TFTV.log => TFTV-2.log), consistent with our multiplayer-N.log scheme.
         /// Any pre-existing numeric "-K" suffix on the base name is replaced (not stacked) so the
         /// decision is idempotent and tolerant of already-suffixed inputs.
         /// </summary>
@@ -73,7 +73,7 @@ namespace Multipleer.Util
         /// Returns true (=&gt; we are the secondary) ONLY on a sharing/IO violation; opens-and-closes
         /// cleanly =&gt; false (=&gt; we are the primary, OR a real separate-machine peer whose primary
         /// path is its OWN unlocked file). This is init-order-independent and is the same lock
-        /// semantics MultipleerLog.Init already relies on, hoisted into a standalone synchronous probe.
+        /// semantics MultiplayerLog.Init already relies on, hoisted into a standalone synchronous probe.
         /// Stays INERT for a single instance and for real cross-machine co-op (no local lock contention).
         /// </summary>
         public static bool ProbePrimaryLocked(string primaryLockPath)

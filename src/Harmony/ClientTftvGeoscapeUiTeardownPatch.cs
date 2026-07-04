@@ -2,15 +2,15 @@ using System;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Save-load robustness (TFTV compat). ANY geoscape teardown/level transition -- a co-op client applying a
     // host save-transfer (SaveTransferCoordinator -> EnterLevel -> FinishLevel), the HOST's own save-load, or
     // a plain single-player load -- momentarily leaves no current level. During that window two TFTV
     // geoscape-UI methods run on null backing data and throw a NullReferenceException, surfacing TFTV's own
-    // error dialog. Multipleer (or just the mod's presence) is only the TRIGGER (the NRE is 100% inside TFTV).
+    // error dialog. Multiplayer (or just the mod's presence) is only the TRIGGER (the NRE is 100% inside TFTV).
     //
     // These two PREFIX patches skip the TFTV body during that teardown window ONLY -- whenever
     // GameUtl.CurrentLevel() is null -- for ANY role (host, client, single-player). This is role-INDEPENDENT
@@ -25,7 +25,7 @@ namespace Multipleer.Harmony
     //
     // TFTV is NEVER hard-referenced: types/methods resolve via AccessTools reflection; when TFTV is absent
     // Prepare() returns false and Harmony skips the patch entirely (zero impact, so non-TFTV installs still
-    // load). Harmony auto-registers both classes via MultipleerMain's PatchAll.
+    // load). Harmony auto-registers both classes via MultiplayerMain's PatchAll.
     internal static class ClientTftvGeoscapeUiTeardownDecision
     {
         // Shared runtime decision for both prefixes. Returns true => let the TFTV body run; false => skip it.

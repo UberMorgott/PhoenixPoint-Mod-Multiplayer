@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.Actions;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.Actions;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// Relay interceptor for base construction START:
@@ -60,7 +60,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] ConstructFacilityPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] ConstructFacilityPatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -70,7 +70,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ConstructFacilityPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ConstructFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -123,7 +123,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] RepairFacilityPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] RepairFacilityPatch failed: " + ex.Message);
                 return true;
             }
         }
@@ -133,7 +133,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] RepairFacilityPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RepairFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 
@@ -180,7 +180,7 @@ namespace Multipleer.Harmony.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] CompleteFacilityPatch failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] CompleteFacilityPatch failed: " + ex.Message);
             }
             return true;
         }
@@ -190,7 +190,7 @@ namespace Multipleer.Harmony.Sync
         {
             if (__state == null) return;
             try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] CompleteFacilityPatch postfix broadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
 }

@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Network.Sync;
-using Multipleer.Validation;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Sync;
+using Multiplayer.Validation;
 using UnityEngine;
 
-namespace Multipleer.Network.TimeSync
+namespace Multiplayer.Network.TimeSync
 {
     /// <summary>
     /// Unity/native GLUE for the host-authoritative geoscape ANCHOR clock. Pure math lives in
@@ -245,7 +245,7 @@ namespace Multipleer.Network.TimeSync
         /// <c>Timing.Paused = true</c> via the SETTER (Timing.cs:110), whose <c>RescheduleForTiming</c> Max's
         /// every already-Started geoscape producer (a paused source ⇒ <c>NextUpdate.ConvertToTiming</c> returns
         /// Max, NextUpdate.cs:199 — engine-native TOTAL sim freeze). Called from
-        /// <see cref="Multipleer.Harmony.ClientGeoSimFreezePatch"/>'s postfix on
+        /// <see cref="Multiplayer.Harmony.ClientGeoSimFreezePatch"/>'s postfix on
         /// <c>GeoscapeEventSystem.OnLevelStart()</c>, which runs on EVERY (re)load AFTER
         /// <c>GeoLevelController.LevelCrt</c>'s <c>Timing.ProcessInstanceData(host, Paused=false)</c> (:515)
         /// reset and BEFORE the hourly producer is Started (:761) — so the already-scheduled producers (via the
@@ -288,9 +288,9 @@ namespace Multipleer.Network.TimeSync
                 ClientSimFreeze.ReassertFreeze(
                     v => _timingPausedProp.SetValue(t, v, null),
                     () => _timingRescheduleMethod?.Invoke(t, new object[] { t }));
-                Debug.Log("[Multipleer] ClientGeoSimFreeze re-asserted: geoscape Timing.Paused = true + rescheduled (sim frozen)");
+                Debug.Log("[Multiplayer] ClientGeoSimFreeze re-asserted: geoscape Timing.Paused = true + rescheduled (sim frozen)");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] FreezeClientGeoSim failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] FreezeClientGeoSim failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -520,7 +520,7 @@ namespace Multipleer.Network.TimeSync
             if (_offset.UsedFallback && !_loggedFallback)
             {
                 _loggedFallback = true;
-                Debug.LogWarning("[Multipleer] TimeSync: link RTT above cap — using best-RTT offset fallback");
+                Debug.LogWarning("[Multiplayer] TimeSync: link RTT above cap — using best-RTT offset fallback");
             }
 
             // Large offset step (real OS clock jump) → hard-set the display rather than lerp across it.
@@ -528,7 +528,7 @@ namespace Multipleer.Network.TimeSync
             if (_offset.IsLargeStep(OffsetStepHardSetSeconds))
             {
                 _needHardSet = true;
-                Debug.Log("[Multipleer] TimeSync: large clock-offset step → display hard-set");
+                Debug.Log("[Multiplayer] TimeSync: large clock-offset step → display hard-set");
             }
         }
 
@@ -633,7 +633,7 @@ namespace Multipleer.Network.TimeSync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] TimeSync client clock write failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] TimeSync client clock write failed: " + ex.Message);
             }
             finally
             {
@@ -693,7 +693,7 @@ namespace Multipleer.Network.TimeSync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer] TimeSync host-apply request failed: " + ex.Message);
+                Debug.LogError("[Multiplayer] TimeSync host-apply request failed: " + ex.Message);
             }
             finally
             {

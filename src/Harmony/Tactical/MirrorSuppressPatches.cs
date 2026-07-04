@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Increment-1 client mirror-mode suppression (spec §6, plan T6). When this instance is a synced-session
@@ -191,11 +191,11 @@ namespace Multipleer.Harmony.Tactical
                 int turnNumber = ToInt(GetMember(faction, "TurnNumber")) + 1;
                 Traverse.Create(faction).Property("TurnNumber").SetValue(turnNumber);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup TurnNumber++ failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup TurnNumber++ failed: " + ex); }
 
             // (2) Faction-level start-turn event (native :394) — presentation hook.
             try { InvokeEvent(faction, "StartTurnEvent"); }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup StartTurnEvent failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup StartTurnEvent failed: " + ex); }
 
             // (3) Recompute this faction's vision/fog (native :396). Presentation-correct on a mirror: it renders
             //     the client's own fog from the host-mirrored actor positions. NOT host-authoritative.
@@ -205,7 +205,7 @@ namespace Multipleer.Harmony.Tactical
                 var m = vision != null ? AccessTools.Method(vision.GetType(), "OnFactionStartTurn") : null;
                 m?.Invoke(vision, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup Vision.OnFactionStartTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup Vision.OnFactionStartTurn failed: " + ex); }
 
             // (4) Bind the view's VIEWER faction + camera to the client's own faction (native :397-400, only when
             //     player & State==Playing). This is what re-anchors the camera onto the squad. Presentation only.
@@ -219,7 +219,7 @@ namespace Multipleer.Harmony.Tactical
                     setViewer?.Invoke(view, new[] { faction });
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup SetViewerTacticalFaction failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup SetViewerTacticalFaction failed: " + ex); }
 
             // (5) Per-actor StartTurn for the client's OWN actors (native :424-427). This is the load-bearing one:
             //     it RemoveUnusableAbilities / SetAbilityTraits("start") / standby so each soldier becomes SELECTABLE,
@@ -234,7 +234,7 @@ namespace Multipleer.Harmony.Tactical
             // then fire the per-turn-start action (mirror native :443). Belt to ClientOnTurn's hand-force.
             SetIsPlayingTurn(faction, true);
             try { turnStartAction?.Invoke(); }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror PlayTurnCrt turnStartAction failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror PlayTurnCrt turnStartAction failed: " + ex); }
 
             // Player input / end-turn wait loop (mirror native :472-484, minus the host-sim View.IsWaiting /
             // CameraDirector.Busy gate which is a host concern and could itself stall a pure mirror). Exits on
@@ -320,25 +320,25 @@ namespace Multipleer.Harmony.Tactical
                         // a re-test can confirm FIX E captures+restores the host AP and isn't itself leaking the re-max
                         // (AP-not-greying RCA). Cheap: one line per own-actor at turn start.
                         if (preserveApWp && (haveAp || haveWp))
-                            Debug.Log("[Multipleer][tac] FIX-E StartTurn netId=" +
+                            Debug.Log("[Multiplayer][tac] FIX-E StartTurn netId=" +
                                       TacticalDeploySync.NetIdForLiveActor(actor) +
                                       (haveAp ? (" AP host=" + apBefore + " maxed=" + apMaxed + " restored=" + StatValue(apStat)) : "") +
                                       (haveWp ? (" WP host=" + wpBefore + " maxed=" + wpMaxed + " restored=" + StatValue(wpStat)) : ""));
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup actor.StartTurn failed: " + ex); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup actor.StartTurn failed: " + ex); }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror setup StartTurnForOwnActors failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror setup StartTurnForOwnActors failed: " + ex); }
         }
 
         /// <summary>FIX E decision: should the per-actor StartTurn replay preserve host-streamed AP/WP? Delegates to
-        /// the pure <see cref="Multipleer.Sync.Tactical.ClientApPreserveGate"/> with the live mirror flag. Always true
+        /// the pure <see cref="Multiplayer.Sync.Tactical.ClientApPreserveGate"/> with the live mirror flag. Always true
         /// on this path (we only run under IsClientMirroring), but routed through the gate so the contract is tested.</summary>
         private static bool ClientTurnStartSetupGateApWp()
-            => Multipleer.Sync.Tactical.ClientApPreserveGate.ShouldPreserveActorApWp(TacticalDeploySync.IsClientMirroring);
+            => Multiplayer.Sync.Tactical.ClientApPreserveGate.ShouldPreserveActorApWp(TacticalDeploySync.IsClientMirroring);
 
         /// <summary>Read a <c>BaseStat</c>'s current float value (its <c>op_Implicit</c> → float; IntValue fallback).
-        /// Mirrors <see cref="Multipleer.Sync.Tactical.TacticalActorStateSync"/>.StatValue so AP/WP capture uses the
+        /// Mirrors <see cref="Multiplayer.Sync.Tactical.TacticalActorStateSync"/>.StatValue so AP/WP capture uses the
         /// SAME grounded accessor as the actor-state mirror that authoritatively writes those stats.</summary>
         private static float StatValue(object stat)
         {
@@ -378,7 +378,7 @@ namespace Multipleer.Harmony.Tactical
         private static void TrySetEndTurnRequested(object faction, bool value)
         {
             try { Traverse.Create(faction).Field("_endTurnRequested").SetValue(value); }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror PlayTurnCrt set _endTurnRequested failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror PlayTurnCrt set _endTurnRequested failed: " + ex); }
         }
 
         private static void SetIsPlayingTurn(object faction, bool value)
@@ -391,7 +391,7 @@ namespace Multipleer.Harmony.Tactical
                 if (p != null && p.GetSetMethod(true) != null) { p.GetSetMethod(true).Invoke(faction, new object[] { value }); return; }
                 Traverse.Create(faction).Property("IsPlayingTurn").SetValue(value);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] mirror PlayTurnCrt SetIsPlayingTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] mirror PlayTurnCrt SetIsPlayingTurn failed: " + ex); }
         }
 
         private static bool IsGameOver(object faction)

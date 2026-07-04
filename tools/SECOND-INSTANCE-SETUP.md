@@ -82,7 +82,7 @@ Decompile-confirmed mod model (`PhoenixPoint.Modding.ModManager` / loaders):
 **Mods are SHARED via directory junctions — ONE source, both instances.** The `/MIR` now
 **excludes** `<install>\Mods\` (`/XD`), so real mod files are **not** duplicated into the copy.
 Instead the copy's `Mods\*` are **directory junctions** (`mklink /J`) pointing at the live
-sources: one per subfolder of the original install `Mods\` (AutoAI, Multipleer, OfficerClass,
+sources: one per subfolder of the original install `Mods\` (AutoAI, Multiplayer, OfficerClass,
 PerkOracle, TheTurned) and one per subscribed Workshop folder that contains a `meta.json`
 (e.g. TFTV `2872311902`; folders without `meta.json`, like `3250097289`, are skipped). A
 junction is reported by `Directory.GetDirectories` as a normal directory, so `PPModLoader`'s
@@ -107,7 +107,7 @@ and never touches the original install or the workshop folders.
 
 > **Shared-config caveat.** Matching the steamID means both instances read/write the
 > **same** `…\Steam\76561197996210591\` folder (saves, `Options.jopt`, `ModConfig.json`).
-> That is exactly what makes the enabled-mods list match. The Multipleer client only needs
+> That is exactly what makes the enabled-mods list match. The Multiplayer client only needs
 > the mods loaded, so this is fine for co-op testing; just avoid having instance #2 overwrite
 > options/saves you care about while both are running. If that ever becomes a problem, the
 > clean alternative is to give the copy its own steamID and **manually create**
@@ -224,7 +224,7 @@ copy, containing:
   throwaway id won.
 - `force_account_name.txt` / `force_steamid.txt` are still written for classic-Goldberg
   compatibility but are **ignored by gbe_fork** — harmless leftovers. The two instances
-  are distinguished by `account_name` (`Client2`) and a throwaway `MULTIPLEER_IDENTITY`
+  are distinguished by `account_name` (`Client2`) and a throwaway `MULTIPLAYER_IDENTITY`
   at launch.
 
 So you only need to drop in the Goldberg `steam_api64.dll` + back up the original
@@ -235,8 +235,8 @@ So you only need to drop in the Goldberg `steam_api64.dll` + back up the origina
 1. Start **instance #1** normally (Steam, or `launch-1st-instance.bat`). Host a campaign
    → it listens on `127.0.0.1:14242`.
 2. Run `launch-second-copy.bat` (edit the `DEST` path inside if you used a different one)
-   to start **instance #2** windowed. It also sets `MULTIPLEER_IDENTITY` (throwaway GUID)
-   as a second safeguard so the two share no Multipleer identity.
+   to start **instance #2** windowed. It also sets `MULTIPLAYER_IDENTITY` (throwaway GUID)
+   as a second safeguard so the two share no Multiplayer identity.
 3. In instance #2: Multiplayer → Direct Connect → `127.0.0.1:14242`.
 4. Tile the windows (Win+Left / Win+Right).
 

@@ -6,7 +6,7 @@
 
 **Architecture:** Host is the sole source of truth. A client geoscape action is intercepted by a Harmony prefix, encoded into a `CampaignActionMessage` (envelope already exists), sent to the host, and local execution is blocked; the host validates ownership/legality/permission, executes the REAL game method, and broadcasts the approved action so every peer (including the originator) reproduces the result without recomputing. The pipeline is built once from small single-responsibility units (CommandCodec, PermissionGate, InterceptRegistry, HostArbiter, ClientApplier, CommandRelay) and the curated C1–C7 method list is registered against it via a declarative registry, prune-later.
 
-**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic resolution), xUnit 2.9.2 (`Multipleer.Tests`), the existing `CampaignAction` packet skeleton (`0x30` request / `0x31` approved / `0x32` rejected), `NetworkEngine` events `OnCampaignActionRequest` / `OnHostCampaignActionResult`, `PermissionManager` per-GUID flags.
+**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic resolution), xUnit 2.9.2 (`Multiplayer.Tests`), the existing `CampaignAction` packet skeleton (`0x30` request / `0x31` approved / `0x32` rejected), `NetworkEngine` events `OnCampaignActionRequest` / `OnHostCampaignActionResult`, `PermissionManager` per-GUID flags.
 
 ---
 
@@ -19,7 +19,7 @@
 - **`CampaignPermission`** flags live in `src/Validation/PermissionManager.cs:7-21`: `ManageAircraft = 1<<6`, `ControlTime = 1<<7`, `FullCommander = 1<<9`, etc. `PermissionManager.HasCampaignPermission(Guid, CampaignPermission)` honours the `FullCommander` override (`:88-97`). `PermissionManager` is Unity-free → unit-linkable.
 - **Existing stub to replace:** `CampaignPermissionHelper.Check(CampaignPermission required)` in `src/Harmony/CampaignPatches.cs:10-19` = host→allow / client→block, **GUID-blind**. PermissionGate (Task 2) is the real per-GUID gate; the host path (Task 4/6) calls it.
 - **`ActionValidator.ValidateCampaignAction`** (`src/Validation/ActionValidator.cs:49-67`) already maps `StartTravel → ManageAircraft` and does a real per-GUID check, BUT it reads `NetworkEngine.Instance.Session` → **not unit-linkable**. The pure permission decision is therefore re-homed in `PermissionGate`; `HostArbiter` does the `Session`-backed GUID resolution.
-- **Test linkage** (`Multipleer.Tests/Multipleer.Tests.csproj`): `EnableDefaultCompileItems=false`; pure Unity-free cores are linked via `<Compile Include="..\src\...\X.cs"><Link>X.cs</Link>`. Only CommandCodec, PermissionGate, InterceptRegistry are pure → linked. HostArbiter/ClientApplier/CommandRelay/Harmony patch touch `NetworkEngine`/game types → build + manual 2-instance verify (NOT unit-tested).
+- **Test linkage** (`Multiplayer.Tests/Multiplayer.Tests.csproj`): `EnableDefaultCompileItems=false`; pure Unity-free cores are linked via `<Compile Include="..\src\...\X.cs"><Link>X.cs</Link>`. Only CommandCodec, PermissionGate, InterceptRegistry are pure → linked. HostArbiter/ClientApplier/CommandRelay/Harmony patch touch `NetworkEngine`/game types → build + manual 2-instance verify (NOT unit-tested).
 
 ### Decompile signatures (verified `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src`)
 
@@ -61,11 +61,11 @@
 |------|--------|
 | `src/Network/NetworkEngine.cs` | Add `public void BroadcastCampaignActionResult(CampaignActionMessage action)` → `BroadcastToAll(new NetworkMessage(PacketType.CampaignActionApproved, MessageSerializer.SerializeCampaignAction(action)))`. (Fan-out variant of the existing one-client `ApproveCampaignAction`.) |
 | `src/Harmony/CampaignPatches.cs` | Replace the body of `CampaignPermissionHelper.Check` to delegate to `PermissionGate` keyed by the host-resolved caller GUID (kept as a thin shim so the existing C1–C5 prefixes compile unchanged). |
-| `Multipleer.Tests/Multipleer.Tests.csproj` | Add linked `<Compile>` items for `PermissionManager.cs`, `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs` (all pure). |
-| `Multipleer.csproj` | No edit needed if it globs `src/**/*.cs`; if it uses explicit includes, add the six new `src/Network/CommandSync/*.cs` + `src/Harmony/StartTravelInterceptPatch.cs`. (Verify the `<Compile>` strategy first; do not assume.) |
+| `Multiplayer.Tests/Multiplayer.Tests.csproj` | Add linked `<Compile>` items for `PermissionManager.cs`, `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs` (all pure). |
+| `Multiplayer.csproj` | No edit needed if it globs `src/**/*.cs`; if it uses explicit includes, add the six new `src/Network/CommandSync/*.cs` + `src/Harmony/StartTravelInterceptPatch.cs`. (Verify the `<Compile>` strategy first; do not assume.) |
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj`
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj`
 
 ---
 
@@ -73,16 +73,16 @@
 
 **Files:**
 - Create `src/Network/CommandSync/CommandCodec.cs`
-- Create test `Multipleer.Tests/CommandCodecTests.cs`
-- Modify `Multipleer.Tests/Multipleer.Tests.csproj` (link the new file)
+- Create test `Multiplayer.Tests/CommandCodecTests.cs`
+- Modify `Multiplayer.Tests/Multiplayer.Tests.csproj` (link the new file)
 
-- [ ] Add the linked compile item to `Multipleer.Tests/Multipleer.Tests.csproj` inside the existing pure-cores `<ItemGroup>`:
+- [ ] Add the linked compile item to `Multiplayer.Tests/Multiplayer.Tests.csproj` inside the existing pure-cores `<ItemGroup>`:
   ```xml
   <Compile Include="..\src\Network\CommandSync\CommandCodec.cs"><Link>CommandCodec.cs</Link></Compile>
   ```
-- [ ] Write the failing test `Multipleer.Tests/CommandCodecTests.cs`:
+- [ ] Write the failing test `Multiplayer.Tests/CommandCodecTests.cs`:
   ```csharp
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network.CommandSync;
   using Xunit;
 
   public class CommandCodecTests
@@ -113,12 +113,12 @@
       }
   }
   ```
-- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~CommandCodecTests` (expect compile error: type not found).
+- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~CommandCodecTests` (expect compile error: type not found).
 - [ ] Implement `src/Network/CommandSync/CommandCodec.cs`:
   ```csharp
   using System.IO;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Pure, Unity-free. Encodes the StartTravel ACTION PAYLOAD only; the CampaignActionMessage
       // envelope (ActionId/Type/Timestamp) is handled by MessageSerializer. The vehicle and the
@@ -160,7 +160,7 @@
       }
   }
   ```
-- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~CommandCodecTests`.
+- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~CommandCodecTests`.
 - [ ] Commit: `feat(geo-sync): CommandCodec StartTravel payload round-trip`
 
 ---
@@ -169,21 +169,21 @@
 
 **Files:**
 - Create `src/Network/CommandSync/PermissionGate.cs`
-- Create test `Multipleer.Tests/PermissionGateTests.cs`
-- Modify `Multipleer.Tests/Multipleer.Tests.csproj` (link `PermissionManager.cs` + `PermissionGate.cs`)
+- Create test `Multiplayer.Tests/PermissionGateTests.cs`
+- Modify `Multiplayer.Tests/Multiplayer.Tests.csproj` (link `PermissionManager.cs` + `PermissionGate.cs`)
 
-- [ ] Add linked compile items to `Multipleer.Tests/Multipleer.Tests.csproj`:
+- [ ] Add linked compile items to `Multiplayer.Tests/Multiplayer.Tests.csproj`:
   ```xml
   <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
   <Compile Include="..\src\Network\CommandSync\PermissionGate.cs"><Link>PermissionGate.cs</Link></Compile>
   ```
-  > `PermissionManager.cs` has `using Multipleer.Network;` but references no Unity/`NetworkEngine` member, so it links cleanly. If the linker pulls an unused-namespace error, the only fix permitted is removing that unused `using` in a separate trivial step — do not add engine deps.
-- [ ] Write the failing test `Multipleer.Tests/PermissionGateTests.cs`:
+  > `PermissionManager.cs` has `using Multiplayer.Network;` but references no Unity/`NetworkEngine` member, so it links cleanly. If the linker pulls an unused-namespace error, the only fix permitted is removing that unused `using` in a separate trivial step — do not add engine deps.
+- [ ] Write the failing test `Multiplayer.Tests/PermissionGateTests.cs`:
   ```csharp
   using System;
-  using Multipleer.Network.CommandSync;
-  using Multipleer.Network.MessageLayer;
-  using Multipleer.Validation;
+  using Multiplayer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
+  using Multiplayer.Validation;
   using Xunit;
 
   public class PermissionGateTests
@@ -226,14 +226,14 @@
       }
   }
   ```
-- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~PermissionGateTests`.
+- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~PermissionGateTests`.
 - [ ] Implement `src/Network/CommandSync/PermissionGate.cs`:
   ```csharp
   using System;
-  using Multipleer.Network.MessageLayer;
-  using Multipleer.Validation;
+  using Multiplayer.Network.MessageLayer;
+  using Multiplayer.Validation;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Real per-playerGUID permission gate. Replaces the GUID-blind CampaignPermissionHelper.Check
       // (host=allow/client=block) with an actual flag lookup against PermissionManager. Pure: no
@@ -277,7 +277,7 @@
       }
   }
   ```
-- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~PermissionGateTests`.
+- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~PermissionGateTests`.
 - [ ] Commit: `feat(geo-sync): PermissionGate real per-GUID flag enforcement`
 
 ---
@@ -286,18 +286,18 @@
 
 **Files:**
 - Create `src/Network/CommandSync/InterceptRegistry.cs`
-- Create test `Multipleer.Tests/InterceptRegistryTests.cs`
-- Modify `Multipleer.Tests/Multipleer.Tests.csproj` (link `InterceptRegistry.cs`)
+- Create test `Multiplayer.Tests/InterceptRegistryTests.cs`
+- Modify `Multiplayer.Tests/Multiplayer.Tests.csproj` (link `InterceptRegistry.cs`)
 
-- [ ] Add linked compile item to `Multipleer.Tests/Multipleer.Tests.csproj`:
+- [ ] Add linked compile item to `Multiplayer.Tests/Multiplayer.Tests.csproj`:
   ```xml
   <Compile Include="..\src\Network\CommandSync\InterceptRegistry.cs"><Link>InterceptRegistry.cs</Link></Compile>
   ```
-- [ ] Write the failing test `Multipleer.Tests/InterceptRegistryTests.cs`:
+- [ ] Write the failing test `Multiplayer.Tests/InterceptRegistryTests.cs`:
   ```csharp
-  using Multipleer.Network.CommandSync;
-  using Multipleer.Network.MessageLayer;
-  using Multipleer.Validation;
+  using Multiplayer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
+  using Multiplayer.Validation;
   using Xunit;
 
   public class InterceptRegistryTests
@@ -329,14 +329,14 @@
       }
   }
   ```
-- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~InterceptRegistryTests`.
+- [ ] Run FAIL: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~InterceptRegistryTests`.
 - [ ] Implement `src/Network/CommandSync/InterceptRegistry.cs` (Task 3 ships ONLY the confirmed `StartTravel` entry + the pending `StartResearch` entry needed by the tests; Task 7 fills the remaining curated rows):
   ```csharp
   using System.Collections.Generic;
-  using Multipleer.Network.MessageLayer;
-  using Multipleer.Validation;
+  using Multiplayer.Network.MessageLayer;
+  using Multiplayer.Validation;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Declarative, BROAD curated intercept table (prune-later). One row per CampaignActionType.
       // SignatureConfirmed=false rows are wired-but-dormant: the runtime resolver skips an unconfirmed
@@ -385,7 +385,7 @@
       }
   }
   ```
-- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj --filter FullyQualifiedName~InterceptRegistryTests`.
+- [ ] Run PASS: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj --filter FullyQualifiedName~InterceptRegistryTests`.
 - [ ] Commit: `feat(geo-sync): InterceptRegistry declarative table + lookup`
 
 ---
@@ -401,11 +401,11 @@
 - [ ] Implement `src/Network/CommandSync/HostArbiter.cs`:
   ```csharp
   using System;
-  using Multipleer.Network.MessageLayer;
-  using Multipleer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
+  using Multiplayer.Network.CommandSync;
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Host-only arbiter. Subscribed to NetworkEngine.OnCampaignActionRequest (sender peerId + msg).
       // Flow: resolve sender->playerGUID via Session -> PermissionGate.IsAllowed -> on allow, execute
@@ -451,7 +451,7 @@
               }
               catch (Exception ex)
               {
-                  Debug.LogError($"[Multipleer] HostArbiter execute failed for {action.ActionType}: {ex}");
+                  Debug.LogError($"[Multiplayer] HostArbiter execute failed for {action.ActionType}: {ex}");
                   _engine.RejectCampaignAction(senderSteamId, action, "Host execution error");
               }
           }
@@ -466,7 +466,7 @@
       }
   }
   ```
-- [ ] Run BUILD: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release` (expect success; `BroadcastCampaignActionResult` and `CommandRelay.ApplyResult` land in Tasks 6 — if building this task in isolation, stub-forward is NOT allowed, so build HostArbiter together with Task 6's `NetworkEngine`/`CommandRelay` members in the same compile and run the build gate after Task 6). 
+- [ ] Run BUILD: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release` (expect success; `BroadcastCampaignActionResult` and `CommandRelay.ApplyResult` land in Tasks 6 — if building this task in isolation, stub-forward is NOT allowed, so build HostArbiter together with Task 6's `NetworkEngine`/`CommandRelay` members in the same compile and run the build gate after Task 6). 
   > **Ordering note:** Task 4 authors `HostArbiter.cs` but the green build gate is shared with Task 6 (which adds `NetworkEngine.BroadcastCampaignActionResult` and `CommandRelay`). Commit the file at end of Task 4; the first passing Release build is asserted at the end of Task 6.
 - [ ] Commit: `feat(geo-sync): HostArbiter validate+execute+broadcast (host-only)`
 
@@ -482,10 +482,10 @@
 - [ ] Implement `src/Network/CommandSync/ClientApplier.cs`:
   ```csharp
   using System;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network.MessageLayer;
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Client-only applier. Subscribed to NetworkEngine.OnHostCampaignActionResult (fired on 0x31
       // Approved AND 0x32 Rejected). For an APPROVED action it reproduces the result locally by
@@ -513,13 +513,13 @@
               }
               catch (Exception ex)
               {
-                  Debug.LogError($"[Multipleer] ClientApplier apply failed for {action.ActionType}: {ex}");
+                  Debug.LogError($"[Multiplayer] ClientApplier apply failed for {action.ActionType}: {ex}");
               }
           }
       }
   }
   ```
-- [ ] Run BUILD (shared gate with Task 6): `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`.
+- [ ] Run BUILD (shared gate with Task 6): `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`.
 - [ ] Commit: `feat(geo-sync): ClientApplier subscribe + apply host result (client-only)`
 
 ---
@@ -533,7 +533,7 @@
 - Create `src/Harmony/StartTravelInterceptPatch.cs`
 - Modify `src/Network/NetworkEngine.cs` (add `BroadcastCampaignActionResult`)
 - Modify `src/Harmony/CampaignPatches.cs` (`CampaignPermissionHelper.Check` shim → `PermissionGate`)
-- (Verify `Multipleer.csproj` picks up the new files; add explicit `<Compile>` only if it does not glob `src/**`.)
+- (Verify `Multiplayer.csproj` picks up the new files; add explicit `<Compile>` only if it does not glob `src/**`.)
 
 - [ ] Add `BroadcastCampaignActionResult` to `src/Network/NetworkEngine.cs` immediately after `RejectCampaignAction` (`:281`):
   ```csharp
@@ -551,10 +551,10 @@
   ```csharp
   using System;
   using System.Collections.Generic;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network.MessageLayer;
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Pipeline orchestrator. Built ONCE; wires HostArbiter + ClientApplier to the engine's existing
       // campaign-action events. Owns the InterceptRegistry and the re-entrancy guard that lets the
@@ -610,7 +610,7 @@
               var entry = InterceptRegistry.Lookup(action.ActionType);
               if (entry == null || !entry.SignatureConfirmed)
               {
-                  Debug.LogWarning($"[Multipleer] No confirmed intercept for {action.ActionType}; skipping apply.");
+                  Debug.LogWarning($"[Multiplayer] No confirmed intercept for {action.ActionType}; skipping apply.");
                   return;
               }
 
@@ -633,10 +633,10 @@
   using System.Collections.Generic;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network.MessageLayer;
   using UnityEngine;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Resolves an InterceptEntry to the live game method via AccessTools and invokes it with the
       // decoded payload. Stage 1 implements ONLY the StartTravel apply (the confirmed vertical proof);
@@ -651,7 +651,7 @@
                       ApplyStartTravel(action);
                       break;
                   default:
-                      Debug.LogWarning($"[Multipleer] CommandExecutor: no apply branch for {action.ActionType}.");
+                      Debug.LogWarning($"[Multiplayer] CommandExecutor: no apply branch for {action.ActionType}.");
                       break;
               }
           }
@@ -661,20 +661,20 @@
               var p = CommandCodec.DecodeStartTravel(action.Payload);
 
               var geoLevel = GeoBridge.GetGeoLevelController();
-              if (geoLevel == null) { Debug.LogWarning("[Multipleer] StartTravel apply: no GeoLevelController."); return; }
+              if (geoLevel == null) { Debug.LogWarning("[Multiplayer] StartTravel apply: no GeoLevelController."); return; }
 
               var vehicle = GeoBridge.FindVehicleById(geoLevel, p.VehicleId);
-              if (vehicle == null) { Debug.LogWarning($"[Multipleer] StartTravel apply: vehicle {p.VehicleId} not found."); return; }
+              if (vehicle == null) { Debug.LogWarning($"[Multiplayer] StartTravel apply: vehicle {p.VehicleId} not found."); return; }
 
               var path = GeoBridge.BuildSitePath(geoLevel, p.SiteIds);
-              if (path == null) { Debug.LogWarning("[Multipleer] StartTravel apply: could not resolve site path."); return; }
+              if (path == null) { Debug.LogWarning("[Multiplayer] StartTravel apply: could not resolve site path."); return; }
 
               // Invoke GeoVehicle.StartTravel(List<GeoSite>) under the relay guard (the intercept prefix
               // checks CommandRelay.IsApplying and lets this through).
               var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
               var listType = typeof(List<>).MakeGenericType(geoSiteType);
               var method = AccessTools.Method(vehicle.GetType(), "StartTravel", new[] { listType });
-              if (method == null) { Debug.LogError("[Multipleer] StartTravel apply: method not resolved."); return; }
+              if (method == null) { Debug.LogError("[Multiplayer] StartTravel apply: method not resolved."); return; }
               method.Invoke(vehicle, new object[] { path });
           }
       }
@@ -688,7 +688,7 @@
   using System.Collections.Generic;
   using HarmonyLib;
 
-  namespace Multipleer.Network.CommandSync
+  namespace Multiplayer.Network.CommandSync
   {
       // Engine-side id<->entity bridge for command apply. Uses AccessTools reflection so the mod never
       // hard-references game types at compile time (matching the CampaignPatches stub strategy).
@@ -744,11 +744,11 @@
   using System.Collections.Generic;
   using System.Reflection;
   using HarmonyLib;
-  using Multipleer.Network;
-  using Multipleer.Network.CommandSync;
-  using Multipleer.Network.MessageLayer;
+  using Multiplayer.Network;
+  using Multiplayer.Network.CommandSync;
+  using Multiplayer.Network.MessageLayer;
 
-  namespace Multipleer.Harmony
+  namespace Multiplayer.Harmony
   {
       // C7 vertical proof: GeoVehicle.StartTravel(List<GeoSite>). Client → encode + relay to host +
       // block local exec. Host (own action) → execute locally, then postfix broadcasts the result.
@@ -843,9 +843,9 @@
   ```
   > This keeps the five existing permission-stub prefixes compiling and correct (host-allow / client-block); the REAL per-GUID enforcement for command actions is in `HostArbiter` via `PermissionGate`. The five legacy prefixes are folded into the registry in Task 7.
 - [ ] Wire `CommandRelay.Wire(NetworkEngine.Instance)` at session start. Locate the existing place where the lobby/session subscribes engine events (search `OnCampaignActionRequest` has zero subscribers; find where `NetworkEngine.Create()`/session start runs) and call `CommandRelay.Wire(engine)` there. Confirm the call site by reading the bootstrap before editing — do not invent a call site.
-- [ ] Run BUILD (the shared green gate for Tasks 4–6): `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release` → expect `Build succeeded`.
-- [ ] Run full unit suite (must stay green): `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj`.
-- [ ] **MANUAL 2-instance verify** (record result in the commit body): launch two instances via `Multipleer/tools/` second-copy setup; host loads a geoscape save, client joins; grant the client `ManageAircraft`; on the client, order an aircraft to travel to a site. EXPECT: client's vehicle does not move locally first (prefix blocked), host executes, both instances show the vehicle travelling to the same site. Then revoke `ManageAircraft` and retry → EXPECT host rejects, no movement on either instance.
+- [ ] Run BUILD (the shared green gate for Tasks 4–6): `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release` → expect `Build succeeded`.
+- [ ] Run full unit suite (must stay green): `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj`.
+- [ ] **MANUAL 2-instance verify** (record result in the commit body): launch two instances via `Multiplayer/tools/` second-copy setup; host loads a geoscape save, client joins; grant the client `ManageAircraft`; on the client, order an aircraft to travel to a site. EXPECT: client's vehicle does not move locally first (prefix blocked), host executes, both instances show the vehicle travelling to the same site. Then revoke `ManageAircraft` and retry → EXPECT host rejects, no movement on either instance.
 - [ ] Commit: `feat(geo-sync): CommandRelay + StartTravel intercept end-to-end (first vertical proof)`
 
 ---
@@ -856,7 +856,7 @@
 
 **Files:**
 - Modify `src/Network/CommandSync/InterceptRegistry.cs` (add rows)
-- Modify `Multipleer.Tests/InterceptRegistryTests.cs` (assert new rows present + confirmed/pending flag)
+- Modify `Multiplayer.Tests/InterceptRegistryTests.cs` (assert new rows present + confirmed/pending flag)
 - Create per-confirmed-entry intercept patches under `src/Harmony/` + apply branches in `CommandExecutor` (only for entries proven safe to sync)
 
 - [ ] **C4 `GeoVehicle.AddEquipment(GeoVehicleEquipmentDef)`** — add registry row (`DeclaringTypeName = "PhoenixPoint.Geoscape.Entities.GeoVehicle"`, `MethodName = "AddEquipment"`, `ParamTypeNames = new[]{ "PhoenixPoint.Geoscape.Entities.GeoVehicleEquipmentDef" }`, `RequiredPermission = ManageAircraft`, `SignatureConfirmed = true`), `ActionType = EquipVehicle`. Add `InterceptRegistryTests` assertion. Run: `dotnet test ... --filter ~InterceptRegistryTests`. Commit: `feat(geo-sync): registry C4 GeoVehicle.AddEquipment (EquipVehicle)`
@@ -867,7 +867,7 @@
 - [ ] **`GeoFaction.KillCharacter(GeoCharacter, CharacterDeathReason)`** — row under `DismissSoldier` (`DeclaringTypeName = "PhoenixPoint.Geoscape.Levels.GeoFaction"`, `ParamTypeNames = new[]{ "PhoenixPoint.Geoscape.Entities.GeoCharacter", "PhoenixPoint.Geoscape.Entities.CharacterDeathReason" }`, `RequiredPermission = ManageRecruitment`, confirmed — **verify `CharacterDeathReason` full namespace; pending if unconfirmed**). Test + build. Commit: `feat(geo-sync): registry GeoFaction.KillCharacter (DismissSoldier)`
 - [ ] **C1 `Research` enqueue** — `StartResearch` row already present as `SignatureConfirmed = false` (Task 3). Leave dormant. Add a doc comment in the registry citing the real candidate `Research.AddResearchToQueue(ResearchElement)` (`Research.cs:370`) and that `SetQueued` is absent in this build. No build change beyond the comment. Commit: `docs(geo-sync): registry C1 Research pending-signature note`
 - [ ] **C2 `ItemManufacturing` enqueue** — add `QueueManufacturing` row with `SignatureConfirmed = false`, citing the real candidate `ItemManufacturing.ManufactureItem(ManufacturableItem)` (`ItemManufacturing.cs:169`); `EnqueueItem` absent in this build. `RequiredPermission = ManageManufacturing`. Add `InterceptRegistryTests` assertion that the row exists and is pending. Test + build. Commit: `feat(geo-sync): registry C2 Manufacturing pending-signature row`
-- [ ] Run full suite once more: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj` and `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release` → both green.
+- [ ] Run full suite once more: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj` and `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release` → both green.
 - [ ] **MANUAL 2-instance verify** each confirmed intercept that has an apply branch (StartTravel already proven in Task 6; for any C-entry given an apply branch, repeat the host-authoritative move/permission check). Prune (set `SignatureConfirmed = false` or remove the row) any intercept that double-applies, is non-deterministic, or is purely local. Record prune decisions in the commit body. Commit: `feat(geo-sync): broaden curated intercept registry (C1–C7, prune-later)`
 
 ---

@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Relays a geoscape vehicle TRAVEL ORDER (Inc4 S2). A client's sim is frozen, so a local
@@ -11,7 +11,7 @@ namespace Multipleer.Network.Sync.Actions
     /// route-line metadata on the 0xA6 surface. Wire payload: <c>i32 ownerId, i32 vehicleId, u16 destCount,
     /// i32 destSiteId*</c>.
     /// <list type="bullet">
-    ///   <item><c>ownerId</c> = <see cref="Multipleer.Network.Sync.State.GeoVehiclePos.StableOwnerKey"/> of the
+    ///   <item><c>ownerId</c> = <see cref="Multiplayer.Network.Sync.State.GeoVehiclePos.StableOwnerKey"/> of the
     ///   owner faction's def asset name — the composite-key half that disambiguates per-faction VehicleIDs
     ///   (shared with the position mirror so the host resolves the SAME live vehicle).</item>
     ///   <item><c>vehicleId</c> = <c>GeoVehicle.VehicleID</c> (per-faction).</item>

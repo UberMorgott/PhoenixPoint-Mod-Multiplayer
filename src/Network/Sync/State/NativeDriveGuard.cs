@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// PURE (Unity-free) missing-member tagging for the HOST native-drive reflection gate shared by

@@ -6,12 +6,12 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge for the host-authoritative RESEARCH state channel (channel #2). The mod has
     /// NO compile-time game references, so every member is resolved by name and cached. This complements
-    /// <see cref="Multipleer.Network.Sync.ResearchReflection"/> (which already binds AddResearchToQueue /
+    /// <see cref="Multiplayer.Network.Sync.ResearchReflection"/> (which already binds AddResearchToQueue /
     /// CompleteResearch / GetResearchById and the id field) with the snapshot/reconcile + change-event
     /// surface the channel needs.
     ///
@@ -145,7 +145,7 @@ namespace Multipleer.Network.Sync.State
                     _factionResearchField = AccessTools.Field(fac.GetType(), "Research");
                 return _factionResearchField?.GetValue(fac);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.GetResearch failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.GetResearch failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -200,12 +200,12 @@ namespace Multipleer.Network.Sync.State
                                 snap.States.Add((id, state));
                             }
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Snapshot Visible failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Snapshot Visible failed (skipped): " + ex.Message); }
                 }
 
                 return snap;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Snapshot failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Snapshot failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -327,7 +327,7 @@ namespace Multipleer.Network.Sync.State
                     }
                     catch (Exception elEx)
                     {
-                        Debug.LogError("[Multipleer] ResearchStateReflection.Apply requeue '" + id + "' failed (skipped): " + elEx.Message);
+                        Debug.LogError("[Multiplayer] ResearchStateReflection.Apply requeue '" + id + "' failed (skipped): " + elEx.Message);
                     }
                 }
 
@@ -353,7 +353,7 @@ namespace Multipleer.Network.Sync.State
                 // client Completed) and skip queued (those get their state from the add path). Best-effort.
                 MirrorStates(research, target);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Apply failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Apply failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -374,11 +374,11 @@ namespace Multipleer.Network.Sync.State
                     if (el == null) continue;
                     if (!InQueue(research, el)) continue;       // membership is reconciled elsewhere; only move present items
                     try { _insertAt.Invoke(research, new object[] { el, idx }); }
-                    catch (Exception elEx) { Debug.LogError("[Multipleer] ResearchStateReflection.EnforceQueueOrder '" + id + "' failed (skipped): " + elEx.Message); }
+                    catch (Exception elEx) { Debug.LogError("[Multiplayer] ResearchStateReflection.EnforceQueueOrder '" + id + "' failed (skipped): " + elEx.Message); }
                     idx++;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.EnforceQueueOrder failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.EnforceQueueOrder failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -414,7 +414,7 @@ namespace Multipleer.Network.Sync.State
                     if (InQueue(research, el)) continue;       // queued elements get their state from the add path
                     _stateField.SetValue(el, stateValue);
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.MirrorStates '" + id + "' failed (skipped): " + ex.Message); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.MirrorStates '" + id + "' failed (skipped): " + ex.Message); }
             }
         }
 
@@ -430,7 +430,7 @@ namespace Multipleer.Network.Sync.State
                 if (el == null) return;
                 _cancel.Invoke(research, new[] { el });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Cancel failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Cancel failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -461,7 +461,7 @@ namespace Multipleer.Network.Sync.State
                 if (m == null) return;
                 m.Invoke(research, new[] { el });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Reorder failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Reorder failed: " + ex.Message); }
         }
 
         /// <summary>Read <c>ResearchElement.ResearchID</c> off a live element (interceptor side).</summary>
@@ -469,7 +469,7 @@ namespace Multipleer.Network.Sync.State
         {
             if (researchElement == null) return null;
             try { Ensure(); return _researchIdField?.GetValue(researchElement) as string; }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.GetId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.GetId failed: " + ex.Message); return null; }
         }
 
         // ─── host change-event subscription (faction-level Start/Complete) ───
@@ -499,7 +499,7 @@ namespace Multipleer.Network.Sync.State
                 if (token.DoneHandler != null) { doneEvt.AddEventHandler(fac, token.DoneHandler); token.DoneEvt = doneEvt; }
                 return token;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.SubscribeFactionResearchEvents failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.SubscribeFactionResearchEvents failed: " + ex.Message); return null; }
         }
 
         public static void Unsubscribe(object token)
@@ -511,7 +511,7 @@ namespace Multipleer.Network.Sync.State
                 if (t.StartEvt != null && t.StartHandler != null) t.StartEvt.RemoveEventHandler(t.Faction, t.StartHandler);
                 if (t.DoneEvt != null && t.DoneHandler != null) t.DoneEvt.RemoveEventHandler(t.Faction, t.DoneHandler);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.Unsubscribe failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Unsubscribe failed: " + ex.Message); }
         }
 
         // ─── host hourly-tick subscription (research progress heartbeat, FIX#1) ───
@@ -541,14 +541,14 @@ namespace Multipleer.Network.Sync.State
                 evt.AddEventHandler(geo, handler);
                 return new HourlyTickToken { Level = geo, Evt = evt, Handler = handler };
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.SubscribeHourlyTick failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.SubscribeHourlyTick failed: " + ex.Message); return null; }
         }
 
         private static void UnsubscribeHourly(HourlyTickToken t)
         {
             if (t == null || t.Level == null || t.Evt == null || t.Handler == null) return;
             try { t.Evt.RemoveEventHandler(t.Level, t.Handler); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.UnsubscribeHourly failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.UnsubscribeHourly failed: " + ex.Message); }
         }
 
         private sealed class HourlyTickToken
@@ -599,7 +599,7 @@ namespace Multipleer.Network.Sync.State
         private static void CompleteEchoOnly(object element)
         {
             try { _stateField.SetValue(element, _completedStateValue); }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.CompleteEchoOnly _state write failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.CompleteEchoOnly _state write failed: " + ex.Message); }
 
             // Cosmetic flags the UI reads off a completed element. Best-effort: a missing optional field
             // must not abort the echo (state is already authoritative).
@@ -676,7 +676,7 @@ namespace Multipleer.Network.Sync.State
 
                 return dm.CreateDelegate(handlerType, onChanged);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ResearchStateReflection.MakeAdapter failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.MakeAdapter failed: " + ex.Message); return null; }
         }
     }
 }

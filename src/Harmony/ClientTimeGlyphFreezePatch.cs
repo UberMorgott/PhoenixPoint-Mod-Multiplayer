@@ -2,16 +2,16 @@ using System;
 using System.Collections;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.TimeSync;
+using Multiplayer.Network;
+using Multiplayer.Network.TimeSync;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Inc4 S1 (§3.3) — CLIENT pause/speed GLYPH decouple for the geoscape sim-freeze. Design spec:
-    /// docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md §3.3.
+    /// docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md §3.3.
     ///
     /// Under the freeze the sim <c>Timing._paused</c> is pinned true (so producers stay Max'd), but the native
     /// time-control widget renders its pause/play glyph and speed indicator from <c>_timing.Paused</c>
@@ -143,7 +143,7 @@ namespace Multipleer.Harmony
                 var pause = TimeGlyphWidgetReflection.PauseGraphic?.GetValue(__instance) as Component;
                 if (pause != null) pause.gameObject.SetActive(hostPaused);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ClientTimePausedGlyphFreezePatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ClientTimePausedGlyphFreezePatch failed: " + ex.Message); }
         }
     }
 
@@ -181,7 +181,7 @@ namespace Multipleer.Harmony
 
                 TimeGlyphWidgetReflection.CorrectSpeedText(__instance, hostPaused, hostSpeed);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ClientTimeSpeedGlyphFreezePatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ClientTimeSpeedGlyphFreezePatch failed: " + ex.Message); }
         }
     }
 }

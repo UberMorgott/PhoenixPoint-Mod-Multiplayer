@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 travel-mirror SMOOTHING — pure, Unity-free snapshot-interpolation core. The host broadcasts each

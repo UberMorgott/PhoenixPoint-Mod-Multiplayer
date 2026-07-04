@@ -1,12 +1,12 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// CLIENT-only deterministic reward-card render hook. The host's geoscape-event RESULT card draws the
@@ -59,10 +59,10 @@ namespace Multipleer.Harmony.Sync
                 var reward = RewardDisplayReflection.TryConsume(geoEvent);
                 if (reward == null) return;
 
-                Debug.Log("[Multipleer] RewardRenderPatch: synthetic result page built → rendering reward lines");
+                Debug.Log("[Multiplayer] RewardRenderPatch: synthetic result page built → rendering reward lines");
                 RewardDisplayReflection.Render(GeoRuntime.Instance, __instance, reward);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] RewardRenderPatch.Postfix failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RewardRenderPatch.Postfix failed: " + ex.Message); }
         }
     }
 }

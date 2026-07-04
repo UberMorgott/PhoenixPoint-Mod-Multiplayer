@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.MessageLayer
+namespace Multiplayer.Network.MessageLayer
 {
     public static class MessageSerializer
     {

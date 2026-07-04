@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// Feature C — client-side ATTACK ANIMATION (tac.fire.start). Today the client shows DAMAGE (tac.damage)
@@ -119,11 +119,11 @@ namespace Multipleer.Sync.Tactical
                 byte[] payload = TacticalLiveCodec.EncodeFireStart(
                     seq, shooterNetId, abilityGuid, targetNetId, targetPos.x, targetPos.y, targetPos.z, shotCount);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacFireStart, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.fire.start@shot-start seq=" + seq + " shooter=" + shooterNetId +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.fire.start@shot-start seq=" + seq + " shooter=" + shooterNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid + " attack=" + attackTypeName +
                           " targetNetId=" + targetNetId + " shots=" + shotCount);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastFireStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastFireStart failed: " + ex); }
         }
 
         // ─── CLIENT: play the attack animation CONCURRENTLY (projectile flies, damage-less, camera-silent) ─
@@ -135,7 +135,7 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeFireStart(payload, out var s)) { Debug.LogError("[Multipleer][tac] tac.fire.start decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeFireStart(payload, out var s)) { Debug.LogError("[Multiplayer][tac] tac.fire.start decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacFireStart, s.Seq)) return;
 
             // DE-DUP (client-predicted local anim): if THIS client already played a predicted local fire animation
@@ -145,51 +145,51 @@ namespace Multipleer.Sync.Tactical
             if (_predictedFire.ConsumeIfPredicted(s.ShooterNetId, NowSeconds()))
             {
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacFireStart, s.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT skipped echoed tac.fire.start (own predicted anim) seq=" + s.Seq +
+                Debug.Log("[Multiplayer][tac] CLIENT skipped echoed tac.fire.start (own predicted anim) seq=" + s.Seq +
                           " shooter=" + s.ShooterNetId);
                 return;
             }
 
             object shooter = TacticalDeploySync.ResolveLiveActor(s.ShooterNetId);
-            if (shooter == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: no actor for netId " + s.ShooterNetId); return; }
+            if (shooter == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: no actor for netId " + s.ShooterNetId); return; }
 
             try
             {
                 object ability = ResolveAbilityByGuid(shooter, s.AbilityDefGuid);
-                if (ability == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: shooter has no ability with guid " + s.AbilityDefGuid); return; }
+                if (ability == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: shooter has no ability with guid " + s.AbilityDefGuid); return; }
 
                 object weapon = GetProp(ability, "Weapon");
-                if (weapon == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: ability has no Weapon (type=" + ability.GetType().Name + ")"); return; }
+                if (weapon == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: ability has no Weapon (type=" + ability.GetType().Name + ")"); return; }
 
                 object target = BuildSyncedFireTarget(s);
-                if (target == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: could not build target"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: could not build target"); return; }
 
                 // Enemy-turn chase cam: snap to the shooter for the replayed shot (follow=false → one-shot snap).
                 if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, shooter != null))
                     TacticalEnemyTurnCamera.ChaseActor(shooter, follow: false);
 
                 object tlc = TacticalDeploySync.LiveTlc;
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: no LiveTlc"); return; }
+                if (tlc == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: no LiveTlc"); return; }
 
                 var fire = AccessTools.Method(tlc.GetType(), "FireWeaponAtTargetCrt");
-                if (fire == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: FireWeaponAtTargetCrt not found"); return; }
+                if (fire == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: FireWeaponAtTargetCrt not found"); return; }
 
                 object timing = GetTiming(shooter, tlc);
-                if (timing == null) { Debug.LogError("[Multipleer][tac] tac.fire.start: no Timing to drive the replay"); return; }
+                if (timing == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: no Timing to drive the replay"); return; }
 
                 // Drive our own wrapper coroutine: it holds the replay guards for the WHOLE inner coroutine
                 // (the guards must survive the cross-frame yields), then clears them in finally.
                 var crt = ReplayFireCrt(tlc, fire, weapon, target, ability);
                 if (!InvokeStart(timing, timing.GetType(), crt))
                 {
-                    Debug.LogError("[Multipleer][tac] tac.fire.start: could not start replay coroutine netId=" + s.ShooterNetId);
+                    Debug.LogError("[Multiplayer][tac] tac.fire.start: could not start replay coroutine netId=" + s.ShooterNetId);
                     return;
                 }
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacFireStart, s.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT playing tac.fire.start seq=" + s.Seq + " shooter=" + s.ShooterNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT playing tac.fire.start seq=" + s.Seq + " shooter=" + s.ShooterNetId +
                           " type=" + ability.GetType().Name + " targetNetId=" + s.TargetNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnFireStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnFireStart failed: " + ex); }
         }
 
         // ─── CLIENT: PREDICTED local fire animation (Option B — animate instantly on the player's own press) ─
@@ -223,38 +223,38 @@ namespace Multipleer.Sync.Tactical
                 if (shooterNetId < 0) return;
 
                 object weapon = GetProp(ability, "Weapon");
-                if (weapon == null) { Debug.LogError("[Multipleer][tac] predict fire: ability has no Weapon (type=" + ability.GetType().Name + ")"); return; }
+                if (weapon == null) { Debug.LogError("[Multiplayer][tac] predict fire: ability has no Weapon (type=" + ability.GetType().Name + ")"); return; }
 
                 // Build a fresh Synced (camera-silent, return-fire-gated) target from the LIVE aim target — never reuse
                 // the Regular-typed live parameter (its AttackType would let the engine fire return-fire / extra hints).
                 ReadTarget(parameter, out int targetNetId, out Vector3 targetPos);
                 object target = BuildSyncedFireTarget(targetNetId, targetPos);
-                if (target == null) { Debug.LogError("[Multipleer][tac] predict fire: could not build target"); return; }
+                if (target == null) { Debug.LogError("[Multiplayer][tac] predict fire: could not build target"); return; }
 
                 object tlc = TacticalDeploySync.LiveTlc;
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] predict fire: no LiveTlc"); return; }
+                if (tlc == null) { Debug.LogError("[Multiplayer][tac] predict fire: no LiveTlc"); return; }
 
                 var fire = AccessTools.Method(tlc.GetType(), "FireWeaponAtTargetCrt");
-                if (fire == null) { Debug.LogError("[Multipleer][tac] predict fire: FireWeaponAtTargetCrt not found"); return; }
+                if (fire == null) { Debug.LogError("[Multiplayer][tac] predict fire: FireWeaponAtTargetCrt not found"); return; }
 
                 object timing = GetTiming(shooter, tlc);
-                if (timing == null) { Debug.LogError("[Multipleer][tac] predict fire: no Timing to drive the replay"); return; }
+                if (timing == null) { Debug.LogError("[Multiplayer][tac] predict fire: no Timing to drive the replay"); return; }
 
                 var crt = ReplayFireCrt(tlc, fire, weapon, target, ability);
                 if (!InvokeStart(timing, timing.GetType(), crt))
                 {
                     // Could not start the predicted anim → do NOT record the guard, so the host echo will replay
                     // normally (the client still gets ONE animation, just the late echoed one instead of the predict).
-                    Debug.LogError("[Multipleer][tac] predict fire: could not start predicted coroutine netId=" + shooterNetId);
+                    Debug.LogError("[Multiplayer][tac] predict fire: could not start predicted coroutine netId=" + shooterNetId);
                     return;
                 }
 
                 // Record AFTER a successful start so the host's echoed fire-start for this shooter is de-duped (skipped).
                 _predictedFire.RecordPredicted(shooterNetId, NowSeconds());
-                Debug.Log("[Multipleer][tac] CLIENT predicted fire anim shooter=" + shooterNetId +
+                Debug.Log("[Multiplayer][tac] CLIENT predicted fire anim shooter=" + shooterNetId +
                           " type=" + ability.GetType().Name + " targetNetId=" + targetNetId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientPredictFireStart failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientPredictFireStart failed: " + ex); }
         }
 
         /// <summary>Wrapper coroutine: raise the client-only replay guards, run the native
@@ -271,7 +271,7 @@ namespace Multipleer.Sync.Tactical
             {
                 object inner = null;
                 try { inner = fire.Invoke(tlc, new[] { weapon, target, ability }); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.fire.start: FireWeaponAtTargetCrt invoke failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.fire.start: FireWeaponAtTargetCrt invoke failed: " + ex); }
 
                 if (inner is IEnumerator e)
                 {
@@ -280,7 +280,7 @@ namespace Multipleer.Sync.Tactical
                     {
                         bool moved;
                         try { moved = e.MoveNext(); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.fire.start replay step failed: " + ex); break; }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.fire.start replay step failed: " + ex); break; }
                         if (!moved) break;
                         object cur = e.Current;
                         yield return cur is NextUpdate nu ? nu : NextUpdate.NextFrame;
@@ -359,7 +359,7 @@ namespace Multipleer.Sync.Tactical
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] BuildSyncedFireTarget ctor failed, falling back to field-set: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildSyncedFireTarget ctor failed, falling back to field-set: " + ex); }
 
             object target = Activator.CreateInstance(targetType);
             if (targetActor != null)
@@ -414,7 +414,7 @@ namespace Multipleer.Sync.Tactical
                     if (g == abilityGuid) return a;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] (fire) ResolveAbilityByGuid failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] (fire) ResolveAbilityByGuid failed: " + ex); }
             return null;
         }
 
@@ -499,7 +499,7 @@ namespace Multipleer.Sync.Tactical
                 best.Invoke(timingInstance, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] (fire) InvokeStart failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] (fire) InvokeStart failed: " + ex); return false; }
         }
 
         private static object GetProp(object obj, string name)

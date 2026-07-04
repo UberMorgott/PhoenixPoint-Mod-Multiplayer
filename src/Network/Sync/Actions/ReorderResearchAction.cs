@@ -1,8 +1,8 @@
 using System;
 using System.IO;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>The relative queue move the player clicked. Wire value is the byte below.</summary>
     public enum ResearchReorderKind : byte

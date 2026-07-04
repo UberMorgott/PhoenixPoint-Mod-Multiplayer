@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// FIX B (relayed-shot cosmetic-delay strip): make a CLIENT-ORIGIN shot the host executes authoritatively
@@ -48,7 +48,7 @@ namespace Multipleer.Harmony.Tactical
             try { return !TacticalCombatSync.TryRunRelayedShootInline(__instance, __0, __1); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] RelayedShootInlinePatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] RelayedShootInlinePatch.Prefix failed: " + ex);
                 return true;   // fail-open: never wedge the native enqueue
             }
         }
@@ -80,12 +80,12 @@ namespace Multipleer.Harmony.Tactical
                 if (!__result && TacticalCombatSync.ShouldForceAimingForRelayedShot(__instance))
                 {
                     __result = true;
-                    Debug.Log("[Multipleer][tac] B2 aim-up skipped for relayed shoot (CurrentlyAiming forced true)");
+                    Debug.Log("[Multiplayer][tac] B2 aim-up skipped for relayed shoot (CurrentlyAiming forced true)");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] RelayedShootAimSkipPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] RelayedShootAimSkipPatch.Postfix failed: " + ex);
             }
         }
     }
@@ -113,7 +113,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalCombatSync.EndRelayedShot(__instance); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] RelayedShootEndPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] RelayedShootEndPatch.Postfix failed: " + ex);
             }
         }
     }

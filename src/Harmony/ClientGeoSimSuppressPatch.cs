@@ -1,10 +1,10 @@
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network;
+using Multiplayer.Network.CommandSync;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // Inc1 Task A: make the CLIENT geoscape engine inert. Prefixes the CLOSED 13-producer set
     // (GeoSimProducerTable) of `private NextUpdate <Method>(Timing)` callbacks. On a client in an active

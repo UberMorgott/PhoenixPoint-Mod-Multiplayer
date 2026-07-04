@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Shared reflection bridge to the game def repository. Every synced def is wired by its stable
@@ -50,7 +50,7 @@ namespace Multipleer.Network.Sync
         {
             if (def == null) return null;
             try { Ensure(); return _guidField?.GetValue(def) as string; }
-            catch (Exception ex) { Debug.LogError("[Multipleer] DefReflection.GetGuid failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] DefReflection.GetGuid failed: " + ex.Message); return null; }
         }
 
         private static object Repo()
@@ -62,7 +62,7 @@ namespace Multipleer.Network.Sync
                 if (_gameComponent != null)
                     _repo = _gameComponent.Invoke(null, null);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] DefReflection.Repo failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] DefReflection.Repo failed: " + ex.Message); }
             return _repo;
         }
 
@@ -78,7 +78,7 @@ namespace Multipleer.Network.Sync
                 if (repo == null) return null;
                 return _getDef.Invoke(repo, new object[] { guid });
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] DefReflection.GetDefByGuid failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] DefReflection.GetDefByGuid failed: " + ex.Message); return null; }
         }
     }
 }

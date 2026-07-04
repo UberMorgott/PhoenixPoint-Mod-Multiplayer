@@ -6,13 +6,13 @@
 
 **Architecture:** Host-authoritative thin-client (fixed; PP is non-deterministic so lockstep is unviable). Two new client-only Harmony patch classes plus one pure helper table: (A) `ClientGeoSimSuppressPatch` prefixes the CLOSED 13-producer set of `NextUpdate`-returning `Timing` callbacks, returning `false` + `__result = NextUpdate.Never` so each producer permanently stops on the client; (B) `ClientTravelEmitterSuppressPatch` prefixes the three `GeoVehicle` travel emitters (`set_Travelling` side-effects, `InitiateTravelling`, `OnArrived`), returning `false` so the client renders motion via the whitelisted `NavigateRoutine` but never mutates its own authoritative geoscape state. (C) is a verify-only checkpoint that the already-live `TimeBridge.ApplyTimeState` (`0x34`/`0x01`) advances the slaved client clock so `NavigateRoutine` renders. Both patch classes gate strictly client-only (host simulates normally) and are best-effort by design (backstopped by host state-diff + CRC reload in later increments).
 
-**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic resolution + `TargetMethods()` multi-target single-prefix; mod never hard-references game types), xUnit 2.9.2 (`Multipleer.Tests`), existing `NetworkEngine` client gate (`Instance`/`IsActive`/`IsHost`), existing `CommandRelay.IsApplying` re-entrancy guard, existing `TimeBridge`/`0x34` clock mirror (time-sync Increment-1, already shipped).
+**Tech Stack:** C# (net472), HarmonyLib (`AccessTools` dynamic resolution + `TargetMethods()` multi-target single-prefix; mod never hard-references game types), xUnit 2.9.2 (`Multiplayer.Tests`), existing `NetworkEngine` client gate (`Instance`/`IsActive`/`IsHost`), existing `CommandRelay.IsApplying` re-entrancy guard, existing `TimeBridge`/`0x34` clock mirror (time-sync Increment-1, already shipped).
 
 ---
 
 ## Grounding notes (decompile-verified — read before coding)
 
-> Decompile root: `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src` (gitignored — verified via Bash grep + Read on real files). Mod source: `E:\DEV\PhoenixPoint\Multipleer\src`.
+> Decompile root: `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src` (gitignored — verified via Bash grep + Read on real files). Mod source: `E:\DEV\PhoenixPoint\Multiplayer\src`.
 
 ### Mod conventions (copy these exactly)
 - **Client gate predicate** (every existing intercept patch, e.g. `src/Harmony/StartTravelInterceptPatch.cs:36-39`, `src/Harmony/TimePauseInterceptPatch.cs:29-33`):
@@ -25,9 +25,9 @@
   ```
   `NetworkEngine.IsActive` / `NetworkEngine.IsHost` are `public bool { get; private set; }` auto-properties (`src/Network/NetworkEngine.cs:14-15`).
 - **Patch class shape** (`src/Harmony/StartTravelInterceptPatch.cs`, `CurtainShowPatch.cs`): `[HarmonyPatch]` attribute on a `public static class`; a `static bool Prepare()` that resolves engine types via `AccessTools.TypeByName("…")` and returns `false` if absent (Harmony skips the class — never crashes); `static MethodBase TargetMethod()` (single) **or** `static IEnumerable<MethodBase> TargetMethods()` (multi); a `static bool Prefix(...)`. Game types are NEVER hard-referenced — injected params typed `object`; non-void `__result` typed `ref object`.
-- **Registration is automatic:** `MultipleerMain.OnModEnabled:26-27` does `harmony.PatchAll(Assembly.GetExecutingAssembly())`. New `[HarmonyPatch]` classes auto-discover; **no manual registration**.
-- **Main csproj** (`Multipleer.csproj`) has no `EnableDefaultCompileItems=false` → SDK globs `src/**/*.cs`. **New `src/` files need no csproj edit.**
-- **Test csproj** (`Multipleer.Tests/Multipleer.Tests.csproj`) HAS `EnableDefaultCompileItems=false` (`:7`); pure src cores are linked individually via `<Compile Include="..\src\…\X.cs"><Link>X.cs</Link></Compile>` (`:14-29`). **A new pure helper that needs a unit test MUST get its own `<Compile>` link line.** Existing links include `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs`, `MessageSerializer.cs`.
+- **Registration is automatic:** `MultiplayerMain.OnModEnabled:26-27` does `harmony.PatchAll(Assembly.GetExecutingAssembly())`. New `[HarmonyPatch]` classes auto-discover; **no manual registration**.
+- **Main csproj** (`Multiplayer.csproj`) has no `EnableDefaultCompileItems=false` → SDK globs `src/**/*.cs`. **New `src/` files need no csproj edit.**
+- **Test csproj** (`Multiplayer.Tests/Multiplayer.Tests.csproj`) HAS `EnableDefaultCompileItems=false` (`:7`); pure src cores are linked individually via `<Compile Include="..\src\…\X.cs"><Link>X.cs</Link></Compile>` (`:14-29`). **A new pure helper that needs a unit test MUST get its own `<Compile>` link line.** Existing links include `CommandCodec.cs`, `PermissionGate.cs`, `InterceptRegistry.cs`, `MessageSerializer.cs`.
 - **Auditable declarative-table pattern:** `src/Network/CommandSync/InterceptRegistry.cs` (one row per type, `static readonly` collection, public read accessors). The producer table mirrors this style so the suppress set is auditable/extendable.
 
 ### The 13 producers — VERIFIED signatures (all identical shape)
@@ -84,17 +84,17 @@ The CommandSync intercept patches keep an `IsApplying → return true` carve-out
 | `src/Network/CommandSync/GeoSimProducerTable.cs` | Pure, auditable declarative table of the 13 producer `(DeclaringTypeName, MethodName)` rows + read accessor. No game types — plain strings. Single source of truth for the suppress set. | **Pure → unit-tested** |
 | `src/Harmony/ClientGeoSimSuppressPatch.cs` | Client-only multi-target Harmony patch: `TargetMethods()` resolves each `GeoSimProducerTable` row (disambiguated by the `Timing` param) → one `Prefix` sets `__result = NextUpdate.Never` + `return false` on the client. | Engine/Harmony — build + 2-instance |
 | `src/Harmony/ClientTravelEmitterSuppressPatch.cs` | Client-only multi-target Harmony patch: `TargetMethods()` yields `GeoVehicle.set_Travelling(bool)`, `InitiateTravelling()`, `OnArrived(Vector3,bool)` → one `Prefix` returns `false` on the client (unconditional, no `IsApplying` carve-out). | Engine/Harmony — build + 2-instance |
-| `Multipleer.Tests/GeoSimProducerTableTests.cs` | xUnit: the table has exactly 13 rows, no nulls/blanks, no duplicate `(type,method)`, includes the canonical anchors, excludes the whitelist. | Test |
+| `Multiplayer.Tests/GeoSimProducerTableTests.cs` | xUnit: the table has exactly 13 rows, no nulls/blanks, no duplicate `(type,method)`, includes the canonical anchors, excludes the whitelist. | Test |
 
 ### Modified files
 
 | File | Change |
 |------|--------|
-| `Multipleer.Tests/Multipleer.Tests.csproj` | Add `<Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>GeoSimProducerTable.cs</Link></Compile>` so the pure table links into the test assembly. |
+| `Multiplayer.Tests/Multiplayer.Tests.csproj` | Add `<Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>GeoSimProducerTable.cs</Link></Compile>` so the pure table links into the test assembly. |
 
-**Build:** `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
-**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
-**In-game (2-instance):** per `multipleer-second-instance-setup` — host one geoscape campaign, join with a second Goldberg-emu instance; see Task 5 checkpoint.
+**Build:** `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
+**Tests:** `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
+**In-game (2-instance):** per `multiplayer-second-instance-setup` — host one geoscape campaign, join with a second Goldberg-emu instance; see Task 5 checkpoint.
 
 ---
 
@@ -102,14 +102,14 @@ The CommandSync intercept patches keep an `IsApplying → return true` carve-out
 
 **Files:**
 - Create: `src/Network/CommandSync/GeoSimProducerTable.cs`
-- Modify: `Multipleer.Tests/Multipleer.Tests.csproj` (add the `<Compile>` link)
-- Test: `Multipleer.Tests/GeoSimProducerTableTests.cs` (Create)
+- Modify: `Multiplayer.Tests/Multiplayer.Tests.csproj` (add the `<Compile>` link)
+- Test: `Multiplayer.Tests/GeoSimProducerTableTests.cs` (Create)
 
-- [ ] **Step 1: Write the failing test** — Create `Multipleer.Tests/GeoSimProducerTableTests.cs`:
+- [ ] **Step 1: Write the failing test** — Create `Multiplayer.Tests/GeoSimProducerTableTests.cs`:
 
 ```csharp
 using System.Linq;
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network.CommandSync;
 using Xunit;
 
 public class GeoSimProducerTableTests
@@ -164,7 +164,7 @@ public class GeoSimProducerTableTests
 ```
 
 - [ ] **Step 2: Run test to verify it fails** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter GeoSimProducerTableTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter GeoSimProducerTableTests`
   Expected: FAIL — compile error (`GeoSimProducerTable` / `Producers` do not exist).
 
 - [ ] **Step 3: Create the pure table** — Create `src/Network/CommandSync/GeoSimProducerTable.cs`:
@@ -172,7 +172,7 @@ public class GeoSimProducerTableTests
 ```csharp
 using System.Collections.Generic;
 
-namespace Multipleer.Network.CommandSync
+namespace Multiplayer.Network.CommandSync
 {
     // Auditable, pure (Unity-free) declarative list of the CLOSED 13-producer geoscape-sim set the
     // CLIENT must suppress so it runs ZERO stochastic/clock-driven authoritative simulation (SD-AIDR
@@ -226,20 +226,20 @@ namespace Multipleer.Network.CommandSync
 }
 ```
 
-- [ ] **Step 4: Link the pure table into the test assembly** — In `Multipleer.Tests/Multipleer.Tests.csproj`, immediately after the `InterceptRegistry.cs` link line (`:29`), add:
+- [ ] **Step 4: Link the pure table into the test assembly** — In `Multiplayer.Tests/Multiplayer.Tests.csproj`, immediately after the `InterceptRegistry.cs` link line (`:29`), add:
 
 ```xml
     <Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>GeoSimProducerTable.cs</Link></Compile>
 ```
 
 - [ ] **Step 5: Run test to verify it passes** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release --filter GeoSimProducerTableTests`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release --filter GeoSimProducerTableTests`
   Expected: PASS (all 11 cases: 1 count + 1 blank + 1 dup + 5 anchors + 3 whitelist).
 
 - [ ] **Step 6: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): auditable 13-producer geoscape-sim suppress table (pure, TDD)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): auditable 13-producer geoscape-sim suppress table (pure, TDD)"
 ```
 
 ---
@@ -257,11 +257,11 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.CommandSync;
+using Multiplayer.Network;
+using Multiplayer.Network.CommandSync;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // SD-AIDR INC-1 (A): make the CLIENT geoscape engine inert. Prefixes the CLOSED 13-producer set
     // (GeoSimProducerTable) of `private NextUpdate <Method>(Timing)` callbacks. On a client in an active
@@ -321,17 +321,17 @@ namespace Multipleer.Harmony
 ```
 
 - [ ] **Step 2: Build to verify it compiles** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 3: Run full suite to verify no regression** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
   Expected: all tests PASS (Task-1 cases + every pre-existing test green).
 
 - [ ] **Step 4: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): ClientGeoSimSuppressPatch - client runs zero geoscape sim (13 producers -> NextUpdate.Never)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): ClientGeoSimSuppressPatch - client runs zero geoscape sim (13 producers -> NextUpdate.Never)"
 ```
 
 ---
@@ -350,10 +350,10 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     // SD-AIDR INC-1 (B): on the CLIENT, suppress the THREE authoritative travel emitters that
     // GeoNavComponent.NavigateRoutine (whitelisted renderer) calls inline on its GeoVehicle (NavActor):
@@ -411,17 +411,17 @@ namespace Multipleer.Harmony
 ```
 
 - [ ] **Step 2: Build to verify it compiles** —
-  Run: `dotnet build E:\DEV\PhoenixPoint\Multipleer\Multipleer.csproj -c Release`
+  Run: `dotnet build E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.csproj -c Release`
   Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`.
 
 - [ ] **Step 3: Run full suite to verify no regression** —
-  Run: `dotnet test E:\DEV\PhoenixPoint\Multipleer\Multipleer.Tests\Multipleer.Tests.csproj -c Release`
+  Run: `dotnet test E:\DEV\PhoenixPoint\Multiplayer\Multiplayer.Tests\Multiplayer.Tests.csproj -c Release`
   Expected: all tests PASS.
 
 - [ ] **Step 4: Commit** —
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "feat(replication): ClientTravelEmitterSuppressPatch - suppress 3 GeoVehicle travel emitters on client (render-only)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "feat(replication): ClientTravelEmitterSuppressPatch - suppress 3 GeoVehicle travel emitters on client (render-only)"
 ```
 
 ---
@@ -444,7 +444,7 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 - [ ] **Step 5: No commit** unless Step 4 produced a real one-line fix. If it did, commit:
 
 ```bash
-git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multipleer commit -m "fix(replication): keep client geoscape clock slaved-advancing (0x34 mirror authoritative)"
+git -C E:\DEV\PhoenixPoint\Multiplayer add -A && git -C E:\DEV\PhoenixPoint\Multiplayer commit -m "fix(replication): keep client geoscape clock slaved-advancing (0x34 mirror authoritative)"
 ```
 
 ---
@@ -453,7 +453,7 @@ git -C E:\DEV\PhoenixPoint\Multipleer add -A && git -C E:\DEV\PhoenixPoint\Multi
 
 **Files:** none (integration verification only).
 
-> Harmony/Unity patches are not unit-testable. Final verification is a 2-instance in-game run per the `multipleer-second-instance-setup` memory (Goldberg-emu second copy + `mklink /J` junctions). The USER performs this; the agent records the outcome.
+> Harmony/Unity patches are not unit-testable. Final verification is a 2-instance in-game run per the `multiplayer-second-instance-setup` memory (Goldberg-emu second copy + `mklink /J` junctions). The USER performs this; the agent records the outcome.
 
 - [ ] **Step 1: Launch two instances** — Start the host instance + the Goldberg-emu second instance. Host creates/loads a geoscape campaign; the second instance joins (lobby → ready → host picks save → transfer → barrier → play). Confirm both reach the geoscape.
 

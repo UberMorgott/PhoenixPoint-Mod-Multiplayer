@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Best-effort: after a client state-channel apply, force the matching geoscape UI module to
@@ -157,7 +157,7 @@ namespace Multipleer.Network.Sync.State
                     case Screen.BaseLayout: RefreshBaseLayout(rt); break;
                 }
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -190,7 +190,7 @@ namespace Multipleer.Network.Sync.State
                 RefreshWalletBar(rt);
                 RefreshResearchProgressBar(rt);
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] GeoUiRefresh.RefreshPersistentBars best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RefreshPersistentBars best-effort failed: " + ex.Message); }
         }
 
         private static void RefreshWalletBar(GeoRuntime rt)

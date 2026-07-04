@@ -4,10 +4,10 @@ using Base.UI;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Multipleer.UI
+namespace Multiplayer.UI
 {
     /// <summary>
-    /// SINGLE source of style for every hand-rolled Multipleer UI surface (lobby, save-picker,
+    /// SINGLE source of style for every hand-rolled Multiplayer UI surface (lobby, save-picker,
     /// status bar, network menu). Centralises the whole skin so the user can re-tune the entire UI
     /// from ONE place — the most important knob being <see cref="UiScale"/>.
     ///
@@ -123,7 +123,7 @@ namespace Multipleer.UI
                 {
                     _panelSpriteResolved = true;
                     try { _panelSprite = NativeWidgetFactory.TryGetPanelBackgroundSprite(); }
-                    catch (Exception e) { Debug.LogError("[Multipleer] LobbyTheme panel sprite capture failed: " + e.Message); }
+                    catch (Exception e) { Debug.LogError("[Multiplayer] LobbyTheme panel sprite capture failed: " + e.Message); }
                 }
                 return _panelSprite;
             }
@@ -153,7 +153,7 @@ namespace Multipleer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] LobbyTheme color capture failed: " + e.Message);
+                Debug.LogError("[Multiplayer] LobbyTheme color capture failed: " + e.Message);
             }
         }
 

@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using UnityEngine;
 
-namespace Multipleer.Sync.Tactical
+namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
     /// LIVE END-TURN + faction-handoff replication (spec §3.5, §5; Inc 4). Host-authoritative turn engine;
@@ -63,9 +63,9 @@ namespace Multipleer.Sync.Tactical
             {
                 byte[] payload = TacticalLiveCodec.EncodeEndTurnIntent(NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentEndTurn, payload);
-                Debug.Log("[Multipleer][tac] CLIENT sent tac.intent.endturn");
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.endturn");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientRelayEndTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientRelayEndTurn failed: " + ex); }
             // Let native RequestEndTurn set the LOCAL flag so the client's PlayTurnCrt loop exits (input off).
             return true;
         }
@@ -78,21 +78,21 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeEndTurnIntent(payload, out uint nonce)) { Debug.LogError("[Multipleer][tac] endturn intent decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeEndTurnIntent(payload, out uint nonce)) { Debug.LogError("[Multiplayer][tac] endturn intent decode failed"); return; }
             if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentEndTurn, nonce)) return;
 
             try
             {
                 object tlc = TacticalDeploySync.LiveTlc ?? ResolveTlc();
                 object current = tlc != null ? GetProp(tlc, "CurrentFaction") : null;
-                if (current == null) { Debug.LogError("[Multipleer][tac] endturn intent: no CurrentFaction"); return; }
+                if (current == null) { Debug.LogError("[Multiplayer][tac] endturn intent: no CurrentFaction"); return; }
                 // public void RequestEndTurn() — sets _endTurnRequested; host NextTurnCrt picks it up.
                 var req = AccessTools.Method(current.GetType(), "RequestEndTurn");
-                if (req == null) { Debug.LogError("[Multipleer][tac] endturn intent: RequestEndTurn not found"); return; }
+                if (req == null) { Debug.LogError("[Multiplayer][tac] endturn intent: RequestEndTurn not found"); return; }
                 req.Invoke(current, null);
-                Debug.Log("[Multipleer][tac] HOST applied client end-turn intent");
+                Debug.Log("[Multiplayer][tac] HOST applied client end-turn intent");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostOnEndTurnIntent failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnEndTurnIntent failed: " + ex); }
         }
 
         // ─── HOST: a faction turn started → broadcast tac.turn ────────────────────────────────────
@@ -109,17 +109,17 @@ namespace Multipleer.Sync.Tactical
             {
                 object tlc = GetProp(nextFaction, "TacticalLevel") ?? TacticalDeploySync.LiveTlc ?? ResolveTlc();
                 int index = ResolveFactionIndex(tlc, nextFaction);
-                if (index < 0) { Debug.LogError("[Multipleer][tac] tac.turn: faction not found in Factions"); return; }
+                if (index < 0) { Debug.LogError("[Multiplayer][tac] tac.turn: faction not found in Factions"); return; }
                 int turnNumber = ToInt(GetProp(nextFaction, "TurnNumber"));
                 string guid = ResolveFactionDefGuid(nextFaction);
 
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacTurn);
                 byte[] payload = TacticalLiveCodec.EncodeTurn(seq, index, turnNumber, guid);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacTurn, payload);
-                Debug.Log("[Multipleer][tac] HOST broadcast tac.turn seq=" + seq + " idx=" + index +
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.turn seq=" + seq + " idx=" + index +
                           " turn=" + turnNumber + " guid=" + guid);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] HostBroadcastTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastTurn failed: " + ex); }
         }
 
         // ─── CLIENT: apply the faction handoff ────────────────────────────────────────────────────
@@ -129,11 +129,11 @@ namespace Multipleer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (!TacticalLiveCodec.TryDecodeTurn(payload, out var t)) { Debug.LogError("[Multipleer][tac] tac.turn decode failed"); return; }
+            if (!TacticalLiveCodec.TryDecodeTurn(payload, out var t)) { Debug.LogError("[Multiplayer][tac] tac.turn decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacTurn, t.Seq)) return;
 
             // DIAG: incoming handoff envelope (before any state resolution). Catches faction-index desync (cause C).
-            Debug.Log("[Multipleer][tac] ClientOnTurn ENTER seq=" + t.Seq + " incomingIdx=" + t.CurrentFactionIndex +
+            Debug.Log("[Multiplayer][tac] ClientOnTurn ENTER seq=" + t.Seq + " incomingIdx=" + t.CurrentFactionIndex +
                       " turn=" + t.TurnNumber + " guid=" + t.FactionDefGuid);
 
             object tlc = TacticalDeploySync.LiveTlc ?? ResolveTlc();
@@ -143,7 +143,7 @@ namespace Multipleer.Sync.Tactical
                 // hydrate-completion drain (ClientEnterInitialTurn) can re-apply it. ShouldApply + monotonic
                 // seq make a stale stash self-ignore. Do NOT Mark here (apply not yet performed).
                 _pendingTurn = t;
-                Debug.Log("[Multipleer][tac] tac.turn: no live TacticalLevelController — buffered seq=" + t.Seq + " idx=" + t.CurrentFactionIndex);
+                Debug.Log("[Multiplayer][tac] tac.turn: no live TacticalLevelController — buffered seq=" + t.Seq + " idx=" + t.CurrentFactionIndex);
                 return;
             }
 
@@ -177,14 +177,14 @@ namespace Multipleer.Sync.Tactical
                         }
                     }
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] tac.turn: outgoing end-turn failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.turn: outgoing end-turn failed: " + ex); }
 
                 // 1b) Point the TLC at the host's current faction (private _currentFactionIndex).
                 var idxTrav = Traverse.Create(tlc).Field("_currentFactionIndex");
                 idxTrav.SetValue(t.CurrentFactionIndex);
 
                 object current = GetProp(tlc, "CurrentFaction");
-                if (current == null) { Debug.LogError("[Multipleer][tac] tac.turn: CurrentFaction null after index set"); return; }
+                if (current == null) { Debug.LogError("[Multiplayer][tac] tac.turn: CurrentFaction null after index set"); return; }
 
                 // 2) Re-stamp the authoritative TurnNumber (public setter) — corrects any local drift and the
                 //    +1 PlayTurnCrt will apply when we start it (we re-stamp AFTER the start below for player).
@@ -246,7 +246,7 @@ namespace Multipleer.Sync.Tactical
 
                     // DIAG: player-resume restore receipt — catches cause B (IsPlayingTurn stays false) and the
                     // resolved view state. isPlayingBefore is pre-restore; isPlayingAfter must be true.
-                    Debug.Log("[Multipleer][tac] CLIENT PLAYER resume idx=" + t.CurrentFactionIndex +
+                    Debug.Log("[Multiplayer][tac] CLIENT PLAYER resume idx=" + t.CurrentFactionIndex +
                               " faction=" + ResolveFactionDefName(current) +
                               " isControlledByPlayer=" + isPlayer +
                               " isPlayingBefore=" + wasPlaying +
@@ -285,7 +285,7 @@ namespace Multipleer.Sync.Tactical
                     // SetViewerTacticalFaction. Reuses the readiness-guard + deferred retry (survives a not-yet-
                     // ready view).
                     viewDown = EnsureClientViewDown(current);
-                    Debug.Log("[Multipleer][tac] CLIENT entered ENEMY-TURN presentation idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (UIStateOtherFactionTurn, host-authoritative)");
+                    Debug.Log("[Multiplayer][tac] CLIENT entered ENEMY-TURN presentation idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (UIStateOtherFactionTurn, host-authoritative)");
                 }
                 else
                 {
@@ -293,14 +293,14 @@ namespace Multipleer.Sync.Tactical
                     // ShouldEnterEnemyPresentation is true for every non-player). Stay a frozen spectator.
                     SetTurnNumber(current, t.TurnNumber);
                     viewDown = EnsureClientViewDown(current);
-                    Debug.Log("[Multipleer][tac] CLIENT mirrored ENEMY/AI turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (frozen spectator)");
+                    Debug.Log("[Multiplayer][tac] CLIENT mirrored ENEMY/AI turn idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (frozen spectator)");
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacTurn, t.Seq);
-                Debug.Log("[Multipleer][tac] CLIENT turn handoff: prevEnded=" + prevEnded + " idx=" + t.CurrentFactionIndex +
+                Debug.Log("[Multiplayer][tac] CLIENT turn handoff: prevEnded=" + prevEnded + " idx=" + t.CurrentFactionIndex +
                           " branch=" + branch + " viewDown=" + viewDown);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] ClientOnTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnTurn failed: " + ex); }
         }
 
         // ─── CLIENT: enter the INITIAL turn right after deploy hydrate ────────────────────────────
@@ -312,7 +312,7 @@ namespace Multipleer.Sync.Tactical
         {
             if (tlc == null) return;
             object current = GetProp(tlc, "CurrentFaction");
-            if (current == null) { Debug.LogError("[Multipleer][tac] ClientEnterInitialTurn: no CurrentFaction"); return; }
+            if (current == null) { Debug.LogError("[Multiplayer][tac] ClientEnterInitialTurn: no CurrentFaction"); return; }
             bool isPlayer = ToBool(GetProp(current, "IsControlledByPlayer"));
             if (isPlayer)
             {
@@ -330,13 +330,13 @@ namespace Multipleer.Sync.Tactical
                 // dispatcher's `while (!IsPlayingTurn)` (UIStateInitial.cs:68) spins for a frame and the HUD drive
                 // below races it. Setting it here closes that gap (idempotent with the coroutine's own set).
                 SetIsPlayingTurn(current, true);
-                Debug.Log("[Multipleer][tac] CLIENT entered INITIAL player turn (turn " + turnNumber + ")");
+                Debug.Log("[Multiplayer][tac] CLIENT entered INITIAL player turn (turn " + turnNumber + ")");
                 // UI-LOCK FIX: the initial turn entry fires at the END of deploy-hydrate, typically BEFORE
                 // TacticalView's UIStateInitView callback has subscribed OnNewTurn → the raised NewTurnEvent
                 // is dropped and no action HUD appears. Drive the view into the new-turn state explicitly.
                 EnsureClientTurnHud(current);
             }
-            else Debug.Log("[Multipleer][tac] CLIENT initial turn is AI/enemy → frozen spectator");
+            else Debug.Log("[Multiplayer][tac] CLIENT initial turn is AI/enemy → frozen spectator");
 
             // DRAIN a tac.turn that raced ahead of this hydrate and was buffered. ShouldApply + monotonic seq
             // make a stale stash self-ignore (ClientOnTurn re-runs ShouldApply). Re-encode from the stash and
@@ -355,10 +355,10 @@ namespace Multipleer.Sync.Tactical
             try
             {
                 byte[] payload = TacticalLiveCodec.EncodeTurn(p.Seq, p.CurrentFactionIndex, p.TurnNumber, p.FactionDefGuid);
-                Debug.Log("[Multipleer][tac] CLIENT draining buffered tac.turn seq=" + p.Seq + " idx=" + p.CurrentFactionIndex);
+                Debug.Log("[Multiplayer][tac] CLIENT draining buffered tac.turn seq=" + p.Seq + " idx=" + p.CurrentFactionIndex);
                 ClientOnTurn(payload);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] DrainPendingTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DrainPendingTurn failed: " + ex); }
         }
 
         // ─── CLIENT UI-LOCK FIX: force the action HUD up regardless of the raced NewTurnEvent ─────────
@@ -392,15 +392,15 @@ namespace Multipleer.Sync.Tactical
                 if (TryDriveClientTurnHud(faction)) return true;
                 // View / _statesStack not ready → defer onto Timing and poll until it is (bounded).
                 object tlc = GetProp(faction, "TacticalLevel");
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return false; }
+                if (tlc == null) { Debug.LogError("[Multiplayer][tac] EnsureClientTurnHud: no TacticalLevel on faction"); return false; }
                 object timing = ResolveTiming(faction, tlc);
                 if (timing == null || InvokeStart(timing, timing.GetType(), DriveTurnHudCrt(faction)) == null)
-                    Debug.LogError("[Multipleer][tac] EnsureClientTurnHud: could not defer HUD drive onto Timing (view may stay locked)");
+                    Debug.LogError("[Multiplayer][tac] EnsureClientTurnHud: could not defer HUD drive onto Timing (view may stay locked)");
                 else
-                    Debug.Log("[Multipleer][tac] EnsureClientTurnHud: view not ready → deferred HUD drive onto Timing");
+                    Debug.Log("[Multiplayer][tac] EnsureClientTurnHud: view not ready → deferred HUD drive onto Timing");
                 return false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientTurnHud failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] EnsureClientTurnHud failed: " + ex); return false; }
         }
 
         /// <summary>Deferred poll: each frame, retry the HUD drive until it succeeds (view + _statesStack ready)
@@ -413,12 +413,12 @@ namespace Multipleer.Sync.Tactical
             {
                 bool done = false;
                 try { done = TryDriveClientTurnHud(faction); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DriveTurnHudCrt: drive failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DriveTurnHudCrt: drive failed: " + ex); }
                 if (done) yield break;
                 frames++;
                 yield return NextUpdate.NextFrame;
             }
-            Debug.LogError("[Multipleer][tac] DriveTurnHudCrt: gave up after " + frames + " frames — view never became ready");
+            Debug.LogError("[Multiplayer][tac] DriveTurnHudCrt: gave up after " + frames + " frames — view never became ready");
         }
 
         /// <summary>Single attempt to drive the view: returns false (caller should defer/retry) if the live
@@ -440,9 +440,9 @@ namespace Multipleer.Sync.Tactical
             {
                 var setViewer = AccessTools.Method(view.GetType(), "SetViewerTacticalFaction");
                 if (setViewer != null) setViewer.Invoke(view, new[] { faction });
-                else Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction not found");
+                else Debug.LogError("[Multiplayer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction not found");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryDriveClientTurnHud: SetViewerTacticalFaction failed: " + ex); }
 
             // (b) Enter UIStateInitial(initForNewTurn:true) via the PRIVATE OnNewTurn(prev=null, next=faction) —
             //     the exact path the engine uses (TacticalView.cs:1100). Reflection (private), 2 args.
@@ -451,12 +451,12 @@ namespace Multipleer.Sync.Tactical
             {
                 var onNewTurn = AccessTools.Method(view.GetType(), "OnNewTurn");
                 if (onNewTurn != null) { onNewTurn.Invoke(view, new[] { null, faction }); hudEntered = true; }
-                else Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: OnNewTurn not found");
+                else Debug.LogError("[Multiplayer][tac] TryDriveClientTurnHud: OnNewTurn not found");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientTurnHud: OnNewTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryDriveClientTurnHud: OnNewTurn failed: " + ex); }
 
             object viewerNow = GetProp(view, "ViewerFaction");
-            Debug.Log("[Multipleer][tac] CLIENT drove turn HUD: viewerFaction set=" + ReferenceEquals(viewerNow, faction) +
+            Debug.Log("[Multiplayer][tac] CLIENT drove turn HUD: viewerFaction set=" + ReferenceEquals(viewerNow, faction) +
                       " UIStateInitial(initForNewTurn) entered=" + hudEntered);
             return true;
         }
@@ -476,15 +476,15 @@ namespace Multipleer.Sync.Tactical
             {
                 if (TryDriveClientViewDown(faction)) return true;
                 object tlc = GetProp(faction, "TacticalLevel");
-                if (tlc == null) { Debug.LogError("[Multipleer][tac] EnsureClientViewDown: no TacticalLevel on faction"); return false; }
+                if (tlc == null) { Debug.LogError("[Multiplayer][tac] EnsureClientViewDown: no TacticalLevel on faction"); return false; }
                 object timing = ResolveTiming(faction, tlc);
                 if (timing == null || InvokeStart(timing, timing.GetType(), DriveViewDownCrt(faction)) == null)
-                    Debug.LogError("[Multipleer][tac] EnsureClientViewDown: could not defer view-down onto Timing (HUD may stay up)");
+                    Debug.LogError("[Multiplayer][tac] EnsureClientViewDown: could not defer view-down onto Timing (HUD may stay up)");
                 else
-                    Debug.Log("[Multipleer][tac] EnsureClientViewDown: view not ready → deferred view-down onto Timing");
+                    Debug.Log("[Multiplayer][tac] EnsureClientViewDown: view not ready → deferred view-down onto Timing");
                 return false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] EnsureClientViewDown failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] EnsureClientViewDown failed: " + ex); return false; }
         }
 
         /// <summary>Deferred poll for the enemy-turn view-down (same pattern as <see cref="DriveTurnHudCrt"/>).</summary>
@@ -495,12 +495,12 @@ namespace Multipleer.Sync.Tactical
             {
                 bool done = false;
                 try { done = TryDriveClientViewDown(faction); }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] DriveViewDownCrt: drive failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DriveViewDownCrt: drive failed: " + ex); }
                 if (done) yield break;
                 frames++;
                 yield return NextUpdate.NextFrame;
             }
-            Debug.LogError("[Multipleer][tac] DriveViewDownCrt: gave up after " + frames + " frames — view never became ready");
+            Debug.LogError("[Multiplayer][tac] DriveViewDownCrt: gave up after " + frames + " frames — view never became ready");
         }
 
         /// <summary>Single attempt to drive the view DOWN: <c>_statesStack.SwitchToState(new UIStateInitial(),
@@ -521,7 +521,7 @@ namespace Multipleer.Sync.Tactical
                 var initialType = AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateInitial");
                 var actionType = AccessTools.TypeByName("Base.UI.StateStackAction");
                 if (initialType == null || actionType == null)
-                { Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: UIStateInitial/StateStackAction type not found"); return true; }
+                { Debug.LogError("[Multiplayer][tac] TryDriveClientViewDown: UIStateInitial/StateStackAction type not found"); return true; }
                 // UIStateInitial is INTERNAL (class + ctor) → bind non-public. ctor(bool initForNewTurn=false).
                 object initialState = Activator.CreateInstance(
                     initialType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -530,11 +530,11 @@ namespace Multipleer.Sync.Tactical
                 // StateStack<TContext>.SwitchToState(IState<TContext> state, StateStackAction stackAction).
                 var switchTo = AccessTools.Method(statesStack.GetType(), "SwitchToState");
                 if (switchTo != null) { switchTo.Invoke(statesStack, new[] { initialState, clearAndPush }); switched = true; }
-                else Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: SwitchToState not found");
+                else Debug.LogError("[Multiplayer][tac] TryDriveClientViewDown: SwitchToState not found");
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TryDriveClientViewDown: SwitchToState failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryDriveClientViewDown: SwitchToState failed: " + ex); }
 
-            Debug.Log("[Multipleer][tac] CLIENT drove view DOWN: UIStateInitial entered=" + switched);
+            Debug.Log("[Multiplayer][tac] CLIENT drove view DOWN: UIStateInitial entered=" + switched);
             return true;
         }
 
@@ -564,7 +564,7 @@ namespace Multipleer.Sync.Tactical
             // runs as a real coroutine (the player branch loops until _endTurnRequested). Use the faction's
             // own Timing (Actor.Timing) via Timing.Start.
             var playTurn = AccessTools.Method(faction.GetType(), "PlayTurnCrt");
-            if (playTurn == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt not found"); return null; }
+            if (playTurn == null) { Debug.LogError("[Multiplayer][tac] PlayTurnCrt not found"); return null; }
             // turnStartAction MUST replicate native NextTurnCrt's closure (TLC.cs:717-721) so the client's
             // turn-start side-effects fire: set TacticalLevelController.HasAnyTurnStarted=true and raise its
             // NewTurnEvent(prev, next). Without this the client's objective/UI hooks (GameOverCondition,
@@ -573,10 +573,10 @@ namespace Multipleer.Sync.Tactical
             // prev is a sanctioned pattern its subscribers tolerate.
             Action turnStartAction = MakeTurnStartAction(faction);
             object crt = playTurn.Invoke(faction, new object[] { turnStartAction });
-            if (crt == null) { Debug.LogError("[Multipleer][tac] PlayTurnCrt returned null"); return null; }
+            if (crt == null) { Debug.LogError("[Multiplayer][tac] PlayTurnCrt returned null"); return null; }
             object handle = StartCoroutineOnTiming(faction, crt);
             if (handle == null)
-                Debug.LogError("[Multipleer][tac] could not start PlayTurnCrt on Timing");
+                Debug.LogError("[Multiplayer][tac] could not start PlayTurnCrt on Timing");
             return handle;
         }
 
@@ -610,7 +610,7 @@ namespace Multipleer.Sync.Tactical
                 if (!ReferenceEquals(current, toSet)) fieldTrav.SetValue(toSet);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] MarkClientTurnPlaying failed: " + ex); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] MarkClientTurnPlaying failed: " + ex); return false; }
         }
 
         /// <summary>Build the per-turn-start action native <c>NextTurnCrt</c> passes into <c>PlayTurnCrt</c>
@@ -626,11 +626,11 @@ namespace Multipleer.Sync.Tactical
                 try
                 {
                     object tlc = GetProp(faction, "TacticalLevel");
-                    if (tlc == null) { Debug.LogError("[Multipleer][tac] turnStartAction: no TacticalLevel on faction"); return; }
+                    if (tlc == null) { Debug.LogError("[Multiplayer][tac] turnStartAction: no TacticalLevel on faction"); return; }
 
                     // 1) HasAnyTurnStarted = true (public getter / private setter).
                     try { Traverse.Create(tlc).Property("HasAnyTurnStarted").SetValue(true); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][tac] turnStartAction: set HasAnyTurnStarted failed: " + ex); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] turnStartAction: set HasAnyTurnStarted failed: " + ex); }
 
                     // 2) Raise NewTurnEvent(prev=null, next=faction) via the backing delegate field.
                     try
@@ -638,9 +638,9 @@ namespace Multipleer.Sync.Tactical
                         object del = Traverse.Create(tlc).Field("NewTurnEvent").GetValue();
                         if (del is Delegate handler) handler.DynamicInvoke(null, faction);
                     }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][tac] turnStartAction: raise NewTurnEvent failed: " + ex); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] turnStartAction: raise NewTurnEvent failed: " + ex); }
                 }
-                catch (Exception ex) { Debug.LogError("[Multipleer][tac] turnStartAction failed: " + ex); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] turnStartAction failed: " + ex); }
             };
         }
 
@@ -677,7 +677,7 @@ namespace Multipleer.Sync.Tactical
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] StartCoroutineOnTiming failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] StartCoroutineOnTiming failed: " + ex); }
             return null;
         }
 
@@ -721,7 +721,7 @@ namespace Multipleer.Sync.Tactical
                 if (p != null && p.CanWrite) { p.SetValue(faction, turnNumber, null); return; }
                 Traverse.Create(faction).Property("TurnNumber").SetValue(turnNumber);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetTurnNumber failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SetTurnNumber failed: " + ex); }
         }
 
         /// <summary>Set <c>TacticalFaction.IsPlayingTurn</c> (TacticalFaction.cs:79, public getter / PRIVATE
@@ -737,7 +737,7 @@ namespace Multipleer.Sync.Tactical
                 if (p != null && p.CanWrite) { p.SetValue(faction, value, null); return; }
                 Traverse.Create(faction).Property("IsPlayingTurn").SetValue(value);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] SetIsPlayingTurn failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SetIsPlayingTurn failed: " + ex); }
         }
 
         private static int ResolveFactionIndex(object tlc, object faction)

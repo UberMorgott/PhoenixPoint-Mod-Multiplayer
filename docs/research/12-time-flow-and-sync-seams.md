@@ -1,12 +1,12 @@
 # Geoscape Time-Flow API & Host-Authoritative Clock Sync Seams
 
-> GROUNDING for **Stage 2: host-authoritative time/clock sync** of the Multipleer co-op mod
+> GROUNDING for **Stage 2: host-authoritative time/clock sync** of the Multiplayer co-op mod
 > (`docs/superpowers/specs/2026-06-12-geoscape-command-sync-design.md` §Stage 2; design goals in
 > [08-geoscape-concurrency](08-geoscape-concurrency.md), permission bit in [03-campaign-layer](03-campaign-layer.md)).
 > Resolves the OPEN SDK question "Time-flow API (pause/speed)" that gated Stage 2.
 > All game refs: decompiled DLL tree `decompiled\AssemblyCSharp\Assembly-CSharp\src` (FALLBACK proxy per
 > `docs/research/source-provenance.md`; confirm exact site against installed `Assembly-CSharp.dll` before hooking).
-> Mod refs: `Multipleer\src`. Date 2026-06-13.
+> Mod refs: `Multiplayer\src`. Date 2026-06-13.
 
 ## 1. Clock owner
 

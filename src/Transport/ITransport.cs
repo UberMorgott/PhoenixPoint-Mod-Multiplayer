@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Transport
+namespace Multiplayer.Transport
 {
     public interface ITransport
     {

@@ -5,7 +5,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge for the report-window mirror's modalData read (HOST) and rebuild (CLIENT). The mod has
@@ -144,7 +144,7 @@ namespace Multipleer.Network.Sync.State
                 var element = _rcResearchElementField.GetValue(researchCompleteData);
                 return ResearchReflection.GetId(element);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalReflection.ReadResearchCompleteId failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadResearchCompleteId failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -179,7 +179,7 @@ namespace Multipleer.Network.Sync.State
                     catch { shareLevel = 0; }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalReflection.ReadDiplomacy failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadDiplomacy failed: " + ex.Message); }
         }
 
         // ─── CLIENT rebuild ───────────────────────────────────────────────
@@ -203,7 +203,7 @@ namespace Multipleer.Network.Sync.State
                 var element = ResearchReflection.ResolveElement(rt, researchId);
                 if (element == null)
                 {
-                    Debug.LogWarning("[Multipleer] ReportModalReflection.BuildResearchCompleteData: researchId '" + researchId + "' did not resolve (skipping show)");
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildResearchCompleteData: researchId '" + researchId + "' did not resolve (skipping show)");
                     return null;
                 }
                 var data = Activator.CreateInstance(_researchCompleteDataType);
@@ -211,7 +211,7 @@ namespace Multipleer.Network.Sync.State
                 if (_rcSwitchToResearchField != null) _rcSwitchToResearchField.SetValue(data, false);
                 return data;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalReflection.BuildResearchCompleteData failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildResearchCompleteData failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -245,7 +245,7 @@ namespace Multipleer.Network.Sync.State
                 if (_dipShareLevelField != null) _dipShareLevelField.SetValue(data, shareLevel);
                 return data;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalReflection.BuildDiplomacyData failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildDiplomacyData failed: " + ex.Message); return null; }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>
@@ -263,7 +263,7 @@ namespace Multipleer.Network.Sync.State
                     if (DefReflection.GetGuid(_factionDefProp.GetValue(f, null)) == guid) return f;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] ReportModalReflection.ResolveFactionByGuid failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ResolveFactionByGuid failed: " + ex.Message); }
             return null;
         }
     }

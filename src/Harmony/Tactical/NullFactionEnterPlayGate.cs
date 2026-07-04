@@ -1,4 +1,4 @@
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// PURE, Unity-free decision behind <see cref="NullFactionEnterPlayPatch"/> (deploy null-faction guard).

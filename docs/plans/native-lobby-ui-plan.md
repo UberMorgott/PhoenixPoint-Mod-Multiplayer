@@ -1,6 +1,6 @@
-# Multipleer — Native Lobby + Save-Picker UI Plan (decompile-grounded)
+# Multiplayer — Native Lobby + Save-Picker UI Plan (decompile-grounded)
 
-> Goal: REPLACE the from-code uGUI overlay (`MultipleerCanvas` + `UiToolkit` +
+> Goal: REPLACE the from-code uGUI overlay (`MultiplayerCanvas` + `UiToolkit` +
 > `LobbyPanel`/`SavePickerPanel`) with **cloned NATIVE Phoenix Point widgets** so the
 > lobby and save-picker look like the game. This is a **UI-surface swap only** — ALL
 > network/session logic (roster / ready / rename / save-transfer / barrier) stays byte-
@@ -9,7 +9,7 @@
 > Source of every cite below = the decompiled game tree
 > `decompiled\AssemblyCSharp\Assembly-CSharp\src\` (provenance:
 > `docs/research/source-provenance.md` §Game). Mod files cited from
-> `Multipleer\src\`. Investigated via Serena symbolic tools.
+> `Multiplayer\src\`. Investigated via Serena symbolic tools.
 
 ---
 
@@ -52,7 +52,7 @@ Evidence:
 Evidence (the pattern is identical in mod and game):
 - Mod, working today: `Object.Instantiate(template, GameModueButtonsGroup.transform)`
   then relabel `Text` + rewire `Button.onClick`
-  (`Multipleer\src\Harmony\MainMenuPatches.cs:40-60`).
+  (`Multiplayer\src\Harmony\MainMenuPatches.cs:40-60`).
 - Game, main menu: `Object.Instantiate<GameObject>(TemplateMenuButton,
   GameModueButtonsGroup.transform)` → set Text → add `onClick` listener
   (`UIModuleMainMenuButtons.Init` `…ViewModules\UIModuleMainMenuButtons.cs:131-141`).
@@ -172,7 +172,7 @@ does not require opening the screen — but see §6 risk + fallback.
   `GameModueButtonsGroup.GetComponentInParent<Canvas>()` (the field is already captured
   in `MainMenuPatches.cs:35`). Parenting our lobby panel there makes it render in the
   menu's own canvas with the game's `CanvasScaler` + correct sort order — **replacing**
-  the mod's separate `MultipleerCanvas` overlay (`MultiplayerUI.EnsureUiRoot:57-85`).
+  the mod's separate `MultiplayerCanvas` overlay (`MultiplayerUI.EnsureUiRoot:57-85`).
 - The capture+parent must happen while the menu UI exists. The existing
   `InjectNetworkButtonPatch.Postfix` (runs in `UIModuleMainMenuButtons.Init`) is the
   natural hook to ALSO grab the menu Canvas (and any same-frame templates) and hand them
@@ -184,10 +184,10 @@ does not require opening the screen — but see §6 risk + fallback.
 ## 6. Migration outline (UI swap only — network logic untouched)
 
 ### Removed / gutted
-- `Multipleer\src\UI\UiToolkit.cs` — DELETE (Arial-font, hand-rolled `Text`/`Button`/
+- `Multiplayer\src\UI\UiToolkit.cs` — DELETE (Arial-font, hand-rolled `Text`/`Button`/
   `InputField` builders). Superseded by cloned native widgets.
-- `Multipleer\src\UI\MultiplayerUI.cs` — REMOVE the overlay-canvas plumbing:
-  `EnsureUiRoot` / `_canvas` / `MultipleerCanvas` / `CanvasScaler` /
+- `Multiplayer\src\UI\MultiplayerUI.cs` — REMOVE the overlay-canvas plumbing:
+  `EnsureUiRoot` / `_canvas` / `MultiplayerCanvas` / `CanvasScaler` /
   `GraphicRaycaster` / `EnsureEventSystem` (`MultiplayerUI.cs:57-99`) and the
   `CreateText`/`CreateInGameBar` from-code helpers (`:357-424`). Keep the class as the
   controller (Instance, Update loop, the MessageBox connect dialogs, all `OnLobby*`
@@ -276,5 +276,5 @@ does not require opening the screen — but see §6 risk + fallback.
 - `…Common.View.ViewModules\UIModuleSaveGameSlot.cs:22,29-50,113,166` — save-row template fields + `InitUsedSaveSlot` + native SP-load wiring.
 - `…Common.View.ViewModules\UIModulePauseScreen.cs:45,48,129,159-161` — `SaveGameModule`/`LoadGameModule` (`UIModuleSaveGame`, `[LinkableUIAsset]`), inactive-until-open.
 - `…Home.View.ViewStates\UIStateHomeLoadGame.cs:15,22,32` — native load-state drives `LoadGameModule.InitLoadMode` (why re-hosting = SP load).
-- Mod: `Multipleer\src\Harmony\MainMenuPatches.cs:35,40-60` (proven clone), `MultiplayerUI.cs:57-99,357-424` (overlay to remove), `LobbyPanel.cs`, `SavePickerPanel.cs`, `UiToolkit.cs`.
+- Mod: `Multiplayer\src\Harmony\MainMenuPatches.cs:35,40-60` (proven clone), `MultiplayerUI.cs:57-99,357-424` (overlay to remove), `LobbyPanel.cs`, `SavePickerPanel.cs`, `UiToolkit.cs`.
 - Data path (unchanged): `PhoenixSaveManager.GetSaves:279`, `SerializationComponent.ReadSavegameBinary:280` (per `flow-reconciliation-plan.md §2/§7`).

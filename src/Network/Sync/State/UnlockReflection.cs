@@ -4,7 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Reflection bridge for the host-authoritative research-UNLOCK state channel (#3). The mod has NO
@@ -123,7 +123,7 @@ namespace Multipleer.Network.Sync.State
 
                 return snap;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] UnlockReflection.Snapshot failed: " + ex.Message); return null; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] UnlockReflection.Snapshot failed: " + ex.Message); return null; }
         }
 
         /// <summary>
@@ -162,7 +162,7 @@ namespace Multipleer.Network.Sync.State
                         var def = DefReflection.GetDefByGuid(guid);
                         if (def == null) continue;
                         try { _addAvailableItem.Invoke(manufacture, new[] { def }); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer] UnlockReflection.Apply AddAvailableItem '" + guid + "' failed (skipped): " + ex.Message); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] UnlockReflection.Apply AddAvailableItem '" + guid + "' failed (skipped): " + ex.Message); }
                     }
                 }
 
@@ -176,11 +176,11 @@ namespace Multipleer.Network.Sync.State
                             var def = DefReflection.GetDefByGuid(guid);
                             if (def == null) continue;
                             try { addMethod.Invoke(augSet, new[] { def }); }
-                            catch (Exception ex) { Debug.LogError("[Multipleer] UnlockReflection.Apply aug Add '" + guid + "' failed (skipped): " + ex.Message); }
+                            catch (Exception ex) { Debug.LogError("[Multiplayer] UnlockReflection.Apply aug Add '" + guid + "' failed (skipped): " + ex.Message); }
                         }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] UnlockReflection.Apply failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] UnlockReflection.Apply failed: " + ex.Message); }
         }
     }
 }

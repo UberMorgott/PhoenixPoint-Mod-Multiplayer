@@ -4,15 +4,15 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 — HOST-DRIVEN TRAVEL MIRROR (design spec §4/§6:
-    /// docs/superpowers/specs/2026-07-02-multipleer-inc4-client-sim-freeze-design.md).
+    /// docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md).
     ///
     /// S1 froze the client geoscape sim CLOCK (<c>Timing.Paused=true</c>), so the client's
     /// <c>GeoNavComponent.NavigateRoutine</c> — a frame-updateable on the now-paused geo Timing — is DEFERRED
@@ -112,7 +112,7 @@ namespace Multipleer.Network.Sync.State
         private static PropertyInfo _pIsVisible, _pOwnedByViewer, _pTravelling, _pCurrentSite;
 
         /// <summary>Drop all per-session state (host signature cache + client interpolation buffers + live-object
-        /// cache + diag caches). Called from the <see cref="Multipleer.Network.Sync.SyncEngine"/> constructor, which
+        /// cache + diag caches). Called from the <see cref="Multiplayer.Network.Sync.SyncEngine"/> constructor, which
         /// is recreated per session — so a new session never inherits a previous one's buffered snapshots (whose
         /// stale seq/placement would otherwise reject or misplace the fresh vehicles until the TTL purge).</summary>
         public static void ResetForNewSession()
@@ -170,10 +170,10 @@ namespace Multipleer.Network.Sync.State
                 byte[] payload = GeoVehicleSnapshot.Encode(s, changed);
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoVehiclePos, SyncKind.StateSnapshot, payload)));
-                Debug.Log("[Multipleer][geo] HOST broadcast geo.vehiclepos seq=" + s + " vehicles=" + changed.Count);
+                Debug.Log("[Multiplayer][geo] HOST broadcast geo.vehiclepos seq=" + s + " vehicles=" + changed.Count);
                 DiagHost(vehicles, changed);   // DIAG: throttled per-vehicle transform probe (host side)
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] HostPollAndBroadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] HostPollAndBroadcast failed: " + ex.Message); }
         }
 
         // ─── CLIENT: apply a host vehicle-placement batch ──────────────────────────────────────────────────
@@ -195,7 +195,7 @@ namespace Multipleer.Network.Sync.State
                     engine != null, engine != null && engine.IsActive, engine != null && engine.IsHost))
                 return;
             if (!GeoVehicleSnapshot.TryDecode(payload, out uint s, out var vehicles))
-            { Debug.LogError("[Multipleer][geo] geo.vehiclepos decode failed"); return; }
+            { Debug.LogError("[Multiplayer][geo] geo.vehiclepos decode failed"); return; }
             if (!seq.ShouldApply(SurfaceIds.GeoVehiclePos, s)) return;   // stale/dup seq → drop
 
             try
@@ -234,9 +234,9 @@ namespace Multipleer.Network.Sync.State
                 }
                 seq.Mark(SurfaceIds.GeoVehiclePos, s);
                 if (buffered > 0)
-                    Debug.Log("[Multipleer][geo] CLIENT buffered geo.vehiclepos seq=" + s + " vehicles=" + buffered);
+                    Debug.Log("[Multiplayer][geo] CLIENT buffered geo.vehiclepos seq=" + s + " vehicles=" + buffered);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] HandleVehiclePos failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] HandleVehiclePos failed: " + ex.Message); }
         }
 
         // ─── CLIENT: per-frame interpolation driver ──────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ namespace Multipleer.Network.Sync.State
                     foreach (var k in _purgeScratch) { _clientTargets.Remove(k); _interp.Remove(k); }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] ClientInterpolateTick failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ClientInterpolateTick failed: " + ex.Message); }
         }
 
         // ─── Reflection helpers ─────────────────────────────────────────────────────────────────────────────
@@ -435,11 +435,11 @@ namespace Multipleer.Network.Sync.State
                 Quaternion parked = pivot.localRotation;
                 Quaternion firstShip = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
                 float ang = Quaternion.Angle(parked, firstShip);
-                Debug.Log("[Multipleer][geo][DIAG-START] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
+                Debug.Log("[Multiplayer][geo][DIAG-START] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
                     + " parked=" + DiagQuat(parked) + " firstShip=" + DiagQuat(firstShip)
                     + " angle=" + ang.ToString("F1") + (ang > 90f ? " OPPOSITE" : ""));
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-START] " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo][DIAG-START] " + ex.Message); }
         }
 
         /// <summary>HOST probe: for the lowest-N shipped keys, log the pivot quat being shipped + its WORLD pos +
@@ -458,7 +458,7 @@ namespace Multipleer.Network.Sync.State
                     if (!(v is Component comp) || comp == null) continue;
                     Transform pivot = comp.transform;
                     EnsureDiagReflection(v.GetType());
-                    Debug.Log("[Multipleer][geo][DIAG-H] key=" + DiagKey(ownerId, id) + " name=" + comp.name
+                    Debug.Log("[Multiplayer][geo][DIAG-H] key=" + DiagKey(ownerId, id) + " name=" + comp.name
                         + " active=" + comp.gameObject.activeInHierarchy
                         + " ship=" + DiagQuat(pivot.localRotation)
                         + " worldPos=" + DiagV3(pivot.position)
@@ -470,7 +470,7 @@ namespace Multipleer.Network.Sync.State
                         + " site=" + DiagProp(_pCurrentSite, v));
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-H] " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo][DIAG-H] " + ex.Message); }
         }
 
         /// <summary>CLIENT probe (called BEFORE the apply loop, so localRotation is the pre-write value):
@@ -501,7 +501,7 @@ namespace Multipleer.Network.Sync.State
                     if (fire)
                     {
                         EnsureDiagReflection(vo.GetType());
-                        Debug.Log("[Multipleer][geo][DIAG-C] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
+                        Debug.Log("[Multiplayer][geo][DIAG-C] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
                             + " active=" + comp.gameObject.activeInHierarchy
                             + " held=" + held
                             + " willWrite=" + DiagQuat(willWrite)
@@ -515,7 +515,7 @@ namespace Multipleer.Network.Sync.State
                     }
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-C] " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo][DIAG-C] " + ex.Message); }
         }
     }
 }

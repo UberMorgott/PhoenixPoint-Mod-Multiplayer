@@ -3,7 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Client-side reflection bridge that SHOWS / DISMISSES a geoscape event dialog the way the game
@@ -125,9 +125,9 @@ namespace Multipleer.Network.Sync.State
                 // Record the now-open occurrence (only when a real id was supplied; a synthetic result page is
                 // pushed with occurrenceId=0 since it is locally dismissed and never host-correlated).
                 if (occurrenceId != 0) _openOccurrenceId = occurrenceId;
-                Debug.Log("[Multipleer] EventDisplay.Show occId=" + occurrenceId + " eventId=" + eventId + " → queued");
+                Debug.Log("[Multiplayer] EventDisplay.Show occId=" + occurrenceId + " eventId=" + eventId + " → queued");
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Show best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventDisplay.Show best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -147,7 +147,7 @@ namespace Multipleer.Network.Sync.State
                 if (!_ready || resultEvent == null) return;
                 var view0 = GetView(rt);
                 var state0 = view0 != null ? GetCurrentEventState(view0) : null;
-                Debug.Log("[Multipleer] EventDisplay.ShowResult occId=" + occurrenceId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] EventDisplay.ShowResult occId=" + occurrenceId + " eventId=" + eventId +
                           " openOccId=" + _openOccurrenceId + " openIsEventState=" + (state0 != null) +
                           " openEventId=" + GetStateEventId(state0) + " → Dismiss+Show result page");
                 // Close the open locked choice modal for THIS occurrence first (host answer applied) so the result
@@ -163,7 +163,7 @@ namespace Multipleer.Network.Sync.State
                 ushort pushOccId = EventMirrorFixGate.Enabled ? occurrenceId : (ushort)0;
                 Show(rt, resultEvent, pushOccId, eventId);
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.ShowResult best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventDisplay.ShowResult best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -185,7 +185,7 @@ namespace Multipleer.Network.Sync.State
                 var state = GetCurrentEventState(view);
                 if (state == null)
                 {
-                    Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
+                    Debug.Log("[Multiplayer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
                               " stateMatched=false (current state is NOT a UIStateBaseGeoscapeEvent<> → nothing to close)");
                     return;   // current state isn't a geoscape-event dialog → nothing to close
                 }
@@ -195,12 +195,12 @@ namespace Multipleer.Network.Sync.State
                 // the current dialog. A non-zero mismatch means a DIFFERENT occurrence is open → don't close it.
                 if (occurrenceId != 0 && _openOccurrenceId != 0 && _openOccurrenceId != occurrenceId)
                 {
-                    Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
+                    Debug.Log("[Multiplayer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
                               " openOccId=" + _openOccurrenceId + " openEventId=" + GetStateEventId(state) +
                               " stateMatched=true occMatch=false (different occurrence open → not closing)");
                     return;
                 }
-                Debug.Log("[Multipleer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
+                Debug.Log("[Multiplayer] EventDisplay.Dismiss occId=" + occurrenceId + " eventId=" + eventId +
                           " openOccId=" + _openOccurrenceId + " openEventId=" + GetStateEventId(state) +
                           " stateMatched=true occMatch=true → FinishQueriedState");
                 _finishQueriedState.Invoke(view, null);
@@ -208,7 +208,7 @@ namespace Multipleer.Network.Sync.State
                 // current dialog with no recorded occurrence).
                 if (occurrenceId == 0 || _openOccurrenceId == occurrenceId) _openOccurrenceId = 0;
             }
-            catch (Exception ex) { Debug.LogWarning("[Multipleer] EventDisplay.Dismiss best-effort failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventDisplay.Dismiss best-effort failed: " + ex.Message); }
         }
 
         // (Removed CloseHostEventModal: the host never needs a force-close-to-"show" path. Host-WIN lets native

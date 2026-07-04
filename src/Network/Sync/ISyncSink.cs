@@ -1,6 +1,6 @@
 using System;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// The engine-side seam passed to <see cref="SurfaceRouter.OnInbound"/>, abstracted so the router has

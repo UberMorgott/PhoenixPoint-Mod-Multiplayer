@@ -1,6 +1,6 @@
 # Co-op Loading Screen Overlay — Design
 
-**Status:** Approved (2026-06-12); SHIPPED + in-game-confirmed over DirectIP (`4976474`). **Mod:** Multipleer (Phoenix Point co-op). **Topic:** shared loading screen showing every player's two-phase load progress.
+**Status:** Approved (2026-06-12); SHIPPED + in-game-confirmed over DirectIP (`4976474`). **Mod:** Multiplayer (Phoenix Point co-op). **Topic:** shared loading screen showing every player's two-phase load progress.
 
 > **AS-BUILT DIVERGENCE (authoritative = [00-current-state](../../research/00-current-state.md) §Co-op loading screen + [09-disconnect-reconnect](../../research/09-disconnect-reconnect.md) §Co-op Loading Overlay).** This design doc records the original plan; the shipped form differs on three points: (1) overlay shows ONLY OTHER players (self-row hidden), not "ALL including host"; (2) simultaneous reveal is via **native-curtain-HOLD** (Harmony prefix suppresses the auto-`LiftCurtain`, peers hold at the still-visible native screen) — NOT a from-code fullscreen black cover (that "Cover" was added then removed); (3) phase-2 bar value = the live native `ProgressFill.fillAmount` forwarded RAW (no mod-side easing; `FillEase` deleted). Engine facts below remain accurate.
 
@@ -24,14 +24,14 @@ All paths under `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\s
 
 ## Mod facts (existing wiring)
 
-Under `E:\DEV\PhoenixPoint\Multipleer\src\`.
+Under `E:\DEV\PhoenixPoint\Multiplayer\src\`.
 
 - `SaveTransferCoordinator.cs`: host chunks save (32KB `SaveChunk`+`SaveDone` crc32), client reassembles (`OnSaveDone`), barrier LOADED/BEGIN (`OpenBarrier :214`, `SendLoaded :361`, `OnClientLoaded :366`, `TryReleaseBarrier :391`, `Begin :404`, `EnterLevel :423`→`game.FinishLevel(_pendingResult)`). Download % already broadcast: `ReportDownloadProgress :449-457`, host `OnLoadProgress :460-477` stores `_peerDownloadPct[steamId]` + rebroadcasts; accessors `LocalDownloadPercent :103`, `TryGetPeerDownloadPercent :114`. Barrier timeout 60s in `Update :483-503`.
 - `SaveLoadPatches.cs` `FinishLevelBarrierPatch`: Prefix on `PhoenixGame.FinishLevel`, `return false` while barrier pending (real gate, not stub).
 - `NetworkEngine.cs RouteMessage`: cases SaveChunk `:451`, SaveDone `:455`, LoadProgress `:459`, ClientLoaded `:463`, SessionBegin `:467`.
 - `MessageSerializer.SerializeLoadProgress(ulong peerSteamId, byte phase, byte percent)` (`src\Network\MessageLayer\MessageSerializer.cs:361-382`), `// phase 0=download,1=load`; `PacketType.LoadProgress = 0x1A`.
 - `SessionManager`: host-authoritative chat/relay; `AddClient` call order = roster order (arrival); PEER_LIST broadcast.
-- UI: `MultipleerMain.cs:33` builds on `ModGO`; mod root overlay canvases pattern at sortingOrder 4000/5000/6000 with `overrideSorting` (`LobbyPanel.cs:127-137`, `MultiplayerUI.cs:100-107`, `SavePickerPanel.cs:64-80`). `LobbyPanel.Refresh :792-796` calls `Hide()` on `SaveTransfer.SessionStarted`. Roster progress is text-only today (`RefreshRoster :934-989`, `ProgressFor :994-1013`). `NativeWidgetFactory.HideMenuChrome` disables native root canvases. Play seam `MultiplayerUI.OnLobbyPlay :191-207`.
+- UI: `MultiplayerMain.cs:33` builds on `ModGO`; mod root overlay canvases pattern at sortingOrder 4000/5000/6000 with `overrideSorting` (`LobbyPanel.cs:127-137`, `MultiplayerUI.cs:100-107`, `SavePickerPanel.cs:64-80`). `LobbyPanel.Refresh :792-796` calls `Hide()` on `SaveTransfer.SessionStarted`. Roster progress is text-only today (`RefreshRoster :934-989`, `ProgressFor :994-1013`). `NativeWidgetFactory.HideMenuChrome` disables native root canvases. Play seam `MultiplayerUI.OnLobbyPlay :191-207`.
 
 ## Architecture
 
@@ -59,7 +59,7 @@ Each client sends a RELIABLE `LoadComplete` when its load truly finishes (the mo
 - HIDE: subscribe `LevelSwitchCurtainController.OnCurtainLifted` (or `Loaded→Playing`), but keep overlay up until the mod BEGIN barrier fires (all enter together).
 
 ## Testing
-- Pure-logic TDD (linked into `Multipleer.Tests`, no UnityEngine dep): slotIndex assignment + reconnect reuse; `RosterProgress` snapshot serialize/deserialize; monotonic-max merge; done-tracking barrier (all-slots-done gate).
+- Pure-logic TDD (linked into `Multiplayer.Tests`, no UnityEngine dep): slotIndex assignment + reconnect reuse; `RosterProgress` snapshot serialize/deserialize; monotonic-max merge; done-tracking barrier (all-slots-done gate).
 - Engine/UI seams (curtain drop, overlay render, `LoadingProgress` read) = manual 2-instance in-game run.
 
 ## Open items — close only in-game (cannot source from decompile)

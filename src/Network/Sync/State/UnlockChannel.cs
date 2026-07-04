@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// State channel #3 — research-UNLOCK availability (fixes facility-type / manufacture-item /

@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Validation;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Validation;
 using UnityEngine;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     public class SessionManager
     {
@@ -114,7 +114,7 @@ namespace Multipleer.Network
                 }
                 foreach (var clientId in toRemove)
                 {
-                    Debug.LogWarning($"[Multipleer] Client {clientId} timed out");
+                    Debug.LogWarning($"[Multiplayer] Client {clientId} timed out");
                     // F1: a heartbeat timeout removes the client directly (it never reaches the
                     // transport OnPeerDisconnected path), so post the "-- X left --" line HERE to keep
                     // the drop notice uniform with crash/graceful-leave. Capture the name before purge.
@@ -132,7 +132,7 @@ namespace Multipleer.Network
                      && _lastHeartbeat.TryGetValue(HostPeerId.Value, out var hostLast)
                      && now - hostLast > HeartbeatTimeoutMs)
             {
-                Debug.LogWarning("[Multipleer] Host heartbeat timed out — treating as host-leave.");
+                Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
                 HostLeaveHandler.TriggerHostLeft();
             }
         }
@@ -239,7 +239,7 @@ namespace Multipleer.Network
 
             if (join == null || join.PlayerGuid == Guid.Empty)
             {
-                Debug.LogWarning($"[Multipleer] Rejecting JOIN from {clientId}: missing/empty playerGUID.");
+                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: missing/empty playerGUID.");
                 var reject = new NetworkMessage(PacketType.ConnectionRejected,
                     NetworkMessage.BuildStringPayload("Invalid player identity (empty GUID)."));
                 _engine.SendToClient(clientId, reject);
@@ -285,13 +285,13 @@ namespace Multipleer.Network
         public void HandleConnectionAccepted(NetworkMessage msg)
         {
             // Client received host confirmation
-            Debug.Log("[Multipleer] Connection accepted by host");
+            Debug.Log("[Multiplayer] Connection accepted by host");
         }
 
         public void HandleConnectionRejected(NetworkMessage msg)
         {
             var reason = NetworkMessage.ParseStringPayload(msg.Payload);
-            Debug.LogError($"[Multipleer] Connection rejected: {reason}");
+            Debug.LogError($"[Multiplayer] Connection rejected: {reason}");
         }
 
         public void HandleClientDisconnected(NetworkMessage msg)
@@ -722,7 +722,7 @@ namespace Multipleer.Network
 
         public void HandleHostDisconnected(NetworkMessage msg)
         {
-            Debug.LogWarning("[Multipleer] Host disconnected — session ended");
+            Debug.LogWarning("[Multiplayer] Host disconnected — session ended");
             OnHostDisconnected?.Invoke();
         }
 

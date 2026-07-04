@@ -1,4 +1,4 @@
-# Foundation Build Plan — Multipleer (lobby / identity / save-transfer / permissions)
+# Foundation Build Plan — Multiplayer (lobby / identity / save-transfer / permissions)
 
 > Concrete, source-grounded BUILD SPEC for foundation work-items #1, #2, #6, #7, #8.
 > Coders implement against THIS document; do not re-derive values. Match the existing
@@ -268,8 +268,8 @@ They become *real* enforcement later (out of foundation scope).
 - **Storage / persistence:** a mod config JSON in an update-safe per-user dir. **Spec 02 §4 + open-
   questions:** the exact PP per-user config dir that survives a mod update is an **OPEN SDK QUESTION**
   (`docs/specs/03-open-questions-sdk.md` → "Persistent Config Location"). **Interim grounded default:**
-  `Application.persistentDataPath` (Unity, always available) → `<persistentDataPath>/Multipleer/identity.json`
-  holding `{ playerGUID }`. Host's permission table → `<...>/Multipleer/coop-perms.json`
+  `Application.persistentDataPath` (Unity, always available) → `<persistentDataPath>/Multiplayer/identity.json`
+  holding `{ playerGUID }`. Host's permission table → `<...>/Multiplayer/coop-perms.json`
   (`[{ playerGUID, lastNickname, flags }]`). Flag this default for confirmation against the real PP
   mod-config dir before release.
 - **Send (JOIN):** client puts `playerGUID` (+ nickname) in the reshaped `ConnectionRequest` payload
@@ -411,7 +411,7 @@ New coordinator class `src/Network/SaveTransferCoordinator.cs` (driven from `Net
   `HandlePeerList`, `HandleAssignOwner`, `HandleLeave`, `HandleRename`, `HandleHostDisconnected`;
   PEER_LIST broadcast builder. Depends on T2,T4. Serialize with T4 (same file). SINGLE/ TEAM.
 - **T7 — ClientIdentity (playerGUID gen/persist)** (#7). New file `src/Network/ClientIdentity.cs` +
-  call from `MultipleerMain`. JSON read/write to `<persistentDataPath>/Multipleer/identity.json`.
+  call from `MultiplayerMain`. JSON read/write to `<persistentDataPath>/Multiplayer/identity.json`.
   Independent file → parallel-safe. SINGLE. **Note: persistent-dir choice = OPEN SDK Q (interim
   default documented §5); not blocking.**
 - **T8 — ActionValidator steamId→GUID resolution** (#7). File: `src/Validation/ActionValidator.cs`.

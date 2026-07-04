@@ -1,6 +1,6 @@
-# Multipleer Transport Layer (as-built)
+# Multiplayer Transport Layer (as-built)
 
-> The transport layer is the foundation of Multipleer's networking architecture. It abstracts the mechanics of passing byte messages between peers, letting the layers above (`NetworkEngine`, `SessionManager`) stay independent of the concrete network: Steam P2P, direct TCP/IP, or UDP with STUN traversal.
+> The transport layer is the foundation of Multiplayer's networking architecture. It abstracts the mechanics of passing byte messages between peers, letting the layers above (`NetworkEngine`, `SessionManager`) stay independent of the concrete network: Steam P2P, direct TCP/IP, or UDP with STUN traversal.
 >
 > Three transports implement a single `ITransport` interface and are interchangeable — the choice happens at initialization and is transparent to all logic above it. Design rationale → [specs/01-design](../specs/01-design.md); the message catalog by phase (below) is the as-built realization of the transport-protocol design.
 
@@ -258,7 +258,7 @@ public void Initialize(TransportType transportType)
 ```
 
 - **Data flow:** network → `ITransport._incomingQueue` → `Update()` → `OnPacketReceived` → `RouteMessage()` → handlers (SessionManager, events). Full routing detail → [01-networking-core](01-networking-core.md).
-- **Update** is called from `MultipleerMain.Update()` every frame, which also drives `Session.Update()`.
+- **Update** is called from `MultiplayerMain.Update()` every frame, which also drives `Session.Update()`.
 - **IsActive** — readiness flag: if `Initialize()` was not called, all external APIs stay silent.
 - **Factory** is just a switch over `TransportType`:
 
@@ -317,7 +317,7 @@ The wire envelope and the binary per-message formats (`NetworkMessage` header, `
 
 ## Summary
 
-The three transports cover different Multipleer deployment scenarios:
+The three transports cover different Multiplayer deployment scenarios:
 
 1. **SteamTransport** — the primary route for the released game: zero-config for the user, automatic NAT traversal.
 2. **DirectTransport** — for LAN, tests, and Steam-less environments. Maximum control and performance at the cost of manual configuration.

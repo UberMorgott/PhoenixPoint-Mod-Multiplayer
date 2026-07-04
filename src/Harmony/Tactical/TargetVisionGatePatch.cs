@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// Inc Vision — CLIENT targeting/selection gate (invis-targeting desync fix). Postfix on
@@ -64,7 +64,7 @@ namespace Multipleer.Harmony.Tactical
                         TacticalDeploySync.IsClientMirroring, sourceIsPlayerFaction, targetIsEnemy, hostKnowsTarget))
                     __result = false;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][tac] TargetVisionGatePatch.Postfix failed: " + ex); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TargetVisionGatePatch.Postfix failed: " + ex); }
         }
 
         // ─── reflection helpers (mirror TacticalVisionSync's style) ───

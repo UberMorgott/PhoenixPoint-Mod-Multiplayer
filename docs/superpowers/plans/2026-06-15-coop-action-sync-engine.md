@@ -6,7 +6,7 @@
 
 **Architecture:** Host-authoritative *discrete-action relay* + host-authoritative *currency echo*, layered on the existing `NetworkEngine` exactly like the `TimeSyncManager` subsystem. We deliberately do NOT continuously stream geoscape state (failed approach SD-AIDR) nor hand-roll per-action wire code with no shared infra (failed approach command-relay v1). Instead: (1) currency converges through one host→client snapshot echo driven by `Wallet.ResourcesChanged`, covering all ~60 mutation call-sites + mod currency for free; (2) discrete player commands flow through one generic `ISyncedAction` bus (register + intercept), host sequences them (last-writer-wins), clients reproduce the same discrete mutation under a re-entrancy guard; (3) timed-op progress is never streamed — only `start` and host-driven `completion` are synced as discrete actions.
 
-**Tech Stack:** C# (.NET Framework, PhoenixPoint mod), HarmonyX (`Harmony` / `AccessTools`), existing `NetworkMessage` + `MessageSerializer` (BinaryWriter/Reader) wire layer, xUnit (`Multipleer.Tests`).
+**Tech Stack:** C# (.NET Framework, PhoenixPoint mod), HarmonyX (`Harmony` / `AccessTools`), existing `NetworkMessage` + `MessageSerializer` (BinaryWriter/Reader) wire layer, xUnit (`Multiplayer.Tests`).
 
 ---
 
@@ -30,7 +30,7 @@
 **Game runtime accessors (reflection — mod has NO compile-time game refs)**
 - Current level: `GameUtl.CurrentLevel()` (static) → `Component`; `comp.GetComponent(GeoLevelControllerType)`; null when not in geoscape / mid-load. Template: `TimeSyncManager.GetGeoLevel()` (`:189-202`) + `EnsureReflection()` (`:135`).
 - Player faction + wallet: `GeoLevelController.PhoenixFaction` (→ `GeoPhoenixFaction`) → `GeoFaction.Wallet` (→ `Wallet`). Path: `level.PhoenixFaction.Wallet`.
-- Harmony registration: `harmony.PatchAll(...)` in `MultipleerMain.cs:27`; patch classes in `src/Harmony/` use `[HarmonyPatch]` + `Prepare()`/`TargetMethod()` reflection + `Prefix` returning `bool` (true=run original, false=skip).
+- Harmony registration: `harmony.PatchAll(...)` in `MultiplayerMain.cs:27`; patch classes in `src/Harmony/` use `[HarmonyPatch]` + `Prepare()`/`TargetMethod()` reflection + `Prefix` returning `bool` (true=run original, false=skip).
 
 **Currency**
 - `ResourceType` `[Flags]` (`PhoenixPoint.Common.Core/ResourceType.cs`): `Supplies=1, Materials=2, Tech=4, AICore1=8, AICore2=0x10, AICore3=0x20, Research=0x40, Production=0x80, Mutagen=0x100, LivingCrystals=0x200, Orichalcum=0x400, ProteanMutane=0x800`.
@@ -116,7 +116,7 @@ One object that lazily binds + caches the game reflection handles (`GameUtl.Curr
 - `src/Network/NetworkEngine.cs` — create `SyncEngine` in `Initialize()`; tick in `Update()`; add `RouteMessage` cases.
 - `src/Validation/PermissionManager.cs` — add `ManageDialogs = 1<<10` to `CampaignPermission`.
 
-**Test (`Multipleer.Tests/`):**
+**Test (`Multiplayer.Tests/`):**
 - `SyncProtocolTests.cs` — wire round-trips for every message + every action payload.
 - `SyncedActionRegistryTests.cs` — register/read/unknown-id.
 - `PermissionGateTests.cs` — category mapping + default-allow + deny when bit cleared.
@@ -157,7 +157,7 @@ Action payloads (each action's `Write`):
 
 ## Task 1: `SyncApplyScope` (re-entrancy guard)
 
-**Files:** Create `src/Network/Sync/SyncApplyScope.cs`; Test `Multipleer.Tests/SyncProtocolTests.cs` (add scope test here or a small dedicated test).
+**Files:** Create `src/Network/Sync/SyncApplyScope.cs`; Test `Multiplayer.Tests/SyncProtocolTests.cs` (add scope test here or a small dedicated test).
 
 - [ ] **Step 1: Write failing test**
 ```csharp
@@ -178,7 +178,7 @@ public void Scope_NestsAndRestores()
 - [ ] **Step 3: Implement**
 ```csharp
 using System;
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Re-entrancy guard: true while the engine is replaying a remote action or
     /// applying a wallet echo. Interceptors check this FIRST and pass through.
@@ -199,7 +199,7 @@ namespace Multipleer.Network.Sync
 
 ## Task 2: `CampaignPermission.ManageDialogs` + `PermissionGate`
 
-**Files:** Modify `src/Validation/PermissionManager.cs:6-20`; Create `src/Network/Sync/PermissionGate.cs`; Test `Multipleer.Tests/PermissionGateTests.cs`.
+**Files:** Modify `src/Validation/PermissionManager.cs:6-20`; Create `src/Network/Sync/PermissionGate.cs`; Test `Multiplayer.Tests/PermissionGateTests.cs`.
 
 - [ ] **Step 1: Add the flag.** In the `[Flags] enum CampaignPermission`, after `FullCommander = 1<<9` add:
 ```csharp
@@ -208,8 +208,8 @@ namespace Multipleer.Network.Sync
 - [ ] **Step 2: Write failing tests** (`PermissionGateTests.cs`)
 ```csharp
 using System;
-using Multipleer.Network.Sync;
-using Multipleer.Validation;
+using Multiplayer.Network.Sync;
+using Multiplayer.Validation;
 using Xunit;
 
 public class PermissionGateTests
@@ -247,10 +247,10 @@ public class PermissionGateTests
 - [ ] **Step 4: Implement** `src/Network/Sync/PermissionGate.cs`
 ```csharp
 using System;
-using Multipleer.Network;
-using Multipleer.Validation;
+using Multiplayer.Network;
+using Multiplayer.Validation;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     public enum ActionCategory
     {
@@ -300,14 +300,14 @@ namespace Multipleer.Network.Sync
 
 ## Task 3: `ISyncedAction` + `SyncedActionIds` + `SyncedActionRegistry`
 
-**Files:** Create the three files; Test `Multipleer.Tests/SyncedActionRegistryTests.cs`.
+**Files:** Create the three files; Test `Multiplayer.Tests/SyncedActionRegistryTests.cs`.
 
 - [ ] **Step 1: Implement `ISyncedAction.cs`**
 ```csharp
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// A discrete, serializable, replayable shared-state mutation.
     public interface ISyncedAction
@@ -325,7 +325,7 @@ namespace Multipleer.Network.Sync
 ```
 - [ ] **Step 2: Implement `SyncedActionIds.cs`**
 ```csharp
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     public static class SyncedActionIds
     {
@@ -347,7 +347,7 @@ namespace Multipleer.Network.Sync
 - [ ] **Step 3: Write failing tests** (`SyncedActionRegistryTests.cs`)
 ```csharp
 using System.IO;
-using Multipleer.Network.Sync;
+using Multiplayer.Network.Sync;
 using Xunit;
 
 public class SyncedActionRegistryTests
@@ -376,7 +376,7 @@ public class SyncedActionRegistryTests
 using System.Collections.Generic;
 using System.IO;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     public static class SyncedActionRegistry
     {
@@ -397,7 +397,7 @@ namespace Multipleer.Network.Sync
 
 ## Task 4: `SyncProtocol` wire codecs + `PacketType` additions
 
-**Files:** Modify `src/Network/MessageLayer/PacketType.cs`; Create `src/Network/Sync/SyncProtocol.cs`; Test `Multipleer.Tests/SyncProtocolTests.cs`.
+**Files:** Modify `src/Network/MessageLayer/PacketType.cs`; Create `src/Network/Sync/SyncProtocol.cs`; Test `Multiplayer.Tests/SyncProtocolTests.cs`.
 
 - [ ] **Step 1: Add PacketTypes.** In `PacketType.cs` after the Management group add:
 ```csharp
@@ -410,7 +410,7 @@ namespace Multipleer.Network.Sync
 - [ ] **Step 2: Write failing tests** (`SyncProtocolTests.cs`)
 ```csharp
 using System.Collections.Generic;
-using Multipleer.Network.Sync;
+using Multiplayer.Network.Sync;
 using Xunit;
 
 public class SyncProtocolTests
@@ -463,7 +463,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Wire codecs for ActionSync payloads. Header/envelope handled by NetworkMessage.
     public static class SyncProtocol
@@ -551,7 +551,7 @@ using System;
 using HarmonyLib;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Centralized reflection surface for live geoscape state + bound action methods.
     /// All game types resolved by name (mod has no compile-time game refs).
@@ -609,13 +609,13 @@ namespace Multipleer.Network.Sync
 
 ## Task 6: `SyncEngine` (subsystem core) + NetworkEngine wiring + ordering tests
 
-**Files:** Create `src/Network/Sync/SyncEngine.cs`; Modify `src/Network/NetworkEngine.cs` (`Initialize`, `Update`, `RouteMessage`); Test `Multipleer.Tests/SyncEngineOrderingTests.cs`.
+**Files:** Create `src/Network/Sync/SyncEngine.cs`; Modify `src/Network/NetworkEngine.cs` (`Initialize`, `Update`, `RouteMessage`); Test `Multiplayer.Tests/SyncEngineOrderingTests.cs`.
 
 The engine must be unit-testable for the ordering logic WITHOUT the network. Extract pure decision helpers as static/internal methods so tests don't need a live `NetworkEngine`.
 
 - [ ] **Step 1: Write failing ordering tests** (`SyncEngineOrderingTests.cs`)
 ```csharp
-using Multipleer.Network.Sync;
+using Multiplayer.Network.Sync;
 using Xunit;
 
 public class SyncEngineOrderingTests
@@ -645,7 +645,7 @@ public class SyncEngineOrderingTests
 - [ ] **Step 2: Run → FAIL.**
 - [ ] **Step 3: Implement `SequenceTracker`** (inside `SyncEngine.cs` or a small own file `src/Network/Sync/SequenceTracker.cs`)
 ```csharp
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Last-writer-wins ordering: drop stale/duplicate action sequences + old wallet versions.
     public sealed class SequenceTracker
@@ -666,9 +666,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network.MessageLayer;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     public sealed class SyncEngine
     {
@@ -817,7 +817,7 @@ using System;
 using System.Collections.Generic;
 using HarmonyLib;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Reflection bridge to the player Wallet: snapshot all ResourceType slots (host)
     /// and apply a target snapshot as signed diffs (client).
@@ -866,7 +866,7 @@ namespace Multipleer.Network.Sync
 using System;
 using HarmonyLib;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// Host-only: subscribes to the player Wallet.ResourcesChanged and marks the
     /// SyncEngine wallet dirty (coalesced flush in SyncEngine.Tick). Also pushes a
@@ -913,7 +913,7 @@ namespace Multipleer.Network.Sync
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     public sealed class StartResearchAction : ISyncedAction
     {
@@ -982,8 +982,8 @@ static bool Prefix(object __instance, object research /* ResearchElement */)
   > Geoscape event UI force-pauses; the event resolves through the synced clock + this action. The host's choice is authoritative; clients see the same outcome applied. If both pick simultaneously, last host-sequenced wins (the earlier one's UI just closes on apply).
 - [ ] **Step 3: `SyncRegistration.cs`** — register every action reader (called from `SyncEngine` ctor):
 ```csharp
-using Multipleer.Network.Sync.Actions;
-namespace Multipleer.Network.Sync
+using Multiplayer.Network.Sync.Actions;
+namespace Multiplayer.Network.Sync
 {
     public static class SyncRegistration
     {

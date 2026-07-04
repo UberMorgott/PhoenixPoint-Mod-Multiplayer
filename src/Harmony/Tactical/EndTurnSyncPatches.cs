@@ -1,9 +1,9 @@
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// LIVE faction-handoff capture (spec §3.5, Inc 4). HOST postfix on
@@ -38,7 +38,7 @@ namespace Multipleer.Harmony.Tactical
             try { TacticalTurnSync.HostBroadcastTurn(nextFaction); }
             catch (System.Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] TacMissionOnNewTurnPatch.Postfix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] TacMissionOnNewTurnPatch.Postfix failed: " + ex);
             }
         }
     }

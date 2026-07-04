@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network.Sync.State;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// Reflection bridge for GeoVehicle SITE EXPLORATION — the game-bound half of the exploration-progress mirror
@@ -153,7 +153,7 @@ namespace Multipleer.Network.Sync
                     if (visuals != null && _endExploreCurrentSite != null)
                     {
                         try { _endExploreCurrentSite.Invoke(vehicle, null); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer][geo] explore end failed: " + ex.Message); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer][geo] explore end failed: " + ex.Message); }
                     }
                     return true;
                 }
@@ -173,7 +173,7 @@ namespace Multipleer.Network.Sync
                     if (_exploreCurrentSite != null)
                     {
                         try { _exploreCurrentSite.Invoke(vehicle, new[] { start, end }); }
-                        catch (Exception ex) { Debug.LogError("[Multipleer][geo] explore create failed: " + ex.Message); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer][geo] explore create failed: " + ex.Message); }
                     }
                 }
                 else if (_setProgression != null)
@@ -181,11 +181,11 @@ namespace Multipleer.Network.Sync
                     // Subsequent poll → just re-anchor the existing bar's Start/End for the new fraction (no
                     // re-schedule, so no leaked updateable). The bar's per-frame Update holds the value between polls.
                     try { _setProgression.Invoke(visuals, new[] { start, end, timing }); }
-                    catch (Exception ex) { Debug.LogError("[Multipleer][geo] explore update failed: " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] explore update failed: " + ex.Message); }
                 }
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] GeoVehicleExploreReflection.ApplyExploreMeta failed: " + ex.Message); return false; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleExploreReflection.ApplyExploreMeta failed: " + ex.Message); return false; }
         }
 
         /// <summary>Build the vehicle's frozen <c>Timing</c> plus Start/End TimeUnits so that

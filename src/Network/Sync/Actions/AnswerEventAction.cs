@@ -1,13 +1,13 @@
 using System;
 using System.IO;
 
-namespace Multipleer.Network.Sync.Actions
+namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
     /// Applies a geoscape event choice over the research-style action relay. Wire payload:
     /// <c>ushort occId, string eventId, i32 choiceIndex</c>.
     /// <list type="bullet">
-    ///   <item><c>occId</c> = the host-synthesized per-occurrence id (<see cref="Multipleer.Harmony.Sync.EventOccurrenceIds"/>)
+    ///   <item><c>occId</c> = the host-synthesized per-occurrence id (<see cref="Multiplayer.Harmony.Sync.EventOccurrenceIds"/>)
     ///   carried on the EventRaised wire — disambiguates two occurrences that share a reusable def-name and lets
     ///   the host resolve the LIVE event instance (NOT a throwaway reconstruction).</item>
     ///   <item><c>eventId</c> = <c>GeoscapeEvent.EventID</c> (def-name; validity/logging).</item>
@@ -68,7 +68,7 @@ namespace Multipleer.Network.Sync.Actions
         // Resolves the LIVE event by occurrence id (EventOccurrenceIds.TryGetEvent inside CompleteEventByOccurrence)
         // — NOT a throwaway rebuild — so the real ChoiceReward / RNG roll is applied and the dismiss carries the
         // authentic outcome.
-        // TODO(multipleer): non-channelled event outcomes (site reveal / mission spawn / faction-diplomacy
+        // TODO(multiplayer): non-channelled event outcomes (site reveal / mission spawn / faction-diplomacy
         // flag / direct research unlock) are NOT yet synced to the client — known gap, see SyncEngine log.
         public void Apply(GeoRuntime rt) => EventReflection.CompleteEventByOccurrence(rt, _occId, _choiceIndex);
     }

@@ -1,11 +1,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using Multipleer.Network;
-using Multipleer.Network.MessageLayer;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using UnityEngine;
 
-namespace Multipleer.Network.Sync.State
+namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// Inc4 S2 — HOST-DRIVEN SITE-EXPLORATION-PROGRESS MIRROR (surface <see cref="SurfaceIds.GeoVehicleExplore"/>
@@ -78,9 +78,9 @@ namespace Multipleer.Network.Sync.State
                 byte[] payload = GeoVehicleExploreSnapshot.Encode(s, changed);
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoVehicleExplore, SyncKind.StateSnapshot, payload)));
-                Debug.Log("[Multipleer][geo] HOST broadcast geo.vehicleexplore seq=" + s + " vehicles=" + changed.Count);
+                Debug.Log("[Multiplayer][geo] HOST broadcast geo.vehicleexplore seq=" + s + " vehicles=" + changed.Count);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] GeoVehicleExploreMirror.HostPollAndBroadcast failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleExploreMirror.HostPollAndBroadcast failed: " + ex.Message); }
         }
 
         // ─── CLIENT: apply a host exploration-progress batch (display-only) ──────────────────────────────────
@@ -95,7 +95,7 @@ namespace Multipleer.Network.Sync.State
                     engine != null, engine != null && engine.IsActive, engine != null && engine.IsHost))
                 return;
             if (!GeoVehicleExploreSnapshot.TryDecode(payload, out uint s, out var vehicles))
-            { Debug.LogError("[Multipleer][geo] geo.vehicleexplore decode failed"); return; }
+            { Debug.LogError("[Multiplayer][geo] geo.vehicleexplore decode failed"); return; }
             if (!seq.ShouldApply(SurfaceIds.GeoVehicleExplore, s)) return;   // stale/dup seq → drop
 
             try
@@ -107,9 +107,9 @@ namespace Multipleer.Network.Sync.State
                         if (GeoVehicleExploreReflection.ApplyExploreMeta(rt, meta)) applied++;
                 seq.Mark(SurfaceIds.GeoVehicleExplore, s);
                 if (applied > 0)
-                    Debug.Log("[Multipleer][geo] CLIENT applied geo.vehicleexplore seq=" + s + " vehicles=" + applied);
+                    Debug.Log("[Multiplayer][geo] CLIENT applied geo.vehicleexplore seq=" + s + " vehicles=" + applied);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer][geo] GeoVehicleExploreMirror.HandleExplore failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleExploreMirror.HandleExplore failed: " + ex.Message); }
         }
     }
 }

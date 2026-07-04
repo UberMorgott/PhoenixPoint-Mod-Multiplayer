@@ -1,4 +1,4 @@
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// The kind of payload carried by a <see cref="SyncProtocol"/> envelope. One inbound chokepoint

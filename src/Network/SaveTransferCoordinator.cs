@@ -6,15 +6,15 @@ using Base.Platforms;
 using Base.Serialization;
 using Base.Utils;
 using HarmonyLib;
-using Multipleer.Network.MessageLayer;
-using Multipleer.Transport;
-using Multipleer.UI;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Transport;
+using Multiplayer.UI;
 using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Params;
 using PhoenixPoint.Common.Saves;
 using UnityEngine;
 
-namespace Multipleer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Owns the session-start save transfer + LOADED/BEGIN barrier (foundation #1, Phase B).
@@ -243,7 +243,7 @@ namespace Multipleer.Network
             // Capture the LIVE native bar when phase-2 begins (Loading), clear it on Playing/Loaded.
             // Done ONCE here (not per-frame) so the pump never FindObjectOfType's every tick.
             _liveProgressBar = _loadingLevel != null
-                ? Multipleer.UI.NativeWidgetFactory.CaptureLiveProgressBar()
+                ? Multiplayer.UI.NativeWidgetFactory.CaptureLiveProgressBar()
                 : null;
         }
 
@@ -283,13 +283,13 @@ namespace Multipleer.Network
         {
             if (!_engine.IsHost)
             {
-                Debug.LogWarning("[Multipleer] HostStartSession called on a non-host peer; ignored.");
+                Debug.LogWarning("[Multiplayer] HostStartSession called on a non-host peer; ignored.");
                 return false;
             }
 
             if (chosen == null)
             {
-                Debug.LogError("[Multipleer] HostStartSession called with no chosen save; aborting.");
+                Debug.LogError("[Multiplayer] HostStartSession called with no chosen save; aborting.");
                 return false;
             }
 
@@ -301,7 +301,7 @@ namespace Multipleer.Network
             bool gateOpen = clientCount >= 1 && AllClientsReadyRoster(roster);
             if (!gateOpen)
             {
-                Debug.LogWarning("[Multipleer] HostStartSession blocked: start gate closed " +
+                Debug.LogWarning("[Multiplayer] HostStartSession blocked: start gate closed " +
                     $"(clients={clientCount}, allReady={AllClientsReadyRoster(roster)}); ignoring start.");
                 return false;
             }
@@ -320,13 +320,13 @@ namespace Multipleer.Network
         {
             if (!_engine.IsHost)
             {
-                Debug.LogWarning("[Multipleer] HostStartSessionInGame called on a non-host peer; ignored.");
+                Debug.LogWarning("[Multiplayer] HostStartSessionInGame called on a non-host peer; ignored.");
                 return false;
             }
 
             if (chosen == null)
             {
-                Debug.LogError("[Multipleer] HostStartSessionInGame called with no chosen save; aborting.");
+                Debug.LogError("[Multiplayer] HostStartSessionInGame called with no chosen save; aborting.");
                 return false;
             }
 
@@ -338,7 +338,7 @@ namespace Multipleer.Network
                 transferActive: TransferActive);
             if (!gateOpen)
             {
-                Debug.LogWarning("[Multipleer] HostStartSessionInGame blocked: in-game load guard closed " +
+                Debug.LogWarning("[Multiplayer] HostStartSessionInGame blocked: in-game load guard closed " +
                     $"(clients={_engine.Session?.ClientCount ?? 0}, started={SessionStarted}, " +
                     $"transferActive={TransferActive}); ignoring load.");
                 return false;
@@ -357,7 +357,7 @@ namespace Multipleer.Network
         // the guard (lobby ready-gate vs in-game guard); this is guard-free.
         private bool LaunchTransfer(SavegameMetaData chosen)
         {
-            Debug.Log($"[Multipleer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
+            Debug.Log($"[Multiplayer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
 
             // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
             // DirectIP (length-prefixed TCP). The Stun/WAN path sends raw UDP with no sequencing/ACK/
@@ -365,7 +365,7 @@ namespace Multipleer.Network
             // transfer. Warn once at start; do not change Steam/Direct behaviour.
             if (_engine.Transport != null && _engine.Transport.TransportType == TransportType.StunUDP)
             {
-                Debug.LogWarning("[Multipleer] Save transfer over the Stun/WAN (UDP) transport is " +
+                Debug.LogWarning("[Multiplayer] Save transfer over the Stun/WAN (UDP) transport is " +
                                  "BEST-EFFORT only: chunks fragment over UDP with no retransmit, so the " +
                                  "transfer may fail on packet loss. Reliable transfer is supported on " +
                                  "Steam and DirectIP.");
@@ -405,7 +405,7 @@ namespace Multipleer.Network
             var blob = result.Value;
             if (blob == null || blob.Length == 0)
             {
-                Debug.LogError("[Multipleer] Save serialization produced no bytes; aborting transfer.");
+                Debug.LogError("[Multiplayer] Save serialization produced no bytes; aborting transfer.");
                 yield break;
             }
 
@@ -430,7 +430,7 @@ namespace Multipleer.Network
             var crc = Crc32(blob);
 
             var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
-            Debug.Log($"[Multipleer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8}");
+            Debug.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8}");
 
             long offset = 0;
             while (offset < blob.Length)
@@ -453,7 +453,7 @@ namespace Multipleer.Network
 
             var donePayload = MessageSerializer.SerializeSaveDone(_transferId, blob.Length, ext, crc);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveDone, donePayload));
-            Debug.Log("[Multipleer] SendBlob: all chunks + SaveDone broadcast sent");
+            Debug.Log("[Multiplayer] SendBlob: all chunks + SaveDone broadcast sent");
         }
 
         private void OpenBarrier()
@@ -477,7 +477,7 @@ namespace Multipleer.Network
             _revealAllSent = false;
             _revealHoldStartedMs = 0;
             _phase2DeadlineMs = 0;
-            Debug.Log($"[Multipleer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
+            Debug.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -495,7 +495,7 @@ namespace Multipleer.Network
             // wipe _begun/buffers mid-new-download. _completedTransferId is the last finished id.
             if (_completedTransferId != Guid.Empty && chunk.TransferId == _completedTransferId)
             {
-                Debug.Log($"[Multipleer] OnSaveChunk: ignoring stale chunk from completed transfer {chunk.TransferId}.");
+                Debug.Log($"[Multiplayer] OnSaveChunk: ignoring stale chunk from completed transfer {chunk.TransferId}.");
                 return;
             }
 
@@ -531,7 +531,7 @@ namespace Multipleer.Network
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
                 _rxChunksRemaining = chunkCount;
-                Debug.Log($"[Multipleer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
+                Debug.Log($"[Multiplayer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
             }
 
             // Fix #4: validate the chunk maps to a clean grid index BEFORE indexing _rxChunkSeen.
@@ -553,12 +553,12 @@ namespace Multipleer.Network
                     ReportDownloadProgress();
                     // Throttled progress trace: every 64 chunks (and at completion). Not per-chunk.
                     if (_rxChunksRemaining == 0 || (_rxChunksRemaining % 64) == 0)
-                        Debug.Log($"[Multipleer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
+                        Debug.Log($"[Multiplayer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
                 }
             }
             else if (chunk.Chunk != null)
             {
-                Debug.LogWarning($"[Multipleer] OnSaveChunk: rejecting malformed chunk " +
+                Debug.LogWarning($"[Multiplayer] OnSaveChunk: rejecting malformed chunk " +
                                  $"(offset={chunk.Offset} len={chunk.Chunk.Length} total={_rxBuffer.Length} " +
                                  $"chunkSize={ChunkSize}) — not on the ChunkSize grid or out of bounds.");
             }
@@ -569,11 +569,11 @@ namespace Multipleer.Network
             if (_engine.IsHost) return;
             var (transferId, totalBytes, ext, crc32) = MessageSerializer.DeserializeSaveDone(msg.Payload);
 
-            Debug.Log($"[Multipleer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
+            Debug.Log($"[Multiplayer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
 
             if (_rxBuffer == null || transferId != _rxTransferId)
             {
-                Debug.LogError("[Multipleer] SaveDone for an unknown transfer; ignoring.");
+                Debug.LogError("[Multiplayer] SaveDone for an unknown transfer; ignoring.");
                 SendLoaded(transferId, false);
                 return;
             }
@@ -582,7 +582,7 @@ namespace Multipleer.Network
             // must be present. A redelivered chunk does not inflate this (see OnSaveChunk).
             if (totalBytes != _rxBuffer.Length || _rxChunksRemaining != 0)
             {
-                Debug.LogError($"[Multipleer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
+                Debug.LogError($"[Multiplayer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
                                $"{_rxChunksRemaining} chunk(s) still missing.");
                 SendLoaded(transferId, false);
                 ResetRx();
@@ -592,7 +592,7 @@ namespace Multipleer.Network
             var actualCrc = Crc32(_rxBuffer);
             if (actualCrc != crc32)
             {
-                Debug.LogError($"[Multipleer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
+                Debug.LogError($"[Multiplayer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
                 SendLoaded(transferId, false);
                 ResetRx();
                 return;
@@ -612,17 +612,17 @@ namespace Multipleer.Network
 
             var timing = GetTiming();
             if (timing == null) { SendLoaded(transferId, false); return; }
-            Debug.Log("[Multipleer] OnSaveDone: verified OK → ClientLoadCrt");
+            Debug.Log("[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt");
             timing.Start(ClientLoadCrt(game, blob, loadExt, transferId));
         }
 
         private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId)
         {
-            Debug.Log("[Multipleer] ClientLoadCrt: preparing entry");
+            Debug.Log("[Multiplayer] ClientLoadCrt: preparing entry");
             yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
             var ok = _pendingResult != null;
-            Debug.Log($"[Multipleer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
+            Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendLoaded(transferId, ok);
         }
@@ -634,7 +634,7 @@ namespace Multipleer.Network
 
         private IEnumerator<NextUpdate> PrepareEntryFromBlobCrt(PhoenixGame game, byte[] blob, string ext)
         {
-            Debug.Log("[Multipleer] PrepareEntryFromBlobCrt: start");
+            Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: start");
 
             // Save-load / co-op save-transfer boundary: forget every resolved event-choice occurrence id.
             // This coroutine is the SHARED host+client reload-entry hook (host: HostSerializeAndSendCrt,
@@ -666,7 +666,7 @@ namespace Multipleer.Network
             var meta = metaRef.Value;
             if (meta == null || meta.LevelScene == null)
             {
-                Debug.LogError("[Multipleer] Transferred save metadata could not be read.");
+                Debug.LogError("[Multiplayer] Transferred save metadata could not be read.");
                 yield break;
             }
 
@@ -693,7 +693,7 @@ namespace Multipleer.Network
             var binding = meta.LevelScene.CreateSceneBinding(serializedParam);
 
             _pendingResult = new LoadLevelGameResult(binding);
-            Debug.Log("[Multipleer] PrepareEntryFromBlobCrt: _pendingResult ready");
+            Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: _pendingResult ready");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -702,7 +702,7 @@ namespace Multipleer.Network
 
         private void SendLoaded(Guid transferId, bool ok)
         {
-            Debug.Log($"[Multipleer] SendLoaded: transfer={transferId} ok={ok} → host");
+            Debug.Log($"[Multiplayer] SendLoaded: transfer={transferId} ok={ok} → host");
             var payload = MessageSerializer.SerializeClientLoaded(_engine.LocalSteamId, transferId, ok);
             _engine.SendToHost(new NetworkMessage(PacketType.ClientLoaded, payload));
         }
@@ -712,13 +712,13 @@ namespace Multipleer.Network
             if (!_engine.IsHost) return;
             var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
 
-            Debug.Log($"[Multipleer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
+            Debug.Log($"[Multiplayer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
                       $"transferId={transferId} (current {_transferId}) ok={ok}.");
 
             // Ignore a stale ack from a prior transfer: it must match the current transfer id.
             if (transferId != _transferId)
             {
-                Debug.LogWarning($"[Multipleer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
+                Debug.LogWarning($"[Multiplayer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
                                  $"transfer {transferId} (current {_transferId}); ignoring.");
                 return;
             }
@@ -730,12 +730,12 @@ namespace Multipleer.Network
                 // LocalSteamId collision on DirectIP / the local 2-instance test rig. The payload
                 // steamId can collide across peers and stall release at Count=1.
                 _loadedPeers.Add(msg.SenderSteamId);
-                Debug.Log($"[Multipleer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
+                Debug.Log($"[Multiplayer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
                 TryReleaseBarrier();
             }
             else
             {
-                Debug.LogWarning($"[Multipleer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
+                Debug.LogWarning($"[Multiplayer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
                                  $"failed to load the transferred save.");
             }
         }
@@ -753,7 +753,7 @@ namespace Multipleer.Network
             foreach (var _ in _engine.Session.GetConnectedClients()) expectedClients++;
 
             var release = BarrierReleased(_hostLoaded, _loadedPeers.Count, expectedClients);
-            Debug.Log($"[Multipleer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
+            Debug.Log($"[Multiplayer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
                       $"loadedClients={_loadedPeers.Count} expectedClients={expectedClients} release={release}.");
 
             if (release)
@@ -775,7 +775,7 @@ namespace Multipleer.Network
         {
             if (_loadCompleteSent) return;
             _loadCompleteSent = true;
-            Debug.Log("[Multipleer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex);
+            Debug.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex);
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
             if (_engine.IsHost) { TryReleaseBarrier(); return; }
@@ -798,7 +798,7 @@ namespace Multipleer.Network
             if (_reachedPlaying) return;
             _reachedPlaying = true;
             _revealHoldStartedMs = NowMs();
-            Debug.Log($"[Multipleer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
+            Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
                       $"→ hold + SendLoadComplete");
             // Idempotent: guarantees done is reported even if LoadingProgress never went null.
             SendLoadComplete();
@@ -807,7 +807,7 @@ namespace Multipleer.Network
         /// <summary>All peers: host says everyone is loaded → lift the held overlay now.</summary>
         public void OnRevealAll(NetworkMessage msg)
         {
-            Debug.Log("[Multipleer] OnRevealAll received → PerformDeferredLift");
+            Debug.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
             PerformDeferredLift();
         }
 
@@ -817,7 +817,7 @@ namespace Multipleer.Network
         {
             if (_revealed) return;
             _revealed = true;
-            Debug.Log("[Multipleer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
+            Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Lift the native curtain we suppressed (animated alpha→0, unpauses rendering, fires
             // OnCurtainLifted → GeoscapeView unlocks input + enables sound). Reflection: mod can't ref the type.
             try
@@ -833,10 +833,10 @@ namespace Multipleer.Network
                     }
                 }
             }
-            catch (Exception e) { Debug.LogError("[Multipleer] native LiftCurtain failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] native LiftCurtain failed: " + e.Message); }
             // Hide the mod overlay roster.
             try { MultiplayerUI.Instance?.HideLoadOverlay(); }
-            catch (Exception e) { Debug.LogError("[Multipleer] HideLoadOverlay failed: " + e.Message); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
         }
 
         /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>
@@ -853,7 +853,7 @@ namespace Multipleer.Network
         {
             var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
             var recvDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
-            Debug.Log($"[Multipleer] RosterProgress RECV [{recvDetail}]");
+            Debug.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
             foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
@@ -869,7 +869,7 @@ namespace Multipleer.Network
             // is not force-revealed mid-load (fix #3).
             _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
 
-            Debug.Log("[Multipleer] BEGIN broadcast.");
+            Debug.Log("[Multiplayer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
             var payload = MessageSerializer.SerializeSessionBegin(startTicks);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SessionBegin, payload));
@@ -888,7 +888,7 @@ namespace Multipleer.Network
             if (_begun) return;
             if (_pendingResult == null)
             {
-                Debug.LogWarning("[Multipleer] BEGIN received but no save was prepared; cannot enter level.");
+                Debug.LogWarning("[Multiplayer] BEGIN received but no save was prepared; cannot enter level.");
                 return;
             }
 
@@ -899,11 +899,11 @@ namespace Multipleer.Network
 
             // Single convergence point for both load paths (PhoenixGame.cs:263). The FinishLevel
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
-            Debug.Log("[Multipleer] EnterLevel → FinishLevel.");
+            Debug.Log("[Multiplayer] EnterLevel → FinishLevel.");
             game.FinishLevel(_pendingResult);
             // Confirm PrepareLoadGame state was applied (was 0 → empty geoscape; expect >0 now).
             var dlcLen = sm.EnabledDlc != null ? sm.EnabledDlc.Length : 0;
-            Debug.Log($"[Multipleer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
+            Debug.Log($"[Multiplayer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
             _pendingResult = null;
             // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
             // game coroutine loads the world on LATER frames). Do NOT hide the overlay here — the
@@ -994,7 +994,7 @@ namespace Multipleer.Network
                     byte pct;
                     if (_liveProgressBar != null)
                     {
-                        var fill = Multipleer.UI.NativeWidgetFactory.GetProgressFill(_liveProgressBar);
+                        var fill = Multiplayer.UI.NativeWidgetFactory.GetProgressFill(_liveProgressBar);
                         pct = fill != null
                             ? RosterProgressTracker.ProgressByte(fill.fillAmount)
                             : RosterProgressTracker.ProgressByte(lp.Progress);
@@ -1006,7 +1006,7 @@ namespace Multipleer.Network
                     if (pct != _lastReportedLoadPct)
                     {
                         _lastReportedLoadPct = pct;
-                        Debug.Log($"[Multipleer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
+                        Debug.Log($"[Multiplayer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
                                   $"pct={pct} (src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})");
                         ReportLoadProgress(pct);
                     }
@@ -1015,7 +1015,7 @@ namespace Multipleer.Network
                 {
                     // Native load finished (LoadingProgress went null) → event-driven done.
                     _lastReportedLoadPct = -1;
-                    Debug.Log("[Multipleer] phase-2 pump: LoadingProgress null → SendLoadComplete");
+                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → SendLoadComplete");
                     SendLoadComplete();
                 }
             }
@@ -1060,13 +1060,13 @@ namespace Multipleer.Network
             {
                 BroadcastSnapshot();
                 _loadPhaseActive = false;
-                Debug.Log("[Multipleer] co-op load: roster all-done — stopping phase-2 snapshots.");
+                Debug.Log("[Multiplayer] co-op load: roster all-done — stopping phase-2 snapshots.");
 
                 // Second barrier satisfied: every peer is loaded → reveal the world simultaneously.
                 if (_engine.IsHost && !_revealAllSent)
                 {
                     _revealAllSent = true;
-                    Debug.Log("[Multipleer] AllDone → broadcast RevealAll");
+                    Debug.Log("[Multiplayer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                     PerformDeferredLift(); // host reveals at the same instant
@@ -1087,7 +1087,7 @@ namespace Multipleer.Network
 
             foreach (var clientId in stragglers)
             {
-                Debug.LogWarning($"[Multipleer] Peer {clientId} did not load in time — kicking.");
+                Debug.LogWarning($"[Multiplayer] Peer {clientId} did not load in time — kicking.");
                 _engine.Session.RemoveClient(clientId);
             }
 
@@ -1107,7 +1107,7 @@ namespace Multipleer.Network
             foreach (var kv in _slotProgress)
                 rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
             var sendDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
-            Debug.Log($"[Multipleer] RosterProgress SEND [{sendDetail}]");
+            Debug.Log($"[Multiplayer] RosterProgress SEND [{sendDetail}]");
             var payload = MessageSerializer.SerializeRosterProgress(rows);
             _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
         }
@@ -1141,7 +1141,7 @@ namespace Multipleer.Network
                 var pp = meta as PPSavegameMetaData;
                 if (pp == null)
                 {
-                    Debug.LogError("[Multipleer] co-op load: metadata is not PPSavegameMetaData; " +
+                    Debug.LogError("[Multiplayer] co-op load: metadata is not PPSavegameMetaData; " +
                                    "cannot apply PrepareLoadGame state (EnabledDlc/GameId/Difficulty).");
                     return;
                 }
@@ -1156,16 +1156,16 @@ namespace Multipleer.Network
                 // Reflection can return null if PP/TFTV renames a member; warn specifically (instead of
                 // letting .SetValue NRE into the generic catch → silent empty geoscape) and apply the rest.
                 if (latestLoadProp == null)
-                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame property 'LatestLoad' not found " +
+                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame property 'LatestLoad' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (currentGameIdField == null)
-                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_currentGameId' not found " +
+                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentGameId' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (currentDifficultyField == null)
-                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_currentDifficulty' not found " +
+                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentDifficulty' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (enabledDlcField == null)
-                    Debug.LogWarning("[Multipleer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
+                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
 
                 latestLoadProp?.SetValue(saveManager, pp, null);
@@ -1175,7 +1175,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] co-op load: failed to apply PrepareLoadGame state: " + e);
+                Debug.LogError("[Multiplayer] co-op load: failed to apply PrepareLoadGame state: " + e);
             }
         }
 
@@ -1189,14 +1189,14 @@ namespace Multipleer.Network
                 saveManager = game?.SaveManager;
                 if (game == null || saveManager == null || saveManager.Serializer == null)
                 {
-                    Debug.LogError("[Multipleer] PhoenixGame/SaveManager not available.");
+                    Debug.LogError("[Multiplayer] PhoenixGame/SaveManager not available.");
                     return false;
                 }
                 return true;
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] Failed to resolve PhoenixGame: " + e.Message);
+                Debug.LogError("[Multiplayer] Failed to resolve PhoenixGame: " + e.Message);
                 return false;
             }
         }
@@ -1210,7 +1210,7 @@ namespace Multipleer.Network
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] Failed to resolve Timing: " + e.Message);
+                Debug.LogError("[Multiplayer] Failed to resolve Timing: " + e.Message);
                 return null;
             }
         }

@@ -1,7 +1,7 @@
 using System.Net;
 using System.Linq;
 
-namespace Multipleer.Util
+namespace Multiplayer.Util
 {
     public enum JoinKind { Invalid, DirectIp, DirectHost, StunCode, SteamId }
 

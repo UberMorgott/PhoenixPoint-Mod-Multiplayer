@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 
-namespace Multipleer.Transport
+namespace Multiplayer.Transport
 {
     /// <summary>
     /// Host-side multiplexer that fans ONE logical session across several child
@@ -191,12 +191,12 @@ namespace Multipleer.Transport
                     // (DirectTransport flips to Failed on a port clash instead of escaping). Log that
                     // too so a down path is visible even when no exception propagates.
                     if (c.State == ConnectionState.Failed)
-                        LogError($"[Multipleer] CompositeTransport: child {c.TransportType} reported " +
+                        LogError($"[Multiplayer] CompositeTransport: child {c.TransportType} reported " +
                                  $"Failed after Host on port {port} ({c.LocalEndpoint}).");
                 }
                 catch (Exception ex)
                 {
-                    LogError($"[Multipleer] CompositeTransport: child {c.TransportType} failed to host " +
+                    LogError($"[Multiplayer] CompositeTransport: child {c.TransportType} failed to host " +
                              $"on port {port}: {ex.GetType().Name}: {ex.Message}");
                 }
             }

@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
+using Multiplayer.Network;
 using PhoenixPoint.Common.Levels.Params;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Barrier safety net for the session-start load.
@@ -50,12 +50,12 @@ namespace Multipleer.Harmony
                 if (!(result is LoadLevelGameResult)) return true;
 
                 // Barrier still closed → hold this entry until BEGIN releases it.
-                Debug.Log("[Multipleer] Holding FinishLevel until session BEGIN (barrier).");
+                Debug.Log("[Multiplayer] Holding FinishLevel until session BEGIN (barrier).");
                 return false;
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] FinishLevelBarrierPatch failed: " + e.Message);
+                Debug.LogError("[Multiplayer] FinishLevelBarrierPatch failed: " + e.Message);
                 return true;
             }
         }

@@ -1,11 +1,11 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.Network.Sync;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Sync
+namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
     /// HOST single-choice PROMPT→RESULT advance signal (additive; gated on <see cref="EventMirrorFixGate"/>).
@@ -72,11 +72,11 @@ namespace Multipleer.Harmony.Sync
                 // EventAdvanceRequest (raced click / transport double-send) into a first-wins no-op
                 // (SingleChoiceAdvanceGate.ShouldDriveHostAdvance via TryHostNativeAdvanceSingleChoice).
                 EventOccurrenceIds.MarkAdvanced(occId);
-                Debug.Log("[Multipleer] HOST BroadcastEventAdvanceResult (single-choice prompt→result) occId=" + occId +
+                Debug.Log("[Multiplayer] HOST BroadcastEventAdvanceResult (single-choice prompt→result) occId=" + occId +
                           " eventId=" + eventId + " choiceIndex=" + choiceIndex + " siteId=" + siteId);
                 engine.Sync?.BroadcastEventAdvanceResult(occId, eventId, choiceIndex, siteId);
             }
-            catch (Exception ex) { Debug.LogError("[Multipleer] SingleChoiceAdvancePatch failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SingleChoiceAdvancePatch failed: " + ex.Message); }
         }
     }
 }

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <!-- Only this project's own files; the mod is brought in via ProjectReference (real DLL). -->
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Real compiled mod: NetworkEngine / SessionManager / SyncEngine / transports as built. -->
+    <ProjectReference Include="..\Multiplayer.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The mod marks its Unity refs Private=false (not copied / not flowed transitively), so the
+         test project needs its own compile-time reference to the Unity types it touches directly
+         (Debug, ILogHandler, SystemInfo). Assembly-CSharp is reached transitively via the mod DLL. -->
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <!-- GeoRuntime (constructed on the relay path via GeoRuntime.Instance) uses HarmonyLib.AccessTools,
+         so 0Harmony must be present at runtime. AccessTools.TypeByName returns null when the game
+         assembly is absent — no game binding occurs — but the Harmony assembly itself must load. -->
+    <Reference Include="0Harmony">
+      <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>

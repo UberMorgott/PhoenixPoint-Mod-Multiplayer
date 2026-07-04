@@ -1,10 +1,10 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using Multipleer.Sync.Tactical;
+using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
-namespace Multipleer.Harmony.Tactical
+namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
     /// BUG3b — CLIENT-mirror hurt-reaction FREEZE fix. An enemy with a damage-triggered hurt-reaction ability
@@ -35,12 +35,12 @@ namespace Multipleer.Harmony.Tactical
         public static bool Prepare()
         {
             var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalHurtReactionAbility");
-            if (t == null) { Debug.LogWarning("[Multipleer][tac] hurt-reaction suppress: TacticalHurtReactionAbility not found — patch skipped"); return false; }
+            if (t == null) { Debug.LogWarning("[Multiplayer][tac] hurt-reaction suppress: TacticalHurtReactionAbility not found — patch skipped"); return false; }
             // public sealed override void Activate(object parameter = null) — single 1-arg overload. EXACT param
             // match (AccessTools does exact-type matching; an overload/Property-vs-Method mismatch silently fails to bind).
             _target = AccessTools.Method(t, "Activate", new[] { typeof(object) });
-            if (_target == null) { Debug.LogWarning("[Multipleer][tac] hurt-reaction suppress: Activate(object) not found — patch skipped"); return false; }
-            Debug.Log("[Multipleer][tac] hurt-reaction suppress patch bound to TacticalHurtReactionAbility.Activate");
+            if (_target == null) { Debug.LogWarning("[Multiplayer][tac] hurt-reaction suppress: Activate(object) not found — patch skipped"); return false; }
+            Debug.Log("[Multiplayer][tac] hurt-reaction suppress patch bound to TacticalHurtReactionAbility.Activate");
             return true;
         }
 
@@ -52,13 +52,13 @@ namespace Multipleer.Harmony.Tactical
             try
             {
                 if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player → real reaction
-                Debug.Log("[Multipleer][tac] CLIENT suppressed enemy hurt-reaction (mirror) ability=" +
+                Debug.Log("[Multiplayer][tac] CLIENT suppressed enemy hurt-reaction (mirror) ability=" +
                           (__instance != null ? __instance.GetType().Name : "<null>"));
                 return false;   // no PlayAction → IsExecuting false → level's Execute completes → no coroutine, no NRE
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multipleer][tac] HurtReactionActivateSuppressPatch.Prefix failed: " + ex);
+                Debug.LogError("[Multiplayer][tac] HurtReactionActivateSuppressPatch.Prefix failed: " + ex);
                 return true;    // fail-open: never block the native reaction on an unexpected error
             }
         }

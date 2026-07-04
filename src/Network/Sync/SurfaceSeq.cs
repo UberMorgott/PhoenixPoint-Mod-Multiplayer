@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Multipleer.Network.Sync
+namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// SHARED per-surface sequencing primitive (unified backbone spec §2.2, "ONE Seq"). HOST: monotonic

@@ -5,15 +5,15 @@ using Base.Serialization;
 using Base.UI;
 using Base.UI.MessageBox;
 using HarmonyLib;
-using Multipleer.Network;
-using Multipleer.UI;
+using Multiplayer.Network;
+using Multiplayer.UI;
 using PhoenixPoint.Common.Saves;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Home.View;
 using PhoenixPoint.Home.View.ViewStates;
 using UnityEngine;
 
-namespace Multipleer.Harmony
+namespace Multiplayer.Harmony
 {
     /// <summary>
     /// Co-op "Choose save" intercept. Instead of hand-building a save-row list (which kept
@@ -119,7 +119,7 @@ namespace Multipleer.Harmony
                 var stackField = AccessTools.Field(typeof(HomeScreenView), "_statesStack");
                 if (stackField == null)
                 {
-                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: HomeScreenView._statesStack field not found.");
+                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: HomeScreenView._statesStack field not found.");
                     return false;
                 }
 
@@ -135,7 +135,7 @@ namespace Multipleer.Harmony
                 }
                 if (stack == null)
                 {
-                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: no live HomeScreenView with an initialized state stack.");
+                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: no live HomeScreenView with an initialized state stack.");
                     return false;
                 }
 
@@ -143,7 +143,7 @@ namespace Multipleer.Harmony
                 var switchToState = AccessTools.Method(stack.GetType(), "SwitchToState");
                 if (switchToState == null)
                 {
-                    Debug.LogError("[Multipleer] OpenNativeLoadScreen: StateStack.SwitchToState not found.");
+                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: StateStack.SwitchToState not found.");
                     return false;
                 }
 
@@ -153,7 +153,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] OpenNativeLoadScreen failed: " + e.Message);
+                Debug.LogError("[Multiplayer] OpenNativeLoadScreen failed: " + e.Message);
                 return false;
             }
         }
@@ -201,7 +201,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] lobby-pick gate failed: " + e.Message);
+                Debug.LogError("[Multiplayer] lobby-pick gate failed: " + e.Message);
             }
 
             if (!_armed) return true; // normal single-player load
@@ -231,7 +231,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] OnLoadGamePressed intercept failed: " + e.Message);
+                Debug.LogError("[Multiplayer] OnLoadGamePressed intercept failed: " + e.Message);
             }
 
             return false; // skip SaveManager.LoadGame — we only wanted the metadata
@@ -252,7 +252,7 @@ namespace Multipleer.Harmony
             if (_armed && _deliverInPrefix && _pickedMeta == null)
             {
                 Disarm();
-                Debug.Log("[Multipleer] F2: in-game load submenu cancelled — intercept disarmed.");
+                Debug.Log("[Multiplayer] F2: in-game load submenu cancelled — intercept disarmed.");
             }
         }
 
@@ -277,7 +277,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] LoadScreen exit handling failed: " + e.Message);
+                Debug.LogError("[Multiplayer] LoadScreen exit handling failed: " + e.Message);
             }
         }
     }
@@ -316,7 +316,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] InGameLoadArm postfix failed: " + e.Message);
+                Debug.LogError("[Multiplayer] InGameLoadArm postfix failed: " + e.Message);
             }
         }
     }
@@ -336,19 +336,19 @@ namespace Multipleer.Harmony
     /// All of these end at the SAME <c>LoadGame</c>, so a single Prefix there closes both holes.
     ///
     /// WHY THIS DOES NOT DOUBLE-GATE THE LEGIT CO-OP ENTRY: the co-op session entry does NOT call
-    /// <c>LoadGame</c> at all — <see cref="Multipleer.Network.SaveTransferCoordinator"/> reimplements the
+    /// <c>LoadGame</c> at all — <see cref="Multiplayer.Network.SaveTransferCoordinator"/> reimplements the
     /// load in-memory (ApplyPrepareLoadGameState) and enters the level by calling
     /// <c>PhoenixGame.FinishLevel(_pendingResult)</c> DIRECTLY (EnterLevel). The barrier-gated FinishLevel
     /// seam (<see cref="FinishLevelBarrierPatch"/>) still solely owns that entry; this prefix only ever
     /// catches a VANILLA solo-load door. The UI prefix, when it captures, returns false so LoadGame is
     /// never reached on that path → no double handling.
     ///
-    /// GATE (reuses the same <see cref="Multipleer.Network.SessionLifecycle"/> predicates as the UI path):
+    /// GATE (reuses the same <see cref="Multiplayer.Network.SessionLifecycle"/> predicates as the UI path):
     ///   • host + active lobby + !started → treat exactly like a lobby save pick: capture as the lobby's
     ///     chosen save (label only, NO load) and re-show the lobby; skip the solo load.
     ///   • host + session STARTED (mid-session) → reroute to the host-authoritative in-session reload
     ///     (the F2 / HostStartSessionInGame transfer) via <see cref="MultiplayerUI.OnInGameLoadPicked"/>
-    ///     when <see cref="Multipleer.Network.SessionLifecycle.HostLoadGuard"/> permits; otherwise BLOCK
+    ///     when <see cref="Multiplayer.Network.SessionLifecycle.HostLoadGuard"/> permits; otherwise BLOCK
     ///     the solo load and log (a host loading a different save solo would desync the clients). Either
     ///     way the original solo <c>LoadGame</c> is skipped.
     ///   • not host / no active session → pass through (vanilla single-player CONTINUE/Quickload unchanged).
@@ -375,7 +375,7 @@ namespace Multipleer.Harmony
                 if (SessionLifecycle.ShouldCaptureAsLobbyPick(isHost, lobbyActive, sessionStarted))
                 {
                     if (picked != null) MultiplayerUI.Instance?.OnLobbyLoadPickCaptured(picked);
-                    Debug.Log("[Multipleer] CONTINUE/Quickload at lobby captured as lobby save pick (no solo load).");
+                    Debug.Log("[Multiplayer] CONTINUE/Quickload at lobby captured as lobby save pick (no solo load).");
                     return false; // skip SaveManager.LoadGame
                 }
 
@@ -389,7 +389,7 @@ namespace Multipleer.Harmony
                     // itself >=1-client gated, so a lone host would otherwise be locked out of loading.
                     if (SessionLifecycle.HostInSessionHasNoClients(isHost, lobbyActive, sessionStarted, connectedClients))
                     {
-                        Debug.Log("[Multipleer] Host mid-session load with no connected clients — allowing vanilla solo load.");
+                        Debug.Log("[Multiplayer] Host mid-session load with no connected clients — allowing vanilla solo load.");
                         return true; // run SaveManager.LoadGame (no peers to desync)
                     }
 
@@ -404,7 +404,7 @@ namespace Multipleer.Harmony
                     {
                         // Reroute into the proven F2 host-authoritative reload (chunked transfer + barrier):
                         // every client reloads into the chosen save. OnInGameLoadPicked re-validates the guard.
-                        Debug.Log("[Multipleer] Host mid-session CONTINUE/Quickload rerouted to co-op in-session reload.");
+                        Debug.Log("[Multiplayer] Host mid-session CONTINUE/Quickload rerouted to co-op in-session reload.");
                         MultiplayerUI.Instance?.OnInGameLoadPicked(picked);
                     }
                     else
@@ -413,7 +413,7 @@ namespace Multipleer.Harmony
                         // running, or null meta): block the solo load rather than desync the clients. The
                         // host should use the in-game co-op reload (pause-menu LOAD) instead. (The zero-
                         // client case was already handled above by allowing the vanilla solo load.)
-                        Debug.LogWarning("[Multipleer] Host mid-session CONTINUE/Quickload BLOCKED — would desync clients. " +
+                        Debug.LogWarning("[Multiplayer] Host mid-session CONTINUE/Quickload BLOCKED — would desync clients. " +
                             "Use the in-game co-op reload (pause-menu LOAD) instead.");
                     }
                     return false; // skip SaveManager.LoadGame either way (never solo-load mid-session)
@@ -426,7 +426,7 @@ namespace Multipleer.Harmony
                 // gated and passes through below.)
                 if (SessionLifecycle.ShouldBlockClientLoad(isHost, lobbyActive))
                 {
-                    Debug.LogWarning("[Multipleer] Client CONTINUE/LOAD/Quickload BLOCKED — only the host can load in co-op.");
+                    Debug.LogWarning("[Multiplayer] Client CONTINUE/LOAD/Quickload BLOCKED — only the host can load in co-op.");
                     GameUtl.GetMessageBox()?.ShowSimplePrompt(
                         "Only the host can load the game in co-op.",
                         MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
@@ -435,7 +435,7 @@ namespace Multipleer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multipleer] LoadGame convergence gate failed: " + e.Message);
+                Debug.LogError("[Multiplayer] LoadGame convergence gate failed: " + e.Message);
             }
 
             return true; // not host / no active session → vanilla single-player load

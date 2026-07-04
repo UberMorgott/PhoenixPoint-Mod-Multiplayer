@@ -6,7 +6,7 @@ using System.Text;
 using System.Threading;
 using UnityEngine;
 
-namespace Multipleer.Transport
+namespace Multiplayer.Transport
 {
     public class StunTransport : ITransport
     {
@@ -221,7 +221,7 @@ namespace Multipleer.Transport
                         // host is local — redirect to loopback on the host's default STUN port.
                         if (_publicEndPoint != null && ip.Equals(_publicEndPoint.Address))
                         {
-                            Debug.Log($"[Multipleer] STUN same-machine: target {ip}:{remotePort} == own public " +
+                            Debug.Log($"[Multiplayer] STUN same-machine: target {ip}:{remotePort} == own public " +
                                       $"address; redirecting to loopback 127.0.0.1:{DefaultStunPort}.");
                             ip = IPAddress.Loopback;
                             remotePort = DefaultStunPort;
@@ -330,7 +330,7 @@ namespace Multipleer.Transport
             }
             else
             {
-                Debug.LogWarning($"[Multipleer] STUN connect failed: {failReason ?? "unknown"}");
+                Debug.LogWarning($"[Multiplayer] STUN connect failed: {failReason ?? "unknown"}");
                 State = ConnectionState.Failed;
                 OnStateChanged?.Invoke(State);
             }
