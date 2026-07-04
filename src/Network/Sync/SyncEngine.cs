@@ -94,6 +94,7 @@ namespace Multipleer.Network.Sync
             // signature + client interpolation buffers), so a new session never inherits a prior one's snapshots.
             State.GeoVehicleMirror.ResetForNewSession();
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
+            State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
             // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
             // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
@@ -1103,6 +1104,11 @@ namespace Multipleer.Network.Sync
                 // on a genuine travel transition (signature-skip), so it is near-silent; it feeds the native yellow
                 // route line on the frozen client (Symptom B). Client never simulates — display-only mirror.
                 State.GeoVehicleTravelMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
+                // Inc4 S2 — site-exploration-PROGRESS mirror (0xA7): same throttle/gate. Ships each exploring
+                // vehicle's bar fill (signature-skip on whole-percent progress → ~free at rest, ~100 updates over an
+                // exploration). Polled AFTER the 0xA6 travel-meta so the client applies CurrentSite before the bar
+                // parents to it. Feeds the native exploration progress bar on the frozen client (Symptom: no bar).
+                State.GeoVehicleExploreMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
             }
         }
 
@@ -1152,6 +1158,14 @@ namespace Multipleer.Network.Sync
                 // (GeoVehicleTravelMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleTravelMirror.HandleTravelMeta(payload, _geoLiveSeq); }
                 catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehicletravel envelope failed: " + ex.Message); }
+                return true;
+            }
+            if (surfaceId == SurfaceIds.GeoVehicleExplore)
+            {
+                // Inc4 S2 exploration-progress mirror: the frozen client renders the native site-exploration bar at
+                // the host fraction (GeoVehicleExploreMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
+                try { State.GeoVehicleExploreMirror.HandleExplore(payload, _geoLiveSeq); }
+                catch (Exception ex) { Debug.LogError("[Multipleer][geo] geo vehicleexplore envelope failed: " + ex.Message); }
                 return true;
             }
             return false;

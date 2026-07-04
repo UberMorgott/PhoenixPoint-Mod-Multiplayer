@@ -23,7 +23,8 @@ namespace Multipleer.Network.Sync.Actions
     /// exploration's visible OUTCOME — completion fires <c>GeoVehicle.SiteExplored</c> (GeoVehicle.cs:477) → the
     /// site reveal / encounter event — converges through the existing geoscape event replication + wallet/
     /// inventory/site echoes, exactly as the host's OWN explore order does. (The transient in-progress exploration
-    /// VISUAL is sim-driven and not mirrored; cosmetic only.)
+    /// progress bar — host-driven, since the client's timer is frozen — is mirrored separately via the 0xA7
+    /// GeoVehicleExplore surface: see <c>State.GeoVehicleExploreMirror</c>.)
     /// </summary>
     public sealed class ExploreSiteAction : ISyncedAction, IHostOnlyApply
     {

@@ -359,5 +359,46 @@ namespace Multipleer.Network.Sync
             Ensure(rt);
             return ResolveVehicles(rt);
         }
+
+        // ─── shared with the exploration-progress mirror (0xA7) ───────────────────────────────────────────────
+
+        /// <summary>Read a live vehicle's <c>CurrentSite.SiteId</c> (the site it is parked at / exploring), or -1
+        /// when the site is null / unreadable. Reuses the same bound <c>CurrentSite</c>/<c>SiteId</c> members the
+        /// travel-metadata read uses.</summary>
+        public static bool TryReadCurrentSiteId(GeoRuntime rt, object vehicle, out int siteId)
+        {
+            siteId = -1;
+            try
+            {
+                Ensure(rt);
+                if (vehicle == null || _currentSiteProp == null || _siteIdField == null) return false;
+                var cs = _currentSiteProp.GetValue(vehicle, null);
+                if (cs == null) return true;   // in transit / no site — resolvable, id stays -1
+                siteId = Convert.ToInt32(_siteIdField.GetValue(cs));
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>CLIENT (sim frozen): ensure a vehicle's display-only <c>&lt;CurrentSite&gt;k__BackingField</c>
+        /// points at <paramref name="siteId"/> ONLY when it is currently null — so the native exploration bar
+        /// (which parents to <c>CurrentSite.Surface</c>) has a valid site even if the 0xA6 travel-meta arrival was
+        /// missed/reordered. Never stomps a non-null value (the 0xA6 mirror owns it), never navigates. Returns the
+        /// resolved live site (existing or freshly set), or null if unresolved.</summary>
+        public static object EnsureCurrentSiteBacking(GeoRuntime rt, object vehicle, int siteId)
+        {
+            try
+            {
+                Ensure(rt);
+                if (vehicle == null || _currentSiteProp == null) return null;
+                var cs = _currentSiteProp.GetValue(vehicle, null);
+                if (cs != null) return cs;   // already set (by the 0xA6 mirror) — leave it
+                if (siteId < 0 || _currentSiteBacking == null) return null;
+                var site = ResolveSite(rt, siteId);
+                if (site != null) _currentSiteBacking.SetValue(vehicle, site);
+                return site;
+            }
+            catch { return null; }
+        }
     }
 }

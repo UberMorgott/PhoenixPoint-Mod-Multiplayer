@@ -109,6 +109,10 @@
          signature. The game glue (GeoVehicleTravelMirror host-read/client-apply) binds game types and is NOT
          linked (mirrors GeoVehicleSnapshot vs GeoVehicleMirror). -->
     <Compile Include="..\src\Network\Sync\State\GeoVehicleTravelMeta.cs"><Link>Sync\State\GeoVehicleTravelMeta.cs</Link></Compile>
+    <!-- Inc4 S2 exploration-progress mirror (0xA7): pure, Unity-free explore-meta DTO + wire codec + whole-percent
+         change signature. The game glue (GeoVehicleExploreMirror host-read/client-render + GeoVehicleExploreReflection)
+         binds game types and is NOT linked (mirrors GeoVehicleTravelMeta vs GeoVehicleTravelMirror). -->
+    <Compile Include="..\src\Network\Sync\State\GeoVehicleExploreMeta.cs"><Link>Sync\State\GeoVehicleExploreMeta.cs</Link></Compile>
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
