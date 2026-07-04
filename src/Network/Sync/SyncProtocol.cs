@@ -336,6 +336,7 @@ namespace Multipleer.Network.Sync
             w.Write(s.State);
             WriteWireStr(w, s.SiteName);
             WriteWireStr(w, s.EncounterID);
+            w.Write((byte)(s.Inspected ? 1 : 0));
         }
 
         private static GeoSiteState ReadSiteIdentity(BinaryReader r)
@@ -346,7 +347,8 @@ namespace Multipleer.Network.Sync
             byte state = r.ReadByte();
             string name = ReadWireStr(r);
             string enc = ReadWireStr(r);
-            return new GeoSiteState(siteId, owner, type, state, name, enc);
+            bool inspected = r.ReadByte() != 0;
+            return new GeoSiteState(siteId, owner, type, state, name, enc, inspected);
         }
 
         private static void WriteWireStr(BinaryWriter w, string s)

@@ -72,6 +72,9 @@ namespace Multipleer.Network.Sync.State
         private static FieldInfo _factionsField;     // GeoLevelController.Factions (IEnumerable<GeoFaction>)
         private static Type _siteTypeEnum;           // GeoSiteType (for byte<->enum)
         private static Type _siteStateEnum;          // GeoSiteState (for byte<->enum)
+        private static MethodInfo _getInspectedMethod;  // GeoSite.GetInspected(GeoFaction) → bool (per-faction reveal, GeoSite.cs:398)
+        private static MethodInfo _setInspectedMethod;  // GeoSite.SetInspected(GeoFaction, bool)      (GeoSite.cs:403)
+        private static PropertyInfo _viewerFactionProp; // GeoLevelController.ViewerFaction (the display/player faction)
         // ─── Case-B inert mirror-site spawn (client) ───
         private static Type _geoSiteType;            // PhoenixPoint.Geoscape.Entities.GeoSite (MakeGenericMethod + AllSites.Add)
         private static MethodInfo _spawnActorGeoSite; // ActorSpawner.SpawnActor<GeoSite>(BaseDef, ActorInstanceData, bool) closed generic
@@ -119,6 +122,15 @@ namespace Multipleer.Network.Sync.State
 
             _siteTypeEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.GeoSiteType");
             _siteStateEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.GeoSiteState");
+
+            // Per-faction site REVEAL (exploration outcome). Best-effort + DELIBERATELY OUTSIDE the _ready gate:
+            // a miss here only disables the inspected-flag mirror (the site still mirrors Owner/Type/State/…), it
+            // must never break the identity channel. GetInspected/SetInspected each have a single overload, so a
+            // name-only lookup binds them; ViewerFaction is the local display faction (identical Phoenix faction on
+            // both instances of a shared co-op campaign) that the host reads + the client writes the reveal for.
+            _getInspectedMethod = AccessTools.Method(geoSiteType, "GetInspected");
+            _setInspectedMethod = AccessTools.Method(geoSiteType, "SetInspected");
+            _viewerFactionProp = AccessTools.Property(geoLevelType, "ViewerFaction");
 
             // Case-B inert mirror-site spawn members (client). Best-effort and DELIBERATELY OUTSIDE the _ready
             // gate below: a miss here only disables Case-B spawn (the event degrades to siteless render), it
@@ -178,6 +190,21 @@ namespace Multipleer.Network.Sync.State
             return GetMap(rt);
         }
 
+        /// <summary>The live geoscape VIEWER faction (the local display/player faction —
+        /// <c>GeoLevelController.ViewerFaction</c>), or null. The site "inspected" reveal is per-faction; the host
+        /// reads it for this faction and the client writes it for the SAME faction (both instances of a shared
+        /// co-op campaign view as the same Phoenix faction), so the client's map reflects the host's exploration.</summary>
+        private static object GetViewerFaction(GeoRuntime rt)
+        {
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo != null && _viewerFactionProp != null) return _viewerFactionProp.GetValue(geo, null);
+            }
+            catch { }
+            return null;
+        }
+
         /// <summary>Resolve a live <c>GeoSite</c> by its <c>SiteId</c> via <c>GeoMap.AllSites</c> (mirrors
         /// <c>EventReflection.ResolveSiteById</c>), or null if absent (Case B — never created here).</summary>
         public static object ResolveSiteById(GeoRuntime rt, int siteId)
@@ -210,11 +237,12 @@ namespace Multipleer.Network.Sync.State
             {
                 Ensure(rt);
                 if (!_ready || dirtySiteIds == null) return list;
+                object viewerFaction = GetViewerFaction(rt);   // resolve once — the per-faction reveal reference
                 foreach (var id in dirtySiteIds)
                 {
                     var site = ResolveSiteById(rt, id);
                     if (site == null) continue; // removed / not yet present → nothing to mirror
-                    try { list.Add(ReadSite(site, id)); }
+                    try { list.Add(ReadSite(site, id, viewerFaction)); }
                     catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.SnapshotDirty read '" + id + "' failed (skipped): " + ex.Message); }
                 }
             }
@@ -240,7 +268,7 @@ namespace Multipleer.Network.Sync.State
             catch { return null; }
         }
 
-        private static GeoSiteState ReadSite(object site, int siteId)
+        private static GeoSiteState ReadSite(object site, int siteId, object viewerFaction)
         {
             // Owner → Def guid (best-effort).
             string ownerGuid = "";
@@ -281,7 +309,17 @@ namespace Multipleer.Network.Sync.State
             try { encounterId = _encounterIdField.GetValue(site) as string ?? ""; }
             catch { encounterId = ""; }
 
-            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId);
+            // Per-faction reveal (exploration outcome). Best-effort: unbound method / null viewer → false (the site
+            // still mirrors its identity, the reveal simply doesn't carry).
+            bool inspected = false;
+            try
+            {
+                if (_getInspectedMethod != null && viewerFaction != null)
+                    inspected = (bool)_getInspectedMethod.Invoke(site, new[] { viewerFaction });
+            }
+            catch { inspected = false; }
+
+            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected);
         }
 
         /// <summary>
@@ -339,6 +377,21 @@ namespace Multipleer.Network.Sync.State
                 {
                     try { _encounterIdField.SetValue(site, dto.EncounterID ?? ""); }
                     catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity encounter failed (skipped): " + ex.Message); }
+                }
+
+                // Per-faction REVEAL (exploration outcome). Drive the NATIVE SetInspected(ViewerFaction, value) so
+                // the site flips to inspected on the sim-frozen client exactly as the host did — this is what makes
+                // a client-relayed "Explore POI" order visibly reveal the site. SetInspected only sets the flag +
+                // fires the display-only InspectedChanged event (no sim advance, no reward cascade); the client
+                // channel is host-attach-only so it never re-broadcasts. Host-authoritative (matches the host's value).
+                if (_setInspectedMethod != null)
+                {
+                    try
+                    {
+                        var viewer = GetViewerFaction(rt);
+                        if (viewer != null) _setInspectedMethod.Invoke(site, new object[] { viewer, dto.Inspected });
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multipleer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }

@@ -221,6 +221,13 @@ namespace Multipleer.Network.Sync.State
                 foreach (var rec in vehicles)
                 {
                     if (!byKey.TryGetValue(rec.Key, out var vehicle) || !(vehicle is Component comp) || comp == null) continue;
+                    // TRAVEL-START PROBE (Symptom B): on the FIRST snapshot after a vehicle (re)starts being mirrored
+                    // (key absent from the live-target cache — parked vehicles ship 0 bytes and get purged), compare
+                    // the incoming host pivot quat to the vehicle's CURRENT parked / pre-mirror local rotation. A
+                    // large angle means the client's rendered DEPARTURE is far from where the host places it
+                    // (>90° ≈ opposite side of the globe) — this pins an antipodal first placement vs a faithful
+                    // small step. One line per (re)start; steady-state polls are covered by DIAG-C.
+                    if (!_clientTargets.ContainsKey(rec.Key)) DiagTravelStart(rec, comp);
                     _clientTargets[rec.Key] = comp;
                     _interp.Push(rec.Key, s, rec, arrival);
                     buffered++;
@@ -415,6 +422,25 @@ namespace Multipleer.Network.Sync.State
 
         private static string DiagKey(int ownerId, int vehicleId)
             => ownerId.ToString("X8") + ":" + vehicleId;
+
+        /// <summary>CLIENT travel-START probe (Symptom B): log the vehicle's parked/pre-mirror pivot rotation vs the
+        /// FIRST incoming host snapshot for a (re)started vehicle, plus the angle between them — flags OPPOSITE when
+        /// that angle exceeds 90° (the client would render the departure ~antipodally). Fires once per (re)start.</summary>
+        private static void DiagTravelStart(GeoVehiclePos rec, Component comp)
+        {
+            try
+            {
+                Transform pivot = comp.transform;
+                if (pivot == null) return;
+                Quaternion parked = pivot.localRotation;
+                Quaternion firstShip = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
+                float ang = Quaternion.Angle(parked, firstShip);
+                Debug.Log("[Multipleer][geo][DIAG-START] key=" + DiagKey(rec.OwnerId, rec.VehicleId) + " name=" + comp.name
+                    + " parked=" + DiagQuat(parked) + " firstShip=" + DiagQuat(firstShip)
+                    + " angle=" + ang.ToString("F1") + (ang > 90f ? " OPPOSITE" : ""));
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-START] " + ex.Message); }
+        }
 
         /// <summary>HOST probe: for the lowest-N shipped keys, log the pivot quat being shipped + its WORLD pos +
         /// parent frame + visibility/owner/travel/site, so the client's paired line can be compared 1:1.</summary>

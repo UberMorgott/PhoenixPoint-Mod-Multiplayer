@@ -238,8 +238,24 @@ namespace Multipleer.Network.Sync
                 Ensure(rt);
                 if (_startExploringMethod == null) return false;
                 object vehicle = ResolveVehicle(rt, ownerId, vehicleId);
-                if (vehicle == null) return false;
+                if (vehicle == null)
+                {
+                    Debug.Log("[Multipleer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId + " UNRESOLVED (no-op)");
+                    return false;
+                }
+                // DIAG (Symptom A): confirm the host actually resolves the relayed vehicle and that its CurrentSite
+                // is present (StartExploringCurrentSite NREs on a null CurrentSite → the reveal never fires). The
+                // exploration OUTCOME (SetInspected reveal) now mirrors to the client via the GeoSite channel #5.
+                int csId = -1;
+                try
+                {
+                    var cs = _currentSiteProp?.GetValue(vehicle, null);
+                    if (cs != null && _siteIdField != null) csId = Convert.ToInt32(_siteIdField.GetValue(cs));
+                }
+                catch { csId = -1; }
                 _startExploringMethod.Invoke(vehicle, null);
+                Debug.Log("[Multipleer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
+                    + " currentSite=" + csId + " → StartExploringCurrentSite invoked");
                 return true;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.StartExploringCurrentSite failed: " + ex.Message); return false; }

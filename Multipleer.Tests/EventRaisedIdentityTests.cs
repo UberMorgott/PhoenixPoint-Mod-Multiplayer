@@ -24,6 +24,18 @@ public class EventRaisedIdentityTests
     }
 
     [Fact]
+    public void EventRaised_IdentityInspectedFlag_RoundTrips()
+    {
+        // The identity block's per-faction reveal flag rides the SAME wire as the GeoSite channel (symmetric byte).
+        var id = new GeoSiteState(55, "FAC", siteType: 10, state: 1, siteName: "K", encounterID: "E", inspected: true);
+        var bytes = SyncProtocol.EncodeEventRaised(1, "EV_INSP", 55, 2, identity: id);
+        Assert.True(SyncProtocol.TryDecodeEventRaised(bytes, out _, out _, out _, out _, out var hasId, out var got));
+        Assert.True(hasId);
+        Assert.True(got.Inspected);
+        Assert.Equal(id, got);
+    }
+
+    [Fact]
     public void EventRaised_NoIdentity_DecodesHasIdentityFalse()
     {
         // Default (no identity) must NOT append the block → hasIdentity=false, and the 4-field prefix stays

@@ -121,8 +121,26 @@ public class GeoSiteSnapshotTests
             0x01,                       // State = 1
             0x01, 0x00, 0x42,           // nameLen=1, "B"
             0x01, 0x00, 0x43,           // encLen=1, "C"
+            0x00,                       // Inspected = false
         };
         Assert.Equal(expected, bytes);
+    }
+
+    [Fact]
+    public void Snapshot_RoundTrips_InspectedFlag()
+    {
+        // The per-faction reveal flag (exploration outcome) must survive the round-trip both ways.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", inspected: true));
+        snap.Sites.Add(new GeoSiteState(2, "o", 10, 1, "n", "e", inspected: false));
+
+        var rt = RoundTrip(snap);
+
+        Assert.True(rt.Sites[0].Inspected);
+        Assert.False(rt.Sites[1].Inspected);
+        // Inspected participates in structural equality (distinguishes an otherwise-identical revealed site).
+        Assert.NotEqual(snap.Sites[0], snap.Sites[1]);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
     }
 
     // ─── registration: the GeoSite channel claims a distinct, stable surface/channel id ────

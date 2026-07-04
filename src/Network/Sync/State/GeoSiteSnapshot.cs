@@ -16,6 +16,14 @@ namespace Multipleer.Network.Sync.State
     /// via <c>Enum.ToObject(enumType, byteValue)</c>. <c>OwnerFactionDefGuid</c> is the owning
     /// <c>GeoFaction.Def.Guid</c> (resolved back to a live faction on the client). <c>SiteName</c> is the
     /// <c>LocalizedTextBind.LocalizationKey</c> the card's token replacement reads.
+    ///
+    /// <c>Inspected</c> = the site's <c>GetInspected(ViewerFaction)</c> per-faction reveal flag (GeoSite.cs:398).
+    /// A site EXPLORATION (host <c>GeoVehicle.StartExploringCurrentSite</c> → completion → <c>SetInspected(faction,
+    /// true)</c>, GeoFaction.cs:1922) fires <c>SiteInspectedChanged</c> — which the channel already subscribes —
+    /// but the reveal itself is per-faction display state the sim-frozen client never derives; without carrying it
+    /// the client refreshes the site IDENTITY yet never flips its revealed state, so a client-relayed "Explore POI"
+    /// order looked like it did nothing. Optional trailing field (default false) so every existing DTO/wire caller
+    /// is unaffected.
     /// </summary>
     public readonly struct GeoSiteState : IEquatable<GeoSiteState>
     {
@@ -25,8 +33,9 @@ namespace Multipleer.Network.Sync.State
         public readonly byte State;        // raw GeoSiteState enum value
         public readonly string SiteName;   // LocalizedTextBind.LocalizationKey
         public readonly string EncounterID;
+        public readonly bool Inspected;    // GetInspected(ViewerFaction) — per-faction site reveal (exploration outcome)
 
-        public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID)
+        public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID, bool inspected = false)
         {
             SiteId = siteId;
             // Normalize null → "" so equality + the wire are stable (the codec also coalesces, this keeps
@@ -36,6 +45,7 @@ namespace Multipleer.Network.Sync.State
             State = state;
             SiteName = siteName ?? "";
             EncounterID = encounterID ?? "";
+            Inspected = inspected;
         }
 
         public bool Equals(GeoSiteState other)
@@ -44,7 +54,8 @@ namespace Multipleer.Network.Sync.State
                && SiteType == other.SiteType
                && State == other.State
                && SiteName == other.SiteName
-               && EncounterID == other.EncounterID;
+               && EncounterID == other.EncounterID
+               && Inspected == other.Inspected;
 
         public override bool Equals(object obj) => obj is GeoSiteState o && Equals(o);
 
@@ -58,12 +69,13 @@ namespace Multipleer.Network.Sync.State
                 h = (h * 397) ^ State;
                 h = (h * 397) ^ (SiteName?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (EncounterID?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (Inspected ? 1 : 0);
                 return h;
             }
         }
 
         public override string ToString()
-            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID})";
+            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected})";
     }
 
     /// <summary>
@@ -75,7 +87,7 @@ namespace Multipleer.Network.Sync.State
     /// <see cref="DiplomacySnapshot"/> / <see cref="ResearchSnapshot"/>).
     ///
     /// Wire payload (inside StateSync):
-    ///   [u16 count]{[i32 SiteId][u16 ownerLen][ownerGuid utf8][u8 SiteType][u8 State][u16 nameLen][siteName utf8][u16 encLen][EncounterID utf8]}*
+    ///   [u16 count]{[i32 SiteId][u16 ownerLen][ownerGuid utf8][u8 SiteType][u8 State][u16 nameLen][siteName utf8][u16 encLen][EncounterID utf8][u8 Inspected]}*
     ///
     /// Case A only: this mirrors EXISTING client sites (resolved by SiteId). Vanilla never creates sites
     /// in-play, so a snapshot id absent on the client is logged + skipped (Case B / site creation deferred).
@@ -99,6 +111,7 @@ namespace Multipleer.Network.Sync.State
                     w.Write(s.State);
                     WriteStr(w, s.SiteName);
                     WriteStr(w, s.EncounterID);
+                    w.Write((byte)(s.Inspected ? 1 : 0));
                 }
                 return ms.ToArray();
             }
@@ -122,7 +135,8 @@ namespace Multipleer.Network.Sync.State
                         byte state = r.ReadByte();
                         string siteName = ReadStr(r);
                         string encounterId = ReadStr(r);
-                        snap.Sites.Add(new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId));
+                        bool inspected = r.ReadByte() != 0;
+                        snap.Sites.Add(new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected));
                     }
                     return snap;
                 }
