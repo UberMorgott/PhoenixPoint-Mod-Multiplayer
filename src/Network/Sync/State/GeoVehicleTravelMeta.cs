@@ -45,6 +45,22 @@ namespace Multiplayer.Network.Sync.State
         /// with <see cref="GeoVehiclePos"/> so both surfaces resolve the SAME live vehicle.</summary>
         public long Key => GeoVehiclePos.MakeKey(OwnerId, VehicleId);
 
+        // Native GeoVehicle Animator "State" integer (decompile-verified GeoVehicle.cs): the flight-visual state
+        // machine that orients the turbine/engine tracer VFX. PARKED=0 (idle hover config), TRAVELLING=1 (forward-
+        // flight config: turbines aimed back → trail streams behind). Natively set to 1 by InitiateTravelling()
+        // (:583, invoked from inside GeoNavComponent.NavigateRoutine :100) and back to 0 on arrival (:344 / :513).
+        public const int AnimStateParked = 0;
+        public const int AnimStateTravelling = 1;
+
+        /// <summary>PURE: map the mirrored <see cref="Travelling"/> flag to the native GeoVehicle Animator "State"
+        /// integer. On a sim-frozen co-op CLIENT the native <c>NavigateRoutine</c> never runs, so
+        /// <c>InitiateTravelling()</c> (the SOLE writer of State=1) never fires and the Animator stays PARKED while
+        /// the position mirror flies the vehicle — leaving the turbine tracer VFX in its parked orientation (renders
+        /// IN FRONT instead of trailing). The travel-meta mirror writes this value to close that gap. Unit-testable
+        /// without Unity.</summary>
+        public static int AnimatorTravelState(bool travelling)
+            => travelling ? AnimStateTravelling : AnimStateParked;
+
         public bool Equals(GeoVehicleTravelMeta o)
         {
             if (OwnerId != o.OwnerId || VehicleId != o.VehicleId || Travelling != o.Travelling

@@ -49,6 +49,15 @@ namespace Multiplayer.Network.Sync
         private static MethodInfo _fromSeconds;           // TimeUnit.FromSeconds(float) — static
         private static MethodInfo _opAdd, _opSub;         // TimeUnit operator + / - (static)
 
+        // ─── explore-button REFRESH (deliberate UX: grey the button while exploring) ──────────────────────────
+        // Drive the SAME native refresh the game fires when an ability's disabled-state changes:
+        // GeoAbility.AbilityStateChangeCheck() → OnAbilityStateChanged → UIStateVehicleSelected.UpdateVehicleActions
+        // (rebuilds the action bar, re-querying GetDisabledState — now explore-aware via ExploreButtonDisablePatch).
+        // ExploreSiteAbility never calls this itself on explore start/stop, so we trigger it at those transitions.
+        private static bool _refreshBound;
+        private static MethodInfo _getExploreAbility;     // GeoVehicle.GetAbility<ExploreSiteAbility>() (closed generic)
+        private static MethodInfo _abilityStateCheck;     // GeoAbility.AbilityStateChangeCheck() — protected, no-arg
+
         private static void Ensure(GeoRuntime rt)
         {
             if (_ready) return;
@@ -208,5 +217,58 @@ namespace Multiplayer.Network.Sync
             end = _opAdd.Invoke(null, new[] { now, offAfter });      // Now + (1-f)·W
             return start != null && end != null;
         }
+
+        // ─── explore-button refresh trigger (host postfix + client mirror both call in) ───────────────────────
+
+        /// <summary>Best-effort bind of <c>GeoVehicle.GetAbility&lt;ExploreSiteAbility&gt;()</c> (closed off a LIVE
+        /// vehicle) + the protected <c>GeoAbility.AbilityStateChangeCheck()</c>. Bind-once; a miss leaves the members
+        /// null so <see cref="RefreshExploreAbilityState(object)"/> degrades to a no-op. Never throws.</summary>
+        private static void EnsureRefreshBinding(object vehicle)
+        {
+            if (_refreshBound) return;
+            if (vehicle == null) return;   // retry once a live vehicle is available
+            try
+            {
+                var exploreAbilityType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Abilities.ExploreSiteAbility");
+                var geoAbilityType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Abilities.GeoAbility");
+                if (exploreAbilityType == null || geoAbilityType == null) return;
+                // The 0-arg, 1-generic-param GetAbility<T>() (ActorComponent.GetAbility<T>()), disambiguated from
+                // the GetAbility<T>(object source) overload — same resolution VehicleTravelReflection uses.
+                MethodInfo openGetAbility = null;
+                foreach (var m in vehicle.GetType().GetMethods())
+                {
+                    if (m.Name == "GetAbility" && m.IsGenericMethodDefinition
+                        && m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 0)
+                    { openGetAbility = m; break; }
+                }
+                _getExploreAbility = openGetAbility?.MakeGenericMethod(exploreAbilityType);
+                _abilityStateCheck = AccessTools.Method(geoAbilityType, "AbilityStateChangeCheck");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer][geo] EnsureRefreshBinding failed (button refresh disabled): " + ex.Message); }
+            finally { _refreshBound = _getExploreAbility != null && _abilityStateCheck != null; }
+        }
+
+        /// <summary>Re-evaluate the vehicle's <c>ExploreSiteAbility</c> disabled-state via the native
+        /// <c>AbilityStateChangeCheck()</c> so a change fires <c>OnAbilityStateChanged</c> → the vehicle-selected UI
+        /// rebuilds the action bar (grey/ungrey the explore button). Best-effort; a bind/resolve miss is a silent
+        /// no-op. Called from the host <c>ExploreCurrentSite</c>/<c>EndExploreCurrentSite</c> postfix and from the
+        /// client mirror on a start↔stop transition.</summary>
+        public static void RefreshExploreAbilityState(object vehicle)
+        {
+            try
+            {
+                if (vehicle == null) return;
+                EnsureRefreshBinding(vehicle);
+                if (_getExploreAbility == null || _abilityStateCheck == null) return;
+                object ability = _getExploreAbility.Invoke(vehicle, null);
+                if (ability == null) return;   // vehicle has no explore ability (e.g. no soldiers slot) → nothing to refresh
+                _abilityStateCheck.Invoke(ability, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][geo] RefreshExploreAbilityState failed: " + ex.Message); }
+        }
+
+        /// <summary>Resolve-by-key overload for the CLIENT mirror (the host postfix passes the live vehicle directly).</summary>
+        public static void RefreshExploreAbilityState(GeoRuntime rt, int ownerId, int vehicleId)
+            => RefreshExploreAbilityState(VehicleTravelReflection.ResolveVehicle(rt, ownerId, vehicleId));
     }
 }

@@ -53,6 +53,8 @@ namespace Multiplayer.Network.Sync
         private static FieldInfo _destSitesField;    // GeoVehicle._destinationSites (List<GeoSite> backing)
         private static FieldInfo _currentSiteBacking; // GeoVehicle.<CurrentSite>k__BackingField (GeoSite)
         private static FieldInfo _siteIdField;       // GeoSite.SiteId (int)
+        private static FieldInfo _animatorField;     // GeoVehicle.Animator (UnityEngine.Animator, public :55) — flight-visual state machine
+        private static MethodInfo _animatorSetInteger; // UnityEngine.Animator.SetInteger(string,int) — resolved off the field type (no AnimationModule ref)
         private static MethodInfo _startTravelMethod; // GeoVehicle.StartTravel(List<GeoSite>)
         private static MethodInfo _startExploringMethod; // GeoVehicle.StartExploringCurrentSite() — no args
 
@@ -91,6 +93,11 @@ namespace Multiplayer.Network.Sync
             _destSitesField = AccessTools.Field(_geoVehicleType, "_destinationSites");
             _currentSiteBacking = AccessTools.Field(_geoVehicleType, "<CurrentSite>k__BackingField");
             _siteIdField = AccessTools.Field(_geoSiteType, "SiteId");
+            _animatorField = AccessTools.Field(_geoVehicleType, "Animator");   // flight-visual state (turbine tracer orientation)
+            // Resolve Animator.SetInteger(string,int) off the field's runtime type so this reflection bridge needs no
+            // UnityEngine.AnimationModule compile reference (it is linked into the Unity-free test project).
+            if (_animatorField != null)
+                _animatorSetInteger = AccessTools.Method(_animatorField.FieldType, "SetInteger", new[] { typeof(string), typeof(int) });
 
             _geoSiteListType = typeof(List<>).MakeGenericType(_geoSiteType);
             // Exact param match disambiguates StartTravel(List<GeoSite>) from StartTravel(List<Vector3>).
@@ -431,6 +438,24 @@ namespace Multiplayer.Network.Sync
                 {
                     try { _travelingField.SetValue(vehicle, meta.Travelling); }
                     catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta travelling failed (skipped): " + ex.Message); }
+                }
+
+                // Flight-visual Animator "State" (turbine tracer FIX): the sim-frozen client never runs
+                // NavigateRoutine → InitiateTravelling()'s Animator.SetInteger("State",1) never fires, so the vehicle
+                // stays in the PARKED visual state (turbines idle-oriented) while the position mirror flies it —
+                // making the engine tracer VFX render IN FRONT instead of trailing. Mirror the state off the
+                // (already-mirrored) Travelling flag: TRAVELLING=1 / PARKED=0, exactly what the native writers do.
+                // Idempotent (SetInteger no-ops on an unchanged value); the 0xA6 surface only ships on a genuine
+                // travel transition, so this runs on start/arrival only.
+                if (_animatorField != null && _animatorSetInteger != null)
+                {
+                    try
+                    {
+                        var anim = _animatorField.GetValue(vehicle);
+                        if (anim != null)
+                            _animatorSetInteger.Invoke(anim, new object[] { "State", GeoVehicleTravelMeta.AnimatorTravelState(meta.Travelling) });
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta animator state failed (skipped): " + ex.Message); }
                 }
                 return true;
             }

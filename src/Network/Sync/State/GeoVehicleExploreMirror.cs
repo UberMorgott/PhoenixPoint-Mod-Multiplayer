@@ -32,8 +32,19 @@ namespace Multiplayer.Network.Sync.State
         // HOST: last-broadcast signature per composite key — skip a vehicle whose exploration state is unchanged.
         private static readonly Dictionary<long, string> _lastSig = new Dictionary<long, string>();
 
-        /// <summary>Drop per-session host state (recreated per session in the <see cref="SyncEngine"/> ctor).</summary>
-        public static void ResetForNewSession() => _lastSig.Clear();
+        // CLIENT: the mirrored per-vehicle "is exploring" flag (composite keys currently exploring per the host's
+        // 0xA7 stream). This is the AUTHORITATIVE client-side source for the explore-button grey-out
+        // (ExploreButtonDisablePatch) — robust even when the client's best-effort native bar-spawn (which would
+        // otherwise flip GeoVehicle.IsExploringSite) failed. Populated ONLY on the frozen client (HandleExplore is
+        // client-gated); empty on the host, which reads native IsExploringSite instead.
+        private static readonly HashSet<long> _clientExploring = new HashSet<long>();
+
+        /// <summary>Drop per-session state (recreated per session in the <see cref="SyncEngine"/> ctor).</summary>
+        public static void ResetForNewSession() { _lastSig.Clear(); _clientExploring.Clear(); }
+
+        /// <summary>CLIENT read: is the vehicle behind <paramref name="key"/> currently exploring per the mirrored
+        /// 0xA7 state? Used by the explore-button disable patch on an active client.</summary>
+        public static bool IsExploringMirrored(long key) => _clientExploring.Contains(key);
 
         // ─── HOST: poll each vehicle's exploration progress + broadcast the changed batch ─────────────────────
 
@@ -104,7 +115,19 @@ namespace Multiplayer.Network.Sync.State
                 int applied = 0;
                 using (SyncApplyScope.Enter())
                     foreach (var meta in vehicles)
+                    {
+                        // Update the authoritative client exploring flag BEFORE applying/refreshing so the button
+                        // disable patch (read via IsExploringMirrored during the refresh's GetDisabledState recompute)
+                        // sees the new value. Then, on a genuine start↔stop transition, drive the SAME native refresh
+                        // the game uses when an ability's state changes (AbilityStateChangeCheck → OnAbilityStateChanged
+                        // → UIStateVehicleSelected.UpdateVehicleActions) so the button greys/ungreys immediately —
+                        // no custom UI redraw, and independent of whether the native progress bar spawned.
+                        bool wasExploring = _clientExploring.Contains(meta.Key);
+                        if (meta.Exploring) _clientExploring.Add(meta.Key); else _clientExploring.Remove(meta.Key);
                         if (GeoVehicleExploreReflection.ApplyExploreMeta(rt, meta)) applied++;
+                        if (wasExploring != meta.Exploring)
+                            GeoVehicleExploreReflection.RefreshExploreAbilityState(rt, meta.OwnerId, meta.VehicleId);
+                    }
                 seq.Mark(SurfaceIds.GeoVehicleExplore, s);
                 if (applied > 0)
                     Debug.Log("[Multiplayer][geo] CLIENT applied geo.vehicleexplore seq=" + s + " vehicles=" + applied);
