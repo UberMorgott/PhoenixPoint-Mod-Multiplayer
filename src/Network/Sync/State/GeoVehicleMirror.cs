@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text;
 using HarmonyLib;
 using Multipleer.Network;
 using Multipleer.Network.MessageLayer;
@@ -57,6 +58,23 @@ namespace Multipleer.Network.Sync.State
         // last flush so a PARKED vehicle produces ZERO bytes (only genuinely-moving vehicles are shipped).
         private static readonly Dictionary<int, string> _lastSig = new Dictionary<int, string>();
 
+        // ─── DIAGNOSTICS (Inc4 S2 travel-mirror gate #3, 2026-07-04) — pure logging, ZERO behaviour change ──
+        // The pipeline ships+applies 25 vehicles/poll yet the client shows no movement; the decompile has
+        // already PROVEN the write field (pivot.localRotation) + target (mesh/marker hang off the pivot) are
+        // correct and that NOTHING re-writes the pivot on the frozen client (paused ⇒ NavigateRoutine's
+        // NextFrame yield is skipped, TimingScheduler.cs:484). These probes localize the last unknowns at
+        // RUNTIME: (a) does the client write HOLD across a poll or get REVERTED (stomp), (b) is the resolved
+        // instance the visible/active scene actor, (c) do host & client agree on the pivot quat AND world
+        // position for the SAME VehicleID (frame-alignment), (d) are the moving vehicles even viewer-visible.
+        // Throttled to 1 sample / DIAG_EVERY polls for the lowest-N VehicleIDs in the batch (host+client pick
+        // the SAME ids from the SAME batch, so lines pair up 1:1). Remove once the break is localized (spec §8).
+        private const int DIAG_EVERY = 8;                 // ~1 log burst / 2 s at the ~4 Hz poll
+        private const int DIAG_TRACK = 3;                 // lowest-3 ids in the batch
+        private static int _diagHostPoll;
+        private static int _diagClientApply;
+        private static readonly Dictionary<int, Quaternion> _diagClientPrevWritten = new Dictionary<int, Quaternion>();
+        private static PropertyInfo _pIsVisible, _pOwnedByViewer, _pTravelling, _pCurrentSite;
+
         // ─── HOST: poll every moving vehicle + broadcast the changed batch ─────────────────────────────────
 
         /// <summary>HOST (throttled from <c>SyncEngine.Tick</c>): read each map vehicle's globe placement (pivot
@@ -103,6 +121,7 @@ namespace Multipleer.Network.Sync.State
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoVehiclePos, SyncKind.StateSnapshot, payload)));
                 Debug.Log("[Multipleer][geo] HOST broadcast geo.vehiclepos seq=" + s + " vehicles=" + changed.Count);
+                DiagHost(vehicles, changed);   // DIAG: throttled per-vehicle transform probe (host side)
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][geo] HostPollAndBroadcast failed: " + ex.Message); }
         }
@@ -138,6 +157,8 @@ namespace Multipleer.Network.Sync.State
                         if (v == null) continue;
                         if (TryReadId(v, out int id)) byId[id] = v;
                     }
+
+                DiagClient(byId, vehicles);   // DIAG: read pre-write pivot + held-check BEFORE the apply loop
 
                 int applied = 0;
                 using (SyncApplyScope.Enter())
@@ -221,6 +242,125 @@ namespace Multipleer.Network.Sync.State
             if (_surfaceProp != null && _surfaceProp.GetValue(vehicle, null) is Transform surface && surface != null)
                 surface.localEulerAngles = new Vector3(rec.X, rec.Y, rec.Z);
             return true;
+        }
+
+        // ─── DIAGNOSTICS impl (pure logging; every call fully try/caught so it can never throw into the game) ──
+
+        private static void EnsureDiagReflection(Type t)
+        {
+            if (_pIsVisible == null) _pIsVisible = AccessTools.Property(t, "IsVisible");
+            if (_pOwnedByViewer == null) _pOwnedByViewer = AccessTools.Property(t, "IsOwnedByViewer");
+            if (_pTravelling == null) _pTravelling = AccessTools.Property(t, "Travelling");
+            if (_pCurrentSite == null) _pCurrentSite = AccessTools.Property(t, "CurrentSite");
+        }
+
+        private static string DiagProp(PropertyInfo p, object v)
+        {
+            try { return p?.GetValue(v, null)?.ToString() ?? "null"; } catch { return "err"; }
+        }
+
+        private static string DiagQuat(Quaternion q)
+            => "(" + q.x.ToString("F4") + "," + q.y.ToString("F4") + "," + q.z.ToString("F4") + "," + q.w.ToString("F4") + ")";
+
+        private static string DiagV3(Vector3 v)
+            => "(" + v.x.ToString("F2") + "," + v.y.ToString("F2") + "," + v.z.ToString("F2") + ")";
+
+        private static string DiagParentChain(Transform t)
+        {
+            if (t == null) return "none";
+            var sb = new StringBuilder();
+            int guard = 0;
+            for (Transform c = t; c != null && guard < 8; c = c.parent, guard++)
+            {
+                if (sb.Length > 0) sb.Append(" < ");
+                sb.Append(c.name);
+            }
+            return sb.ToString();
+        }
+
+        // The n lowest VehicleIDs in the batch — host & client compute this identically so their DIAG lines pair up.
+        private static HashSet<int> LowestIds(IList<GeoVehiclePos> batch, int n)
+        {
+            var ids = new List<int>(batch.Count);
+            foreach (var b in batch) ids.Add(b.VehicleId);
+            ids.Sort();
+            if (ids.Count > n) ids.RemoveRange(n, ids.Count - n);
+            return new HashSet<int>(ids);
+        }
+
+        /// <summary>HOST probe: for the lowest-N shipped ids, log the pivot quat being shipped + its WORLD pos +
+        /// parent frame + visibility/owner/travel/site, so the client's paired line can be compared 1:1.</summary>
+        private static void DiagHost(IEnumerable vehicles, List<GeoVehiclePos> changed)
+        {
+            try
+            {
+                if (changed == null || changed.Count == 0) return;
+                if ((++_diagHostPoll % DIAG_EVERY) != 0) return;
+                var tracked = LowestIds(changed, DIAG_TRACK);
+                foreach (var v in vehicles)
+                {
+                    if (v == null || !TryReadId(v, out int id) || !tracked.Contains(id)) continue;
+                    if (!(v is Component comp) || comp == null) continue;
+                    Transform pivot = comp.transform;
+                    EnsureDiagReflection(v.GetType());
+                    Debug.Log("[Multipleer][geo][DIAG-H] id=" + id + " name=" + comp.name
+                        + " active=" + comp.gameObject.activeInHierarchy
+                        + " ship=" + DiagQuat(pivot.localRotation)
+                        + " worldPos=" + DiagV3(pivot.position)
+                        + " parent=" + DiagParentChain(pivot.parent)
+                        + " parentWRot=" + (pivot.parent != null ? DiagQuat(pivot.parent.rotation) : "none")
+                        + " vis=" + DiagProp(_pIsVisible, v)
+                        + " mine=" + DiagProp(_pOwnedByViewer, v)
+                        + " travel=" + DiagProp(_pTravelling, v)
+                        + " site=" + DiagProp(_pCurrentSite, v));
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-H] " + ex.Message); }
+        }
+
+        /// <summary>CLIENT probe (called BEFORE the apply loop, so localRotation is the pre-write value):
+        /// for the lowest-N ids, compare the CURRENT pivot rotation to the value we wrote LAST poll —
+        /// HELD ⇒ the write survived (no stomp); REVERTED ⇒ something reset the pivot between polls. Also logs
+        /// the value about to be written, world pos, parent frame, active state and visibility so it pairs 1:1
+        /// with DIAG-H for the same id. Updates the per-id prev-written cache every poll (accurate held-check).</summary>
+        private static void DiagClient(Dictionary<int, object> byId, List<GeoVehiclePos> batch)
+        {
+            try
+            {
+                if (batch == null || batch.Count == 0) return;
+                bool fire = (++_diagClientApply % DIAG_EVERY) == 0;
+                var tracked = LowestIds(batch, DIAG_TRACK);
+                foreach (var rec in batch)
+                {
+                    if (!tracked.Contains(rec.VehicleId)) continue;
+                    if (!byId.TryGetValue(rec.VehicleId, out var vo) || !(vo is Component comp) || comp == null) continue;
+                    Transform pivot = comp.transform;
+                    Quaternion before = pivot.localRotation;                                 // pre-write (this poll)
+                    Quaternion willWrite = new Quaternion(rec.QX, rec.QY, rec.QZ, rec.QW);
+                    string held = "n/a(first)";
+                    if (_diagClientPrevWritten.TryGetValue(rec.VehicleId, out var prev))
+                        held = Quaternion.Angle(before, prev) < 0.05f
+                            ? "HELD"
+                            : "REVERTED(before=" + DiagQuat(before) + " prevWrote=" + DiagQuat(prev) + ")";
+                    _diagClientPrevWritten[rec.VehicleId] = willWrite;
+                    if (fire)
+                    {
+                        EnsureDiagReflection(vo.GetType());
+                        Debug.Log("[Multipleer][geo][DIAG-C] id=" + rec.VehicleId + " name=" + comp.name
+                            + " active=" + comp.gameObject.activeInHierarchy
+                            + " held=" + held
+                            + " willWrite=" + DiagQuat(willWrite)
+                            + " worldPos=" + DiagV3(pivot.position)
+                            + " parent=" + DiagParentChain(pivot.parent)
+                            + " parentWRot=" + (pivot.parent != null ? DiagQuat(pivot.parent.rotation) : "none")
+                            + " vis=" + DiagProp(_pIsVisible, vo)
+                            + " mine=" + DiagProp(_pOwnedByViewer, vo)
+                            + " travel=" + DiagProp(_pTravelling, vo)
+                            + " site=" + DiagProp(_pCurrentSite, vo));
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][geo][DIAG-C] " + ex.Message); }
         }
     }
 }
