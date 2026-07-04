@@ -66,11 +66,14 @@ namespace Multipleer.Network.Sync.State
     public static class GeoVehicleMirror
     {
         // ─── CLIENT: snapshot interpolation (Inc4 S2 smoothing) ──────────────────────────────────────────────
-        // Render latency behind the newest snapshot: ~1.5 × the nominal ~0.25 s (4 Hz, VehiclePollTickInterval=15
-        // @60fps) emit interval, so the two snapshots straddling the render clock are always in the buffer and the
-        // client interpolates between them (rather than extrapolating past the newest). Slow geoscape travel makes
-        // this ~0.375 s of visual latency imperceptible.
-        private const double InterpDelaySeconds = 0.375;
+        // Render latency behind the newest snapshot, DERIVED from the canonical emit cadence in VehicleEmitScheduler
+        // (was a hardcoded 0.375 @ the old 15-tick cadence): 1.5 emit-intervals so the two snapshots straddling the
+        // render clock are always buffered and the client interpolates between them (never extrapolates past the
+        // newest). At 6 ticks/60fps that is ~0.15 s — imperceptible for slow geoscape travel. Static readonly
+        // (computed via a pure helper); declared before _interp so it is initialised first. Bandwidth sanity: worst
+        // case ~25 vehicles × 36 B × 10 Hz ≈ 9 KB/s, fine.
+        private static readonly double InterpDelaySeconds = VehicleInterpolator.DeriveDelaySeconds(
+            VehicleEmitScheduler.EmitTickInterval, VehicleEmitScheduler.NominalFps, VehicleEmitScheduler.EmitDelayMultiplier);
         // Purge a key not refreshed within this window (destroyed/despawned vehicle, or one that stopped travelling
         // so the host no longer ships it) — many missed polls, far below a real gap.
         private const double StaleTtlSeconds = 5.0;

@@ -23,5 +23,6 @@ namespace Multipleer.Network.Sync
 
         // Vehicles / geoscape travel 40-49
         public const ushort MoveVehicle = 40;
+        public const ushort ExploreSite = 41;
     }
 }

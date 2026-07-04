@@ -64,6 +64,19 @@ namespace Multipleer.Network.Sync.State
         /// <summary>The render latency: samples are rendered at <c>now - DelaySeconds</c>.</summary>
         public double DelaySeconds => _delaySeconds;
 
+        /// <summary>Derive the render latency from the host EMIT cadence so the delay auto-tracks the poll rate
+        /// (no hardcoded magic number that silently rots when the cadence is retuned): render
+        /// <paramref name="emitMultiplier"/> emit-intervals behind the newest snapshot, where one emit interval =
+        /// <paramref name="emitTickInterval"/> ticks / <paramref name="nominalFps"/>. With the default
+        /// 1.5 × (6 / 60) that is 0.15 s — enough that the two snapshots straddling the render clock are always
+        /// buffered (interpolate, never extrapolate), yet imperceptible for slow geoscape travel. Pure — the
+        /// interp-delay derivation is directly unit-testable without Unity/SyncEngine.</summary>
+        public static double DeriveDelaySeconds(int emitTickInterval, double nominalFps, double emitMultiplier)
+        {
+            if (nominalFps <= 0.0) return 0.0;
+            return emitMultiplier * (emitTickInterval / nominalFps);
+        }
+
         /// <summary>Number of live keys currently buffered.</summary>
         public int Count => _buffers.Count;
 

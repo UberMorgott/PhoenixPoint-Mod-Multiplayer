@@ -36,6 +36,7 @@ namespace Multipleer.Network.Sync
 
             // Vehicles / geoscape travel
             SyncedActionRegistry.Register(SyncedActionIds.MoveVehicle, MoveVehicleAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.ExploreSite, ExploreSiteAction.Read);
         }
     }
 }

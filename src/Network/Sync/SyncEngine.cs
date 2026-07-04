@@ -64,9 +64,11 @@ namespace Multipleer.Network.Sync
         // carries only the vehicle-position mirror; other live geoscape surfaces can share it.
         private readonly SurfaceSeq _geoLiveSeq = new SurfaceSeq();
         private int _vehiclePollTick;   // host: frame counter throttling the vehicle-placement poll
-        // Poll moving-vehicle placements every Nth Tick (matches the wallet-poll cadence, ~4 Hz at 60 fps).
-        // The per-vehicle signature skip makes a parked-vehicle tick ~free; only moving vehicles ship bytes.
-        private const int VehiclePollTickInterval = 15;
+        // Poll moving-vehicle placements every Nth Tick. The cadence lives in VehicleEmitScheduler (single source of
+        // truth: GeoVehicleMirror's derived interp delay must track this rate), now 6 ticks / ~10 Hz @60fps (was 15
+        // / ~4 Hz) for tighter perceived latency. The per-vehicle signature skip makes a parked-vehicle tick ~free;
+        // only moving vehicles ship bytes, so faster polling costs nothing at rest.
+        private const int VehiclePollTickInterval = VehicleEmitScheduler.EmitTickInterval;
 
         // ─── Client geoscape-event raise/dismiss correlation (occurrence-id keyed) ─────────
         // Pure, Unity-free ordering brain: keys raise/dismiss on the host-synthesized per-occurrence id so two
@@ -130,6 +132,20 @@ namespace Multipleer.Network.Sync
             var payload = WriteAction(a);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ActionApply,
                 SyncProtocol.EncodeActionApply(a.ActionId, seq, payload)));
+            // Host-LOCAL vehicle order (travel/explore) just changed authoritative travel state → ship the mirror
+            // now instead of waiting up to a full poll interval (route line + first placement feel instant).
+            if (VehicleEmitScheduler.TriggersImmediateEmit(a.Category)) RequestImmediateVehicleEmit();
+        }
+
+        /// <summary>Host: collapse the vehicle-mirror poll latency to the NEXT Tick after an order that just changed
+        /// a vehicle's authoritative travel state (StartTravel / StartExploringCurrentSite), so the 0xA5 placement +
+        /// 0xA6 route-line meta ship at once instead of up to a full poll interval later. No-op off-host / freeze-OFF
+        /// (nothing polls then). Idempotent; the existing Tick poll path does the actual read+broadcast next frame
+        /// (not mid-apply — the transform hasn't moved yet at StartTravel time; the 0xA6 meta change is what ships).</summary>
+        public void RequestImmediateVehicleEmit()
+        {
+            if (_engine == null || !_engine.IsHost || !ClientSimFreeze.Enabled) return;
+            _vehiclePollTick = VehicleEmitScheduler.ArmImmediate(VehiclePollTickInterval);
         }
 
         // ─── Inbound: host ────────────────────────────────────────────────
@@ -219,6 +235,9 @@ namespace Multipleer.Network.Sync
             _tracker.Mark(seq);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ActionApply,
                 SyncProtocol.EncodeActionApply(id, seq, payload)));
+            // Client-relayed vehicle order (travel/explore) just applied authoritatively → ship the mirror now
+            // instead of waiting up to a full poll interval (tightens the click→visible-motion latency).
+            if (VehicleEmitScheduler.TriggersImmediateEmit(action.Category)) RequestImmediateVehicleEmit();
         }
 
         // ─── Inbound: client ──────────────────────────────────────────────

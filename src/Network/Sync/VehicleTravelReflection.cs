@@ -54,6 +54,7 @@ namespace Multipleer.Network.Sync
         private static FieldInfo _currentSiteBacking; // GeoVehicle.<CurrentSite>k__BackingField (GeoSite)
         private static FieldInfo _siteIdField;       // GeoSite.SiteId (int)
         private static MethodInfo _startTravelMethod; // GeoVehicle.StartTravel(List<GeoSite>)
+        private static MethodInfo _startExploringMethod; // GeoVehicle.StartExploringCurrentSite() — no args
 
         private static void Ensure(GeoRuntime rt)
         {
@@ -84,10 +85,19 @@ namespace Multipleer.Network.Sync
             _geoSiteListType = typeof(List<>).MakeGenericType(_geoSiteType);
             // Exact param match disambiguates StartTravel(List<GeoSite>) from StartTravel(List<Vector3>).
             _startTravelMethod = AccessTools.Method(_geoVehicleType, "StartTravel", new[] { _geoSiteListType });
+            // Explore relay: no-arg command that explores the vehicle's own CurrentSite (GeoVehicle.cs:414). Optional
+            // (does not gate _ready — a missing member just degrades the explore relay, never the travel path).
+            _startExploringMethod = AccessTools.Method(_geoVehicleType, "StartExploringCurrentSite");
 
             _ready = _vehiclesProp != null && _vehicleIdField != null && _ownerProp != null
                      && _siteIdField != null && _startTravelMethod != null;
         }
+
+        /// <summary>Force the bind-once reflection cache. Interceptors with a travel path arg trigger it implicitly
+        /// via <see cref="ReadPathSiteIds"/>; the explore relay has no such arg, so <c>ExploreSitePatch</c> calls
+        /// this before <see cref="TryReadVehicleKey"/> so <c>_vehicleIdField</c>/<c>_ownerProp</c> are bound (else
+        /// the key read fails and a frozen-client order would run locally + die).</summary>
+        public static void EnsureBound(GeoRuntime rt) => Ensure(rt);
 
         // ─── shared: composite (OwnerId, VehicleId) key off a live GeoVehicle ─────────────────────────────────
 
@@ -212,6 +222,27 @@ namespace Multipleer.Network.Sync
                 return true;
             }
             catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.StartTravel failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>HOST: resolve the vehicle for the composite (OwnerId, VehicleId) key and run the authoritative
+        /// no-arg <c>GeoVehicle.StartExploringCurrentSite()</c> — it explores the vehicle's OWN CurrentSite, which on
+        /// the host is the authoritative position (it arrived there via the mirrored travel). The timed exploration
+        /// then runs on the host clock; its completion fires <c>GeoVehicle.SiteExplored</c> → the site reveal /
+        /// encounter, which reaches the client via the existing geoscape event replication (the client never runs
+        /// the frozen timer). Returns true if the vehicle resolved + the method invoked. No-op (false) if the
+        /// vehicle / method is unresolvable.</summary>
+        public static bool StartExploringCurrentSite(GeoRuntime rt, int ownerId, int vehicleId)
+        {
+            try
+            {
+                Ensure(rt);
+                if (_startExploringMethod == null) return false;
+                object vehicle = ResolveVehicle(rt, ownerId, vehicleId);
+                if (vehicle == null) return false;
+                _startExploringMethod.Invoke(vehicle, null);
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multipleer][geo] VehicleTravelReflection.StartExploringCurrentSite failed: " + ex.Message); return false; }
         }
 
         // ─── host read / client write: travel METADATA (route-line mirror) ────────────────────────────────────
