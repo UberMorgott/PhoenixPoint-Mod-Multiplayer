@@ -165,6 +165,8 @@
     <Compile Include="..\src\Network\Sync\Actions\ExploreSiteAction.cs"><Link>Sync\Actions\ExploreSiteAction.cs</Link></Compile>
     <!-- Pure, Unity-free host vehicle-mirror emit scheduler (immediate-emit trigger predicate + throttle math). -->
     <Compile Include="..\src\Network\Sync\VehicleEmitScheduler.cs"><Link>Sync\VehicleEmitScheduler.cs</Link></Compile>
+    <!-- Pure, Unity-free host explore-apply guard (native-Activate vs direct-fallback decision). -->
+    <Compile Include="..\src\Network\Sync\ExploreApplyDecision.cs"><Link>Sync\ExploreApplyDecision.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Sync\SyncRegistration.cs</Link></Compile>
     <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
     <Compile Include="..\src\Network\ClientIdentity.cs"><Link>ClientIdentity.cs</Link></Compile>

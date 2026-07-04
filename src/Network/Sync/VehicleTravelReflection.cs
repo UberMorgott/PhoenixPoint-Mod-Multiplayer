@@ -56,6 +56,16 @@ namespace Multiplayer.Network.Sync
         private static MethodInfo _startTravelMethod; // GeoVehicle.StartTravel(List<GeoSite>)
         private static MethodInfo _startExploringMethod; // GeoVehicle.StartExploringCurrentSite() — no args
 
+        // ─── native explore-ability activation path (Symptom A: route the host apply through the SAME
+        // ExploreSiteAbility.Activate a local host click uses, not a raw StartExploringCurrentSite). Optional /
+        // best-effort — a miss just degrades to the direct call; never gates _ready. ─────────────────────────────
+        private static bool _exploreAbilityBound;
+        private static Type _exploreAbilityType;        // PhoenixPoint...Abilities.ExploreSiteAbility
+        private static MethodInfo _getExploreAbility;    // GeoVehicle.GetAbility<ExploreSiteAbility>() (closed generic)
+        private static MethodInfo _getDefaultTarget;     // GeoAbility.GetDefaultTarget() : GeoAbilityTarget
+        private static MethodInfo _canActivate;          // GeoAbility.CanActivate(GeoAbilityTarget)
+        private static MethodInfo _activate;             // GeoAbility.Activate(GeoAbilityTarget)
+
         private static void Ensure(GeoRuntime rt)
         {
             if (_ready) return;
@@ -236,16 +246,15 @@ namespace Multiplayer.Network.Sync
             try
             {
                 Ensure(rt);
-                if (_startExploringMethod == null) return false;
                 object vehicle = ResolveVehicle(rt, ownerId, vehicleId);
                 if (vehicle == null)
                 {
                     Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId + " UNRESOLVED (no-op)");
                     return false;
                 }
-                // DIAG (Symptom A): confirm the host actually resolves the relayed vehicle and that its CurrentSite
-                // is present (StartExploringCurrentSite NREs on a null CurrentSite → the reveal never fires). The
-                // exploration OUTCOME (SetInspected reveal) now mirrors to the client via the GeoSite channel #5.
+                // DIAG: confirm the host actually resolves the relayed vehicle and that its CurrentSite is present
+                // (StartExploringCurrentSite NREs on a null CurrentSite → the reveal never fires). The exploration
+                // OUTCOME (SetInspected reveal) mirrors to the client via the GeoSite channel + progress via 0xA7.
                 int csId = -1;
                 try
                 {
@@ -253,12 +262,87 @@ namespace Multiplayer.Network.Sync
                     if (cs != null && _siteIdField != null) csId = Convert.ToInt32(_siteIdField.GetValue(cs));
                 }
                 catch { csId = -1; }
+
+                // Symptom A — NATIVE-FIRST: run the SAME entrypoint a local host click uses
+                // (OnActionConfirmed → ExploreSiteAbility.Activate(target) → ActivateInternal → StartExploringCurrentSite),
+                // including native CanActivate validation, so a client-relayed explore is indistinguishable from the
+                // host's own order. Terminates at the SAME patched StartExploringCurrentSite as the direct path, under
+                // the same SyncApplyScope (ExploreSitePatch passes through on IsApplying) → no extra relay/loop.
+                // Double-activation guard: CanActivate keeps us off Activate's disabled LogError path; ActivateInternal
+                // additionally no-ops while IsExploringSite. Any resolve/probe miss or CanActivate=false → fall back to
+                // the raw direct call (proven behavior — never drop a valid host order).
+                EnsureExploreAbility(vehicle);
+                bool abilityResolved = false, targetResolved = false, canActivate = false;
+                object ability = null, target = null;
+                try
+                {
+                    if (_getExploreAbility != null) ability = _getExploreAbility.Invoke(vehicle, null);
+                    abilityResolved = ability != null;
+                    if (abilityResolved && _getDefaultTarget != null)
+                    {
+                        target = _getDefaultTarget.Invoke(ability, null);
+                        targetResolved = target != null;
+                    }
+                    if (targetResolved && _canActivate != null)
+                        canActivate = (bool)_canActivate.Invoke(ability, new[] { target });
+                }
+                catch (Exception ex) { Debug.LogWarning("[Multiplayer][geo] host explore: native ability probe failed (using direct): " + ex.Message); }
+
+                if (ExploreApplyDecision.Decide(abilityResolved, targetResolved, canActivate) == ExploreApplyPath.NativeActivate
+                    && _activate != null)
+                {
+                    try
+                    {
+                        _activate.Invoke(ability, new[] { target });
+                        Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
+                            + " currentSite=" + csId + " → ExploreSiteAbility.Activate (native path)");
+                        return true;
+                    }
+                    catch (Exception ex) { Debug.LogWarning("[Multiplayer][geo] host explore: native Activate threw, falling back to direct: " + ex.Message); }
+                }
+
+                if (_startExploringMethod == null) return false;
                 _startExploringMethod.Invoke(vehicle, null);
                 Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
-                    + " currentSite=" + csId + " → StartExploringCurrentSite invoked");
+                    + " currentSite=" + csId + " → StartExploringCurrentSite (direct path; native probe a/t/c="
+                    + abilityResolved + "/" + targetResolved + "/" + canActivate + ")");
                 return true;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][geo] VehicleTravelReflection.StartExploringCurrentSite failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>Best-effort bind of the native explore-ability activation members off a LIVE vehicle (needed to
+        /// close the generic <c>GetAbility&lt;ExploreSiteAbility&gt;()</c>). Bind-once; a miss leaves the members null
+        /// so <see cref="StartExploringCurrentSite"/> degrades to the direct call. Never throws.</summary>
+        private static void EnsureExploreAbility(object vehicle)
+        {
+            if (_exploreAbilityBound) return;
+            if (vehicle == null) return;   // retry on a later call once a live vehicle is available
+            try
+            {
+                _exploreAbilityType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Abilities.ExploreSiteAbility");
+                var geoAbilityType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Abilities.GeoAbility");
+                var geoAbilityTargetType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Abilities.GeoAbilityTarget");
+                if (_exploreAbilityType == null || geoAbilityType == null || geoAbilityTargetType == null) return;
+
+                // GetAbility<T>() : the 0-arg, 1-generic-param overload (ActorComponent.GetAbility<T>() where
+                // T : Ability), inherited onto GeoVehicle. Disambiguated from GetAbility<T>(object source).
+                MethodInfo openGetAbility = null;
+                foreach (var m in vehicle.GetType().GetMethods())
+                {
+                    if (m.Name == "GetAbility" && m.IsGenericMethodDefinition
+                        && m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 0)
+                    { openGetAbility = m; break; }
+                }
+                _getExploreAbility = openGetAbility?.MakeGenericMethod(_exploreAbilityType);
+
+                // GeoAbility public API (exact param match disambiguates the obsolete Activate(object) override).
+                _getDefaultTarget = AccessTools.Method(geoAbilityType, "GetDefaultTarget");
+                _canActivate = AccessTools.Method(geoAbilityType, "CanActivate", new[] { geoAbilityTargetType });
+                _activate = AccessTools.Method(geoAbilityType, "Activate", new[] { geoAbilityTargetType });
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer][geo] EnsureExploreAbility bind failed (using direct explore): " + ex.Message); }
+            finally { _exploreAbilityBound = true; }
         }
 
         // ─── host read / client write: travel METADATA (route-line mirror) ────────────────────────────────────
