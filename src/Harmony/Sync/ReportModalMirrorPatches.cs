@@ -23,6 +23,19 @@ namespace Multiplayer.Harmony.Sync
     /// gate OFF the Postfix broadcasts nothing and the Prefix suppresses nothing → byte-for-byte unchanged.
     /// All best-effort try/catch; on any failure native runs (fail-open).
     ///
+    /// HOST TRANSPARENCY (S1 invariant — do not break): on the host the Prefix is pure-observe — it returns TRUE
+    /// (native runs) because <c>ClientShouldSuppress</c> only suppresses when <c>!IsHost</c>; the Postfix runs AFTER
+    /// native and only READS the already-shown modalData via reflection to broadcast it. Neither path mutates the
+    /// modal, its DialogCallback, its priority, or the ResearchElement, so the host's window (incl. the native
+    /// "new research available" line, whose visibility is <c>ResearchElement.UnlocksResearches</c> — deterministic
+    /// per def) is identical with the gate ON or OFF. Never move host work into the Prefix or mutate any arg here.
+    ///
+    /// CHANNEL OWNERSHIP (S3 invariant): this channel carries ONLY GeoscapeView modal openers (ModalType 6/14/25/38).
+    /// Geoscape EVENT windows are owned by the separate 0x65/0x66 event-replication channel and do NOT flow through
+    /// GeoscapeView.OpenModal/ModalType at all (they push a state-stack state — UIStateGeoscapeEvent — and have no
+    /// ModalType entry), so 0x69 can never carry an event window and the two channels cannot double-show. The tight
+    /// 4-type whitelist (<see cref="ReportModalClassifier"/>) enforces this; keep event types out of it.
+    ///
     /// Args are taken positionally as boxed objects (<c>__0</c> = ModalType enum, etc.) so the mod needs NO
     /// compile-time game-enum reference — the same boxing-injection pattern used by
     /// <c>SuppressedAbilityViewClearPatch</c> for its StateStackAction enum arg.

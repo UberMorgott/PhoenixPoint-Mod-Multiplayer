@@ -22,6 +22,7 @@ public class ReportModalClassifierTests
     [InlineData(1)]    // GeoHavenAttackOutcome (Phase-B mission outcome)
     [InlineData(5)]    // GeoScavengeOutcome (Phase-B mission outcome)
     [InlineData(7)]    // LoadPrompt
+    [InlineData(8)]    // SiteEncounter (encounter modal — event-adjacent; MUST stay out of the report channel, S3)
     [InlineData(13)]   // DualClassPicker (decision)
     [InlineData(23)]   // AlienResearchBrief (deferred C)
     [InlineData(33)]   // InterceptionOutcome (deferred C)
@@ -31,6 +32,26 @@ public class ReportModalClassifierTests
     [InlineData(9999)] // _CustomMission (would alias to byte 15 if truncated — must stay false)
     public void IsReportModal_NonReports_False(int modalType)
         => Assert.False(ReportModalClassifier.IsReportModal(modalType));
+
+    // ── S3 channel-ownership guard: across the ENTIRE ModalType enum, ONLY the 4 Phase-A reports are whitelisted.
+    // Proves no brief/outcome/encounter/decision modal can ever leak onto the 0x69 report channel — the geoscape
+    // EVENT channel (0x65/0x66) has exclusive ownership of event windows (which carry no ModalType at all). If a
+    // new report is ever whitelisted, this test forces the author to update the expected set deliberately.
+    [Fact]
+    public void IsReportModal_OnlyTheFourReports_AcrossEntireModalTypeEnum()
+    {
+        var whitelisted = new System.Collections.Generic.HashSet<int> { 6, 14, 25, 38 };
+        // ModalType spans None=-1 and 0..40 (GameHavenAttackBrief..GameDemoEnd), plus _CustomMission=9999.
+        foreach (var modalType in EnumerateModalTypeValues())
+            Assert.Equal(whitelisted.Contains(modalType), ReportModalClassifier.IsReportModal(modalType));
+    }
+
+    private static System.Collections.Generic.IEnumerable<int> EnumerateModalTypeValues()
+    {
+        yield return -1;      // None
+        for (int i = 0; i <= 40; i++) yield return i;
+        yield return 9999;    // _CustomMission
+    }
 
     // ── variant map ──────────────────────────────────────────────────────────────────────────────
     [Theory]
