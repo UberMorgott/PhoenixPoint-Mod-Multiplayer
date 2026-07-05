@@ -138,6 +138,18 @@ namespace Multiplayer.Harmony.Sync
                 if (!ReportMirrorGate.Enabled) return;
                 if (SyncApplyScope.IsApplying) return;        // never re-broadcast a reconstructed window
                 if (!ReportModalClassifier.IsReportModal(modalType)) return;
+                // Research variant: this Postfix runs INSIDE the Research.OnResearchCompleted dispatch, BEFORE
+                // the requirement subscribers flip dependent elements to Revealed/Unlocked — a payload read here
+                // ships a stale-false "new research available" nav flag (the 35e996e regression: client force-hid
+                // a line the host natively showed). Defer the build+broadcast to the next engine tick, where the
+                // read matches what the host's own bind renders (ReportModalClassifier.ShouldDeferHostBroadcast).
+                if (ReportModalClassifier.ShouldDeferHostBroadcast(modalType))
+                {
+                    engine.Sync?.QueueDeferredReportModal(modalType, modalData, priority);
+                    Debug.Log("[Multiplayer] HOST report modalType=" + modalType +
+                              " deferred to next tick (post-cascade nav-flag read)");
+                    return;
+                }
                 if (!ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) return;
                 Debug.Log("[Multiplayer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
                           " siteId=" + payload.SiteId + " defId=" + payload.DefId + " extras=" + (payload.ExtraIds?.Count ?? 0) +

@@ -198,9 +198,13 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>
         /// Host: the NATIVE "new research available" line visibility of the research-complete popup, as the
         /// bind computes it — <c>ResearchElement.UnlocksResearches.Any()</c> (GeoReseatchCompleteDataBind.cs:
-        /// 124-125 → SetResearchRewards toggles NewResearchesGroup on <c>Count() > 0</c>). Read AFTER the native
-        /// open (Postfix), i.e. after the completion cascade settled, exactly like the host's own bind at show
-        /// time. Returns a <see cref="ResearchNavMirror"/> tri-state: Unknown on ANY miss (the client then
+        /// 124-125 → SetResearchRewards toggles NewResearchesGroup on <c>Count() > 0</c>).
+        /// READ-TIMING CONTRACT: this recompute is only correct AFTER the research-completion cascade settles —
+        /// the OpenModal Postfix runs INSIDE the <c>Research.OnResearchCompleted</c> dispatch, before dependent
+        /// elements flip Revealed/Unlocked, so it must NOT be called from there (that shipped stale NavHidden
+        /// every time — soak 2026-07-05). Callers reach it via the deferred one-tick broadcast
+        /// (<c>SyncEngine.FlushDeferredReportModals</c>; <c>ReportModalClassifier.ShouldDeferHostBroadcast</c>).
+        /// Returns a <see cref="ResearchNavMirror"/> tri-state: Unknown on ANY miss (the client then
         /// leaves its bind native — fail-open, never a stripped host/client button from a read failure).
         /// </summary>
         public static int ReadResearchNavFlag(object researchCompleteData)

@@ -501,6 +501,8 @@ namespace Multiplayer.Network.Sync
         public void DetachAllChannels()
         {
             foreach (var ch in _channels.All) ch.DetachHost();
+            // Teardown belt: never carry a deferred report across a session boundary (its modalData is dead).
+            lock (_deferredReports) _deferredReports.Clear();
         }
 
         // ─── Geoscape event display (host->all show/dismiss) ───────────────
@@ -975,6 +977,47 @@ namespace Multiplayer.Network.Sync
                 SyncProtocol.EncodeReportModal(payload)));
         }
 
+        // ─── deferred report-modal broadcast (read-timing fix) ────────────────────────────────────────
+        // The Research report's payload read (ResearchElement.UnlocksResearches → the "new research
+        // available" nav flag) is only correct AFTER the completion cascade settles — but the OpenModal
+        // Postfix that broadcasts the report runs INSIDE that cascade (see
+        // ReportModalClassifier.ShouldDeferHostBroadcast). The opener queues the raw (modalType, modalData,
+        // priority) here; the next host Tick — by which time the same-call-stack cascade has finished —
+        // builds the payload (fresh reflection read) and broadcasts it. The client is unaffected by the
+        // one-tick delay: its mirrored popup is opened BY this payload, so the nav flag always arrives with it.
+        private readonly List<(int modalType, object modalData, int priority)> _deferredReports
+            = new List<(int, object, int)>();
+
+        /// <summary>HOST: queue a report whose payload must be read after the current sim dispatch settles.</summary>
+        public void QueueDeferredReportModal(int modalType, object modalData, int priority)
+        {
+            lock (_deferredReports) _deferredReports.Add((modalType, modalData, priority));
+        }
+
+        /// <summary>Host Tick: build + broadcast every deferred report with a POST-cascade payload read.</summary>
+        private void FlushDeferredReportModals()
+        {
+            (int modalType, object modalData, int priority)[] pending;
+            lock (_deferredReports)
+            {
+                if (_deferredReports.Count == 0) return;
+                pending = _deferredReports.ToArray();
+                _deferredReports.Clear();
+            }
+            foreach (var (modalType, modalData, priority) in pending)
+            {
+                try
+                {
+                    if (!State.ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) continue;
+                    Debug.Log("[Multiplayer] HOST BroadcastReportModal (deferred, post-cascade read) modalType=" + modalType +
+                              " variant=" + payload.Variant + " defId=" + payload.DefId + " shareLevel=" + payload.ShareLevel +
+                              " priority=" + payload.Priority);
+                    BroadcastReportModal(payload);
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.FlushDeferredReportModals failed: " + ex.Message); }
+            }
+        }
+
         /// <summary>
         /// Client: the host opened a report window. Decode + reconstruct the modalData from already-synced ids by
         /// variant, then replay the native modal under <see cref="SyncApplyScope"/> (so any patched opener that
@@ -1089,6 +1132,10 @@ namespace Multiplayer.Network.Sync
                 State.GeoVehicleMirror.ClientInterpolateTick(_engine);
                 return;
             }
+
+            // Host: broadcast any report deferred for a post-cascade payload read (research nav flag) —
+            // by this tick the completion dispatch that queued it has fully settled.
+            FlushDeferredReportModals();
 
             // Host: bind the wallet watcher once the geoscape (and its wallet) is live. Attach is
             // idempotent — it early-returns until the wallet exists, then once it is bound. Mirrors the

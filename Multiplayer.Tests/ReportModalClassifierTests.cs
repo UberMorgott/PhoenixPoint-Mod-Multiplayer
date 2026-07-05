@@ -117,4 +117,40 @@ public class ReportModalClassifierTests
     [InlineData(ReportModalVariant.SiteMissionBrief, true)]
     public void IsPersistent_MatchesNativeOpener(ReportModalVariant variant, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.IsPersistent(variant));
+
+    // ── deferred host broadcast (research nav-flag read timing, soak 2026-07-05) ──────────────────────
+    // ONLY the Research report defers: its payload reads ResearchElement.UnlocksResearches, which is stale
+    // inside the OpenModal Postfix (the Research.OnResearchCompleted dispatch hasn't flipped dependent
+    // elements to Revealed/Unlocked yet → host shipped NavHidden for a research that genuinely unlocks →
+    // client force-hid the host's native "new research available" line). Blocking briefs must stay
+    // synchronous (their host intent gate arms in the Postfix); the rest have no read-timing hazard.
+    [Theory]
+    [InlineData(14, true)]    // GeoResearchComplete → deferred one tick (post-cascade read)
+    [InlineData(4, false)]    // GeoScavengeBrief — blocking, must arm/broadcast synchronously
+    [InlineData(15, false)]   // GeoAmbushBrief — blocking
+    [InlineData(26, false)]   // AncientSiteAttackBrief — blocking
+    [InlineData(28, false)]   // AncientSiteDefenceBrief — blocking
+    [InlineData(6, false)]    // GeoPhoenixBaseOutcome
+    [InlineData(25, false)]   // PandoranRevealResult
+    [InlineData(38, false)]   // DiplomacyResearchBrief (ShareLevel is a plain diplomacy int — no recompute)
+    [InlineData(0, false)]    // non-whitelisted
+    public void ShouldDeferHostBroadcast_OnlyResearch(int modalType, bool expected)
+        => Assert.Equal(expected, ReportModalClassifier.ShouldDeferHostBroadcast(modalType));
+
+    // The exact 2026-07-05 failure combo, pinned end-to-end on the pure side: a stale queue-time read folds
+    // to NavHidden (FlagFor(false)) and — because Hidden is a DEFINITE flag — the client would force-hide the
+    // line (ShouldOverride true). The defer decision above is what prevents that stale read from ever being
+    // taken; a genuinely-unknown read (NavUnknown) must stay fail-open (no override → client-native compute).
+    [Fact]
+    public void StaleHiddenForcesHide_ButUnknownFailsOpen_RegressionCombo()
+    {
+        int staleFlag = ResearchNavMirror.FlagFor(false);   // what the stale queue-time read shipped
+        Assert.Equal(ResearchNavMirror.NavHidden, staleFlag);
+        Assert.True(ResearchNavMirror.ShouldOverride(isHost: false, isActiveSession: true, navFlag: staleFlag));
+        Assert.False(ResearchNavMirror.NavVisible(staleFlag));   // → button stripped on the client (the bug)
+
+        // Fail-open contract (unchanged): an unknown flag never forces anything — client stays native.
+        Assert.False(ResearchNavMirror.ShouldOverride(isHost: false, isActiveSession: true,
+                                                      navFlag: ResearchNavMirror.NavUnknown));
+    }
 }

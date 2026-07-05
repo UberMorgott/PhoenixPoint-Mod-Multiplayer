@@ -109,6 +109,23 @@ namespace Multiplayer.Network.Sync.State
                || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief;
 
         /// <summary>
+        /// True iff the HOST must defer this report's payload build + broadcast to the NEXT engine tick instead
+        /// of reading it inside the <c>OpenModal</c> Postfix. The Research variant's payload carries the native
+        /// "new research available" line visibility (<c>ResearchElement.UnlocksResearches</c>) — but the popup is
+        /// queued from INSIDE the <c>Research.OnResearchCompleted</c> multicast dispatch
+        /// (GeoscapeView.OnFactionResearchCompleted → OpenModal, GeoscapeView.cs:1980-1992), and the dependent
+        /// elements' Revealed/Unlocked flips happen in OTHER subscribers of the SAME event
+        /// (ExistingResearchRequirement.OnResearchCompleted → UpdateProgress) that run AFTER the opener — so a
+        /// Postfix-time read sees stale states and ships NavHidden for a research that genuinely unlocks
+        /// (soak 2026-07-05: host shipped shareLevel=1 for every completion; client force-hid a line the host's
+        /// own bind — which runs on a LATER view-update frame — showed). One tick later the cascade (same call
+        /// stack) has fully settled, matching what the host's native bind renders. Blocking briefs must stay
+        /// synchronous (their intent gate arms in the Postfix); every other variant has no read-timing hazard. PURE.
+        /// </summary>
+        public static bool ShouldDeferHostBroadcast(int modalType)
+            => VariantFor(modalType) == ReportModalVariant.Research;
+
+        /// <summary>
         /// True iff <paramref name="modalType"/> is a BLOCKING host prompt: a window during which the host's own
         /// geoscape is modal-locked and the co-op session must not advance under it. Drives BOTH ends of the
         /// lock: the client's mirrored modal is view-locked (BlockingModalClientLockPatches — inert buttons,
