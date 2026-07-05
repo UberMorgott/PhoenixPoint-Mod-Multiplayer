@@ -55,6 +55,11 @@ namespace Multiplayer.Network.Sync
         private static FieldInfo _siteIdField;       // GeoSite.SiteId (int)
         private static FieldInfo _animatorField;     // GeoVehicle.Animator (UnityEngine.Animator, public :55) — flight-visual state machine
         private static MethodInfo _animatorSetInteger; // UnityEngine.Animator.SetInteger(string,int) — resolved off the field type (no AnimationModule ref)
+        // WA-3 aircraft HP/repair tail (audit gap 5d). All optional — a miss degrades to a tail-less meta.
+        private static FieldInfo _statsField;        // GeoVehicle.Stats (GeoVehicleStats, public field :41)
+        private static FieldInfo _hitPointsField;    // GeoVehicleStats.HitPoints (public int field)
+        private static FieldInfo _maxHitPointsField; // GeoVehicleStats.MaxHitPoints (public int field)
+        private static FieldInfo _maintPointsField;  // GeoVehicle._maintenancePointsToRepair (private int :49; IsRepairing => >0, :150)
         private static MethodInfo _startTravelMethod; // GeoVehicle.StartTravel(List<GeoSite>)
         private static MethodInfo _startExploringMethod; // GeoVehicle.StartExploringCurrentSite() — no args
 
@@ -94,6 +99,14 @@ namespace Multiplayer.Network.Sync
             _currentSiteBacking = AccessTools.Field(_geoVehicleType, "<CurrentSite>k__BackingField");
             _siteIdField = AccessTools.Field(_geoSiteType, "SiteId");
             _animatorField = AccessTools.Field(_geoVehicleType, "Animator");   // flight-visual state (turbine tracer orientation)
+            // WA-3 HP/repair tail members (optional — never gate _ready; a miss ships a tail-less meta).
+            _statsField = AccessTools.Field(_geoVehicleType, "Stats");
+            if (_statsField != null)
+            {
+                _hitPointsField = AccessTools.Field(_statsField.FieldType, "HitPoints");
+                _maxHitPointsField = AccessTools.Field(_statsField.FieldType, "MaxHitPoints");
+            }
+            _maintPointsField = AccessTools.Field(_geoVehicleType, "_maintenancePointsToRepair");
             // Resolve Animator.SetInteger(string,int) off the field's runtime type so this reflection bridge needs no
             // UnityEngine.AnimationModule compile reference (it is linked into the Unity-free test project).
             if (_animatorField != null)
@@ -395,10 +408,35 @@ namespace Multiplayer.Network.Sync
                 }
                 catch { }
 
-                meta = new GeoVehicleTravelMeta(ownerId, vehicleId, travelling, currentSiteId, dests.ToArray());
+                meta = new GeoVehicleTravelMeta(ownerId, vehicleId, travelling, currentSiteId, dests.ToArray(),
+                                                ReadHealthTail(vehicle));
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>HOST: read the WA-3 HP/repair tail off a live vehicle — <c>Stats.HitPoints</c>/<c>MaxHitPoints</c>
+        /// (public int fields) + <c>IsRepairing</c> via the <c>_maintenancePointsToRepair</c> backing int. Null on
+        /// any miss (tail-less meta — never gates the travel read).</summary>
+        private static GeoVehicleHealthTail ReadHealthTail(object vehicle)
+        {
+            try
+            {
+                if (_statsField == null || _hitPointsField == null || _maxHitPointsField == null) return null;
+                var stats = _statsField.GetValue(vehicle);
+                if (stats == null) return null;
+                int hp = Convert.ToInt32(_hitPointsField.GetValue(stats));
+                int maxHp = Convert.ToInt32(_maxHitPointsField.GetValue(stats));
+                bool repairing = false;
+                try
+                {
+                    if (_maintPointsField != null)
+                        repairing = Convert.ToInt32(_maintPointsField.GetValue(vehicle)) > 0;
+                }
+                catch { repairing = false; }
+                return new GeoVehicleHealthTail(hp, maxHp, repairing);
+            }
+            catch { return null; }
         }
 
         /// <summary>CLIENT (sim frozen): write <paramref name="meta"/> onto the resolved live vehicle's
@@ -462,6 +500,31 @@ namespace Multiplayer.Network.Sync
                             _animatorSetInteger.Invoke(anim, new object[] { "State", GeoVehicleTravelMeta.AnimatorTravelState(meta.Travelling) });
                     }
                     catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta animator state failed (skipped): " + ex.Message); }
+                }
+
+                // WA-3 HP/repair tail (gap 5d): VALUE-ONLY writes to Stats.HitPoints/MaxHitPoints (public int
+                // fields) — wallet-style silent, NEVER SetHitpoints (GeoVehicle.cs:708 fires OnMaintenanceChanged
+                // + breaking-down/fully-repaired cascades = SIM on the frozen client). IsRepairing is stamped via
+                // the private _maintenancePointsToRepair backing int (1/0 sentinel — its only consumers,
+                // ScheduleRepair + the hourly repair, never run on the frozen client). Null tail = not carried
+                // (older payload / host read miss) — never a clear. The HP-bar repaint is kicked by the caller
+                // (GeoVehicleTravelMirror → GeoUiRefresh.RefreshVehicleBars).
+                if (meta.Health != null)
+                {
+                    try
+                    {
+                        if (_statsField != null && _hitPointsField != null && _maxHitPointsField != null)
+                        {
+                            var stats = _statsField.GetValue(vehicle);
+                            if (stats != null)
+                            {
+                                _hitPointsField.SetValue(stats, meta.Health.Hp);
+                                _maxHitPointsField.SetValue(stats, meta.Health.MaxHp);
+                            }
+                        }
+                        _maintPointsField?.SetValue(vehicle, meta.Health.IsRepairing ? 1 : 0);
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] ApplyTravelMeta health failed (skipped): " + ex.Message); }
                 }
                 return true;
             }

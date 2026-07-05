@@ -31,14 +31,17 @@ namespace Multiplayer.Network.Sync.State
         public readonly bool Travelling;    // GeoVehicle.Travelling
         public readonly int CurrentSiteId;  // GeoSite.SiteId of CurrentSite, or -1 (null / in transit)
         public readonly int[] DestSiteIds;  // remaining DestinationSites' SiteIds, in order (never null)
+        public readonly GeoVehicleHealthTail Health; // WA-3 aircraft HP/repair tail; null = not carried (never a clear)
 
-        public GeoVehicleTravelMeta(int ownerId, int vehicleId, bool travelling, int currentSiteId, int[] destSiteIds)
+        public GeoVehicleTravelMeta(int ownerId, int vehicleId, bool travelling, int currentSiteId, int[] destSiteIds,
+                                    GeoVehicleHealthTail health = null)
         {
             OwnerId = ownerId;
             VehicleId = vehicleId;
             Travelling = travelling;
             CurrentSiteId = currentSiteId;
             DestSiteIds = destSiteIds ?? Array.Empty<int>();
+            Health = health;
         }
 
         /// <summary>The composite mirror key (VehicleID alone is only per-faction unique) — shared key-space
@@ -68,7 +71,7 @@ namespace Multiplayer.Network.Sync.State
             if (DestSiteIds.Length != o.DestSiteIds.Length) return false;
             for (int i = 0; i < DestSiteIds.Length; i++)
                 if (DestSiteIds[i] != o.DestSiteIds[i]) return false;
-            return true;
+            return Health == null ? o.Health == null : Health.Equals(o.Health);
         }
 
         public override bool Equals(object obj) => obj is GeoVehicleTravelMeta o && Equals(o);
@@ -82,6 +85,7 @@ namespace Multiplayer.Network.Sync.State
                 h = (h * 397) ^ (Travelling ? 1 : 0);
                 h = (h * 397) ^ CurrentSiteId;
                 foreach (var id in DestSiteIds) h = (h * 397) ^ id;
+                h = (h * 397) ^ (Health?.GetHashCode() ?? 0);
                 return h;
             }
         }
@@ -99,8 +103,57 @@ namespace Multiplayer.Network.Sync.State
                 if (i > 0) sb.Append(',');
                 sb.Append(v.DestSiteIds[i].ToString(CultureInfo.InvariantCulture));
             }
+            // WA-3 health tail — part of the change signature so an HP tick (hourly RepairFactionAircrafts,
+            // GeoLevelController.cs:815) or a repair-flag flip re-ships the vehicle even while parked. A
+            // tail-less read appends nothing (signature identical to the pre-WA-3 format).
+            if (v.Health != null)
+                sb.Append("|h").Append(v.Health.Hp).Append('/').Append(v.Health.MaxHp)
+                  .Append('/').Append(v.Health.IsRepairing ? '1' : '0');
             return sb.ToString();
         }
+    }
+
+    /// <summary>
+    /// PURE optional-tail record of one aircraft's HP/repair display state — WA-3 of the 2026-07-05
+    /// popup-mirror spec §5 (audit gap 5d, GeoVehicle.cs:105/47/138-150). Null = not carried (host read
+    /// miss / older payload — NEVER a clear). Decompile-verified 2026-07-05:
+    ///   • <c>Hp</c>/<c>MaxHp</c> — <c>GeoVehicle.Stats.HitPoints</c>/<c>MaxHitPoints</c> (public int FIELDS
+    ///     on <c>GeoVehicleStats</c>). Host reads the fields; the client writes them DIRECTLY (wallet-style
+    ///     silent value write): the native writer <c>SetHitpoints</c> (GeoVehicle.cs:708) fires
+    ///     <c>OnMaintenanceChanged</c> + <c>OnReachingMaintenanceLimit</c>/<c>OnAircraftFullyRepairing</c>
+    ///     — SIM cascade on the frozen client.
+    ///   • <c>IsRepairing</c> — <c>GeoVehicle.IsRepairing =&gt; _maintenancePointsToRepair &gt; 0</c>
+    ///     (GeoVehicle.cs:150). The client stamps the private backing int to a 1/0 sentinel (display-only;
+    ///     its consumer <c>ScheduleRepair</c>/hourly repair never runs on the frozen client).
+    /// </summary>
+    public sealed class GeoVehicleHealthTail : IEquatable<GeoVehicleHealthTail>
+    {
+        public readonly int Hp;
+        public readonly int MaxHp;
+        public readonly bool IsRepairing;
+
+        public GeoVehicleHealthTail(int hp, int maxHp, bool isRepairing)
+        {
+            Hp = hp;
+            MaxHp = maxHp;
+            IsRepairing = isRepairing;
+        }
+
+        /// <summary>True iff there is nothing to mirror: full HP and not repairing — the host poll's
+        /// initial-suppress check (a pristine parked vehicle stays 0 bytes, matching the pre-WA-3 walk).</summary>
+        public bool IsPristine => Hp >= MaxHp && !IsRepairing;
+
+        public bool Equals(GeoVehicleHealthTail other)
+            => other != null && Hp == other.Hp && MaxHp == other.MaxHp && IsRepairing == other.IsRepairing;
+
+        public override bool Equals(object obj) => obj is GeoVehicleHealthTail o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked { return ((Hp * 397) ^ MaxHp) * 397 ^ (IsRepairing ? 1 : 0); }
+        }
+
+        public override string ToString() => $"Health({Hp}/{MaxHp} repairing={IsRepairing})";
     }
 
     /// <summary>
@@ -111,9 +164,23 @@ namespace Multiplayer.Network.Sync.State
     /// Wire payload (inside the 0x67 envelope, surface GeoVehicleTravel):
     ///   [u32 seq][u16 count]{ [i32 OwnerId][i32 VehicleId][u8 travelling][i32 currentSiteId][u16 destCount][i32 destSiteId]* }*
     /// The leading seq is the host's per-surface <see cref="SurfaceSeq"/> value (client drops a stale/dup seq).
+    ///
+    /// WA-3 EXTRAS BLOCK (versioned optional tail — the GeoSiteSnapshot extras precedent): appended AFTER the
+    /// record array, and ONLY when ≥1 vehicle carries a health tail — a no-tail payload stays byte-identical
+    /// to the pre-WA-3 wire. An older decoder never reads past the record array (trailing bytes ignored); a
+    /// newer decoder reads the block only when bytes remain (older payload → all tails null). Layout:
+    ///   [u16 extrasCount] { [i32 ownerId][i32 vehicleId] [u16 recLen] [u8 tailFlags] [payloads in bit order…] }*
+    ///   recLen = byte length of tailFlags + payloads (parse-known-then-skip: future tails take new HIGHER
+    ///   bits with payloads appended after the known ones, so an old decoder skips per record).
+    ///   tailFlags: bit0 = health tail → payload [i32 hp][i32 maxHp]; bit4 = IsRepairing VALUE (no payload).
+    ///              bits 1-3/5-7 RESERVED for future tails.
+    ///   An extras record whose composite key is absent from the record array is skipped (join-by-key).
     /// </summary>
     public static class GeoVehicleTravelSnapshot
     {
+        private const byte TailHasHealth = 1 << 0;    // payload: [i32 hp][i32 maxHp]
+        private const byte TailIsRepairing = 1 << 4;  // value bit (meaningful only with TailHasHealth)
+
         public static byte[] Encode(uint seq, IList<GeoVehicleTravelMeta> vehicles)
         {
             vehicles = vehicles ?? new List<GeoVehicleTravelMeta>();
@@ -131,6 +198,27 @@ namespace Multiplayer.Network.Sync.State
                     var dests = v.DestSiteIds ?? Array.Empty<int>();
                     w.Write((ushort)dests.Length);
                     foreach (var id in dests) w.Write(id);
+                }
+                // WA-3 extras block — written ONLY when ≥1 vehicle carries a tail, so a no-tail payload stays
+                // byte-identical to the pre-WA-3 wire (existing pins hold; older decoders ignore the block).
+                int extras = 0;
+                foreach (var v in vehicles) if (v.Health != null) extras++;
+                if (extras > 0)
+                {
+                    w.Write((ushort)extras);
+                    foreach (var v in vehicles)
+                    {
+                        if (v.Health == null) continue;
+                        w.Write(v.OwnerId);
+                        w.Write(v.VehicleId);
+                        byte flags = TailHasHealth;
+                        if (v.Health.IsRepairing) flags |= TailIsRepairing;
+                        // recLen = flags byte + [i32 hp][i32 maxHp].
+                        w.Write((ushort)(1 + 4 + 4));
+                        w.Write(flags);
+                        w.Write(v.Health.Hp);
+                        w.Write(v.Health.MaxHp);
+                    }
                 }
                 return ms.ToArray();
             }
@@ -163,11 +251,59 @@ namespace Multiplayer.Network.Sync.State
                         for (int d = 0; d < destCount; d++) dests[d] = r.ReadInt32();
                         list.Add(new GeoVehicleTravelMeta(owner, id, travelling, currentSiteId, dests));
                     }
+                    // WA-3 extras block — read ONLY if bytes remain (an older payload without it decodes with
+                    // all tails null). A truncated block throws → whole payload rejected (no-partial-accept
+                    // contract kept). Records for unknown keys are skipped (join-by-key, never a throw).
+                    if (ms.Position < ms.Length)
+                    {
+                        int ne = r.ReadUInt16();
+                        Dictionary<long, GeoVehicleHealthTail> tails = null;
+                        for (int i = 0; i < ne; i++)
+                        {
+                            int owner = r.ReadInt32();
+                            int id = r.ReadInt32();
+                            int recLen = r.ReadUInt16();
+                            var rec = r.ReadBytes(recLen);
+                            if (rec.Length != recLen)
+                                throw new EndOfStreamException("GeoVehicleTravelSnapshot: truncated extras record");
+                            var tail = DecodeHealthTail(rec);
+                            if (tail != null)
+                                (tails ?? (tails = new Dictionary<long, GeoVehicleHealthTail>()))
+                                    [GeoVehiclePos.MakeKey(owner, id)] = tail;
+                        }
+                        if (tails != null)
+                            for (int i = 0; i < list.Count; i++)
+                            {
+                                var v = list[i];
+                                if (!tails.TryGetValue(v.Key, out var tail)) continue;
+                                list[i] = new GeoVehicleTravelMeta(v.OwnerId, v.VehicleId, v.Travelling,
+                                    v.CurrentSiteId, v.DestSiteIds, tail);
+                            }
+                    }
                     vehicles = list;
                     return true;
                 }
             }
             catch (Exception) { return false; }
+        }
+
+        /// <summary>
+        /// Parse one extras record's known tails ([u8 tailFlags][payloads in ascending bit order]). Payloads
+        /// of UNKNOWN (future, higher) bits trail the known ones and are simply left unread — the record slice
+        /// is length-prefixed, so an old decoder degrades to "known tails only". A KNOWN bit whose payload is
+        /// truncated throws → whole payload rejected by the caller.
+        /// </summary>
+        private static GeoVehicleHealthTail DecodeHealthTail(byte[] rec)
+        {
+            using (var ms = new MemoryStream(rec))
+            using (var r = new BinaryReader(ms, Encoding.UTF8))
+            {
+                byte flags = r.ReadByte();
+                if ((flags & TailHasHealth) == 0) return null;
+                int hp = r.ReadInt32();
+                int maxHp = r.ReadInt32();
+                return new GeoVehicleHealthTail(hp, maxHp, (flags & TailIsRepairing) != 0);
+            }
         }
     }
 }

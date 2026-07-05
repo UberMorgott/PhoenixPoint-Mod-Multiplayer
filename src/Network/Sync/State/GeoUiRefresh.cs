@@ -318,6 +318,56 @@ namespace Multiplayer.Network.Sync.State
             _baseLayoutInit.Invoke(module, args);
         }
 
+        // ─── WA-3: aircraft HP bar (vehicle-selected panel) ──────────────────────────────────────────
+        // UIModuleVehicleSelection repaints its HP bar ONLY from GeoVehicle.OnMaintenanceChanged (its handler
+        // sets the private bool _refreshVehicleBars; Update() consumes it → RefreshVehicleBars() reads
+        // Stats.HitPoints — UIModuleVehicleSelection.cs:412-433). The client's silent HP value write
+        // deliberately skips that event, so we set the SAME native deferred-repaint flag the handler sets —
+        // the module's own Update() then repaints from the freshly-stamped model. Best-effort, never throws.
+        private static FieldInfo _vehicleSelModuleField;   // GeoscapeModulesData.VehicleSelectionModule
+        private static FieldInfo _vehicleSelRefreshField;  // UIModuleVehicleSelection._refreshVehicleBars (private bool)
+        private static bool _vehicleSelEnsured;
+
+        private static void EnsureVehicleSelection()
+        {
+            if (_vehicleSelEnsured) return;
+            _vehicleSelEnsured = true;
+            try
+            {
+                var moduleT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleVehicleSelection");
+                if (moduleT == null) return;
+                var modulesT = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
+                if (modulesT == null) return;
+                _vehicleSelModuleField = AccessTools.Field(modulesT, "VehicleSelectionModule");
+                _vehicleSelRefreshField = AccessTools.Field(moduleT, "_refreshVehicleBars");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureVehicleSelection failed: " + ex.Message); }
+        }
+
+        /// <summary>Arm the vehicle-selection module's native deferred HP-bar repaint after a WA-3 aircraft
+        /// HP/repair value write. Safe no-op when the module is closed/missing (a closed module's Update()
+        /// simply consumes the flag on its next open and repaints from the then-current model).</summary>
+        public static void RefreshVehicleBars(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure(rt);
+                EnsureVehicleSelection();
+                if (_vehicleSelModuleField == null || _vehicleSelRefreshField == null
+                    || _viewField == null || _modulesField == null) return;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return;
+                var modules = _modulesField.GetValue(view);
+                if (modules == null) return;
+                var module = _vehicleSelModuleField.GetValue(modules);
+                if (module == null) return;
+                _vehicleSelRefreshField.SetValue(module, true);
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RefreshVehicleBars best-effort failed: " + ex.Message); }
+        }
+
         private static bool IsOpen(object module)
         {
             // UIModuleBehavior : MonoBehaviour → ((Component)module).gameObject.activeInHierarchy.

@@ -56,10 +56,13 @@ namespace Multiplayer.Network.Sync.State
                     bool known = _lastSig.TryGetValue(meta.Key, out var prev);
                     if (known && prev == sig) continue;   // unchanged → skip (0 bytes)
                     _lastSig[meta.Key] = sig;
-                    // Suppress the initial "parked, never travelled, no route" state — nothing for the client to
-                    // draw or clear. We still record its signature above so it never re-ships. Once a vehicle
-                    // travels (or a previously-shipped one must be cleared), it ships.
-                    if (!known && !meta.Travelling && (meta.DestSiteIds == null || meta.DestSiteIds.Length == 0))
+                    // Suppress the initial "parked, never travelled, no route, pristine hull" state — nothing
+                    // for the client to draw or clear. We still record its signature above so it never re-ships.
+                    // Once a vehicle travels (or a previously-shipped one must be cleared), it ships. WA-3: a
+                    // DAMAGED or repairing vehicle ships its initial state too (the HP tail is real display
+                    // state); a pristine one stays 0 bytes exactly like the pre-WA-3 walk.
+                    if (!known && !meta.Travelling && (meta.DestSiteIds == null || meta.DestSiteIds.Length == 0)
+                        && (meta.Health == null || meta.Health.IsPristine))
                         continue;
                     changed.Add(meta);
                 }
@@ -102,12 +105,22 @@ namespace Multiplayer.Network.Sync.State
             {
                 var rt = GeoRuntime.Instance;
                 int applied = 0;
+                bool healthApplied = false;
                 using (SyncApplyScope.Enter())
                     foreach (var meta in vehicles)
-                        if (VehicleTravelReflection.ApplyTravelMeta(rt, meta)) applied++;
+                        if (VehicleTravelReflection.ApplyTravelMeta(rt, meta))
+                        {
+                            applied++;
+                            if (meta.Health != null) healthApplied = true;
+                        }
                 seq.Mark(SurfaceIds.GeoVehicleTravel, s);
+                // WA-3: an HP/repair value write is invisible until the aircraft HP bar repaints (it only
+                // repaints from GeoVehicle.OnMaintenanceChanged, which the silent write deliberately skips) —
+                // kick the native deferred repaint (UIModuleVehicleSelection._refreshVehicleBars).
+                if (healthApplied) GeoUiRefresh.RefreshVehicleBars(rt);
                 if (applied > 0)
-                    Debug.Log("[Multiplayer][geo] CLIENT applied geo.vehicletravel seq=" + s + " vehicles=" + applied);
+                    Debug.Log("[Multiplayer][geo] CLIENT applied geo.vehicletravel seq=" + s + " vehicles=" + applied
+                              + (healthApplied ? " (health tail applied + HP-bar kick)" : ""));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][geo] GeoVehicleTravelMirror.HandleTravelMeta failed: " + ex.Message); }
         }

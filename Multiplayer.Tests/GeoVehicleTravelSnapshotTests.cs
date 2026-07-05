@@ -120,4 +120,115 @@ public class GeoVehicleTravelSnapshotTests
         var atSite = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0]);
         Assert.NotEqual(GeoVehicleTravelMeta.Signature(inTransit), GeoVehicleTravelMeta.Signature(atSite));
     }
+
+    // ─── WA-3 aircraft HP/repair tail (audit gap 5d): optional extras block on the 0xA6 wire ───
+
+    [Fact]
+    public void HealthTail_RoundTrips_MixedCarriedAndAbsent()
+    {
+        var input = new List<GeoVehicleTravelMeta>
+        {
+            new GeoVehicleTravelMeta(11, 7, true, -1, new[] { 5 }, new GeoVehicleHealthTail(37, 100, isRepairing: true)),
+            new GeoVehicleTravelMeta(11, 8, false, 42, new int[0]),                       // no tail
+            new GeoVehicleTravelMeta(-22, 7, false, 9, new int[0], new GeoVehicleHealthTail(100, 100, isRepairing: false)),
+        };
+
+        byte[] wire = GeoVehicleTravelSnapshot.Encode(77u, input);
+        Assert.True(GeoVehicleTravelSnapshot.TryDecode(wire, out uint seq, out var outList));
+
+        Assert.Equal(77u, seq);
+        Assert.Equal(3, outList.Count);
+        for (int i = 0; i < input.Count; i++)
+            Assert.Equal(input[i], outList[i]);   // structural equality incl. the health tail
+        Assert.Equal(new GeoVehicleHealthTail(37, 100, true), outList[0].Health);
+        Assert.Null(outList[1].Health);
+        Assert.False(outList[2].Health.IsRepairing);
+    }
+
+    // Wire-compat pin: a batch with NO health tails must stay BYTE-IDENTICAL to the pre-WA-3 wire (no
+    // extras block) — and decoding such a payload (any older payload) yields null tails.
+    [Fact]
+    public void HealthTail_NoTails_WireByteIdentical_AndDecodesNullHealth()
+    {
+        var meta = new GeoVehicleTravelMeta(3, 1, true, -1, new[] { 7 });
+        byte[] wire = GeoVehicleTravelSnapshot.Encode(5u, new List<GeoVehicleTravelMeta> { meta });
+
+        var expected = new byte[]
+        {
+            0x05, 0x00, 0x00, 0x00,     // seq = 5 (u32 LE)
+            0x01, 0x00,                 // count = 1
+            0x03, 0x00, 0x00, 0x00,     // OwnerId = 3
+            0x01, 0x00, 0x00, 0x00,     // VehicleId = 1
+            0x01,                       // travelling = 1
+            0xFF, 0xFF, 0xFF, 0xFF,     // currentSiteId = -1
+            0x01, 0x00,                 // destCount = 1
+            0x07, 0x00, 0x00, 0x00,     // destSiteId = 7
+        };                              // NO extras block
+        Assert.Equal(expected, wire);
+
+        Assert.True(GeoVehicleTravelSnapshot.TryDecode(wire, out _, out var outList));
+        Assert.Null(outList[0].Health);   // absent-tail compat: older payload → tail not carried
+    }
+
+    [Fact]
+    public void HealthTail_TruncatedExtras_RejectsWholePayload()
+    {
+        byte[] wire = GeoVehicleTravelSnapshot.Encode(6u, new List<GeoVehicleTravelMeta>
+        {
+            new GeoVehicleTravelMeta(3, 1, false, 9, new int[0], new GeoVehicleHealthTail(50, 100, false)),
+        });
+        var chopped = new byte[wire.Length - 3];   // cut into the extras record → declared recLen no longer fits
+        System.Array.Copy(wire, chopped, chopped.Length);
+        Assert.False(GeoVehicleTravelSnapshot.TryDecode(chopped, out _, out _));
+    }
+
+    [Fact]
+    public void HealthTail_ExtrasForUnknownKey_Skipped()
+    {
+        // Splice: encode a 1-vehicle batch with a tail, then decode after swapping the record's VehicleId so
+        // the extras key no longer matches — the join-by-key must skip it, not throw.
+        byte[] wire = GeoVehicleTravelSnapshot.Encode(8u, new List<GeoVehicleTravelMeta>
+        {
+            new GeoVehicleTravelMeta(3, 1, false, 9, new int[0], new GeoVehicleHealthTail(50, 100, false)),
+        });
+        wire[10] = 0x02;   // record VehicleId 1 → 2 (extras block still says 1)
+        Assert.True(GeoVehicleTravelSnapshot.TryDecode(wire, out _, out var outList));
+        Assert.Single(outList);
+        Assert.Null(outList[0].Health);   // unknown-key extras record ignored
+    }
+
+    [Fact]
+    public void Signature_ChangesOnHpTick_AndOnRepairFlag()
+    {
+        var parked = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0]);
+        var damaged = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0], new GeoVehicleHealthTail(60, 100, true));
+        var repairedTick = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0], new GeoVehicleHealthTail(70, 100, true));
+        var repairDone = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0], new GeoVehicleHealthTail(70, 100, false));
+
+        Assert.NotEqual(GeoVehicleTravelMeta.Signature(parked), GeoVehicleTravelMeta.Signature(damaged));
+        Assert.NotEqual(GeoVehicleTravelMeta.Signature(damaged), GeoVehicleTravelMeta.Signature(repairedTick));
+        Assert.NotEqual(GeoVehicleTravelMeta.Signature(repairedTick), GeoVehicleTravelMeta.Signature(repairDone));
+        // Same tail → same signature (no re-ship storm while parked at stable HP).
+        Assert.Equal(GeoVehicleTravelMeta.Signature(repairDone),
+                     GeoVehicleTravelMeta.Signature(new GeoVehicleTravelMeta(9, 1, false, 42, new int[0],
+                         new GeoVehicleHealthTail(70, 100, false))));
+    }
+
+    [Fact]
+    public void HealthTail_Equality_AndPristine()
+    {
+        Assert.Equal(new GeoVehicleHealthTail(5, 10, true), new GeoVehicleHealthTail(5, 10, true));
+        Assert.NotEqual(new GeoVehicleHealthTail(5, 10, true), new GeoVehicleHealthTail(5, 10, false));
+        Assert.NotEqual(new GeoVehicleHealthTail(5, 10, true), new GeoVehicleHealthTail(6, 10, true));
+
+        // IsPristine drives the host's initial-suppress rule: full HP + not repairing = nothing to mirror.
+        Assert.True(new GeoVehicleHealthTail(100, 100, false).IsPristine);
+        Assert.False(new GeoVehicleHealthTail(99, 100, false).IsPristine);
+        Assert.False(new GeoVehicleHealthTail(100, 100, true).IsPristine);
+
+        // Meta equality includes the tail (change detection can never collapse a tail flip).
+        var a = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0], new GeoVehicleHealthTail(70, 100, false));
+        var b = new GeoVehicleTravelMeta(9, 1, false, 42, new int[0]);
+        Assert.NotEqual(a, b);
+    }
 }
