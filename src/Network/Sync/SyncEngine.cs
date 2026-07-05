@@ -481,6 +481,9 @@ namespace Multiplayer.Network.Sync
             _tracker.MarkChannel(channelId, ver);
             try { using (SyncApplyScope.Enter()) channel.Apply(GeoRuntime.Instance, payload); }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
+            // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
+            // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
+            if (channelId == SurfaceIds.MistChannel) return;
             // Best-effort: rebuild the open UI for this channel's screen. Channels 1/2 map to a single
             // screen (targeted Refresh). The unlock (3) + diplomacy (4) channels span multiple modules (an
             // unlock shows in BOTH the manufacturing list AND the base-layout facility picker; diplomacy has

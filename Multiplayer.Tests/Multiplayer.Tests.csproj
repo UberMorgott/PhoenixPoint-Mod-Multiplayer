@@ -140,6 +140,10 @@
          NOT linked (mirrors GeoVehicleSnapshot/GeoSiteSnapshot vs their reflection). -->
     <Compile Include="..\src\Network\Sync\State\GeoVehicleIdentity.cs"><Link>Sync\State\GeoVehicleIdentity.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\GeoVehicleIdentityTracker.cs"><Link>Sync\State\GeoVehicleIdentityTracker.cs</Link></Compile>
+    <!-- WA-1 mist channel (#8, GeoState 0xA1): pure blob/chunk codec + splitter + client last-wins
+         reassembler. The engine glue (MistChannel pump, MistReflection RecordInstanceData/ProcessInstanceData
+         bridge) binds game types + SyncEngine and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\MistSnapshot.cs"><Link>Sync\State\MistSnapshot.cs</Link></Compile>
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
