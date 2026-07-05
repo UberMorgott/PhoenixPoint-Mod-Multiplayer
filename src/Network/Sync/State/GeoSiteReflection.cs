@@ -387,12 +387,19 @@ namespace Multiplayer.Network.Sync.State
             try { mission = ReadMissionRecord(site); }
             catch { mission = null; }
 
-            // WA-2 haven tail: best-effort — a miss carries null (= not carried; the identity still mirrors).
+            // WA-2 tails: best-effort — a miss carries null (= not carried; the identity still mirrors).
             GeoHavenTail haven = null;
             try { haven = ReadHavenTail(site); }
             catch { haven = null; }
+            GeoAlienBaseTail alienBase = null;
+            try { alienBase = ReadAlienBaseTail(site); }
+            catch { alienBase = null; }
+            GeoExcavationTail excavation = null;
+            try { excavation = ReadExcavationTail(GeoRuntime.Instance, site); }
+            catch { excavation = null; }
 
-            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited, mission, haven);
+            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited,
+                mission, haven, alienBase, excavation);
         }
 
         /// <summary>
@@ -1034,7 +1041,7 @@ namespace Multiplayer.Network.Sync.State
                 if (map == null) return null;
                 var mapType = map.GetType();
 
-                var token = new SiteEventToken { Map = map };
+                var token = new SiteEventToken();
                 foreach (var name in SiteEventNames)
                 {
                     var evt = mapType.GetEvent(name, BindingFlags.Public | BindingFlags.Instance);
@@ -1044,10 +1051,31 @@ namespace Multiplayer.Network.Sync.State
                     try
                     {
                         evt.AddEventHandler(map, handler);
-                        token.Handlers.Add((evt, handler));
+                        token.Handlers.Add((map, evt, handler));
                     }
                     catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
                 }
+                // WA-2 excavation dirty triggers (gap 3c): GeoPhoenixFaction.OnExcavationStarted/Completed
+                // (GeoPhoenixFaction.cs:280-282). Both hand (faction, SiteExcavationState) — the site CARRIER
+                // is arg 1 (GetOwningSiteId unwraps SiteExcavationState.Site). Same token/detach lifecycle as
+                // the map events: the faction instance is reborn with the GeoLevel exactly like the GeoMap, so
+                // the channel's instance-compare rebind covers both. Best-effort: a miss only drops the
+                // excavation dirty trigger (start/completion still dirty via the mission family / state flips).
+                var fac = rt?.PhoenixFaction();
+                if (fac != null)
+                    foreach (var name in GeoSiteDirtyEvents.PhoenixFactionEventNames)
+                    {
+                        var evt = fac.GetType().GetEvent(name, BindingFlags.Public | BindingFlags.Instance);
+                        if (evt == null) continue;
+                        var handler = MakeSiteAdapter(evt, onSiteChanged, argIndex: 1);
+                        if (handler == null) continue;
+                        try
+                        {
+                            evt.AddEventHandler(fac, handler);
+                            token.Handlers.Add((fac, evt, handler));
+                        }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
+                    }
                 return token.Handlers.Count > 0 ? token : null;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe failed: " + ex.Message); return null; }
@@ -1055,10 +1083,10 @@ namespace Multiplayer.Network.Sync.State
 
         public static void Unsubscribe(object token)
         {
-            if (!(token is SiteEventToken t) || t.Map == null) return;
-            foreach (var (evt, handler) in t.Handlers)
+            if (!(token is SiteEventToken t)) return;
+            foreach (var (target, evt, handler) in t.Handlers)
             {
-                try { evt.RemoveEventHandler(t.Map, handler); }
+                try { evt.RemoveEventHandler(target, handler); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Unsubscribe remove failed: " + ex.Message); }
             }
             t.Handlers.Clear();
@@ -1077,10 +1105,12 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>
-        /// The owning site's <c>SiteId</c> for an aggregate-event arg 0 that may not BE a <c>GeoSite</c>:
-        /// the WA-2 haven family (GeoMap.cs:279-283) hands the <c>GeoHaven</c> component instead — unwrap it
-        /// via <c>GeoHaven.Site</c> (GeoHaven.cs:166). A plain <c>GeoSite</c> resolves as before; anything
-        /// else (unbound / unexpected type) is -1 (the sink drops it).
+        /// The owning site's <c>SiteId</c> for a dirty-event carrier that may not BE a <c>GeoSite</c>:
+        /// the WA-2 haven family (GeoMap.cs:279-283) hands the <c>GeoHaven</c> component — unwrap via
+        /// <c>GeoHaven.Site</c> (GeoHaven.cs:166); the excavation family (GeoPhoenixFaction.cs:280-282) hands
+        /// the <c>SiteExcavationState</c> — unwrap via its readonly <c>Site</c> field
+        /// (SiteExcavationState.cs:15). A plain <c>GeoSite</c> resolves as before; anything else (unbound /
+        /// unexpected type) is -1 (the sink drops it).
         /// </summary>
         public static int GetOwningSiteId(object siteOrCarrier)
         {
@@ -1090,6 +1120,9 @@ namespace Multiplayer.Network.Sync.State
                 EnsureHavenTail();
                 if (_geoHavenType != null && _geoHavenType.IsInstanceOfType(siteOrCarrier) && _havenSiteProp != null)
                     return GetSiteId(_havenSiteProp.GetValue(siteOrCarrier, null));
+                EnsureExcavationTail();
+                if (_excavStateType != null && _excavStateType.IsInstanceOfType(siteOrCarrier) && _excavSiteField != null)
+                    return GetSiteId(_excavSiteField.GetValue(siteOrCarrier));
                 return GetSiteId(siteOrCarrier);
             }
             catch { return -1; }
@@ -1199,19 +1232,301 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyHavenTail failed: " + ex.Message); }
         }
 
-        private sealed class SiteEventToken
+        // ─── WA-2 alien-base tail (base-type evolution + site addons, spec §5 gap 4b) ───
+        // Decompile-verified 2026-07-05:
+        //   • GeoAlienBase is a COMPONENT on the site actor (GeoAlienBase.cs:24, Site back-ref :96).
+        //   • AlienBaseTypeDef { get; private set; } (:62) — promoted by ChangeAlienBaseType (:167-197,
+        //     fires GeoMap.SiteAlienBaseTypeChanged :287). The client stamps the compiler-generated setter
+        //     ONLY (value write): ChangeAlienBaseType itself runs ActivateBase → CreateAlienBaseMission +
+        //     SpawnMonster + expansion updateables — SIM on the mirror.
+        //   • GeoSite._addons (HashSet<GeoSiteAddonDef>, GeoSite.cs:63; public Addons :237). Add/RemoveAddon
+        //     fire AddonsChanged (:452/:463) → GeoMap.SiteAddonsChanged — the client REWRITES the set
+        //     directly instead (no event re-raise, the usual no-cascade mirror discipline).
+
+        private static bool _alienBaseTailEnsured;
+        private static Type _geoAlienBaseType;              // PhoenixPoint.Geoscape.Entities.GeoAlienBase
+        private static PropertyInfo _alienBaseTypeDefProp;  // GeoAlienBase.AlienBaseTypeDef (host read)
+        private static MethodInfo _alienBaseTypeDefSetter;  // private auto-prop setter (client stamp)
+        private static FieldInfo _siteAddonsField;          // GeoSite._addons (HashSet<GeoSiteAddonDef>)
+        private static MethodInfo _addonsClearMethod;       // HashSet<GeoSiteAddonDef>.Clear (client rewrite)
+        private static MethodInfo _addonsAddMethod;         // HashSet<GeoSiteAddonDef>.Add
+
+        private static void EnsureAlienBaseTail()
         {
-            public object Map;
-            public readonly List<(EventInfo evt, Delegate handler)> Handlers = new List<(EventInfo, Delegate)>();
+            if (_alienBaseTailEnsured) return;
+            _alienBaseTailEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                _geoAlienBaseType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoAlienBase");
+                if (_geoAlienBaseType != null)
+                {
+                    _alienBaseTypeDefProp = AccessTools.Property(_geoAlienBaseType, "AlienBaseTypeDef");
+                    _alienBaseTypeDefSetter = AccessTools.PropertySetter(_geoAlienBaseType, "AlienBaseTypeDef");
+                }
+                var geoSiteT = _geoSiteType ?? AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                if (geoSiteT != null)
+                {
+                    _siteAddonsField = AccessTools.Field(geoSiteT, "_addons");
+                    var hashSetT = _siteAddonsField?.FieldType;   // HashSet<GeoSiteAddonDef>
+                    if (hashSetT != null)
+                    {
+                        _addonsClearMethod = AccessTools.Method(hashSetT, "Clear", Type.EmptyTypes);
+                        _addonsAddMethod = AccessTools.Method(hashSetT, "Add");
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureAlienBaseTail failed (alien-base tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>HOST: read the alien-base tail off a live site, or null (not an alien base / unbound).</summary>
+        public static GeoAlienBaseTail ReadAlienBaseTail(object site)
+        {
+            try
+            {
+                EnsureAlienBaseTail();
+                if (_geoAlienBaseType == null || !(site is Component c)) return null;
+                object alienBase = null;
+                try { alienBase = c.GetComponent(_geoAlienBaseType); }
+                catch { return null; }
+                if (alienBase == null) return null;
+                string typeGuid = "";
+                try { typeGuid = DefReflection.GetGuid(_alienBaseTypeDefProp?.GetValue(alienBase, null)) ?? ""; }
+                catch { typeGuid = ""; }
+                var addons = new List<string>();
+                try
+                {
+                    if (_siteAddonsField?.GetValue(site) is IEnumerable set)
+                        foreach (var def in set)
+                        {
+                            var g = DefReflection.GetGuid(def);
+                            if (!string.IsNullOrEmpty(g)) addons.Add(g);
+                        }
+                }
+                catch { /* addons stay best-effort-empty */ }
+                return new GeoAlienBaseTail(typeGuid, addons.ToArray());
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadAlienBaseTail failed: " + ex.Message);
+                return null;
+            }
         }
 
         /// <summary>
-        /// Emit a DynamicMethod delegate matching <paramref name="evt"/>'s handler signature that loads arg 0
-        /// (the <c>GeoSite</c>) and forwards it to <paramref name="onSiteChanged"/> (<c>Action&lt;object&gt;</c>),
-        /// ignoring any further args. Mirrors <c>ResearchStateReflection.MakeAdapter</c> but captures arg 0
-        /// instead of discarding all args. Null if the event has no parameters or on failure.
+        /// CLIENT: stamp the mirrored alien-base tail — VALUE-ONLY, idempotent, last-wins. The type def is
+        /// written via the compiler-generated setter (never <c>ChangeAlienBaseType</c> — its cascade is sim);
+        /// an unresolved/empty guid SKIPS the stamp (never nulls a live type). The addon set is REWRITTEN
+        /// (Clear + Add resolved defs — empty list is an honest clear; unresolved guids skipped). Null tail =
+        /// not carried → no-op. Ends with the native <see cref="RefreshSiteVisuals"/> kick (base-type art).
         /// </summary>
-        private static Delegate MakeSiteAdapter(EventInfo evt, Action<object> onSiteChanged)
+        public static void ApplyAlienBaseTail(GeoRuntime rt, object site, GeoAlienBaseTail tail)
+        {
+            if (site == null || tail == null) return;
+            try
+            {
+                EnsureAlienBaseTail();
+                if (_geoAlienBaseType == null || !(site is Component c)) return;
+                object alienBase = null;
+                try { alienBase = c.GetComponent(_geoAlienBaseType); }
+                catch { alienBase = null; }
+                if (alienBase != null && _alienBaseTypeDefSetter != null && !string.IsNullOrEmpty(tail.TypeDefGuid))
+                {
+                    try
+                    {
+                        var typeDef = DefReflection.GetDefByGuid(tail.TypeDefGuid);
+                        if (typeDef != null) _alienBaseTypeDefSetter.Invoke(alienBase, new[] { typeDef });
+                        else Debug.LogWarning("[Multiplayer] GeoSiteReflection.ApplyAlienBaseTail: type guid '" + tail.TypeDefGuid + "' did not resolve (skipped)");
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAlienBaseTail type failed (skipped): " + ex.Message); }
+                }
+                if (_siteAddonsField != null && _addonsClearMethod != null && _addonsAddMethod != null)
+                {
+                    try
+                    {
+                        var set = _siteAddonsField.GetValue(site);
+                        if (set != null)
+                        {
+                            _addonsClearMethod.Invoke(set, null);
+                            foreach (var g in tail.AddonDefGuids)
+                            {
+                                var def = DefReflection.GetDefByGuid(g);
+                                if (def != null) _addonsAddMethod.Invoke(set, new[] { def });
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAlienBaseTail addons failed (skipped): " + ex.Message); }
+                }
+                RefreshSiteVisuals(site);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAlienBaseTail failed: " + ex.Message); }
+        }
+
+        // ─── WA-2 excavation tail (archeology dig state, spec §5 gap 3c) ───
+        // Decompile-verified 2026-07-05:
+        //   • GeoPhoenixFaction._excavatingSites (List<SiteExcavationState>, GeoPhoenixFaction.cs:108;
+        //     public ExcavatingSites :196; StartExcavatingSite :802-821 creates + Inits + subscribes).
+        //   • SiteExcavationState: readonly Site FIELD (:15); IsExcavated / ExcavationStartDate /
+        //     ExcavationEndDate auto-props with private setters (:25-29); StartExcavation sets the dates and
+        //     arms a Timing updateable (:54-68 — SIM, never run on the mirror); CompleteExcavation resets the
+        //     dates, flips IsExcavated and creates the ancient-site mission (:70-89 — SIM).
+        //   • TimeUnit (Base.Core) wraps a TimeSpan: read `.TimeSpan.Ticks`, build via FromTimeSpan(TimeSpan).
+        //   • Display consumers re-derive natively: GeoSite.IsExcavated() walks ExcavatingSites (GeoSite.cs:472)
+        //     and feeds the ancient-site art (GeoSiteVisualsController.cs:348) via RefreshVisuals.
+
+        private static bool _excavTailEnsured;
+        private static Type _excavStateType;            // ...Factions.Archeology.SiteExcavationState
+        private static ConstructorInfo _excavStateCtor; // SiteExcavationState(GeoSite) public
+        private static FieldInfo _excavSiteField;       // SiteExcavationState.Site (readonly field)
+        private static PropertyInfo _excavIsExcavatedProp;   // IsExcavated (host read)
+        private static MethodInfo _excavIsExcavatedSetter;   // private set (client stamp)
+        private static PropertyInfo _excavEndDateProp;       // ExcavationEndDate (host read, TimeUnit)
+        private static MethodInfo _excavEndDateSetter;       // private set (client stamp)
+        private static MethodInfo _excavStartDateSetter;     // ExcavationStartDate private set (client Zero on complete)
+        private static FieldInfo _excavatingSitesField;      // GeoPhoenixFaction._excavatingSites (List<...>)
+        private static PropertyInfo _timeUnitTimeSpanProp;   // TimeUnit.TimeSpan
+        private static MethodInfo _timeUnitFromTimeSpan;     // TimeUnit.FromTimeSpan(TimeSpan) static
+
+        private static void EnsureExcavationTail()
+        {
+            if (_excavTailEnsured) return;
+            _excavTailEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                _excavStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.Archeology.SiteExcavationState");
+                var geoSiteT = _geoSiteType ?? AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                var timeUnitT = AccessTools.TypeByName("Base.Core.TimeUnit");
+                var pxFactionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction");
+                if (_excavStateType == null || geoSiteT == null || timeUnitT == null) return;
+                _excavStateCtor = AccessTools.Constructor(_excavStateType, new[] { geoSiteT });
+                _excavSiteField = AccessTools.Field(_excavStateType, "Site");
+                _excavIsExcavatedProp = AccessTools.Property(_excavStateType, "IsExcavated");
+                _excavIsExcavatedSetter = AccessTools.PropertySetter(_excavStateType, "IsExcavated");
+                _excavEndDateProp = AccessTools.Property(_excavStateType, "ExcavationEndDate");
+                _excavEndDateSetter = AccessTools.PropertySetter(_excavStateType, "ExcavationEndDate");
+                _excavStartDateSetter = AccessTools.PropertySetter(_excavStateType, "ExcavationStartDate");
+                if (pxFactionT != null) _excavatingSitesField = AccessTools.Field(pxFactionT, "_excavatingSites");
+                _timeUnitTimeSpanProp = AccessTools.Property(timeUnitT, "TimeSpan");
+                // EXACT param match (harmony-accesstools-exact-param-match): FromSeconds has overloads.
+                _timeUnitFromTimeSpan = AccessTools.Method(timeUnitT, "FromTimeSpan", new[] { typeof(TimeSpan) });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureExcavationTail failed (excavation tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>The phoenix faction's excavation record for <paramref name="site"/>, or null.</summary>
+        private static object FindExcavationState(GeoRuntime rt, object site)
+        {
+            if (_excavatingSitesField == null || _excavSiteField == null) return null;
+            var fac = rt?.PhoenixFaction();
+            if (fac == null) return null;
+            if (!(_excavatingSitesField.GetValue(fac) is IEnumerable list)) return null;
+            foreach (var rec in list)
+            {
+                if (rec == null) continue;
+                if (ReferenceEquals(_excavSiteField.GetValue(rec), site)) return rec;
+            }
+            return null;
+        }
+
+        /// <summary>HOST: read the excavation tail for a live site, or null (no record → not carried).</summary>
+        public static GeoExcavationTail ReadExcavationTail(GeoRuntime rt, object site)
+        {
+            try
+            {
+                EnsureExcavationTail();
+                var rec = FindExcavationState(rt, site);
+                if (rec == null) return null;
+                bool excavated = false;
+                try { excavated = (bool)(_excavIsExcavatedProp?.GetValue(rec, null) ?? false); }
+                catch { excavated = false; }
+                long ticks = 0;
+                try
+                {
+                    var endDate = _excavEndDateProp?.GetValue(rec, null);
+                    if (endDate != null && _timeUnitTimeSpanProp != null)
+                        ticks = ((TimeSpan)_timeUnitTimeSpanProp.GetValue(endDate, null)).Ticks;
+                }
+                catch { ticks = 0; }
+                return new GeoExcavationTail(!excavated, ticks);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadExcavationTail failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: stamp the mirrored excavation state — VALUE-ONLY, idempotent, last-wins. Finds (or
+        /// creates via the public <c>SiteExcavationState(GeoSite)</c> ctor + direct list add) the faction's
+        /// record for this site, then stamps <c>IsExcavated</c>/<c>ExcavationEndDate</c> via the private
+        /// setters. NEVER <c>Init</c>/<c>StartExcavation</c>/event subscribe — no Timing updateable, no
+        /// CompleteExcavation cascade (mission creation) on the mirror; the host's own completion arrives as
+        /// the next tail. Null tail = not carried → no-op. Ends with <see cref="RefreshSiteVisuals"/>
+        /// (ancient-site art re-reads <c>GeoSite.IsExcavated()</c>).
+        /// </summary>
+        public static void ApplyExcavationTail(GeoRuntime rt, object site, GeoExcavationTail tail)
+        {
+            if (site == null || tail == null) return;
+            try
+            {
+                EnsureExcavationTail();
+                if (_excavIsExcavatedSetter == null || _excavEndDateSetter == null
+                    || _timeUnitFromTimeSpan == null) return;
+                var rec = FindExcavationState(rt, site);
+                if (rec == null)
+                {
+                    if (_excavStateCtor == null || _excavatingSitesField == null) return;
+                    var fac = rt?.PhoenixFaction();
+                    if (fac == null || !(_excavatingSitesField.GetValue(fac) is IList list)) return;
+                    rec = _excavStateCtor.Invoke(new[] { site });
+                    list.Add(rec);
+                }
+                object endDate = _timeUnitFromTimeSpan.Invoke(null,
+                    new object[] { TimeSpan.FromTicks(tail.Excavating ? tail.EndDateTicks : 0L) });
+                try { _excavEndDateSetter.Invoke(rec, new[] { endDate }); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExcavationTail endDate failed (skipped): " + ex.Message); }
+                try { _excavIsExcavatedSetter.Invoke(rec, new object[] { !tail.Excavating }); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExcavationTail isExcavated failed (skipped): " + ex.Message); }
+                // Completed digs also reset the start date natively (CompleteExcavation) — mirror that.
+                if (!tail.Excavating && _excavStartDateSetter != null)
+                {
+                    try
+                    {
+                        object zero = _timeUnitFromTimeSpan.Invoke(null, new object[] { TimeSpan.Zero });
+                        _excavStartDateSetter.Invoke(rec, new[] { zero });
+                    }
+                    catch { /* cosmetic */ }
+                }
+                RefreshSiteVisuals(site);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExcavationTail failed: " + ex.Message); }
+        }
+
+        /// <summary>The owning <c>GeoSite</c> of a live <c>GeoMission</c> (<c>GeoMission.Site</c>,
+        /// GeoMission.cs:136), or null — the mission-drift dirty hook resolves its site through this.</summary>
+        public static object GetMissionSite(object mission)
+        {
+            if (mission == null) return null;
+            try { return AccessTools.Property(mission.GetType(), "Site")?.GetValue(mission, null); }
+            catch { return null; }
+        }
+
+        private sealed class SiteEventToken
+        {
+            // (target, event, handler) triples: GeoMap events + the WA-2 GeoPhoenixFaction excavation events.
+            public readonly List<(object target, EventInfo evt, Delegate handler)> Handlers
+                = new List<(object, EventInfo, Delegate)>();
+        }
+
+        /// <summary>
+        /// Emit a DynamicMethod delegate matching <paramref name="evt"/>'s handler signature that loads the
+        /// site-carrier arg at <paramref name="argIndex"/> (arg 0 = the <c>GeoSite</c>/<c>GeoHaven</c> for the
+        /// GeoMap events; arg 1 = the <c>SiteExcavationState</c> for the faction excavation events) and
+        /// forwards it to <paramref name="onSiteChanged"/> (<c>Action&lt;object&gt;</c>), ignoring the rest.
+        /// Mirrors <c>ResearchStateReflection.MakeAdapter</c> but captures one arg instead of discarding all.
+        /// Null if the event has too few parameters or on failure.
+        /// </summary>
+        private static Delegate MakeSiteAdapter(EventInfo evt, Action<object> onSiteChanged, int argIndex = 0)
         {
             if (evt == null) return null;
             try
@@ -1220,7 +1535,7 @@ namespace Multiplayer.Network.Sync.State
                 MethodInfo invoke = handlerType.GetMethod("Invoke");
                 if (invoke == null) return null;
                 ParameterInfo[] ps = invoke.GetParameters();
-                if (ps.Length == 0) return null; // every site event has the GeoSite as arg 0
+                if (ps.Length <= argIndex) return null; // carrier arg must exist
 
                 // DynamicMethod signature: [Action<object> closure-arg, <event params...>]
                 Type[] dmSig = new Type[ps.Length + 1];
@@ -1230,8 +1545,8 @@ namespace Multiplayer.Network.Sync.State
                 var dm = new DynamicMethod("GeoMap_Site_Adapter", typeof(void), dmSig,
                     typeof(GeoSiteReflection).Module, skipVisibility: true);
                 ILGenerator il = dm.GetILGenerator();
-                il.Emit(OpCodes.Ldarg_0);   // the bound Action<object>
-                il.Emit(OpCodes.Ldarg_1);   // event arg 0 == the GeoSite (reference type → object)
+                il.Emit(OpCodes.Ldarg_0);                // the bound Action<object>
+                il.Emit(OpCodes.Ldarg, argIndex + 1);    // the site-carrier event arg (reference type → object)
                 il.Emit(OpCodes.Callvirt, typeof(Action<object>).GetMethod("Invoke"));
                 il.Emit(OpCodes.Ret);
 

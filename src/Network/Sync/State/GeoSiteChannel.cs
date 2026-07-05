@@ -32,10 +32,26 @@ namespace Multiplayer.Network.Sync.State
         private object _token;   // opaque GeoMap site-event subscription token
         private object _map;     // bound GeoMap instance (rebind guard)
 
+        // The host-attached live instance (set in AttachHost — which only runs on the host branch of
+        // SyncEngine.Tick — cleared in DetachHost). Lets out-of-band dirty sources (the WA-2 mission-drift
+        // Harmony hook) mark a site without threading the channel instance through the patch.
+        private static GeoSiteChannel _live;
+
         // Site ids changed since the last flush. Guarded by its own lock: the site events fire on the host
         // sim and the Snapshot flush drains it; a swap-under-lock keeps the encode consistent.
         private readonly HashSet<int> _dirty = new HashSet<int>();
         private readonly object _dirtyLock = new object();
+
+        /// <summary>Out-of-band host dirty-mark (WA-2 mission drift): mark <paramref name="siteId"/> dirty on
+        /// the live host-attached channel. No-op when not host-attached (client / no session) — the ONLY
+        /// setter of <see cref="_live"/> is the host-branch AttachHost.</summary>
+        public static void MarkSiteDirtyExternal(int siteId)
+        {
+            var ch = _live;
+            if (ch == null || siteId < 0) return;
+            lock (ch._dirtyLock) { ch._dirty.Add(siteId); }
+            NetworkEngine.Instance?.Sync?.MarkChannelDirty(SurfaceIds.GeoSiteChannel);
+        }
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -84,10 +100,13 @@ namespace Multiplayer.Network.Sync.State
                 // the mirrored LIVE→site-id brief arrives separately on the 0x69 report rail and binds off
                 // this attached mission. Null site (Case-B spawn failed) is a guarded no-op inside.
                 GeoSiteReflection.ApplyMission(rt, site, dto.Mission);
-                // WA-2 optional tails: value-only display stamps (haven population; infestation rides the
-                // Owner identity write). Null tail = not carried — never a clear. Frozen-sim safe (backing-
-                // field writes only) + idempotent last-wins; ends with the native RefreshVisuals kick.
+                // WA-2 optional tails: value-only display stamps (haven population — infestation rides the
+                // Owner identity write; alien-base type + addons; excavation dig state). Null tail = not
+                // carried — never a clear. Frozen-sim safe (backing-field / private-setter writes only, no
+                // native cascades) + idempotent last-wins; each ends with the native RefreshVisuals kick.
                 GeoSiteReflection.ApplyHavenTail(rt, site, dto.Haven);
+                GeoSiteReflection.ApplyAlienBaseTail(rt, site, dto.AlienBase);
+                GeoSiteReflection.ApplyExcavationTail(rt, site, dto.Excavation);
             }
         }
 
@@ -118,6 +137,7 @@ namespace Multiplayer.Network.Sync.State
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(id);
             });
             if (_token == null) { _map = null; return; } // no event bound → retry next frame
+            _live = this;                                // host-attached → out-of-band dirty marks target us
             Debug.Log("[Multiplayer] GeoSiteChannel: subscribed site events on live GeoMap (rebind-safe)");
         }
 
@@ -126,6 +146,7 @@ namespace Multiplayer.Network.Sync.State
             if (_token != null) GeoSiteReflection.Unsubscribe(_token);
             _token = null;
             _map = null;
+            if (_live == this) _live = null;
             lock (_dirtyLock) { _dirty.Clear(); }
         }
     }

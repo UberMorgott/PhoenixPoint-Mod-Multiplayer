@@ -200,7 +200,113 @@ public class GeoSiteTailTests
         Assert.Equal(Site(3, new GeoHavenTail(100, true)), Site(3, new GeoHavenTail(100, true)));
     }
 
-    // ─── dirty-subscription decision pin (WA-2: the haven family joins the GeoMap bind list) ────
+    // ─── alien-base tail (commit 2, gap 4b) ─────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("NEST_GUID", new string[0])]
+    [InlineData("LAIR_GUID", new[] { "SPAWNERY_GUID" })]
+    [InlineData("CITADEL_GUID", new[] { "A_GUID", "B_GUID", "C_GUID" })]
+    [InlineData("", new[] { "A_GUID" })]   // unreadable type still carries addons (client skips type stamp)
+    public void AlienBaseTail_RoundTrips(string typeGuid, string[] addons)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(4, "o", 40, 1, "n", "e",
+            alienBase: new GeoAlienBaseTail(typeGuid, addons)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].AlienBase);
+        Assert.Equal(typeGuid, rt.Sites[0].AlienBase.TypeDefGuid);
+        Assert.Equal(addons, rt.Sites[0].AlienBase.AddonDefGuids);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void AlienBaseTail_EmptyAddons_IsHonestClear_DistinctFromAbsent()
+    {
+        // Empty addon list must survive as EMPTY (a clear), never collapse into "tail absent".
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 40, 1, "n", "e", alienBase: new GeoAlienBaseTail("T", new string[0])));
+        snap.Sites.Add(new GeoSiteState(2, "o", 40, 1, "n", "e"));   // no tail at all
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].AlienBase);
+        Assert.Empty(rt.Sites[0].AlienBase.AddonDefGuids);
+        Assert.Null(rt.Sites[1].AlienBase);
+    }
+
+    // ─── excavation tail (commit 2, gap 3c) ─────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(true, 637500000000000000L)]   // digging: end date carried
+    [InlineData(false, 0L)]                   // completed: IsExcavated=true on the client, dates Zero
+    public void ExcavationTail_RoundTrips(bool excavating, long ticks)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(6, "o", 90, 1, "n", "e",
+            excavation: new GeoExcavationTail(excavating, ticks)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Excavation);
+        Assert.Equal(excavating, rt.Sites[0].Excavation.Excavating);
+        Assert.Equal(ticks, rt.Sites[0].Excavation.EndDateTicks);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    // ─── combined tails ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AllTails_CoexistOnOneRecord_AndPerSiteIndependently()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 20, 1, "n", "e",
+            haven: new GeoHavenTail(1200, true),
+            alienBase: new GeoAlienBaseTail("TYPE", new[] { "ADDON" }),
+            excavation: new GeoExcavationTail(true, 42L)));
+        snap.Sites.Add(new GeoSiteState(2, "o", 40, 1, "n", "e",
+            alienBase: new GeoAlienBaseTail("LAIR", null)));
+        snap.Sites.Add(new GeoSiteState(3, "o", 90, 1, "n", "e",
+            excavation: new GeoExcavationTail(false, 0L)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.Equal(snap.Sites[1], rt.Sites[1]);
+        Assert.Equal(snap.Sites[2], rt.Sites[2]);
+        Assert.Null(rt.Sites[1].Haven);
+        Assert.Null(rt.Sites[1].Excavation);
+        Assert.Null(rt.Sites[2].AlienBase);
+    }
+
+    [Fact]
+    public void NewTails_ParticipateInEquality()
+    {
+        var baseline = Site(3);
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 20, 1, "n", "e", alienBase: new GeoAlienBaseTail("T")));
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 20, 1, "n", "e", excavation: new GeoExcavationTail(true, 1)));
+        Assert.NotEqual(new GeoAlienBaseTail("T", new[] { "A" }), new GeoAlienBaseTail("T", new[] { "B" }));
+        Assert.NotEqual(new GeoAlienBaseTail("T"), new GeoAlienBaseTail("U"));
+        Assert.NotEqual(new GeoExcavationTail(true, 1), new GeoExcavationTail(false, 1));
+        Assert.NotEqual(new GeoExcavationTail(true, 1), new GeoExcavationTail(true, 2));
+        Assert.Equal(new GeoAlienBaseTail("T", new[] { "A" }), new GeoAlienBaseTail("T", new[] { "A" }));
+        Assert.Equal(new GeoExcavationTail(true, 1), new GeoExcavationTail(true, 1));
+    }
+
+    [Fact]
+    public void CombinedTails_TruncatedInsideExcavation_RejectsWholePayload()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 20, 1, "n", "e",
+            haven: new GeoHavenTail(5, false), excavation: new GeoExcavationTail(true, long.MaxValue)));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        var truncated = new byte[bytes.Length - 4];   // cut inside the i64 end-date
+        System.Array.Copy(bytes, truncated, truncated.Length);
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
+    }
+
+    // ─── dirty-subscription decision pins (WA-2 families join the bind lists) ───────────────────
 
     [Fact]
     public void SubscribedGeoMapEvents_IncludeHavenFamily()
@@ -213,7 +319,17 @@ public class GeoSiteTailTests
         Assert.Contains("SiteOwnerChanged", names);
         Assert.Contains("SiteStateChanged", names);
         Assert.Contains("SiteMissionStarted", names);
-        Assert.Equal(13, names.Length);
+        // WA-2 commit 2: alien-base family.
+        Assert.Contains("SiteAddonsChanged", names);
+        Assert.Contains("SiteAlienBaseTypeChanged", names);
+        Assert.Equal(15, names.Length);
         Assert.Equal(names.Length, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void SubscribedPhoenixFactionEvents_AreTheExcavationPair()
+    {
+        var names = GeoSiteDirtyEvents.PhoenixFactionEventNames;
+        Assert.Equal(new[] { "OnExcavationStarted", "OnExcavationCompleted" }, names);
     }
 }
