@@ -191,8 +191,6 @@
          Unity-free → unit-tested directly; the live SessionNotifier/HostLeaveHandler/intercept that USE
          them bind game types and are NOT linked (in-game verified). -->
     <Compile Include="..\src\Network\SessionLifecycle.cs"><Link>SessionLifecycle.cs</Link></Compile>
-    <!-- Inc1 Task A: pure, Unity-free declarative producer table (client geoscape sim-freeze). -->
-    <Compile Include="..\src\Network\CommandSync\GeoSimProducerTable.cs"><Link>CommandSync\GeoSimProducerTable.cs</Link></Compile>
     <!-- Inc1 Task C: pure, Unity-free gate decision for the client-only TFTV aircraft-maintenance freeze. -->
     <Compile Include="..\src\Harmony\ClientTftvAircraftFreezeGate.cs"><Link>Harmony\ClientTftvAircraftFreezeGate.cs</Link></Compile>
     <!-- Inc4 S0: pure, Unity-free feature flag + freeze-decision gate for the client geoscape sim-freeze. The
