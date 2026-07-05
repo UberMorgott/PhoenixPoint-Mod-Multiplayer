@@ -74,12 +74,12 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>HOST inbound: end the CURRENT faction's turn on the host sim (any client may end any
         /// turn for now — open permission). The host's <c>NextTurnCrt</c> then advances and the
         /// <c>TacMission.OnNewTurn</c> postfix broadcasts <c>tac.turn</c>.</summary>
-        public static void HostOnEndTurnIntent(byte[] payload)
+        public static void HostOnEndTurnIntent(ulong senderPeerId, byte[] payload)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeEndTurnIntent(payload, out uint nonce)) { Debug.LogError("[Multiplayer][tac] endturn intent decode failed"); return; }
-            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentEndTurn, nonce)) return;
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentEndTurn, nonce)) return;
 
             try
             {

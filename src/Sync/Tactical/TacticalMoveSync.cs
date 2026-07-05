@@ -135,13 +135,13 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>HOST inbound: resolve netId→actor and execute the real move toward the requested pos on
         /// the host sim. Running the native move fires <see cref="HostBroadcastMoveOutcome"/> via the
         /// OnPlayingActionEnd postfix, which streams the FINAL pose to all peers.</summary>
-        public static void HostOnMoveIntent(byte[] payload)
+        public static void HostOnMoveIntent(ulong senderPeerId, byte[] payload)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeMoveIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] move intent decode failed"); return; }
             // Drop a reliable-transport double-send (a double-applied move would step the actor twice).
-            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentMove, intent.Nonce)) return;
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentMove, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.NetId);
             // [DIAG] HOST DECODE: decoded destination + whether the netId resolved to a live actor.

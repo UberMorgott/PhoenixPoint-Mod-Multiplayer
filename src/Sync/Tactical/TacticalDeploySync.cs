@@ -765,7 +765,7 @@ namespace Multiplayer.Sync.Tactical
         ///   • TacDeployChunk (0x81): one FRAGMENT of an over-cap snapshot → feed the reassembler; only the
         ///     fragment that completes the (siteId,deployGeneration) set yields the whole payload (idempotent).
         /// </summary>
-        private static bool HandleTacticalEnvelope(byte surfaceId, byte[] payload)
+        private static bool HandleTacticalEnvelope(ulong senderPeerId, byte surfaceId, byte[] payload)
         {
             if (surfaceId == (byte)TacticalSurfaceIds.TacDeploy)
             {
@@ -798,7 +798,7 @@ namespace Multiplayer.Sync.Tactical
             // is side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentMove)
             {
-                try { TacticalMoveSync.HostOnMoveIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.move failed: " + ex); }
+                try { TacticalMoveSync.HostOnMoveIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.move failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacMoveStart)
@@ -813,7 +813,7 @@ namespace Multiplayer.Sync.Tactical
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentEndTurn)
             {
-                try { TacticalTurnSync.HostOnEndTurnIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.endturn failed: " + ex); }
+                try { TacticalTurnSync.HostOnEndTurnIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.endturn failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacTurn)
@@ -825,7 +825,7 @@ namespace Multiplayer.Sync.Tactical
             // ─── LIVE combat/damage rail (Inc 3a) ─────────────────────────────────────────────────
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentAbility)
             {
-                try { TacticalCombatSync.HostOnAbilityIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.ability failed: " + ex); }
+                try { TacticalCombatSync.HostOnAbilityIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.ability failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacDamage)
@@ -864,7 +864,7 @@ namespace Multiplayer.Sync.Tactical
             // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentEquip)
             {
-                try { TacticalEquipSync.HostOnEquipIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.equip failed: " + ex); }
+                try { TacticalEquipSync.HostOnEquipIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.equip failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacEquip)
@@ -878,7 +878,7 @@ namespace Multiplayer.Sync.Tactical
             // side-guarded internally, so a stray envelope on the wrong side is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacIntentOverwatch)
             {
-                try { TacticalOverwatchSync.HostOnArmIntent(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.overwatch failed: " + ex); }
+                try { TacticalOverwatchSync.HostOnArmIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.overwatch failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacOverwatchState)

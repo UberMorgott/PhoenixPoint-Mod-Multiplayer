@@ -1126,8 +1126,9 @@ namespace Multiplayer.Sync.Tactical
 
     /// <summary>
     /// HOST-side intent de-duplicator: the reliable transport can double-send a client intent envelope; a
-    /// double-applied MOVE would step the actor twice. Keyed by the intent's (surfaceId, nonce); a bounded
-    /// ring drops the oldest so memory stays flat over a long battle. PURE (no engine types).
+    /// double-applied MOVE would step the actor twice. Keyed by the intent's (peerId, surfaceId, nonce) —
+    /// client nonces are client-LOCAL monotonic, so the peer discriminator keeps two clients' nonce streams
+    /// apart; a bounded ring drops the oldest so memory stays flat over a long battle. PURE (no engine types).
     /// </summary>
     public sealed class TacticalIntentDedup : Network.Sync.IntentDedup
     {

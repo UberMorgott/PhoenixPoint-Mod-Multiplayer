@@ -211,29 +211,41 @@ public class TacticalIntentDedupTests
     public void IsNew_FirstTrueRepeatFalse()
     {
         var d = new TacticalIntentDedup();
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, 1u));
-        Assert.False(d.IsNew(TacticalSurfaceIds.TacIntentMove, 1u));   // reliable-transport double-send
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, 2u));
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));
+        Assert.False(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));   // reliable-transport double-send
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 2u));
     }
 
     [Fact]
     public void IsNew_SurfaceNamespaced()
     {
         var d = new TacticalIntentDedup();
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, 1u));
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));
         // Same nonce on a different intent surface is a distinct event.
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentEndTurn, 1u));
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentEndTurn, 1u));
+    }
+
+    [Fact]
+    public void IsNew_PeerNamespaced_TwoClientsSameNonceBothAccepted()
+    {
+        // 3+ player regression: each client's _nonceCounter starts at 1, so client A and client B both
+        // send (TacIntentMove, nonce=1). Peer-less keying dropped client B's move as a "duplicate".
+        var d = new TacticalIntentDedup();
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));    // client A
+        Assert.True(d.IsNew(8UL, TacticalSurfaceIds.TacIntentMove, 1u));    // client B, same surface+nonce
+        Assert.False(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));   // A's double-send → dropped
+        Assert.False(d.IsNew(8UL, TacticalSurfaceIds.TacIntentMove, 1u));   // B's double-send → dropped
     }
 
     [Fact]
     public void IsNew_EvictsOldestPastCapacity()
     {
         var d = new TacticalIntentDedup(capacity: 16);
-        for (uint n = 1; n <= 16; n++) Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, n));
+        for (uint n = 1; n <= 16; n++) Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, n));
         // Overflow evicts nonce 1.
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, 17u));
-        Assert.True(d.IsNew(TacticalSurfaceIds.TacIntentMove, 1u));    // 1 was evicted → seen as new again
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 17u));
+        Assert.True(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 1u));    // 1 was evicted → seen as new again
         // A recent one is still deduped.
-        Assert.False(d.IsNew(TacticalSurfaceIds.TacIntentMove, 17u));
+        Assert.False(d.IsNew(7UL, TacticalSurfaceIds.TacIntentMove, 17u));
     }
 }

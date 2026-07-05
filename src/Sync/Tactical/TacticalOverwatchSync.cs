@@ -104,12 +104,12 @@ namespace Multiplayer.Sync.Tactical
         /// rebuild the cone + a <c>TacticalAbilityTarget{Cone}</c>, then invoke the real <c>Activate</c> on the
         /// host actor. The host is NOT mirroring, so the prefix passes through and the host SetCone postfix
         /// (<see cref="OnHostSetCone"/>) broadcasts <c>tac.overwatch.state</c>. No-op off-host / off-session.</summary>
-        public static void HostOnArmIntent(byte[] payload)
+        public static void HostOnArmIntent(ulong senderPeerId, byte[] payload)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeOverwatchIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] overwatch intent decode failed"); return; }
-            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentOverwatch, intent.Nonce)) return;
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentOverwatch, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
             Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded overwatch actorNetId=" + intent.ActorNetId +

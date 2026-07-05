@@ -200,12 +200,12 @@ namespace Multiplayer.Sync.Tactical
         /// invoke the real shot on the host sim. The host's authoritative roll chain fires
         /// (FireWeaponAtTargetCrt → ApplyDamage), and each ApplyDamage broadcasts a tac.damage. No-op
         /// off-host / off-session.</summary>
-        public static void HostOnAbilityIntent(byte[] payload)
+        public static void HostOnAbilityIntent(ulong senderPeerId, byte[] payload)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeIntentAbility(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] shoot intent decode failed"); return; }
-            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentAbility, intent.Nonce)) return;
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentAbility, intent.Nonce)) return;
 
             object shooter = TacticalDeploySync.ResolveLiveActor(intent.ShooterNetId);
             Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded shooter=" + intent.ShooterNetId +

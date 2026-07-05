@@ -63,7 +63,7 @@ public class SurfaceRouterGeoStateTests
     [Fact]
     public void TacticalHook_TakesPrecedence_OverGeoState()
     {
-        SurfaceRouter.TacticalInbound = (sid, pl) => true;   // tactical claims everything
+        SurfaceRouter.TacticalInbound = (peer, sid, pl) => true;   // tactical claims everything
         try
         {
             var router = new SurfaceRouter();

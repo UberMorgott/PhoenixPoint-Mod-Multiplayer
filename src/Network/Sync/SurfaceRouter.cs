@@ -19,11 +19,14 @@ namespace Multiplayer.Network.Sync
         /// Tactical replication fast-path hook (armed by <c>TacticalDeploySync.ArmInboundHook</c>). Tactical
         /// surfaces (host→ALL one-way snapshot pushes, e.g. <c>tac.deploy</c>, plus the live move/combat/
         /// vision/equip/overwatch/anim surfaces) ride the SAME 0x67 envelope inbound chokepoint. This delegate
-        /// is consulted with the decoded (surfaceId, payload): it returns true if it consumed the surface.
-        /// NULL by default → the router is inert (every envelope is dropped). Signature:
-        /// <c>(surfaceId, payload) -&gt; handled?</c>.
+        /// is consulted with the sender + decoded (surfaceId, payload): it returns true if it consumed the
+        /// surface. The senderPeerId is threaded through so host intent handlers can dedup per-peer (client
+        /// intent nonces are client-LOCAL monotonic counters — without the peer in the key, two clients'
+        /// nonces collide and the later client's intents are silently dropped). NULL by default → the router
+        /// is inert (every envelope is dropped). Signature:
+        /// <c>(senderPeerId, surfaceId, payload) -&gt; handled?</c>.
         /// </summary>
-        public static System.Func<byte, byte[], bool> TacticalInbound;
+        public static System.Func<ulong, byte, byte[], bool> TacticalInbound;
 
         /// <summary>
         /// Geoscape replication hook (armed by the owning <c>SyncEngine</c> via <c>_router.GeoscapeInbound</c>).
@@ -43,7 +46,7 @@ namespace Multiplayer.Network.Sync
             // push). Inert unless tactical init armed the hook; any non-tactical envelope is dropped (the
             // geoscape action relay rides the legacy 0x60/0x61/0x62 path in SyncEngine, not this router).
             var tac = TacticalInbound;
-            if (tac != null && tac(surfaceId, payload)) return;
+            if (tac != null && tac(senderPeerId, surfaceId, payload)) return;
             // Geoscape fast-path (additive, instance-bound): a geoscape envelope surface (0xA0-0xBF) is
             // consumed here. Inert unless the owning SyncEngine armed the hook; consulted AFTER tactical so a
             // tactical surface always wins its own id range.

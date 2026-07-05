@@ -96,12 +96,12 @@ namespace Multiplayer.Sync.Tactical
         /// real <c>SetSelectedEquipment</c> on the host actor. The host is NOT mirroring, so the prefix passes
         /// through and the host postfix (<see cref="OnHostEquipChanged"/>) broadcasts <c>tac.equip</c>. No-op
         /// off-host / off-session.</summary>
-        public static void HostOnEquipIntent(byte[] payload)
+        public static void HostOnEquipIntent(ulong senderPeerId, byte[] payload)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
             if (!TacticalLiveCodec.TryDecodeEquipIntent(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] equip intent decode failed"); return; }
-            if (!TacticalDeploySync.IntentDedup.IsNew(TacticalSurfaceIds.TacIntentEquip, intent.Nonce)) return;
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentEquip, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
             Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded equip actorNetId=" + intent.ActorNetId +

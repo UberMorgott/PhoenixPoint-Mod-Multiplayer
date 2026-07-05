@@ -29,7 +29,7 @@ public class SurfaceRouterGeoscapeTests
     [Fact]
     public void TacticalHook_TakesPrecedence_GeoscapeNotConsultedWhenTacticalClaims()
     {
-        SurfaceRouter.TacticalInbound = (sid, pl) => true;   // tactical claims everything
+        SurfaceRouter.TacticalInbound = (peer, sid, pl) => true;   // tactical claims everything
         try
         {
             var router = new SurfaceRouter();
@@ -44,9 +44,25 @@ public class SurfaceRouterGeoscapeTests
     }
 
     [Fact]
+    public void TacticalHook_ReceivesSenderPeerId()
+    {
+        // The peer id feeds the host's per-peer intent dedup (client nonces are client-local monotonic,
+        // so without the peer in the key two clients' intents collide) — it must survive the router.
+        ulong gotPeer = 0;
+        SurfaceRouter.TacticalInbound = (peer, sid, pl) => { gotPeer = peer; return true; };
+        try
+        {
+            var router = new SurfaceRouter();
+            router.OnInbound(42UL, Wallet(new byte[] { 1 }), null);
+            Assert.Equal(42UL, gotPeer);
+        }
+        finally { SurfaceRouter.TacticalInbound = null; }
+    }
+
+    [Fact]
     public void UnclaimedEnvelope_IsDropped_NeverThrows()
     {
-        SurfaceRouter.TacticalInbound = (sid, pl) => false;   // tactical declines
+        SurfaceRouter.TacticalInbound = (peer, sid, pl) => false;   // tactical declines
         try
         {
             var router = new SurfaceRouter();
