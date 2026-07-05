@@ -161,6 +161,10 @@
          The channel + reflection bridge (PersonnelChannel / PersonnelReflection) and the membership
          Harmony seams (PersonnelMembershipPatches) bind game types + NetworkEngine and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\PersonnelSnapshot.cs"><Link>Sync\State\PersonnelSnapshot.cs</Link></Compile>
+    <!-- PS3 recruit-pool channel (#10): pure codec + haven-flush core + pool reconcile (Unity-free).
+         The channel + reflection bridge (RecruitPoolChannel / RecruitPoolReflection) and the pool
+         Harmony seams (RecruitPoolPatches) bind game types + NetworkEngine and are NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\RecruitPoolSnapshot.cs"><Link>Sync\State\RecruitPoolSnapshot.cs</Link></Compile>
     <!-- WA-1 mist channel (#8, GeoState 0xA1): pure blob/chunk codec + splitter + client last-wins
          reassembler. The engine glue (MistChannel pump, MistReflection RecordInstanceData/ProcessInstanceData
          bridge) binds game types + SyncEngine and is NOT linked. -->

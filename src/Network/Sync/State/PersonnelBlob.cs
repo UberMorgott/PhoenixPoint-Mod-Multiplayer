@@ -21,8 +21,10 @@ namespace Multiplayer.Network.Sync.State
     public static class PersonnelBlob
     {
         private static Type _geoCharacterType;
+        private static Type _geoUnitDescriptorType;
 
-        /// <summary>HOST: one soldier → game-Serializer graph bytes, or null (caller skips/logs).</summary>
+        /// <summary>HOST: one [SerializeType] root (GeoCharacter for #9, GeoUnitDescriptor for #10) →
+        /// game-Serializer graph bytes, or null (caller skips/logs). Type-agnostic by construction.</summary>
         public static byte[] Write(object geoCharacter)
         {
             if (geoCharacter == null) return null;
@@ -51,6 +53,24 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex)
             {
                 Debug.LogError("[Multiplayer] PersonnelBlob.Read failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>CLIENT (#10): blob bytes → a transient <c>GeoUnitDescriptor</c> (the [SerializeType]
+        /// recruit/capture snapshot — save-proven inside ExtendedInstanceData), or null on any failure.</summary>
+        public static object ReadDescriptor(byte[] blob)
+        {
+            if (blob == null || blob.Length == 0) return null;
+            try
+            {
+                if (_geoUnitDescriptorType == null)
+                    _geoUnitDescriptorType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor");
+                return TacticalDeploySync.DeserializeGraph(blob, _geoUnitDescriptorType, quiet: true);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] PersonnelBlob.ReadDescriptor failed: " + ex.Message);
                 return null;
             }
         }
