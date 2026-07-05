@@ -6,6 +6,103 @@ using System.Text;
 namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
+    /// PURE (Unity-free) mirror record of one site's <c>GeoSite.ActiveMission</c> — the P1 mission-state mirror
+    /// of the unified popup-mirror design (2026-07-05 spec §P1). Carried as an OPTIONAL tail of each
+    /// <see cref="GeoSiteState"/> record on the GeoSite channel (#5): a <c>null</c> record = TOMBSTONE (host has
+    /// no active mission on that site — cleared/cancelled/completed). The client rebuilds the SAME mission
+    /// subclass on its own resolved site via the pure serializer-support ctors and stamps these runtime bits, so
+    /// a later mirrored LIVE→site-id brief (ReportModalVariant.ActiveMissionBrief) binds fully natively off
+    /// <c>site.ActiveMission</c>.
+    ///
+    /// Class discriminator values are REQUIRED because ModalType alone is ambiguous (GeoAlienBaseBrief 2 covers
+    /// TWO classes whose bind hard-casts — a wrong-class rebuild throws) and the wire must stay class-exact.
+    /// Only the runtime bits a brief bind actually reads are carried (decompile-verified 2026-07-05):
+    ///   • HavenDefense — HavenDefenceBriefDataBind reads AttackerFaction + Attacker/DefenderDeployment +
+    ///     AttackedZone (GeoHavenDefenseMission.cs:51-79); ctor's live HavenAttacker is NOT reconstructable →
+    ///     carry {attackerFactionGuid, deployments, attackedZoneDefGuid}.
+    ///   • AlienBaseAssault — deployments + attacker faction (GeoAlienBaseAssaultMission.cs:44-49).
+    ///   • PhoenixBaseDefense — attackingSites (GeoPhoenixBaseDefenseMission.cs:27-35, `_attackingSites`) +
+    ///     `_enemyFaction`; carried as site ids (resolved back on the client's own map).
+    ///   • Everything else rebuilds from (site, missionDef) alone — pure base-ctors.
+    /// <c>Unknown</c> (255) marks a host mission class outside the mapped set (the BehemothAttackBrief-34
+    /// fallback family, GeoscapeView.cs:1751): the client NEVER attaches it — the display path degrades to the
+    /// notify-only text modal instead (honest fallback, spec Batch-1 risk note).
+    /// </summary>
+    public sealed class GeoMissionRecord : IEquatable<GeoMissionRecord>
+    {
+        // ── mission-class discriminator (wire byte). 0 is RESERVED for "no mission" (a null record
+        //    encodes as a lone 0 byte); it is never a valid record value. ──
+        public const byte HavenDefense = 1;           // GeoHavenDefenseMission         → brief 0
+        public const byte AlienBase = 2;              // GeoAlienBaseMission            → brief 2
+        public const byte AlienBaseAssault = 3;       // GeoAlienBaseAssaultMission     → brief 2
+        public const byte PhoenixBaseDefense = 4;     // GeoPhoenixBaseDefenseMission   → brief 11
+        public const byte PhoenixBaseInfestation = 5; // GeoPhoenixBaseInfestationMission → brief 20
+        public const byte InfestationCleanse = 6;     // GeoInfestationCleanseMission   → brief 36
+        public const byte Scavenging = 7;             // GeoScavengingMission           → brief 4
+        public const byte Ambush = 8;                 // GeoAmbushMission               → brief 15
+        public const byte AncientSite = 9;            // GeoAncientSiteMission          → brief 26/28
+        public const byte Unknown = 255;              // unmapped class (fallback-34 family) — never rebuilt
+
+        public readonly byte MissionClass;            // discriminator above (never 0 on a live record)
+        public readonly string MissionDefGuid;        // TacMissionTypeDef guid (GeoMission.MissionDef)
+        public readonly string AttackerFactionDefGuid;// PPFactionDef guid (HavenDefense/AlienBaseAssault attacker; PhoenixBaseDefense _enemyFaction)
+        public readonly int AttackerDeployment;       // HavenDefense / AlienBaseAssault strength numbers
+        public readonly int DefenderDeployment;
+        public readonly string AttackedZoneDefGuid;   // GeoHavenZoneDef guid (HavenDefense _attackedZoneDef)
+        public readonly int[] AttackingSiteIds;       // PhoenixBaseDefense/HavenDefense attacking-site ids (may be empty)
+
+        public GeoMissionRecord(byte missionClass, string missionDefGuid,
+                                string attackerFactionDefGuid = null, int attackerDeployment = 0,
+                                int defenderDeployment = 0, string attackedZoneDefGuid = null,
+                                int[] attackingSiteIds = null)
+        {
+            MissionClass = missionClass;
+            MissionDefGuid = missionDefGuid ?? "";
+            AttackerFactionDefGuid = attackerFactionDefGuid ?? "";
+            AttackerDeployment = attackerDeployment;
+            DefenderDeployment = defenderDeployment;
+            AttackedZoneDefGuid = attackedZoneDefGuid ?? "";
+            AttackingSiteIds = attackingSiteIds ?? new int[0];
+        }
+
+        public bool Equals(GeoMissionRecord other)
+        {
+            if (other == null) return false;
+            if (MissionClass != other.MissionClass
+                || MissionDefGuid != other.MissionDefGuid
+                || AttackerFactionDefGuid != other.AttackerFactionDefGuid
+                || AttackerDeployment != other.AttackerDeployment
+                || DefenderDeployment != other.DefenderDeployment
+                || AttackedZoneDefGuid != other.AttackedZoneDefGuid
+                || AttackingSiteIds.Length != other.AttackingSiteIds.Length) return false;
+            for (int i = 0; i < AttackingSiteIds.Length; i++)
+                if (AttackingSiteIds[i] != other.AttackingSiteIds[i]) return false;
+            return true;
+        }
+
+        public override bool Equals(object obj) => obj is GeoMissionRecord o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = MissionClass;
+                h = (h * 397) ^ (MissionDefGuid?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (AttackerFactionDefGuid?.GetHashCode() ?? 0);
+                h = (h * 397) ^ AttackerDeployment;
+                h = (h * 397) ^ DefenderDeployment;
+                h = (h * 397) ^ (AttackedZoneDefGuid?.GetHashCode() ?? 0);
+                h = (h * 397) ^ AttackingSiteIds.Length;
+                return h;
+            }
+        }
+
+        public override string ToString()
+            => $"Mission(class={MissionClass} def={MissionDefGuid} attacker={AttackerFactionDefGuid} " +
+               $"atk={AttackerDeployment} def={DefenderDeployment} zone={AttackedZoneDefGuid} sites={AttackingSiteIds.Length})";
+    }
+
+    /// <summary>
     /// One site's mirrored IDENTITY: the fields the geoscape-event card / native art collection reads off
     /// <c>Context.Site</c> (Owner / Type / State / EncounterID, plus the site name loc-key for token text).
     /// A pure value type with structural equality so the codec round-trip is directly assertable.
@@ -44,9 +141,11 @@ namespace Multiplayer.Network.Sync.State
         public readonly bool Inspected;    // GetInspected(ViewerFaction) — per-faction site reveal (exploration outcome)
         public readonly bool Visible;      // GetVisible(ViewerFaction) — site shown on the map at all (RevealAroundSite outcome)
         public readonly bool Visited;      // GetVisited(ViewerFaction) — first-visit flag (haven visited icon / objectives)
+        public readonly GeoMissionRecord Mission; // site.ActiveMission mirror (P1); null = TOMBSTONE (no active mission)
 
         public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID,
-                            bool inspected = false, bool visible = false, bool visited = false)
+                            bool inspected = false, bool visible = false, bool visited = false,
+                            GeoMissionRecord mission = null)
         {
             SiteId = siteId;
             // Normalize null → "" so equality + the wire are stable (the codec also coalesces, this keeps
@@ -59,6 +158,7 @@ namespace Multiplayer.Network.Sync.State
             Inspected = inspected;
             Visible = visible;
             Visited = visited;
+            Mission = mission;
         }
 
         public bool Equals(GeoSiteState other)
@@ -70,7 +170,8 @@ namespace Multiplayer.Network.Sync.State
                && EncounterID == other.EncounterID
                && Inspected == other.Inspected
                && Visible == other.Visible
-               && Visited == other.Visited;
+               && Visited == other.Visited
+               && (Mission == null ? other.Mission == null : Mission.Equals(other.Mission));
 
         public override bool Equals(object obj) => obj is GeoSiteState o && Equals(o);
 
@@ -87,12 +188,13 @@ namespace Multiplayer.Network.Sync.State
                 h = (h * 397) ^ (Inspected ? 1 : 0);
                 h = (h * 397) ^ (Visible ? 2 : 0);
                 h = (h * 397) ^ (Visited ? 4 : 0);
+                h = (h * 397) ^ (Mission?.GetHashCode() ?? 0);
                 return h;
             }
         }
 
         public override string ToString()
-            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited})";
+            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())})";
     }
 
     /// <summary>
@@ -104,8 +206,10 @@ namespace Multiplayer.Network.Sync.State
     /// <see cref="DiplomacySnapshot"/> / <see cref="ResearchSnapshot"/>).
     ///
     /// Wire payload (inside StateSync):
-    ///   [u16 count]{[i32 SiteId][u16 ownerLen][ownerGuid utf8][u8 SiteType][u8 State][u16 nameLen][siteName utf8][u16 encLen][EncounterID utf8][u8 exploredFlags]}*
+    ///   [u16 count]{[i32 SiteId][u16 ownerLen][ownerGuid utf8][u8 SiteType][u8 State][u16 nameLen][siteName utf8][u16 encLen][EncounterID utf8][u8 exploredFlags][mission]}*
     ///   exploredFlags bit0=Inspected bit1=Visible bit2=Visited (the per-faction explored-state family).
+    ///   mission (P1 ActiveMission mirror) = [u8 missionClass]; 0 = no active mission (TOMBSTONE), else
+    ///   [str missionDefGuid][str attackerFactionGuid][i32 atkDeploy][i32 defDeploy][str attackedZoneGuid][u8 nSites][i32 siteId × nSites].
     ///
     /// Case A only: this mirrors EXISTING client sites (resolved by SiteId). Vanilla never creates sites
     /// in-play, so a snapshot id absent on the client is logged + skipped (Case B / site creation deferred).
@@ -135,6 +239,25 @@ namespace Multiplayer.Network.Sync.State
                     if (s.Visible) flags |= 2;
                     if (s.Visited) flags |= 4;
                     w.Write(flags);
+                    // P1 ActiveMission mirror tail: class byte 0 = tombstone (no mission / cleared). A record
+                    // whose class is 0 would alias the tombstone → treated as absent (never encoded live).
+                    var m = s.Mission;
+                    if (m == null || m.MissionClass == 0)
+                    {
+                        w.Write((byte)0);
+                    }
+                    else
+                    {
+                        w.Write(m.MissionClass);
+                        WriteStr(w, m.MissionDefGuid);
+                        WriteStr(w, m.AttackerFactionDefGuid);
+                        w.Write(m.AttackerDeployment);
+                        w.Write(m.DefenderDeployment);
+                        WriteStr(w, m.AttackedZoneDefGuid);
+                        int n2 = m.AttackingSiteIds.Length > byte.MaxValue ? byte.MaxValue : m.AttackingSiteIds.Length;
+                        w.Write((byte)n2);
+                        for (int i = 0; i < n2; i++) w.Write(m.AttackingSiteIds[i]);
+                    }
                 }
                 return ms.ToArray();
             }
@@ -159,8 +282,25 @@ namespace Multiplayer.Network.Sync.State
                         string siteName = ReadStr(r);
                         string encounterId = ReadStr(r);
                         byte flags = r.ReadByte();
+                        // P1 ActiveMission mirror tail (class byte 0 = tombstone → null record).
+                        GeoMissionRecord mission = null;
+                        byte missionClass = r.ReadByte();
+                        if (missionClass != 0)
+                        {
+                            string missionDefGuid = ReadStr(r);
+                            string attackerGuid = ReadStr(r);
+                            int atkDeploy = r.ReadInt32();
+                            int defDeploy = r.ReadInt32();
+                            string zoneGuid = ReadStr(r);
+                            int nSites = r.ReadByte();
+                            var siteIds = new int[nSites];
+                            for (int j = 0; j < nSites; j++) siteIds[j] = r.ReadInt32();
+                            mission = new GeoMissionRecord(missionClass, missionDefGuid, attackerGuid,
+                                atkDeploy, defDeploy, zoneGuid, siteIds);
+                        }
                         snap.Sites.Add(new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId,
-                            inspected: (flags & 1) != 0, visible: (flags & 2) != 0, visited: (flags & 4) != 0));
+                            inspected: (flags & 1) != 0, visible: (flags & 2) != 0, visited: (flags & 4) != 0,
+                            mission: mission));
                     }
                     return snap;
                 }

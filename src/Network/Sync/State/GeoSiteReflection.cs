@@ -87,16 +87,22 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _siteMappingInstanceProp; // GeoSiteTypeMappingDef.Instance (static)
         private static MethodInfo _getSiteTemplateMethod;     // GeoSiteTypeMappingDef.GetSiteTemplate(GeoSiteType) → ComponentSetDef
 
-        // The 7 aggregate site events on GeoMap, by name. SiteAdded/SiteRemoved are bound for symmetry
+        // The aggregate site events on GeoMap, by name. SiteAdded/SiteRemoved are bound for symmetry
         // (Case A only updates existing sites; an add/remove still re-snapshots so an in-play identity flip
         // converges, and a removed/added id absent on the client is harmlessly skipped in Apply).
         // SiteFirstTimeVisited (GeoMap.cs:263, fired by GeoSite.SiteVisited on the FIRST SetVisited(true)) covers
         // a site whose ONLY change is the Visited flip (plain first arrival at an already-inspected site) — without
         // it that flip never dirty-marks and the client's Visited state silently diverges.
+        // SiteMissionStarted/Ended/Cancelled (GeoMap.cs:265-269, re-raised from the per-site events at
+        // GeoMap.cs:426-429) drive the P1 ActiveMission mirror: a mission set (GeoSite.SetActiveMission →
+        // RegisterMission → SiteMissionStarted) or clear (updateable-mission end / cancel) dirty-marks the site so
+        // the snapshot carries the fresh mission record / tombstone. All carry the GeoSite as arg 0 (2-arg
+        // SiteChangedEventHandler<GeoMission>), which the DynamicMethod adapter already handles.
         private static readonly string[] SiteEventNames =
         {
             "SiteOwnerChanged", "SiteStateChanged", "SiteVisibilityChanged",
             "SiteInspectedChanged", "SiteFirstTimeVisited", "SiteAdded", "SiteRemoved",
+            "SiteMissionStarted", "SiteMissionEnded", "SiteMissionCancelled",
         };
 
         private static void Ensure(GeoRuntime rt)
@@ -374,7 +380,13 @@ namespace Multiplayer.Network.Sync.State
             }
             catch { visited = false; }
 
-            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited);
+            // P1 ActiveMission mirror: best-effort — a read failure carries a null record (tombstone), which is
+            // also the honest degrade (the client then clears its mirror and the display path degrades).
+            GeoMissionRecord mission = null;
+            try { mission = ReadMissionRecord(site); }
+            catch { mission = null; }
+
+            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited, mission);
         }
 
         /// <summary>
@@ -478,6 +490,413 @@ namespace Multiplayer.Network.Sync.State
                 RefreshSiteVisuals(site);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }
+        }
+
+        // ─── P1 ActiveMission mirror (host read + client attach) ─────────────────────────────────────────
+        // Own lazy gate (EnsureMissionMirror), separate from Ensure: a miss here degrades ONLY the mission
+        // mirror (identity/explored-state keep flowing); it can never break channel #5.
+        //
+        // Decompile-verified 2026-07-05:
+        //   • GeoSite.ActiveMission — public auto-property { get; set; } (GeoSite.cs:101). The client attach
+        //     writes it DIRECTLY (pure mirror): native SetActiveMission (GeoSite.cs:776) throws on an occupied
+        //     site AND runs RegisterMission → hooks OnMissionActivated→LaunchTacticalGame handlers + fires
+        //     SiteMissionStarted → GeoscapeView.OnSiteMissionStarted → ShowMissionBriefing → OpenModalPersistent
+        //     — i.e. the STATE channel would open UI, violating the cross-rail invariant (spec §4: state
+        //     channels never open UI; the 0x69 report rail is the ONLY display driver, and it arms the lock).
+        //   • Client rebuild ctors — the pure serializer-support ctors (field assignment only, no live-object
+        //     params, no sim writes):
+        //       GeoHavenDefenseMission(TacMissionTypeDef, GeoSite, PPFactionDef)          private, :151
+        //       GeoAlienBaseMission(TacMissionTypeDef, GeoSite, MissionParams)            public,  :20
+        //       GeoAlienBaseAssaultMission(TacMissionTypeDef, GeoSite, PPFactionDef)      private, :51
+        //       GeoPhoenixBaseDefenseMission(TacMissionTypeDef, GeoSite)                  private, :63
+        //         (the public ctor runs PhoenixBase.ResetBaseAssaultProtection() — a sim write — so the
+        //          private one + direct field stamps is the pure path)
+        //       GeoPhoenixBaseInfestationMission(TacMissionTypeDef, GeoSite, GeoSquad, MissionParams) public, :20
+        //       GeoInfestationCleanseMission(GeoSite, TacMissionTypeDef, MissionParams)   public,  :14
+        //       GeoScavengingMission(GeoSite, TacMissionTypeDef, MissionParams)           public,  :23
+        //       GeoAmbushMission(GeoSite, TacMissionTypeDef, MissionParams)               public,  :24
+        //       GeoAncientSiteMission(GeoSite, TacMissionTypeDef)                         public,  :30
+        //   • Runtime bits the brief binds read (stamped from the DTO after construction):
+        //       GeoUpdateableMission.AttackerFaction — readonly PPFactionDef field (set via FieldInfo);
+        //       GeoHavenDefenseMission._attackedZoneDef (GeoHavenZoneDef), AttackerDeployment/DefenderDeployment
+        //         (auto-props, private set → PropertySetter), _attackingSites (IList<GeoSite>);
+        //       GeoAlienBaseAssaultMission._attackerDeployment/_defenderDeployment (int fields);
+        //       GeoPhoenixBaseDefenseMission._enemyFaction (PPFactionDef), _attackingSites (List<GeoSite>).
+        //     The mission is NEVER StartUpdating'd and never registered (no producers, no updateable ticking on
+        //     the frozen client sim) — it exists solely so native brief binds resolve site.ActiveMission.
+
+        private static bool _missionEnsured;
+        private static PropertyInfo _activeMissionProp;      // GeoSite.ActiveMission (public auto-prop)
+        private static PropertyInfo _geoMissionDefProp;      // GeoMission.MissionDef
+        private static FieldInfo _updAttackerFactionField;   // GeoUpdateableMission.AttackerFaction (readonly PPFactionDef)
+        private static Type _havenDefT, _alienBaseT, _alienAssaultT, _pxDefT, _pxInfestT, _cleanseT, _scavT, _ambushT, _ancientT;
+        private static ConstructorInfo _havenDefCtor;        // (TacMissionTypeDef, GeoSite, PPFactionDef) private
+        private static ConstructorInfo _alienBaseCtor;       // (TacMissionTypeDef, GeoSite, MissionParams) public
+        private static ConstructorInfo _alienAssaultCtor;    // (TacMissionTypeDef, GeoSite, PPFactionDef) private
+        private static ConstructorInfo _pxDefCtor;           // (TacMissionTypeDef, GeoSite) private
+        private static ConstructorInfo _pxInfestCtor;        // (TacMissionTypeDef, GeoSite, GeoSquad, MissionParams) public
+        private static ConstructorInfo _cleanseCtor;         // (GeoSite, TacMissionTypeDef, MissionParams) public
+        private static ConstructorInfo _scavCtor;            // (GeoSite, TacMissionTypeDef, MissionParams) public
+        private static ConstructorInfo _ambushCtor2;         // (GeoSite, TacMissionTypeDef, MissionParams) public
+        private static ConstructorInfo _ancientCtor2;        // (GeoSite, TacMissionTypeDef) public
+        private static FieldInfo _havenZoneDefField;         // GeoHavenDefenseMission._attackedZoneDef
+        private static MethodInfo _havenAtkDeploySetter;     // GeoHavenDefenseMission.AttackerDeployment private set
+        private static MethodInfo _havenDefDeploySetter;     // GeoHavenDefenseMission.DefenderDeployment private set
+        private static PropertyInfo _havenAtkDeployProp;     // (host read)
+        private static PropertyInfo _havenDefDeployProp;     // (host read)
+        private static FieldInfo _havenAttackingSitesField;  // GeoHavenDefenseMission._attackingSites (IList<GeoSite>)
+        private static FieldInfo _assaultAtkDeployField;     // GeoAlienBaseAssaultMission._attackerDeployment
+        private static FieldInfo _assaultDefDeployField;     // GeoAlienBaseAssaultMission._defenderDeployment
+        private static FieldInfo _pxEnemyFactionField;       // GeoPhoenixBaseDefenseMission._enemyFaction
+        private static FieldInfo _pxAttackingSitesField;     // GeoPhoenixBaseDefenseMission._attackingSites (List<GeoSite>)
+        private static Type _geoSiteListType;                // List<GeoSite> (for _attackingSites fills)
+
+        private static void EnsureMissionMirror()
+        {
+            if (_missionEnsured) return;
+            _missionEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                var geoSiteT = _geoSiteType ?? AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                var geoMissionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
+                var updT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoUpdateableMission");
+                var tacDefT = AccessTools.TypeByName("PhoenixPoint.Common.Levels.Missions.TacMissionTypeDef");
+                var ppFacDefT = AccessTools.TypeByName("PhoenixPoint.Common.Entities.PPFactionDef");
+                var squadT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoSquad");
+                if (geoSiteT == null || geoMissionT == null || tacDefT == null) return;
+                var missionParamsT = AccessTools.Inner(geoMissionT, "MissionParams");
+
+                _activeMissionProp = AccessTools.Property(geoSiteT, "ActiveMission");
+                _geoMissionDefProp = AccessTools.Property(geoMissionT, "MissionDef");
+                if (updT != null) _updAttackerFactionField = AccessTools.Field(updT, "AttackerFaction");
+
+                _havenDefT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoHavenDefenseMission");
+                _alienBaseT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoAlienBaseMission");
+                _alienAssaultT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoAlienBaseAssaultMission");
+                _pxDefT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoPhoenixBaseDefenseMission");
+                _pxInfestT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoPhoenixBaseInfestationMission");
+                _cleanseT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoInfestationCleanseMission");
+                _scavT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoScavengingMission");
+                _ambushT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoAmbushMission");
+                _ancientT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoAncientSiteMission");
+
+                // EXACT param matches everywhere (harmony-accesstools-exact-param-match): the classes carry
+                // [Obsolete]/serializer overloads that must not be picked.
+                if (_havenDefT != null && ppFacDefT != null)
+                {
+                    _havenDefCtor = AccessTools.Constructor(_havenDefT, new[] { tacDefT, geoSiteT, ppFacDefT });
+                    _havenZoneDefField = AccessTools.Field(_havenDefT, "_attackedZoneDef");
+                    _havenAtkDeployProp = AccessTools.Property(_havenDefT, "AttackerDeployment");
+                    _havenDefDeployProp = AccessTools.Property(_havenDefT, "DefenderDeployment");
+                    _havenAtkDeploySetter = AccessTools.PropertySetter(_havenDefT, "AttackerDeployment");
+                    _havenDefDeploySetter = AccessTools.PropertySetter(_havenDefT, "DefenderDeployment");
+                    _havenAttackingSitesField = AccessTools.Field(_havenDefT, "_attackingSites");
+                }
+                if (_alienBaseT != null && missionParamsT != null)
+                    _alienBaseCtor = AccessTools.Constructor(_alienBaseT, new[] { tacDefT, geoSiteT, missionParamsT });
+                if (_alienAssaultT != null && ppFacDefT != null)
+                {
+                    _alienAssaultCtor = AccessTools.Constructor(_alienAssaultT, new[] { tacDefT, geoSiteT, ppFacDefT });
+                    _assaultAtkDeployField = AccessTools.Field(_alienAssaultT, "_attackerDeployment");
+                    _assaultDefDeployField = AccessTools.Field(_alienAssaultT, "_defenderDeployment");
+                }
+                if (_pxDefT != null)
+                {
+                    _pxDefCtor = AccessTools.Constructor(_pxDefT, new[] { tacDefT, geoSiteT });
+                    _pxEnemyFactionField = AccessTools.Field(_pxDefT, "_enemyFaction");
+                    _pxAttackingSitesField = AccessTools.Field(_pxDefT, "_attackingSites");
+                }
+                if (_pxInfestT != null && squadT != null && missionParamsT != null)
+                    _pxInfestCtor = AccessTools.Constructor(_pxInfestT, new[] { tacDefT, geoSiteT, squadT, missionParamsT });
+                if (_cleanseT != null && missionParamsT != null)
+                    _cleanseCtor = AccessTools.Constructor(_cleanseT, new[] { geoSiteT, tacDefT, missionParamsT });
+                if (_scavT != null && missionParamsT != null)
+                    _scavCtor = AccessTools.Constructor(_scavT, new[] { geoSiteT, tacDefT, missionParamsT });
+                if (_ambushT != null && missionParamsT != null)
+                    _ambushCtor2 = AccessTools.Constructor(_ambushT, new[] { geoSiteT, tacDefT, missionParamsT });
+                if (_ancientT != null)
+                    _ancientCtor2 = AccessTools.Constructor(_ancientT, new[] { geoSiteT, tacDefT });
+
+                _geoSiteListType = typeof(List<>).MakeGenericType(geoSiteT);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureMissionMirror failed (mission mirror disabled): " + ex.Message); }
+        }
+
+        /// <summary>The live <c>GeoSite.ActiveMission</c> of a resolved site, or null (no mission / unbound).</summary>
+        public static object GetActiveMission(object site)
+        {
+            try
+            {
+                EnsureMissionMirror();
+                if (site == null || _activeMissionProp == null) return null;
+                return _activeMissionProp.GetValue(site, null);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The wire class discriminator for a live GeoMission instance (subclasses of a mapped class
+        /// classify as that class — the same `is`-semantics GetMissionBriefModal uses), or
+        /// <see cref="GeoMissionRecord.Unknown"/> for the unmapped fallback-34 family, or 0 for null.</summary>
+        public static byte ClassifyMission(object mission)
+        {
+            if (mission == null) return 0;
+            EnsureMissionMirror();
+            if (_havenDefT != null && _havenDefT.IsInstanceOfType(mission)) return GeoMissionRecord.HavenDefense;
+            if (_alienAssaultT != null && _alienAssaultT.IsInstanceOfType(mission)) return GeoMissionRecord.AlienBaseAssault;
+            if (_alienBaseT != null && _alienBaseT.IsInstanceOfType(mission)) return GeoMissionRecord.AlienBase;
+            if (_pxDefT != null && _pxDefT.IsInstanceOfType(mission)) return GeoMissionRecord.PhoenixBaseDefense;
+            if (_pxInfestT != null && _pxInfestT.IsInstanceOfType(mission)) return GeoMissionRecord.PhoenixBaseInfestation;
+            if (_cleanseT != null && _cleanseT.IsInstanceOfType(mission)) return GeoMissionRecord.InfestationCleanse;
+            if (_scavT != null && _scavT.IsInstanceOfType(mission)) return GeoMissionRecord.Scavenging;
+            if (_ambushT != null && _ambushT.IsInstanceOfType(mission)) return GeoMissionRecord.Ambush;
+            if (_ancientT != null && _ancientT.IsInstanceOfType(mission)) return GeoMissionRecord.AncientSite;
+            return GeoMissionRecord.Unknown;
+        }
+
+        /// <summary>The mirrored mission's <c>MissionDef.Guid</c>, or "" on any miss.</summary>
+        public static string GetMissionDefGuid(object mission)
+        {
+            try
+            {
+                EnsureMissionMirror();
+                if (mission == null || _geoMissionDefProp == null) return "";
+                return DefReflection.GetGuid(_geoMissionDefProp.GetValue(mission, null)) ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// HOST: read <c>site.ActiveMission</c> into a wire <see cref="GeoMissionRecord"/>, or null (= tombstone)
+        /// when the site has no active mission. An unmapped class still carries a record
+        /// (<see cref="GeoMissionRecord.Unknown"/> + def guid) so the client knows the host HAS a mission there
+        /// (it clears any stale mirror and the display path degrades honestly).
+        /// </summary>
+        public static GeoMissionRecord ReadMissionRecord(object site)
+        {
+            try
+            {
+                var mission = GetActiveMission(site);
+                if (mission == null) return null;
+                byte cls = ClassifyMission(mission);
+                if (cls == 0) return null;
+                string defGuid = GetMissionDefGuid(mission);
+                string attackerGuid = "";
+                int atk = 0, def = 0;
+                string zoneGuid = "";
+                int[] siteIds = null;
+
+                switch (cls)
+                {
+                    case GeoMissionRecord.HavenDefense:
+                        attackerGuid = ReadPPFactionGuid(_updAttackerFactionField?.GetValue(mission));
+                        try { atk = Convert.ToInt32(_havenAtkDeployProp?.GetValue(mission, null) ?? 0); } catch { }
+                        try { def = Convert.ToInt32(_havenDefDeployProp?.GetValue(mission, null) ?? 0); } catch { }
+                        try { zoneGuid = DefReflection.GetGuid(_havenZoneDefField?.GetValue(mission)) ?? ""; } catch { }
+                        siteIds = ReadSiteIds(_havenAttackingSitesField?.GetValue(mission));
+                        break;
+                    case GeoMissionRecord.AlienBaseAssault:
+                        attackerGuid = ReadPPFactionGuid(_updAttackerFactionField?.GetValue(mission));
+                        try { atk = Convert.ToInt32(_assaultAtkDeployField?.GetValue(mission) ?? 0); } catch { }
+                        try { def = Convert.ToInt32(_assaultDefDeployField?.GetValue(mission) ?? 0); } catch { }
+                        break;
+                    case GeoMissionRecord.PhoenixBaseDefense:
+                        try { attackerGuid = DefReflection.GetGuid(_pxEnemyFactionField?.GetValue(mission)) ?? ""; } catch { }
+                        siteIds = ReadSiteIds(_pxAttackingSitesField?.GetValue(mission));
+                        break;
+                }
+                return new GeoMissionRecord(cls, defGuid, attackerGuid, atk, def, zoneGuid, siteIds);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadMissionRecord failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        private static string ReadPPFactionGuid(object ppFactionDef)
+        {
+            try { return DefReflection.GetGuid(ppFactionDef) ?? ""; }
+            catch { return ""; }
+        }
+
+        private static int[] ReadSiteIds(object siteList)
+        {
+            try
+            {
+                if (!(siteList is IEnumerable sites)) return null;
+                var ids = new List<int>();
+                foreach (var s in sites)
+                {
+                    int id = GetSiteId(s);
+                    if (id >= 0) ids.Add(id);
+                }
+                return ids.ToArray();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// CLIENT: mirror <paramref name="rec"/> onto the resolved site's <c>ActiveMission</c> — the P1 attach.
+        ///   • null record / Unknown class → TOMBSTONE: clear <c>ActiveMission</c> (direct property write, no
+        ///     cascade). Unknown clears too — a stale mirror of a replaced mission must never feed a brief bind.
+        ///   • same class + same def guid already attached → refresh the mutable runtime bits (haven-defense /
+        ///     assault deployments tick down hourly on the host) and keep the instance.
+        ///   • else → construct the class-exact mission via its pure ctor, stamp the DTO's runtime bits, and
+        ///     write <c>site.ActiveMission</c> DIRECTLY (never SetActiveMission — no RegisterMission handlers, no
+        ///     SiteMissionStarted cascade, no UI: the 0x69 report rail is the only display driver, spec §4).
+        /// Best-effort: any failure leaves the site untouched (the display path then degrades honestly).
+        /// </summary>
+        public static void ApplyMission(GeoRuntime rt, object site, GeoMissionRecord rec)
+        {
+            if (site == null) return;
+            try
+            {
+                EnsureMissionMirror();
+                if (_activeMissionProp == null || !_activeMissionProp.CanWrite) return;
+
+                object current = GetActiveMission(site);
+
+                if (rec == null || rec.MissionClass == GeoMissionRecord.Unknown || rec.MissionClass == 0)
+                {
+                    if (current != null)
+                    {
+                        _activeMissionProp.SetValue(site, null, null);
+                        Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
+                                  + " → cleared (tombstone" + (rec == null ? "" : ", unknown host class") + ")");
+                    }
+                    return;
+                }
+
+                // Same mission already mirrored → refresh the mutable bits only (keep the instance the queued
+                // brief may already reference).
+                if (current != null && ClassifyMission(current) == rec.MissionClass
+                    && GetMissionDefGuid(current) == rec.MissionDefGuid)
+                {
+                    StampMissionRuntimeBits(rt, current, rec);
+                    return;
+                }
+
+                var mission = BuildMissionForRecord(rt, site, rec);
+                if (mission == null) return;   // unresolved def/ctor → leave untouched (display degrades)
+                StampMissionRuntimeBits(rt, mission, rec);
+                _activeMissionProp.SetValue(site, mission, null);
+                Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
+                          + " class=" + rec.MissionClass + " def=" + rec.MissionDefGuid + " → attached (pure mirror)");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyMission failed: " + ex.Message); }
+        }
+
+        /// <summary>Construct the class-exact display mission via its pure ctor (see the region note), or null.</summary>
+        private static object BuildMissionForRecord(GeoRuntime rt, object site, GeoMissionRecord rec)
+        {
+            var missionDef = DefReflection.GetDefByGuid(rec.MissionDefGuid);
+            if (missionDef == null)
+            {
+                Debug.LogWarning("[Multiplayer] GeoSiteReflection.BuildMissionForRecord: missionDef guid '"
+                                 + rec.MissionDefGuid + "' did not resolve (skipped)");
+                return null;
+            }
+            object attackerDef = string.IsNullOrEmpty(rec.AttackerFactionDefGuid)
+                ? null : DefReflection.GetDefByGuid(rec.AttackerFactionDefGuid);
+            try
+            {
+                switch (rec.MissionClass)
+                {
+                    case GeoMissionRecord.HavenDefense:
+                        return _havenDefCtor?.Invoke(new[] { missionDef, site, attackerDef });
+                    case GeoMissionRecord.AlienBase:
+                        return _alienBaseCtor?.Invoke(new[] { missionDef, site, null });
+                    case GeoMissionRecord.AlienBaseAssault:
+                        return _alienAssaultCtor?.Invoke(new[] { missionDef, site, attackerDef });
+                    case GeoMissionRecord.PhoenixBaseDefense:
+                        return _pxDefCtor?.Invoke(new[] { missionDef, site });
+                    case GeoMissionRecord.PhoenixBaseInfestation:
+                        return _pxInfestCtor?.Invoke(new[] { missionDef, site, null, null });
+                    case GeoMissionRecord.InfestationCleanse:
+                        return _cleanseCtor?.Invoke(new[] { site, missionDef, null });
+                    case GeoMissionRecord.Scavenging:
+                        return _scavCtor?.Invoke(new[] { site, missionDef, null });
+                    case GeoMissionRecord.Ambush:
+                        return _ambushCtor2?.Invoke(new[] { site, missionDef, null });
+                    case GeoMissionRecord.AncientSite:
+                        return _ancientCtor2?.Invoke(new[] { site, missionDef });
+                    default:
+                        return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.BuildMissionForRecord class=" + rec.MissionClass
+                               + " ctor failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Stamp the DTO's runtime bits onto a constructed/refreshed mirror mission (each individually
+        /// guarded — a partial stamp still renders; missing bits only degrade the affected brief line).</summary>
+        private static void StampMissionRuntimeBits(GeoRuntime rt, object mission, GeoMissionRecord rec)
+        {
+            switch (rec.MissionClass)
+            {
+                case GeoMissionRecord.HavenDefense:
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(rec.AttackedZoneDefGuid) && _havenZoneDefField != null)
+                        {
+                            var zoneDef = DefReflection.GetDefByGuid(rec.AttackedZoneDefGuid);
+                            if (zoneDef != null) _havenZoneDefField.SetValue(mission, zoneDef);
+                        }
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits zone failed: " + ex.Message); }
+                    try { _havenAtkDeploySetter?.Invoke(mission, new object[] { rec.AttackerDeployment }); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits atk failed: " + ex.Message); }
+                    try { _havenDefDeploySetter?.Invoke(mission, new object[] { rec.DefenderDeployment }); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits def failed: " + ex.Message); }
+                    try
+                    {
+                        if (_havenAttackingSitesField != null)
+                            _havenAttackingSitesField.SetValue(mission, BuildSiteList(rt, rec.AttackingSiteIds));
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits havenSites failed: " + ex.Message); }
+                    break;
+                case GeoMissionRecord.AlienBaseAssault:
+                    try { _assaultAtkDeployField?.SetValue(mission, rec.AttackerDeployment); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits assaultAtk failed: " + ex.Message); }
+                    try { _assaultDefDeployField?.SetValue(mission, rec.DefenderDeployment); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits assaultDef failed: " + ex.Message); }
+                    break;
+                case GeoMissionRecord.PhoenixBaseDefense:
+                    try
+                    {
+                        if (_pxEnemyFactionField != null && !string.IsNullOrEmpty(rec.AttackerFactionDefGuid))
+                        {
+                            var facDef = DefReflection.GetDefByGuid(rec.AttackerFactionDefGuid);
+                            if (facDef != null) _pxEnemyFactionField.SetValue(mission, facDef);
+                        }
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits enemyFaction failed: " + ex.Message); }
+                    try
+                    {
+                        if (_pxAttackingSitesField != null)
+                            _pxAttackingSitesField.SetValue(mission, BuildSiteList(rt, rec.AttackingSiteIds));
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] StampMissionRuntimeBits pxSites failed: " + ex.Message); }
+                    break;
+            }
+        }
+
+        /// <summary>A concrete <c>List&lt;GeoSite&gt;</c> of the resolvable ids (unresolved ids skipped) — never
+        /// null so <c>AttackingSites</c>-style getters never NRE on the mirror.</summary>
+        private static object BuildSiteList(GeoRuntime rt, int[] siteIds)
+        {
+            var list = (IList)Activator.CreateInstance(_geoSiteListType);
+            if (siteIds != null)
+                foreach (var id in siteIds)
+                {
+                    var s = ResolveSiteById(rt, id);
+                    if (s != null) list.Add(s);
+                }
+            return list;
         }
 
         /// <summary>

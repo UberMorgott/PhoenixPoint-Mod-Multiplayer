@@ -122,6 +122,7 @@ public class GeoSiteSnapshotTests
             0x01, 0x00, 0x42,           // nameLen=1, "B"
             0x01, 0x00, 0x43,           // encLen=1, "C"
             0x00,                       // exploredFlags = 0 (not inspected/visible/visited)
+            0x00,                       // missionClass = 0 (no active mission — tombstone)
         };
         Assert.Equal(expected, bytes);
     }
@@ -130,15 +131,17 @@ public class GeoSiteSnapshotTests
     public void Encode_ExploredFlagsByte_Pinned()
     {
         // bit0=Inspected bit1=Visible bit2=Visited — pin the packing so host/client never disagree.
+        // (The flags byte sits directly before the trailing mission-class byte, 0x00 = no mission.)
         var snap = new GeoSiteSnapshot();
         snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C", inspected: true, visible: true, visited: true));
         var bytes = GeoSiteSnapshot.Encode(snap);
-        Assert.Equal(0x07, bytes[bytes.Length - 1]);   // trailing flags byte = all three set
+        Assert.Equal(0x07, bytes[bytes.Length - 2]);   // flags byte = all three set
+        Assert.Equal(0x00, bytes[bytes.Length - 1]);   // mission tail = tombstone
 
         snap = new GeoSiteSnapshot();
         snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C", inspected: false, visible: true, visited: false));
         bytes = GeoSiteSnapshot.Encode(snap);
-        Assert.Equal(0x02, bytes[bytes.Length - 1]);   // Visible only → bit1
+        Assert.Equal(0x02, bytes[bytes.Length - 2]);   // Visible only → bit1
     }
 
     [Fact]
@@ -192,6 +195,126 @@ public class GeoSiteSnapshotTests
         Assert.NotEqual(baseline, new GeoSiteState(3, "o", 60, 1, "n", "e", visited: true));
         Assert.NotEqual(new GeoSiteState(3, "o", 60, 1, "n", "e", visible: true),
                         new GeoSiteState(3, "o", 60, 1, "n", "e", visited: true));
+    }
+
+    // ─── P1 ActiveMission mirror record (mission-state DTO round-trip, 2026-07-05 popup-mirror spec) ────
+
+    [Fact]
+    public void MissionRecord_RoundTrips_AllClasses_MinimalRecord()
+    {
+        // Every mapped class round-trips with just (class, defGuid) — the pure-base-ctor family.
+        var classes = new byte[]
+        {
+            GeoMissionRecord.HavenDefense, GeoMissionRecord.AlienBase, GeoMissionRecord.AlienBaseAssault,
+            GeoMissionRecord.PhoenixBaseDefense, GeoMissionRecord.PhoenixBaseInfestation,
+            GeoMissionRecord.InfestationCleanse, GeoMissionRecord.Scavenging, GeoMissionRecord.Ambush,
+            GeoMissionRecord.AncientSite, GeoMissionRecord.Unknown,
+        };
+        var snap = new GeoSiteSnapshot();
+        for (int i = 0; i < classes.Length; i++)
+            snap.Sites.Add(new GeoSiteState(i, "o", 60, 1, "n", "e",
+                mission: new GeoMissionRecord(classes[i], "DEF_" + i)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(classes.Length, rt.Sites.Count);
+        for (int i = 0; i < classes.Length; i++)
+        {
+            Assert.NotNull(rt.Sites[i].Mission);
+            Assert.Equal(classes[i], rt.Sites[i].Mission.MissionClass);
+            Assert.Equal("DEF_" + i, rt.Sites[i].Mission.MissionDefGuid);
+            Assert.Equal(snap.Sites[i], rt.Sites[i]);
+        }
+    }
+
+    [Fact]
+    public void MissionRecord_RoundTrips_HavenDefenseRuntimeBits()
+    {
+        // Brief-0 bits: attacker faction + deployments + attacked zone + participating sites.
+        var rec = new GeoMissionRecord(GeoMissionRecord.HavenDefense, "TAC_DEF_GUID",
+            attackerFactionDefGuid: "ALIEN_PPFAC_GUID", attackerDeployment: 1200, defenderDeployment: 800,
+            attackedZoneDefGuid: "ZONE_GUID", attackingSiteIds: new[] { 3, 17, 42 });
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(5, "o", 20, 1, "n", "e", mission: rec));
+
+        var rt = RoundTrip(snap);
+
+        var m = rt.Sites[0].Mission;
+        Assert.Equal(rec, m);
+        Assert.Equal(1200, m.AttackerDeployment);
+        Assert.Equal(800, m.DefenderDeployment);
+        Assert.Equal("ZONE_GUID", m.AttackedZoneDefGuid);
+        Assert.Equal(new[] { 3, 17, 42 }, m.AttackingSiteIds);
+    }
+
+    [Fact]
+    public void MissionRecord_RoundTrips_PhoenixBaseDefenseAttackingSites()
+    {
+        // Brief-11 bits: enemy faction + attackingSites ids (the runtime data the ctor needed live).
+        var rec = new GeoMissionRecord(GeoMissionRecord.PhoenixBaseDefense, "TAC_DEF_GUID",
+            attackerFactionDefGuid: "ALN_PPFAC", attackingSiteIds: new[] { 101, 102 });
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(8, "o", 10, 1, "n", "e", mission: rec));
+
+        var rt = RoundTrip(snap);
+        Assert.Equal(rec, rt.Sites[0].Mission);
+        Assert.Equal(new[] { 101, 102 }, rt.Sites[0].Mission.AttackingSiteIds);
+    }
+
+    [Fact]
+    public void MissionRecord_Tombstone_NullMission_RoundTripsAsNull()
+    {
+        // Absence = tombstone: a site whose mission cleared carries a NULL record — the client must be able
+        // to distinguish "no mission" from any live record.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", mission: null));
+        snap.Sites.Add(new GeoSiteState(2, "o", 10, 1, "n", "e",
+            mission: new GeoMissionRecord(GeoMissionRecord.Scavenging, "DEF")));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Null(rt.Sites[0].Mission);
+        Assert.NotNull(rt.Sites[1].Mission);
+        Assert.NotEqual(rt.Sites[0], new GeoSiteState(1, "o", 10, 1, "n", "e",
+            mission: new GeoMissionRecord(GeoMissionRecord.Scavenging, "DEF")));
+    }
+
+    [Fact]
+    public void MissionRecord_ClassZero_EncodesAsTombstone()
+    {
+        // Class 0 is the wire sentinel for "no mission" — a (mis)constructed record with class 0 must never
+        // alias a live record on the other side.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", mission: new GeoMissionRecord(0, "DEF")));
+        var rt = RoundTrip(snap);
+        Assert.Null(rt.Sites[0].Mission);
+    }
+
+    [Fact]
+    public void MissionRecord_EqualityDistinguishesEveryField()
+    {
+        var baseline = new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 10, 20, "Z", new[] { 1 });
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.AlienBase, "D", "F", 10, 20, "Z", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "X", "F", 10, 20, "Z", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "X", 10, 20, "Z", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 11, 20, "Z", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 10, 21, "Z", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 10, 20, "X", new[] { 1 }));
+        Assert.NotEqual(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 10, 20, "Z", new[] { 2 }));
+        Assert.Equal(baseline, new GeoMissionRecord(GeoMissionRecord.HavenDefense, "D", "F", 10, 20, "Z", new[] { 1 }));
+    }
+
+    [Fact]
+    public void MissionRecord_TruncatedTail_RejectedAsNull()
+    {
+        // A payload cut inside the mission tail must reject (null), never yield a half-read record.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
+            mission: new GeoMissionRecord(GeoMissionRecord.HavenDefense, "DEFGUID", "FAC", 1, 2, "ZONE", new[] { 9 })));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        var truncated = new byte[bytes.Length - 3];
+        System.Array.Copy(bytes, truncated, truncated.Length);
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
     }
 
     // ─── registration: the GeoSite channel claims a distinct, stable surface/channel id ────

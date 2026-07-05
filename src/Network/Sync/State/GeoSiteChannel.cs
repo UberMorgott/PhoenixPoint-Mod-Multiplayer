@@ -4,17 +4,21 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
-    /// State channel #5 — GeoSite IDENTITY mirror (fixes stale client sites → wrong geoscape-event
-    /// header/backdrop). The client geoscape sim is frozen, so existing client GeoSites never update their
+    /// State channel #5 — GeoSite IDENTITY + ACTIVE-MISSION mirror (fixes stale client sites → wrong
+    /// geoscape-event header/backdrop; unlocks LIVE→site-id mission briefs, P1 of the 2026-07-05 popup-mirror
+    /// spec). The client geoscape sim is frozen, so existing client GeoSites never update their
     /// Owner/Type/State/EncounterID/name; an event modal then resolves a STALE <c>Context.Site</c> and the
     /// native art collection (derived from <c>Context.Site.Owner</c>/<c>Type</c>) renders wrong. Host
-    /// subscribes the 7 aggregate site events on <c>GeoMap</c> (identity + the per-faction explored-state family:
-    /// Inspected/Visible/Visited — exploration completion, reveal-around, first visit); each fire marks that
-    /// site's id dirty and the channel dirty. <see cref="Snapshot"/> encodes the dirty sites' identity (then clears the dirty set);
-    /// the client resolves each by <c>SiteId</c> in <c>GeoMap.AllSites</c> and writes the identity onto the
-    /// FRESH site (via private backing fields — pure mirror, no cascade). The wire codec +
-    /// <see cref="GeoSiteSnapshot"/> live in their own pure file for unit testability;
-    /// <see cref="GeoSiteReflection"/> is the bridge. Mirrors <see cref="DiplomacyChannel"/>.
+    /// subscribes the aggregate site events on <c>GeoMap</c> (identity + the per-faction explored-state family:
+    /// Inspected/Visible/Visited — plus the mission family SiteMissionStarted/Ended/Cancelled for the
+    /// ActiveMission mirror); each fire marks that site's id dirty and the channel dirty.
+    /// <see cref="Snapshot"/> encodes the dirty sites' identity + mission record (then clears the dirty set);
+    /// the client resolves each by <c>SiteId</c> in <c>GeoMap.AllSites</c>, writes the identity onto the
+    /// FRESH site (via private backing fields — pure mirror, no cascade) and attaches/clears the mirrored
+    /// <c>ActiveMission</c> (direct property write — never SetActiveMission, never UI: the 0x69 report rail is
+    /// the sole display driver). The wire codec + <see cref="GeoSiteSnapshot"/>/<see cref="GeoMissionRecord"/>
+    /// live in their own pure file for unit testability; <see cref="GeoSiteReflection"/> is the bridge.
+    /// Mirrors <see cref="DiplomacyChannel"/>.
     ///
     /// CASE A ONLY: vanilla never CREATES sites in-play (all exist from world setup + ride the join
     /// snapshot), so a snapshot id absent on the client is logged + skipped — genuinely-new-site creation
@@ -71,11 +75,14 @@ namespace Multiplayer.Network.Sync.State
                 // SpawnMirrorSite is idempotent (re-apply / a now-present site is a no-op) and applies the
                 // identity itself. Case A (site present) keeps the existing ApplyIdentity refresh.
                 if (EventReflection.ShouldSpawnMirror(hasIdentity: true, siteResolved: site != null))
-                {
-                    GeoSiteReflection.SpawnMirrorSite(rt, dto);
-                    continue;
-                }
-                GeoSiteReflection.ApplyIdentity(rt, site, dto);
+                    site = GeoSiteReflection.SpawnMirrorSite(rt, dto);
+                else
+                    GeoSiteReflection.ApplyIdentity(rt, site, dto);
+                // P1 ActiveMission mirror: attach/refresh/clear the site's mirrored mission (null record =
+                // tombstone). PURE state write — NO UI is opened here (spec §4: state channels never open UI);
+                // the mirrored LIVE→site-id brief arrives separately on the 0x69 report rail and binds off
+                // this attached mission. Null site (Case-B spawn failed) is a guarded no-op inside.
+                GeoSiteReflection.ApplyMission(rt, site, dto.Mission);
             }
         }
 
