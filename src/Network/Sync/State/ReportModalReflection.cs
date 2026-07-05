@@ -142,6 +142,9 @@ namespace Multiplayer.Network.Sync.State
             int shareLevel = 0;
             string defId = "";
             var extraIds = new List<string>();
+            byte missionClass = 0;
+            int outcomeState = 0;
+            byte[] rewardBlob = null;
 
             switch (variant)
             {
@@ -171,13 +174,22 @@ namespace Multiplayer.Network.Sync.State
                     // the GeoSite channel (#5), which attached the mission the client will bind.
                     ReadAmbushBrief(modalData, out siteId, out defId);
                     break;
+                case ReportModalVariant.MissionOutcome:
+                    // modalData is the COMPLETED live GeoMission (post-tac rail UIStateInitial.cs:112 / cancel
+                    // paths GeoscapeView.cs:1934/:1938). Base identity (siteId + missionDef guid) reads like the
+                    // brief variants; the outcome-only tail (class discriminator + outcome state + reward display
+                    // blob) rides THIS wire so the client rebuild never depends on the tombstonable P1 mirror.
+                    ReadAmbushBrief(modalData, out siteId, out defId);
+                    ReadMissionOutcome(modalData, out missionClass, out outcomeState, out rewardBlob);
+                    break;
                 case ReportModalVariant.NullData:
                 default:
                     break; // modalType only
             }
 
             // Whitelisted ModalType values are all 0..40 → fit the byte wire field.
-            payload = new ReportModalPayload((byte)modalType, variant, siteId, priority, shareLevel, defId, extraIds);
+            payload = new ReportModalPayload((byte)modalType, variant, siteId, priority, shareLevel, defId, extraIds,
+                                             missionClass, outcomeState, rewardBlob);
             return true;
         }
 
@@ -526,6 +538,313 @@ namespace Multiplayer.Network.Sync.State
             {
                 Debug.LogError("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief failed: " + ex.Message);
                 return null;
+            }
+        }
+
+        // ─── MissionOutcome members (Batch-2 P3; own lazy gate — a miss degrades ONLY the outcome mirror) ───
+        // Decompile-verified 2026-07-05:
+        //   • GeoMission.GetMissionOutcomeState() → TacFactionState (GeoMission.cs:556; null Result → Playing).
+        //   • GeoMission.Reward { get; private set; } (GeoMission.cs:145) — NOT set by the ctor (only
+        //     Complete/Cancel create it), so the client's rebuilt display mission MUST be stamped with a
+        //     reconstructed GeoFactionReward or the outcome binds NRE (HavenDefence/InfestedHaven read
+        //     Reward.ApplyResult.Diplomacy; AncientSite reads Reward.HasRewards()).
+        //   • GeoMission.Result { get; private set; } (:143) + IsCompleted { get; protected set; } (:149) —
+        //     AlienBaseOutcomeDataBind reads Result.GetResultByFacionDef(viewer.Def.PPFactionDef).State
+        //     (FirstOrDefault → null on empty ⇒ stamp ONE FactionResult{viewer PPFactionDef, outcomeState}).
+        //   • TacMissionResult (parameterless; readonly field FactionResults: List<FactionResult>) +
+        //     FactionResult (parameterless; public fields FactionDef/State) — PhoenixPoint.Common.Entities.
+        //   • GeoFactionReward / GeoFactionRewardApplyResult (parameterless, PhoenixPoint.Geoscape.Core): all
+        //     collections field-initialized; ApplyResult starts NULL on the reward → stamp one. Display fields
+        //     filled from the wire RewardDisplaySnapshot: Resources (outer = HasRewards gate + ApplyResult =
+        //     what RewardsController.SetResources renders), Items (GeoItem(def,count) per line), and
+        //     FactionSkillPoints. Diplomacy lines are NOT reconstructed (parties ride the snapshot as display
+        //     NAMES, not guids — live-object rebuild would be locale-fragile): the attitude row shows empty on
+        //     the client (AttitudeChange.SetAttitudes(empty) hides natively); diplomacy STATE converges via
+        //     channel #4. Documented display degradation.
+        //   • GeoItem(ItemDef, int count = 1, int charges = -1, AmmoManager, int malfunctionPercent = -100)
+        //     (GeoItem.cs:31) + ItemStorage.AddItem(GeoItem) (ItemStorage.cs:52).
+        private static bool _outcomeEnsured;
+        private static MethodInfo _getMissionOutcomeState;   // GeoMission.GetMissionOutcomeState()
+        private static PropertyInfo _missionRewardProp;      // GeoMission.Reward (private set)
+        private static MethodInfo _missionResultSetter;      // GeoMission.Result private set
+        private static MethodInfo _missionCompletedSetter;   // GeoMission.IsCompleted protected set
+        private static Type _tacMissionResultType;           // TacMissionResult
+        private static FieldInfo _tacResultFactionsField;    // TacMissionResult.FactionResults (readonly List<>)
+        private static Type _factionResultType;              // FactionResult
+        private static FieldInfo _facResultDefField;         // FactionResult.FactionDef (PPFactionDef)
+        private static FieldInfo _facResultStateField;       // FactionResult.State (TacFactionState)
+        private static Type _tacFactionStateEnum;            // TacFactionState
+        private static PropertyInfo _viewerFactionProp;      // GeoLevelController.ViewerFaction
+        private static FieldInfo _geoFactionDefPPField;      // GeoFactionDef.PPFactionDef (public field)
+        private static Type _factionRewardType;              // GeoFactionReward
+        private static FieldInfo _frwResourcesField, _frwItemsField, _frwSkillField, _frwApplyResultField;
+        private static Type _applyResultType;                // GeoFactionRewardApplyResult
+        private static FieldInfo _arwResourcesField, _arwItemsField, _arwSkillField;
+        private static MethodInfo _packAddUnique;            // ResourcePack.AddUnique(ResourceUnit)
+        private static ConstructorInfo _resourceUnitCtor2;   // ResourceUnit(ResourceType, float)
+        private static Type _resourceTypeEnum2;              // ResourceType
+        private static MethodInfo _storageAddItem;           // ItemStorage.AddItem(GeoItem)
+        private static ConstructorInfo _geoItemCtor;         // GeoItem(ItemDef, int, int, AmmoManager, int)
+
+        private static void EnsureOutcome()
+        {
+            if (_outcomeEnsured) return;
+            _outcomeEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                var missionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
+                var geoLevelT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+                var geoFactionDefT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoFactionDef");
+                _tacMissionResultType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.TacMissionResult");
+                _factionResultType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.FactionResult");
+                _tacFactionStateEnum = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.TacFactionState");
+                _factionRewardType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoFactionReward");
+                _applyResultType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoFactionRewardApplyResult");
+                var packT = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourcePack");
+                var unitT = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceUnit");
+                _resourceTypeEnum2 = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceType");
+                var storageT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.ItemStorage");
+                var geoItemT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoItem");
+                var itemDefT = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Items.ItemDef");
+                var ammoT = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.AmmoManager");
+                if (missionT == null) return;
+
+                _getMissionOutcomeState = AccessTools.Method(missionT, "GetMissionOutcomeState", Type.EmptyTypes);
+                _missionRewardProp = AccessTools.Property(missionT, "Reward");
+                _missionResultSetter = AccessTools.PropertySetter(missionT, "Result");
+                _missionCompletedSetter = AccessTools.PropertySetter(missionT, "IsCompleted");
+                if (_tacMissionResultType != null)
+                    _tacResultFactionsField = AccessTools.Field(_tacMissionResultType, "FactionResults");
+                if (_factionResultType != null)
+                {
+                    _facResultDefField = AccessTools.Field(_factionResultType, "FactionDef");
+                    _facResultStateField = AccessTools.Field(_factionResultType, "State");
+                }
+                if (geoLevelT != null) _viewerFactionProp = AccessTools.Property(geoLevelT, "ViewerFaction");
+                if (geoFactionDefT != null) _geoFactionDefPPField = AccessTools.Field(geoFactionDefT, "PPFactionDef");
+                if (_factionRewardType != null)
+                {
+                    _frwResourcesField = AccessTools.Field(_factionRewardType, "Resources");
+                    _frwItemsField = AccessTools.Field(_factionRewardType, "Items");
+                    _frwSkillField = AccessTools.Field(_factionRewardType, "FactionSkillPoints");
+                    _frwApplyResultField = AccessTools.Field(_factionRewardType, "ApplyResult");
+                }
+                if (_applyResultType != null)
+                {
+                    _arwResourcesField = AccessTools.Field(_applyResultType, "Resources");
+                    _arwItemsField = AccessTools.Field(_applyResultType, "Items");
+                    _arwSkillField = AccessTools.Field(_applyResultType, "FactionSkillPoints");
+                }
+                if (packT != null && unitT != null)
+                {
+                    // EXACT param matches (harmony-accesstools-exact-param-match) — both carry overloads.
+                    _packAddUnique = AccessTools.Method(packT, "AddUnique", new[] { unitT });
+                    if (_resourceTypeEnum2 != null)
+                        _resourceUnitCtor2 = AccessTools.Constructor(unitT, new[] { _resourceTypeEnum2, typeof(float) });
+                }
+                if (storageT != null && geoItemT != null)
+                    _storageAddItem = AccessTools.Method(storageT, "AddItem", new[] { geoItemT });
+                if (geoItemT != null && itemDefT != null && ammoT != null)
+                    _geoItemCtor = AccessTools.Constructor(geoItemT,
+                        new[] { itemDefT, typeof(int), typeof(int), ammoT, typeof(int) });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.EnsureOutcome failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Host: read the completed mission's OUTCOME wire fields off the live modalData —
+        /// class discriminator (<c>GeoSiteReflection.ClassifyMission</c>), outcome state
+        /// (<c>GetMissionOutcomeState()</c> raw int; miss → 0 None) and the reward display blob
+        /// (<c>mission.Reward</c> → <c>RewardDisplayReflection.BuildFromReward</c> → snapshot encode; a
+        /// cancel-path empty reward yields an empty snapshot → empty-render on the client, matching the host).
+        /// </summary>
+        public static void ReadMissionOutcome(object mission, out byte missionClass, out int outcomeState, out byte[] rewardBlob)
+        {
+            missionClass = 0;
+            outcomeState = 0;
+            rewardBlob = null;
+            try
+            {
+                EnsureOutcome();
+                if (mission == null) return;
+                missionClass = GeoSiteReflection.ClassifyMission(mission);
+                if (_getMissionOutcomeState != null)
+                {
+                    try { outcomeState = Convert.ToInt32(_getMissionOutcomeState.Invoke(mission, null)); }
+                    catch { outcomeState = 0; }
+                }
+                var reward = _missionRewardProp?.GetValue(mission, null);
+                var snap = RewardDisplayReflection.BuildFromReward(reward);
+                rewardBlob = RewardDisplaySnapshot.Encode(snap);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadMissionOutcome failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Client: rebuild the DISPLAY-ONLY mission for a mirrored MISSION-OUTCOME modal — entirely from the
+        /// 0x69 payload (siteId + missionDef guid + missionClass + outcomeState + reward blob), NEVER from
+        /// <c>site.ActiveMission</c> (the P1 mirror may already be tombstoned when the outcome shows — spec
+        /// Batch-2 ordering decision: the payload is self-sufficient, like the event result card). The mission
+        /// is constructed via the SAME pure ctor map as the P1 attach (<c>GeoSiteReflection.BuildDisplayMission</c>),
+        /// then stamped with a minimal Result (viewer FactionResult carrying the host's outcome state — the
+        /// AlienBase/AncientSite binds branch on it) and a reconstructed display Reward (resources/items/skill
+        /// points off the wire snapshot — <c>RewardsController.SetReward</c> then renders fully natively). The
+        /// mission is NEVER attached to the site and never launched. Null on ANY unresolved piece → the caller
+        /// skips the show (non-blocking report; nothing waits on it).
+        /// </summary>
+        public static object BuildMissionOutcome(GeoRuntime rt, byte modalType, int siteId, string missionDefGuid,
+                                                 byte missionClass, int outcomeState, byte[] rewardBlob)
+        {
+            try
+            {
+                EnsureOutcome();
+                if (!ReportModalClassifier.OutcomeRebuildMatches(modalType, missionClass))
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildMissionOutcome: class " + missionClass
+                                     + " does not bind outcome modalType " + modalType + " (skipping show)");
+                    return null;
+                }
+                var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                if (site == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildMissionOutcome: siteId " + siteId
+                                     + " did not resolve (skipping show)");
+                    return null;
+                }
+                var mission = GeoSiteReflection.BuildDisplayMission(rt, site, missionClass, missionDefGuid);
+                if (mission == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildMissionOutcome: display mission for class "
+                                     + missionClass + " def '" + missionDefGuid + "' did not build (skipping show)");
+                    return null;
+                }
+                if (!StampOutcomeResult(rt, mission, outcomeState))
+                {
+                    // Without a Result the AlienBase bind NREs (Result.GetResultByFacionDef) and the AncientSite
+                    // bind mis-branches (Playing) — skip rather than show a wrong/crashing card.
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildMissionOutcome: outcome-result stamp failed (skipping show)");
+                    return null;
+                }
+                if (!StampDisplayReward(mission, RewardDisplaySnapshot.Decode(rewardBlob)))
+                {
+                    // Without a Reward object the HavenDefence/InfestedHaven/AncientSite binds NRE on
+                    // Reward.ApplyResult / Reward.HasRewards() — skip rather than crash the geoscape UI.
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildMissionOutcome: reward stamp failed (skipping show)");
+                    return null;
+                }
+                return mission;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] ReportModalReflection.BuildMissionOutcome failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Stamp <c>mission.Result</c> = a minimal <c>TacMissionResult</c> with ONE
+        /// <c>FactionResult{ FactionDef = viewer PPFactionDef, State = (TacFactionState)outcomeState }</c>, and
+        /// <c>IsCompleted = true</c> (host parity). False on any reflection miss.</summary>
+        private static bool StampOutcomeResult(GeoRuntime rt, object mission, int outcomeState)
+        {
+            try
+            {
+                if (_tacMissionResultType == null || _factionResultType == null || _tacFactionStateEnum == null
+                    || _tacResultFactionsField == null || _facResultDefField == null || _facResultStateField == null
+                    || _missionResultSetter == null) return false;
+
+                object viewerPPDef = null;
+                var geo = rt?.GeoLevel();
+                var viewer = geo != null ? _viewerFactionProp?.GetValue(geo, null) : null;
+                if (viewer != null)
+                {
+                    var facDef = AccessTools.Property(viewer.GetType(), "Def")?.GetValue(viewer, null);
+                    if (facDef != null) viewerPPDef = _geoFactionDefPPField?.GetValue(facDef);
+                }
+                if (viewerPPDef == null) return false;   // GetResultByFacionDef would miss → bind NRE
+
+                var result = Activator.CreateInstance(_tacMissionResultType);
+                var facResult = Activator.CreateInstance(_factionResultType);
+                _facResultDefField.SetValue(facResult, viewerPPDef);
+                _facResultStateField.SetValue(facResult, Enum.ToObject(_tacFactionStateEnum, outcomeState));
+                if (!(_tacResultFactionsField.GetValue(result) is IList factionResults)) return false;
+                factionResults.Add(facResult);
+
+                _missionResultSetter.Invoke(mission, new[] { result });
+                try { _missionCompletedSetter?.Invoke(mission, new object[] { true }); } catch { /* cosmetic parity */ }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] ReportModalReflection.StampOutcomeResult failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Stamp <c>mission.Reward</c> = a reconstructed display <c>GeoFactionReward</c> (+ ApplyResult) off the
+        /// wire snapshot: resource lines (outer pack = the <c>HasRewards()</c> gate; ApplyResult pack = what
+        /// <c>RewardsController.SetResources</c> renders), item lines (fresh <c>GeoItem(def,count)</c> per side)
+        /// and skill points. An empty/null snapshot still stamps the EMPTY reward pair — the binds then render
+        /// the native "no rewards" card exactly like the host's cancel path. False on a reflection miss.
+        /// </summary>
+        private static bool StampDisplayReward(object mission, RewardDisplaySnapshot snap)
+        {
+            try
+            {
+                if (_factionRewardType == null || _applyResultType == null || _frwApplyResultField == null
+                    || _missionRewardProp == null || _missionRewardProp.GetSetMethod(true) == null)
+                    return false;
+
+                var reward = Activator.CreateInstance(_factionRewardType);
+                var applyResult = Activator.CreateInstance(_applyResultType);
+                _frwApplyResultField.SetValue(reward, applyResult);
+
+                if (snap != null && !snap.IsEmpty)
+                {
+                    // Resources → BOTH packs (outer gates HasRewards; ApplyResult renders).
+                    if (_packAddUnique != null && _resourceUnitCtor2 != null && _resourceTypeEnum2 != null)
+                        foreach (var line in snap.Resources)
+                        {
+                            object unit = _resourceUnitCtor2.Invoke(new[]
+                                { Enum.ToObject(_resourceTypeEnum2, line.ResourceType), (object)(float)line.RoundedValue });
+                            var outerPack = _frwResourcesField?.GetValue(reward);
+                            if (outerPack != null) _packAddUnique.Invoke(outerPack, new[] { unit });
+                            var arPack = _arwResourcesField?.GetValue(applyResult);
+                            if (arPack != null) _packAddUnique.Invoke(arPack, new[] { unit });
+                        }
+
+                    // Items → a FRESH GeoItem per storage (never share one CommonItemData across storages).
+                    if (_storageAddItem != null && _geoItemCtor != null)
+                        foreach (var line in snap.Items)
+                        {
+                            var def = DefReflection.GetDefByGuid(line.ItemDefGuid);
+                            if (def == null)
+                            {
+                                Debug.Log("[Multiplayer] outcome reward item dropped (unresolved def " + line.ItemDefGuid + ")");
+                                continue;
+                            }
+                            var outerStorage = _frwItemsField?.GetValue(reward);
+                            if (outerStorage != null)
+                                _storageAddItem.Invoke(outerStorage, new[] { _geoItemCtor.Invoke(new object[] { def, line.Count, -1, null, -100 }) });
+                            var arStorage = _arwItemsField?.GetValue(applyResult);
+                            if (arStorage != null)
+                                _storageAddItem.Invoke(arStorage, new[] { _geoItemCtor.Invoke(new object[] { def, line.Count, -1, null, -100 }) });
+                        }
+
+                    if (snap.FactionSkillPoints != 0)
+                    {
+                        try { _frwSkillField?.SetValue(reward, snap.FactionSkillPoints); } catch { }
+                        try { _arwSkillField?.SetValue(applyResult, snap.FactionSkillPoints); } catch { }
+                    }
+                }
+
+                _missionRewardProp.GetSetMethod(true).Invoke(mission, new[] { reward });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] ReportModalReflection.StampDisplayReward failed: " + ex.Message);
+                return false;
             }
         }
 

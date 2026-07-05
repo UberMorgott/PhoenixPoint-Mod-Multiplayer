@@ -121,6 +121,92 @@ public class ReportModalProtocolTests
         Assert.Empty(d.ExtraIds);
     }
 
+    // ── MissionOutcome (Batch-2 P3): outcome tail [missionClass:u8][outcomeState:i32][u16 rewardLen][blob]
+    // rides ONLY the MissionOutcome variant, appended behind the extras. The reward blob is a
+    // RewardDisplaySnapshot payload — the full reward roundtrip is asserted through BOTH codecs. ──
+    [Theory]
+    [InlineData(1, GeoMissionRecord.HavenDefense, 3)]     // GeoHavenAttackOutcome, Won
+    [InlineData(5, GeoMissionRecord.Scavenging, 3)]       // GeoScavengeOutcome, Won
+    [InlineData(12, GeoMissionRecord.PhoenixBaseDefense, 2)] // GeoPhoenixBaseDefenseOutcome, Defeated (cancel path)
+    [InlineData(29, GeoMissionRecord.AncientSite, 3)]     // AncientSiteDefenceOutcome, Won
+    public void MissionOutcome_RoundTrips_WithRewardPayload(int modalType, byte missionClass, int outcomeState)
+    {
+        // Real reward blob through the real codec (the "reward payload roundtrip" test): resources + items +
+        // skill points — the fields the outcome stamp reconstructs on the client.
+        var snap = new RewardDisplaySnapshot();
+        snap.Resources.Add(new RewardResourceLine(2, 150));   // Materials +150
+        snap.Resources.Add(new RewardResourceLine(1, 42));    // Supplies +42
+        snap.Items.Add(new RewardItemLine("ITEM_DEF_GUID_X", 3));
+        snap.FactionSkillPoints = 8;
+        var blob = RewardDisplaySnapshot.Encode(snap);
+
+        var p = new ReportModalPayload((byte)modalType, ReportModalVariant.MissionOutcome, 321, int.MaxValue,
+                                       0, "MISSION_DEF_GUID", null, missionClass, outcomeState, blob);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(modalType, d.ModalType);
+        Assert.Equal(ReportModalVariant.MissionOutcome, d.Variant);
+        Assert.Equal(321, d.SiteId);
+        Assert.Equal(int.MaxValue, d.Priority);   // post-tac rail opens at prio int.MaxValue
+        Assert.Equal("MISSION_DEF_GUID", d.DefId);
+        Assert.Equal(missionClass, d.MissionClass);
+        Assert.Equal(outcomeState, d.OutcomeState);
+
+        var decoded = RewardDisplaySnapshot.Decode(d.RewardBlob);
+        Assert.NotNull(decoded);
+        Assert.Equal(2, decoded.Resources.Count);
+        Assert.Equal(new RewardResourceLine(2, 150), decoded.Resources[0]);
+        Assert.Equal(new RewardResourceLine(1, 42), decoded.Resources[1]);
+        Assert.Equal(new RewardItemLine("ITEM_DEF_GUID_X", 3), decoded.Items[0]);
+        Assert.Equal(8, decoded.FactionSkillPoints);
+    }
+
+    [Fact]
+    public void MissionOutcome_EmptyReward_RoundTripsEmpty()
+    {
+        // Cancel-path outcome (mission.Cancel() → fresh empty GeoFactionReward): null blob → empty on decode,
+        // never null-crash — the client stamps the EMPTY reward pair (native "no rewards" card).
+        var p = new ReportModalPayload(12, ReportModalVariant.MissionOutcome, 44, int.MaxValue,
+                                       0, "DEF", null, GeoMissionRecord.PhoenixBaseDefense, 2, null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(GeoMissionRecord.PhoenixBaseDefense, d.MissionClass);
+        Assert.Equal(2, d.OutcomeState);
+        Assert.NotNull(d.RewardBlob);
+        Assert.Empty(d.RewardBlob);
+        var decoded = RewardDisplaySnapshot.Decode(d.RewardBlob);
+        Assert.NotNull(decoded);
+        Assert.True(decoded.IsEmpty);
+    }
+
+    [Fact]
+    public void NonOutcomeVariants_WireIsByteIdenticalToPhaseA()
+    {
+        // WIRE PIN: the outcome tail is written ONLY for MissionOutcome — a non-outcome payload built with
+        // garbage in the outcome fields still encodes the EXACT Phase-A bytes (cross-version stability).
+        var phaseA = new ReportModalPayload(14, ReportModalVariant.Research, -1, 99, 2, "PR_X", null);
+        var withGarbage = new ReportModalPayload(14, ReportModalVariant.Research, -1, 99, 2, "PR_X", null,
+                                                 missionClass: 9, outcomeState: 3, rewardBlob: new byte[] { 1, 2, 3 });
+        Assert.Equal(SyncProtocol.EncodeReportModal(phaseA), SyncProtocol.EncodeReportModal(withGarbage));
+    }
+
+    [Fact]
+    public void MissionOutcome_TruncatedTail_DecodesDefaults()
+    {
+        // Length-guarded tail: chopping the outcome tail off still decodes the leading fields, with class 0
+        // (→ OutcomeRebuildMatches false → the client rebuild skips gracefully) — never a throw.
+        var p = new ReportModalPayload(5, ReportModalVariant.MissionOutcome, 7, 100, 0, "DEF", null,
+                                       GeoMissionRecord.Scavenging, 3, new byte[] { 9, 9 });
+        var full = SyncProtocol.EncodeReportModal(p);
+        var truncated = new byte[full.Length - 9];   // strip [u8 class][i32 state][u16 len][2-byte blob]
+        System.Array.Copy(full, truncated, truncated.Length);
+        Assert.True(SyncProtocol.TryDecodeReportModal(truncated, out var d));
+        Assert.Equal(5, d.ModalType);
+        Assert.Equal((byte)0, d.MissionClass);
+        Assert.Equal(0, d.OutcomeState);
+        Assert.Empty(d.RewardBlob);
+    }
+
     // ── ReportModalHide (0x6C): the host resolved its BLOCKING modal → clients close the mirror ──
     [Fact]
     public void ReportModalHide_RoundTrips()

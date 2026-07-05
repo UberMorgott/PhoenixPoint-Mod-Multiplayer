@@ -62,6 +62,30 @@ namespace Multiplayer.Network.Sync.State
     /// gate alone prevents racing the host's decision — 2026-07-05 soak: the wider Batch-1 lock made the
     /// scavenge brief's CLOSE dead on the client for as long as the host left its copy open).
     ///
+    /// MISSION OUTCOME FAMILY (Batch-2 P3 of the 2026-07-05 unified popup-mirror spec): the post-tactical
+    /// loot/result reports. Host opens them via the SAME OpenModal(Persistent) chokepoint — the post-tac rail
+    /// (<c>UIStateInitial.cs:105-139</c>, <c>OpenModalPersistent(GetMissionOutcomeModal(lastMission), lastMission,
+    /// int.MaxValue)</c>) and the cancel paths (<c>OnSiteMissionCancelled</c> GeoscapeView.cs:1930-1939: base-defense
+    /// cancel → 12, ancient-defence cancel → 29, both prio int.MaxValue). Whitelisted outcome ids
+    /// {1,3,5,12,16,21,27,29,35,37} → <see cref="ReportModalVariant.MissionOutcome"/>. NON-blocking by contract:
+    /// outcomes are reports, not decisions — no HostBlockingPromptGate arm, no client view-lock, native local close.
+    /// TOMBSTONE-ORDERING DECISION (spec Batch-2, documented choice): the outcome shows AFTER the mission ended,
+    /// so the P1 site-channel mirror may already have TOMBSTONED <c>site.ActiveMission</c> when the 0x69 arrives.
+    /// The MissionOutcome payload therefore carries EVERYTHING the rebuild needs IN THE MESSAGE ITSELF
+    /// (missionClass discriminator + outcome state + reward display blob — the event-result-card pattern), and the
+    /// client rebuilds a DISPLAY-ONLY mission via the same pure ctor map (never attached to the site, never
+    /// SetActiveMission) — the rebuild is fully independent of the mission-record mirror's lifecycle.
+    /// Rebuild-vs-skip is <see cref="OutcomeRebuildMatches"/> (mirrors the native <c>GetMissionOutcomeModal</c>
+    /// class→modal mapping, GeoscapeView.cs:1800-1881); a failed rebuild skips the show (logged) — no degraded
+    /// notice, because nothing blocks on it.
+    /// DELIBERATE EXCLUSIONS (verified 2026-07-05):
+    ///   • InterceptionOutcome 33 — modalData is a live <c>GeoAirMission</c>; the bind (InterceptionOutcomeDataBind)
+    ///     reads live PlayerAircraft/EnemyAircraft interceptor objects + equipment — unbuildable from site ids;
+    ///     interception is a host-side minigame with no shared tactical, its loot rides the silent wallet rail.
+    ///   • HavenInfiltrateOutcome 18 — the steal-mission classes are outside the P1 class map (no rebuild ctor path).
+    ///   • BehemothAttackOutcome 35 IS whitelisted (suppresses a client-local ghost + keeps host authority) but its
+    ///     host class is by definition unmapped → <see cref="OutcomeRebuildMatches"/> is always false → skip-show.
+    ///
     /// The live modalData read (host) + reconstruct (client) lives in <see cref="ReportModalReflection"/>
     /// (reflection-bound, not unit-testable); this class is the pure boundary that drives it.
     /// </summary>
@@ -82,6 +106,18 @@ namespace Multiplayer.Network.Sync.State
         public const int BehemothAttackBrief = 34; // ModalType.cs:39 — GetMissionBriefModal FALLBACK (degrades)
         public const int InfestedHavenBrief = 36;  // ModalType.cs:41 — infested-haven cleanse brief
         public const int DiplomacyResearchBrief = 38;
+
+        // ── mission OUTCOME modals (Batch-2 P3; all open persistent at prio int.MaxValue) ──
+        public const int GeoHavenAttackOutcome = 1;            // ModalType.cs:6  — haven-defense loot report
+        public const int GeoAlienBaseOutcome = 3;              // ModalType.cs:8  — alien-base result (both classes)
+        public const int GeoScavengeOutcome = 5;               // ModalType.cs:10 — scavenge loot report
+        public const int GeoPhoenixBaseDefenseOutcome = 12;    // ModalType.cs:17 — base-defense result (+ cancel path :1934)
+        public const int GeoAmbushOutcome = 16;                // ModalType.cs:21 — ambush loot report
+        public const int GeoPhoenixBaseInfestationOutcome = 21;// ModalType.cs:26 — infested-base result
+        public const int AncientSiteAttackOutcome = 27;        // ModalType.cs:32 — ancient-site attack result
+        public const int AncientSiteDefenceOutcome = 29;       // ModalType.cs:34 — ancient-site defence result (+ cancel :1938)
+        public const int BehemothAttackOutcome = 35;           // ModalType.cs:40 — outcome FALLBACK family (never rebuilds)
+        public const int InfestedHavenOutcome = 37;            // ModalType.cs:42 — infested-haven cleanse result
 
         /// <summary>True iff <paramref name="modalType"/> (native ModalType enum value) is a whitelisted
         /// report modal. Takes the full int value (ModalType is int-backed: None=-1, _CustomMission=9999) so a
@@ -104,6 +140,16 @@ namespace Multiplayer.Network.Sync.State
                 case BehemothAttackBrief:
                 case InfestedHavenBrief:
                 case DiplomacyResearchBrief:
+                case GeoHavenAttackOutcome:
+                case GeoAlienBaseOutcome:
+                case GeoScavengeOutcome:
+                case GeoPhoenixBaseDefenseOutcome:
+                case GeoAmbushOutcome:
+                case GeoPhoenixBaseInfestationOutcome:
+                case AncientSiteAttackOutcome:
+                case AncientSiteDefenceOutcome:
+                case BehemothAttackOutcome:
+                case InfestedHavenOutcome:
                     return true;
                 default:
                     return false;
@@ -131,20 +177,32 @@ namespace Multiplayer.Network.Sync.State
                 case BehemothAttackBrief:
                 case InfestedHavenBrief:
                     return ReportModalVariant.ActiveMissionBrief;
+                case GeoHavenAttackOutcome:
+                case GeoAlienBaseOutcome:
+                case GeoScavengeOutcome:
+                case GeoPhoenixBaseDefenseOutcome:
+                case GeoAmbushOutcome:
+                case GeoPhoenixBaseInfestationOutcome:
+                case AncientSiteAttackOutcome:
+                case AncientSiteDefenceOutcome:
+                case BehemothAttackOutcome:
+                case InfestedHavenOutcome:
+                    return ReportModalVariant.MissionOutcome;
                 case GeoPhoenixBaseOutcome:
                 default:
                     return ReportModalVariant.NullData;
             }
         }
 
-        /// <summary>NullData/SiteOnly/AmbushBrief/SiteMissionBrief/ActiveMissionBrief modals are opened
-        /// PERSISTENT natively (OpenModalPersistent — every mission brief via ShowMissionBriefing,
-        /// GeoscapeView.cs:1903); Research/Diplomacy via OpenModal (non-persistent). The client replays with the
-        /// same persistence. PURE.</summary>
+        /// <summary>NullData/SiteOnly/AmbushBrief/SiteMissionBrief/ActiveMissionBrief/MissionOutcome modals are
+        /// opened PERSISTENT natively (OpenModalPersistent — every mission brief via ShowMissionBriefing,
+        /// GeoscapeView.cs:1903; every whitelisted outcome via the post-tac rail UIStateInitial.cs:112 and the
+        /// cancel paths :1934/:1938); Research/Diplomacy via OpenModal (non-persistent). The client replays with
+        /// the same persistence. PURE.</summary>
         public static bool IsPersistent(ReportModalVariant variant)
             => variant == ReportModalVariant.NullData || variant == ReportModalVariant.SiteOnly
                || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief
-               || variant == ReportModalVariant.ActiveMissionBrief;
+               || variant == ReportModalVariant.ActiveMissionBrief || variant == ReportModalVariant.MissionOutcome;
 
         /// <summary>
         /// True iff the HOST must defer this report's payload build + broadcast to the NEXT engine tick instead
@@ -255,5 +313,37 @@ namespace Multiplayer.Network.Sync.State
         /// </summary>
         public static bool ShouldShowDegradedNotice(ReportModalVariant variant, bool rebuildSucceeded)
             => !rebuildSucceeded && variant == ReportModalVariant.ActiveMissionBrief;
+
+        /// <summary>
+        /// The MissionOutcome rebuild-vs-skip decision: true iff a display-only mission of
+        /// <paramref name="missionClass"/> (a <see cref="GeoMissionRecord"/> discriminator, carried IN the 0x69
+        /// outcome payload — never read off the tombstonable site mirror) faithfully binds the outcome
+        /// <paramref name="modalType"/> — the same class → modal mapping the native <c>GetMissionOutcomeModal</c>
+        /// uses (GeoscapeView.cs:1800-1881). GeoAlienBaseOutcome 3 accepts BOTH alien-base classes (the bind
+        /// branches per class); AncientSite attack 27 / defence 29 both bind the ONE GeoAncientSiteMission class
+        /// (the native split is participant-data-derived — the host's modal id on the wire IS the split).
+        /// BehemothAttackOutcome 35 is the outcome FALLBACK family (unmapped host class) → always false →
+        /// the caller skips the show (non-blocking report; nothing waits on it). PURE.
+        /// </summary>
+        public static bool OutcomeRebuildMatches(int modalType, byte missionClass)
+        {
+            switch (modalType)
+            {
+                case GeoHavenAttackOutcome: return missionClass == GeoMissionRecord.HavenDefense;
+                case GeoAlienBaseOutcome:
+                    return missionClass == GeoMissionRecord.AlienBase
+                        || missionClass == GeoMissionRecord.AlienBaseAssault;
+                case GeoScavengeOutcome: return missionClass == GeoMissionRecord.Scavenging;
+                case GeoPhoenixBaseDefenseOutcome: return missionClass == GeoMissionRecord.PhoenixBaseDefense;
+                case GeoAmbushOutcome: return missionClass == GeoMissionRecord.Ambush;
+                case GeoPhoenixBaseInfestationOutcome: return missionClass == GeoMissionRecord.PhoenixBaseInfestation;
+                case AncientSiteAttackOutcome:
+                case AncientSiteDefenceOutcome:
+                    return missionClass == GeoMissionRecord.AncientSite;
+                case InfestedHavenOutcome: return missionClass == GeoMissionRecord.InfestationCleanse;
+                case BehemothAttackOutcome: return false;   // fallback family: unmapped host class → always skip
+                default: return false;
+            }
+        }
     }
 }

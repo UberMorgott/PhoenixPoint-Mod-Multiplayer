@@ -28,20 +28,32 @@ public class ReportModalClassifierTests
     public void IsReportModal_WhitelistedReports_True(int modalType)
         => Assert.True(ReportModalClassifier.IsReportModal(modalType));
 
+    // ── Batch-2 P3: the whitelisted mission OUTCOME modals (post-tac rail UIStateInitial.cs:105-139 at prio
+    // int.MaxValue + the cancel paths GeoscapeView.cs:1934/:1938 — all through the same OpenModalPersistent
+    // chokepoint). NON-blocking reports: payload-carried rebuild, native local close. ──
     [Theory]
-    [InlineData(1)]    // GeoHavenAttackOutcome (Phase-B mission outcome)
-    [InlineData(5)]    // GeoScavengeOutcome (Phase-B mission outcome — only the BRIEF is mirrored)
+    [InlineData(1)]    // GeoHavenAttackOutcome
+    [InlineData(3)]    // GeoAlienBaseOutcome
+    [InlineData(5)]    // GeoScavengeOutcome
+    [InlineData(12)]   // GeoPhoenixBaseDefenseOutcome (+ base-defense cancel path)
+    [InlineData(16)]   // GeoAmbushOutcome
+    [InlineData(21)]   // GeoPhoenixBaseInfestationOutcome
+    [InlineData(27)]   // AncientSiteAttackOutcome
+    [InlineData(29)]   // AncientSiteDefenceOutcome (+ ancient-defence cancel path)
+    [InlineData(35)]   // BehemothAttackOutcome (fallback family — mirrors; rebuild always skips)
+    [InlineData(37)]   // InfestedHavenOutcome
+    public void IsReportModal_WhitelistedOutcomes_True(int modalType)
+        => Assert.True(ReportModalClassifier.IsReportModal(modalType));
+
+    [Theory]
     [InlineData(7)]    // LoadPrompt
     [InlineData(8)]    // SiteEncounter (encounter modal — event-adjacent; MUST stay out of the report channel, S3)
-    [InlineData(12)]   // GeoPhoenixBaseDefenseOutcome (Phase-B mission outcome)
     [InlineData(13)]   // DualClassPicker (decision)
-    [InlineData(16)]   // GeoAmbushOutcome (Phase-B mission outcome — only the BRIEF is mirrored)
-    [InlineData(21)]   // GeoPhoenixBaseInfestationOutcome (Phase-B mission outcome)
+    [InlineData(17)]   // HavenInfiltrateBrief (steal-mission family — outside the P1 class map)
+    [InlineData(18)]   // HavenInfiltrateOutcome (steal-mission family — deliberately excluded, Batch-2)
     [InlineData(23)]   // AlienResearchBrief (deferred — P8 verify-first)
-    [InlineData(27)]   // AncientSiteAttackOutcome (Phase-B mission outcome)
-    [InlineData(33)]   // InterceptionOutcome (deferred C)
-    [InlineData(35)]   // BehemothAttackOutcome (Phase-B mission outcome)
-    [InlineData(37)]   // InfestedHavenOutcome (Phase-B mission outcome)
+    [InlineData(32)]   // InterceptionBrief (live air-combat objects — unbuildable from site ids)
+    [InlineData(33)]   // InterceptionOutcome (deliberately excluded: bind reads live GeoAirMission aircraft)
     [InlineData(40)]   // GameDemoEnd
     [InlineData(-1)]   // None
     [InlineData(9999)] // _CustomMission (would alias to a small byte if truncated — must stay false)
@@ -57,7 +69,10 @@ public class ReportModalClassifierTests
     public void IsReportModal_OnlyTheWhitelistedReports_AcrossEntireModalTypeEnum()
     {
         var whitelisted = new System.Collections.Generic.HashSet<int>
-            { 0, 2, 4, 6, 11, 14, 15, 20, 25, 26, 28, 34, 36, 38 };
+        {
+            0, 2, 4, 6, 11, 14, 15, 20, 25, 26, 28, 34, 36, 38,       // Phase-A reports + mirrored briefs
+            1, 3, 5, 12, 16, 21, 27, 29, 35, 37,                       // Batch-2 P3 mission outcomes
+        };
         // ModalType spans None=-1 and 0..40 (GameHavenAttackBrief..GameDemoEnd), plus _CustomMission=9999.
         foreach (var modalType in EnumerateModalTypeValues())
             Assert.Equal(whitelisted.Contains(modalType), ReportModalClassifier.IsReportModal(modalType));
@@ -149,6 +164,16 @@ public class ReportModalClassifierTests
     [InlineData(20, ReportModalVariant.ActiveMissionBrief)] // GeoPhoenixBaseInfestationBrief
     [InlineData(34, ReportModalVariant.ActiveMissionBrief)] // BehemothAttackBrief (fallback family)
     [InlineData(36, ReportModalVariant.ActiveMissionBrief)] // InfestedHavenBrief
+    [InlineData(1, ReportModalVariant.MissionOutcome)]   // GeoHavenAttackOutcome (Batch-2 P3)
+    [InlineData(3, ReportModalVariant.MissionOutcome)]   // GeoAlienBaseOutcome
+    [InlineData(5, ReportModalVariant.MissionOutcome)]   // GeoScavengeOutcome
+    [InlineData(12, ReportModalVariant.MissionOutcome)]  // GeoPhoenixBaseDefenseOutcome
+    [InlineData(16, ReportModalVariant.MissionOutcome)]  // GeoAmbushOutcome
+    [InlineData(21, ReportModalVariant.MissionOutcome)]  // GeoPhoenixBaseInfestationOutcome
+    [InlineData(27, ReportModalVariant.MissionOutcome)]  // AncientSiteAttackOutcome
+    [InlineData(29, ReportModalVariant.MissionOutcome)]  // AncientSiteDefenceOutcome
+    [InlineData(35, ReportModalVariant.MissionOutcome)]  // BehemothAttackOutcome (fallback — never rebuilds)
+    [InlineData(37, ReportModalVariant.MissionOutcome)]  // InfestedHavenOutcome
     public void VariantFor_MapsEachWhitelistedModal(int modalType, ReportModalVariant expected)
         => Assert.Equal(expected, ReportModalClassifier.VariantFor(modalType));
 
@@ -162,6 +187,7 @@ public class ReportModalClassifierTests
     [InlineData(ReportModalVariant.AmbushBrief, true)]
     [InlineData(ReportModalVariant.SiteMissionBrief, true)]
     [InlineData(ReportModalVariant.ActiveMissionBrief, true)]
+    [InlineData(ReportModalVariant.MissionOutcome, true)]   // post-tac rail + cancel paths: OpenModalPersistent
     public void IsPersistent_MatchesNativeOpener(ReportModalVariant variant, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.IsPersistent(variant));
 
@@ -186,7 +212,9 @@ public class ReportModalClassifierTests
     [InlineData(20, false)]   // GeoPhoenixBaseInfestationBrief — blocking
     [InlineData(34, false)]   // BehemothAttackBrief — blocking
     [InlineData(36, false)]   // InfestedHavenBrief — blocking
-    [InlineData(1, false)]    // non-whitelisted
+    [InlineData(1, false)]    // GeoHavenAttackOutcome — outcome payload reads settled post-tac state, no defer
+    [InlineData(5, false)]    // GeoScavengeOutcome
+    [InlineData(12, false)]   // GeoPhoenixBaseDefenseOutcome
     public void ShouldDeferHostBroadcast_OnlyResearch(int modalType, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.ShouldDeferHostBroadcast(modalType));
 
@@ -252,5 +280,65 @@ public class ReportModalClassifierTests
         // Fail-open contract (unchanged): an unknown flag never forces anything — client stays native.
         Assert.False(ResearchNavMirror.ShouldOverride(isHost: false, isActiveSession: true,
                                                       navFlag: ResearchNavMirror.NavUnknown));
+    }
+
+    // ── Batch-2 P3: MissionOutcome rebuild-vs-skip decision — the same class→modal mapping the native
+    // GetMissionOutcomeModal uses (GeoscapeView.cs:1800-1881). The class rides the 0x69 PAYLOAD (never
+    // site.ActiveMission — the P1 mirror may already be tombstoned when the outcome shows). ──
+    [Theory]
+    // outcome 1 (haven attack) ← HavenDefense only
+    [InlineData(1, GeoMissionRecord.HavenDefense, true)]
+    [InlineData(1, GeoMissionRecord.Scavenging, false)]
+    // outcome 3 (alien base) ← BOTH alien-base classes (the bind branches per class)
+    [InlineData(3, GeoMissionRecord.AlienBase, true)]
+    [InlineData(3, GeoMissionRecord.AlienBaseAssault, true)]
+    [InlineData(3, GeoMissionRecord.HavenDefense, false)]
+    // outcome 5 (scavenge) ← Scavenging only
+    [InlineData(5, GeoMissionRecord.Scavenging, true)]
+    [InlineData(5, GeoMissionRecord.Ambush, false)]
+    // outcome 12 (base defense, incl. the cancel path) ← PhoenixBaseDefense only
+    [InlineData(12, GeoMissionRecord.PhoenixBaseDefense, true)]
+    [InlineData(12, GeoMissionRecord.PhoenixBaseInfestation, false)]
+    // outcome 16 (ambush) ← Ambush only
+    [InlineData(16, GeoMissionRecord.Ambush, true)]
+    [InlineData(16, GeoMissionRecord.Scavenging, false)]
+    // outcome 21 (base infestation) ← PhoenixBaseInfestation only
+    [InlineData(21, GeoMissionRecord.PhoenixBaseInfestation, true)]
+    [InlineData(21, GeoMissionRecord.InfestationCleanse, false)]
+    // outcomes 27/29 (ancient attack/defence) ← the ONE GeoAncientSiteMission class binds BOTH
+    // (the native attack/defence split is participant-derived — the host's modal id on the wire IS the split)
+    [InlineData(27, GeoMissionRecord.AncientSite, true)]
+    [InlineData(29, GeoMissionRecord.AncientSite, true)]
+    [InlineData(27, GeoMissionRecord.Scavenging, false)]
+    [InlineData(29, GeoMissionRecord.HavenDefense, false)]
+    // outcome 35 (fallback family): host class is by definition unmapped → NEVER rebuilds → skip-show
+    [InlineData(35, GeoMissionRecord.HavenDefense, false)]
+    [InlineData(35, GeoMissionRecord.Unknown, false)]
+    // outcome 37 (infested haven) ← InfestationCleanse only
+    [InlineData(37, GeoMissionRecord.InfestationCleanse, true)]
+    [InlineData(37, GeoMissionRecord.PhoenixBaseInfestation, false)]
+    // unknown/tombstone classes never bind; brief ids never route here
+    [InlineData(1, GeoMissionRecord.Unknown, false)]
+    [InlineData(12, (byte)0, false)]
+    [InlineData(11, GeoMissionRecord.PhoenixBaseDefense, false)]  // brief id ≠ outcome id
+    [InlineData(4, GeoMissionRecord.Scavenging, false)]
+    public void OutcomeRebuildMatches_ClassExactTable(int modalType, byte missionClass, bool expected)
+        => Assert.Equal(expected, ReportModalClassifier.OutcomeRebuildMatches(modalType, missionClass));
+
+    // ── tombstone-vs-outcome ORDERING decision pin (Batch-2, documented choice): the outcome mirror is
+    // PAYLOAD-CARRIED — its variant is MissionOutcome (self-sufficient rebuild off the 0x69 fields), never
+    // ActiveMissionBrief (which binds the tombstonable P1 site mirror). If someone remaps an outcome id onto
+    // the ActiveMissionBrief path, a post-tactical tombstone race would silently eat loot reports. ──
+    [Fact]
+    public void Outcomes_ArePayloadCarried_NeverActiveMissionMirrorBound()
+    {
+        foreach (var id in new[] { 1, 3, 5, 12, 16, 21, 27, 29, 35, 37 })
+        {
+            Assert.Equal(ReportModalVariant.MissionOutcome, ReportModalClassifier.VariantFor(id));
+            Assert.NotEqual(ReportModalVariant.ActiveMissionBrief, ReportModalClassifier.VariantFor(id));
+            // Non-blocking by contract: outcomes are reports, not decisions — no gate, no view-lock.
+            Assert.False(ReportModalClassifier.IsBlockingModal(id));
+            Assert.False(ReportModalClassifier.IsMandatoryBrief(id));
+        }
     }
 }

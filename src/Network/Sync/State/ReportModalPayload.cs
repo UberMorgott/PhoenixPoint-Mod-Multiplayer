@@ -11,7 +11,13 @@ namespace Multiplayer.Network.Sync.State
     ///   • <see cref="Research"/>     — modalData is GeoResearchCompleteData (GeoResearchComplete). carries researchID.
     ///   • <see cref="Diplomacy"/>    — modalData is DiplomacyResearchRewardData (DiplomacyResearchBrief).
     ///                                  carries factionDefGuid + researchID[] + shareLevel.
-    ///   • <see cref="MissionOutcome"/> — RESERVED for Phase-B (mission-outcome modals); NOT emitted this phase.
+    ///   • <see cref="MissionOutcome"/> — post-tactical mission OUTCOME report (Batch-2 P3; ids
+    ///                                  1/3/5/12/16/21/27/29/35/37). Carries siteId + missionDef guid PLUS the
+    ///                                  outcome-only trailing fields (missionClass discriminator, outcome state,
+    ///                                  reward display blob) so the client rebuild is INDEPENDENT of the P1
+    ///                                  site-mirror lifecycle (the mission record may already be tombstoned when
+    ///                                  the outcome shows — the payload is self-sufficient, like the event
+    ///                                  result card). NON-blocking: native local close, no gate, no view-lock.
     ///   • <see cref="AmbushBrief"/>  — modalData is a GeoAmbushMission (GeoAmbushBrief 15, the mandatory
     ///                                  "You've been ambushed!" prompt). carries siteId (mission.Site.SiteId) +
     ///                                  defId (mission.MissionDef.Guid); the client rebuilds a display-only
@@ -77,8 +83,27 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>Diplomacy: the shared researches' ResearchID list. Empty for the other variants.</summary>
         public List<string> ExtraIds;
 
+        /// <summary>MissionOutcome: the <see cref="GeoMissionRecord"/> class discriminator of the host's
+        /// completed mission (carried on THIS wire — the site mirror may be tombstoned). 0 otherwise.</summary>
+        public byte MissionClass;
+
+        /// <summary>MissionOutcome: the host's <c>GeoMission.GetMissionOutcomeState()</c> (raw
+        /// <c>TacFactionState</c>: None=0/Playing=1/Defeated=2/Won=3). 0 otherwise.</summary>
+        public int OutcomeState;
+
+        /// <summary>MissionOutcome: <see cref="RewardDisplaySnapshot"/>-encoded reward display lines
+        /// (host <c>mission.Reward</c> read via <c>RewardDisplayReflection.BuildFromReward</c>). Empty otherwise.</summary>
+        public byte[] RewardBlob;
+
         public ReportModalPayload(byte modalType, ReportModalVariant variant, int siteId, int priority,
                                   int shareLevel, string defId, List<string> extraIds)
+            : this(modalType, variant, siteId, priority, shareLevel, defId, extraIds, 0, 0, null)
+        {
+        }
+
+        public ReportModalPayload(byte modalType, ReportModalVariant variant, int siteId, int priority,
+                                  int shareLevel, string defId, List<string> extraIds,
+                                  byte missionClass, int outcomeState, byte[] rewardBlob)
         {
             ModalType = modalType;
             Variant = variant;
@@ -87,6 +112,9 @@ namespace Multiplayer.Network.Sync.State
             ShareLevel = shareLevel;
             DefId = defId ?? "";
             ExtraIds = extraIds ?? new List<string>();
+            MissionClass = missionClass;
+            OutcomeState = outcomeState;
+            RewardBlob = rewardBlob ?? new byte[0];
         }
     }
 }

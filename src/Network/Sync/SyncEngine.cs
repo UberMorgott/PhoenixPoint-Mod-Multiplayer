@@ -682,6 +682,9 @@ namespace Multiplayer.Network.Sync
             // Same belt for blocking-modal mirror-origin tags: a stale tag from the old geoscape must never
             // view-lock a later (native or mirrored) window of the same type.
             State.BlockingModalMirrorRegistry.Reset();
+            // Batch-2 belts: queued/last-seen outcome mirrors died with the old geoscape.
+            lock (_pendingOutcomes) _pendingOutcomes.Clear();
+            _outcomeDedup.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -1034,6 +1037,25 @@ namespace Multiplayer.Network.Sync
             try
             {
                 var rt = GeoRuntime.Instance;
+                // MISSION OUTCOME (Batch-2 P3) takes its own path: consecutive-dup guard (0x69 has no occId until
+                // Batch-3 P5; STUN reliable sends twice) + queue-don't-drop when this client is still in tactical
+                // (the host's post-tac rail fires on ITS geoscape re-entry, which can precede ours).
+                if (p.Variant == State.ReportModalVariant.MissionOutcome)
+                {
+                    if (!_outcomeDedup.ShouldShow(data))
+                    {
+                        Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
+                                  + " → IGNORED (duplicate outcome delivery)");
+                        return;
+                    }
+                    if (!State.GeoModalDisplay.CanShow(rt))
+                    {
+                        QueuePendingOutcome(p);
+                        return;
+                    }
+                    ShowMissionOutcome(rt, p);
+                    return;
+                }
                 object modalData;
                 switch (p.Variant)
                 {
@@ -1085,7 +1107,7 @@ namespace Multiplayer.Network.Sync
                         }
                         break;
                     default:
-                        return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
+                        return;   // unknown/future variant → ignore (MissionOutcome handled above)
                 }
                 bool persistent = State.ReportModalClassifier.IsPersistent(p.Variant);
                 Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType + " variant=" + p.Variant +
@@ -1096,6 +1118,58 @@ namespace Multiplayer.Network.Sync
                     State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
+        }
+
+        // ─── mission-outcome mirror (Batch-2 P3): client dedup + queue-don't-drop + show ─────────────
+        // Outcomes are NON-blocking reports (no gate, no view-lock, native local close). The rebuild is
+        // payload-carried (missionClass/outcomeState/rewardBlob ride the 0x69) so it never depends on the
+        // tombstonable P1 site-mission mirror. A client still in tactical when the host's post-tac rail fires
+        // queues the payload (bounded) and drains it on the geoscape tick once the view is live.
+        private readonly State.ReportOutcomeDedup _outcomeDedup = new State.ReportOutcomeDedup();
+        private readonly List<State.ReportModalPayload> _pendingOutcomes = new List<State.ReportModalPayload>();
+        private const int MaxPendingOutcomes = 8;
+
+        private void QueuePendingOutcome(State.ReportModalPayload p)
+        {
+            lock (_pendingOutcomes)
+            {
+                _pendingOutcomes.Add(p);
+                // Bounded: drop the OLDEST on overflow (newer outcomes are the ones the player still expects).
+                while (_pendingOutcomes.Count > MaxPendingOutcomes) _pendingOutcomes.RemoveAt(0);
+            }
+            Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
+                      + " → QUEUED (geoscape view not live yet — likely still in tactical); pending="
+                      + _pendingOutcomes.Count);
+        }
+
+        /// <summary>Client tick: show every queued outcome once the geoscape view is live (FIFO).</summary>
+        private void DrainPendingOutcomes(GeoRuntime rt)
+        {
+            if (_pendingOutcomes.Count == 0) return;
+            if (!State.GeoModalDisplay.CanShow(rt)) return;
+            State.ReportModalPayload[] pending;
+            lock (_pendingOutcomes)
+            {
+                pending = _pendingOutcomes.ToArray();
+                _pendingOutcomes.Clear();
+            }
+            foreach (var p in pending)
+            {
+                try { ShowMissionOutcome(rt, p); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.DrainPendingOutcomes failed: " + ex.Message); }
+            }
+        }
+
+        private void ShowMissionOutcome(GeoRuntime rt, State.ReportModalPayload p)
+        {
+            var modalData = State.ReportModalReflection.BuildMissionOutcome(
+                rt, p.ModalType, p.SiteId, p.DefId, p.MissionClass, p.OutcomeState, p.RewardBlob);
+            Debug.Log("[Multiplayer] CLIENT ShowMissionOutcome modalType=" + p.ModalType + " siteId=" + p.SiteId
+                      + " class=" + p.MissionClass + " outcome=" + p.OutcomeState
+                      + " rewardBytes=" + (p.RewardBlob?.Length ?? 0) + " built=" + (modalData != null));
+            if (modalData == null) return;   // unresolved rebuild → skip (non-blocking report, logged upstream)
+            using (SyncApplyScope.Enter())
+                State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent: true);
         }
 
         /// <summary>
@@ -1147,6 +1221,10 @@ namespace Multiplayer.Network.Sync
                 // Reuses this existing per-frame hook (NetworkEngine.Update → Sync.Tick) — no new MonoBehaviour.
                 // Self-gated on ClientSimFreeze inside; flag-OFF / not-frozen = no-op (clears any stale buffers).
                 State.GeoVehicleMirror.ClientInterpolateTick(_engine);
+                // Batch-2 P3: show any mission-outcome mirror that arrived while this client was still in
+                // tactical (queue-don't-drop) — drains once the geoscape view is live again.
+                try { DrainPendingOutcomes(GeoRuntime.Instance); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.Tick outcome drain failed: " + ex.Message); }
                 return;
             }
 

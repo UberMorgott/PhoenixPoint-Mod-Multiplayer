@@ -69,6 +69,10 @@
     <Compile Include="..\src\Network\Sync\ReportMirrorGate.cs"><Link>Sync\ReportMirrorGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalPayload.cs"><Link>Sync\State\ReportModalPayload.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalClassifier.cs"><Link>Sync\State\ReportModalClassifier.cs</Link></Compile>
+    <!-- Batch-2 P3 mission-outcome mirror: pure consecutive-duplicate guard for the (still occId-less) 0x69
+         outcome payloads. The rebuild/stamp bridge (ReportModalReflection.BuildMissionOutcome) binds game
+         types and is NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\ReportOutcomeDedup.cs"><Link>Sync\State\ReportOutcomeDedup.cs</Link></Compile>
     <!-- Research-nav-line mirror (pure): host's NATIVE "new research available" answer + client pending
          store (the host/client button-inversion fix). The Harmony glue (ResearchNavGroupMirrorPatch) and
          the host read (ReportModalReflection.ReadResearchNavFlag) bind game types and are NOT linked. -->

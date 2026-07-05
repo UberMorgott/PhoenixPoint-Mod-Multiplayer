@@ -103,6 +103,26 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>
+        /// Client: true iff the geoscape view + its switch query are LIVE, i.e. <see cref="Show"/> would actually
+        /// queue (not silently no-op). Drives the Batch-2 outcome-show deferral: a mission-outcome 0x69 can land
+        /// while this client is still IN TACTICAL (the host re-enters geoscape first — its post-tac rail fires on
+        /// re-entry), and a dropped outcome would lose the loot report — so SyncEngine queues it and drains once
+        /// this turns true (spec Batch-2 risk: "queue, don't drop").
+        /// </summary>
+        public static bool CanShow(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return false;
+                var view = GetView(rt);
+                if (view == null) return false;
+                return _switchQueryField.GetValue(view) != null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Client: queue a report modal (<paramref name="modalType"/> = native ModalType byte) with the
         /// reconstructed <paramref name="modalData"/> at <paramref name="priority"/>, with PauseGame=false and a
         /// null DialogCallback. <paramref name="persistent"/> mirrors whether the host opened it via

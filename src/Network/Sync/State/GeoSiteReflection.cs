@@ -1108,5 +1108,31 @@ namespace Multiplayer.Network.Sync.State
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.MakeSiteAdapter failed: " + ex.Message); return null; }
         }
+
+        // ─── display-only mission rebuild for the OUTCOME mirror (Batch-2 P3) ───
+
+        /// <summary>
+        /// CLIENT: construct a class-exact DISPLAY-ONLY mission for a mirrored MISSION-OUTCOME modal from wire
+        /// ids alone — the same pure ctor map the P1 record apply uses (<see cref="ApplyMission"/>'s
+        /// BuildMissionForRecord), but the record is synthesized from the 0x69 payload's own
+        /// (missionClass, missionDefGuid), NEVER read off <c>site.ActiveMission</c>: the outcome shows AFTER the
+        /// mission ended, so the P1 mirror may already be tombstoned (spec Batch-2 ordering decision — the
+        /// payload is self-sufficient). The mission is NEVER attached to the site (no SetActiveMission, no
+        /// producers on the frozen client sim) — it only feeds the native outcome bind. Null on any miss.
+        /// </summary>
+        public static object BuildDisplayMission(GeoRuntime rt, object site, byte missionClass, string missionDefGuid)
+        {
+            if (site == null) return null;
+            try
+            {
+                EnsureMissionMirror();
+                return BuildMissionForRecord(rt, site, new GeoMissionRecord(missionClass, missionDefGuid));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.BuildDisplayMission failed: " + ex.Message);
+                return null;
+            }
+        }
     }
 }

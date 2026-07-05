@@ -504,8 +504,13 @@ namespace Multiplayer.Network.Sync
         // A one-way notice (no dismiss packet): each peer closes its own copy locally with OK. variantTag
         // (ReportModalVariant) selects the client rebuild path; only the fields a variant needs are non-default
         // (siteId = -1, priority/shareLevel = 0, defId = "", no extras). Host + client run the SAME build, so
-        // every field is a fixed REQUIRED field (no cross-version optionality this phase). A Phase-B MissionOutcome
-        // variant can append a trailing reward blob behind the extras without disturbing the A-variant wire.
+        // every field is a fixed REQUIRED field (no cross-version optionality this phase).
+        // MISSION-OUTCOME TAIL (Batch-2 P3): a MissionOutcome payload — AND ONLY that variant — appends
+        //   [missionClass:u8][outcomeState:i32][u16 rewardLen][rewardBlob:N]
+        // behind the extras: the class discriminator + outcome state + RewardDisplaySnapshot display blob ride
+        // the MESSAGE so the client rebuild never depends on the (possibly already tombstoned) P1 site mirror.
+        // Every other variant's wire is BYTE-IDENTICAL to the Phase-A format (wire pin kept). Decode of the tail
+        // is length-guarded: a truncated tail yields the defaults (class 0 → the rebuild skips gracefully).
 
         public static byte[] EncodeReportModal(ReportModalPayload p)
         {
@@ -524,6 +529,17 @@ namespace Multiplayer.Network.Sync
                         "ReportModal extraIds exceeds the u16 count field (" + extras.Count + " > " + ushort.MaxValue + ").");
                 w.Write((ushort)extras.Count);
                 foreach (var id in extras) WriteWireStr(w, id);
+                if (p.Variant == ReportModalVariant.MissionOutcome)
+                {
+                    var blob = p.RewardBlob ?? new byte[0];
+                    if (blob.Length > ushort.MaxValue)
+                        throw new ArgumentOutOfRangeException(nameof(p),
+                            "ReportModal reward blob exceeds the u16 length field (" + blob.Length + " > " + ushort.MaxValue + ").");
+                    w.Write(p.MissionClass);
+                    w.Write(p.OutcomeState);
+                    w.Write((ushort)blob.Length);
+                    w.Write(blob);
+                }
                 return ms.ToArray();
             }
         }
@@ -547,8 +563,23 @@ namespace Multiplayer.Network.Sync
                     int extraCount = r.ReadUInt16();
                     var extras = new List<string>(extraCount);
                     for (int i = 0; i < extraCount; i++) extras.Add(ReadWireStr(r));
+                    byte missionClass = 0;
+                    int outcomeState = 0;
+                    byte[] rewardBlob = null;
+                    if ((ReportModalVariant)variantByte == ReportModalVariant.MissionOutcome)
+                    {
+                        // Length-guarded outcome tail: a truncated tail leaves the defaults (class 0 → the
+                        // client rebuild skips gracefully) — never a throw, never partial garbage.
+                        if (ms.Length - ms.Position >= sizeof(byte) + sizeof(int) + sizeof(ushort))
+                        {
+                            missionClass = r.ReadByte();
+                            outcomeState = r.ReadInt32();
+                            int len = r.ReadUInt16();
+                            if (len > 0 && ms.Length - ms.Position >= len) rewardBlob = r.ReadBytes(len);
+                        }
+                    }
                     payload = new ReportModalPayload(modalType, (ReportModalVariant)variantByte,
-                        siteId, priority, shareLevel, defId, extras);
+                        siteId, priority, shareLevel, defId, extras, missionClass, outcomeState, rewardBlob);
                     return true;
                 }
             }
