@@ -28,7 +28,7 @@ namespace Multiplayer.Network.Sync
         public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
         public const byte GeoSiteChannel = 5;       // GeoSite identity mirror (Owner/Type/State/name/EncounterID) — Case A
         public const byte GeoVehicleChannel = 6;    // mid-session vehicle-creation mirror (spawn inert mirror of a host-acquired craft; ongoing 0xA5/0xA6/0xA7 then drive it)
-        // channel id 7 RESERVED for the P7 objectives channel (unified-popup-mirror spec §BATCH-4) — do NOT reuse.
+        public const byte ObjectivesChannel = 7;    // P7 faction objectives + GeoscapeEventSystem variables (TFTV quest lines / DLC5 / critical path) — value records + native AddObjective/RemoveObjective reconcile
         public const byte MistChannel = 8;          // WA-1 mist field mirror (chunked RecordInstanceData echo → native ProcessInstanceData redraw on the frozen client)
 
         // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───

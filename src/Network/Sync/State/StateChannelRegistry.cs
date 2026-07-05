@@ -20,7 +20,7 @@ namespace Multiplayer.Network.Sync.State
             Register(new DiplomacyChannel());   // #4 — faction diplomacy / reputation (value-only mirror)
             Register(new GeoSiteChannel());     // #5 — GeoSite identity mirror (Owner/Type/State/name/EncounterID), Case A
             Register(new GeoVehicleChannel());  // #6 — mid-session vehicle-creation mirror (host-acquired craft → inert client mirror)
-            // #7 RESERVED for the P7 objectives channel — do NOT reuse.
+            Register(new ObjectivesChannel());  // #7 — P7 faction objectives + event-system variables (TFTV quest lines / DLC5 / critical path)
             Register(new MistChannel());        // #8 — WA-1 mist field mirror (chunked native RecordInstanceData echo)
         }
 

@@ -43,6 +43,15 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _finishQueriedState;  // GeoscapeView.FinishQueriedState()
         private static Type _eventStateBaseType;        // UIStateBaseGeoscapeEvent<> (open generic)
         private static FieldInfo _eventIdField;         // GeoscapeEvent.EventID (string, public field :18)
+        // ── marketplace state selection (Batch-4 §P8): the host shows a marketplace event in
+        // UIStateMarketplaceGeoscapeEvent (GeoscapeView.OnGeoscapeEventRaised:2046-2049 branches on
+        // EventSystem.IsEventTheMarketplace), so the client rebuild must select the SAME state class or
+        // the marketplace opens as a plain text event dialog. ALL optional — never gate _ready: a miss
+        // degrades to the proven plain-event state.
+        private static ConstructorInfo _uiStateMarketplaceCtor; // UIStateMarketplaceGeoscapeEvent(GeoscapeEvent)
+        private static FieldInfo _marketSettingsField;          // GeoLevelController.TheMarketplaceSettings (public field :175)
+        private static FieldInfo _marketEventField;             // TheMarketplaceSettingsDef.MarketplaceEvent (GeoscapeEventDef, :87)
+        private static PropertyInfo _marketEventIdProp;         // GeoscapeEventDef.EventID (string property :81)
 
         // The occurrence id of the dialog THIS client currently has open (0 = none). The native UIState carries
         // no occurrence id, so Show() records it here and Dismiss()/ShowResult() match on it — the authoritative
@@ -90,6 +99,18 @@ namespace Multiplayer.Network.Sync.State
             _finishQueriedState = AccessTools.Method(viewType, "FinishQueriedState");
             _eventIdField = AccessTools.Field(eventType, "EventID");   // for id-matched dismiss
 
+            // Marketplace state selection (optional — a miss keeps the plain-event state, fail-open).
+            var marketStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateMarketplaceGeoscapeEvent");
+            if (marketStateType != null)
+                _uiStateMarketplaceCtor = AccessTools.Constructor(marketStateType, new[] { eventType });
+            _marketSettingsField = AccessTools.Field(geoType, "TheMarketplaceSettings");
+            if (_marketSettingsField != null)
+            {
+                _marketEventField = AccessTools.Field(_marketSettingsField.FieldType, "MarketplaceEvent");
+                if (_marketEventField != null)
+                    _marketEventIdProp = AccessTools.Property(_marketEventField.FieldType, "EventID");
+            }
+
             _ready = _viewField != null && _switchQueryField != null && _queryStateSwitch != null
                      && _requestCtor != null && _uiStateCtor != null && _finishQueriedState != null;
         }
@@ -117,7 +138,15 @@ namespace Multiplayer.Network.Sync.State
                 var query = _switchQueryField.GetValue(view);
                 if (query == null) return;
 
-                object uiState = _uiStateCtor.Invoke(new[] { geoEvent });
+                // Batch-4 §P8 marketplace fix: mirror the host's state-class branch
+                // (GeoscapeView.OnGeoscapeEventRaised:2046-2049) — a marketplace event must open in
+                // UIStateMarketplaceGeoscapeEvent (the trade UI), not the plain text event dialog. The
+                // pure gate compares the LIVE event's def-name to the level's marketplace event id
+                // (IsEventTheMarketplace's own comparison, GeoscapeEventSystem.cs:409). Fail-open: any
+                // unresolved member keeps the proven plain-event state.
+                bool marketplace = _uiStateMarketplaceCtor != null
+                    && ShouldUseMarketplaceState(_eventIdField?.GetValue(geoEvent) as string, GetMarketplaceEventId(rt));
+                object uiState = (marketplace ? _uiStateMarketplaceCtor : _uiStateCtor).Invoke(new[] { geoEvent });
                 object request = _requestCtor.Invoke(new object[] { uiState, 0 });
                 // pause arrives via time-sync; do NOT pause here (avoids a pause-relay loop).
                 _requestPauseField?.SetValue(request, false);
@@ -125,7 +154,8 @@ namespace Multiplayer.Network.Sync.State
                 // Record the now-open occurrence (only when a real id was supplied; a synthetic result page is
                 // pushed with occurrenceId=0 since it is locally dismissed and never host-correlated).
                 if (occurrenceId != 0) _openOccurrenceId = occurrenceId;
-                Debug.Log("[Multiplayer] EventDisplay.Show occId=" + occurrenceId + " eventId=" + eventId + " → queued");
+                Debug.Log("[Multiplayer] EventDisplay.Show occId=" + occurrenceId + " eventId=" + eventId
+                          + " state=" + (marketplace ? "Marketplace" : "Event") + " → queued");
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventDisplay.Show best-effort failed: " + ex.Message); }
         }
@@ -215,6 +245,33 @@ namespace Multiplayer.Network.Sync.State
         // render+close its result page; host-resolves-remote-claim renders the synthetic result page via
         // SyncEngine.ResolveToResultPage (and its OK click closes natively via ShouldLocalClose). Both the host's
         // own losing click and the synthetic result-page OK dismiss are handled by the native FinishEncounter path.)
+
+        /// <summary>
+        /// PURE marketplace state-selection gate (unit-tested): the client picks
+        /// <c>UIStateMarketplaceGeoscapeEvent</c> iff the event's def-name equals the level's marketplace
+        /// event id — the exact comparison native <c>IsEventTheMarketplace</c> makes
+        /// (GeoscapeEventSystem.cs:409). Empty/null on either side (synthetic result pages carry
+        /// EventID == ""; a mid-load level has no settings yet) → plain event state, never a guess.
+        /// </summary>
+        public static bool ShouldUseMarketplaceState(string eventId, string marketplaceEventId)
+            => !string.IsNullOrEmpty(eventId) && !string.IsNullOrEmpty(marketplaceEventId)
+               && string.Equals(eventId, marketplaceEventId, StringComparison.Ordinal);
+
+        // The level's marketplace event def-name (GeoLevelController.TheMarketplaceSettings
+        // .MarketplaceEvent.EventID), or null when unresolved (DLC absent / mid-load) — fail-open.
+        private static string GetMarketplaceEventId(GeoRuntime rt)
+        {
+            try
+            {
+                if (_marketSettingsField == null || _marketEventField == null || _marketEventIdProp == null) return null;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var settings = _marketSettingsField.GetValue(geo);
+                var eventDef = settings != null ? _marketEventField.GetValue(settings) : null;
+                return eventDef != null ? _marketEventIdProp.GetValue(eventDef, null) as string : null;
+            }
+            catch { return null; }
+        }
 
         // The current GeoscapeViewSwitchQuery._currentStateSwitchRequest.State if it is a
         // UIStateBaseGeoscapeEvent<>, else null.

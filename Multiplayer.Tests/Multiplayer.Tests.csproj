@@ -127,6 +127,10 @@
          InventoryChannel/ResearchChannel, which are also unlinked — only their pure codecs are). -->
     <Compile Include="..\src\Network\Sync\State\UnlockSnapshot.cs"><Link>Sync\State\UnlockSnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\DiplomacySnapshot.cs"><Link>Sync\State\DiplomacySnapshot.cs</Link></Compile>
+    <!-- P7 objectives channel (#7) codec (pure, Unity-free) for wire round-trip tests. The channel +
+         reflection bridge (ObjectivesChannel / ObjectivesReflection) touch SyncEngine/Unity and are
+         NOT linked (mirrors DiplomacyChannel/DiplomacyReflection). -->
+    <Compile Include="..\src\Network\Sync\State\ObjectivesSnapshot.cs"><Link>Sync\State\ObjectivesSnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\GeoSiteSnapshot.cs"><Link>Sync\State\GeoSiteSnapshot.cs</Link></Compile>
     <!-- WA-2 mission-drift per-site rate limiter (pure, Unity-free). The Harmony hook
          (MissionDriftDirtyPatch) binds game types and is NOT linked. -->
