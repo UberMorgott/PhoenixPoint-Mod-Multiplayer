@@ -173,6 +173,9 @@
          types via CutsceneReflection (compiles against 0Harmony + UnityEngine.CoreModule, never invoked in tests). -->
     <Compile Include="..\src\Network\Sync\CutsceneReflection.cs"><Link>Sync\CutsceneReflection.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\PlayCutsceneAction.cs"><Link>Sync\Actions\PlayCutsceneAction.cs</Link></Compile>
+    <!-- Pure cutscene-mirror broadcast gate: host+active only; the IsApplying skip is NON-HOST-scoped (a host
+         cutscene fired inside a relayed action apply must still broadcast). -->
+    <Compile Include="..\src\Network\Sync\CutsceneBroadcastDecision.cs"><Link>Sync\CutsceneBroadcastDecision.cs</Link></Compile>
     <!-- Pure, Unity-free host vehicle-mirror emit scheduler (immediate-emit trigger predicate + throttle math). -->
     <Compile Include="..\src\Network\Sync\VehicleEmitScheduler.cs"><Link>Sync\VehicleEmitScheduler.cs</Link></Compile>
     <!-- Pure, Unity-free host explore-apply guard (native-Activate vs direct-fallback decision). -->

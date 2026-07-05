@@ -21,9 +21,12 @@ namespace Multiplayer.Harmony.Sync
     /// Single-chokepoint design (smallest native mechanism): one patch mirrors every geoscape cutscene rather than
     /// hooking each producer (reward / research / marketplace). No double-play — the host plays natively and only
     /// broadcasts; the client has no local cutscene originator (its mirrored modal DialogCallbacks are nulled) and
-    /// plays solely from the mirror. Guards: host + active session only; <c>!SyncApplyScope.IsApplying</c> so the
-    /// client's own mirror-driven <c>ToCutsceneState</c> can never re-broadcast (belt-and-braces with the host-only
-    /// gate). Reflective target (Prepare returns false → PatchAll skips) so an engine rename never bombs. Best-effort.
+    /// plays solely from the mirror. Guards live in the pure <see cref="CutsceneBroadcastDecision"/>: host + active
+    /// session only; the <c>SyncApplyScope.IsApplying</c> skip applies ONLY on the non-host (client mirror-driven
+    /// replay never re-broadcasts) — on the HOST a cutscene fired synchronously INSIDE a relayed action apply
+    /// (relayed explore → instant SiteExplored → reward → ToCutsceneState, all under SyncApplyScope.Enter,
+    /// SyncEngine.cs:208) MUST still broadcast. Reflective target (Prepare returns false → PatchAll skips) so an
+    /// engine rename never bombs. Best-effort.
     /// </summary>
     [HarmonyPatch]
     public static class CutsceneMirrorPatch
@@ -46,9 +49,13 @@ namespace Multiplayer.Harmony.Sync
         {
             try
             {
-                if (SyncApplyScope.IsApplying) return;   // client mirror-driven playback → never re-broadcast
                 var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;   // host authority only
+                // Pure decision (unit-tested): host+active only; IsApplying suppresses ONLY the non-host (client
+                // mirror replay). A host cutscene inside a relayed action apply (IsApplying true) still broadcasts.
+                if (!CutsceneBroadcastDecision.ShouldBroadcast(
+                        engine != null && engine.IsHost,
+                        engine != null && engine.IsActiveSession,
+                        SyncApplyScope.IsApplying)) return;
                 if (__0 == null) return;
 
                 string guid = DefReflection.GetGuid(__0);
