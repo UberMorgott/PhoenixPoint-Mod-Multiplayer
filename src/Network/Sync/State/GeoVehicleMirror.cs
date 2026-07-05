@@ -165,6 +165,22 @@ namespace Multiplayer.Network.Sync.State
                     changed.Add(rec);
                 }
 
+                // WA-1 BEHEMOTH: a GeoActor OUTSIDE GeoMap.Vehicles (GeoMap.cs:241) — the walk above never sees
+                // it. Append its reserved-key record to the SAME surfaces: placement rides 0xA5 with the shared
+                // signature-skip (parked/dormant behemoth = 0 bytes), presence/status/tombstone ride channel #6
+                // (HostObserveBehemoth + the HostPrune below once the key leaves liveKeys). Near-zero cost.
+                if (GeoBehemothReflection.TryReadHost(GeoRuntime.Instance, out var behemothRec, out byte behemothStatus))
+                {
+                    liveKeys.Add(behemothRec.Key);
+                    GeoVehicleChannel.HostObserveBehemoth(behemothRec, behemothStatus);
+                    string behemothSig = GeoVehiclePos.Signature(behemothRec);
+                    if (!_lastSig.TryGetValue(behemothRec.Key, out var prevBehemothSig) || prevBehemothSig != behemothSig)
+                    {
+                        _lastSig[behemothRec.Key] = behemothSig;
+                        changed.Add(behemothRec);
+                    }
+                }
+
                 // Drop signatures for vehicles that left the map (destroyed/despawned) so a re-created key
                 // re-ships from scratch.
                 if (_lastSig.Count > liveKeys.Count)
@@ -225,6 +241,10 @@ namespace Multiplayer.Network.Sync.State
                         if (TryReadId(v, out int id) && TryReadOwnerKey(v, out int ownerId))
                             byKey[GeoVehiclePos.MakeKey(ownerId, id)] = v;
                     }
+                // WA-1 BEHEMOTH: lives outside GeoMap.Vehicles — resolve it via GeoLevel.AlienFaction.Behemoth
+                // under its reserved composite key (spawned/adopted by channel #6; absent → records skipped).
+                if (GeoBehemothReflection.TryResolveLive(out var behemothComp))
+                    byKey[GeoBehemothState.Key] = behemothComp;
 
                 DiagClient(byKey, vehicles);   // DIAG: read current pivot + newest-target held-check BEFORE buffering
 
@@ -240,8 +260,10 @@ namespace Multiplayer.Network.Sync.State
                     // the incoming host pivot quat to the vehicle's CURRENT parked / pre-mirror local rotation. A
                     // large angle means the client's rendered DEPARTURE is far from where the host places it
                     // (>90° ≈ opposite side of the globe) — this pins an antipodal first placement vs a faithful
-                    // small step. One line per (re)start; steady-state polls are covered by DIAG-C.
-                    if (!_clientTargets.ContainsKey(rec.Key)) DiagTravelStart(rec, comp);
+                    // small step. One line per (re)start; steady-state polls are covered by DIAG-C. (Behemoth
+                    // records skip the probe: its reflection members differ from GeoVehicle's cached ones.)
+                    if (!_clientTargets.ContainsKey(rec.Key) && !GeoBehemothState.IsBehemothKey(rec.Key))
+                        DiagTravelStart(rec, comp);
                     _clientTargets[rec.Key] = comp;
                     _interp.Push(rec.Key, s, rec, arrival);
                     buffered++;
@@ -291,7 +313,13 @@ namespace Multiplayer.Network.Sync.State
                         Component comp = kv.Value;
                         if (comp == null) { _purgeScratch.Add(kv.Key); continue; }   // vehicle destroyed → prune
                         if (_interp.TrySample(kv.Key, now, out var sample))
-                            WritePlacement(comp, sample);
+                        {
+                            // WA-1 BEHEMOTH: its Surface property lives on GeoBehemothActor — the GeoVehicle
+                            // PropertyInfo cached here cannot be invoked on it (TargetException would abort the
+                            // whole frame's writes) → dedicated type-correct writer.
+                            if (GeoBehemothState.IsBehemothKey(kv.Key)) GeoBehemothReflection.WritePlacement(comp, sample);
+                            else WritePlacement(comp, sample);
+                        }
                     }
                     foreach (var k in _purgeScratch) { _clientTargets.Remove(k); _interp.Remove(k); }
                 }
@@ -518,6 +546,7 @@ namespace Multiplayer.Network.Sync.State
                 foreach (var rec in batch)
                 {
                     if (!tracked.Contains(rec.Key)) continue;
+                    if (GeoBehemothState.IsBehemothKey(rec.Key)) continue;   // behemoth: GeoVehicle diag props don't apply
                     if (!byKey.TryGetValue(rec.Key, out var vo) || !(vo is Component comp) || comp == null) continue;
                     Transform pivot = comp.transform;
                     Quaternion before = pivot.localRotation;                                 // pre-write (this poll)

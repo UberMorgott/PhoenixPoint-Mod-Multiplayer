@@ -41,6 +41,7 @@ namespace Multiplayer.Network.Sync.State
         private readonly GeoVehicleIdentityTracker _tracker = new GeoVehicleIdentityTracker();
         private readonly object _lock = new object();
         private bool _bound;   // host: seeded the pre-existing vehicles (bind-once)
+        private byte _lastBehemothStatus = byte.MaxValue;   // host: WA-1 behemoth status edge-detect (255 = none seen)
 
         public GeoVehicleChannel() => _live = this;
 
@@ -61,6 +62,26 @@ namespace Multiplayer.Network.Sync.State
                 if (self._tracker.TryMarkNew(id))
                     NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
             }
+        }
+
+        /// <summary>HOST (WA-1, per poll while a behemoth is live): upsert the behemoth's SENTINEL identity
+        /// (see <see cref="GeoBehemothState"/>) so presence + <c>BehemothStatus</c> + (via <see cref="HostPrune"/>,
+        /// once the key leaves the live set) the tombstone all reuse this channel's resident/tombstone machinery.
+        /// Dirties on FIRST sighting and on every STATUS edge; placement inside the identity is refreshed
+        /// silently (whatever flush ships next carries the freshest one). No-op off-session.</summary>
+        public static void HostObserveBehemoth(GeoVehiclePos placement, byte status)
+        {
+            var self = _live;
+            if (self == null) return;
+            bool dirty;
+            lock (self._lock)
+            {
+                bool first = self._tracker.UpsertResident(GeoBehemothState.MakeIdentity(status, placement));
+                dirty = first || status != self._lastBehemothStatus;
+                self._lastBehemothStatus = status;
+            }
+            if (dirty)
+                NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
         }
 
         /// <summary>HOST (after the poll loop builds the live-key set): keys no longer live become TOMBSTONES (the
@@ -104,6 +125,13 @@ namespace Multiplayer.Network.Sync.State
             var liveKeys = GeoVehicleIdentityReflection.ResolveLiveKeys(rt);
             foreach (var id in snap.Vehicles)
             {
+                // WA-1 BEHEMOTH sentinel entry: not a GeoVehicle (lives outside GeoMap.Vehicles) — its own
+                // spawn-if-absent + status stamp path, idempotent by the live AlienFaction.Behemoth accessor.
+                if (GeoBehemothState.IsBehemothIdentity(id))
+                {
+                    GeoBehemothReflection.ApplyPresence(rt, id);
+                    continue;
+                }
                 // Idempotent: spawn ONLY when the composite key is not already live (resident re-emission /
                 // join-save-covered identity = no-op, never a second vehicle). SpawnMirrorVehicle re-checks too.
                 if (GeoVehicleIdentityTracker.ShouldSpawn(id.Key, liveKeys))
@@ -111,6 +139,13 @@ namespace Multiplayer.Network.Sync.State
             }
             foreach (var key in snap.Tombstones)
             {
+                // WA-1 BEHEMOTH tombstone: host lost/removed the behemoth → despawn the live mirror (no-op when
+                // none is live — tombstones re-emit every flush).
+                if (GeoBehemothState.IsBehemothKey(key))
+                {
+                    GeoBehemothReflection.Despawn(rt);
+                    continue;
+                }
                 // Idempotent: despawn ONLY a live key (tombstones are re-emitted every flush; a key already gone
                 // — or never spawned on this client — is a no-op). The two sets are disjoint by tracker contract.
                 if (GeoVehicleIdentityTracker.ShouldDespawn(key, liveKeys))
@@ -137,7 +172,11 @@ namespace Multiplayer.Network.Sync.State
 
         public void DetachHost()
         {
-            lock (_lock) { _tracker.Clear(); }
+            lock (_lock)
+            {
+                _tracker.Clear();
+                _lastBehemothStatus = byte.MaxValue;
+            }
             _bound = false;
         }
     }

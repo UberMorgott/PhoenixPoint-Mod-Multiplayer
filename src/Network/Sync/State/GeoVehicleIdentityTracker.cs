@@ -69,6 +69,20 @@ namespace Multiplayer.Network.Sync.State
             return true;
         }
 
+        /// <summary>Host (WA-1 behemoth): record/refresh a resident identity whose VALUE changes over time
+        /// (status/placement in the sentinel entry). Unlike <see cref="TryMarkNew"/> the value is ALWAYS
+        /// updated in place (the next Snapshot re-emits the freshest one); returns true only on the FIRST
+        /// sighting of the key — the caller decides dirtiness for value changes (e.g. status edge) itself.
+        /// A re-appearing key clears its tombstone (spawn supersedes the earlier despawn).</summary>
+        public bool UpsertResident(GeoVehicleIdentity identity)
+        {
+            long key = identity.Key;
+            bool first = _known.Add(key);
+            _resident[key] = identity;
+            _tombstones.Remove(key);
+            return first;
+        }
+
         /// <summary>Host: the FULL resident identity set for one Snapshot flush (NOT drained — re-emitted every
         /// flush so a lost packet / failed client apply heals on the next one; client apply is key-idempotent).</summary>
         public List<GeoVehicleIdentity> GetResident() => new List<GeoVehicleIdentity>(_resident.Values);
