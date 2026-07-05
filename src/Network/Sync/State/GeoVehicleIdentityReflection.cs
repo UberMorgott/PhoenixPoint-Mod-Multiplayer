@@ -211,6 +211,26 @@ namespace Multiplayer.Network.Sync.State
             return keys;
         }
 
+        /// <summary>The live vehicle whose composite key equals <paramref name="key"/>, or null (PS1 crew
+        /// apply: resolves BOTH a join-save-loaded craft and a mirror-spawned one — same key derivation).</summary>
+        public static object ResolveVehicleByKey(GeoRuntime rt, long key)
+        {
+            try
+            {
+                Ensure(rt);
+                if (!_ready) return null;
+                var map = GetMap(rt);
+                if (map == null || !(_vehiclesProp?.GetValue(map, null) is IEnumerable vehicles)) return null;
+                foreach (var v in vehicles)
+                {
+                    if (v == null) continue;
+                    if (TryReadKey(v, out long k) && k == key) return v;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.ResolveVehicleByKey failed: " + ex.Message); }
+            return null;
+        }
+
         /// <summary>Composite key of one live vehicle, matching the position mirror's key derivation.</summary>
         private static bool TryReadKey(object vehicle, out long key)
         {

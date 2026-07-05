@@ -22,6 +22,7 @@ namespace Multiplayer.Network.Sync.State
             Register(new GeoVehicleChannel());  // #6 — mid-session vehicle-creation mirror (host-acquired craft → inert client mirror)
             Register(new ObjectivesChannel());  // #7 — P7 faction objectives + event-system variables (TFTV quest lines / DLC5 / critical path)
             Register(new MistChannel());        // #8 — WA-1 mist field mirror (chunked native RecordInstanceData echo)
+            Register(new PersonnelChannel());   // #9 — PS1 Phoenix roster composition (per-site GeoUnitIds, value-only _tacUnits reconcile)
         }
 
         private void Register(IStateChannel channel)

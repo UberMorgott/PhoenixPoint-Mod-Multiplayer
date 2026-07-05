@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace Multiplayer.Network.Sync.State
 {
@@ -43,6 +44,11 @@ namespace Multiplayer.Network.Sync.State
         private bool _bound;   // host: seeded the pre-existing vehicles (bind-once)
         private byte _lastBehemothStatus = byte.MaxValue;   // host: WA-1 behemoth status edge-detect (255 = none seen)
 
+        // PS1 crew tail: last-observed ordered GeoUnitIds per live PHOENIX vehicle key (poll-detect in
+        // HostObserve — pre-existing vehicles never re-emit an identity, but their crew still mutates).
+        // The FULL map re-emits every flush (resident-style heal on the unacked rail); pruned with liveKeys.
+        private readonly Dictionary<long, long[]> _crew = new Dictionary<long, long[]>();
+
         public GeoVehicleChannel() => _live = this;
 
         // ─── HOST: new-key detection hooks called from GeoVehicleMirror.HostPollAndBroadcast ───────────────────
@@ -54,6 +60,22 @@ namespace Multiplayer.Network.Sync.State
         {
             var self = _live;
             if (self == null) return;
+            // PS1 crew tail: poll-detect crew changes for EVERY live Phoenix vehicle — known keys included
+            // (a pre-bind craft never re-emits an identity, but the host still re-assigns its crew). Value
+            // compare vs the last-observed ordered set; a change stores + dirties (next flush ships the
+            // full crew map). Non-Phoenix vehicles return false (crew scope = the shared faction only).
+            if (PersonnelReflection.TryReadCrewIds(GeoRuntime.Instance, vehicle, out var crew))
+            {
+                bool crewDirty;
+                lock (self._lock)
+                {
+                    self._crew.TryGetValue(placement.Key, out var prev);
+                    crewDirty = !GeoVehicleCrew.SameCrew(prev, crew);
+                    if (crewDirty) self._crew[placement.Key] = crew;
+                }
+                if (crewDirty)
+                    NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
+            }
             lock (self._lock)
             {
                 if (self._tracker.IsKnown(placement.Key)) return;   // cheap: already seen → skip the reflection read
@@ -92,7 +114,21 @@ namespace Multiplayer.Network.Sync.State
             var self = _live;
             if (self == null || liveKeys == null) return;
             bool pruned;
-            lock (self._lock) { pruned = self._tracker.Prune(liveKeys); }
+            lock (self._lock)
+            {
+                pruned = self._tracker.Prune(liveKeys);
+                // PS1: drop crew entries of dead keys silently — the tombstone despawn (dirtied by the
+                // prune above) already removes the whole vehicle client-side.
+                if (self._crew.Count > 0)
+                {
+                    List<long> dead = null;
+                    foreach (var k in self._crew.Keys)
+                        if (!liveKeys.Contains(k))
+                            (dead = dead ?? new List<long>()).Add(k);
+                    if (dead != null)
+                        foreach (var k in dead) self._crew.Remove(k);
+                }
+            }
             if (pruned)
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
         }
@@ -106,22 +142,31 @@ namespace Multiplayer.Network.Sync.State
             // until rejoin. Re-delivery is safe: the client apply is key-idempotent in both directions.
             List<GeoVehicleIdentity> resident;
             List<long> tombstones;
+            List<GeoVehicleCrewRecord> crew = null;
             lock (_lock)
             {
-                if (!_tracker.HasPayload) return null;   // nothing to mirror → no payload (FlushChannel no-ops)
+                if (!_tracker.HasPayload && _crew.Count == 0) return null;   // nothing to mirror → no payload (FlushChannel no-ops)
                 resident = _tracker.GetResident();
                 tombstones = _tracker.GetTombstones();
+                if (_crew.Count > 0)
+                {
+                    // PS1: FULL crew map every flush (resident-style — a lost flush / failed apply heals
+                    // on the next one; the client reconcile is value-only idempotent).
+                    crew = new List<GeoVehicleCrewRecord>(_crew.Count);
+                    foreach (var kv in _crew) crew.Add(new GeoVehicleCrewRecord(kv.Key, kv.Value));
+                }
             }
             var snap = new GeoVehicleIdentitySnapshot();
             snap.Vehicles.AddRange(resident);
             snap.Tombstones.AddRange(tombstones);
+            if (crew != null) snap.Crew.AddRange(crew);
             return GeoVehicleIdentitySnapshot.Encode(snap);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = GeoVehicleIdentitySnapshot.Decode(data);
-            if (snap == null || (snap.Vehicles.Count == 0 && snap.Tombstones.Count == 0)) return;
+            if (snap == null || (snap.Vehicles.Count == 0 && snap.Tombstones.Count == 0 && snap.Crew.Count == 0)) return;
             var liveKeys = GeoVehicleIdentityReflection.ResolveLiveKeys(rt);
             foreach (var id in snap.Vehicles)
             {
@@ -151,6 +196,19 @@ namespace Multiplayer.Network.Sync.State
                 if (GeoVehicleIdentityTracker.ShouldDespawn(key, liveKeys))
                     GeoVehicleIdentityReflection.DespawnVehicle(rt, key);
             }
+            // PS1 crew tail — applied AFTER the resident spawn loop (spawn-then-crew ordering, spec §2.3),
+            // so a just-mirrored craft's crew lands in the same apply. Value-only _tacUnits reconcile;
+            // an unresolvable key (mid-load, failed spawn) logs + skips — the full-map re-emission heals.
+            foreach (var c in snap.Crew)
+            {
+                var vehicle = GeoVehicleIdentityReflection.ResolveVehicleByKey(rt, c.Key);
+                if (vehicle == null)
+                {
+                    Debug.Log("[Multiplayer] GeoVehicleChannel: crew apply skipped — vehicle key=" + c.Key.ToString("X") + " not live on this client");
+                    continue;
+                }
+                PersonnelReflection.ApplyVehicleCrew(rt, vehicle, c.UnitIds);
+            }
         }
 
         public void AttachHost(SyncEngine eng)
@@ -175,6 +233,7 @@ namespace Multiplayer.Network.Sync.State
             lock (_lock)
             {
                 _tracker.Clear();
+                _crew.Clear();
                 _lastBehemothStatus = byte.MaxValue;
             }
             _bound = false;

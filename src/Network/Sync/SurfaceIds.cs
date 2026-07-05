@@ -30,6 +30,7 @@ namespace Multiplayer.Network.Sync
         public const byte GeoVehicleChannel = 6;    // mid-session vehicle-creation mirror (spawn inert mirror of a host-acquired craft; ongoing 0xA5/0xA6/0xA7 then drive it)
         public const byte ObjectivesChannel = 7;    // P7 faction objectives + GeoscapeEventSystem variables (TFTV quest lines / DLC5 / critical path) — value records + native AddObjective/RemoveObjective reconcile
         public const byte MistChannel = 8;          // WA-1 mist field mirror (chunked RecordInstanceData echo → native ProcessInstanceData redraw on the frozen client)
+        public const byte PersonnelChannel = 9;     // PS1 Phoenix roster COMPOSITION mirror (per-site ordered GeoUnitIds, value-only _tacUnits reconcile; PS2 adds the per-soldier live-state tail). Vehicle CREW rides the #6 crew tail (one writer per field).
 
         // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───
         // Migrated geoscape host→all messages ride the SAME 0x67 SurfaceRouter chokepoint as tactical, on ids
