@@ -59,4 +59,26 @@ public class EventDialogClassificationTests
     [InlineData("PROG_EV_42", false)] // real multi-choice host event → swallow
     public void IsSyntheticResultPage_OnlyEmptyEventId(string eventId, bool expectedSynthetic)
         => Assert.Equal(expectedSynthetic, EventReflection.IsSyntheticResultPage(eventId));
+
+    // ─── mission-deploy exclusion (SOURCE-side: host never broadcasts an arrival deploy/land prompt) ──────
+    // Root fix for the in-game leak where a host arrive→CANCEL at a mission site (PROG_AN2_MISS "Второе
+    // посвящение", subtitle "МЕСТНОСТЬ РАЗВЕДКИ") left a stuck synthetic result page on the client. The event
+    // is classified as a mission-deploy prompt iff ANY choice's outcome starts a tactical mission
+    // (Outcome.StartMission.MissionTypeDef != null, GeoEventChoiceOutcome.cs:315). The reflection reader
+    // (IsMissionDeployEvent(object)) binds live game types and cannot JIT in-process; the ANY-classifier that
+    // drives it (IsMissionDeployByOutcomes) is fully covered here (no Unity types).
+    [Theory]
+    [InlineData(new bool[] { }, false)]              // no choices → not a deploy prompt (siteless narrative)
+    [InlineData(new[] { false }, false)]             // single info/reward choice (EX93/PROG_PX12 scavenge) → mirror
+    [InlineData(new[] { false, false }, false)]      // multi-choice narrative/diplomacy brief → mirror as normal
+    [InlineData(new[] { true, false }, true)]        // Deploy + Leave (PROG_AN2_MISS shape) → deploy prompt, exclude
+    [InlineData(new[] { false, true }, true)]        // order-independent (Leave + Deploy)
+    [InlineData(new[] { true }, true)]               // lone Deploy choice → deploy prompt, exclude
+    [InlineData(new[] { true, true }, true)]         // both start missions → still a deploy prompt
+    public void IsMissionDeployByOutcomes_AnyChoiceStartsMission(bool[] choiceStartsMission, bool expectedDeploy)
+        => Assert.Equal(expectedDeploy, EventReflection.IsMissionDeployByOutcomes(choiceStartsMission));
+
+    [Fact]
+    public void IsMissionDeployByOutcomes_NullFlagsFailOpenToNotDeploy()
+        => Assert.False(EventReflection.IsMissionDeployByOutcomes(null)); // read failure → broadcast as before (no legit-event regression)
 }

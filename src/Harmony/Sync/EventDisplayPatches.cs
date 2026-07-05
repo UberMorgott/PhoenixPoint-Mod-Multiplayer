@@ -78,6 +78,20 @@ namespace Multiplayer.Harmony.Sync
             {
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
+                // EXCLUDE mission-arrival/deploy prompts (ANY choice starts a tactical mission) from the client
+                // mirror. These are transient host-side PRE-DECISION windows (vehicle arrives → "Deploy / Leave"):
+                // a host cancel closes only on the host, but the client — having mirrored the raise — would
+                // synthesize a phantom result page and get stuck (in-game leak: PROG_AN2_MISS "Второе посвящение",
+                // subtitle "МЕСТНОСТЬ РАЗВЕДКИ"). The client = mirror of COMMITTED state only; the deploy decision
+                // is host-local and the mission (on Deploy) arrives via the tactical deploy channel, not this rail.
+                // Skip the raise at the SOURCE (host never broadcasts it) — verified before occId is assigned, so
+                // no orphan occurrence. Fail-open: an unreadable event is broadcast as before (no legit-event regression).
+                if (EventReflection.IsMissionDeployEvent(geoEvent))
+                {
+                    Debug.Log("[Multiplayer] HOST skip BroadcastEventRaised eventId=" + eventId +
+                              " (mission-deploy prompt — client never mirrors an arrival deploy/land confirmation)");
+                    return;
+                }
                 int siteId = EventReflection.GetSiteId(geoEvent);
                 // Carry the visiting vehicle id so the client rebuilds the SAME 3-arg context. Without it the
                 // client's context has Vehicle == null and an [AircraftName]-token description NREs inside the
@@ -161,6 +175,15 @@ namespace Multiplayer.Harmony.Sync
             try
             {
                 string eventId = EventReflection.GetEventId(__instance);
+                // SYMMETRIC to the raise-side exclusion: never broadcast a dismiss for a mission-deploy prompt the
+                // client was never shown (the raise was skipped) — it would buffer as an orphan pending-dismiss.
+                // The arrive→cancel/deploy decision is host-local; on Deploy the mission rides the tactical channel.
+                if (EventReflection.IsMissionDeployEvent(__instance))
+                {
+                    Debug.Log("[Multiplayer] HOST skip BroadcastEventDismiss eventId=" + eventId +
+                              " (mission-deploy prompt — not mirrored to client)");
+                    return;
+                }
                 // The picked choice's index (off GeoscapeEvent.SelectedChoice, set inside CompleteEvent). >= 0
                 // tells clients to rebuild + show that choice's follow-up RESULT/OUTCOME page natively; a null/
                 // decline choice resolves to -1 → close-only. The reward STATE already syncs via the channels.

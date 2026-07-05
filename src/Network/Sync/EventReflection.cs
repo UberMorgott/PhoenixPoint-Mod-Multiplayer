@@ -107,6 +107,8 @@ namespace Multiplayer.Network.Sync
         private static FieldInfo _choiceTextField;     // GeoEventChoice.Text (LocalizedTextBind)
         private static FieldInfo _choiceOutcomeField;  // GeoEventChoice.Outcome (GeoEventChoiceOutcome)
         private static FieldInfo _outcomeTextField;    // GeoEventChoiceOutcome.OutcomeText (EventTextVariation)
+        private static FieldInfo _outcomeStartMissionField; // GeoEventChoiceOutcome.StartMission (OutcomeStartMission, GeoEventChoiceOutcome.cs:55)
+        private static FieldInfo _startMissionTypeDefField; // OutcomeStartMission.MissionTypeDef (CustomMissionTypeDef, OutcomeStartMission.cs:9)
         private static MethodInfo _replaceTokensMethod; // GeoscapeEventContext.ReplaceEventTokens(string)
         private static ConstructorInfo _eventDataCtor;  // GeoscapeEventData() default ctor
 
@@ -216,7 +218,16 @@ namespace Multiplayer.Network.Sync
             _choiceTextField = AccessTools.Field(choiceType, "Text");
             _choiceOutcomeField = AccessTools.Field(choiceType, "Outcome");
             var outcomeType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoEventChoiceOutcome");
-            if (outcomeType != null) _outcomeTextField = AccessTools.Field(outcomeType, "OutcomeText");
+            if (outcomeType != null)
+            {
+                _outcomeTextField = AccessTools.Field(outcomeType, "OutcomeText");
+                _outcomeStartMissionField = AccessTools.Field(outcomeType, "StartMission");
+            }
+            // Mission-deploy discriminator: a choice whose Outcome.StartMission.MissionTypeDef != null is a
+            // Deploy/Land button (GeoEventChoiceOutcome.cs:315 → RewardStartCustomMission). Best-effort — a null
+            // field only makes IsMissionDeployEvent fail OPEN (broadcast as before), never suppress a legit event.
+            var startMissionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.OutcomeStartMission");
+            if (startMissionType != null) _startMissionTypeDefField = AccessTools.Field(startMissionType, "MissionTypeDef");
             _replaceTokensMethod = AccessTools.Method(_contextType, "ReplaceEventTokens", new[] { typeof(string) });
 
             // Native OK-label chain (best-effort; NOT part of _ready — a missing link just falls back to "OK").
@@ -1035,6 +1046,69 @@ namespace Multiplayer.Network.Sync
                 return !string.IsNullOrEmpty(key);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ChoiceHasOutcomeText failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
+        /// PURE: classify an event as a MISSION-DEPLOY prompt from its per-choice "this choice starts a mission"
+        /// flags. True iff ANY choice starts a tactical mission — that choice is a Deploy/Land button, so the whole
+        /// window is a transient host-side PRE-DECISION prompt the client must NOT mirror (the mission itself rides
+        /// the tactical deploy channel; the host's arrive→cancel/deploy decision is host-local). No choices /
+        /// all-false (a plain narrative, scavenge, or diplomacy event) → NOT a deploy prompt → mirrored as normal.
+        /// Null flags → false (fail OPEN to broadcast; never suppress a legit event on a read failure). Unit-tested.
+        /// </summary>
+        public static bool IsMissionDeployByOutcomes(bool[] choiceStartsMission)
+        {
+            if (choiceStartsMission == null) return false;
+            for (int i = 0; i < choiceStartsMission.Length; i++)
+                if (choiceStartsMission[i]) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// True iff <paramref name="choice"/>'s outcome STARTS a tactical mission, i.e.
+        /// <c>Outcome.StartMission.MissionTypeDef != null</c> — the exact condition the native reward builder uses
+        /// to emit a <c>RewardStartCustomMission</c> (GeoEventChoiceOutcome.cs:315). Returns false on null /
+        /// unreadable / unbound field (safe: a missed positive only means the event mirrors as before).
+        /// </summary>
+        public static bool ChoiceStartsMission(object choice)
+        {
+            if (choice == null) return false;
+            try
+            {
+                Ensure();
+                var outcome = _choiceOutcomeField?.GetValue(choice);
+                if (outcome == null) return false;
+                var startMission = _outcomeStartMissionField?.GetValue(outcome);
+                if (startMission == null) return false;
+                return _startMissionTypeDefField?.GetValue(startMission) != null;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ChoiceStartsMission failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
+        /// Host SOURCE-side exclusion predicate: true iff this live event is a mission-arrival/deploy prompt (ANY
+        /// choice's outcome starts a mission). Such windows are the vehicle-arrival "Deploy / Leave" confirmation
+        /// (e.g. story site PROG_AN2_MISS "Второе посвящение"): a host-local pre-decision prompt whose host-side
+        /// cancel/deploy must produce NO client dialog. When true, <c>EventRaisedDisplayPatch</c> /
+        /// <c>CompleteEventDismissPatch</c> SKIP the raise/dismiss broadcast, so the client never opens (nor
+        /// synthesizes a phantom result page for) it. Fail OPEN: null / unreadable choices → false (broadcast as
+        /// before — no regression to legit scavenge / narrative / diplomacy events). Best-effort (never throws).
+        /// </summary>
+        public static bool IsMissionDeployEvent(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return false;
+            try
+            {
+                Ensure();
+                var data = _eventDataProp?.GetValue(geoscapeEvent, null);
+                var choices = _choicesField?.GetValue(data) as IList;
+                if (choices == null) return false;   // unreadable → fail OPEN to broadcast
+                var flags = new bool[choices.Count];
+                for (int i = 0; i < choices.Count; i++)
+                    flags[i] = ChoiceStartsMission(choices[i]);
+                return IsMissionDeployByOutcomes(flags);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.IsMissionDeployEvent failed: " + ex.Message); return false; }
         }
 
         /// <summary>
