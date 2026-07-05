@@ -164,8 +164,11 @@ namespace Multiplayer.Network.Sync.State
                     break;
                 case ReportModalVariant.AmbushBrief:
                 case ReportModalVariant.SiteMissionBrief:
-                    // modalData is the live GeoMission (ambush / scavenge / ancient-site) →
-                    // Site.SiteId + MissionDef.Guid off the GeoMission base properties.
+                case ReportModalVariant.ActiveMissionBrief:
+                    // modalData is the live GeoMission (ambush / scavenge / ancient-site / LIVE→site-id brief) →
+                    // Site.SiteId + MissionDef.Guid off the GeoMission base properties. The ActiveMissionBrief
+                    // family needs nothing more on THIS wire: the runtime bits ride the P1 mission record on
+                    // the GeoSite channel (#5), which attached the mission the client will bind.
                     ReadAmbushBrief(modalData, out siteId, out defId);
                     break;
                 case ReportModalVariant.NullData:
@@ -468,6 +471,62 @@ namespace Multiplayer.Network.Sync.State
                 return ctor.Invoke(withParams ? new object[] { site, missionDef, null } : new object[] { site, missionDef });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// Client: resolve the modalData for a mirrored ActiveMissionBrief — the client's OWN
+        /// <c>site.ActiveMission</c>, attached by the P1 mission-state mirror (GeoSite channel #5,
+        /// <c>GeoSiteReflection.ApplyMission</c>). NO object is constructed here: the attached mirror IS the
+        /// class-exact mission with the DTO-stamped runtime bits, so the native bind
+        /// (HavenDefenceBriefDataBind / AlienBaseDataBind / PhoenixBaseDefenseDataBind / …) reads it exactly
+        /// like the host's. Returns null — the caller degrades to the notify-only text prompt
+        /// (<c>ReportModalClassifier.ShouldShowDegradedNotice</c>) — when:
+        ///   • the site id doesn't resolve (dangling id on a not-yet-synced client map);
+        ///   • the site has no attached mission (mission record not landed yet / tombstoned / Unknown class);
+        ///   • the mission class doesn't faithfully bind this ModalType
+        ///     (<c>ReportModalClassifier.ActiveMissionRebuildMatches</c> — incl. the always-degrading 34);
+        ///   • the wire missionDef guid mismatches the attached mission (stale mirror of a replaced mission).
+        /// The HOST intent gate was armed at the 0x69 SHOW independently of this decision.
+        /// </summary>
+        public static object BuildActiveMissionBrief(GeoRuntime rt, byte modalType, int siteId, string missionDefGuid)
+        {
+            try
+            {
+                var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                if (site == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief: siteId " + siteId
+                                     + " did not resolve (degrading)");
+                    return null;
+                }
+                var mission = GeoSiteReflection.GetActiveMission(site);
+                if (mission == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief: site " + siteId
+                                     + " has no mirrored ActiveMission (degrading)");
+                    return null;
+                }
+                byte missionClass = GeoSiteReflection.ClassifyMission(mission);
+                if (!ReportModalClassifier.ActiveMissionRebuildMatches(modalType, missionClass))
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief: mirrored class "
+                                     + missionClass + " does not bind modalType " + modalType + " (degrading)");
+                    return null;
+                }
+                if (!string.IsNullOrEmpty(missionDefGuid)
+                    && GeoSiteReflection.GetMissionDefGuid(mission) != missionDefGuid)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief: mirrored missionDef"
+                                     + " mismatches the wire guid '" + missionDefGuid + "' (stale mirror — degrading)");
+                    return null;
+                }
+                return mission;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] ReportModalReflection.BuildActiveMissionBrief failed: " + ex.Message);
+                return null;
+            }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>

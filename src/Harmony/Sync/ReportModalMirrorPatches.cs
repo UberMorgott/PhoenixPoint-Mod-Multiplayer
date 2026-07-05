@@ -32,7 +32,8 @@ namespace Multiplayer.Harmony.Sync
     ///
     /// CHANNEL OWNERSHIP (S3 invariant): this channel carries ONLY GeoscapeView modal openers (the
     /// <see cref="ReportModalClassifier"/> whitelist: reports 6/14/25/38 + the mirrored mission briefs
-    /// 15/4/26/28). Geoscape EVENT windows are owned by the separate 0x65/0x66 event-replication channel and do
+    /// 15/4/26/28 + the ActiveMissionBrief family 0/2/11/20/34/36, Batch-1 P2 of the 2026-07-05 popup-mirror
+    /// spec). Geoscape EVENT windows are owned by the separate 0x65/0x66 event-replication channel and do
     /// NOT flow through GeoscapeView.OpenModal/ModalType at all (they push a state-stack state —
     /// UIStateGeoscapeEvent — and have no ModalType entry), so 0x69 can never carry an event window and the two
     /// channels cannot double-show. The tight whitelist enforces this; keep event types out of it.
@@ -206,6 +207,51 @@ namespace Multiplayer.Harmony.Sync
                           " → gate released + ReportModalHide broadcast");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalReleasePatch failed: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// HOST release BELT on <c>UIModuleModal.Hide(ModalType)</c> — covers the blocking briefs whose opener does
+    /// NOT route their resolve through <c>GeoscapeView.ModalResultCallback</c>. Every ShowMissionBriefing brief
+    /// gets the ModalResultCallback handler (the primary release above), but the haven-details "Defend" path
+    /// opens the SAME GeoHavenAttackBrief=0 with its own callback (<c>HavenFacilityController.cs:126 →
+    /// OpenModal(GeoHavenAttackBrief, OnDefendZoneResult, site.ActiveMission)</c>) — without this belt that
+    /// window's close would never release the gate nor the client's mirrored copy (permanent lock). EVERY modal
+    /// close funnels through <c>UIStateGeoModal.ExitState → _modalModule.Hide(_modal)</c> (UIStateGeoModal.cs:
+    /// 118-121), so Hide is the one guaranteed chokepoint. Double-fire with the primary is safe by design:
+    /// <c>HostBlockingPromptGate.Release</c> is match-gated and the client's <c>CloseBlocking</c> is idempotent
+    /// (a second hide with nothing current is a logged no-op). Host-only + active session; the client's own
+    /// Hide (mirror close / lock restore) is untouched. Reflective target (Prepare false → skipped on rename).
+    /// </summary>
+    [HarmonyPatch]
+    public static class BlockingModalHideReleasePatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            _target = BlockingModalClientLock.ResolveModuleMethod("Hide", withHandlerAndData: false);
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // __0 = modalType (ModalType enum, boxed).
+        public static void Postfix(object __0)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                int modalType = Convert.ToInt32(__0);
+                if (!ReportModalClassifier.IsBlockingModal(modalType)) return;
+                if (!HostBlockingPromptGate.IsArmed) return;   // already released by the primary → silent no-op
+                HostBlockingPromptGate.Release(modalType);
+                engine.Sync?.BroadcastReportModalHide((byte)modalType);
+                Debug.Log("[Multiplayer] HOST blocking modal hidden (belt) modalType=" + modalType +
+                          " → gate released + ReportModalHide broadcast");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalHideReleasePatch failed: " + ex.Message); }
         }
     }
 }

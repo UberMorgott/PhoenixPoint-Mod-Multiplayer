@@ -99,6 +99,28 @@ public class ReportModalProtocolTests
         Assert.Empty(d.ExtraIds);
     }
 
+    [Theory]
+    [InlineData(0)]    // GeoHavenAttackBrief (haven defense — top user pain)
+    [InlineData(2)]    // GeoAlienBaseBrief
+    [InlineData(11)]   // GeoPhoenixBaseDefenseBrief (base attack)
+    [InlineData(20)]   // GeoPhoenixBaseInfestationBrief
+    [InlineData(34)]   // BehemothAttackBrief (fallback family)
+    [InlineData(36)]   // InfestedHavenBrief
+    public void ActiveMissionBrief_RoundTrips(int modalType)
+    {
+        // Batch-1 family: same wire shape as the other brief variants (siteId + missionDef guid, priority 0);
+        // the runtime bits ride the P1 mission record on channel #5, not this packet.
+        var p = new ReportModalPayload((byte)modalType, ReportModalVariant.ActiveMissionBrief, 90, 0, 0, "MISSION_DEF_GUID", null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(modalType, d.ModalType);
+        Assert.Equal(ReportModalVariant.ActiveMissionBrief, d.Variant);
+        Assert.Equal(90, d.SiteId);
+        Assert.Equal(0, d.Priority);
+        Assert.Equal("MISSION_DEF_GUID", d.DefId);
+        Assert.Empty(d.ExtraIds);
+    }
+
     // ── ReportModalHide (0x6C): the host resolved its BLOCKING modal → clients close the mirror ──
     [Fact]
     public void ReportModalHide_RoundTrips()

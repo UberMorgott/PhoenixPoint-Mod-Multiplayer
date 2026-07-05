@@ -13,7 +13,8 @@ namespace Multiplayer.Network.Sync.State
     ///
     /// CHANNEL OWNERSHIP (do not blur): this is the REPORT-WINDOW channel (0x69 ReportModalShow). It carries ONLY
     /// the whitelisted <c>GeoscapeView.OpenModal</c>/<c>OpenModalPersistent</c> modals (reports 6/14/25/38 +
-    /// the mirrored mission briefs 15/4/26/28 — <see cref="ReportModalClassifier"/>).
+    /// the mirrored mission briefs 15/4/26/28 + the ActiveMissionBrief family 0/2/11/20/34/36 —
+    /// <see cref="ReportModalClassifier"/>).
     /// Geoscape EVENT windows (<c>UIStateGeoscapeEvent : UIStateBaseGeoscapeEvent&lt;&gt;</c>) are owned by a SEPARATE
     /// channel (0x65/0x66 EventRaised/Dismiss, occurrence-id FIFO deduped) and are NEVER routed here — they do not
     /// even go through the OpenModal chokepoint (they push a state-stack state via
@@ -199,6 +200,68 @@ namespace Multiplayer.Network.Sync.State
                 return Convert.ToInt32(_uiStateModalTypeProp.GetValue(state, null)) == modalType;
             }
             catch { return false; }
+        }
+
+        // ─── degraded mission-brief notice (ActiveMissionBrief rebuild failure) ──────────────────────────
+        // Native simple text prompt via GameUtl.GetMessageBox().ShowSimplePrompt(...) — the SAME surface the
+        // mod's session UI uses (MultiplayerUI.cs). Reflection-bound to keep this file's no-compile-time-game-
+        // reference discipline. NOTIFY-ONLY by design (spec Batch-1): the client may dismiss it locally — the
+        // protection against racing the host's pending decision is the HOST-side intent gate
+        // (HostBlockingPromptGate, armed at the 0x69 SHOW), not this window.
+        private static bool _mbEnsured;
+        private static MethodInfo _getMessageBox;        // Base.Core.GameUtl.GetMessageBox() static
+        private static MethodInfo _showSimplePrompt;     // MessageBox.ShowSimplePrompt(string, icon, buttons, callback, sender, userData)
+        private static object _mbIconWarning;            // MessageBoxIcon.Warning
+        private static object _mbButtonsOk;              // MessageBoxButtons.OK
+
+        private static void EnsureMessageBox()
+        {
+            if (_mbEnsured) return;
+            _mbEnsured = true;
+            try
+            {
+                var gameUtlT = AccessTools.TypeByName("Base.Core.GameUtl");
+                var mbT = AccessTools.TypeByName("Base.UI.MessageBox.MessageBox");
+                var iconT = AccessTools.TypeByName("Base.UI.MessageBox.MessageBoxIcon");
+                var buttonsT = AccessTools.TypeByName("Base.UI.MessageBox.MessageBoxButtons");
+                var callbackT = AccessTools.TypeByName("Base.UI.MessageBox.MessageBoxCallback");
+                if (gameUtlT == null || mbT == null || iconT == null || buttonsT == null || callbackT == null) return;
+                _getMessageBox = AccessTools.Method(gameUtlT, "GetMessageBox", Type.EmptyTypes);
+                // EXACT param match (harmony-accesstools-exact-param-match): the 6-arg simple overload
+                // (content, icon, buttons, callback, sender, userData) — not the override-labels 7-arg one.
+                _showSimplePrompt = AccessTools.Method(mbT, "ShowSimplePrompt",
+                    new[] { typeof(string), iconT, buttonsT, callbackT, typeof(object), typeof(object) });
+                _mbIconWarning = Enum.Parse(iconT, "Warning");
+                _mbButtonsOk = Enum.Parse(buttonsT, "OK");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.EnsureMessageBox failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Client: the mirrored ActiveMissionBrief could NOT be rebuilt (site/mission unresolved, class
+        /// mismatch, or the always-degrading fallback-34 family) — show the DEGRADED notify-only native text
+        /// prompt instead of silently dropping the host's blocking brief. The user learns WHY the session is
+        /// paused; dismissing it is local-only (null-safe callback) and mutates nothing. The host intent gate
+        /// stays armed until the host resolves (0x6C). Best-effort: a MessageBox miss just logs.
+        /// </summary>
+        public static void ShowDegradedBriefNotice(byte modalType)
+        {
+            try
+            {
+                EnsureMessageBox();
+                if (_getMessageBox == null || _showSimplePrompt == null) return;
+                var mb = _getMessageBox.Invoke(null, null);
+                if (mb == null) return;
+                _showSimplePrompt.Invoke(mb, new object[]
+                {
+                    "The host is deciding on a mission briefing.\n" +
+                    "This briefing could not be displayed on your side; actions are paused until the host decides.",
+                    _mbIconWarning, _mbButtonsOk, null, null, null,
+                });
+                Debug.Log("[Multiplayer] GeoModalDisplay.ShowDegradedBriefNotice modalType=" + modalType
+                          + " → notify-only text prompt (host gate stays armed)");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.ShowDegradedBriefNotice failed: " + ex.Message); }
         }
 
         /// <summary>

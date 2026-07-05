@@ -23,6 +23,16 @@ namespace Multiplayer.Network.Sync.State
     ///                                  client rebuilds the matching display-only mission class
     ///                                  (ReportModalReflection.BuildSiteMissionBrief) and shows the SAME native
     ///                                  brief, view-locked until the host's Confirm/Cancel (ReportModalHide).
+    ///   • <see cref="ActiveMissionBrief"/> — modalData is a LIVE→site-id brief GeoMission whose bind needs
+    ///                                  runtime state a fresh ctor can't supply (GeoHavenAttackBrief 0 /
+    ///                                  GeoAlienBaseBrief 2 / GeoPhoenixBaseDefenseBrief 11 /
+    ///                                  GeoPhoenixBaseInfestationBrief 20 / BehemothAttackBrief 34 /
+    ///                                  InfestedHavenBrief 36). Same wire shape (siteId + missionDef guid); the
+    ///                                  client resolves its OWN <c>site.ActiveMission</c> — attached by the P1
+    ///                                  mission-state mirror on channel #5 — and shows the SAME native brief,
+    ///                                  view-locked. Rebuild failure (site/mission unresolved, class mismatch,
+    ///                                  fallback-34 family) → degraded notify-only text modal; the HOST intent
+    ///                                  gate is armed either way (intents never race the host's decision).
     /// </summary>
     public enum ReportModalVariant : byte
     {
@@ -33,6 +43,7 @@ namespace Multiplayer.Network.Sync.State
         MissionOutcome = 4,   // Phase-B placeholder (do not emit in Phase-A)
         AmbushBrief = 5,      // mandatory ambush prompt mirror (view-only + blocking on the client)
         SiteMissionBrief = 6, // optional site deploy briefs (scavenge/ancient) — mirrored view-only + blocking
+        ActiveMissionBrief = 7, // LIVE→site-id briefs off the P1-mirrored site.ActiveMission — blocking + degradable
     }
 
     /// <summary>

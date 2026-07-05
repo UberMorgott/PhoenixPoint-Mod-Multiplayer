@@ -1070,6 +1070,20 @@ namespace Multiplayer.Network.Sync
                         modalData = State.ReportModalReflection.BuildSiteMissionBrief(rt, p.ModalType, p.SiteId, p.DefId);
                         if (modalData == null) return;   // unresolved site/def → don't show an empty brief
                         break;
+                    case State.ReportModalVariant.ActiveMissionBrief:
+                        // LIVE→site-id brief (base attack 11 / haven defense 0 / alien base 2 / infestation
+                        // 20/36 / behemoth fallback 34): bind the client's OWN site.ActiveMission — attached by
+                        // the P1 mission-state mirror (GeoSite channel #5). Rebuild failure → DEGRADED
+                        // notify-only text prompt (never a silent drop of a blocking brief); the HOST intent
+                        // gate armed at the host's open either way, so client intents can never race the
+                        // pending decision (spec P2 hard invariant: gate correctness > display fidelity).
+                        modalData = State.ReportModalReflection.BuildActiveMissionBrief(rt, p.ModalType, p.SiteId, p.DefId);
+                        if (State.ReportModalClassifier.ShouldShowDegradedNotice(p.Variant, rebuildSucceeded: modalData != null))
+                        {
+                            State.GeoModalDisplay.ShowDegradedBriefNotice(p.ModalType);
+                            return;
+                        }
+                        break;
                     default:
                         return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
                 }

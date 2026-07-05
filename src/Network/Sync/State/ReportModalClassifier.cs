@@ -13,6 +13,11 @@ namespace Multiplayer.Network.Sync.State
     ///   • GeoScavengeBrief      (4)   → SiteMissionBrief (modalData GeoScavengingMission → siteId + missionDef guid)
     ///   • AncientSiteAttackBrief(26)  → SiteMissionBrief (modalData GeoAncientSiteMission → siteId + missionDef guid)
     ///   • AncientSiteDefenceBrief(28) → SiteMissionBrief (modalData GeoAncientSiteMission → siteId + missionDef guid)
+    ///   • GeoHavenAttackBrief   (0), GeoAlienBaseBrief (2), GeoPhoenixBaseDefenseBrief (11),
+    ///     GeoPhoenixBaseInfestationBrief (20), BehemothAttackBrief (34), InfestedHavenBrief (36)
+    ///                                 → ActiveMissionBrief (modalData = live GeoMission → siteId + missionDef
+    ///                                   guid; the client binds its OWN site.ActiveMission, attached by the P1
+    ///                                   mission-state mirror — Batch-1 of the 2026-07-05 popup-mirror spec)
     /// Everything else (interactive decisions, mission OUTCOME modals — Phase-B) is NOT whitelisted →
     /// the host never broadcasts it and the client never suppresses it (left fully native).
     ///
@@ -31,18 +36,28 @@ namespace Multiplayer.Network.Sync.State
     ///   • AncientSiteAttackBrief 26 / AncientSiteDefenceBrief 28 — GeoAncientSiteMission(site, def)
     ///     (GeoAncientSiteMission.cs:30, pure base-ctor); bind reads ArcheologySettings + Site.Type +
     ///     GetEnemyFaction (def-derived) only (AncientSiteBriefDataBind).
-    /// Deliberately still HOST-LOCAL (cannot be rebuilt faithfully from synced ids — do NOT add without a new
-    /// rebuild path):
-    ///   • GeoHavenAttackBrief 0     — GeoHavenDefenseMission ctor needs runtime (HavenAttacker, attackZone);
-    ///     bind reads live deployment points / leader / zone RNG (HavenDefenceBriefDataBind).
+    /// MISSION-BRIEF FAMILY (Batch-1 P2 of the 2026-07-05 unified popup-mirror spec — supersedes the earlier
+    /// "deliberately HOST-LOCAL" rule for these six): the LIVE→site-id briefs whose modalData is a live
+    /// GeoMission with runtime state a fresh ctor can't supply are now mirrored via
+    /// <see cref="ReportModalVariant.ActiveMissionBrief"/> — the P1 mission-state mirror (GeoSite channel #5,
+    /// <c>GeoMissionRecord</c>) attaches the SAME mission subclass to the client's own site, and the client
+    /// rebuild resolves <c>site.ActiveMission</c> (class-checked, <see cref="ActiveMissionRebuildMatches"/>):
+    ///   • GeoHavenAttackBrief 0     — GeoHavenDefenseMission; attacker faction + deployments + attacked zone
+    ///     ride the mission record (HavenDefenceBriefDataBind reads them off the attached mirror).
     ///   • GeoAlienBaseBrief 2       — ONE ModalType, TWO classes (GeoAlienBaseMission | GeoAlienBaseAssaultMission);
-    ///     the assault ctor needs runtime deployments and the bind hard-casts per class → a wrong-class rebuild throws.
-    ///   • GeoPhoenixBaseDefenseBrief 11 — ctor needs runtime attackingSites.
-    ///   • GeoPhoenixBaseInfestationBrief 20 / InfestedHavenBrief 36 — binds read live haven/deployment state.
-    ///   • BehemothAttackBrief 34    — fallback for otherwise-unmapped mission classes; no single rebuild ctor.
+    ///     the record's class discriminator picks the exact class (the bind hard-casts — wrong class throws).
+    ///   • GeoPhoenixBaseDefenseBrief 11 — attackingSites ride the record as site ids.
+    ///   • GeoPhoenixBaseInfestationBrief 20 / InfestedHavenBrief 36 — binds read Site/MissionDef-derived state
+    ///     off the attached mirror.
+    ///   • BehemothAttackBrief 34    — the GetMissionBriefModal FALLBACK (GeoscapeView.cs:1751): the host class
+    ///     is unmapped → the client never attaches it → the rebuild ALWAYS degrades (honest fallback).
+    /// DEGRADED FALLBACK (spec P1/P2 invariant): a failed rebuild (dangling site id / class mismatch / 34)
+    /// shows a notify-only native text prompt instead of the brief — and the HOST blocking gate is armed from
+    /// the 0x69 SHOW regardless, so client intents can never race the host's pending decision.
     /// <see cref="IsBlockingModal"/> marks every mirrored brief BLOCKING: the client's mirror is view-locked
     /// (inert buttons, no local close) and the host rejects client intents while it is pending
-    /// (HostBlockingPromptGate) — for the mandatory ambush that is native semantics; for the optional briefs it
+    /// (HostBlockingPromptGate) — for the mandatory briefs (ambush 15, base defense 11, ancient defence 28)
+    /// that is native semantics (PauseGame + IsMandatoryMission); for the optional briefs it
     /// mirrors the host's own modal-lock (the host player is deciding; a client action would race the decision).
     ///
     /// The live modalData read (host) + reconstruct (client) lives in <see cref="ReportModalReflection"/>
@@ -51,13 +66,19 @@ namespace Multiplayer.Network.Sync.State
     public static class ReportModalClassifier
     {
         // ── ModalType enum values (PhoenixPoint.Common.Utils.ModalType, verified decompile 2026-06-26) ──
+        public const int GeoHavenAttackBrief = 0;  // ModalType.cs:5 — haven-defense deploy brief (top user pain)
+        public const int GeoAlienBaseBrief = 2;    // ModalType.cs:7 — alien-base brief (TWO classes, discriminator-bound)
         public const int GeoScavengeBrief = 4;     // ModalType.cs:9 — optional scavenge/resource-site deploy brief
         public const int GeoPhoenixBaseOutcome = 6;
+        public const int GeoPhoenixBaseDefenseBrief = 11; // ModalType.cs:16 — BASE ATTACK brief (auto-opens, mandatory)
         public const int GeoResearchComplete = 14;
         public const int GeoAmbushBrief = 15;      // ModalType.cs:20 — mandatory ambush prompt (GeoscapeView.cs:1780)
+        public const int GeoPhoenixBaseInfestationBrief = 20; // ModalType.cs:25 — infested phoenix base brief
         public const int PandoranRevealResult = 25;
         public const int AncientSiteAttackBrief = 26;  // ModalType.cs:31 — ancient-site attack deploy brief
         public const int AncientSiteDefenceBrief = 28; // ModalType.cs:33 — ancient-site defence deploy brief
+        public const int BehemothAttackBrief = 34; // ModalType.cs:39 — GetMissionBriefModal FALLBACK (degrades)
+        public const int InfestedHavenBrief = 36;  // ModalType.cs:41 — infested-haven cleanse brief
         public const int DiplomacyResearchBrief = 38;
 
         /// <summary>True iff <paramref name="modalType"/> (native ModalType enum value) is a whitelisted
@@ -67,13 +88,19 @@ namespace Multiplayer.Network.Sync.State
         {
             switch (modalType)
             {
+                case GeoHavenAttackBrief:
+                case GeoAlienBaseBrief:
                 case GeoScavengeBrief:
                 case GeoPhoenixBaseOutcome:
+                case GeoPhoenixBaseDefenseBrief:
                 case GeoResearchComplete:
                 case GeoAmbushBrief:
+                case GeoPhoenixBaseInfestationBrief:
                 case PandoranRevealResult:
                 case AncientSiteAttackBrief:
                 case AncientSiteDefenceBrief:
+                case BehemothAttackBrief:
+                case InfestedHavenBrief:
                 case DiplomacyResearchBrief:
                     return true;
                 default:
@@ -95,18 +122,27 @@ namespace Multiplayer.Network.Sync.State
                 case AncientSiteAttackBrief:
                 case AncientSiteDefenceBrief:
                     return ReportModalVariant.SiteMissionBrief;
+                case GeoHavenAttackBrief:
+                case GeoAlienBaseBrief:
+                case GeoPhoenixBaseDefenseBrief:
+                case GeoPhoenixBaseInfestationBrief:
+                case BehemothAttackBrief:
+                case InfestedHavenBrief:
+                    return ReportModalVariant.ActiveMissionBrief;
                 case GeoPhoenixBaseOutcome:
                 default:
                     return ReportModalVariant.NullData;
             }
         }
 
-        /// <summary>NullData/SiteOnly/AmbushBrief/SiteMissionBrief modals are opened PERSISTENT natively
-        /// (OpenModalPersistent — every mission brief via ShowMissionBriefing, GeoscapeView.cs:1903);
-        /// Research/Diplomacy via OpenModal (non-persistent). The client replays with the same persistence. PURE.</summary>
+        /// <summary>NullData/SiteOnly/AmbushBrief/SiteMissionBrief/ActiveMissionBrief modals are opened
+        /// PERSISTENT natively (OpenModalPersistent — every mission brief via ShowMissionBriefing,
+        /// GeoscapeView.cs:1903); Research/Diplomacy via OpenModal (non-persistent). The client replays with the
+        /// same persistence. PURE.</summary>
         public static bool IsPersistent(ReportModalVariant variant)
             => variant == ReportModalVariant.NullData || variant == ReportModalVariant.SiteOnly
-               || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief;
+               || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief
+               || variant == ReportModalVariant.ActiveMissionBrief;
 
         /// <summary>
         /// True iff the HOST must defer this report's payload build + broadcast to the NEXT engine tick instead
@@ -131,8 +167,11 @@ namespace Multiplayer.Network.Sync.State
         /// lock: the client's mirrored modal is view-locked (BlockingModalClientLockPatches — inert buttons,
         /// no local close, released only by the host's resolve → ReportModalHide) and the host rejects every
         /// in-flight client intent while it is pending (HostBlockingPromptGate in SyncEngine.OnActionRequest).
-        /// = the mandatory ambush brief + every mirrored SITE MISSION BRIEF (host Confirm → tactical co-op
-        /// deploy flow; host Cancel → ReportModalHide closes the client copy, normal flow resumes). PURE.
+        /// = the mandatory ambush brief + every mirrored MISSION BRIEF — the SiteMissionBrief family
+        /// {4,26,28} and the ActiveMissionBrief family {0,2,11,20,34,36} (host Confirm → tactical co-op
+        /// deploy flow; host Cancel → ReportModalHide closes the client copy, normal flow resumes). The gate
+        /// arms from the 0x69 SHOW itself, NOT from a successful client rebuild — a degraded notify-only
+        /// fallback still leaves the host rejecting intents (spec P2 hard invariant). PURE.
         /// </summary>
         public static bool IsBlockingModal(int modalType)
         {
@@ -142,10 +181,51 @@ namespace Multiplayer.Network.Sync.State
                 case GeoScavengeBrief:
                 case AncientSiteAttackBrief:
                 case AncientSiteDefenceBrief:
+                case GeoHavenAttackBrief:
+                case GeoAlienBaseBrief:
+                case GeoPhoenixBaseDefenseBrief:
+                case GeoPhoenixBaseInfestationBrief:
+                case BehemothAttackBrief:
+                case InfestedHavenBrief:
                     return true;
                 default:
                     return false;
             }
         }
+
+        /// <summary>
+        /// The ActiveMissionBrief rebuild-vs-degrade decision: true iff a mission of <paramref name="missionClass"/>
+        /// (a <see cref="GeoMissionRecord"/> discriminator, as classified off the client's mirrored
+        /// <c>site.ActiveMission</c>) faithfully binds the brief <paramref name="modalType"/> — the same class →
+        /// modal mapping the native <c>GetMissionBriefModal</c> uses (GeoscapeView.cs:1724-1798). A mismatch
+        /// (stale mirror / dangling site / the fallback-34 family, whose host class is by definition unmapped)
+        /// → the caller degrades to the notify-only text prompt. GeoAlienBaseBrief 2 accepts BOTH alien-base
+        /// classes (the bind casts per class, and the attached mirror IS the exact class). PURE.
+        /// </summary>
+        public static bool ActiveMissionRebuildMatches(int modalType, byte missionClass)
+        {
+            switch (modalType)
+            {
+                case GeoHavenAttackBrief: return missionClass == GeoMissionRecord.HavenDefense;
+                case GeoAlienBaseBrief:
+                    return missionClass == GeoMissionRecord.AlienBase
+                        || missionClass == GeoMissionRecord.AlienBaseAssault;
+                case GeoPhoenixBaseDefenseBrief: return missionClass == GeoMissionRecord.PhoenixBaseDefense;
+                case GeoPhoenixBaseInfestationBrief: return missionClass == GeoMissionRecord.PhoenixBaseInfestation;
+                case InfestedHavenBrief: return missionClass == GeoMissionRecord.InfestationCleanse;
+                case BehemothAttackBrief: return false;   // fallback family: unmapped host class → always degrade
+                default: return false;
+            }
+        }
+
+        /// <summary>
+        /// True iff a FAILED client rebuild of <paramref name="variant"/> must surface the DEGRADED notify-only
+        /// text prompt instead of silently skipping the show. Only the ActiveMissionBrief family degrades
+        /// visibly (spec Batch-1): the pre-existing AmbushBrief/SiteMissionBrief variants keep their verified
+        /// skip-show behavior (no-regress pin for {15,4,26,28}); a SUCCESSFUL rebuild never degrades. The host
+        /// intent gate is armed independently of this decision. PURE.
+        /// </summary>
+        public static bool ShouldShowDegradedNotice(ReportModalVariant variant, bool rebuildSucceeded)
+            => !rebuildSucceeded && variant == ReportModalVariant.ActiveMissionBrief;
     }
 }

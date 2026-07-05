@@ -72,6 +72,34 @@ public class HostBlockingPromptGateTests
         Assert.False(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
     }
 
+    // ── Batch-1 ActiveMissionBrief family {0,2,11,20,34,36} rides the SAME gate: arm on the host's 0x69
+    // SHOW (BEFORE any mirror gating — even a degraded notify-only client fallback leaves intents rejected),
+    // release on the host's resolve (ModalResultCallback, or the UIModuleModal.Hide belt for openers with a
+    // non-ModalResultCallback handler, e.g. the haven-details Defend path). ──
+    [Theory]
+    [InlineData(0)]    // GeoHavenAttackBrief (haven defense)
+    [InlineData(2)]    // GeoAlienBaseBrief
+    [InlineData(11)]   // GeoPhoenixBaseDefenseBrief (base attack — auto-opens on OnSiteMissionStarted)
+    [InlineData(20)]   // GeoPhoenixBaseInfestationBrief
+    [InlineData(34)]   // BehemothAttackBrief (fallback family — client ALWAYS degrades, gate must still arm)
+    [InlineData(36)]   // InfestedHavenBrief
+    public void ActiveMissionBrief_ArmRejects_ReleaseUnblocks(int modalType)
+    {
+        HostBlockingPromptGate.Arm(modalType);
+        Assert.True(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+        HostBlockingPromptGate.Release(modalType);
+        Assert.False(HostBlockingPromptGate.IsArmed);
+        Assert.False(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+    }
+
+    [Fact]
+    public void ActiveMissionBrief_StrayOtherBriefRelease_StaysBlocked()
+    {
+        HostBlockingPromptGate.Arm(11);       // base-attack brief pending
+        HostBlockingPromptGate.Release(0);    // stray haven-brief resolve elsewhere
+        Assert.True(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+    }
+
     [Fact]
     public void SiteMissionBrief_StrayAmbushRelease_StaysBlocked()
     {
