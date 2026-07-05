@@ -85,20 +85,28 @@ namespace Multiplayer.Network.Sync.State
     }
 
     /// <summary>
-    /// Decoded GeoVehicle CREATION-identity batch (mid-session vehicle-creation channel #6): the identity of each
-    /// NEWLY-detected vehicle, mirrored host→all so a sim-frozen client spawns an inert mirror of an aircraft it
-    /// never created (manufacture/story/steal). Pure data + wire codec — free of any <c>IStateChannel</c>/
-    /// <c>SyncEngine</c>/Unity dependency so it is directly unit-testable (mirrors <see cref="GeoSiteSnapshot"/>).
-    /// The engine glue (host detect + client spawn) lives in <c>GeoVehicleChannel</c> / <c>GeoVehicleIdentityReflection</c>.
+    /// Decoded GeoVehicle CREATION/DESTRUCTION batch (mid-session vehicle-creation channel #6): the FULL resident
+    /// identity set (every post-bind creation, re-emitted each flush — the unacked transport heals lost flushes /
+    /// failed applies through the client's key-idempotent apply) plus the FULL tombstone key set (vehicles the
+    /// host destroyed/lost — the client despawns its mirror). Pure data + wire codec — free of any
+    /// <c>IStateChannel</c>/<c>SyncEngine</c>/Unity dependency so it is directly unit-testable (mirrors
+    /// <see cref="GeoSiteSnapshot"/>). The engine glue (host detect + client spawn/despawn) lives in
+    /// <c>GeoVehicleChannel</c> / <c>GeoVehicleIdentityReflection</c>.
     ///
     /// Wire payload (inside the 0x67 envelope, GeoState 0xA1 surface, EncodeStateSync(channelId=6, ver, payload)):
     ///   [u16 count]{[i32 OwnerId][i32 VehicleId][str OwnerFactionDefGuid][str VehicleSetDefGuid]
     ///               [f32 QX][f32 QY][f32 QZ][f32 QW][f32 X][f32 Y][f32 Z]}*
-    /// Strings are [u16 len][utf8] (mirrors <see cref="GeoSiteSnapshot"/>).
+    ///   [u16 tombCount]{[i64 compositeKey]}*
+    /// Strings are [u16 len][utf8] (mirrors <see cref="GeoSiteSnapshot"/>). Both peers run the same DLL, so the
+    /// tombstone section is unconditional (no legacy-format branch).
     /// </summary>
     public sealed class GeoVehicleIdentitySnapshot
     {
         public readonly List<GeoVehicleIdentity> Vehicles = new List<GeoVehicleIdentity>();
+
+        /// <summary>Composite keys (see <see cref="GeoVehicleIdentity.Key"/>) of vehicles no longer live on the
+        /// host — the client despawns any live mirror with that key (idempotent when absent).</summary>
+        public readonly List<long> Tombstones = new List<long>();
 
         public static byte[] Encode(GeoVehicleIdentitySnapshot snap)
         {
@@ -116,6 +124,8 @@ namespace Multiplayer.Network.Sync.State
                     w.Write(v.QX); w.Write(v.QY); w.Write(v.QZ); w.Write(v.QW);
                     w.Write(v.X); w.Write(v.Y); w.Write(v.Z);
                 }
+                w.Write((ushort)snap.Tombstones.Count);
+                foreach (var key in snap.Tombstones) w.Write(key);
                 return ms.ToArray();
             }
         }
@@ -140,6 +150,9 @@ namespace Multiplayer.Network.Sync.State
                         float x = r.ReadSingle(), y = r.ReadSingle(), z = r.ReadSingle();
                         snap.Vehicles.Add(new GeoVehicleIdentity(ownerId, vehicleId, facGuid, setGuid, qx, qy, qz, qw, x, y, z));
                     }
+                    int tombs = r.ReadUInt16();
+                    for (int i = 0; i < tombs; i++)
+                        snap.Tombstones.Add(r.ReadInt64());
                     return snap;
                 }
             }

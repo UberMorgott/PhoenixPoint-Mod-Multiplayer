@@ -9,17 +9,21 @@ namespace Multiplayer.Network.Sync.State
     /// key, leaving the craft invisible on the client forever. This channel closes that gap: the host detects a
     /// genuinely-NEW composite key during the existing ~4 Hz <c>GeoVehicleMirror.HostPollAndBroadcast</c> walk of
     /// <c>GeoMap.Vehicles</c> (near-zero extra cost — that loop already computes each key), queues the new
-    /// vehicle's <see cref="GeoVehicleIdentity"/>, and marks the channel dirty. <see cref="Snapshot"/> flushes the
-    /// queued identities host→all on the GeoState (0xA1) rail; <see cref="Apply"/> spawns an INERT mirror
-    /// (<see cref="GeoVehicleIdentityReflection.SpawnMirrorVehicle"/>) for any key not already live, so 0xA5/0xA6/
-    /// 0xA7 then resolve + drive it. Mirrors <see cref="GeoSiteChannel"/> (identity mirror, host-attach-only, pure
-    /// no-cascade client apply).
+    /// vehicle's <see cref="GeoVehicleIdentity"/>, and marks the channel dirty. <see cref="Snapshot"/> ships the
+    /// FULL RESIDENT identity set + FULL tombstone set host→all on the GeoState (0xA1) rail EVERY flush (the rail
+    /// is unacked: drain-once emission would strand a vehicle behind ONE lost flush or one failed client apply —
+    /// mid-load, unresolved guid, spawn-bind miss — until rejoin; re-emission heals because the client apply is
+    /// key-idempotent both ways). <see cref="Apply"/> spawns an INERT mirror
+    /// (<see cref="GeoVehicleIdentityReflection.SpawnMirrorVehicle"/>) for any identity key not already live, so
+    /// 0xA5/0xA6/0xA7 then resolve + drive it — and despawns the live vehicle of any TOMBSTONED key (host
+    /// destroyed/lost the craft; without this the client mirror ghosts in GeoMap.Vehicles forever). Mirrors
+    /// <see cref="GeoSiteChannel"/> (identity mirror, host-attach-only, pure no-cascade client apply).
     ///
-    /// JOIN / full-sync semantics: the channel's initial-snapshot path (<c>BroadcastAllChannels</c> → Snapshot) is
-    /// consistently present, but yields nothing at bind — every vehicle a joining peer needs already rides the
-    /// full join save-blob (host-authoritative full-state replication). <see cref="AttachHost"/> SEEDS the
-    /// vehicles present at bind as KNOWN (no emit) for exactly that reason; only genuinely post-bind creations are
-    /// broadcast. A duplicate/late identity for an already-live vehicle is a no-op (idempotent by composite key).
+    /// JOIN / full-sync semantics: every vehicle a joining peer needs already rides the full join save-blob
+    /// (host-authoritative full-state replication). <see cref="AttachHost"/> SEEDS the vehicles present at bind
+    /// as KNOWN (no emit) for exactly that reason; only genuinely post-bind creations become resident. The
+    /// initial-snapshot path (<c>BroadcastAllChannels</c> → Snapshot) re-ships the resident + tombstone sets to a
+    /// late joiner — all no-ops there (post-bind creations are in its join save; tombstoned keys aren't live).
     ///
     /// The pure new-key state machine + client spawn-idempotence predicate live in
     /// <see cref="GeoVehicleIdentityTracker"/> (unit-tested); the wire codec in
@@ -59,41 +63,58 @@ namespace Multiplayer.Network.Sync.State
             }
         }
 
-        /// <summary>HOST (after the poll loop builds the live-key set): forget keys no longer live so a re-created
-        /// vehicle re-emits its identity. No-op off-session.</summary>
+        /// <summary>HOST (after the poll loop builds the live-key set): keys no longer live become TOMBSTONES (the
+        /// channel dirties so the client despawn ships next flush) and a re-created vehicle re-emits its identity.
+        /// No-op off-session.</summary>
         public static void HostPrune(ICollection<long> liveKeys)
         {
             var self = _live;
             if (self == null || liveKeys == null) return;
-            lock (self._lock) { self._tracker.Prune(liveKeys); }
+            bool pruned;
+            lock (self._lock) { pruned = self._tracker.Prune(liveKeys); }
+            if (pruned)
+                NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
         }
 
         // ─── IStateChannel ─────────────────────────────────────────────────────────────────────────────────────
 
         public byte[] Snapshot(GeoRuntime rt)
         {
-            List<GeoVehicleIdentity> pending;
+            // RESIDENT emission: ship the FULL identity + tombstone sets every flush (never drain). The rail is
+            // unacked — a drained-once identity behind one lost flush / failed apply left the vehicle invisible
+            // until rejoin. Re-delivery is safe: the client apply is key-idempotent in both directions.
+            List<GeoVehicleIdentity> resident;
+            List<long> tombstones;
             lock (_lock)
             {
-                pending = _tracker.DrainPending();
+                if (!_tracker.HasPayload) return null;   // nothing to mirror → no payload (FlushChannel no-ops)
+                resident = _tracker.GetResident();
+                tombstones = _tracker.GetTombstones();
             }
-            if (pending.Count == 0) return null;   // nothing new → no payload (FlushChannel no-ops on null)
             var snap = new GeoVehicleIdentitySnapshot();
-            snap.Vehicles.AddRange(pending);
+            snap.Vehicles.AddRange(resident);
+            snap.Tombstones.AddRange(tombstones);
             return GeoVehicleIdentitySnapshot.Encode(snap);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = GeoVehicleIdentitySnapshot.Decode(data);
-            if (snap == null || snap.Vehicles.Count == 0) return;
+            if (snap == null || (snap.Vehicles.Count == 0 && snap.Tombstones.Count == 0)) return;
             var liveKeys = GeoVehicleIdentityReflection.ResolveLiveKeys(rt);
             foreach (var id in snap.Vehicles)
             {
-                // Idempotent: spawn ONLY when the composite key is not already live (duplicate / join-save-covered
-                // identity = no-op, never a second vehicle). SpawnMirrorVehicle re-checks the live keys too.
+                // Idempotent: spawn ONLY when the composite key is not already live (resident re-emission /
+                // join-save-covered identity = no-op, never a second vehicle). SpawnMirrorVehicle re-checks too.
                 if (GeoVehicleIdentityTracker.ShouldSpawn(id.Key, liveKeys))
                     GeoVehicleIdentityReflection.SpawnMirrorVehicle(rt, id);
+            }
+            foreach (var key in snap.Tombstones)
+            {
+                // Idempotent: despawn ONLY a live key (tombstones are re-emitted every flush; a key already gone
+                // — or never spawned on this client — is a no-op). The two sets are disjoint by tracker contract.
+                if (GeoVehicleIdentityTracker.ShouldDespawn(key, liveKeys))
+                    GeoVehicleIdentityReflection.DespawnVehicle(rt, key);
             }
         }
 

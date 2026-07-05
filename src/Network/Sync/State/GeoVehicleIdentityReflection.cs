@@ -21,10 +21,14 @@ namespace Multiplayer.Network.Sync.State
     ///     template the native <c>GeoFaction.CreateVehicle</c> instantiates (GeoFaction.cs:2006), but WITHOUT
     ///     <c>DoEnterPlay</c> so no <c>Owner.RegisterVehicle</c> / faction-controller / travel producer / event
     ///     wiring runs (GeoVehicle.cs:398-403). It is stamped with the host's <c>Owner</c> + <c>VehicleID</c> +
-    ///     initial placement and added DIRECTLY to <c>GeoMap.Vehicles</c> (bypassing <c>RegisterActor</c> —
-    ///     GeoMap.cs:371-376 — pure mirror, the same no-cascade discipline as
-    ///     <see cref="GeoSiteReflection.SpawnMirrorSite"/>). The client clock is frozen anyway, so even the view's
+    ///     initial placement PLUS the minimal enter-play state the native selection UI reads (Stats /
+    ///     RangeRemaining / loadout / Navigation.Init — the mirror is click-selectable in co-op), added to
+    ///     <c>GeoMap.Vehicles</c> (bypassing <c>RegisterActor</c> — GeoMap.cs:371-376 — pure mirror, the same
+    ///     no-cascade discipline as <see cref="GeoSiteReflection.SpawnMirrorSite"/>) and registered in the owner
+    ///     faction cache (<c>GeoMap.UpdateVehicleOwner</c>). The client clock is frozen anyway, so even the view's
     ///     own updateables never advance; this is display-only. Idempotent by composite key.
+    ///   • CLIENT <see cref="DespawnVehicle"/> — tombstoned key → remove the client's live vehicle (native
+    ///     <c>GeoVehicle.Destroy()</c> for a join-save-loaded one, symmetric no-cascade teardown for a mirror).
     ///
     /// The composite key equals the position/travel/explore mirrors' key: (<c>StableOwnerKey(owner def name)</c>,
     /// <c>VehicleID</c>) — so once spawned, 0xA5/0xA6/0xA7 resolve and drive it. All reflection is null-safe: a
@@ -45,6 +49,22 @@ namespace Multiplayer.Network.Sync.State
         private static Type _componentSetType;      // Base.Core.ComponentSet
         private static PropertyInfo _setDefProp;    // ComponentSet.SetDef (ComponentSetDef)
         private static MethodInfo _spawnActorGeoVehicle; // ActorSpawner.SpawnActor<GeoVehicle>(BaseDef, ActorInstanceData, bool)
+        // Minimal enter-play stamp (mirrors GeoFaction.CreateVehicle:2010-2012 + GeoVehicle.PrepareEnterPlay:395):
+        private static PropertyInfo _vehicleDefProp;    // GeoVehicle.VehicleDef (GeoVehicleDef)
+        private static FieldInfo _statsField;           // GeoVehicle.Stats (GeoVehicleStats, public field)
+        private static FieldInfo _baseStatsField;       // GeoVehicleDef.BaseStats (GeoVehicleStats)
+        private static MethodInfo _statsClone;          // GeoVehicleStats.Clone()
+        private static FieldInfo _maxRangeField;        // GeoVehicleStats.MaximumRange (EarthUnits)
+        private static PropertyInfo _rangeRemainingProp;// GeoVehicle.RangeRemaining (EarthUnits)
+        private static PropertyInfo _loadoutManagerProp;// GeoFaction.GeoLoadoutManager
+        private static MethodInfo _getVehicleLoadout;   // GeoLoadoutManager.GetGeoVehicleLoadout(GeoVehicleDef)
+        private static MethodInfo _useLoadout;          // GeoVehicle.UseLoadout(GeoVehicleLoadoutDef)
+        private static FieldInfo _navigationField;      // GeoVehicle.Navigation (GeoNavComponent, public field)
+        private static MethodInfo _navInit;             // GeoNavComponent.Init(INavigatableGeoActor)
+        // Tombstone despawn + owner faction cache:
+        private static MethodInfo _updateVehicleOwner;  // GeoMap.UpdateVehicleOwner(GeoVehicle, GeoFaction, GeoFaction)
+        private static MethodInfo _vehicleDestroy;      // GeoVehicle.Destroy() (native full teardown, GeoVehicle.cs:593)
+        private static PropertyInfo _inPlayProp;        // ActorComponent.InPlay (ran DoEnterPlay ⇒ full native destroy path)
 
         private static void Ensure(GeoRuntime rt)
         {
@@ -58,6 +78,7 @@ namespace Multiplayer.Network.Sync.State
             var map = _mapField.GetValue(geo);
             if (map == null) return;
             _vehiclesProp = AccessTools.Property(map.GetType(), "Vehicles");
+            _updateVehicleOwner = AccessTools.Method(map.GetType(), "UpdateVehicleOwner");
 
             _geoVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicle");
             if (_geoVehicleType == null) return;
@@ -65,15 +86,39 @@ namespace Multiplayer.Network.Sync.State
             _ownerProp = AccessTools.Property(_geoVehicleType, "Owner");
             _surfaceProp = AccessTools.Property(_geoVehicleType, "Surface");
             _refreshVisibility = AccessTools.Method(_geoVehicleType, "RefreshVisibility", Type.EmptyTypes);
+            _vehicleDestroy = AccessTools.Method(_geoVehicleType, "Destroy", Type.EmptyTypes);
+            _inPlayProp = AccessTools.Property(_geoVehicleType, "InPlay");   // inherited from ActorComponent
 
-            // GeoFaction.Def — resolved off a live faction (mirrors GeoSiteReflection). Best-effort.
+            // Enter-play stamp members (all best-effort — a miss degrades that piece only, logged at use site).
+            _vehicleDefProp = AccessTools.Property(_geoVehicleType, "VehicleDef");
+            _statsField = AccessTools.Field(_geoVehicleType, "Stats");
+            _rangeRemainingProp = AccessTools.Property(_geoVehicleType, "RangeRemaining");
+            _useLoadout = AccessTools.Method(_geoVehicleType, "UseLoadout");
+            _navigationField = AccessTools.Field(_geoVehicleType, "Navigation");
+            if (_vehicleDefProp != null)
+                _baseStatsField = AccessTools.Field(_vehicleDefProp.PropertyType, "BaseStats");
+            if (_baseStatsField != null)
+            {
+                _statsClone = AccessTools.Method(_baseStatsField.FieldType, "Clone", Type.EmptyTypes);
+                _maxRangeField = AccessTools.Field(_baseStatsField.FieldType, "MaximumRange");
+            }
+            var navActorIface = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.INavigatableGeoActor");
+            if (_navigationField != null && navActorIface != null)
+                _navInit = AccessTools.Method(_navigationField.FieldType, "Init", new[] { navActorIface });
+
+            // GeoFaction.Def + GeoLoadoutManager — resolved off a live faction (mirrors GeoSiteReflection). The
+            // faction-def property is a READY-GATE member (see below); with an empty Factions list it stays null
+            // and Ensure retries on the next call instead of latching a dead channel.
             if (_factionsField != null && _factionsField.GetValue(geo) is IEnumerable facs)
                 foreach (var f in facs)
                 {
                     if (f == null) continue;
                     _factionDefProp = AccessTools.Property(f.GetType(), "Def");
+                    _loadoutManagerProp = AccessTools.Property(f.GetType(), "GeoLoadoutManager");
                     break;
                 }
+            if (_loadoutManagerProp != null)
+                _getVehicleLoadout = AccessTools.Method(_loadoutManagerProp.PropertyType, "GetGeoVehicleLoadout");
 
             // ComponentSet.SetDef → the spawn ComponentSetDef guid (Base.Core.ComponentSet.cs:12).
             _componentSetType = AccessTools.TypeByName("Base.Core.ComponentSet");
@@ -93,8 +138,13 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
 
-            // Core gate: id resolution + list access. Spawn members are best-effort (a miss disables spawn only).
-            _ready = _vehicleIdField != null && _vehiclesProp != null && _ownerProp != null;
+            // Core gate: id resolution + list access + owner-faction guid resolution. _factionDefProp binds off
+            // the FIRST live faction — latching ready while it is still null (early Ensure, empty Factions list)
+            // would leave the channel silently dead for the whole process (owner guids never resolve); gating on
+            // it makes Ensure retry the faction bind next call. Pure predicate = unit-tested ReflectionReady.
+            // Spawn members remain best-effort (a miss disables spawn only).
+            _ready = GeoVehicleIdentityTracker.ReflectionReady(
+                _vehicleIdField != null, _vehiclesProp != null, _ownerProp != null, _factionDefProp != null);
         }
 
         private static object GetMap(GeoRuntime rt)
@@ -237,12 +287,66 @@ namespace Multiplayer.Network.Sync.State
                         surface.localEulerAngles = new Vector3(identity.X, identity.Y, identity.Z);
                 }
 
-                // Register WITHOUT cascade: add directly to GeoMap.Vehicles (bypasses RegisterActor — pure mirror).
+                // ── Minimal ENTER-PLAY stamp ─────────────────────────────────────────────────────────────────
+                // The mirror is click-SELECTABLE (visible, Owner = the shared viewer faction), and the native
+                // selection UI reads state only DoEnterPlay-era code sets — a bare inert spawn NREs it. Stamp the
+                // exact pieces the UI reads, mirroring GeoFaction.CreateVehicle (GeoFaction.cs:2010-2012) and
+                // GeoVehicle.PrepareEnterPlay (GeoVehicle.cs:395), WITHOUT DoEnterPlay itself — no
+                // Owner.RegisterVehicle event wiring / VehicleFactionController / travel or explore producers, and
+                // nothing here schedules on the (frozen) client Timing:
+                //   • Stats = VehicleDef.BaseStats.Clone() — UIStateVehicleSelected → SetVehicleInfo /
+                //     CalculateRemainingPossibleRange dereference Stats (RequiresRepair → Stats.HitPoints).
+                //   • RangeRemaining = Stats.MaximumRange — travel-range ring + reachable-site markers.
+                //   • UseLoadout(Owner.GeoLoadoutManager.GetGeoVehicleLoadout(VehicleDef)) — equipment strip;
+                //     pure local list + stat-bonus mutation (GeoVehicle.AddEquipment), no producers.
+                //   • Navigation.Init(this) — binds NavActor + default pathfinder only (GeoNavComponent.cs:32-43);
+                //     DrawPathToSite → Navigation.FindPath NREs un-Init'd. Nothing starts navigating.
+                object stats = null;
+                try
+                {
+                    object vehicleDef = _vehicleDefProp?.GetValue(vehicle, null);
+                    object baseStats = vehicleDef != null ? _baseStatsField?.GetValue(vehicleDef) : null;
+                    stats = baseStats != null ? _statsClone?.Invoke(baseStats, null) : null;
+                    if (stats != null && _statsField != null)
+                    {
+                        _statsField.SetValue(vehicle, stats);
+                        if (_maxRangeField != null && _rangeRemainingProp != null)
+                            _rangeRemainingProp.SetValue(vehicle, _maxRangeField.GetValue(stats), null);
+                    }
+                    else
+                        Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: Stats stamp unresolved (mirror may NRE native selection UI)");
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: Stats stamp failed: " + ex.Message); }
+                try
+                {
+                    object loadoutMgr = _loadoutManagerProp?.GetValue(faction, null);
+                    object vehicleDef = _vehicleDefProp?.GetValue(vehicle, null);
+                    if (loadoutMgr != null && vehicleDef != null && _getVehicleLoadout != null && _useLoadout != null)
+                        _useLoadout.Invoke(vehicle, new[] { _getVehicleLoadout.Invoke(loadoutMgr, new[] { vehicleDef }) });
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: UseLoadout failed: " + ex.Message); }
+                try
+                {
+                    object nav = _navigationField?.GetValue(vehicle);
+                    if (nav != null && _navInit != null) _navInit.Invoke(nav, new[] { vehicle });
+                    else Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: Navigation.Init unresolved (path-draw may NRE)");
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: Navigation.Init failed: " + ex.Message); }
+
+                // Register WITHOUT cascade: add directly to GeoMap.Vehicles (bypasses RegisterActor — pure mirror),
+                // then write the owner-faction cache via the PUBLIC native GeoMap.UpdateVehicleOwner(v, null, owner)
+                // (GeoMap.cs:524-528) — GeoFaction.Vehicles IS Map.VehiclesByOwner (that cache, GeoFaction.cs:137),
+                // and UIStateVehicleSelected.OnVehichleChanged keys its keep-selected check on it. Also raises
+                // Map.VehicleChanged so open aircraft lists repaint natively.
                 try
                 {
                     var map = GetMap(rt);
                     if (map != null && _vehiclesProp.GetValue(map, null) is IList list)
+                    {
                         list.Add(vehicle);
+                        try { _updateVehicleOwner?.Invoke(map, new object[] { vehicle, null, faction }); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: UpdateVehicleOwner failed: " + ex.Message); }
+                    }
                     else
                         Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle: GeoMap.Vehicles not an IList (not registered)");
                 }
@@ -256,6 +360,55 @@ namespace Multiplayer.Network.Sync.State
                           + " id=" + identity.VehicleId + " ownerGuid=" + identity.OwnerFactionDefGuid + " setGuid=" + identity.VehicleSetDefGuid);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.SpawnMirrorVehicle failed: " + ex.Message); }
+        }
+
+        /// <summary>CLIENT: despawn the live vehicle whose composite key was TOMBSTONED by the host (craft
+        /// destroyed/lost — without this the client mirror ghosts in GeoMap.Vehicles forever). Two teardown paths,
+        /// each matching how the vehicle ENTERED this client:
+        ///   • <c>InPlay</c> (join-save-loaded, ran full native DoEnterPlay) → native <c>GeoVehicle.Destroy()</c>
+        ///     (GeoVehicle.cs:593-604: OnVehicleDestroyed → OnExitPlay unregisters faction events + GeoMap actor/
+        ///     cache/list + raises VehicleChanged → Object.Destroy) — identical to the host's own destroy.
+        ///   • inert mirror (spawned here, never registered) → symmetric no-cascade teardown: remove from
+        ///     GeoMap.Vehicles, undo the owner cache via UpdateVehicleOwner(v, owner, null) (raises VehicleChanged
+        ///     so the native UI deselects/repaints), destroy the GameObject.
+        /// Idempotent (no live key → no-op); best-effort; never throws into the apply loop.</summary>
+        public static void DespawnVehicle(GeoRuntime rt, long key)
+        {
+            try
+            {
+                Ensure(rt);
+                if (!_ready) return;
+                var map = GetMap(rt);
+                if (map == null || !(_vehiclesProp?.GetValue(map, null) is IList list)) return;
+
+                object victim = null;
+                foreach (var v in list)
+                {
+                    if (v == null) continue;
+                    if (TryReadKey(v, out long k) && k == key) { victim = v; break; }
+                }
+                if (victim == null) return;   // already gone / never spawned here → tombstone no-op
+
+                bool inPlay = false;
+                try { inPlay = _inPlayProp != null && (bool)_inPlayProp.GetValue(victim, null); } catch { }
+                if (inPlay && _vehicleDestroy != null)
+                {
+                    _vehicleDestroy.Invoke(victim, null);   // full native teardown (it removes itself from the map)
+                }
+                else
+                {
+                    // List first, so the VehicleChanged raised by the cache write already sees the vehicle gone.
+                    list.Remove(victim);
+                    object owner = null;
+                    try { owner = _ownerProp?.GetValue(victim, null); } catch { }
+                    try { _updateVehicleOwner?.Invoke(map, new object[] { victim, owner, null }); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.DespawnVehicle: UpdateVehicleOwner failed: " + ex.Message); }
+                    if (victim is Component comp && comp != null)
+                        UnityEngine.Object.Destroy(comp.gameObject);
+                }
+                Debug.Log("[Multiplayer][geo] DespawnVehicle: tombstoned vehicle removed key=" + key.ToString("X") + " inPlay=" + inPlay);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoVehicleIdentityReflection.DespawnVehicle failed: " + ex.Message); }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>
