@@ -102,6 +102,36 @@ namespace Multiplayer.Network.Sync.State
                $"atk={AttackerDeployment} def={DefenderDeployment} zone={AttackedZoneDefGuid} sites={AttackingSiteIds.Length})";
     }
 
+    /// <summary>What the client-side mission mirror must do with an incoming record (see
+    /// <see cref="MissionMirrorDecision"/>).</summary>
+    public enum MissionMirrorAction : byte
+    {
+        None = 0,        // no record, nothing attached → nothing to do
+        Clear = 1,       // tombstone/unknown while a mirror is attached → clear ActiveMission
+        KeepRefresh = 2, // same class + same def already attached → stamp runtime bits, KEEP the instance
+        Rebuild = 3,     // different/absent mirror → construct class-exact mission and attach
+    }
+
+    /// <summary>
+    /// PURE branch logic of <c>GeoSiteReflection.ApplyMission</c> (unit-testable without game types): a
+    /// tombstone (null record) or an Unknown/0 class NEVER attaches; an already-mirrored same-class/same-def
+    /// mission is refreshed IN PLACE (the queued brief may hold the instance — and the ongoing haven-defense /
+    /// assault deployments tick down hourly on the host, so re-applies MUST land on the existing mirror);
+    /// anything else rebuilds class-exact.
+    /// </summary>
+    public static class MissionMirrorDecision
+    {
+        public static MissionMirrorAction Decide(bool hasCurrent, byte currentClass, string currentDefGuid,
+                                                 GeoMissionRecord rec)
+        {
+            if (rec == null || rec.MissionClass == GeoMissionRecord.Unknown || rec.MissionClass == 0)
+                return hasCurrent ? MissionMirrorAction.Clear : MissionMirrorAction.None;
+            if (hasCurrent && currentClass == rec.MissionClass && currentDefGuid == rec.MissionDefGuid)
+                return MissionMirrorAction.KeepRefresh;
+            return MissionMirrorAction.Rebuild;
+        }
+    }
+
     /// <summary>
     /// PURE decision data: the <c>GeoMap</c> aggregate events the channel-#5 dirty subscription binds
     /// (<c>GeoSiteReflection.Subscribe</c> iterates this list; unit tests pin it — the reflection binding

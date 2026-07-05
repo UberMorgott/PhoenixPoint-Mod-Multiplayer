@@ -545,6 +545,7 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _activeMissionProp;      // GeoSite.ActiveMission (public auto-prop)
         private static PropertyInfo _geoMissionDefProp;      // GeoMission.MissionDef
         private static FieldInfo _updAttackerFactionField;   // GeoUpdateableMission.AttackerFaction (readonly PPFactionDef)
+        private static FieldInfo _updMissionUpdatedField;    // GeoUpdateableMission.OnMissionUpdated event backing delegate
         private static Type _havenDefT, _alienBaseT, _alienAssaultT, _pxDefT, _pxInfestT, _cleanseT, _scavT, _ambushT, _ancientT;
         private static ConstructorInfo _havenDefCtor;        // (TacMissionTypeDef, GeoSite, PPFactionDef) private
         private static ConstructorInfo _alienBaseCtor;       // (TacMissionTypeDef, GeoSite, MissionParams) public
@@ -577,14 +578,25 @@ namespace Multiplayer.Network.Sync.State
                 var geoMissionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
                 var updT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoUpdateableMission");
                 var tacDefT = AccessTools.TypeByName("PhoenixPoint.Common.Levels.Missions.TacMissionTypeDef");
-                var ppFacDefT = AccessTools.TypeByName("PhoenixPoint.Common.Entities.PPFactionDef");
-                var squadT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoSquad");
+                // Decompile-verified namespaces (PPFactionDef.cs:8 = PhoenixPoint.Common.Core; GeoSquad lives in
+                // Geoscape.Entities). The previous names ("Common.Entities.PPFactionDef", "Geoscape.Core.GeoSquad")
+                // resolved NULL → every member behind the `ppFacDefT != null` guards silently stayed null → the
+                // host flushed haven-defense records as atk=0 def=0 zone= sites=0 and the client could neither
+                // build nor stamp them (contested-site progress-circle divergence, soak 2026-07-05).
+                var ppFacDefT = AccessTools.TypeByName("PhoenixPoint.Common.Core.PPFactionDef");
+                var squadT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSquad");
+                if (ppFacDefT == null || squadT == null)
+                    Debug.LogWarning("[Multiplayer] EnsureMissionMirror type miss: ppFacDef=" + (ppFacDefT != null)
+                                     + " squad=" + (squadT != null) + " — affected mission-class mirrors degrade");
                 if (geoSiteT == null || geoMissionT == null || tacDefT == null) return;
                 var missionParamsT = AccessTools.Inner(geoMissionT, "MissionParams");
 
                 _activeMissionProp = AccessTools.Property(geoSiteT, "ActiveMission");
                 _geoMissionDefProp = AccessTools.Property(geoMissionT, "MissionDef");
                 if (updT != null) _updAttackerFactionField = AccessTools.Field(updT, "AttackerFaction");
+                // Field-like event's compiler-generated backing delegate (same name as the event) — raised
+                // after a value-only refresh so the contested-site pie repaints (see RaiseMissionUpdated).
+                if (updT != null) _updMissionUpdatedField = AccessTools.Field(updT, "OnMissionUpdated");
 
                 _havenDefT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoHavenDefenseMission");
                 _alienBaseT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoAlienBaseMission");
@@ -771,35 +783,55 @@ namespace Multiplayer.Network.Sync.State
                 if (_activeMissionProp == null || !_activeMissionProp.CanWrite) return;
 
                 object current = GetActiveMission(site);
-
-                if (rec == null || rec.MissionClass == GeoMissionRecord.Unknown || rec.MissionClass == 0)
+                switch (MissionMirrorDecision.Decide(current != null,
+                            current != null ? ClassifyMission(current) : (byte)0,
+                            current != null ? GetMissionDefGuid(current) : null, rec))
                 {
-                    if (current != null)
-                    {
+                    case MissionMirrorAction.None:
+                        return;
+                    case MissionMirrorAction.Clear:
                         _activeMissionProp.SetValue(site, null, null);
+                        RefreshSiteVisuals(site);   // frame-driven RefreshMissionVisuals destroys the pie
                         Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
                                   + " → cleared (tombstone" + (rec == null ? "" : ", unknown host class") + ")");
-                    }
-                    return;
+                        return;
+                    case MissionMirrorAction.KeepRefresh:
+                        // Same mission already mirrored → refresh the mutable bits only (keep the instance the
+                        // queued brief may already reference), then REPAINT: the client sim is frozen, so the
+                        // mirrored mission never ticks and GeoUpdatedableMissionVisualsController's only repaint
+                        // triggers (SetMission / OnMissionUpdated) never fire on their own — without the raise
+                        // the contested-site progress circle froze at its attach/join-snapshot value forever.
+                        StampMissionRuntimeBits(rt, current, rec);
+                        RaiseMissionUpdated(current);   // pie controller RefreshVisuals (display-only event)
+                        RefreshSiteVisuals(site);       // covers a not-yet-instantiated pie (visibility flip)
+                        Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
+                                  + " → refreshed (class=" + rec.MissionClass + " atk=" + rec.AttackerDeployment
+                                  + " def=" + rec.DefenderDeployment + ")");
+                        return;
+                    case MissionMirrorAction.Rebuild:
+                        var mission = BuildMissionForRecord(rt, site, rec);
+                        if (mission == null) return;   // unresolved def/ctor → leave untouched (display degrades)
+                        StampMissionRuntimeBits(rt, mission, rec);
+                        _activeMissionProp.SetValue(site, mission, null);
+                        RefreshSiteVisuals(site);       // instantiates the pie prefab + SetMission → first paint
+                        Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
+                                  + " class=" + rec.MissionClass + " def=" + rec.MissionDefGuid + " → attached (pure mirror)");
+                        return;
                 }
-
-                // Same mission already mirrored → refresh the mutable bits only (keep the instance the queued
-                // brief may already reference).
-                if (current != null && ClassifyMission(current) == rec.MissionClass
-                    && GetMissionDefGuid(current) == rec.MissionDefGuid)
-                {
-                    StampMissionRuntimeBits(rt, current, rec);
-                    return;
-                }
-
-                var mission = BuildMissionForRecord(rt, site, rec);
-                if (mission == null) return;   // unresolved def/ctor → leave untouched (display degrades)
-                StampMissionRuntimeBits(rt, mission, rec);
-                _activeMissionProp.SetValue(site, mission, null);
-                Debug.Log("[Multiplayer] GeoSiteReflection.ApplyMission site=" + GetSiteId(site)
-                          + " class=" + rec.MissionClass + " def=" + rec.MissionDefGuid + " → attached (pure mirror)");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyMission failed: " + ex.Message); }
+        }
+
+        /// <summary>Raise the mission's <c>OnMissionUpdated</c> (field-like event backing delegate) after a
+        /// value-only stamp. Vanilla's SOLE subscriber is <c>GeoUpdatedableMissionVisualsController</c>
+        /// (GeoUpdatedableMissionVisualsController.cs:30/55-58) whose handler just re-sets the pie material's
+        /// <c>_Progress</c> from <c>MissionProgress</c> — display-only, no sim cascade (TFTV never subscribes,
+        /// grep 2026-07-05), frozen-sim safe. Best-effort no-op if unbound; never throws.</summary>
+        private static void RaiseMissionUpdated(object mission)
+        {
+            if (mission == null || _updMissionUpdatedField == null) return;
+            try { (_updMissionUpdatedField.GetValue(mission) as Delegate)?.DynamicInvoke(mission); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.RaiseMissionUpdated failed: " + ex.Message); }
         }
 
         /// <summary>Construct the class-exact display mission via its pure ctor (see the region note), or null.</summary>

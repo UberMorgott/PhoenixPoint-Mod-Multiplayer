@@ -35,9 +35,12 @@ namespace Multiplayer.Harmony.Sync
         {
             var updT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoUpdateableMission");
             var timingT = AccessTools.TypeByName("Base.Core.Timing");
-            if (updT == null || timingT == null) return false;
             // EXACT param match (harmony-accesstools-exact-param-match): Update(Timing) private.
-            _target = AccessTools.Method(updT, "Update", new[] { timingT });
+            if (updT != null && timingT != null) _target = AccessTools.Method(updT, "Update", new[] { timingT });
+            // Binding evidence in Player.log: Prepare=false skips SILENTLY otherwise — a miss here would be
+            // indistinguishable from "no drift" in a soak (fail-open by design, but never invisibly).
+            Debug.Log("[Multiplayer] MissionDriftDirtyPatch.Prepare: GeoUpdateableMission.Update(Timing) "
+                      + (_target != null ? "bound" : "NOT FOUND — mission-drift re-snapshot disabled"));
             return _target != null;
         }
 
