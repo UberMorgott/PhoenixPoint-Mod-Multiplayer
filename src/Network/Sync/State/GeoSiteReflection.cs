@@ -98,12 +98,13 @@ namespace Multiplayer.Network.Sync.State
         // RegisterMission → SiteMissionStarted) or clear (updateable-mission end / cancel) dirty-marks the site so
         // the snapshot carries the fresh mission record / tombstone. All carry the GeoSite as arg 0 (2-arg
         // SiteChangedEventHandler<GeoMission>), which the DynamicMethod adapter already handles.
-        private static readonly string[] SiteEventNames =
-        {
-            "SiteOwnerChanged", "SiteStateChanged", "SiteVisibilityChanged",
-            "SiteInspectedChanged", "SiteFirstTimeVisited", "SiteAdded", "SiteRemoved",
-            "SiteMissionStarted", "SiteMissionEnded", "SiteMissionCancelled",
-        };
+        // WA-2 HAVEN family (GeoMap.cs:279-283) drives the haven tail: HavenPopulationChanged
+        // (GeoHaven.PopulationChangedHandler = void(GeoHaven, int, int)), HavenPopulationZoneAttrition
+        // (GeoHaven.ZoneAttritionHandler = void(GeoHaven, GeoHavenZone) — DIRTY TRIGGER only, per-zone health
+        // not carried) and HavenInfestationStateChanged (Action<GeoHaven>). Their arg 0 is the GeoHAVEN, not
+        // the GeoSite — the dirty sink unwraps it via GeoHaven.Site (GetOwningSiteId).
+        // The list itself lives in the PURE codec file (GeoSiteDirtyEvents) so unit tests pin the decision.
+        private static readonly string[] SiteEventNames = GeoSiteDirtyEvents.GeoMapEventNames;
 
         private static void Ensure(GeoRuntime rt)
         {
@@ -386,7 +387,12 @@ namespace Multiplayer.Network.Sync.State
             try { mission = ReadMissionRecord(site); }
             catch { mission = null; }
 
-            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited, mission);
+            // WA-2 haven tail: best-effort — a miss carries null (= not carried; the identity still mirrors).
+            GeoHavenTail haven = null;
+            try { haven = ReadHavenTail(site); }
+            catch { haven = null; }
+
+            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited, mission, haven);
         }
 
         /// <summary>
@@ -1010,11 +1016,13 @@ namespace Multiplayer.Network.Sync.State
         // ─── host site-event subscription (aggregate, GeoMap-level) ───
 
         /// <summary>
-        /// Subscribe <paramref name="onSiteChanged"/> (which receives the changed <c>GeoSite</c> instance) to
-        /// all 6 aggregate site events on the live <c>GeoMap</c>. Returns an opaque token for
-        /// <see cref="Unsubscribe"/>, or null if the map / no event is available. Each event has a different
-        /// arity (1/2/3 args) but the GeoSite is always arg 0, so a per-event DynamicMethod adapter captures
-        /// arg 0 and forwards it. Best-effort: a missing event is skipped (the others still bind).
+        /// Subscribe <paramref name="onSiteChanged"/> (which receives event arg 0 — the changed <c>GeoSite</c>,
+        /// or the <c>GeoHaven</c> for the WA-2 haven family; the sink unwraps via
+        /// <see cref="GetOwningSiteId"/>) to the <see cref="SiteEventNames"/> aggregate events on the live
+        /// <c>GeoMap</c>. Returns an opaque token for <see cref="Unsubscribe"/>, or null if the map / no event
+        /// is available. Each event has a different arity (1/2/3 args) but the changed carrier is always arg 0,
+        /// so a per-event DynamicMethod adapter captures arg 0 and forwards it. Best-effort: a missing event is
+        /// skipped (the others still bind).
         /// </summary>
         public static object Subscribe(GeoRuntime rt, Action<object> onSiteChanged)
         {
@@ -1066,6 +1074,129 @@ namespace Multiplayer.Network.Sync.State
                 return id is int i ? i : -1;
             }
             catch { return -1; }
+        }
+
+        /// <summary>
+        /// The owning site's <c>SiteId</c> for an aggregate-event arg 0 that may not BE a <c>GeoSite</c>:
+        /// the WA-2 haven family (GeoMap.cs:279-283) hands the <c>GeoHaven</c> component instead — unwrap it
+        /// via <c>GeoHaven.Site</c> (GeoHaven.cs:166). A plain <c>GeoSite</c> resolves as before; anything
+        /// else (unbound / unexpected type) is -1 (the sink drops it).
+        /// </summary>
+        public static int GetOwningSiteId(object siteOrCarrier)
+        {
+            if (siteOrCarrier == null) return -1;
+            try
+            {
+                EnsureHavenTail();
+                if (_geoHavenType != null && _geoHavenType.IsInstanceOfType(siteOrCarrier) && _havenSiteProp != null)
+                    return GetSiteId(_havenSiteProp.GetValue(siteOrCarrier, null));
+                return GetSiteId(siteOrCarrier);
+            }
+            catch { return -1; }
+        }
+
+        // ─── WA-2 haven tail (population / infestation display mirror, spec §5 gap 4d) ───
+        // Own lazy gate: a miss here degrades ONLY the haven tail (identity/explored/mission keep flowing).
+        //
+        // Decompile-verified 2026-07-05 (GeoHaven.cs):
+        //   • GeoHaven is a COMPONENT on the site actor (GeoHaven.cs:867 `site.GetComponent<GeoHaven>()`),
+        //     with `Site` { get; private set; } back-reference (:166).
+        //   • Population — public property (:172) over private int `_population` (:144). The SETTER cascades
+        //     (OnPopulationChanged → ZonesStats.UpdateZonesStats/UpdateRange; 0 → Site.DestroySite — SIM), so
+        //     the client writes the BACKING FIELD directly (the Owner/_owner no-cascade discipline).
+        //   • IsInfested — DERIVED property (:213): `Site.Owner.IsAlienFaction`. No backing state exists to
+        //     stamp; the identity mirror's Owner write is what flips it client-side. The carried flag is the
+        //     host-authoritative record — apply only logs a divergence (owner guid failed to resolve).
+
+        private static bool _havenTailEnsured;
+        private static Type _geoHavenType;                // PhoenixPoint.Geoscape.Entities.GeoHaven
+        private static PropertyInfo _havenSiteProp;       // GeoHaven.Site (owning-site unwrap)
+        private static PropertyInfo _havenPopulationProp; // GeoHaven.Population (host read)
+        private static FieldInfo _havenPopulationField;   // GeoHaven._population (client no-cascade write)
+        private static PropertyInfo _havenIsInfestedProp; // GeoHaven.IsInfested (derived; host read / client diag)
+
+        private static void EnsureHavenTail()
+        {
+            if (_havenTailEnsured) return;
+            _havenTailEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                _geoHavenType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoHaven");
+                if (_geoHavenType == null) return;
+                _havenSiteProp = AccessTools.Property(_geoHavenType, "Site");
+                _havenPopulationProp = AccessTools.Property(_geoHavenType, "Population");
+                _havenPopulationField = AccessTools.Field(_geoHavenType, "_population");
+                _havenIsInfestedProp = AccessTools.Property(_geoHavenType, "IsInfested");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureHavenTail failed (haven tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>The site's live <c>GeoHaven</c> component, or null (not a haven / unbound).</summary>
+        private static object GetHavenComponent(object site)
+        {
+            if (_geoHavenType == null || !(site is Component c)) return null;
+            try { return c.GetComponent(_geoHavenType); }
+            catch { return null; }
+        }
+
+        /// <summary>HOST: read the haven tail off a live site, or null (not a haven / unbound → not carried).</summary>
+        public static GeoHavenTail ReadHavenTail(object site)
+        {
+            try
+            {
+                EnsureHavenTail();
+                var haven = GetHavenComponent(site);
+                if (haven == null || _havenPopulationProp == null) return null;
+                int population = Convert.ToInt32(_havenPopulationProp.GetValue(haven, null));
+                bool infested = false;
+                try
+                {
+                    if (_havenIsInfestedProp != null)
+                        infested = (bool)_havenIsInfestedProp.GetValue(haven, null);
+                }
+                catch { infested = false; }
+                return new GeoHavenTail(population, infested);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadHavenTail failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: stamp the mirrored haven tail onto the resolved site — VALUE-ONLY, idempotent, last-wins.
+        /// Population is written to the private <c>_population</c> backing field (never the property: its
+        /// setter cascades into ZonesStats/DestroySite — sim on the mirror). Infested is DERIVED from
+        /// <c>Site.Owner</c> (which <see cref="ApplyIdentity"/> already mirrored) — a disagreement is logged,
+        /// never stamped. Null tail = not carried (older payload / non-haven) → no-op, NEVER a clear.
+        /// Ends with the native <see cref="RefreshSiteVisuals"/> kick (haven marker/alert art re-reads state).
+        /// </summary>
+        public static void ApplyHavenTail(GeoRuntime rt, object site, GeoHavenTail tail)
+        {
+            if (site == null || tail == null) return;
+            try
+            {
+                EnsureHavenTail();
+                var haven = GetHavenComponent(site);
+                if (haven == null) return;   // not a haven on this client (or unbound) — nothing to stamp
+                if (_havenPopulationField != null)
+                {
+                    try { _havenPopulationField.SetValue(haven, tail.Population); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyHavenTail population failed (skipped): " + ex.Message); }
+                }
+                try
+                {
+                    if (_havenIsInfestedProp != null
+                        && (bool)_havenIsInfestedProp.GetValue(haven, null) != tail.Infested)
+                        Debug.Log("[Multiplayer] GeoSiteReflection.ApplyHavenTail site=" + GetSiteId(site)
+                                  + ": derived IsInfested disagrees with host flag " + tail.Infested
+                                  + " (owner mirror likely unresolved)");
+                }
+                catch { /* diagnostic only */ }
+                RefreshSiteVisuals(site);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyHavenTail failed: " + ex.Message); }
         }
 
         private sealed class SiteEventToken

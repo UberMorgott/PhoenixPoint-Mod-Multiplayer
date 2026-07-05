@@ -11,7 +11,8 @@ namespace Multiplayer.Network.Sync.State
     /// native art collection (derived from <c>Context.Site.Owner</c>/<c>Type</c>) renders wrong. Host
     /// subscribes the aggregate site events on <c>GeoMap</c> (identity + the per-faction explored-state family:
     /// Inspected/Visible/Visited — plus the mission family SiteMissionStarted/Ended/Cancelled for the
-    /// ActiveMission mirror); each fire marks that site's id dirty and the channel dirty.
+    /// ActiveMission mirror, plus the WA-2 haven family HavenPopulationChanged/HavenPopulationZoneAttrition/
+    /// HavenInfestationStateChanged for the haven tail); each fire marks that site's id dirty and the channel dirty.
     /// <see cref="Snapshot"/> encodes the dirty sites' identity + mission record (then clears the dirty set);
     /// the client resolves each by <c>SiteId</c> in <c>GeoMap.AllSites</c>, writes the identity onto the
     /// FRESH site (via private backing fields — pure mirror, no cascade) and attaches/clears the mirrored
@@ -83,6 +84,10 @@ namespace Multiplayer.Network.Sync.State
                 // the mirrored LIVE→site-id brief arrives separately on the 0x69 report rail and binds off
                 // this attached mission. Null site (Case-B spawn failed) is a guarded no-op inside.
                 GeoSiteReflection.ApplyMission(rt, site, dto.Mission);
+                // WA-2 optional tails: value-only display stamps (haven population; infestation rides the
+                // Owner identity write). Null tail = not carried — never a clear. Frozen-sim safe (backing-
+                // field writes only) + idempotent last-wins; ends with the native RefreshVisuals kick.
+                GeoSiteReflection.ApplyHavenTail(rt, site, dto.Haven);
             }
         }
 
@@ -103,10 +108,11 @@ namespace Multiplayer.Network.Sync.State
             DetachHost();                        // drop any stale (dead-map) binding
             _map = map;
             byte id = ChannelId;
-            // Each site event hands us the changed GeoSite; mark its id dirty + the channel dirty.
+            // Each site event hands us the changed GeoSite (the WA-2 haven family hands the GeoHaven —
+            // GetOwningSiteId unwraps it via GeoHaven.Site); mark its id dirty + the channel dirty.
             _token = GeoSiteReflection.Subscribe(rt, site =>
             {
-                int siteId = GeoSiteReflection.GetSiteId(site);
+                int siteId = GeoSiteReflection.GetOwningSiteId(site);
                 if (siteId < 0) return;
                 lock (_dirtyLock) { _dirty.Add(siteId); }
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(id);
