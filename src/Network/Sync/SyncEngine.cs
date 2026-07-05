@@ -682,9 +682,10 @@ namespace Multiplayer.Network.Sync
             // Same belt for blocking-modal mirror-origin tags: a stale tag from the old geoscape must never
             // view-lock a later (native or mirrored) window of the same type.
             State.BlockingModalMirrorRegistry.Reset();
-            // Batch-2 belts: queued/last-seen outcome mirrors died with the old geoscape.
+            // Batch-2 belts: queued/last-seen outcome mirrors + harvest-float dedup died with the old geoscape.
             lock (_pendingOutcomes) _pendingOutcomes.Clear();
             _outcomeDedup.Reset();
+            _harvestDedup.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -1380,7 +1381,59 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo vehicleexplore envelope failed: " + ex.Message); }
                 return true;
             }
+            if (surfaceId == SurfaceIds.GeoHarvestFloat)
+            {
+                // Batch-2 P6 resource-harvest float mirror: display-only replay of the host's native
+                // GeoSite.ShowResourceHarvested at the same site. occId-deduped (STUN double-send → one float);
+                // never credits resources (wallet 0xA0 stays the one silent balance writer).
+                try { OnHarvestFloat(payload); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo harvestfloat envelope failed: " + ex.Message); }
+                return true;
+            }
             return false;
+        }
+
+        // ─── resource-harvest float mirror (Batch-2 P6) ───────────────────
+
+        private readonly State.HarvestFloatDedup _harvestDedup = new State.HarvestFloatDedup();
+
+        /// <summary>
+        /// Host: broadcast one harvest-float tuple (the FIRST ResourceUnit of the native pack — exactly what the
+        /// native float renders). Rides the unified 0x67 envelope on <see cref="SurfaceIds.GeoHarvestFloat"/>
+        /// with a host-monotonic occurrence id. No-op off-host. Display-only by contract.
+        /// </summary>
+        public void BroadcastHarvestFloat(int siteId, int resourceType, float value)
+        {
+            if (!_engine.IsHost) return;
+            ushort occId = State.HarvestFloatIds.Next();
+            Debug.Log("[Multiplayer] HOST BroadcastHarvestFloat occId=" + occId + " siteId=" + siteId
+                      + " type=" + resourceType + " value=" + value);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(SurfaceIds.GeoHarvestFloat, SyncKind.StateSnapshot,
+                    State.HarvestFloatCodec.Encode(occId, siteId, resourceType, value))));
+        }
+
+        /// <summary>
+        /// Client: replay the mirrored harvest float at its site via the SAME native
+        /// <c>GeoSite.ShowResourceHarvested</c> (under <see cref="SyncApplyScope"/> so the suppress-Prefix of
+        /// <c>HarvestFloatMirrorPatch</c> passes the engine-driven call). Dedup by occurrence id; an unresolved
+        /// site drops the float (cosmetic — never queued, unlike outcome reports).
+        /// </summary>
+        public void OnHarvestFloat(byte[] data)
+        {
+            if (_engine.IsHost) return;   // authority already showed its own float natively
+            if (!State.HarvestFloatCodec.TryDecode(data, out var occId, out var siteId, out var resourceType, out var value)) return;
+            if (!_harvestDedup.ShouldApply(occId))
+            {
+                Debug.Log("[Multiplayer] CLIENT OnHarvestFloat occId=" + occId + " → IGNORED (duplicate delivery)");
+                return;
+            }
+            try
+            {
+                using (SyncApplyScope.Enter())
+                    State.GeoSiteReflection.ShowHarvestFloat(GeoRuntime.Instance, siteId, resourceType, value);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnHarvestFloat failed: " + ex.Message); }
         }
 
         bool ISyncSink.IsHost => _engine.IsHost;

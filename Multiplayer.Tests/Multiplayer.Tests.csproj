@@ -73,6 +73,10 @@
          outcome payloads. The rebuild/stamp bridge (ReportModalReflection.BuildMissionOutcome) binds game
          types and is NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\ReportOutcomeDedup.cs"><Link>Sync\State\ReportOutcomeDedup.cs</Link></Compile>
+    <!-- Batch-2 P6 harvest-float mirror: pure wire codec + occId counter + bounded dedup window. The Harmony
+         glue (HarvestFloatMirrorPatch) + native replay (GeoSiteReflection.ShowHarvestFloat) bind game types
+         and are NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\HarvestFloat.cs"><Link>Sync\State\HarvestFloat.cs</Link></Compile>
     <!-- Research-nav-line mirror (pure): host's NATIVE "new research available" answer + client pending
          store (the host/client button-inversion fix). The Harmony glue (ResearchNavGroupMirrorPatch) and
          the host read (ReportModalReflection.ReadResearchNavFlag) bind game types and are NOT linked. -->

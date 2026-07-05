@@ -1134,5 +1134,98 @@ namespace Multiplayer.Network.Sync.State
                 return null;
             }
         }
+
+        // ─── resource-harvest FLOAT mirror (Batch-2 P6) ───
+        // Native: GeoSite.ShowResourceHarvested(ResourcePack) (GeoSite.cs:931) renders the FIRST ResourceUnit's
+        // Type + RoundedValue as a site-anchored float. Host READS that tuple off the live pack; the client
+        // REPLAYS the same native call with a freshly built single-unit pack. Display-only — never credits
+        // resources (wallet 0xA0 is the one balance writer).
+
+        private static bool _harvestEnsured;
+        private static MethodInfo _showResourceHarvested;   // GeoSite.ShowResourceHarvested(ResourcePack)
+        private static ConstructorInfo _resourcePackCtor;   // ResourcePack() (params-array ctor exists too; EXACT empty match)
+        private static MethodInfo _packAdd;                 // ResourcePack.Add(ResourceUnit)
+        private static ConstructorInfo _resourceUnitCtor;   // ResourceUnit(ResourceType, float)
+        private static FieldInfo _resourceUnitTypeField;    // ResourceUnit.Type (public FIELD, ResourceUnit.cs:12)
+        private static FieldInfo _resourceUnitValueField;   // ResourceUnit.Value (public FIELD, ResourceUnit.cs:15)
+        private static Type _resourceTypeEnum;              // PhoenixPoint.Common.Core.ResourceType
+
+        private static void EnsureHarvest()
+        {
+            if (_harvestEnsured) return;
+            _harvestEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                var geoSiteT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                var packT = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourcePack");
+                var unitT = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceUnit");
+                _resourceTypeEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceType");
+                if (geoSiteT == null || packT == null || unitT == null || _resourceTypeEnum == null) return;
+                // EXACT param matches (harmony-accesstools-exact-param-match) — overloads exist on both.
+                _showResourceHarvested = AccessTools.Method(geoSiteT, "ShowResourceHarvested", new[] { packT });
+                _resourcePackCtor = AccessTools.Constructor(packT, Type.EmptyTypes);
+                _packAdd = AccessTools.Method(packT, "Add", new[] { unitT });
+                _resourceUnitCtor = AccessTools.Constructor(unitT, new[] { _resourceTypeEnum, typeof(float) });
+                _resourceUnitTypeField = AccessTools.Field(unitT, "Type");
+                _resourceUnitValueField = AccessTools.Field(unitT, "Value");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureHarvest failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// HOST: read the FIRST <c>ResourceUnit</c>'s raw type + value off a live <c>ResourcePack</c> — exactly
+        /// the tuple the native float renders (GeoSite.cs:933 <c>resources.FirstOrDefault()</c>). False on an
+        /// empty pack / any miss (caller skips the broadcast; the native float shows None/0 there anyway).
+        /// </summary>
+        public static bool ReadFirstResource(object resourcePack, out int resourceType, out float value)
+        {
+            resourceType = 0; value = 0f;
+            try
+            {
+                EnsureHarvest();
+                if (_resourceUnitTypeField == null || _resourceUnitValueField == null) return false;
+                if (!(resourcePack is IEnumerable units)) return false;
+                foreach (var u in units)
+                {
+                    resourceType = Convert.ToInt32(_resourceUnitTypeField.GetValue(u));
+                    value = Convert.ToSingle(_resourceUnitValueField.GetValue(u));
+                    return true;
+                }
+                return false;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ReadFirstResource failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
+        /// CLIENT: replay the native harvest float at the mirrored site — resolve the site by id, build a
+        /// single-unit <c>ResourcePack</c> {(ResourceType)resourceType, value} and invoke the SAME native
+        /// <c>GeoSite.ShowResourceHarvested</c> the host ran. Pure display (collector-visuals float);
+        /// no wallet/state mutation. Best-effort: any miss logs + no-ops (a dropped float is cosmetic).
+        /// </summary>
+        public static void ShowHarvestFloat(GeoRuntime rt, int siteId, int resourceType, float value)
+        {
+            try
+            {
+                EnsureHarvest();
+                if (_showResourceHarvested == null || _resourcePackCtor == null
+                    || _packAdd == null || _resourceUnitCtor == null || _resourceTypeEnum == null)
+                {
+                    Debug.LogWarning("[Multiplayer] GeoSiteReflection.ShowHarvestFloat: reflection unbound (float dropped)");
+                    return;
+                }
+                var site = ResolveSiteById(rt, siteId);
+                if (site == null)
+                {
+                    Debug.Log("[Multiplayer] GeoSiteReflection.ShowHarvestFloat: siteId " + siteId
+                              + " did not resolve (float dropped — cosmetic)");
+                    return;
+                }
+                object unit = _resourceUnitCtor.Invoke(new[] { Enum.ToObject(_resourceTypeEnum, resourceType), (object)value });
+                object pack = _resourcePackCtor.Invoke(null);
+                _packAdd.Invoke(pack, new[] { unit });
+                _showResourceHarvested.Invoke(site, new[] { pack });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ShowHarvestFloat failed: " + ex.Message); }
+        }
     }
 }
