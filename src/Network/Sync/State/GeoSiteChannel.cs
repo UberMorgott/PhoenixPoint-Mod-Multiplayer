@@ -8,8 +8,9 @@ namespace Multiplayer.Network.Sync.State
     /// header/backdrop). The client geoscape sim is frozen, so existing client GeoSites never update their
     /// Owner/Type/State/EncounterID/name; an event modal then resolves a STALE <c>Context.Site</c> and the
     /// native art collection (derived from <c>Context.Site.Owner</c>/<c>Type</c>) renders wrong. Host
-    /// subscribes the 6 aggregate site events on <c>GeoMap</c>; each fire marks that site's id dirty and the
-    /// channel dirty. <see cref="Snapshot"/> encodes the dirty sites' identity (then clears the dirty set);
+    /// subscribes the 7 aggregate site events on <c>GeoMap</c> (identity + the per-faction explored-state family:
+    /// Inspected/Visible/Visited — exploration completion, reveal-around, first visit); each fire marks that
+    /// site's id dirty and the channel dirty. <see cref="Snapshot"/> encodes the dirty sites' identity (then clears the dirty set);
     /// the client resolves each by <c>SiteId</c> in <c>GeoMap.AllSites</c> and writes the identity onto the
     /// FRESH site (via private backing fields — pure mirror, no cascade). The wire codec +
     /// <see cref="GeoSiteSnapshot"/> live in their own pure file for unit testability;

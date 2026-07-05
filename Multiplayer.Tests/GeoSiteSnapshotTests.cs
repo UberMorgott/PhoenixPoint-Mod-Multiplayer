@@ -121,9 +121,24 @@ public class GeoSiteSnapshotTests
             0x01,                       // State = 1
             0x01, 0x00, 0x42,           // nameLen=1, "B"
             0x01, 0x00, 0x43,           // encLen=1, "C"
-            0x00,                       // Inspected = false
+            0x00,                       // exploredFlags = 0 (not inspected/visible/visited)
         };
         Assert.Equal(expected, bytes);
+    }
+
+    [Fact]
+    public void Encode_ExploredFlagsByte_Pinned()
+    {
+        // bit0=Inspected bit1=Visible bit2=Visited — pin the packing so host/client never disagree.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C", inspected: true, visible: true, visited: true));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        Assert.Equal(0x07, bytes[bytes.Length - 1]);   // trailing flags byte = all three set
+
+        snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C", inspected: false, visible: true, visited: false));
+        bytes = GeoSiteSnapshot.Encode(snap);
+        Assert.Equal(0x02, bytes[bytes.Length - 1]);   // Visible only → bit1
     }
 
     [Fact]
@@ -141,6 +156,42 @@ public class GeoSiteSnapshotTests
         // Inspected participates in structural equality (distinguishes an otherwise-identical revealed site).
         Assert.NotEqual(snap.Sites[0], snap.Sites[1]);
         Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    // ─── explored-state family: host exploration (SetInspected+SetVisited) + reveal-around (SetVisible)
+    //     must carry per-flag, independently, in BOTH directions (true and false). ─────────────────────
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]   // inspected only (reveal via RevealSite on an already-visible site)
+    [InlineData(false, true, false)]   // newly revealed-around POI: visible, still "?" (not inspected)
+    [InlineData(false, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]     // explored POI: inspected + visible + visited
+    public void Snapshot_RoundTrips_ExploredStateFamily(bool inspected, bool visible, bool visited)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(9, "o", 60, 1, "n", "e", inspected, visible, visited));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(inspected, rt.Sites[0].Inspected);
+        Assert.Equal(visible, rt.Sites[0].Visible);
+        Assert.Equal(visited, rt.Sites[0].Visited);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);   // structural equality covers the whole family
+    }
+
+    [Fact]
+    public void ExploredStateFamily_FlagsAreIndependentInEquality()
+    {
+        // Each flag alone must distinguish two otherwise-identical DTOs (no flag aliases another).
+        var baseline = new GeoSiteState(3, "o", 60, 1, "n", "e");
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 60, 1, "n", "e", inspected: true));
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 60, 1, "n", "e", visible: true));
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 60, 1, "n", "e", visited: true));
+        Assert.NotEqual(new GeoSiteState(3, "o", 60, 1, "n", "e", visible: true),
+                        new GeoSiteState(3, "o", 60, 1, "n", "e", visited: true));
     }
 
     // ─── registration: the GeoSite channel claims a distinct, stable surface/channel id ────

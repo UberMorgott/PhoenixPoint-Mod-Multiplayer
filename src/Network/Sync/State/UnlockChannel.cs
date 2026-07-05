@@ -20,7 +20,6 @@ namespace Multiplayer.Network.Sync.State
 
         private object _token;     // opaque faction research-event token (Start/Complete)
         private object _faction;   // bound faction instance (rebind guard)
-        private bool _bound;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -38,7 +37,9 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;
+            // NO hard "already bound" gate — rebind when the LIVE faction instance changes (geoscape reload builds
+            // a fresh GeoPhoenixFaction; the old `if (_bound) return;` left this channel on the dead instance
+            // forever → unlock sync silently stopped after a tactical round-trip. WalletWatcher lesson).
             if (eng == null) return;
             var fac = GeoRuntime.Instance.PhoenixFaction();
             if (fac == null) return;                          // not in geoscape yet / mid-load
@@ -54,7 +55,6 @@ namespace Multiplayer.Network.Sync.State
                 GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             // Seed clients with the authoritative unlock set the moment we bind.
             eng.MarkChannelDirty(id);
-            _bound = true;
         }
 
         public void DetachHost()
@@ -62,7 +62,6 @@ namespace Multiplayer.Network.Sync.State
             if (_token != null) ResearchStateReflection.Unsubscribe(_token);
             _token = null;
             _faction = null;
-            _bound = false;
         }
     }
 }

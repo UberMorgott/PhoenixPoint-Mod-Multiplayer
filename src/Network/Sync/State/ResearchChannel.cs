@@ -23,7 +23,6 @@ namespace Multiplayer.Network.Sync.State
         private object _token;       // opaque faction-event token (Start/Complete) from ResearchStateReflection
         private object _hourToken;   // opaque hourly-tick (HourTicked) token — FIX#1 progress heartbeat
         private object _research;    // the bound Research instance (rebind guard)
-        private bool _bound;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -46,7 +45,9 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;                                  // bound; skip the per-frame reflection
+            // NO hard "already bound" gate — rebind when the LIVE Research instance changes (geoscape reload
+            // builds a fresh one; the old `if (_bound) return;` left this channel on the dead instance forever —
+            // research sync silently stopped after a tactical round-trip. WalletWatcher lesson, WalletWatcher.cs:20-28).
             if (eng == null) return;
             var research = ResearchStateReflection.GetResearch(GeoRuntime.Instance);
             if (research == null) return;                        // not in geoscape yet / mid-load
@@ -63,7 +64,6 @@ namespace Multiplayer.Network.Sync.State
                 GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             // Seed clients with the authoritative research the moment we bind.
             eng.MarkChannelDirty(id);
-            _bound = true;
         }
 
         public void DetachHost()
@@ -73,7 +73,6 @@ namespace Multiplayer.Network.Sync.State
             _token = null;
             _hourToken = null;
             _research = null;
-            _bound = false;
         }
     }
 }

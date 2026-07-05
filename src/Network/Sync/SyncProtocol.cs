@@ -327,7 +327,10 @@ namespace Multiplayer.Network.Sync
             catch { return false; }
         }
 
-        // One GeoSiteState record on the wire (same field order as GeoSiteSnapshot's per-site block).
+        // One GeoSiteState record on the wire (same field order + exploredFlags byte as GeoSiteSnapshot's
+        // per-site block: bit0=Inspected bit1=Visible bit2=Visited). Carrying the FULL family here matters:
+        // GeoSiteReflection.ApplyIdentity now writes Visible/Visited, so an identity decoded with defaulted
+        // (false) flags would HIDE a live visible site on the client.
         private static void WriteSiteIdentity(BinaryWriter w, GeoSiteState s)
         {
             w.Write(s.SiteId);
@@ -336,7 +339,11 @@ namespace Multiplayer.Network.Sync
             w.Write(s.State);
             WriteWireStr(w, s.SiteName);
             WriteWireStr(w, s.EncounterID);
-            w.Write((byte)(s.Inspected ? 1 : 0));
+            byte flags = 0;
+            if (s.Inspected) flags |= 1;
+            if (s.Visible) flags |= 2;
+            if (s.Visited) flags |= 4;
+            w.Write(flags);
         }
 
         private static GeoSiteState ReadSiteIdentity(BinaryReader r)
@@ -347,8 +354,9 @@ namespace Multiplayer.Network.Sync
             byte state = r.ReadByte();
             string name = ReadWireStr(r);
             string enc = ReadWireStr(r);
-            bool inspected = r.ReadByte() != 0;
-            return new GeoSiteState(siteId, owner, type, state, name, enc, inspected);
+            byte flags = r.ReadByte();
+            return new GeoSiteState(siteId, owner, type, state, name, enc,
+                inspected: (flags & 1) != 0, visible: (flags & 2) != 0, visited: (flags & 4) != 0);
         }
 
         private static void WriteWireStr(BinaryWriter w, string s)
