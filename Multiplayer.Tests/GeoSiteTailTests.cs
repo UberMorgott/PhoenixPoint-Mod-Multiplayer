@@ -306,6 +306,104 @@ public class GeoSiteTailTests
         Assert.Null(GeoSiteSnapshot.Decode(truncated));
     }
 
+    // ─── attack-schedule tail (gap 6b: pre-attack countdown mirror) ─────────────────────────────
+
+    [Theory]
+    [InlineData("ALIEN_FAC", 637000000000000000L, 637000648000000000L)]
+    [InlineData("NJ_FAC", 0L, 1L)]
+    [InlineData("", long.MaxValue, long.MinValue)]   // unreadable faction guid still round-trips
+    public void AttackTail_RoundTrips(string guid, long at, long forT)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(5, "o", 10, 1, "n", "e",
+            attack: new GeoAttackTail(new[] { new GeoAttackEntry(guid, at, forT) })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Attack);
+        Assert.Single(rt.Sites[0].Attack.Entries);
+        Assert.Equal(guid, rt.Sites[0].Attack.Entries[0].AttackerFactionDefGuid);
+        Assert.Equal(at, rt.Sites[0].Attack.Entries[0].ScheduledAtTicks);
+        Assert.Equal(forT, rt.Sites[0].Attack.Entries[0].ScheduledForTicks);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void AttackTail_MultipleAttackers_RoundTrip()
+    {
+        // Two factions with concurrent armed schedules on the same site (alien + human aggressor).
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(5, "o", 10, 1, "n", "e",
+            attack: new GeoAttackTail(new[]
+            {
+                new GeoAttackEntry("ALN", 100L, 200L),
+                new GeoAttackEntry("NJ", 150L, 260L),
+            })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(2, rt.Sites[0].Attack.Entries.Length);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void AttackTail_EmptyEntries_IsHonestClear_DistinctFromAbsent()
+    {
+        // Empty tail (schedule entries exist, none armed) must survive as EMPTY — the clear signal after
+        // the attack fires — and never collapse into "tail absent" (no schedule entry at all).
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", attack: new GeoAttackTail()));
+        snap.Sites.Add(new GeoSiteState(2, "o", 10, 1, "n", "e"));   // no tail at all
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Attack);
+        Assert.Empty(rt.Sites[0].Attack.Entries);
+        Assert.Null(rt.Sites[1].Attack);
+    }
+
+    [Fact]
+    public void AttackTail_CoexistsWithAllOtherTails()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 20, 1, "n", "e",
+            haven: new GeoHavenTail(1200, true),
+            alienBase: new GeoAlienBaseTail("TYPE", new[] { "ADDON" }),
+            excavation: new GeoExcavationTail(true, 42L),
+            attack: new GeoAttackTail(new[] { new GeoAttackEntry("ALN", 1L, 2L) })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.Single(rt.Sites[0].Attack.Entries);
+    }
+
+    [Fact]
+    public void AttackTail_ParticipatesInEquality()
+    {
+        var baseline = Site(3);
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 20, 1, "n", "e", attack: new GeoAttackTail()));
+        Assert.NotEqual(new GeoAttackTail(), new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 2) }));
+        Assert.NotEqual(new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 2) }),
+                        new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 3) }));
+        Assert.NotEqual(new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 2) }),
+                        new GeoAttackTail(new[] { new GeoAttackEntry("B", 1, 2) }));
+        Assert.Equal(new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 2) }),
+                     new GeoAttackTail(new[] { new GeoAttackEntry("A", 1, 2) }));
+    }
+
+    [Fact]
+    public void AttackTail_TruncatedInsideEntry_RejectsWholePayload()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
+            attack: new GeoAttackTail(new[] { new GeoAttackEntry("ALN", 1L, long.MaxValue) })));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        var truncated = new byte[bytes.Length - 4];   // cut inside the trailing i64
+        System.Array.Copy(bytes, truncated, truncated.Length);
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
+    }
+
     // ─── dirty-subscription decision pins (WA-2 families join the bind lists) ───────────────────
 
     [Fact]
@@ -331,5 +429,13 @@ public class GeoSiteTailTests
     {
         var names = GeoSiteDirtyEvents.PhoenixFactionEventNames;
         Assert.Equal(new[] { "OnExcavationStarted", "OnExcavationCompleted" }, names);
+    }
+
+    [Fact]
+    public void SubscribedGeoFactionEvents_AreTheAttackScheduleTrigger()
+    {
+        // Gap 6b: SiteAttackScheduled (GeoFaction.cs:319), subscribed on EVERY faction; carrier = arg 1
+        // (the SiteAttackSchedule — GetOwningSiteId unwraps its readonly Site field).
+        Assert.Equal(new[] { "SiteAttackScheduled" }, GeoSiteDirtyEvents.GeoFactionEventNames);
     }
 }

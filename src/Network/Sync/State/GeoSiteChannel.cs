@@ -107,6 +107,10 @@ namespace Multiplayer.Network.Sync.State
                 GeoSiteReflection.ApplyHavenTail(rt, site, dto.Haven);
                 GeoSiteReflection.ApplyAlienBaseTail(rt, site, dto.AlienBase);
                 GeoSiteReflection.ApplyExcavationTail(rt, site, dto.Excavation);
+                // Pre-attack schedule tail (gap 6b): stamps the faction's SiteAttackSchedule value-only and
+                // re-raises the native SiteAttackScheduled (SuppressEvents-guarded) so the vanilla warning
+                // toast + status-bar countdown render natively; empty tail = clear (attack fired/cancelled).
+                GeoSiteReflection.ApplyAttackTail(rt, site, dto.Attack);
             }
         }
 

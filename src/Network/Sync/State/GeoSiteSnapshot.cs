@@ -134,6 +134,17 @@ namespace Multiplayer.Network.Sync.State
         {
             "OnExcavationStarted", "OnExcavationCompleted",
         };
+
+        // Attack-schedule dirty trigger (audit gap 6b): GeoFaction.SiteAttackScheduled
+        // (FactionSiteAttackHandler(GeoFaction, SiteAttackSchedule), GeoFaction.cs:319; raised by
+        // ScheduleAttackOnSite :1932 and AttackAncientSite :532). Subscribed on EVERY faction (any faction —
+        // alien or human — can arm a pre-attack countdown); the SITE CARRIER is arg 1 (unwrapped via
+        // SiteAttackSchedule.Site). The attack FIRING needs no own trigger: mission creation dirties the
+        // site via SiteMissionStarted and the re-snapshot then carries the now-disarmed (empty) tail.
+        public static readonly string[] GeoFactionEventNames =
+        {
+            "SiteAttackScheduled",
+        };
     }
 
     /// <summary>
@@ -256,6 +267,86 @@ namespace Multiplayer.Network.Sync.State
     }
 
     /// <summary>
+    /// PURE optional-tail record of one site's PRE-ATTACK SCHEDULE state — audit gap 6b
+    /// (SiteAttackSchedule.cs:13; GeoFaction.cs:105-107/1926-1938). One entry per ARMED
+    /// (<c>HasAttackScheduled</c>) schedule targeting this site, across ALL factions' PhoenixBase +
+    /// AncientSite schedule lists. The client stamps the same schedule state onto its own faction lists
+    /// (ScheduledAt + NextUpdateAttack — VALUE-ONLY, never RescheduleAttack: no Timing producer, mission
+    /// creation stays host-only and arrives via the ch#5 mission record) and re-raises the native
+    /// <c>SiteAttackScheduled</c> event so GeoscapeLog renders the vanilla warning toast + status-bar
+    /// countdown (GeoscapeLog.cs:446-476) — or TFTV's prefix suppresses it, exactly as on the host.
+    /// Carriage: null = not carried (host has NO schedule ENTRY for this site — nothing ever armed);
+    /// an EMPTY Entries array = honest clear (entries exist but none armed — fired/expired attack).
+    /// AttackerFactionDefGuid is the owning <c>GeoFaction.Def</c> guid (same resolve as the Owner mirror).
+    /// </summary>
+    public sealed class GeoAttackEntry : IEquatable<GeoAttackEntry>
+    {
+        public readonly string AttackerFactionDefGuid;
+        public readonly long ScheduledAtTicks;    // SiteAttackSchedule.ScheduledAt (TimeUnit.TimeSpan.Ticks)
+        public readonly long ScheduledForTicks;   // SiteAttackSchedule.ScheduledFor (NextUpdateAttack.NextTime)
+
+        public GeoAttackEntry(string attackerFactionDefGuid, long scheduledAtTicks, long scheduledForTicks)
+        {
+            AttackerFactionDefGuid = attackerFactionDefGuid ?? "";
+            ScheduledAtTicks = scheduledAtTicks;
+            ScheduledForTicks = scheduledForTicks;
+        }
+
+        public bool Equals(GeoAttackEntry other)
+            => other != null && AttackerFactionDefGuid == other.AttackerFactionDefGuid
+               && ScheduledAtTicks == other.ScheduledAtTicks && ScheduledForTicks == other.ScheduledForTicks;
+
+        public override bool Equals(object obj) => obj is GeoAttackEntry o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = AttackerFactionDefGuid?.GetHashCode() ?? 0;
+                h = (h * 397) ^ ScheduledAtTicks.GetHashCode();
+                h = (h * 397) ^ ScheduledForTicks.GetHashCode();
+                return h;
+            }
+        }
+
+        public override string ToString()
+            => $"AttackBy({AttackerFactionDefGuid} at={ScheduledAtTicks} for={ScheduledForTicks})";
+    }
+
+    /// <summary>See <see cref="GeoAttackEntry"/> — the per-site tail wrapper (Entries never null).</summary>
+    public sealed class GeoAttackTail : IEquatable<GeoAttackTail>
+    {
+        public readonly GeoAttackEntry[] Entries;   // never null (empty = honest clear, last-wins)
+
+        public GeoAttackTail(GeoAttackEntry[] entries = null)
+        {
+            Entries = entries ?? new GeoAttackEntry[0];
+        }
+
+        public bool Equals(GeoAttackTail other)
+        {
+            if (other == null || Entries.Length != other.Entries.Length) return false;
+            for (int i = 0; i < Entries.Length; i++)
+                if (!Entries[i].Equals(other.Entries[i])) return false;
+            return true;
+        }
+
+        public override bool Equals(object obj) => obj is GeoAttackTail o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = Entries.Length;
+                for (int i = 0; i < Entries.Length; i++) h = (h * 397) ^ Entries[i].GetHashCode();
+                return h;
+            }
+        }
+
+        public override string ToString() => $"Attack(n={Entries.Length})";
+    }
+
+    /// <summary>
     /// One site's mirrored IDENTITY: the fields the geoscape-event card / native art collection reads off
     /// <c>Context.Site</c> (Owner / Type / State / EncounterID, plus the site name loc-key for token text).
     /// A pure value type with structural equality so the codec round-trip is directly assertable.
@@ -298,11 +389,13 @@ namespace Multiplayer.Network.Sync.State
         public readonly GeoHavenTail Haven;       // WA-2 haven tail (extras block); null = not carried (never a clear)
         public readonly GeoAlienBaseTail AlienBase;     // WA-2 alien-base tail; null = not carried
         public readonly GeoExcavationTail Excavation;   // WA-2 excavation tail; null = not carried
+        public readonly GeoAttackTail Attack;           // pre-attack schedule tail (gap 6b); null = not carried
 
         public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID,
                             bool inspected = false, bool visible = false, bool visited = false,
                             GeoMissionRecord mission = null, GeoHavenTail haven = null,
-                            GeoAlienBaseTail alienBase = null, GeoExcavationTail excavation = null)
+                            GeoAlienBaseTail alienBase = null, GeoExcavationTail excavation = null,
+                            GeoAttackTail attack = null)
         {
             SiteId = siteId;
             // Normalize null → "" so equality + the wire are stable (the codec also coalesces, this keeps
@@ -319,6 +412,7 @@ namespace Multiplayer.Network.Sync.State
             Haven = haven;
             AlienBase = alienBase;
             Excavation = excavation;
+            Attack = attack;
         }
 
         public bool Equals(GeoSiteState other)
@@ -334,7 +428,8 @@ namespace Multiplayer.Network.Sync.State
                && (Mission == null ? other.Mission == null : Mission.Equals(other.Mission))
                && (Haven == null ? other.Haven == null : Haven.Equals(other.Haven))
                && (AlienBase == null ? other.AlienBase == null : AlienBase.Equals(other.AlienBase))
-               && (Excavation == null ? other.Excavation == null : Excavation.Equals(other.Excavation));
+               && (Excavation == null ? other.Excavation == null : Excavation.Equals(other.Excavation))
+               && (Attack == null ? other.Attack == null : Attack.Equals(other.Attack));
 
         public override bool Equals(object obj) => obj is GeoSiteState o && Equals(o);
 
@@ -355,12 +450,13 @@ namespace Multiplayer.Network.Sync.State
                 h = (h * 397) ^ (Haven?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (AlienBase?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (Excavation?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (Attack?.GetHashCode() ?? 0);
                 return h;
             }
         }
 
         public override string ToString()
-            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())})";
+            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())} attack={(Attack == null ? "none" : Attack.ToString())})";
     }
 
     /// <summary>
@@ -388,7 +484,9 @@ namespace Multiplayer.Network.Sync.State
     ///   tailFlags: bit0 = haven tail       → payload [i32 population]; bit4 = Infested VALUE (no payload).
     ///              bit1 = alien-base tail  → payload [str typeGuid][u8 nAddons]{[str addonGuid]}*.
     ///              bit2 = excavation tail  → payload [i64 endDateTicks]; bit5 = Excavating VALUE (no payload).
-    ///              bits 3/6/7 RESERVED for future tails (higher bits, payloads appended after known ones).
+    ///              bit3 = attack-schedule tail → payload [u8 n]{[str attackerGuid][i64 atTicks][i64 forTicks]}*
+    ///                     (gap 6b pre-attack countdown; n=0 = honest clear).
+    ///              bits 6/7 RESERVED for future tails (higher bits, payloads appended after known ones).
     ///   An extras record for a siteId absent from the record array is skipped (join-by-id, never a throw).
     ///
     /// Case A only: this mirrors EXISTING client sites (resolved by SiteId). Vanilla never creates sites
@@ -401,6 +499,7 @@ namespace Multiplayer.Network.Sync.State
         private const byte TailHasHaven = 1 << 0;       // payload: [i32 population]
         private const byte TailHasAlienBase = 1 << 1;   // payload: [str typeGuid][u8 nAddons]{[str addonGuid]}*
         private const byte TailHasExcavation = 1 << 2;  // payload: [i64 excavationEndDateTicks]
+        private const byte TailHasAttack = 1 << 3;      // payload: [u8 n]{[str attackerGuid][i64 atTicks][i64 forTicks]}*
         private const byte TailInfested = 1 << 4;       // value bit (meaningful only with TailHasHaven)
         private const byte TailExcavating = 1 << 5;     // value bit (meaningful only with TailHasExcavation)
 
@@ -468,7 +567,7 @@ namespace Multiplayer.Network.Sync.State
         }
 
         private static bool HasTail(GeoSiteState s)
-            => s.Haven != null || s.AlienBase != null || s.Excavation != null;
+            => s.Haven != null || s.AlienBase != null || s.Excavation != null || s.Attack != null;
 
         /// <summary>[u8 tailFlags][payloads in ascending bit order] for one site's carried tails.</summary>
         private static byte[] EncodeTailRecord(GeoSiteState s)
@@ -488,6 +587,7 @@ namespace Multiplayer.Network.Sync.State
                     flags |= TailHasExcavation;
                     if (s.Excavation.Excavating) flags |= TailExcavating;
                 }
+                if (s.Attack != null) flags |= TailHasAttack;
                 w.Write(flags);
                 if (s.Haven != null) w.Write(s.Haven.Population);
                 if (s.AlienBase != null)
@@ -499,6 +599,17 @@ namespace Multiplayer.Network.Sync.State
                     for (int i = 0; i < n; i++) WriteStr(w, s.AlienBase.AddonDefGuids[i]);
                 }
                 if (s.Excavation != null) w.Write(s.Excavation.EndDateTicks);
+                if (s.Attack != null)
+                {
+                    int n = s.Attack.Entries.Length > byte.MaxValue ? byte.MaxValue : s.Attack.Entries.Length;
+                    w.Write((byte)n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        WriteStr(w, s.Attack.Entries[i].AttackerFactionDefGuid);
+                        w.Write(s.Attack.Entries[i].ScheduledAtTicks);
+                        w.Write(s.Attack.Entries[i].ScheduledForTicks);
+                    }
+                }
                 return ms.ToArray();
             }
         }
@@ -568,7 +679,7 @@ namespace Multiplayer.Network.Sync.State
                                 if (!tails.TryGetValue(s.SiteId, out var set)) continue;
                                 snap.Sites[i] = new GeoSiteState(s.SiteId, s.OwnerFactionDefGuid, s.SiteType,
                                     s.State, s.SiteName, s.EncounterID, s.Inspected, s.Visible, s.Visited,
-                                    s.Mission, set.Haven, set.AlienBase, set.Excavation);
+                                    s.Mission, set.Haven, set.AlienBase, set.Excavation, set.Attack);
                             }
                     }
                     return snap;
@@ -584,7 +695,8 @@ namespace Multiplayer.Network.Sync.State
             public GeoHavenTail Haven;
             public GeoAlienBaseTail AlienBase;
             public GeoExcavationTail Excavation;
-            public bool Any => Haven != null || AlienBase != null || Excavation != null;
+            public GeoAttackTail Attack;
+            public bool Any => Haven != null || AlienBase != null || Excavation != null || Attack != null;
         }
 
         /// <summary>
@@ -612,6 +724,19 @@ namespace Multiplayer.Network.Sync.State
                 }
                 if ((flags & TailHasExcavation) != 0)
                     set.Excavation = new GeoExcavationTail((flags & TailExcavating) != 0, r.ReadInt64());
+                if ((flags & TailHasAttack) != 0)
+                {
+                    int n = r.ReadByte();
+                    var entries = new GeoAttackEntry[n];
+                    for (int i = 0; i < n; i++)
+                    {
+                        string guid = ReadStr(r);
+                        long at = r.ReadInt64();
+                        long forT = r.ReadInt64();
+                        entries[i] = new GeoAttackEntry(guid, at, forT);
+                    }
+                    set.Attack = new GeoAttackTail(entries);
+                }
                 return set.Any ? set : null;
             }
         }

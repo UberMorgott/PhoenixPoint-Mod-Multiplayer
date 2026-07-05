@@ -397,9 +397,12 @@ namespace Multiplayer.Network.Sync.State
             GeoExcavationTail excavation = null;
             try { excavation = ReadExcavationTail(GeoRuntime.Instance, site); }
             catch { excavation = null; }
+            GeoAttackTail attack = null;
+            try { attack = ReadAttackTail(GeoRuntime.Instance, site); }
+            catch { attack = null; }
 
             return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited,
-                mission, haven, alienBase, excavation);
+                mission, haven, alienBase, excavation, attack);
         }
 
         /// <summary>
@@ -1076,6 +1079,28 @@ namespace Multiplayer.Network.Sync.State
                         }
                         catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
                     }
+                // Attack-schedule dirty trigger (gap 6b): GeoFaction.SiteAttackScheduled on EVERY faction —
+                // any faction (alien or human) can arm a pre-attack countdown on a Phoenix base / ancient
+                // site. Carrier = arg 1 (the SiteAttackSchedule; GetOwningSiteId unwraps its Site field).
+                // Same token/detach lifecycle: factions are reborn with the GeoLevel exactly like the GeoMap,
+                // so the channel's instance-compare rebind covers them. Best-effort per faction.
+                foreach (var anyFac in EnumerateFactions(rt))
+                {
+                    if (anyFac == null) continue;
+                    foreach (var name in GeoSiteDirtyEvents.GeoFactionEventNames)
+                    {
+                        var evt = anyFac.GetType().GetEvent(name, BindingFlags.Public | BindingFlags.Instance);
+                        if (evt == null) continue;
+                        var handler = MakeSiteAdapter(evt, onSiteChanged, argIndex: 1);
+                        if (handler == null) continue;
+                        try
+                        {
+                            evt.AddEventHandler(anyFac, handler);
+                            token.Handlers.Add((anyFac, evt, handler));
+                        }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe add '" + name + "' failed (skipped): " + ex.Message); }
+                    }
+                }
                 return token.Handlers.Count > 0 ? token : null;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.Subscribe failed: " + ex.Message); return null; }
@@ -1123,6 +1148,9 @@ namespace Multiplayer.Network.Sync.State
                 EnsureExcavationTail();
                 if (_excavStateType != null && _excavStateType.IsInstanceOfType(siteOrCarrier) && _excavSiteField != null)
                     return GetSiteId(_excavSiteField.GetValue(siteOrCarrier));
+                EnsureAttackTail();
+                if (_attackScheduleType != null && _attackScheduleType.IsInstanceOfType(siteOrCarrier) && _attackSiteField != null)
+                    return GetSiteId(_attackSiteField.GetValue(siteOrCarrier));
                 return GetSiteId(siteOrCarrier);
             }
             catch { return -1; }
@@ -1500,6 +1528,319 @@ namespace Multiplayer.Network.Sync.State
                 RefreshSiteVisuals(site);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExcavationTail failed: " + ex.Message); }
+        }
+
+        // ─── attack-schedule tail (pre-attack countdown mirror, audit gap 6b) ───
+        // Own lazy gate: a miss degrades ONLY the attack tail (identity/mission/other tails keep flowing).
+        //
+        // Decompile-verified 2026-07-05:
+        //   • SiteAttackSchedule (PhoenixPoint.Geoscape.Core, SiteAttackSchedule.cs:13) — public fields
+        //     Site (readonly, :16), ScheduledAt (TimeUnit, :25), NextUpdateAttack (NextUpdate, :22); props
+        //     HasAttackScheduled (:38), ScheduledFor (:34 → NextUpdateAttack.NextTime); public ctor
+        //     (GeoSite, GeoFaction) (:45); UnscheduleAttack() stops the Timing producer (:99).
+        //   • GeoFaction holds one list per family: _phoenixBaseTargets/_ancientSiteTargets
+        //     (GeoFaction.cs:105-107) exposed as PhoenixBaseAttackSchedule/AncientSiteAttackSchedule
+        //     (:149-151); ScheduleAttackOnSite arms + raises SiteAttackScheduled (:1926-1938, event :319).
+        //   • Host reads ARMED schedules; client stamps VALUE-ONLY (ScheduledAt + NextUpdateAttack via
+        //     NextUpdate.Absolute) and NEVER RescheduleAttack — no Timing producer on the mirror, the
+        //     mission lands via the ch#5 mission record. The client then re-raises the native
+        //     SiteAttackScheduled event so GeoscapeLog renders the vanilla warning toast + status-bar
+        //     countdown (GeoscapeLog.cs:446-476; display reads Timing.Now, which tracks host display time
+        //     under the freeze) — with GeoscapeView.SuppressEvents flipped true around the raise so the
+        //     HighPriority entry can NOT RequestGamePause → SetTimeState → OnPauseTime → the time-control
+        //     relay (which would send !GlyphHostPaused — an UNPAUSE when the host already auto-paused).
+        //     TFTV parity is automatic: TFTV prefix-suppresses OnFactionSiteAttackScheduled on BOTH sides
+        //     (TFTVBaseDefenseGeoscape.cs:1502-1517), so the mirrored raise is silenced exactly like the
+        //     host's native one.
+
+        private static bool _attackTailEnsured;
+        private static Type _attackScheduleType;          // PhoenixPoint.Geoscape.Core.SiteAttackSchedule
+        private static ConstructorInfo _attackScheduleCtor;   // (GeoSite, GeoFaction) public
+        private static FieldInfo _attackSiteField;            // Site (readonly public)
+        private static FieldInfo _attackScheduledAtField;     // ScheduledAt (public TimeUnit field)
+        private static FieldInfo _attackNextUpdateField;      // NextUpdateAttack (public NextUpdate field)
+        private static PropertyInfo _attackHasScheduledProp;  // HasAttackScheduled (bool)
+        private static PropertyInfo _attackScheduledForProp;  // ScheduledFor (TimeUnit)
+        private static MethodInfo _attackUnscheduleMethod;    // UnscheduleAttack()
+        private static object _nextUpdateNever;                // NextUpdate.Never (static readonly value)
+        private static MethodInfo _nextUpdateAbsolute;         // NextUpdate.Absolute(TimeUnit) static
+        private static PropertyInfo _factionPxScheduleProp;    // GeoFaction.PhoenixBaseAttackSchedule
+        private static PropertyInfo _factionAncientScheduleProp; // GeoFaction.AncientSiteAttackSchedule
+        private static FieldInfo _factionPxTargetsField;       // GeoFaction._phoenixBaseTargets (List)
+        private static FieldInfo _factionAncientTargetsField;  // GeoFaction._ancientSiteTargets (List)
+        private static FieldInfo _factionAttackEventField;     // SiteAttackScheduled backing delegate (client raise)
+        private static PropertyInfo _geoViewProp;              // GeoLevelController.View (GeoscapeView)
+        private static FieldInfo _viewSuppressEventsField;     // GeoscapeView.SuppressEvents (public bool field)
+
+        private const int SiteTypePhoenixBase = 10;   // GeoSiteType.PhoenixBase (sparse enum, GeoSiteType.cs:6)
+
+        private static void EnsureAttackTail()
+        {
+            if (_attackTailEnsured) return;
+            _attackTailEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                EnsureExcavationTail();  // binds the shared TimeUnit bridge (_timeUnitTimeSpanProp/FromTimeSpan)
+                _attackScheduleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.SiteAttackSchedule");
+                var geoFactionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoFaction");
+                var geoSiteT = _geoSiteType ?? AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                var nextUpdateT = AccessTools.TypeByName("Base.Core.NextUpdate");
+                var timeUnitT = AccessTools.TypeByName("Base.Core.TimeUnit");
+                if (_attackScheduleType == null || geoFactionT == null || geoSiteT == null
+                    || nextUpdateT == null || timeUnitT == null) return;
+                _attackScheduleCtor = AccessTools.Constructor(_attackScheduleType, new[] { geoSiteT, geoFactionT });
+                _attackSiteField = AccessTools.Field(_attackScheduleType, "Site");
+                _attackScheduledAtField = AccessTools.Field(_attackScheduleType, "ScheduledAt");
+                _attackNextUpdateField = AccessTools.Field(_attackScheduleType, "NextUpdateAttack");
+                _attackHasScheduledProp = AccessTools.Property(_attackScheduleType, "HasAttackScheduled");
+                _attackScheduledForProp = AccessTools.Property(_attackScheduleType, "ScheduledFor");
+                _attackUnscheduleMethod = AccessTools.Method(_attackScheduleType, "UnscheduleAttack", Type.EmptyTypes);
+                try { _nextUpdateNever = AccessTools.Field(nextUpdateT, "Never")?.GetValue(null); } catch { }
+                // EXACT param match (harmony-accesstools-exact-param-match): Absolute has a single overload,
+                // but pin the TimeUnit signature anyway so a future overload can't silently rebind.
+                _nextUpdateAbsolute = AccessTools.Method(nextUpdateT, "Absolute", new[] { timeUnitT });
+                _factionPxScheduleProp = AccessTools.Property(geoFactionT, "PhoenixBaseAttackSchedule");
+                _factionAncientScheduleProp = AccessTools.Property(geoFactionT, "AncientSiteAttackSchedule");
+                _factionPxTargetsField = AccessTools.Field(geoFactionT, "_phoenixBaseTargets");
+                _factionAncientTargetsField = AccessTools.Field(geoFactionT, "_ancientSiteTargets");
+                _factionAttackEventField = AccessTools.Field(geoFactionT, "SiteAttackScheduled");
+                var geoLevelT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+                if (geoLevelT != null) _geoViewProp = AccessTools.Property(geoLevelT, "View");
+                var viewT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+                if (viewT != null) _viewSuppressEventsField = AccessTools.Field(viewT, "SuppressEvents");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureAttackTail failed (attack tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>All live factions (<c>GeoLevelController.Factions</c>), or an empty enumerable.</summary>
+        private static IEnumerable EnumerateFactions(GeoRuntime rt)
+        {
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo != null && _factionsField != null && _factionsField.GetValue(geo) is IEnumerable facs)
+                    return facs;
+            }
+            catch { }
+            return new object[0];
+        }
+
+        /// <summary>One faction's schedule entries for <paramref name="site"/> across BOTH families
+        /// (phoenix-base + ancient-site lists). Yields the live SiteAttackSchedule objects.</summary>
+        private static List<object> FindSchedulesForSite(object faction, object site)
+        {
+            var found = new List<object>();
+            if (faction == null || site == null || _attackSiteField == null) return found;
+            foreach (var prop in new[] { _factionPxScheduleProp, _factionAncientScheduleProp })
+            {
+                if (prop == null) continue;
+                object list = null;
+                try { list = prop.GetValue(faction, null); } catch { }
+                if (!(list is IEnumerable schedules)) continue;
+                foreach (var s in schedules)
+                {
+                    if (s == null) continue;
+                    try { if (ReferenceEquals(_attackSiteField.GetValue(s), site)) found.Add(s); }
+                    catch { }
+                }
+            }
+            return found;
+        }
+
+        private static bool ScheduleArmed(object schedule)
+        {
+            try { return (bool)(_attackHasScheduledProp?.GetValue(schedule, null) ?? false); }
+            catch { return false; }
+        }
+
+        private static long ScheduleTicks(PropertyInfo prop, FieldInfo field, object schedule)
+        {
+            try
+            {
+                object tu = prop != null ? prop.GetValue(schedule, null) : field?.GetValue(schedule);
+                if (tu != null && _timeUnitTimeSpanProp != null)
+                    return ((TimeSpan)_timeUnitTimeSpanProp.GetValue(tu, null)).Ticks;
+            }
+            catch { }
+            return 0L;
+        }
+
+        /// <summary>
+        /// HOST: read the pre-attack schedule tail for a live site. Null = NO schedule entry exists for this
+        /// site on any faction (nothing ever armed → nothing to clear); else one wire entry per ARMED
+        /// schedule (possibly zero = honest clear after the attack fired/unscheduled).
+        /// </summary>
+        public static GeoAttackTail ReadAttackTail(GeoRuntime rt, object site)
+        {
+            try
+            {
+                EnsureAttackTail();
+                if (site == null || _attackScheduleType == null || _attackSiteField == null) return null;
+                bool anyEntry = false;
+                var entries = new List<GeoAttackEntry>();
+                foreach (var faction in EnumerateFactions(rt))
+                {
+                    if (faction == null) continue;
+                    var schedules = FindSchedulesForSite(faction, site);
+                    if (schedules.Count == 0) continue;
+                    anyEntry = true;
+                    string facGuid = "";
+                    try { facGuid = DefReflection.GetGuid(_factionDefProp?.GetValue(faction, null)) ?? ""; }
+                    catch { facGuid = ""; }
+                    foreach (var s in schedules)
+                    {
+                        if (!ScheduleArmed(s)) continue;
+                        long at = ScheduleTicks(null, _attackScheduledAtField, s);
+                        long forT = ScheduleTicks(_attackScheduledForProp, null, s);
+                        entries.Add(new GeoAttackEntry(facGuid, at, forT));
+                    }
+                }
+                return anyEntry ? new GeoAttackTail(entries.ToArray()) : null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadAttackTail failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: mirror the pre-attack schedule state — VALUE-ONLY, idempotent, last-wins.
+        ///   • Not-carried entries CLEAR: any armed schedule for this site whose faction is absent from the
+        ///     tail is unscheduled (producer stop + NextUpdateAttack=Never) — covers fired/cancelled attacks.
+        ///   • Carried entries STAMP find-or-create (public ctor + direct list add, family by site type) and
+        ///     re-raise the native <c>SiteAttackScheduled</c> ONLY on a genuine arm/re-arm (idempotent
+        ///     re-snapshots never duplicate the toast/timer), with <c>GeoscapeView.SuppressEvents</c> flipped
+        ///     true around the raise (no client pause-relay side effects — see region banner).
+        /// Null tail = not carried → no-op. Never RescheduleAttack (no Timing producer on the mirror).
+        /// </summary>
+        public static void ApplyAttackTail(GeoRuntime rt, object site, GeoAttackTail tail)
+        {
+            if (site == null || tail == null) return;
+            try
+            {
+                EnsureAttackTail();
+                if (_attackScheduleType == null || _attackNextUpdateField == null
+                    || _nextUpdateAbsolute == null || _timeUnitFromTimeSpan == null) return;
+
+                foreach (var faction in EnumerateFactions(rt))
+                {
+                    if (faction == null) continue;
+                    string facGuid = "";
+                    try { facGuid = DefReflection.GetGuid(_factionDefProp?.GetValue(faction, null)) ?? ""; }
+                    catch { facGuid = ""; }
+
+                    GeoAttackEntry carried = null;
+                    for (int i = 0; i < tail.Entries.Length; i++)
+                        if (tail.Entries[i].AttackerFactionDefGuid == facGuid) { carried = tail.Entries[i]; break; }
+
+                    var schedules = FindSchedulesForSite(faction, site);
+
+                    if (carried == null)
+                    {
+                        // Not carried for this faction → clear any armed mirror (attack fired/unscheduled).
+                        foreach (var s in schedules)
+                        {
+                            if (!ScheduleArmed(s)) continue;
+                            try { _attackUnscheduleMethod?.Invoke(s, null); } catch { }
+                            if (_nextUpdateNever != null)
+                            {
+                                try { _attackNextUpdateField.SetValue(s, _nextUpdateNever); }
+                                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAttackTail clear failed (skipped): " + ex.Message); }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Carried → find-or-create this faction's schedule entry for the site.
+                    object schedule = schedules.Count > 0 ? schedules[0] : null;
+                    if (schedule == null)
+                    {
+                        if (_attackScheduleCtor == null) continue;
+                        // Family by site type (sparse enum int): PhoenixBase → _phoenixBaseTargets, the
+                        // ancient family (AncientHarvest/AncientRefinery) → _ancientSiteTargets — the same
+                        // lists the native schedulers use (GeoFaction.cs:105-107).
+                        int siteType = 0;
+                        try { siteType = Convert.ToInt32(_typeProp?.GetValue(site, null) ?? 0); } catch { }
+                        var listField = siteType == SiteTypePhoenixBase ? _factionPxTargetsField : _factionAncientTargetsField;
+                        if (listField == null || !(listField.GetValue(faction) is IList targets)) continue;
+                        try
+                        {
+                            schedule = _attackScheduleCtor.Invoke(new[] { site, faction });
+                            targets.Add(schedule);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAttackTail create failed (skipped): " + ex.Message);
+                            continue;
+                        }
+                    }
+
+                    // Idempotence: an unchanged armed schedule is a no-op (re-snapshot must not re-toast).
+                    bool prevArmed = ScheduleArmed(schedule);
+                    long prevFor = ScheduleTicks(_attackScheduledForProp, null, schedule);
+                    if (prevArmed && prevFor == carried.ScheduledForTicks) continue;
+
+                    try
+                    {
+                        try { _attackUnscheduleMethod?.Invoke(schedule, null); } catch { }  // drop any stale producer (save-load re-arm)
+                        object at = _timeUnitFromTimeSpan.Invoke(null, new object[] { TimeSpan.FromTicks(carried.ScheduledAtTicks) });
+                        object forT = _timeUnitFromTimeSpan.Invoke(null, new object[] { TimeSpan.FromTicks(carried.ScheduledForTicks) });
+                        _attackScheduledAtField?.SetValue(schedule, at);
+                        _attackNextUpdateField.SetValue(schedule, _nextUpdateAbsolute.Invoke(null, new[] { forT }));
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAttackTail stamp failed (skipped): " + ex.Message);
+                        continue;
+                    }
+
+                    RaiseSiteAttackScheduled(rt, faction, schedule);
+                    Debug.Log("[Multiplayer] GeoSiteReflection.ApplyAttackTail site=" + GetSiteId(site)
+                              + " attacker=" + facGuid + " for=" + carried.ScheduledForTicks + " → armed (pure mirror)");
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyAttackTail failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// CLIENT: re-raise the native <c>GeoFaction.SiteAttackScheduled</c> so GeoscapeLog renders the
+        /// vanilla telegraph (warning toast + status-bar countdown) off the freshly-stamped schedule —
+        /// with <c>GeoscapeView.SuppressEvents</c> pinned true for the synchronous dispatch so the
+        /// HighPriority entry cannot RequestGamePause (→ pause-relay poison, see region banner). TFTV's
+        /// OnFactionSiteAttackScheduled prefix suppresses the handler identically on both sides.
+        /// </summary>
+        private static void RaiseSiteAttackScheduled(GeoRuntime rt, object faction, object schedule)
+        {
+            try
+            {
+                if (_factionAttackEventField == null) return;
+                var del = _factionAttackEventField.GetValue(faction) as Delegate;
+                if (del == null) return;   // no subscriber (log not wired yet) — state is stamped, timer restores on next log init
+                object view = null;
+                bool prevSuppress = false, flipped = false;
+                try
+                {
+                    var geo = rt?.GeoLevel();
+                    if (geo != null && _geoViewProp != null) view = _geoViewProp.GetValue(geo, null);
+                    if (view != null && _viewSuppressEventsField != null)
+                    {
+                        prevSuppress = (bool)_viewSuppressEventsField.GetValue(view);
+                        _viewSuppressEventsField.SetValue(view, true);
+                        flipped = true;
+                    }
+                }
+                catch { flipped = false; }
+                try { del.DynamicInvoke(faction, schedule); }
+                finally
+                {
+                    if (flipped)
+                    {
+                        try { _viewSuppressEventsField.SetValue(view, prevSuppress); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.RaiseSiteAttackScheduled failed: " + ex.Message); }
         }
 
         /// <summary>The owning <c>GeoSite</c> of a live <c>GeoMission</c> (<c>GeoMission.Site</c>,
