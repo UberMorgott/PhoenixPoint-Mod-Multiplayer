@@ -26,6 +26,7 @@ namespace Multiplayer.Network.Sync
         public const byte UnlockChannel = 3;       // research-unlock availability (facilities/manufacture/augmentations)
         public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
         public const byte GeoSiteChannel = 5;       // GeoSite identity mirror (Owner/Type/State/name/EncounterID) — Case A
+        public const byte GeoVehicleChannel = 6;    // mid-session vehicle-creation mirror (spawn inert mirror of a host-acquired craft; ongoing 0xA5/0xA6/0xA7 then drive it)
 
         // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───
         // Migrated geoscape host→all messages ride the SAME 0x67 SurfaceRouter chokepoint as tactical, on ids

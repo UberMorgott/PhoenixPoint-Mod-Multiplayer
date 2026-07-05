@@ -158,6 +158,7 @@ namespace Multiplayer.Network.Sync.State
                     var rec = new GeoVehiclePos(ownerId, id, heading.x, heading.y, heading.z,
                                                 pivotRot.x, pivotRot.y, pivotRot.z, pivotRot.w);
                     liveKeys.Add(rec.Key);
+                    GeoVehicleChannel.HostObserve(rec, v);   // Inc4 S4: NEW composite key → mid-session creation channel #6
                     string sig = GeoVehiclePos.Signature(rec);
                     if (_lastSig.TryGetValue(rec.Key, out var prev) && prev == sig) continue;   // unchanged → skip (idle = 0 bytes)
                     _lastSig[rec.Key] = sig;
@@ -172,6 +173,10 @@ namespace Multiplayer.Network.Sync.State
                     foreach (var k in _lastSig.Keys) if (!liveKeys.Contains(k)) stale.Add(k);
                     foreach (var k in stale) _lastSig.Remove(k);
                 }
+
+                // Inc4 S4: prune the creation-channel's known keys in lock-step so a re-created vehicle re-emits its
+                // identity (runs even when nothing moved, hence before the changed==0 early return).
+                GeoVehicleChannel.HostPrune(liveKeys);
 
                 if (changed.Count == 0) return;
 

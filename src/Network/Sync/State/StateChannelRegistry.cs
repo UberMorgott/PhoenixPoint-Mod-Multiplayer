@@ -19,6 +19,7 @@ namespace Multiplayer.Network.Sync.State
             Register(new UnlockChannel());      // #3 — research-unlock availability (facilities/manufacture/augmentations)
             Register(new DiplomacyChannel());   // #4 — faction diplomacy / reputation (value-only mirror)
             Register(new GeoSiteChannel());     // #5 — GeoSite identity mirror (Owner/Type/State/name/EncounterID), Case A
+            Register(new GeoVehicleChannel());  // #6 — mid-session vehicle-creation mirror (host-acquired craft → inert client mirror)
         }
 
         private void Register(IStateChannel channel)

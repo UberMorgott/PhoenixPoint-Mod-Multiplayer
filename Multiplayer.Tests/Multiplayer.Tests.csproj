@@ -113,6 +113,12 @@
          change signature. The game glue (GeoVehicleExploreMirror host-read/client-render + GeoVehicleExploreReflection)
          binds game types and is NOT linked (mirrors GeoVehicleTravelMeta vs GeoVehicleTravelMirror). -->
     <Compile Include="..\src\Network\Sync\State\GeoVehicleExploreMeta.cs"><Link>Sync\State\GeoVehicleExploreMeta.cs</Link></Compile>
+    <!-- Inc4 S4 mid-session vehicle-creation channel (#6, GeoState 0xA1): pure, Unity-free creation-identity DTO +
+         wire codec, and the pure host new-key poll-diff tracker + client spawn-idempotence predicate. The engine
+         glue (GeoVehicleChannel, GeoVehicleIdentityReflection spawn/read) binds game types + NetworkEngine and is
+         NOT linked (mirrors GeoVehicleSnapshot/GeoSiteSnapshot vs their reflection). -->
+    <Compile Include="..\src\Network\Sync\State\GeoVehicleIdentity.cs"><Link>Sync\State\GeoVehicleIdentity.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\GeoVehicleIdentityTracker.cs"><Link>Sync\State\GeoVehicleIdentityTracker.cs</Link></Compile>
     <!-- Event-reward DISPLAY snapshot codec (pure, Unity-free) for wire round-trip tests. The host-read
          (BuildFromReward) + client-render (RewardDisplayRender) bind game types and are NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\RewardDisplaySnapshot.cs"><Link>Sync\State\RewardDisplaySnapshot.cs</Link></Compile>
