@@ -301,6 +301,10 @@ namespace Multiplayer.Network.Sync
                     try
                     {
                         _activate.Invoke(ability, new[] { target });
+                        // Host stale-Explore-button fix: the native click-path hides the POI context menu after
+                        // Activate (UIStateVehicleSelected.OnContextualItemSelected:431); this programmatic apply
+                        // skips it, so do the SAME native hide if the host's menu is open on this site.
+                        GeoSiteContextMenu.HideIfShowingSite(rt, csId);
                         Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
                             + " currentSite=" + csId + " → ExploreSiteAbility.Activate (native path)");
                         return true;
@@ -310,6 +314,8 @@ namespace Multiplayer.Network.Sync
 
                 if (_startExploringMethod == null) return false;
                 _startExploringMethod.Invoke(vehicle, null);
+                // Same stale-Explore-button fix on the direct fallback path (see native-path branch above).
+                GeoSiteContextMenu.HideIfShowingSite(rt, csId);
                 Debug.Log("[Multiplayer][geo] host explore: vehicle " + ownerId.ToString("X8") + ":" + vehicleId
                     + " currentSite=" + csId + " → StartExploringCurrentSite (direct path; native probe a/t/c="
                     + abilityResolved + "/" + targetResolved + "/" + canActivate + ")");
