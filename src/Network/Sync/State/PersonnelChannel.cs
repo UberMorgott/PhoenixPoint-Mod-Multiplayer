@@ -1,25 +1,33 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
-    /// State channel #9 — Phoenix roster COMPOSITION mirror (PS1 of the 2026-07-05 personnel-sync spec).
-    /// The client geoscape sim is frozen, so after join its roster CONTAINMENT never changes: a host
-    /// base↔craft assignment, hire, dismissal or transfer leaves the client's <c>_tacUnits</c> stale
-    /// forever (audit §2). The host re-snapshots the FULL per-site membership (ordered <c>GeoUnitId</c>s
-    /// of every Phoenix site's <c>_tacUnits</c>) whenever any membership seam fires; the client
-    /// reconciles each mirrored container VALUE-ONLY via <see cref="RosterReconcile"/> — direct list
-    /// mutation, never native <c>AddCharacter</c>/<c>RemoveCharacter</c> (their cascade is sim on the
-    /// frozen mirror). Vehicle CREW rides the #6 crew tail (one writer per field: #9 = site membership
-    /// only). Codec + reconcile core live in <see cref="PersonnelSnapshot"/> (pure, unit-tested);
-    /// <see cref="PersonnelReflection"/> is the bridge. Mirrors <see cref="GeoSiteChannel"/>.
+    /// State channel #9 — Phoenix roster mirror (2026-07-05 personnel-sync spec, PS1 + PS2).
+    /// The client geoscape sim is frozen, so after join its roster never changes on its own:
+    /// • PS1 (membership): a host base↔craft assignment, hire, dismissal or transfer leaves the client's
+    ///   <c>_tacUnits</c> stale forever (audit §2). The host re-snapshots the FULL per-site membership
+    ///   (ordered <c>GeoUnitId</c>s) whenever any membership seam fires; the client reconciles each
+    ///   container VALUE-ONLY via <see cref="RosterReconcile"/> — never native AddCharacter/RemoveCharacter.
+    ///   Vehicle CREW rides the #6 crew tail (one writer per field: #9 = site membership only).
+    /// • PS2 (live-state): per CHANGED soldier the flush appends a whole-<c>GeoCharacter</c> game-Serializer
+    ///   blob record (HP/stamina/fatigue/progression/equipment/augment/corruption/bodypart-HP — the
+    ///   self-contained [SerializeType(Version=6)] snapshot unit). Host: dirty seams
+    ///   (<see cref="MarkSoldierStateDirtyExternal"/>) + the hourly bulk mark
+    ///   (<see cref="MarkAllSoldiersStateDirtyExternal"/>) drain through the pure
+    ///   <see cref="PersonnelStateFlush"/> — FNV-1a-64 blob-hash skip (unchanged soldiers ship zero bytes,
+    ///   R3) + a per-flush byte budget (EncodeStateSync u16 cap; overflow re-queues and drains next tick
+    ///   via the AttachHost re-mark — the MistChannel pump pattern). Client: decode via
+    ///   <see cref="PersonnelBlob"/> (game Serializer + own-Timing pump, R2) and value-copy onto the
+    ///   existing instance via <see cref="PersonnelReflection.ApplySoldierState"/> (R1 fallback path —
+    ///   RecreateFromAnotherCharacter is a new-instance factory, not an in-place copy). Failures degrade
+    ///   to notify: log + keep the previous soldier state, never throw.
     ///
-    /// Dirty triggers: the PS1 Harmony seams (container <c>AddCharacter</c>/<c>RemoveCharacter</c> on
-    /// GeoVehicle + GeoSite — taxonomy §8; hire/gift/manufacture/transfer all funnel through them) call
-    /// <see cref="MarkSoldierDirtyExternal"/> on the live host-attached channel. Marks coalesce per
-    /// SyncEngine tick; the flush ships the WHOLE Phoenix site-membership set (small — ids only), so a
-    /// multi-container transfer lands atomically in ONE snapshot.
+    /// Dirty triggers: PS1 membership seams (container Add/RemoveCharacter, PersonnelMembershipPatches)
+    /// and PS2 state seams (ApllyTacticalResult/SetItems/Heal/SetInjured/DamageBodyPart/AddProgression +
+    /// the BaseHourlyUpdate bulk driver, PersonnelStatePatches). Marks coalesce per SyncEngine tick.
     /// </summary>
     public sealed class PersonnelChannel : IStateChannel
     {
@@ -31,10 +39,28 @@ namespace Multiplayer.Network.Sync.State
         private static PersonnelChannel _live;
 
         // GeoUnitIds changed since the last flush (0 = seed/unresolved sentinel — the flush is full-set
-        // regardless; the set is the coalesced dirty TRIGGER + diagnostic, and PS2 will drain it for
-        // per-soldier blob emission). Own lock: hooks fire on the host sim, Snapshot drains (swap-then-clear).
+        // regardless; the set is the coalesced dirty TRIGGER + diagnostic). Own lock: hooks fire on the
+        // host sim, Snapshot drains (swap-then-clear).
         private readonly HashSet<long> _dirty = new HashSet<long>();
+        // PS2: soldiers whose live-state blob must (re-)emit — per-id records, unlike the full-set
+        // membership block. Budget-deferred ids return here after the flush (drained next tick).
+        private readonly HashSet<long> _stateDirty = new HashSet<long>();
+        // PS2: hourly heal/stamina/train sweep — ONE bulk flag instead of enumerating the roster inside
+        // the Harmony seam; expanded to all live ids at flush time, coalescing any number of hourly
+        // marks in a tick into one flush (spec §3).
+        private bool _stateBulk;
         private readonly object _dirtyLock = new object();
+
+        // Host-only: per-soldier hash of the last EMITTED blob (FNV-1a 64) — the hourly whole-roster
+        // sweep re-blobs dirty soldiers but only CHANGED bytes ship (R3). Deliberately NOT seeded at
+        // AttachHost: the join blob already carries the whole roster, so pre-existing soldiers emit
+        // nothing until a state seam actually fires; the first post-seam emit doubles as drift heal
+        // (and seeding would cost a full-roster serialize hitch on every rebind boundary).
+        private readonly Dictionary<long, ulong> _lastSentBlobHash = new Dictionary<long, ulong>();
+
+        // Per-flush byte budget for PS2 state records: EncodeStateSync's u16 len (65535) is the hard
+        // wire cap; 24 KB mirrors the MistChannel-proven per-message bound (MistChannel.ChunkBytes).
+        private const int StateBytesPerFlush = 24 * 1024;
 
         private object _faction;   // bound GeoPhoenixFaction instance (rebind-by-instance guard)
 
@@ -49,34 +75,122 @@ namespace Multiplayer.Network.Sync.State
             NetworkEngine.Instance?.Sync?.MarkChannelDirty(SurfaceIds.PersonnelChannel);
         }
 
+        /// <summary>Out-of-band host dirty-mark (PS2 state Harmony seams): this soldier's live-state blob
+        /// must (re-)emit. No-op when not host-attached; id 0 (read miss) is useless for a per-id record
+        /// and is dropped here (the flush core drops it too).</summary>
+        public static void MarkSoldierStateDirtyExternal(long geoUnitId)
+        {
+            var ch = _live;
+            if (ch == null || geoUnitId == 0) return;
+            lock (ch._dirtyLock) { ch._stateDirty.Add(geoUnitId); }
+            NetworkEngine.Instance?.Sync?.MarkChannelDirty(SurfaceIds.PersonnelChannel);
+        }
+
+        /// <summary>Out-of-band host bulk mark (hourly heal/stamina/train driver): every live Phoenix
+        /// soldier becomes state-dirty at the next flush. Many marks per tick coalesce into ONE flush;
+        /// the blob-hash skip then culls the unchanged majority (R3).</summary>
+        public static void MarkAllSoldiersStateDirtyExternal()
+        {
+            var ch = _live;
+            if (ch == null) return;
+            lock (ch._dirtyLock) { ch._stateBulk = true; }
+            NetworkEngine.Instance?.Sync?.MarkChannelDirty(SurfaceIds.PersonnelChannel);
+        }
+
         public byte[] Snapshot(GeoRuntime rt)
         {
-            int dirtyCount;
+            int membershipDirty;
+            bool bulk;
+            List<long> stateIds;
             lock (_dirtyLock)
             {
-                if (_dirty.Count == 0) return null;   // nothing changed → no payload (FlushChannel no-ops on null)
-                dirtyCount = _dirty.Count;
+                if (_dirty.Count == 0 && _stateDirty.Count == 0 && !_stateBulk) return null;
+                membershipDirty = _dirty.Count;
                 _dirty.Clear();
+                bulk = _stateBulk;
+                _stateBulk = false;
+                stateIds = new List<long>(_stateDirty);
+                _stateDirty.Clear();
             }
-            var rosters = PersonnelReflection.SnapshotSiteRosters(rt);
-            if (rosters == null || rosters.Count == 0) return null;   // mid-load / no faction → next mark re-arms
+
             var snap = new PersonnelSnapshot();
-            snap.Sites.AddRange(rosters);
-            Debug.Log("[Multiplayer] PersonnelChannel flush sites=" + rosters.Count + " dirtyUnits=" + dirtyCount);
+            if (membershipDirty > 0)
+            {
+                var rosters = PersonnelReflection.SnapshotSiteRosters(rt);
+                if (rosters != null) snap.Sites.AddRange(rosters);
+                if (snap.Sites.Count > 0)
+                    Debug.Log("[Multiplayer] PersonnelChannel flush sites=" + snap.Sites.Count + " dirtyUnits=" + membershipDirty);
+            }
+
+            // PS2 state records — guarded so a state-side failure can never kill the membership flush.
+            try
+            {
+                if (stateIds.Count > 0 || bulk)
+                {
+                    var index = PersonnelReflection.BuildCharacterIndex(rt);
+                    if (bulk)
+                    {
+                        var seen = new HashSet<long>(stateIds);
+                        foreach (var id in index.ById.Keys)
+                            if (seen.Add(id)) stateIds.Add(id);
+                    }
+                    var flush = PersonnelStateFlush.Run(stateIds,
+                        id => index.ById.TryGetValue(id, out var soldier) ? PersonnelBlob.Write(soldier) : null,
+                        _lastSentBlobHash, StateBytesPerFlush);
+                    snap.States.AddRange(flush.Emit);
+                    if (flush.Deferred.Count > 0)
+                        lock (_dirtyLock) { foreach (var d in flush.Deferred) _stateDirty.Add(d); }
+                    if (flush.Emit.Count > 0 || flush.Deferred.Count > 0 || flush.Failed > 0 || flush.Oversized > 0)
+                        Debug.Log("[Multiplayer] PersonnelChannel state flush emit=" + flush.Emit.Count
+                                  + " skipUnchanged=" + flush.SkippedUnchanged + " deferred=" + flush.Deferred.Count
+                                  + " failed=" + flush.Failed + " oversized=" + flush.Oversized + (bulk ? " (bulk)" : ""));
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelChannel state flush failed: " + ex.Message); }
+
+            if (snap.Sites.Count == 0 && snap.States.Count == 0) return null;   // mid-load / all skipped → next mark re-arms
             return PersonnelSnapshot.Encode(snap);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = PersonnelSnapshot.Decode(data);
-            if (snap == null || snap.Sites.Count == 0) return;
-            Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count);
+            if (snap == null || (snap.Sites.Count == 0 && snap.States.Count == 0)) return;
+            Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count + " states=" + snap.States.Count);
             // ONE index for the whole payload: every Phoenix soldier resolved across vehicles + sites.
             // RosterReconcile Contains-guards entries that a preceding record's move made stale, and the
             // host emits each soldier in at most one container per snapshot (single-writer truth).
             var index = PersonnelReflection.BuildCharacterIndex(rt);
             foreach (var rec in snap.Sites)
                 PersonnelReflection.ApplySiteRoster(rt, rec, index);
+            // PS2 live-state AFTER membership (a just-transferred soldier is already in its mirrored
+            // container; ById keys instances, so the reconcile above never invalidates it). Every failure
+            // degrades to notify — log + keep the soldier's previous state, never throw into the engine.
+            foreach (var st in snap.States)
+            {
+                if (!index.ById.TryGetValue(st.UnitId, out var existing))
+                {
+                    Debug.Log("[Multiplayer] PersonnelChannel: live-state for GeoUnitId " + st.UnitId
+                              + " — soldier not live on this client, skipped");
+                    continue;
+                }
+                var decoded = PersonnelBlob.Read(st.Blob);
+                if (decoded == null)
+                {
+                    Debug.LogError("[Multiplayer] PersonnelChannel: blob decode failed for GeoUnitId " + st.UnitId
+                                   + " — soldier keeps previous state");
+                    continue;
+                }
+                long decodedId = PersonnelReflection.ReadUnitId(decoded);
+                if (decodedId != 0 && decodedId != st.UnitId)
+                {
+                    Debug.LogError("[Multiplayer] PersonnelChannel: blob id mismatch (" + decodedId + " != "
+                                   + st.UnitId + ") — record skipped");
+                    continue;
+                }
+                if (PersonnelReflection.ApplySoldierState(existing, decoded))
+                    Debug.Log("[Multiplayer] PersonnelChannel: applied live-state for GeoUnitId " + st.UnitId);
+            }
         }
 
         public void AttachHost(SyncEngine eng)
@@ -86,6 +200,10 @@ namespace Multiplayer.Network.Sync.State
             // WalletWatcher lesson. No event subscription here: the dirty sources are the static Harmony
             // membership seams routed through _live, so rebinding = retargeting _live + re-seeding.
             if (eng == null) return;
+            // PS2 drain pump: budget-deferred / bulk state marks must keep the channel dirty so the flush
+            // loop (which runs after this AttachHost pass each host Tick) ships the next slice this very
+            // tick — the MistChannel._sendQueue pattern.
+            lock (_dirtyLock) { if (_stateDirty.Count > 0 || _stateBulk) eng.MarkChannelDirty(ChannelId); }
             var fac = GeoRuntime.Instance.PhoenixFaction();
             if (fac == null) return;                       // not in geoscape yet / mid-load
             if (ReferenceEquals(fac, _faction)) return;    // already bound to this instance
@@ -95,6 +213,7 @@ namespace Multiplayer.Network.Sync.State
             // Seed a baseline flush on (re)bind: the join blob / reloaded save already matches, so the
             // client reconcile is an idempotent no-op — but a reload boundary that raced a membership
             // change re-converges here. Sentinel 0 arms the local dirty gate for the engine flush.
+            // (State blobs deliberately NOT seeded — see _lastSentBlobHash.)
             lock (_dirtyLock) { _dirty.Add(0); }
             eng.MarkChannelDirty(ChannelId);
         }
@@ -103,7 +222,8 @@ namespace Multiplayer.Network.Sync.State
         {
             _faction = null;
             if (_live == this) _live = null;
-            lock (_dirtyLock) { _dirty.Clear(); }
+            lock (_dirtyLock) { _dirty.Clear(); _stateDirty.Clear(); _stateBulk = false; }
+            _lastSentBlobHash.Clear();
         }
     }
 }

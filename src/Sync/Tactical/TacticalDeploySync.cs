@@ -1029,15 +1029,19 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveGameSerializer failed: " + ex); return null; }
         }
 
-        private static byte[] SerializeGraph(object[] graph)
+        // quiet=true (PersonnelBlob per-soldier round-trips): skip the probe logs + the host
+        // self-roundtrip — a per-soldier self-read would DOUBLE the serializer work on every hourly
+        // roster flush. Default (false) keeps the tac.deploy path byte- and log-identical.
+        internal static byte[] SerializeGraph(object[] graph, bool quiet = false)
         {
             EnsureReflection();
             if (_serializerType == null || _byRefType == null || _timeSliceType == null) return null;
             try
             {
                 // PROBE: host input graph (element count + concrete type names).
-                Debug.Log("[Multiplayer][tac] Write input graph count=" + (graph?.Length ?? -1) +
-                          " types=[" + GraphTypeNames(graph) + "]");
+                if (!quiet)
+                    Debug.Log("[Multiplayer][tac] Write input graph count=" + (graph?.Length ?? -1) +
+                              " types=[" + GraphTypeNames(graph) + "]");
                 // Use the engine's configured Serializer (Context = SerializationComponent) — see
                 // ResolveGameSerializer. A `new Serializer(null)` writes Def refs that the paired Read can
                 // never reconstruct (null Context → NRE in BaseDef.ResolveOrCreateBaseDef → empty graph).
@@ -1071,14 +1075,15 @@ namespace Multiplayer.Sync.Tactical
                 byte[] outBytes = valueField?.GetValue(dest) as byte[];
 
                 // PROBE: output length + checksum (host-sent bytes, compare to client-received bytesHash).
-                Debug.Log("[Multiplayer][tac] Write output destLen=" + (outBytes?.Length ?? -1) +
-                          " bytesHash " + BytesHash(outBytes));
+                if (!quiet)
+                    Debug.Log("[Multiplayer][tac] Write output destLen=" + (outBytes?.Length ?? -1) +
+                              " bytesHash " + BytesHash(outBytes));
 
                 // PROBE: in-process host self-roundtrip. Read our OWN bytes right back. If this returns a
                 // non-empty graph the Read contract is sound and the empty-on-client is an env/type problem;
                 // if it returns null the contract itself is broken. Guarded so it runs once (not inside the
                 // self-test's own DeserializeGraph — which never calls back into SerializeGraph anyway).
-                if (outBytes != null && !_inSelfRoundtrip)
+                if (outBytes != null && !_inSelfRoundtrip && !quiet)
                 {
                     _inSelfRoundtrip = true;
                     try
@@ -1098,7 +1103,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SerializeGraph failed: " + ex); return null; }
         }
 
-        private static object DeserializeGraph(byte[] bytes, Type expectedType)
+        // quiet=true (PersonnelBlob): skip the probe logs (per-soldier hourly reads would spam).
+        internal static object DeserializeGraph(byte[] bytes, Type expectedType, bool quiet = false)
         {
             EnsureReflection();
             if (_serializerType == null || _byRefType == null || _timeSliceType == null) return null;
@@ -1107,8 +1113,9 @@ namespace Multiplayer.Sync.Tactical
             {
                 // PROBE: checksum of the bytes handed to Read (client-received OR host self-test input).
                 // Compare to the host "Write output bytesHash" to confirm byte-identity end-to-end.
-                Debug.Log("[Multiplayer][tac] Read input bytesHash " + BytesHash(bytes) +
-                          " expectedType=" + (expectedType?.Name ?? "any"));
+                if (!quiet)
+                    Debug.Log("[Multiplayer][tac] Read input bytesHash " + BytesHash(bytes) +
+                              " expectedType=" + (expectedType?.Name ?? "any"));
                 // MUST be the same engine-configured Serializer the host wrote with (Context =
                 // SerializationComponent). A null-Context Serializer NREs in BaseDef.ResolveOrCreateBaseDef
                 // while reconstructing any Def ref → silent abort → empty graph. See ResolveGameSerializer.
@@ -1138,10 +1145,11 @@ namespace Multiplayer.Sync.Tactical
                 // PROBE (moved BEFORE the null-guard so it ALWAYS fires): distinguish empty-graph (Value==null)
                 // from a typed-but-mismatched graph. Materialize once when non-null; reuse below.
                 List<object> graphList = result == null ? null : new List<object>(result);
-                Debug.Log("[Multiplayer][tac] Read graph " +
-                          (result == null ? "NULL (ByRef.Value==null → empty graph)"
-                                          : ("count=" + graphList.Count + " types=[" +
-                                             string.Join(",", graphList.ConvertAll(o => o?.GetType().Name).ToArray()) + "]")));
+                if (!quiet)
+                    Debug.Log("[Multiplayer][tac] Read graph " +
+                              (result == null ? "NULL (ByRef.Value==null → empty graph)"
+                                              : ("count=" + graphList.Count + " types=[" +
+                                                 string.Join(",", graphList.ConvertAll(o => o?.GetType().Name).ToArray()) + "]")));
                 if (result == null) return null;
                 foreach (var o in graphList)
                     if (o != null && (expectedType == null || expectedType.IsInstanceOfType(o))) return o;

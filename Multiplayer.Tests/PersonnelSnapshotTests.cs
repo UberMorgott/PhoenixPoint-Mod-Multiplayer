@@ -118,6 +118,123 @@ public class PersonnelSnapshotTests
     [Fact]
     public void Decode_Null_ReturnsNull() => Assert.Null(PersonnelSnapshot.Decode(null));
 
+    // ─── PS2 live-state block (whole-GeoCharacter blob tail, bit0) ──────────────────────────────────────────
+
+    [Fact]
+    public void RoundTrip_StateRecords_PreserveIdAndBlobBytes()
+    {
+        var snap = new PersonnelSnapshot();
+        snap.Sites.Add(new PersonnelSiteRoster(3, new long[] { 7 }));
+        snap.States.Add(new PersonnelSoldierState(7, new byte[] { 1, 2, 3, 4, 5 }));
+        snap.States.Add(new PersonnelSoldierState(9, new byte[0] ));   // zero-length blob is framable
+        snap.States.Add(new PersonnelSoldierState(11, new byte[] { 0xFF }));
+
+        var outSnap = PersonnelSnapshot.Decode(PersonnelSnapshot.Encode(snap));
+
+        Assert.NotNull(outSnap);
+        Assert.Single(outSnap.Sites);
+        Assert.Equal(3, outSnap.States.Count);
+        Assert.Equal(7, outSnap.States[0].UnitId);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, outSnap.States[0].Blob);
+        Assert.Equal(9, outSnap.States[1].UnitId);
+        Assert.Empty(outSnap.States[1].Blob);
+        Assert.Equal(11, outSnap.States[2].UnitId);
+        Assert.Equal(new byte[] { 0xFF }, outSnap.States[2].Blob);
+    }
+
+    [Fact]
+    public void RoundTrip_StateOnlyFlush_EmptySitesIsHonest()
+    {
+        // PS2-only flush: siteCount=0, states present (spec §2.2 no-tail invariant, both blocks fixed).
+        var snap = new PersonnelSnapshot();
+        snap.States.Add(new PersonnelSoldierState(42, new byte[] { 9, 9 }));
+
+        var outSnap = PersonnelSnapshot.Decode(PersonnelSnapshot.Encode(snap));
+
+        Assert.NotNull(outSnap);
+        Assert.Empty(outSnap.Sites);
+        Assert.Single(outSnap.States);
+        Assert.Equal(42, outSnap.States[0].UnitId);
+    }
+
+    [Fact]
+    public void Encode_NoStates_EndsWithZeroStateCount_LegacyPin()
+    {
+        // PS1-shape payload stays byte-stable: a membership-only flush still trails [u16 stateCount=0],
+        // exactly what the pre-PS2 encoder wrote (legacy decoders keep working).
+        var snap = new PersonnelSnapshot();
+        snap.Sites.Add(new PersonnelSiteRoster(1, new long[] { 5 }));
+        byte[] wire = PersonnelSnapshot.Encode(snap);
+        Assert.Equal(0, wire[wire.Length - 2]);
+        Assert.Equal(0, wire[wire.Length - 1]);
+    }
+
+    [Fact]
+    public void Decode_KnownBlobPlusUnknownHigherBits_ParsesBlobSkipsExtras()
+    {
+        // Forward compat: bit0 blob + a future bit1 payload appended after it. The decoder takes the
+        // known blob and recLen-skips the extra bytes (parse-known-then-skip contract).
+        byte[] wire;
+        using (var ms = new MemoryStream())
+        using (var w = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            w.Write((ushort)0);           // siteCount
+            w.Write((ushort)1);           // stateCount
+            w.Write(7L);                  // GeoUnitId
+            w.Write((ushort)(1 + 4 + 3 + 2));   // recLen: flags + blobLen + blob(3) + future payload(2)
+            w.Write((byte)0x03);          // bit0 (blob) + unknown bit1
+            w.Write(3);                   // blobLen
+            w.Write(new byte[] { 10, 20, 30 });
+            w.Write(new byte[] { 0xAA, 0xBB });   // future bit1 payload — must be skipped
+            wire = ms.ToArray();
+        }
+
+        var outSnap = PersonnelSnapshot.Decode(wire);
+
+        Assert.NotNull(outSnap);
+        Assert.Single(outSnap.States);
+        Assert.Equal(7, outSnap.States[0].UnitId);
+        Assert.Equal(new byte[] { 10, 20, 30 }, outSnap.States[0].Blob);
+    }
+
+    [Fact]
+    public void Decode_BlobLenExceedsRecord_ReturnsNull()
+    {
+        // A KNOWN payload that lies about its length is corruption → all-or-nothing reject.
+        byte[] wire;
+        using (var ms = new MemoryStream())
+        using (var w = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            w.Write((ushort)0);           // siteCount
+            w.Write((ushort)1);           // stateCount
+            w.Write(7L);
+            w.Write((ushort)8);           // recLen = flags + blobLen + 3 blob bytes
+            w.Write((byte)0x01);
+            w.Write(20);                  // blobLen 20 > recLen budget
+            w.Write(new byte[] { 1, 2, 3 });
+            wire = ms.ToArray();
+        }
+        Assert.Null(PersonnelSnapshot.Decode(wire));
+    }
+
+    [Fact]
+    public void Encode_OversizeBlob_DroppedNotCorrupted()
+    {
+        // recLen is u16: a blob that cannot be framed is dropped by the encoder (defense-in-depth —
+        // the flush core's MaxBlobWireBytes gate rejects it long before). The rest still encodes.
+        var snap = new PersonnelSnapshot();
+        snap.Sites.Add(new PersonnelSiteRoster(1, new long[] { 5 }));
+        snap.States.Add(new PersonnelSoldierState(5, new byte[70000]));
+        snap.States.Add(new PersonnelSoldierState(6, new byte[] { 1 }));
+
+        var outSnap = PersonnelSnapshot.Decode(PersonnelSnapshot.Encode(snap));
+
+        Assert.NotNull(outSnap);
+        Assert.Single(outSnap.Sites);
+        Assert.Single(outSnap.States);
+        Assert.Equal(6, outSnap.States[0].UnitId);
+    }
+
     // ─── RosterReconcile (value-only membership reconcile core) ─────────────────────────────────────────────
 
     private sealed class Soldier

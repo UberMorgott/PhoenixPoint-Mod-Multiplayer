@@ -47,24 +47,46 @@ namespace Multiplayer.Network.Sync.State
     }
 
     /// <summary>
+    /// PURE record of one soldier's PS2 live-state tail: the whole <c>GeoCharacter</c> written by the
+    /// game's configured Serializer (the <c>TailHasCharacterBlob</c> bit-0 payload). Blob bytes are
+    /// opaque to the codec — serialize/deserialize is the game-bound <c>PersonnelBlob</c> glue.
+    /// </summary>
+    public sealed class PersonnelSoldierState
+    {
+        public readonly long UnitId;
+        public readonly byte[] Blob;   // whole-GeoCharacter game-Serializer graph (never null on emit)
+
+        public PersonnelSoldierState(long unitId, byte[] blob)
+        {
+            UnitId = unitId;
+            Blob = blob;
+        }
+    }
+
+    /// <summary>
     /// Decoded personnel snapshot for state channel #9 — pure data + wire codec, free of any
     /// <c>IStateChannel</c>/<c>SyncEngine</c>/Unity dependency so it is directly unit-testable (mirrors
-    /// <see cref="GeoSiteSnapshot"/>). PS1 carries only the site-roster membership block; the PS2
-    /// live-state block is a versioned optional record array this decoder already SKIPS record-by-record
-    /// (recLen-prefixed, parse-known-then-skip — no known tail bits exist yet), so PS2 can add per-soldier
-    /// payload bits without a wire break.
+    /// <see cref="GeoSiteSnapshot"/>). PS1 = the site-roster membership block; PS2 = the per-soldier
+    /// live-state block (versioned optional tail, bit0 <see cref="TailHasCharacterBlob"/> = whole
+    /// GeoCharacter blob). Bits 1-7 stay RESERVED: payloads append after known ones in ascending bit
+    /// order, and the recLen skip keeps an older decoder tolerant (parse-known-then-skip).
     ///
     /// Wire payload (inside EncodeStateSync(channelId=9, ver, payload)) — BOTH blocks always present
     /// (fixed order), each independently empty:
     ///   [u16 siteCount] { [i32 siteId] [u16 nUnits] [i64 GeoUnitId × nUnits] }*     // PS1 membership, ordered
     ///   [u16 stateCount]{ [i64 GeoUnitId] [u16 recLen] [u8 tailFlags][payloads…] }* // PS2 live-state tail
+    ///   bit0 payload = [u32 blobLen][blob bytes]
     ///   recLen = byte length of tailFlags + payloads, so an older decoder skips a record whose flags
-    ///   carry unknown (future, higher) bits; a truncated record throws → whole payload rejected
+    ///   carry unknown (future, higher) bits; a truncated KNOWN payload throws → whole payload rejected
     ///   (all-or-nothing, the GeoSiteSnapshot extras contract).
     /// </summary>
     public sealed class PersonnelSnapshot
     {
+        /// <summary>tailFlags bit0: record carries a whole-GeoCharacter Serializer blob (PS2).</summary>
+        public const byte TailHasCharacterBlob = 0x01;
+
         public readonly List<PersonnelSiteRoster> Sites = new List<PersonnelSiteRoster>();
+        public readonly List<PersonnelSoldierState> States = new List<PersonnelSoldierState>();
 
         public static byte[] Encode(PersonnelSnapshot snap)
         {
@@ -80,8 +102,23 @@ namespace Multiplayer.Network.Sync.State
                     w.Write((ushort)n);
                     for (int i = 0; i < n; i++) w.Write(s.UnitIds[i]);
                 }
-                // PS2 live-state block: ALWAYS present (fixed order); PS1 emits none.
-                w.Write((ushort)0);
+                // PS2 live-state block: ALWAYS present (fixed order). A null/oversize blob can't be
+                // framed (recLen is u16) — dropped defensively here; the flush core (MaxBlobWireBytes)
+                // is the real gate, so this branch is unreachable in the live channel.
+                var emittable = new List<PersonnelSoldierState>();
+                if (snap.States != null)
+                    foreach (var st in snap.States)
+                        if (st?.Blob != null && 1 + 4 + st.Blob.Length <= ushort.MaxValue)
+                            emittable.Add(st);
+                w.Write((ushort)emittable.Count);
+                foreach (var st in emittable)
+                {
+                    w.Write(st.UnitId);
+                    w.Write((ushort)(1 + 4 + st.Blob.Length));   // recLen = flags + blobLen + blob
+                    w.Write(TailHasCharacterBlob);
+                    w.Write(st.Blob.Length);
+                    w.Write(st.Blob);
+                }
                 return ms.ToArray();
             }
         }
@@ -104,16 +141,41 @@ namespace Multiplayer.Network.Sync.State
                         for (int j = 0; j < n; j++) ids[j] = r.ReadInt64();
                         snap.Sites.Add(new PersonnelSiteRoster(siteId, ids));
                     }
-                    // PS2 live-state block: PS1 knows no tail bits → skip each recLen-prefixed record
-                    // (parse-known-then-skip). A truncated record throws → whole payload rejected.
+                    // PS2 live-state block: parse the known bit0 payload, then skip whatever a future
+                    // higher bit appended (recLen-bounded). A truncated KNOWN payload throws → whole
+                    // payload rejected (all-or-nothing); unknown-bits-only records skip silently.
                     int nStates = r.ReadUInt16();
                     for (int i = 0; i < nStates; i++)
                     {
-                        r.ReadInt64();                      // GeoUnitId (unused until PS2)
+                        long unitId = r.ReadInt64();
                         int recLen = r.ReadUInt16();
-                        var rec = r.ReadBytes(recLen);
-                        if (rec.Length != recLen)
-                            throw new EndOfStreamException("PersonnelSnapshot: truncated state record (wanted " + recLen + ", got " + rec.Length + ")");
+                        int consumed = 0;
+                        if (recLen >= 1)
+                        {
+                            byte flags = r.ReadByte();
+                            consumed = 1;
+                            if ((flags & TailHasCharacterBlob) != 0)
+                            {
+                                if (recLen - consumed < 4)
+                                    throw new EndOfStreamException("PersonnelSnapshot: state record too short for blobLen (recLen=" + recLen + ")");
+                                int blobLen = r.ReadInt32();
+                                consumed += 4;
+                                if (blobLen < 0 || blobLen > recLen - consumed)
+                                    throw new EndOfStreamException("PersonnelSnapshot: blobLen " + blobLen + " exceeds record (recLen=" + recLen + ")");
+                                var blob = r.ReadBytes(blobLen);
+                                if (blob.Length != blobLen)
+                                    throw new EndOfStreamException("PersonnelSnapshot: truncated blob (wanted " + blobLen + ", got " + blob.Length + ")");
+                                consumed += blobLen;
+                                snap.States.Add(new PersonnelSoldierState(unitId, blob));
+                            }
+                        }
+                        int skip = recLen - consumed;
+                        if (skip > 0)
+                        {
+                            var rest = r.ReadBytes(skip);
+                            if (rest.Length != skip)
+                                throw new EndOfStreamException("PersonnelSnapshot: truncated state record (wanted " + skip + " more, got " + rest.Length + ")");
+                        }
                     }
                     return snap;
                 }
@@ -121,6 +183,84 @@ namespace Multiplayer.Network.Sync.State
             // Pure/Unity-free (unit-testable): swallow malformed payloads and return null. Callers
             // (PersonnelChannel.Apply) treat null as "no-op". No UnityEngine.Debug dependency here.
             catch (Exception) { return null; }
+        }
+    }
+
+    /// <summary>
+    /// PURE host-side PS2 flush core: which dirty soldiers actually SHIP this flush. Per distinct id it
+    /// serializes (via the injected delegate), hash-compares against the last-EMITTED blob (FNV-1a 64 —
+    /// the GeoVehiclePos.Signature/MistSnapshot.ContentHash change-detect pattern) and emits only changed
+    /// soldiers, bounded by a per-flush byte budget (EncodeStateSync's u16 len is a hard 65535 wire cap;
+    /// the channel drains overflow next tick via AttachHost re-mark — the MistChannel pump pattern).
+    /// Outcomes per id: EMIT (changed, fits) / SkippedUnchanged (hash equal) / Deferred (budget hit —
+    /// stays dirty, NOT hash-stamped, re-blobbed next flush so latest state wins) / Failed (serialize
+    /// returned null — vanished or serializer unavailable; NOT deferred so a dead id can't spin the
+    /// drain loop) / Oversized (blob can't fit the u16 record frame — dropped, caller logs).
+    /// Unity-free → directly unit-testable with fake blobbers.
+    /// </summary>
+    public static class PersonnelStateFlush
+    {
+        /// <summary>Hard per-blob wire cap: keeps recLen (u16, 65535) + the 15-byte record frame +
+        /// the sibling membership block safely under EncodeStateSync's u16 payload cap.</summary>
+        public const int MaxBlobWireBytes = 60000;
+
+        /// <summary>Record frame overhead: i64 id + u16 recLen + u8 flags + u32 blobLen.</summary>
+        public const int RecordOverheadBytes = 15;
+
+        public sealed class Result
+        {
+            public readonly List<PersonnelSoldierState> Emit = new List<PersonnelSoldierState>();
+            public readonly List<long> Deferred = new List<long>();   // budget overflow — stays dirty
+            public int SkippedUnchanged;
+            public int Failed;
+            public int Oversized;
+        }
+
+        public static ulong Hash(byte[] blob)
+        {
+            unchecked
+            {
+                ulong h = 14695981039346656037UL;
+                if (blob != null) foreach (byte b in blob) { h ^= b; h *= 1099511628211UL; }
+                return h;
+            }
+        }
+
+        public static Result Run(IEnumerable<long> dirtyIds, Func<long, byte[]> serialize,
+                                 IDictionary<long, ulong> lastSent, int byteBudget)
+        {
+            var res = new Result();
+            if (dirtyIds == null) return res;
+            var seen = new HashSet<long>();
+            int used = 0;
+            bool budgetClosed = false;   // once the budget rejects one record, defer the rest UNSERIALIZED
+            foreach (var id in dirtyIds)
+            {
+                if (id == 0 || !seen.Add(id)) continue;   // 0 = None sentinel; dup ids coalesce
+                if (budgetClosed) { res.Deferred.Add(id); continue; }
+                var blob = serialize != null ? serialize(id) : null;
+                if (blob == null || blob.Length == 0) { res.Failed++; continue; }
+                if (blob.Length > MaxBlobWireBytes) { res.Oversized++; continue; }
+                ulong h = Hash(blob);
+                if (lastSent != null && lastSent.TryGetValue(id, out var prev) && prev == h)
+                {
+                    res.SkippedUnchanged++;
+                    continue;
+                }
+                int recBytes = RecordOverheadBytes + blob.Length;
+                // Emit-at-least-one: the first changed record always ships (its blob is ≤ the hard cap),
+                // else a single blob larger than the budget would starve forever.
+                if (used + recBytes > byteBudget && res.Emit.Count > 0)
+                {
+                    res.Deferred.Add(id);
+                    budgetClosed = true;
+                    continue;
+                }
+                res.Emit.Add(new PersonnelSoldierState(id, blob));
+                if (lastSent != null) lastSent[id] = h;
+                used += recBytes;
+            }
+            return res;
         }
     }
 

@@ -230,5 +230,146 @@ namespace Multiplayer.Network.Sync.State
             }
             return ids.ToArray();
         }
+
+        // ─── PS2 live-state apply (whole-GeoCharacter value copy onto the EXISTING instance) ───
+
+        // (Type.FullName + "." + fieldName) → FieldInfo, misses cached too (GetTacUnits pattern).
+        private static readonly Dictionary<string, FieldInfo> _fieldCache = new Dictionary<string, FieldInfo>();
+        private static MethodInfo _setItemsMethod;            // GeoCharacter.SetItems(armour, equipment, inventory, freeReload)
+        private static MethodInfo _aggregateBodyPartsMethod;  // GeoCharacter.AggregateBodyPartHealth() (private)
+
+        private static FieldInfo CachedField(Type t, string name)
+        {
+            string key = t.FullName + "." + name;
+            if (!_fieldCache.TryGetValue(key, out var f))
+            {
+                f = AccessTools.Field(t, name);
+                _fieldCache[key] = f;   // cache the miss too
+            }
+            return f;
+        }
+
+        /// <summary>Reference/value copy of one serialized field decoded → existing. False = field missing
+        /// (caller decides whether that is fatal; most are load-bearing).</summary>
+        private static bool CopyField(Type t, string name, object decoded, object existing)
+        {
+            var f = CachedField(t, name);
+            if (f == null) return false;
+            f.SetValue(existing, f.GetValue(decoded));
+            return true;
+        }
+
+        /// <summary>Clear + refill the existing PUBLIC list field from the decoded one (keeps the existing
+        /// list INSTANCE — safer for any captured reference than a wholesale swap).</summary>
+        private static void CopyListContents(Type t, string name, object decoded, object existing)
+        {
+            var f = CachedField(t, name);
+            if (!(f?.GetValue(existing) is IList target) || !(f.GetValue(decoded) is IList source)) return;
+            target.Clear();
+            foreach (var o in source) target.Add(o);
+        }
+
+        /// <summary>Invoke <c>CopyFrom(sameStatType, bool triggerStatChangeEvent:false)</c> on a StatusStat
+        /// (copies Min/Max/Value + modifications exactly, silently — StatusStat.cs:141-152). Overload picked
+        /// by assignability: StatusStat also carries a BaseStat-typed override that self-dispatches, so
+        /// either match is correct.</summary>
+        private static void CopyStatFrom(object existingStat, object decodedStat)
+        {
+            if (existingStat == null || decodedStat == null) return;
+            foreach (var m in existingStat.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (m.Name != "CopyFrom") continue;
+                var pars = m.GetParameters();
+                if (pars.Length != 2 || pars[1].ParameterType != typeof(bool)) continue;
+                if (!pars[0].ParameterType.IsInstanceOfType(decodedStat)) continue;
+                m.Invoke(existingStat, new object[] { decodedStat, false });
+                return;
+            }
+        }
+
+        /// <summary>Stamina + hunger: CopyFrom when both sides carry fatigue (keeps the existing instance's
+        /// owner + event wiring); reference-adopt when the existing side has none. Decoded null → leave.</summary>
+        private static void ApplyFatigue(Type t, object existing, object decoded)
+        {
+            var ff = CachedField(t, "_fatigue");
+            if (ff == null) return;
+            object deF = ff.GetValue(decoded);
+            if (deF == null) return;
+            object exF = ff.GetValue(existing);
+            if (exF == null) { ff.SetValue(existing, deF); return; }   // adopt (inert mirror — no rewire)
+            var fs = CachedField(deF.GetType(), "_stamina");
+            CopyStatFrom(fs?.GetValue(exF), fs?.GetValue(deF));
+            var fh = CachedField(deF.GetType(), "_hunger");
+            if (fh != null) fh.SetValue(exF, fh.GetValue(deF));
+        }
+
+        /// <summary>
+        /// CLIENT (#9 PS2): copy the decoded transient soldier's WHOLE live state onto the existing
+        /// instance, value-only. This is the spec's R1 FALLBACK path — decompile-verified
+        /// (GeoCharacter.cs:1006-1062), the native <c>RecreateFromAnotherCharacter</c> is a static FACTORY
+        /// returning a NEW instance (identity churn on the mirror) and drops state on the floor
+        /// (OtherStats/AdditionalDeploymentTags self-AddRange bug, corruption + hunger never copied), so
+        /// it is NOT usable as an in-place apply. Here instead:
+        ///   1. serialized value/reference fields mirror directly (identity, corruption, bonus stats,
+        ///      progression graph, loadout mirrors, OtherStats, deployment tags, fatigue);
+        ///   2. ONE native per-character recompute rides <c>SetItems(armour, equipment, inventory,
+        ///      freeReload:false)</c> (GeoCharacter.cs:831-880 — clears+refills the three GeoItem lists,
+        ///      re-derives item abilities, CarryWeight + UpdateStats(recalculateBodparts:true) off the NEW
+        ///      progression/corruption/bonus; decompile-verified per-character only, no faction/level/sim
+        ///      cascade). freeReload FALSE: the blob carries the host's exact ammo/charges — a free reload
+        ///      would falsify them (deliberate deviation from the spec's freeReload:true sketch);
+        ///   3. bodypart-HP snapshot + native <c>AggregateBodyPartHealth</c> (the ApllyTacticalResult order);
+        ///   4. exact host HP LAST via StatusStat.CopyFrom (UpdateStats ratio-preserves into the new Max
+        ///      first; CopyFrom then lands Min/Max/Value exactly, silent).
+        /// The decoded progression is adopted WITHOUT rewiring its events onto the existing character:
+        /// the frozen client never drives progression natively (every change arrives as the next blob),
+        /// and the wired handlers reach global AchievmentTracker/StatisticsManager sim — inert by
+        /// construction. Any failure logs + returns false; the soldier keeps its previous state.
+        /// </summary>
+        public static bool ApplySoldierState(object existing, object decoded)
+        {
+            if (existing == null || decoded == null) return false;
+            try
+            {
+                var t = existing.GetType();
+                CopyField(t, "_identity", decoded, existing);
+                CopyField(t, "_corruptionValue", decoded, existing);
+                CopyField(t, "_bonusCharacterStats", decoded, existing);
+                if (!CopyField(t, "_progression", decoded, existing))
+                    Debug.LogError("[Multiplayer] PersonnelReflection: GeoCharacter._progression not found — progression not mirrored");
+                CopyField(t, "_armourLoadoutItems", decoded, existing);
+                CopyField(t, "_equipmentLoadoutItems", decoded, existing);
+                CopyField(t, "_inventoryLoadoutItems", decoded, existing);
+                CopyListContents(t, "OtherStats", decoded, existing);
+                CopyListContents(t, "AdditionalDeploymentTags", decoded, existing);
+                ApplyFatigue(t, existing, decoded);
+
+                if (_setItemsMethod == null) _setItemsMethod = AccessTools.Method(t, "SetItems");
+                if (_setItemsMethod != null)
+                {
+                    _setItemsMethod.Invoke(existing, new object[]
+                    {
+                        CachedField(t, "_armourItems")?.GetValue(decoded),
+                        CachedField(t, "_equipmentItems")?.GetValue(decoded),
+                        CachedField(t, "_inventoryItems")?.GetValue(decoded),
+                        false
+                    });
+                }
+                else Debug.LogError("[Multiplayer] PersonnelReflection: GeoCharacter.SetItems not found — items/stats not mirrored");
+
+                CopyField(t, "_bodypartHealth", decoded, existing);
+                if (_aggregateBodyPartsMethod == null) _aggregateBodyPartsMethod = AccessTools.Method(t, "AggregateBodyPartHealth");
+                _aggregateBodyPartsMethod?.Invoke(existing, null);
+
+                var hf = CachedField(t, "_health");
+                CopyStatFrom(hf?.GetValue(existing), hf?.GetValue(decoded));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] PersonnelReflection.ApplySoldierState failed (soldier keeps previous state): " + ex.Message);
+                return false;
+            }
+        }
     }
 }
