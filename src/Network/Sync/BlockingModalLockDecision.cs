@@ -14,20 +14,24 @@ namespace Multiplayer.Network.Sync
         /// Swallow a LOCAL close/confirm of the modal (<c>UIStateGeoModal.FinishDialog</c> — every button routes
         /// there via <c>UIModal.Confirm/Close/Cancel → _handler</c>; and <c>OnCancel</c> — the Esc/back path) iff:
         /// we are a CLIENT in an active co-op session, this is NOT an engine-driven replay (a mirror-driven close
-        /// under <c>SyncApplyScope</c> must pass), and the modal is a blocking type. Host is NEVER touched
-        /// (host transparency: its native confirm launches the mission). Fail-open on the glue side (an
-        /// unreadable modal type → native runs).
+        /// under <c>SyncApplyScope</c> must pass), the modal is a blocking type, AND it was shown BY THE MIRROR
+        /// (<paramref name="isMirrorShown"/> — <c>BlockingModalMirrorRegistry</c>): a client-NATIVE window of the
+        /// same type keeps its native buttons (no host hide will ever release it — locking it bricked the client,
+        /// soak 2026-07-05), and a mirror window whose hide already landed (hide-before-show race) enters
+        /// unlocked. Host is NEVER touched (host transparency: its native confirm launches the mission).
+        /// Fail-open on the glue side (an unreadable modal type → native runs).
         /// </summary>
-        public static bool ShouldBlockLocalClose(bool isHost, bool isActiveSession, bool isApplying, bool isBlockingModal)
-            => !isHost && isActiveSession && !isApplying && isBlockingModal;
+        public static bool ShouldBlockLocalClose(bool isHost, bool isActiveSession, bool isApplying, bool isBlockingModal, bool isMirrorShown)
+            => !isHost && isActiveSession && !isApplying && isBlockingModal && isMirrorShown;
 
         /// <summary>
         /// Grey the modal's buttons (CanvasGroup.interactable=false on the shown UIModal — the same one-toggle
-        /// dim used by the event-dialog client lock) iff: client + active session + blocking type. No
-        /// <c>isApplying</c> term: the mirrored state is QUEUED under the apply scope but the modal SHOWS later
+        /// dim used by the event-dialog client lock) iff: client + active session + blocking type + shown BY THE
+        /// MIRROR (same origin contract as <see cref="ShouldBlockLocalClose"/>). No <c>isApplying</c> term: the
+        /// mirrored state is QUEUED under the apply scope but the modal SHOWS later
         /// (UIStateGeoModal.EnterState → UIModuleModal.Show on a view-update frame, outside the scope).
         /// </summary>
-        public static bool ShouldGreyButtons(bool isHost, bool isActiveSession, bool isBlockingModal)
-            => !isHost && isActiveSession && isBlockingModal;
+        public static bool ShouldGreyButtons(bool isHost, bool isActiveSession, bool isBlockingModal, bool isMirrorShown)
+            => !isHost && isActiveSession && isBlockingModal && isMirrorShown;
     }
 }

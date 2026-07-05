@@ -26,6 +26,11 @@ namespace Multiplayer.Harmony.Sync
     /// RELEASE: only the engine closes this window — host resolve → <c>ReportModalHide</c> →
     /// <c>GeoModalDisplay.CloseBlocking</c> → <c>FinishQueriedState</c> (bypasses both swallowed methods), or
     /// the geoscape→tactical transition tears the whole view down (host confirm → co-op deploy flow).
+    /// ORIGIN CONTRACT (2026-07-05): the lock applies ONLY to a window the MIRROR showed
+    /// (<see cref="Multiplayer.Network.Sync.State.BlockingModalMirrorRegistry"/>, tagged by
+    /// <c>GeoModalDisplay.Show</c>, cleared by every <c>ReportModalHide</c>): a client-NATIVE blocking-type
+    /// window keeps fully native buttons (no host hide would ever release it), and a mirror window whose hide
+    /// landed before it entered (queued-show race) comes up unlocked and locally closeable.
     /// Decisions are pure (<see cref="BlockingModalLockDecision"/>, unit-tested); the HOST is NEVER touched
     /// (host transparency) and every patch fails OPEN (unreadable state → native runs). Reflective targets
     /// (Prepare false → PatchAll skips) so an engine rename never bombs.
@@ -102,7 +107,8 @@ namespace Multiplayer.Harmony.Sync
                 if (!BlockingModalLockDecision.ShouldGreyButtons(
                         engine != null && engine.IsHost,
                         engine != null && engine.IsActiveSession,
-                        ReportModalClassifier.IsBlockingModal(modalType))) return;
+                        ReportModalClassifier.IsBlockingModal(modalType),
+                        BlockingModalMirrorRegistry.IsMirrorShown(modalType))) return;   // native-origin / already-hidden → never greyed
                 BlockingModalClientLock.SetModalInteractable(__instance, modalType, false);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalButtonGreyPatch failed: " + ex.Message); }
@@ -197,7 +203,8 @@ namespace Multiplayer.Harmony.Sync
                     engine != null && engine.IsHost,
                     engine != null && engine.IsActiveSession,
                     SyncApplyScope.IsApplying,
-                    ReportModalClassifier.IsBlockingModal(modalType));
+                    ReportModalClassifier.IsBlockingModal(modalType),
+                    BlockingModalMirrorRegistry.IsMirrorShown(modalType));   // native-origin / already-hidden → native close runs
             }
             catch (Exception ex)
             {

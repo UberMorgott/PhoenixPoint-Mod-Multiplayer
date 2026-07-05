@@ -135,6 +135,11 @@ namespace Multiplayer.Network.Sync.State
                 object request = _requestCtor.Invoke(new object[] { uiState, priority });
                 // pause arrives via time-sync; do NOT pause here (avoids a pause-relay loop).
                 _requestPauseField?.SetValue(request, false);
+                // ORIGIN TAG: only a MIRROR-shown blocking modal is view-locked (BlockingModalClientLockPatches).
+                // Tagged at queue time — the lock patches consult it when the window actually enters; a
+                // ReportModalHide that lands first clears it (hide-before-show race → window enters unlocked).
+                if (ReportModalClassifier.IsBlockingModal(modalType))
+                    BlockingModalMirrorRegistry.MarkMirrorShown(modalType);
                 _queryStateSwitch.Invoke(query, new[] { request });
                 Debug.Log("[Multiplayer] GeoModalDisplay.Show modalType=" + modalType + " persistent=" + persistent +
                           " priority=" + priority + " hasData=" + (modalData != null) + " → queued");
@@ -155,6 +160,12 @@ namespace Multiplayer.Network.Sync.State
         {
             try
             {
+                // ALWAYS drop the mirror-origin tag FIRST — including when no matching window is current yet.
+                // That is exactly the hide-before-show race (the mirrored Show is a QUEUED state switch; a fast
+                // host cancel can land the hide while the modal is still queued): with the tag cleared the
+                // window then enters UNLOCKED (native buttons, null DialogCallback) and the user closes it
+                // locally — previously it entered view-locked with no future hide → permanently dead Cancel.
+                BlockingModalMirrorRegistry.ClearMirrorShown(modalType);
                 Ensure();
                 if (!_ready || _finishQueriedState == null) return;
                 var view = GetView(rt);
@@ -164,7 +175,7 @@ namespace Multiplayer.Network.Sync.State
                 if (!IsCurrentGeoModalOfType(query, modalType))
                 {
                     Debug.Log("[Multiplayer] GeoModalDisplay.CloseBlocking modalType=" + modalType +
-                              " → no matching modal current (already closed / never shown) — no-op");
+                              " → no matching modal current (queued/closed) — mirror tag cleared; a queued copy enters unlocked");
                     return;
                 }
                 _finishQueriedState.Invoke(view, null);

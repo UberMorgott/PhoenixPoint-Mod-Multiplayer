@@ -24,6 +24,12 @@ namespace Multiplayer.Harmony.Sync
     /// local Phoenix faction's own <c>Research</c> instance — <c>GetAlliesContribution</c> (Research.cs:705)
     /// calls this same method on ALLY Research instances, which must keep their client-local rate
     /// (accepted edge: the NPC-ally ETA term may diverge slightly; rare and minor, not mirrored).
+    ///
+    /// KNOWN TEST GAP (integration-only): the <c>isLocalPhoenix</c> instance-identity check below (live
+    /// ReferenceEquals against the reflected Phoenix <c>Research</c>) and the Priority.Last
+    /// runs-after-TFTV postfix ordering are NOT unit-covered — both need live game/Harmony state. Unit
+    /// tests pin only the pure <see cref="ClientResearchRate.ShouldOverride"/> truth table + store
+    /// semantics; these two live paths are covered by the in-game co-op verify.
     /// </summary>
     [HarmonyPatch]
     public static class ClientResearchRatePatch

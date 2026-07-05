@@ -18,11 +18,19 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>
         /// Last host-synced hourly research rate. Null until the first ch2 snapshot carrying a rate
         /// arrives (fresh join / old-host payload) — the override postfix NEVER fires while null, so a
-        /// client that hasn't heard from the host keeps its locally-computed rate. Not cleared on session
-        /// end: the gate requires an ACTIVE client session, so a stale value is inert outside one, and a
-        /// new session's ch2 seed (host marks dirty on bind) refreshes it immediately on join.
+        /// client that hasn't heard from the host keeps its locally-computed rate. Cleared via
+        /// <see cref="Reset"/> on engine teardown (NetworkEngine.Shutdown/TearDown): without it, a fast
+        /// client→client reconnection could apply the PREVIOUS session's rate in the window between join
+        /// (IsActiveSession true) and that session's first ch2 seed.
         /// </summary>
         public static float? SyncedRate;
+
+        /// <summary>Session teardown: drop the synced rate so the next session starts null (no
+        /// cross-session leak; the override stays off until that session's first ch2 seed arrives).</summary>
+        public static void Reset()
+        {
+            SyncedRate = null;
+        }
 
         /// <summary>
         /// Client apply (ch2): record the snapshot's rate. A payload WITHOUT a rate (old host build /

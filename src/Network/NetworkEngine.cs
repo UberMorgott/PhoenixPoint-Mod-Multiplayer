@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
+using Multiplayer.Network.Sync.State;
 using Multiplayer.Network.TimeSync;
 using Multiplayer.Transport;
 using UnityEngine;
@@ -147,6 +148,9 @@ namespace Multiplayer.Network
             // Drop all state-channel change-event subscriptions on the same path.
             Sync?.DetachAllChannels();
             Sync = null;
+            // Drop the client-synced research rate: a fast client→client reconnection must not apply the
+            // PREVIOUS session's rate in the window between join and the new session's first ch2 seed.
+            ClientResearchRate.Reset();
             IsActive = false;
             IsHost = false;
 
@@ -184,6 +188,8 @@ namespace Multiplayer.Network
             SaveTransfer = null;   // re-created fresh in Initialize() → resets _begun / SessionStarted
             TimeSync = null;
             Sync = null;
+            // Mirrors Shutdown(): no cross-session research-rate leak on the full-teardown path either.
+            ClientResearchRate.Reset();
 
             IsActive = false;
             IsHost = false;

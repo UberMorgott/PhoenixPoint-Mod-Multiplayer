@@ -79,6 +79,7 @@
          and are NOT linked (in-game verified), mirroring the rest of the report channel. -->
     <Compile Include="..\src\Network\Sync\HostBlockingPromptGate.cs"><Link>Sync\HostBlockingPromptGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\BlockingModalLockDecision.cs"><Link>Sync\BlockingModalLockDecision.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\BlockingModalMirrorRegistry.cs"><Link>Sync\State\BlockingModalMirrorRegistry.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Sync\ISyncedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Sync\PermissionGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Sync\GeoRuntime.cs</Link></Compile>

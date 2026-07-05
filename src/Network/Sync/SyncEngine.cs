@@ -679,6 +679,9 @@ namespace Multiplayer.Network.Sync
             HostBlockingPromptGate.Reset();
             // Same belt for pending research-nav overrides (their mirrored popups died with the old geoscape).
             State.ResearchNavMirror.Reset();
+            // Same belt for blocking-modal mirror-origin tags: a stale tag from the old geoscape must never
+            // view-lock a later (native or mirrored) window of the same type.
+            State.BlockingModalMirrorRegistry.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released

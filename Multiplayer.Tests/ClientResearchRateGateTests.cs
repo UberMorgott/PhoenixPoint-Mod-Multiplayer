@@ -49,6 +49,16 @@ public class ClientResearchRateGateTests
         Assert.Equal(0f, ClientResearchRate.SyncedRate);
     }
 
+    [Fact]
+    public void Reset_ClearsSyncedRate()
+    {
+        // Engine teardown (NetworkEngine.Shutdown/TearDown) calls Reset so a fast client→client
+        // reconnection can never apply the PREVIOUS session's rate before the new ch2 seed arrives.
+        ClientResearchRate.SyncedRate = 99f;
+        ClientResearchRate.Reset();
+        Assert.Null(ClientResearchRate.SyncedRate);
+    }
+
     // ─── gate: ShouldOverride truth table ───────────────────────────────────
 
     [Fact]
