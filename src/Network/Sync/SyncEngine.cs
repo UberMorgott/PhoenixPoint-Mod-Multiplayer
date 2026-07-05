@@ -675,6 +675,8 @@ namespace Multiplayer.Network.Sync
             // Boundary belt: a save-transfer/reload must never inherit a stale blocking-prompt arm (the modal it
             // guarded is gone with the old geoscape). Re-arms naturally if the restored host reopens the prompt.
             HostBlockingPromptGate.Reset();
+            // Same belt for pending research-nav overrides (their mirrored popups died with the old geoscape).
+            State.ResearchNavMirror.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -999,6 +1001,10 @@ namespace Multiplayer.Network.Sync
                     case State.ReportModalVariant.Research:
                         modalData = State.ReportModalReflection.BuildResearchCompleteData(rt, p.DefId);
                         if (modalData == null) return;   // element unresolved → don't show an empty card
+                        // Mirror the HOST's native "new research available" line: the flag rides ShareLevel
+                        // (ResearchNavMirror tri-state); ResearchNavGroupMirrorPatch consumes it at bind time.
+                        // Unknown/legacy → not armed → the client's bind stays native (fail-open).
+                        State.ResearchNavMirror.Arm(p.DefId, p.ShareLevel);
                         break;
                     case State.ReportModalVariant.Diplomacy:
                         modalData = State.ReportModalReflection.BuildDiplomacyData(rt, p.DefId, p.ExtraIds, p.ShareLevel);

@@ -36,6 +36,7 @@ namespace Multiplayer.Network.Sync.State
         private static Type _researchCompleteDataType; // GeoResearchCompleteData
         private static FieldInfo _rcResearchElementField; // GeoResearchCompleteData.ResearchElement
         private static FieldInfo _rcSwitchToResearchField; // GeoResearchCompleteData.SwitchToResearchState
+        private static PropertyInfo _rcUnlocksProp;       // ResearchElement.UnlocksResearches (lazy, off the live element)
         private static Type _diplomacyDataType;         // DiplomacyResearchRewardData
         private static FieldInfo _dipFactionField;       // DiplomacyResearchRewardData.Faction (GeoFaction)
         private static FieldInfo _dipResearchesField;    // DiplomacyResearchRewardData.Researches (IEnumerable<ResearchElement>)
@@ -144,8 +145,11 @@ namespace Multiplayer.Network.Sync.State
                     siteId = ReadSiteId(modalData);
                     break;
                 case ReportModalVariant.Research:
-                    // modalData is GeoResearchCompleteData → ResearchElement.ResearchID.
+                    // modalData is GeoResearchCompleteData → ResearchElement.ResearchID. ShareLevel carries the
+                    // host's NATIVE "new research available" line visibility (ResearchNavMirror tri-state) so the
+                    // client mirrors the host's answer instead of recomputing it on diverged derived state.
                     defId = ReadResearchCompleteId(modalData) ?? "";
+                    shareLevel = ReadResearchNavFlag(modalData);
                     break;
                 case ReportModalVariant.Diplomacy:
                     // modalData is DiplomacyResearchRewardData → Faction.Def.Guid + Researches[].ResearchID + DiplomacyShareLevel.
@@ -182,6 +186,36 @@ namespace Multiplayer.Network.Sync.State
                 return ResearchReflection.GetId(element);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadResearchCompleteId failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// Host: the NATIVE "new research available" line visibility of the research-complete popup, as the
+        /// bind computes it — <c>ResearchElement.UnlocksResearches.Any()</c> (GeoReseatchCompleteDataBind.cs:
+        /// 124-125 → SetResearchRewards toggles NewResearchesGroup on <c>Count() > 0</c>). Read AFTER the native
+        /// open (Postfix), i.e. after the completion cascade settled, exactly like the host's own bind at show
+        /// time. Returns a <see cref="ResearchNavMirror"/> tri-state: Unknown on ANY miss (the client then
+        /// leaves its bind native — fail-open, never a stripped host/client button from a read failure).
+        /// </summary>
+        public static int ReadResearchNavFlag(object researchCompleteData)
+        {
+            try
+            {
+                Ensure(GeoRuntime.Instance);
+                if (researchCompleteData == null || _rcResearchElementField == null) return ResearchNavMirror.NavUnknown;
+                var element = _rcResearchElementField.GetValue(researchCompleteData);
+                if (element == null) return ResearchNavMirror.NavUnknown;
+                if (_rcUnlocksProp == null || !_rcUnlocksProp.DeclaringType.IsInstanceOfType(element))
+                    _rcUnlocksProp = AccessTools.Property(element.GetType(), "UnlocksResearches");
+                if (_rcUnlocksProp == null) return ResearchNavMirror.NavUnknown;
+                if (!(_rcUnlocksProp.GetValue(element, null) is IEnumerable unlocks)) return ResearchNavMirror.NavUnknown;
+                foreach (var _ in unlocks) return ResearchNavMirror.FlagFor(true);   // any element → line shown
+                return ResearchNavMirror.FlagFor(false);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] ReportModalReflection.ReadResearchNavFlag failed: " + ex.Message);
+                return ResearchNavMirror.NavUnknown;
+            }
         }
 
         /// <summary>

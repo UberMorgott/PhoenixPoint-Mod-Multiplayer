@@ -49,7 +49,8 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>The host opener's modal priority, replayed verbatim so the client stacks identically.</summary>
         public int Priority;
 
-        /// <summary>Diplomacy: the share level. 0 for the other variants.</summary>
+        /// <summary>Diplomacy: the share level. Research: the host's native "new research available" line
+        /// visibility (<see cref="ResearchNavMirror"/> tri-state: 0 unknown / 1 hidden / 2 shown). 0 otherwise.</summary>
         public int ShareLevel;
 
         /// <summary>Research: the ResearchElement.ResearchID. Diplomacy: the faction's Def.Guid. "" otherwise.</summary>

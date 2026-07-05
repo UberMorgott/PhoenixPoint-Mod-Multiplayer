@@ -69,6 +69,10 @@
     <Compile Include="..\src\Network\Sync\ReportMirrorGate.cs"><Link>Sync\ReportMirrorGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalPayload.cs"><Link>Sync\State\ReportModalPayload.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalClassifier.cs"><Link>Sync\State\ReportModalClassifier.cs</Link></Compile>
+    <!-- Research-nav-line mirror (pure): host's NATIVE "new research available" answer + client pending
+         store (the host/client button-inversion fix). The Harmony glue (ResearchNavGroupMirrorPatch) and
+         the host read (ReportModalReflection.ReadResearchNavFlag) bind game types and are NOT linked. -->
+    <Compile Include="..\src\Network\Sync\State\ResearchNavMirror.cs"><Link>Sync\State\ResearchNavMirror.cs</Link></Compile>
     <!-- Blocking-prompt (ambush brief) mirror: pure host intent gate + client view-lock decisions (Unity-free).
          The Harmony glue (BlockingModalClientLockPatches / BlockingModalReleasePatch) and the reflection
          rebuild (ReportModalReflection.BuildAmbushMission / GeoModalDisplay.CloseBlocking) bind game types
