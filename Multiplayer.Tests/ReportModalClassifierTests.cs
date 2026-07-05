@@ -45,6 +45,15 @@ public class ReportModalClassifierTests
     public void IsReportModal_WhitelistedOutcomes_True(int modalType)
         => Assert.True(ReportModalClassifier.IsReportModal(modalType));
 
+    // ── WA-3 gap 5c: the interception pair mirrors as an ALWAYS-notify-only variant (live-aircraft binds —
+    // 32's InterceptionInfoData interactive brief, 33's GeoAirMission which is NOT even a GeoMission — are
+    // decompile-verified unbuildable client-side; whitelisting also suppresses any client-local ghost). ──
+    [Theory]
+    [InlineData(32)]   // InterceptionBrief — pending-decision notice, blocking (host PauseGame=true at open)
+    [InlineData(33)]   // InterceptionOutcome — resolved notice, non-blocking report
+    public void IsReportModal_InterceptionPair_True(int modalType)
+        => Assert.True(ReportModalClassifier.IsReportModal(modalType));
+
     [Theory]
     [InlineData(7)]    // LoadPrompt
     [InlineData(8)]    // SiteEncounter (encounter modal — event-adjacent; MUST stay out of the report channel, S3)
@@ -52,8 +61,6 @@ public class ReportModalClassifierTests
     [InlineData(17)]   // HavenInfiltrateBrief (steal-mission family — outside the P1 class map)
     [InlineData(18)]   // HavenInfiltrateOutcome (steal-mission family — deliberately excluded, Batch-2)
     [InlineData(23)]   // AlienResearchBrief (deferred — P8 verify-first)
-    [InlineData(32)]   // InterceptionBrief (live air-combat objects — unbuildable from site ids)
-    [InlineData(33)]   // InterceptionOutcome (deliberately excluded: bind reads live GeoAirMission aircraft)
     [InlineData(40)]   // GameDemoEnd
     [InlineData(-1)]   // None
     [InlineData(9999)] // _CustomMission (would alias to a small byte if truncated — must stay false)
@@ -72,6 +79,7 @@ public class ReportModalClassifierTests
         {
             0, 2, 4, 6, 11, 14, 15, 20, 25, 26, 28, 34, 36, 38,       // Phase-A reports + mirrored briefs
             1, 3, 5, 12, 16, 21, 27, 29, 35, 37,                       // Batch-2 P3 mission outcomes
+            32, 33,                                                    // WA-3 interception pair (notify-only)
         };
         // ModalType spans None=-1 and 0..40 (GameHavenAttackBrief..GameDemoEnd), plus _CustomMission=9999.
         foreach (var modalType in EnumerateModalTypeValues())
@@ -98,6 +106,7 @@ public class ReportModalClassifierTests
             ReportModalClassifier.GeoPhoenixBaseInfestationBrief, // 20
             ReportModalClassifier.BehemothAttackBrief,     // 34
             ReportModalClassifier.InfestedHavenBrief,      // 36
+            ReportModalClassifier.InterceptionBrief,       // 32 — WA-3: host paused deciding intercept/disengage
         };
         foreach (var modalType in EnumerateModalTypeValues())
             Assert.Equal(blocking.Contains(modalType), ReportModalClassifier.IsBlockingModal(modalType));
@@ -174,6 +183,8 @@ public class ReportModalClassifierTests
     [InlineData(29, ReportModalVariant.MissionOutcome)]  // AncientSiteDefenceOutcome
     [InlineData(35, ReportModalVariant.MissionOutcome)]  // BehemothAttackOutcome (fallback — never rebuilds)
     [InlineData(37, ReportModalVariant.MissionOutcome)]  // InfestedHavenOutcome
+    [InlineData(32, ReportModalVariant.InterceptionNotice)] // InterceptionBrief (WA-3 — always notify-only)
+    [InlineData(33, ReportModalVariant.InterceptionNotice)] // InterceptionOutcome (WA-3 — always notify-only)
     public void VariantFor_MapsEachWhitelistedModal(int modalType, ReportModalVariant expected)
         => Assert.Equal(expected, ReportModalClassifier.VariantFor(modalType));
 
@@ -188,6 +199,7 @@ public class ReportModalClassifierTests
     [InlineData(ReportModalVariant.SiteMissionBrief, true)]
     [InlineData(ReportModalVariant.ActiveMissionBrief, true)]
     [InlineData(ReportModalVariant.MissionOutcome, true)]   // post-tac rail + cancel paths: OpenModalPersistent
+    [InlineData(ReportModalVariant.InterceptionNotice, false)] // never replays a native modal (notify-only prompt)
     public void IsPersistent_MatchesNativeOpener(ReportModalVariant variant, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.IsPersistent(variant));
 
@@ -215,8 +227,35 @@ public class ReportModalClassifierTests
     [InlineData(1, false)]    // GeoHavenAttackOutcome — outcome payload reads settled post-tac state, no defer
     [InlineData(5, false)]    // GeoScavengeOutcome
     [InlineData(12, false)]   // GeoPhoenixBaseDefenseOutcome
+    [InlineData(32, false)]   // InterceptionBrief — blocking, must arm/broadcast synchronously (payload reads nothing)
+    [InlineData(33, false)]   // InterceptionOutcome — payload reads nothing, no read-timing hazard
     public void ShouldDeferHostBroadcast_OnlyResearch(int modalType, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.ShouldDeferHostBroadcast(modalType));
+
+    // ── WA-3 interception-notice text decision: 32 = pending (host paused deciding; gate armed),
+    // 33 = resolved report (nothing blocks). ──────────────────────────────────────────────────────
+    [Fact]
+    public void InterceptionNoticeIsPending_OnlyTheBrief()
+    {
+        Assert.True(ReportModalClassifier.InterceptionNoticeIsPending(ReportModalClassifier.InterceptionBrief));
+        Assert.False(ReportModalClassifier.InterceptionNoticeIsPending(ReportModalClassifier.InterceptionOutcome));
+        // The pending half must be exactly the blocking half — a pending notice without an armed host gate
+        // (or vice versa) would lie to the user about whether actions are paused.
+        foreach (var modalType in new[] { ReportModalClassifier.InterceptionBrief, ReportModalClassifier.InterceptionOutcome })
+            Assert.Equal(ReportModalClassifier.InterceptionNoticeIsPending(modalType),
+                         ReportModalClassifier.IsBlockingModal(modalType));
+    }
+
+    [Fact]
+    public void InterceptionPair_NeverMandatory_NeverDegradedBriefNotice()
+    {
+        // Not mandatory: the client's notice is a locally dismissible plain prompt (no view-lock machinery).
+        Assert.False(ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.InterceptionBrief));
+        Assert.False(ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.InterceptionOutcome));
+        // The ActiveMissionBrief degrade decision must NOT claim the interception variant — it has its own
+        // always-notify path (ShowInterceptionNotice), pinned here so the two degrade rails stay distinct.
+        Assert.False(ReportModalClassifier.ShouldShowDegradedNotice(ReportModalVariant.InterceptionNotice, rebuildSucceeded: false));
+    }
 
     // ── ActiveMissionBrief rebuild-vs-degrade decision (Batch-1): the client binds its P1-mirrored
     // site.ActiveMission ONLY when the mirrored class faithfully binds the brief's ModalType — the same

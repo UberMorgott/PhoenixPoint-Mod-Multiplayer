@@ -161,6 +161,26 @@ public class ReportModalProtocolTests
         Assert.Equal(8, decoded.FactionSkillPoints);
     }
 
+    // WA-3 interception pair (32 brief / 33 outcome): defaults-only payload — the client shows the
+    // notify-only prompt keyed by ModalType, so no ids ride the wire.
+    [Theory]
+    [InlineData((byte)32, 100)]           // brief — OpenModalPersistent default priority
+    [InlineData((byte)33, int.MaxValue)]  // outcome — ShowInterceptionResult opens at int.MaxValue
+    public void InterceptionNotice_RoundTrips_DefaultsOnly(byte modalType, int priority)
+    {
+        var p = new ReportModalPayload(modalType, ReportModalVariant.InterceptionNotice, -1, priority, 0, "", null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(modalType, d.ModalType);
+        Assert.Equal(ReportModalVariant.InterceptionNotice, d.Variant);
+        Assert.Equal(-1, d.SiteId);
+        Assert.Equal(priority, d.Priority);
+        Assert.Equal("", d.DefId);
+        Assert.Empty(d.ExtraIds);
+        Assert.Equal(0, d.MissionClass);      // no outcome tail on this variant
+        Assert.Empty(d.RewardBlob);
+    }
+
     [Fact]
     public void MissionOutcome_EmptyReward_RoundTripsEmpty()
     {

@@ -266,6 +266,32 @@ namespace Multiplayer.Network.Sync.State
         /// stays armed until the host resolves (0x6C). Best-effort: a MessageBox miss just logs.
         /// </summary>
         public static void ShowDegradedBriefNotice(byte modalType)
+            => ShowNoticePrompt(
+                "The host is deciding on a mission briefing.\n" +
+                "This briefing could not be displayed on your side; actions are paused until the host decides.",
+                "ShowDegradedBriefNotice modalType=" + modalType + " (host gate stays armed)");
+
+        /// <summary>
+        /// Client: the host opened/resolved an aerial INTERCEPTION (WA-3 gap 5c; ModalType 32/33). The native
+        /// windows are decompile-verified unbuildable client-side (live aircraft objects — see
+        /// <see cref="ReportModalClassifier"/> INTERCEPTION FAMILY), so this is the SAME notify-only degrade
+        /// path as the brief notice, with interception-specific text: <paramref name="pending"/> (brief 32) =
+        /// host is choosing intercept/disengage while its geoscape is paused (the host intent gate is armed);
+        /// resolved (outcome 33) = the air battle finished — loot rides the wallet rail, hull damage rides the
+        /// 0xA6 HP tail. Dismissing is local-only either way. Best-effort: a MessageBox miss just logs.
+        /// </summary>
+        public static void ShowInterceptionNotice(byte modalType, bool pending)
+            => ShowNoticePrompt(
+                pending
+                    ? "The host is resolving an aerial interception.\n" +
+                      "Actions are paused until the host decides."
+                    : "The host resolved an aerial interception.\n" +
+                      "Any salvage and aircraft damage are already reflected on your side.",
+                "ShowInterceptionNotice modalType=" + modalType + " pending=" + pending);
+
+        /// <summary>Shared notify-only native text prompt (GameUtl.GetMessageBox().ShowSimplePrompt) — the
+        /// degrade surface every unbuildable mirrored window funnels through. Never throws.</summary>
+        private static void ShowNoticePrompt(string text, string logTag)
         {
             try
             {
@@ -273,16 +299,10 @@ namespace Multiplayer.Network.Sync.State
                 if (_getMessageBox == null || _showSimplePrompt == null) return;
                 var mb = _getMessageBox.Invoke(null, null);
                 if (mb == null) return;
-                _showSimplePrompt.Invoke(mb, new object[]
-                {
-                    "The host is deciding on a mission briefing.\n" +
-                    "This briefing could not be displayed on your side; actions are paused until the host decides.",
-                    _mbIconWarning, _mbButtonsOk, null, null, null,
-                });
-                Debug.Log("[Multiplayer] GeoModalDisplay.ShowDegradedBriefNotice modalType=" + modalType
-                          + " → notify-only text prompt (host gate stays armed)");
+                _showSimplePrompt.Invoke(mb, new object[] { text, _mbIconWarning, _mbButtonsOk, null, null, null });
+                Debug.Log("[Multiplayer] GeoModalDisplay." + logTag + " → notify-only text prompt");
             }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.ShowDegradedBriefNotice failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay notice (" + logTag + ") failed: " + ex.Message); }
         }
 
         /// <summary>

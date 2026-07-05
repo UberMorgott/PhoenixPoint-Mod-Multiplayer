@@ -39,6 +39,12 @@ namespace Multiplayer.Network.Sync.State
     ///                                  view-locked. Rebuild failure (site/mission unresolved, class mismatch,
     ///                                  fallback-34 family) → degraded notify-only text modal; the HOST intent
     ///                                  gate is armed either way (intents never race the host's decision).
+    ///   • <see cref="InterceptionNotice"/> — the interception pair (InterceptionBrief 32 / InterceptionOutcome
+    ///                                  33, WA-3 gap 5c). BOTH binds are decompile-verified UNBUILDABLE
+    ///                                  client-side (see ReportModalClassifier — live aircraft objects), so the
+    ///                                  client NEVER rebuilds the native window: it always shows the notify-only
+    ///                                  text prompt (32 = pending-decision text + host gate armed; 33 = resolved
+    ///                                  text, non-blocking). No ids carried — all fields stay defaults.
     /// </summary>
     public enum ReportModalVariant : byte
     {
@@ -50,6 +56,7 @@ namespace Multiplayer.Network.Sync.State
         AmbushBrief = 5,      // mandatory ambush prompt mirror (view-only + blocking on the client)
         SiteMissionBrief = 6, // optional site deploy briefs (scavenge/ancient) — mirrored view-only + blocking
         ActiveMissionBrief = 7, // LIVE→site-id briefs off the P1-mirrored site.ActiveMission — blocking + degradable
+        InterceptionNotice = 8, // interception brief/outcome (32/33) — ALWAYS notify-only on the client (WA-3)
     }
 
     /// <summary>

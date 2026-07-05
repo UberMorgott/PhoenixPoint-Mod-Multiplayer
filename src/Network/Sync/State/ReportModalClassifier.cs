@@ -78,10 +78,26 @@ namespace Multiplayer.Network.Sync.State
     /// Rebuild-vs-skip is <see cref="OutcomeRebuildMatches"/> (mirrors the native <c>GetMissionOutcomeModal</c>
     /// class→modal mapping, GeoscapeView.cs:1800-1881); a failed rebuild skips the show (logged) — no degraded
     /// notice, because nothing blocks on it.
+    /// INTERCEPTION FAMILY (WA-3 gap 5c, supersedes the earlier "33 deliberately excluded" rule — 2026-07-05):
+    /// both interception modals are whitelisted as <see cref="ReportModalVariant.InterceptionNotice"/> — the
+    /// client ALWAYS degrades to the notify-only text prompt because BOTH binds are decompile-verified
+    /// unbuildable from synced ids (interception is a host-side minigame; its loot rides the silent wallet
+    /// rail and the hull damage rides the WA-3 0xA6 HP tail):
+    ///   • InterceptionBrief 32 — <c>GeoscapeView.ShowInterception</c> (:762) stamps
+    ///     <c>InterceptionInfoData.CurrentPlayerAircraft/CurrentEnemyAircraft</c> (LIVE GeoVehicles) and opens
+    ///     via <c>OpenModalPersistent(32, data)</c> → native <c>PauseGame = true</c> (:861). The bind
+    ///     (InterceptionBriefDataBind:81) drives an INTERACTIVE aircraft-cycling input loop over the site's
+    ///     live vehicle lists + equipment — no id-rebuild exists. BLOCKING: the host is paused deciding
+    ///     (intercept / auto-resolve / disengage), so the intent gate arms like every optional blocking brief;
+    ///     released natively via ModalResultCallback (:833 → InterceptionBriefCallback) / the Hide belt.
+    ///     NON-mandatory: the client's notice is a locally-dismissible plain prompt.
+    ///   • InterceptionOutcome 33 — <c>ShowInterceptionResult</c> (:781) opens <c>OpenModal(33, null,
+    ///     GeoAirMission, int.MaxValue)</c>. <c>GeoAirMission</c> is NOT a GeoMission (standalone class,
+    ///     GeoAirMission.cs:11) → outside the <see cref="GeoMissionRecord"/> ctor map, so it can NOT ride the
+    ///     payload-carried MissionOutcome variant; its bind (InterceptionOutcomeDataBind.DisplayMissionData)
+    ///     reads live <c>PlayerAircraft/EnemyAircraft.Vehicle</c> equipment panels + <c>PlayerAircraftCrew</c>
+    ///     + <c>Reward</c> — unstampable. NON-blocking (a report): resolved-text notice, no gate, local close.
     /// DELIBERATE EXCLUSIONS (verified 2026-07-05):
-    ///   • InterceptionOutcome 33 — modalData is a live <c>GeoAirMission</c>; the bind (InterceptionOutcomeDataBind)
-    ///     reads live PlayerAircraft/EnemyAircraft interceptor objects + equipment — unbuildable from site ids;
-    ///     interception is a host-side minigame with no shared tactical, its loot rides the silent wallet rail.
     ///   • HavenInfiltrateOutcome 18 — the steal-mission classes are outside the P1 class map (no rebuild ctor path).
     ///   • BehemothAttackOutcome 35 IS whitelisted (suppresses a client-local ghost + keeps host authority) but its
     ///     host class is by definition unmapped → <see cref="OutcomeRebuildMatches"/> is always false → skip-show.
@@ -119,6 +135,10 @@ namespace Multiplayer.Network.Sync.State
         public const int BehemothAttackOutcome = 35;           // ModalType.cs:40 — outcome FALLBACK family (never rebuilds)
         public const int InfestedHavenOutcome = 37;            // ModalType.cs:42 — infested-haven cleanse result
 
+        // ── interception pair (WA-3 gap 5c; both ALWAYS notify-only on the client) ──
+        public const int InterceptionBrief = 32;               // ModalType.cs:37 — live-aircraft decision brief (blocking)
+        public const int InterceptionOutcome = 33;             // ModalType.cs:38 — air-battle result report (non-blocking)
+
         /// <summary>True iff <paramref name="modalType"/> (native ModalType enum value) is a whitelisted
         /// report modal. Takes the full int value (ModalType is int-backed: None=-1, _CustomMission=9999) so a
         /// non-report id can never alias a whitelisted one. PURE.</summary>
@@ -150,6 +170,8 @@ namespace Multiplayer.Network.Sync.State
                 case AncientSiteDefenceOutcome:
                 case BehemothAttackOutcome:
                 case InfestedHavenOutcome:
+                case InterceptionBrief:
+                case InterceptionOutcome:
                     return true;
                 default:
                     return false;
@@ -188,6 +210,9 @@ namespace Multiplayer.Network.Sync.State
                 case BehemothAttackOutcome:
                 case InfestedHavenOutcome:
                     return ReportModalVariant.MissionOutcome;
+                case InterceptionBrief:
+                case InterceptionOutcome:
+                    return ReportModalVariant.InterceptionNotice;
                 case GeoPhoenixBaseOutcome:
                 default:
                     return ReportModalVariant.NullData;
@@ -198,11 +223,20 @@ namespace Multiplayer.Network.Sync.State
         /// opened PERSISTENT natively (OpenModalPersistent — every mission brief via ShowMissionBriefing,
         /// GeoscapeView.cs:1903; every whitelisted outcome via the post-tac rail UIStateInitial.cs:112 and the
         /// cancel paths :1934/:1938); Research/Diplomacy via OpenModal (non-persistent). The client replays with
-        /// the same persistence. PURE.</summary>
+        /// the same persistence. InterceptionNotice never replays a native modal at all (the client shows the
+        /// notify-only prompt) → false. PURE.</summary>
         public static bool IsPersistent(ReportModalVariant variant)
             => variant == ReportModalVariant.NullData || variant == ReportModalVariant.SiteOnly
                || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief
                || variant == ReportModalVariant.ActiveMissionBrief || variant == ReportModalVariant.MissionOutcome;
+
+        /// <summary>
+        /// The interception-notice TEXT decision: true iff <paramref name="modalType"/> is the PENDING-decision
+        /// half of the pair (InterceptionBrief 32 — host paused choosing intercept/disengage, gate armed;
+        /// notice says actions are paused) vs the resolved report (InterceptionOutcome 33 — notice says the
+        /// air battle finished; nothing blocks). PURE.
+        /// </summary>
+        public static bool InterceptionNoticeIsPending(int modalType) => modalType == InterceptionBrief;
 
         /// <summary>
         /// True iff the HOST must defer this report's payload build + broadcast to the NEXT engine tick instead
@@ -231,7 +265,11 @@ namespace Multiplayer.Network.Sync.State
         /// deploy flow; host Cancel → ReportModalHide closes the client copy, normal flow resumes). The gate
         /// arms from the 0x69 SHOW itself, NOT from a successful client rebuild — a degraded notify-only
         /// fallback still leaves the host rejecting intents (spec P2 hard invariant). The CLIENT view-lock is
-        /// the NARROWER <see cref="IsMandatoryBrief"/> (soak 2026-07-05 dead-CLOSE fix). PURE.
+        /// the NARROWER <see cref="IsMandatoryBrief"/> (soak 2026-07-05 dead-CLOSE fix). WA-3: the
+        /// InterceptionBrief 32 joins the blocking set — its native open is PauseGame=true
+        /// (OpenModalPersistent, GeoscapeView.cs:861) with the host deciding intercept/disengage; its resolve
+        /// funnels through the SAME ModalResultCallback (:833) → the existing release + hide rails apply.
+        /// InterceptionOutcome 33 is a report — never blocking. PURE.
         /// </summary>
         public static bool IsBlockingModal(int modalType)
         {
@@ -247,6 +285,7 @@ namespace Multiplayer.Network.Sync.State
                 case GeoPhoenixBaseInfestationBrief:
                 case BehemothAttackBrief:
                 case InfestedHavenBrief:
+                case InterceptionBrief:
                     return true;
                 default:
                     return false;

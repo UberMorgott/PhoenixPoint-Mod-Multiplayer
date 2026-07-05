@@ -1041,6 +1041,23 @@ namespace Multiplayer.Network.Sync
             try
             {
                 var rt = GeoRuntime.Instance;
+                // INTERCEPTION NOTICE (WA-3 gap 5c, modals 32/33): the client never rebuilds the native window
+                // (live-aircraft binds — classifier INTERCEPTION FAMILY note); it shows the notify-only prompt.
+                // Same consecutive-dup guard as outcomes (0x69 has no occId yet; STUN reliable sends twice).
+                // The HOST intent gate for the blocking brief 32 armed at the host's open regardless (spec P2:
+                // gate correctness > display fidelity); 33 is a non-blocking report.
+                if (p.Variant == State.ReportModalVariant.InterceptionNotice)
+                {
+                    if (!_outcomeDedup.ShouldShow(data))
+                    {
+                        Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
+                                  + " → IGNORED (duplicate interception-notice delivery)");
+                        return;
+                    }
+                    State.GeoModalDisplay.ShowInterceptionNotice(p.ModalType,
+                        pending: State.ReportModalClassifier.InterceptionNoticeIsPending(p.ModalType));
+                    return;
+                }
                 // MISSION OUTCOME (Batch-2 P3) takes its own path: consecutive-dup guard (0x69 has no occId until
                 // Batch-3 P5; STUN reliable sends twice) + queue-don't-drop when this client is still in tactical
                 // (the host's post-tac rail fires on ITS geoscape re-entry, which can precede ours).

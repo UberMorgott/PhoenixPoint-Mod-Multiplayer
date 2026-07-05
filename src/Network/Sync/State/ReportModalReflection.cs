@@ -182,6 +182,13 @@ namespace Multiplayer.Network.Sync.State
                     ReadAmbushBrief(modalData, out siteId, out defId);
                     ReadMissionOutcome(modalData, out missionClass, out outcomeState, out rewardBlob);
                     break;
+                case ReportModalVariant.InterceptionNotice:
+                    // WA-3 interception pair (32/33): the client NEVER rebuilds the native window (32's
+                    // InterceptionInfoData and 33's GeoAirMission are live-aircraft objects — see the
+                    // classifier's INTERCEPTION FAMILY note), it only shows the notify-only prompt keyed by
+                    // ModalType — so NOTHING is read off the modalData here (zero reflection = zero host-side
+                    // failure modes). All payload fields stay defaults.
+                    break;
                 case ReportModalVariant.NullData:
                 default:
                     break; // modalType only
