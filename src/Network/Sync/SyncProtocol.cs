@@ -225,6 +225,13 @@ namespace Multiplayer.Network.Sync
         //   Title.Localize() + Description.Last().GetText(context). Emitted ONLY when at least one string is
         //   non-empty, so the no-text wire stays byte-identical (keeps EventRaised_WireBytes_AreStable pinned).
         private const byte RaiseFlagWireTexts = 0x08;
+        //   bit4 (0x10) = Batch-3 P4 DISPLAY-SEQUENCER stamp follows (AFTER the wire texts, new fields at END):
+        //   [displaySeq:u32][nativePriority:i32] — the host's unified display-order stamp taken at its own
+        //   GeoscapeViewSwitchQuery.QueryStateSwitch fire-time + the native view-switch request priority
+        //   (TriggeredByEvent 10 / plain 0 / completed-upgrade 15, GeoscapeView.cs:2044-2062). Emitted ONLY when
+        //   displaySeq != 0, so an unstamped (gate-off/legacy) raise stays byte-identical (wire pin kept); a
+        //   legacy decoder simply never reads the trailing block (optional-tail tolerance, as bit3).
+        private const byte RaiseFlagDisplaySeq = 0x10;
 
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId = -1)
             => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, null, false);
@@ -240,7 +247,11 @@ namespace Multiplayer.Network.Sync
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow)
             => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, null, null);
 
+        // seq-less shim: callers that don't stamp the P4 display sequencer (gate off / legacy).
         public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow, string wireTitle, string wireNarrative)
+            => EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative, 0, 0);
+
+        public static byte[] EncodeEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity, bool singleChoice, bool oneWindow, string wireTitle, string wireNarrative, uint displaySeq, int nativePriority)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -257,6 +268,7 @@ namespace Multiplayer.Network.Sync
                 if (singleChoice) flag |= RaiseFlagSingleChoice;
                 if (oneWindow) flag |= RaiseFlagOneWindow;
                 if (hasTexts) flag |= RaiseFlagWireTexts;
+                if (displaySeq != 0) flag |= RaiseFlagDisplaySeq;
                 if (flag != 0)
                 {
                     w.Write(flag);
@@ -266,6 +278,12 @@ namespace Multiplayer.Network.Sync
                         // Texts go AFTER the identity block (new fields at END of payload).
                         WriteWireStr(w, wireTitle);
                         WriteWireStr(w, wireNarrative);
+                    }
+                    if (displaySeq != 0)
+                    {
+                        // P4 display-sequencer stamp at the very END (newest optional block last).
+                        w.Write(displaySeq);
+                        w.Write(nativePriority);
                     }
                 }
                 return ms.ToArray();
@@ -288,11 +306,16 @@ namespace Multiplayer.Network.Sync
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow)
             => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out singleChoice, out oneWindow, out _, out _);
 
+        // 10-out shim: callers/tests that ignore the P4 display-sequencer stamp.
         public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow, out string wireTitle, out string wireNarrative)
+            => TryDecodeEventRaised(data, out occurrenceId, out eventId, out siteId, out vehicleId, out hasIdentity, out identity, out singleChoice, out oneWindow, out wireTitle, out wireNarrative, out _, out _);
+
+        public static bool TryDecodeEventRaised(byte[] data, out ushort occurrenceId, out string eventId, out int siteId, out int vehicleId, out bool hasIdentity, out GeoSiteState identity, out bool singleChoice, out bool oneWindow, out string wireTitle, out string wireNarrative, out uint displaySeq, out int nativePriority)
         {
             occurrenceId = 0; eventId = null; siteId = -1; vehicleId = -1; hasIdentity = false;
             identity = default(GeoSiteState); singleChoice = false; oneWindow = false;
             wireTitle = ""; wireNarrative = "";
+            displaySeq = 0; nativePriority = 0;
             try
             {
                 using (var ms = new MemoryStream(data))
@@ -319,6 +342,13 @@ namespace Multiplayer.Network.Sync
                             // Host-resolved display texts (title + raise narrative), AFTER the identity block.
                             wireTitle = ReadWireStr(r);
                             wireNarrative = ReadWireStr(r);
+                        }
+                        if ((flag & RaiseFlagDisplaySeq) != 0
+                            && ms.Length - ms.Position >= sizeof(uint) + sizeof(int))
+                        {
+                            // P4 display-sequencer stamp at the very END (length-guarded, never a throw).
+                            displaySeq = r.ReadUInt32();
+                            nativePriority = r.ReadInt32();
                         }
                     }
                     return true;
@@ -511,6 +541,12 @@ namespace Multiplayer.Network.Sync
         // the MESSAGE so the client rebuild never depends on the (possibly already tombstoned) P1 site mirror.
         // Every other variant's wire is BYTE-IDENTICAL to the Phase-A format (wire pin kept). Decode of the tail
         // is length-guarded: a truncated tail yields the defaults (class 0 → the rebuild skips gracefully).
+        // BATCH-3 TAIL (P4+P5): every stamped payload appends [occId:u16][displaySeq:u32] at the very END
+        // (after the variant tail): the P5 report occurrence id (client ReportOccurrenceDedup → STUN
+        // double-send idempotent) + the P4 unified display-order stamp (nativePriority already rides the
+        // existing Priority field — the modal opener's priority IS the view-switch request priority). Written
+        // ONLY when stamped (occId/displaySeq non-zero) so every pre-Batch-3 wire stays byte-identical; decode
+        // is length-guarded → a legacy payload yields 0/0 (no dedup, direct display path).
 
         public static byte[] EncodeReportModal(ReportModalPayload p)
         {
@@ -539,6 +575,12 @@ namespace Multiplayer.Network.Sync
                     w.Write(p.OutcomeState);
                     w.Write((ushort)blob.Length);
                     w.Write(blob);
+                }
+                if (p.OccId != 0 || p.DisplaySeq != 0)
+                {
+                    // Batch-3 tail (always both fields, fixed 6 bytes, so the guarded decode is unambiguous).
+                    w.Write(p.OccId);
+                    w.Write(p.DisplaySeq);
                 }
                 return ms.ToArray();
             }
@@ -580,6 +622,13 @@ namespace Multiplayer.Network.Sync
                     }
                     payload = new ReportModalPayload(modalType, (ReportModalVariant)variantByte,
                         siteId, priority, shareLevel, defId, extras, missionClass, outcomeState, rewardBlob);
+                    // Batch-3 tail (length-guarded): [occId:u16][displaySeq:u32]. Absent on a legacy wire →
+                    // defaults 0/0 (no dedup, direct display path).
+                    if (ms.Length - ms.Position >= sizeof(ushort) + sizeof(uint))
+                    {
+                        payload.OccId = r.ReadUInt16();
+                        payload.DisplaySeq = r.ReadUInt32();
+                    }
                     return true;
                 }
             }
@@ -588,15 +637,28 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>
         /// Host → all: close the mirrored BLOCKING report modal (ambush brief) on clients — the host resolved
-        /// it (ModalResultCallback: Confirm→LaunchMission / any other result). Wire: [modalType:u8].
+        /// it (ModalResultCallback: Confirm→LaunchMission / any other result). Wire: [modalType:u8] plus the
+        /// Batch-3 P5 optional tail ([occId:u16-LE], written only when non-zero) so the client dedups a STUN
+        /// double-sent hide exactly like a show; a legacy 1-byte wire decodes occId 0 (never deduped).
         /// </summary>
         public static byte[] EncodeReportModalHide(byte modalType) => new[] { modalType };
 
+        public static byte[] EncodeReportModalHide(byte modalType, ushort occId)
+        {
+            if (occId == 0) return new[] { modalType };
+            return new[] { modalType, (byte)(occId & 0xFF), (byte)(occId >> 8) };
+        }
+
         public static bool TryDecodeReportModalHide(byte[] data, out byte modalType)
+            => TryDecodeReportModalHide(data, out modalType, out _);
+
+        public static bool TryDecodeReportModalHide(byte[] data, out byte modalType, out ushort occId)
         {
             modalType = 0;
+            occId = 0;
             if (data == null || data.Length < 1) return false;
             modalType = data[0];
+            if (data.Length >= 3) occId = (ushort)(data[1] | (data[2] << 8));
             return true;
         }
 

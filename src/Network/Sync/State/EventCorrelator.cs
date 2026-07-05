@@ -136,6 +136,10 @@ namespace Multiplayer.Network.Sync.State
         public int PendingCount => _pending.Count;
         /// <summary>Single-choice prompt mirrors awaiting a host advance (diagnostics/tests).</summary>
         public int PromptMirrorCount => _promptMirror.Count;
+        /// <summary>True iff no dialog occupies the single client display slot. Batch-3 P4: the unified display
+        /// queue treats an EVENT display as closed exactly when this slot frees (dismiss/advance) — the
+        /// correlator is the queue's event-rail CONSUMER, keeping all its dedup/correlation logic.</summary>
+        public bool ShownSlotFree => _shownSlot == 0;
         /// <summary>Buffered advances that beat their raise (diagnostics/tests).</summary>
         public int PendingAdvanceCount => _pendingAdvance.Count;
 

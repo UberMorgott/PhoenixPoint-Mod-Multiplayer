@@ -139,22 +139,32 @@ namespace Multiplayer.Harmony.Sync
                 if (!ReportMirrorGate.Enabled) return;
                 if (SyncApplyScope.IsApplying) return;        // never re-broadcast a reconstructed window
                 if (!ReportModalClassifier.IsReportModal(modalType)) return;
+                // Batch-3 P4: consume the display-order stamp recorded by ViewSwitchQueryStampPatch when the
+                // native OpenModal(Persistent) body pushed its UIStateGeoModal — same call stack, exact
+                // native-queue seq. Fallback (forceOnTop/replaceTop bypassed QueryStateSwitch, or the stamp
+                // patch is unbound): a fresh seq at open time keeps a consistent order.
+                uint displaySeq = 0;
+                if (DisplaySequencerGate.Enabled
+                    && !Multiplayer.Network.Sync.State.DisplayStamp.TryTake("UIStateGeoModal", out displaySeq, out _))
+                    displaySeq = Multiplayer.Network.Sync.State.DisplaySequence.NextSeq();
                 // Research variant: this Postfix runs INSIDE the Research.OnResearchCompleted dispatch, BEFORE
                 // the requirement subscribers flip dependent elements to Revealed/Unlocked — a payload read here
                 // ships a stale-false "new research available" nav flag (the 35e996e regression: client force-hid
                 // a line the host natively showed). Defer the build+broadcast to the next engine tick, where the
                 // read matches what the host's own bind renders (ReportModalClassifier.ShouldDeferHostBroadcast).
+                // The P4 stamp is captured NOW (queue time = native fire-time) and rides the deferred tuple.
                 if (ReportModalClassifier.ShouldDeferHostBroadcast(modalType))
                 {
-                    engine.Sync?.QueueDeferredReportModal(modalType, modalData, priority);
+                    engine.Sync?.QueueDeferredReportModal(modalType, modalData, priority, displaySeq);
                     Debug.Log("[Multiplayer] HOST report modalType=" + modalType +
-                              " deferred to next tick (post-cascade nav-flag read)");
+                              " deferred to next tick (post-cascade nav-flag read) displaySeq=" + displaySeq);
                     return;
                 }
                 if (!ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) return;
+                payload.DisplaySeq = displaySeq;
                 Debug.Log("[Multiplayer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
                           " siteId=" + payload.SiteId + " defId=" + payload.DefId + " extras=" + (payload.ExtraIds?.Count ?? 0) +
-                          " shareLevel=" + payload.ShareLevel + " priority=" + payload.Priority);
+                          " shareLevel=" + payload.ShareLevel + " priority=" + payload.Priority + " displaySeq=" + displaySeq);
                 engine.Sync?.BroadcastReportModal(payload);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalMirror.HostBroadcast failed: " + ex.Message); }

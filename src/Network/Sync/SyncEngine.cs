@@ -87,6 +87,33 @@ namespace Multiplayer.Network.Sync
         /// <summary>Host-side first-click-wins arbiter for event choices (reached from CompleteEventPatch.Prefix).</summary>
         public State.ChoiceArbiter Arbiter => _choiceArbiter;
 
+        // ─── Batch-3 P4 unified display sequencer (client) ─────────────────
+        // ONE cross-rail order surface: every host-STAMPED display (event raise 0x65 / report modal 0x69 /
+        // cutscene action) is held here and released one-at-a-time in the host's native display order
+        // (nativePriority DESC, displaySeq ASC — the GeoscapeViewSwitchQuery semantics), each next display only
+        // when the current one closes (event dismiss/advance frees the correlator slot; a mirrored modal's
+        // UIModuleModal.Hide fires ClientDisplayCloseSignalPatch). The per-rail handlers stay the executors —
+        // EventCorrelator is this queue's event-rail CONSUMER (dedup/correlation untouched). UNSTAMPED
+        // (displaySeq 0: legacy host / gate off) messages take their exact pre-Batch-3 direct path, so a rail
+        // is never live on both routes at once (the spec's double-display-mid-migration guard).
+        private readonly State.UnifiedDisplayQueue _displayQueue = new State.UnifiedDisplayQueue();
+        // Released-display build payloads, keyed by displaySeq (the pure queue holds only order metadata).
+        private struct StashedDisplay
+        {
+            public byte Kind;                          // UnifiedDisplayQueue.Kind*
+            public byte[] EventData;                   // KindEvent: raw 0x65 payload; KindReport: raw 0x69 (legacy byte-dedup belt)
+            public State.ReportModalPayload Report;    // KindReport: decoded payload
+            public string CutsceneGuid;                // KindCutscene
+            public int CutscenePriority;               // KindCutscene
+        }
+        private readonly Dictionary<uint, StashedDisplay> _stashedDisplays = new Dictionary<uint, StashedDisplay>();
+        // The ModalType of the Report display currently occupying the queue slot (close-signal type match).
+        private byte _currentReportModalType;
+        // Batch-3 P5: report-rail (0x69/0x6C) occurrence-id dedup — STUN double-send → idempotent no-op.
+        private readonly State.ReportOccurrenceDedup _reportDedup = new State.ReportOccurrenceDedup();
+        // Tick belt: last-seen geoscape-view liveness, to free a queue slot orphaned by a view teardown.
+        private bool _geoViewWasLive;
+
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
@@ -105,6 +132,11 @@ namespace Multiplayer.Network.Sync
             // (0xA1) now ride this envelope rail ONLY (host emits them unconditionally; see BroadcastFullWallet/
             // FlushChannel/Tick).
             _router.GeoscapeInbound = HandleGeoscapeEnvelope;
+            // Batch-3 P4: route a stamped mirrored cutscene through the unified display queue. The action file
+            // is NetworkEngine-free (linked into the pure test build), so it reaches this engine via the pure
+            // router seam; a fresh session's SyncEngine re-installs the hook (stale-engine calls fail closed on
+            // the instance checks inside EnqueueCutsceneDisplay).
+            State.CutsceneDisplayRouter.Enqueue = EnqueueCutsceneDisplay;
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -523,6 +555,30 @@ namespace Multiplayer.Network.Sync
         public void OnEventRaised(byte[] data)
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
+            // Batch-3 P4: a STAMPED raise (displaySeq != 0) rides the unified display queue — ordered against
+            // report modals + cutscenes in host display order, released one-at-a-time into the correlator
+            // (ProcessEventRaised). An unstamped/legacy raise (or gate off) takes the direct path unchanged.
+            if (DisplaySequencerGate.Enabled
+                && SyncProtocol.TryDecodeEventRaised(data, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out var displaySeq, out var nativePriority)
+                && displaySeq != 0)
+            {
+                if (!_displayQueue.Enqueue(displaySeq, nativePriority, State.UnifiedDisplayQueue.KindEvent))
+                {
+                    Debug.Log("[Multiplayer] CLIENT OnEventRaised displaySeq=" + displaySeq + " → IGNORED (duplicate display delivery)");
+                    return;
+                }
+                _stashedDisplays[displaySeq] = new StashedDisplay { Kind = State.UnifiedDisplayQueue.KindEvent, EventData = data };
+                TryReleaseDisplays();
+                return;
+            }
+            ProcessEventRaised(data);
+        }
+
+        // The event-rail display EXECUTOR (the pre-Batch-3 OnEventRaised body): decode + correlate + show.
+        // Reached directly for an unstamped raise, or from TryReleaseDisplays when the unified queue releases
+        // a stamped one — the EventCorrelator is the queue's consumer and keeps all its dedup/ordering logic.
+        private void ProcessEventRaised(byte[] data)
+        {
             if (!SyncProtocol.TryDecodeEventRaised(data, out var occId, out var eventId, out var siteId, out var vehicleId, out var hasIdentity, out var identity, out var singleChoice, out var oneWindow, out var wireTitle, out var wireNarrative)) return;
             if (string.IsNullOrEmpty(eventId)) return;
             try
@@ -693,6 +749,16 @@ namespace Multiplayer.Network.Sync
             lock (_pendingOutcomes) _pendingOutcomes.Clear();
             _outcomeDedup.Reset();
             _harvestDedup.Reset();
+            // Batch-3 belts (spec risk note): the unified display queue + its stashes + the report occId dedup
+            // + the HOST stamp counters all die with the old geoscape — a stale current/queued display whose
+            // close signal can never arrive would stall every post-transfer display, and a stale dedup id
+            // could eat a fresh one.
+            _displayQueue.Reset();
+            _stashedDisplays.Clear();
+            _currentReportModalType = 0;
+            _reportDedup.Reset();
+            State.DisplaySequence.Reset();
+            State.DisplayStamp.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -762,6 +828,117 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        // ─── Batch-3 P4: unified display-queue release + close signals ─────────────────────────────
+
+        /// <summary>
+        /// Client: drain the unified display queue — release the next stamped display (host order: priority
+        /// DESC, displaySeq ASC) into its per-rail executor while the single slot is free. A display whose
+        /// executor did NOT put a real window on the view-switch (deferred outcome, degraded notice, terminal
+        /// event resolution, cutscene, failed rebuild) is NON-occupying: its slot frees at once and the drain
+        /// continues; an occupying one (event dialog / mirrored modal) stops the drain until its close signal
+        /// (dismiss/advance frees the correlator slot; UIModuleModal.Hide → <see cref="OnClientModalClosed"/>).
+        /// </summary>
+        private void TryReleaseDisplays()
+        {
+            while (_displayQueue.TryRelease(out var seq, out var kind))
+            {
+                if (!_stashedDisplays.TryGetValue(seq, out var d))
+                {
+                    // DEFENSIVE (stash written at Enqueue, dropped only here/reset): nothing to execute —
+                    // free the slot so the queue can never wedge on a phantom display.
+                    Debug.LogError("[Multiplayer] CLIENT released display seq=" + seq + " kind=" + kind +
+                                   " but its stash is MISSING → skipped (slot freed)");
+                    _displayQueue.NotifyClosed(seq);
+                    continue;
+                }
+                _stashedDisplays.Remove(seq);
+                bool occupies = false;
+                try
+                {
+                    switch (kind)
+                    {
+                        case State.UnifiedDisplayQueue.KindEvent:
+                            // The correlator consumes the raise exactly as the direct path would; it OCCUPIES
+                            // the queue slot iff it occupied the correlator's single display slot (ShowDialog /
+                            // prompt mirror). Terminal resolutions (result page / noop / dup) free it at once.
+                            ProcessEventRaised(d.EventData);
+                            occupies = !_eventCorrelator.ShownSlotFree;
+                            break;
+                        case State.UnifiedDisplayQueue.KindReport:
+                            occupies = ProcessReportModalShow(d.Report, d.EventData);
+                            if (occupies) _currentReportModalType = d.Report.ModalType;   // close-signal type match
+                            break;
+                        case State.UnifiedDisplayQueue.KindCutscene:
+                            // Ordered by its queue position; playback itself is serialized by the native
+                            // view-switch (UIStateGeoCutscene), and no close signal exists → non-occupying.
+                            CutsceneReflection.PlayGeoscapeCutscene(GeoRuntime.Instance, d.CutsceneGuid, d.CutscenePriority);
+                            break;
+                    }
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.TryReleaseDisplays seq=" + seq + " kind=" + kind + " failed: " + ex.Message); }
+                Debug.Log("[Multiplayer] CLIENT display released seq=" + seq + " kind=" + kind +
+                          " occupies=" + occupies + " (queued=" + _displayQueue.QueuedCount + ")");
+                if (occupies) break;   // wait for the close signal before the next display
+                _displayQueue.NotifyClosed(seq);
+            }
+        }
+
+        /// <summary>
+        /// Client: route a STAMPED mirrored cutscene through the unified queue (installed as the
+        /// <see cref="State.CutsceneDisplayRouter"/> hook — the action file is NetworkEngine-free). True =
+        /// consumed (queued, or a duplicate delivery swallowed); false = not queueable here (host/no session)
+        /// → the caller plays directly, the pre-Batch-3 behavior.
+        /// </summary>
+        internal bool EnqueueCutsceneDisplay(uint displaySeq, int nativePriority, string cutsceneGuid)
+        {
+            if (_engine == null || !_engine.IsActive || _engine.IsHost) return false;
+            if (!_displayQueue.Enqueue(displaySeq, nativePriority, State.UnifiedDisplayQueue.KindCutscene))
+            {
+                Debug.Log("[Multiplayer] CLIENT cutscene displaySeq=" + displaySeq + " → IGNORED (duplicate display delivery)");
+                return true;   // duplicate → swallow, never double-play
+            }
+            _stashedDisplays[displaySeq] = new StashedDisplay
+            {
+                Kind = State.UnifiedDisplayQueue.KindCutscene,
+                CutsceneGuid = cutsceneGuid,
+                CutscenePriority = nativePriority
+            };
+            TryReleaseDisplays();
+            return true;
+        }
+
+        // A dismiss/advance may have freed the correlator's single display slot — if an EVENT display was
+        // occupying the unified queue, its "current display closed" moment is exactly that slot-free, so free
+        // the queue slot and release the next stamped display. Called AFTER DrainQueuedRaises so a correlator-
+        // internal release (legacy mixed-rail case) that re-occupied the slot correctly keeps the queue held.
+        private void NotifyEventDisplayMaybeClosed()
+        {
+            if (!DisplaySequencerGate.Enabled) return;
+            if (_displayQueue.HasCurrent && _displayQueue.CurrentKind == State.UnifiedDisplayQueue.KindEvent
+                && _eventCorrelator.ShownSlotFree)
+            {
+                _displayQueue.NotifyClosed(_displayQueue.CurrentSeq);
+                TryReleaseDisplays();
+            }
+        }
+
+        /// <summary>
+        /// Client (from <c>ClientDisplayCloseSignalPatch</c>): a native modal window hid — EVERY modal close
+        /// funnels through <c>UIModuleModal.Hide</c> (host-driven 0x6C → CloseBlocking → FinishQueriedState →
+        /// ExitState → Hide, AND a local OK on a non-blocking mirrored report). If the hidden type is the
+        /// Report display occupying the unified queue, that display just closed → release the next one.
+        /// Type-matched so an unrelated native window's close never releases someone else's slot.
+        /// </summary>
+        public void OnClientModalClosed(int modalType)
+        {
+            if (!DisplaySequencerGate.Enabled) return;
+            if (!_displayQueue.HasCurrent || _displayQueue.CurrentKind != State.UnifiedDisplayQueue.KindReport) return;
+            if (modalType != _currentReportModalType) return;
+            _currentReportModalType = 0;
+            _displayQueue.NotifyClosed(_displayQueue.CurrentSeq);
+            TryReleaseDisplays();
+        }
+
         /// <summary>
         /// Client: host's answer was applied. The dismiss is correlated by its per-OCCURRENCE id: when its dialog
         /// is open it is resolved in place (choiceIndex &gt;= 0 → rebuild + show the RESULT/OUTCOME page;
@@ -810,6 +987,9 @@ namespace Multiplayer.Network.Sync
                 }
                 // The shown dialog (if any) just closed → release the next deferred raise in occId order.
                 DrainQueuedRaises(rt);
+                // Batch-3 P4: a freed correlator slot = the queued EVENT display closed → release the next
+                // stamped display (report modal / cutscene / event) in host display order.
+                NotifyEventDisplayMaybeClosed();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventDismiss failed: " + ex.Message); }
         }
@@ -857,6 +1037,8 @@ namespace Multiplayer.Network.Sync
                 // cleared _shownSlot) → release the next deferred raise in occId order, exactly as a dismiss does.
                 // (A buffered/no-op advance leaves the slot busy → TryDequeueNext is a no-op — harmless.)
                 DrainQueuedRaises(rt);
+                // Batch-3 P4: same close signal as a dismiss — a freed slot releases the next stamped display.
+                NotifyEventDisplayMaybeClosed();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventAdvanceResult failed: " + ex.Message); }
         }
@@ -935,11 +1117,11 @@ namespace Multiplayer.Network.Sync
         /// optional absent-site identity block (so a client without the site degrades gracefully, not StartingBase)
         /// and the host-resolved wire texts (title + raise narrative) so a runtime-narrative def (TFTV VoidOmen,
         /// empty loc keys) still renders on a client whose local def resolution yields a BLANK window.</summary>
-        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false, bool oneWindow = false, string wireTitle = null, string wireNarrative = null)
+        public void BroadcastEventRaised(ushort occurrenceId, string eventId, int siteId, int vehicleId, GeoSiteState? identity = null, bool singleChoice = false, bool oneWindow = false, string wireTitle = null, string wireNarrative = null, uint displaySeq = 0, int nativePriority = 0)
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventRaised,
-                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative)));
+                SyncProtocol.EncodeEventRaised(occurrenceId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative, displaySeq, nativePriority)));
         }
 
         /// <summary>
@@ -987,6 +1169,10 @@ namespace Multiplayer.Network.Sync
         public void BroadcastReportModal(State.ReportModalPayload payload)
         {
             if (!_engine.IsHost) return;
+            // Batch-3 P5: every 0x69 send carries a fresh monotonic occurrence id (the DisplaySequence host
+            // counter, same pattern as EventOccurrenceIds) so the client dedups the STUN double-send. The P4
+            // displaySeq was stamped by the CALLER at native QueryStateSwitch fire-time (payload.DisplaySeq).
+            payload.OccId = State.DisplaySequence.NextReportOccId();
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ReportModalShow,
                 SyncProtocol.EncodeReportModal(payload)));
         }
@@ -999,33 +1185,37 @@ namespace Multiplayer.Network.Sync
         // priority) here; the next host Tick — by which time the same-call-stack cascade has finished —
         // builds the payload (fresh reflection read) and broadcasts it. The client is unaffected by the
         // one-tick delay: its mirrored popup is opened BY this payload, so the nav flag always arrives with it.
-        private readonly List<(int modalType, object modalData, int priority)> _deferredReports
-            = new List<(int, object, int)>();
+        private readonly List<(int modalType, object modalData, int priority, uint displaySeq)> _deferredReports
+            = new List<(int, object, int, uint)>();
 
-        /// <summary>HOST: queue a report whose payload must be read after the current sim dispatch settles.</summary>
-        public void QueueDeferredReportModal(int modalType, object modalData, int priority)
+        /// <summary>HOST: queue a report whose payload must be read after the current sim dispatch settles.
+        /// <paramref name="displaySeq"/> is the P4 stamp captured at QUEUE time (= the native QueryStateSwitch
+        /// fire-time) — the one-tick-deferred broadcast must NOT restamp, or the wire order would drift from
+        /// the host's native display order.</summary>
+        public void QueueDeferredReportModal(int modalType, object modalData, int priority, uint displaySeq = 0)
         {
-            lock (_deferredReports) _deferredReports.Add((modalType, modalData, priority));
+            lock (_deferredReports) _deferredReports.Add((modalType, modalData, priority, displaySeq));
         }
 
         /// <summary>Host Tick: build + broadcast every deferred report with a POST-cascade payload read.</summary>
         private void FlushDeferredReportModals()
         {
-            (int modalType, object modalData, int priority)[] pending;
+            (int modalType, object modalData, int priority, uint displaySeq)[] pending;
             lock (_deferredReports)
             {
                 if (_deferredReports.Count == 0) return;
                 pending = _deferredReports.ToArray();
                 _deferredReports.Clear();
             }
-            foreach (var (modalType, modalData, priority) in pending)
+            foreach (var (modalType, modalData, priority, displaySeq) in pending)
             {
                 try
                 {
                     if (!State.ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) continue;
+                    payload.DisplaySeq = displaySeq;   // the queue-time P4 stamp, never a flush-time restamp
                     Debug.Log("[Multiplayer] HOST BroadcastReportModal (deferred, post-cascade read) modalType=" + modalType +
                               " variant=" + payload.Variant + " defId=" + payload.DefId + " shareLevel=" + payload.ShareLevel +
-                              " priority=" + payload.Priority);
+                              " priority=" + payload.Priority + " displaySeq=" + displaySeq);
                     BroadcastReportModal(payload);
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.FlushDeferredReportModals failed: " + ex.Message); }
@@ -1042,6 +1232,38 @@ namespace Multiplayer.Network.Sync
         {
             if (_engine.IsHost) return;   // host shows it via its own local sim
             if (!SyncProtocol.TryDecodeReportModal(data, out var p)) return;
+            // Batch-3 P5: occurrence-id dedup FIRST — the STUN reliable transport deliberately sends twice, so
+            // a duplicate 0x69 must be an idempotent no-op regardless of the sequencer gate. occId 0 = legacy
+            // unstamped wire → never deduped here (the byte-level _outcomeDedup belt below still covers it).
+            if (_reportDedup.SeenBefore(p.OccId))
+            {
+                Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType + " occId=" + p.OccId +
+                          " → IGNORED (duplicate report delivery)");
+                return;
+            }
+            // Batch-3 P4: a STAMPED show rides the unified display queue in host display order (nativePriority
+            // IS the modal priority — the opener's arg is the native view-switch request priority). An
+            // unstamped/legacy show (or gate off) takes the direct path unchanged.
+            if (DisplaySequencerGate.Enabled && p.DisplaySeq != 0)
+            {
+                if (!_displayQueue.Enqueue(p.DisplaySeq, p.Priority, State.UnifiedDisplayQueue.KindReport))
+                {
+                    Debug.Log("[Multiplayer] CLIENT OnReportModalShow displaySeq=" + p.DisplaySeq + " → IGNORED (duplicate display delivery)");
+                    return;
+                }
+                _stashedDisplays[p.DisplaySeq] = new StashedDisplay { Kind = State.UnifiedDisplayQueue.KindReport, Report = p, EventData = data };
+                TryReleaseDisplays();
+                return;
+            }
+            ProcessReportModalShow(p, data);
+        }
+
+        // The report-rail display EXECUTOR (the pre-Batch-3 OnReportModalShow body). Returns TRUE iff a real
+        // GeoModal window was queued on the view-switch (it then OCCUPIES the unified display queue until its
+        // UIModuleModal.Hide close signal); notices, deferred outcomes and failed rebuilds return false so the
+        // queue never waits on a window that will never close.
+        private bool ProcessReportModalShow(State.ReportModalPayload p, byte[] data)
+        {
             try
             {
                 var rt = GeoRuntime.Instance;
@@ -1056,11 +1278,11 @@ namespace Multiplayer.Network.Sync
                     {
                         Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
                                   + " → IGNORED (duplicate interception-notice delivery)");
-                        return;
+                        return false;
                     }
                     State.GeoModalDisplay.ShowInterceptionNotice(p.ModalType,
                         pending: State.ReportModalClassifier.InterceptionNoticeIsPending(p.ModalType));
-                    return;
+                    return false;   // notify-only text prompt — never occupies the display queue
                 }
                 // MISSION OUTCOME (Batch-2 P3) takes its own path: consecutive-dup guard (0x69 has no occId until
                 // Batch-3 P5; STUN reliable sends twice) + queue-don't-drop when this client is still in tactical
@@ -1071,15 +1293,14 @@ namespace Multiplayer.Network.Sync
                     {
                         Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
                                   + " → IGNORED (duplicate outcome delivery)");
-                        return;
+                        return false;
                     }
                     if (!State.GeoModalDisplay.CanShow(rt))
                     {
                         QueuePendingOutcome(p);
-                        return;
+                        return false;   // deferred to the geoscape-return drain — must not hold the queue
                     }
-                    ShowMissionOutcome(rt, p);
-                    return;
+                    return ShowMissionOutcome(rt, p);
                 }
                 object modalData;
                 switch (p.Variant)
@@ -1093,7 +1314,7 @@ namespace Multiplayer.Network.Sync
                         break;
                     case State.ReportModalVariant.Research:
                         modalData = State.ReportModalReflection.BuildResearchCompleteData(rt, p.DefId);
-                        if (modalData == null) return;   // element unresolved → don't show an empty card
+                        if (modalData == null) return false;   // element unresolved → don't show an empty card
                         // Mirror the HOST's native "new research available" line: the flag rides ShareLevel
                         // (ResearchNavMirror tri-state); ResearchNavGroupMirrorPatch consumes it at bind time.
                         // Unknown/legacy → not armed → the client's bind stays native (fail-open).
@@ -1108,14 +1329,14 @@ namespace Multiplayer.Network.Sync
                         // modal's data bind. The window is view-locked client-side (BlockingModalClientLockPatches)
                         // and closes solely on the host's resolve (ReportModalHide) or the tactical transition.
                         modalData = State.ReportModalReflection.BuildAmbushMission(rt, p.SiteId, p.DefId);
-                        if (modalData == null) return;   // unresolved site/def → don't show an empty brief
+                        if (modalData == null) return false;   // unresolved site/def → don't show an empty brief
                         break;
                     case State.ReportModalVariant.SiteMissionBrief:
                         // Same display-only rebuild contract as AmbushBrief, concrete class by modalType
                         // (scavenge / ancient-site deploy briefs). View-locked; closes on the host's resolve
                         // (Confirm → tactical co-op deploy flow; Cancel → ReportModalHide) — never locally.
                         modalData = State.ReportModalReflection.BuildSiteMissionBrief(rt, p.ModalType, p.SiteId, p.DefId);
-                        if (modalData == null) return;   // unresolved site/def → don't show an empty brief
+                        if (modalData == null) return false;   // unresolved site/def → don't show an empty brief
                         break;
                     case State.ReportModalVariant.ActiveMissionBrief:
                         // LIVE→site-id brief (base attack 11 / haven defense 0 / alien base 2 / infestation
@@ -1128,11 +1349,11 @@ namespace Multiplayer.Network.Sync
                         if (State.ReportModalClassifier.ShouldShowDegradedNotice(p.Variant, rebuildSucceeded: modalData != null))
                         {
                             State.GeoModalDisplay.ShowDegradedBriefNotice(p.ModalType);
-                            return;
+                            return false;   // notify-only degrade — never occupies the display queue
                         }
                         break;
                     default:
-                        return;   // unknown/future variant → ignore (MissionOutcome handled above)
+                        return false;   // unknown/future variant → ignore (MissionOutcome handled above)
                 }
                 bool persistent = State.ReportModalClassifier.IsPersistent(p.Variant);
                 Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType + " variant=" + p.Variant +
@@ -1140,9 +1361,10 @@ namespace Multiplayer.Network.Sync
                           " shareLevel=" + p.ShareLevel + " priority=" + p.Priority + " persistent=" + persistent +
                           " hasData=" + (modalData != null));
                 using (SyncApplyScope.Enter())
-                    State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
+                    return State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
+            return false;
         }
 
         // ─── mission-outcome mirror (Batch-2 P3): client dedup + queue-don't-drop + show ─────────────
@@ -1185,16 +1407,16 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        private void ShowMissionOutcome(GeoRuntime rt, State.ReportModalPayload p)
+        private bool ShowMissionOutcome(GeoRuntime rt, State.ReportModalPayload p)
         {
             var modalData = State.ReportModalReflection.BuildMissionOutcome(
                 rt, p.ModalType, p.SiteId, p.DefId, p.MissionClass, p.OutcomeState, p.RewardBlob);
             Debug.Log("[Multiplayer] CLIENT ShowMissionOutcome modalType=" + p.ModalType + " siteId=" + p.SiteId
                       + " class=" + p.MissionClass + " outcome=" + p.OutcomeState
                       + " rewardBytes=" + (p.RewardBlob?.Length ?? 0) + " built=" + (modalData != null));
-            if (modalData == null) return;   // unresolved rebuild → skip (non-blocking report, logged upstream)
+            if (modalData == null) return false;   // unresolved rebuild → skip (non-blocking report, logged upstream)
             using (SyncApplyScope.Enter())
-                State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent: true);
+                return State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent: true);
         }
 
         /// <summary>
@@ -1205,8 +1427,10 @@ namespace Multiplayer.Network.Sync
         public void BroadcastReportModalHide(byte modalType)
         {
             if (!_engine.IsHost) return;
+            // Batch-3 P5: the hide carries its own fresh occurrence id — a STUN double-sent 0x6C dedups on the
+            // client exactly like a show (the second delivery must not race a LATER window of the same type).
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ReportModalHide,
-                SyncProtocol.EncodeReportModalHide(modalType)));
+                SyncProtocol.EncodeReportModalHide(modalType, State.DisplaySequence.NextReportOccId())));
         }
 
         /// <summary>
@@ -1219,11 +1443,25 @@ namespace Multiplayer.Network.Sync
         public void OnReportModalHide(byte[] data)
         {
             if (_engine.IsHost) return;   // authority closed natively; it never applies its own broadcast
-            if (!SyncProtocol.TryDecodeReportModalHide(data, out var modalType)) return;
+            if (!SyncProtocol.TryDecodeReportModalHide(data, out var modalType, out var occId)) return;
+            // Batch-3 P5: occurrence-id dedup — a STUN double-sent hide must not re-run CloseBlocking (the
+            // second delivery could clear the mirror tag / pop a LATER window of the same type). occId 0 =
+            // legacy unstamped wire → falls through (CloseBlocking itself is type-matched + idempotent).
+            if (_reportDedup.SeenBefore(occId))
+            {
+                Debug.Log("[Multiplayer] CLIENT OnReportModalHide modalType=" + modalType + " occId=" + occId +
+                          " → IGNORED (duplicate hide delivery)");
+                return;
+            }
             try
             {
                 using (SyncApplyScope.Enter())
                     State.GeoModalDisplay.CloseBlocking(GeoRuntime.Instance, modalType);
+                // Batch-3 P4: the close normally funnels through UIModuleModal.Hide (→ OnClientModalClosed
+                // releases the queue). BELT for the hide-before-show race: the mirrored window was still queued
+                // (never entered → no Hide will fire for the MIRRORED copy while it occupies the queue slot) —
+                // free the slot here so the sequencer can't wedge on a window the host already resolved.
+                OnClientModalClosed(modalType);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalHide failed: " + ex.Message); }
         }
@@ -1250,6 +1488,25 @@ namespace Multiplayer.Network.Sync
                 // tactical (queue-don't-drop) — drains once the geoscape view is live again.
                 try { DrainPendingOutcomes(GeoRuntime.Instance); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.Tick outcome drain failed: " + ex.Message); }
+                // Batch-3 P4 belt: the geoscape view was torn down (tactical/loading) and came back. Any
+                // display that was CURRENT in the unified queue died with the view's native switch requests —
+                // its close signal can never fire — so free the slot on the false→true transition and release
+                // the next stashed display onto the fresh view.
+                try
+                {
+                    bool geoViewLive = State.GeoModalDisplay.CanShow(GeoRuntime.Instance);
+                    if (geoViewLive && !_geoViewWasLive && _displayQueue.HasCurrent)
+                    {
+                        Debug.Log("[Multiplayer] CLIENT geoscape view returned with a stale current display seq="
+                                  + _displayQueue.CurrentSeq + " kind=" + _displayQueue.CurrentKind
+                                  + " → slot freed (its native request died with the old view)");
+                        _currentReportModalType = 0;
+                        _displayQueue.ClearCurrent();
+                        TryReleaseDisplays();
+                    }
+                    _geoViewWasLive = geoViewLive;
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.Tick display-queue belt failed: " + ex.Message); }
                 return;
             }
 

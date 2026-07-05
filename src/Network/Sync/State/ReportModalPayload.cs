@@ -102,6 +102,17 @@ namespace Multiplayer.Network.Sync.State
         /// (host <c>mission.Reward</c> read via <c>RewardDisplayReflection.BuildFromReward</c>). Empty otherwise.</summary>
         public byte[] RewardBlob;
 
+        /// <summary>Batch-3 P5: host-monotonic report occurrence id (<see cref="DisplaySequence.NextReportOccId"/>)
+        /// stamped at broadcast so the client's <see cref="ReportOccurrenceDedup"/> drops a transport double-send.
+        /// 0 = legacy/unstamped wire (never deduped).</summary>
+        public ushort OccId;
+
+        /// <summary>Batch-3 P4: unified display-order stamp (<see cref="DisplaySequence.NextSeq"/>) taken at the
+        /// host's own <c>GeoscapeViewSwitchQuery.QueryStateSwitch</c> fire-time. 0 = legacy/unstamped → the client
+        /// takes the pre-Batch-3 direct display path. The queue's nativePriority is <see cref="Priority"/> (the
+        /// modal opener's priority IS the native view-switch request priority — decompile GeoscapeView.cs:849/868).</summary>
+        public uint DisplaySeq;
+
         public ReportModalPayload(byte modalType, ReportModalVariant variant, int siteId, int priority,
                                   int shareLevel, string defId, List<string> extraIds)
             : this(modalType, variant, siteId, priority, shareLevel, defId, extraIds, 0, 0, null)
@@ -122,6 +133,8 @@ namespace Multiplayer.Network.Sync.State
             MissionClass = missionClass;
             OutcomeState = outcomeState;
             RewardBlob = rewardBlob ?? new byte[0];
+            OccId = 0;
+            DisplaySeq = 0;
         }
     }
 }

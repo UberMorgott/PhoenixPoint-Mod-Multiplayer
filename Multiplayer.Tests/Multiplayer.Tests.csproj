@@ -73,6 +73,16 @@
          outcome payloads. The rebuild/stamp bridge (ReportModalReflection.BuildMissionOutcome) binds game
          types and is NOT linked. -->
     <Compile Include="..\src\Network\Sync\State\ReportOutcomeDedup.cs"><Link>Sync\State\ReportOutcomeDedup.cs</Link></Compile>
+    <!-- Batch-3 P4+P5 unified display sequencer + report-rail occId dedup (all pure): the ONE cutover gate,
+         the host stamp counters + one-slot stamp handoff, the client cross-rail order queue (native
+         GeoscapeViewSwitchQuery semantics), the 0x69/0x6C occurrence-id dedup set, and the cutscene-to-queue
+         routing seam (PlayCutsceneAction is linked below and references it). The Harmony stamp/close-signal
+         patches (ViewSwitchQueryStampPatch / ClientDisplayCloseSignalPatch) bind game types, NOT linked. -->
+    <Compile Include="..\src\Network\Sync\DisplaySequencerGate.cs"><Link>Sync\DisplaySequencerGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\DisplaySequence.cs"><Link>Sync\State\DisplaySequence.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\UnifiedDisplayQueue.cs"><Link>Sync\State\UnifiedDisplayQueue.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\ReportOccurrenceDedup.cs"><Link>Sync\State\ReportOccurrenceDedup.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\CutsceneDisplayRouter.cs"><Link>Sync\State\CutsceneDisplayRouter.cs</Link></Compile>
     <!-- Batch-2 P6 harvest-float mirror: pure wire codec + occId counter + bounded dedup window. The Harmony
          glue (HarvestFloatMirrorPatch) + native replay (GeoSiteReflection.ShowHarvestFloat) bind game types
          and are NOT linked. -->

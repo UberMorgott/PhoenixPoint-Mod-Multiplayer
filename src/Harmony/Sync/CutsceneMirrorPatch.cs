@@ -61,8 +61,16 @@ namespace Multiplayer.Harmony.Sync
                 string guid = DefReflection.GetGuid(__0);
                 if (string.IsNullOrEmpty(guid)) return;   // can't identify the def on the wire → skip
 
-                engine.Sync?.BroadcastHostAction(new PlayCutsceneAction(guid, __1));
-                Debug.Log("[Multiplayer][geo] host cutscene → broadcast mirror guid=" + guid + " priority=" + __1);
+                // Batch-3 P4: consume the display-order stamp recorded by ViewSwitchQueryStampPatch when the
+                // native ToCutsceneState body pushed its UIStateGeoCutscene — same call stack, exact native-
+                // queue seq (the priority already rides the action verbatim). Fallback: fresh seq at broadcast.
+                uint displaySeq = 0;
+                if (DisplaySequencerGate.Enabled
+                    && !Multiplayer.Network.Sync.State.DisplayStamp.TryTake("UIStateGeoCutscene", out displaySeq, out _))
+                    displaySeq = Multiplayer.Network.Sync.State.DisplaySequence.NextSeq();
+                engine.Sync?.BroadcastHostAction(new PlayCutsceneAction(guid, __1, displaySeq));
+                Debug.Log("[Multiplayer][geo] host cutscene → broadcast mirror guid=" + guid + " priority=" + __1 +
+                          " displaySeq=" + displaySeq);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] CutsceneMirrorPatch postfix failed: " + ex.Message); }
         }

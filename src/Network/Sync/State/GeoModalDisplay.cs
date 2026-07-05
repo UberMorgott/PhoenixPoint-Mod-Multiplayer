@@ -126,18 +126,20 @@ namespace Multiplayer.Network.Sync.State
         /// Client: queue a report modal (<paramref name="modalType"/> = native ModalType byte) with the
         /// reconstructed <paramref name="modalData"/> at <paramref name="priority"/>, with PauseGame=false and a
         /// null DialogCallback. <paramref name="persistent"/> mirrors whether the host opened it via
-        /// OpenModalPersistent. No-op on any failure.
+        /// OpenModalPersistent. No-op on any failure. Returns TRUE iff the native view-switch push actually
+        /// queued (Batch-3 P4: only a genuinely-queued window OCCUPIES the unified display queue — a silent
+        /// no-op must release the slot immediately or every later display starves).
         /// </summary>
-        public static void Show(GeoRuntime rt, byte modalType, object modalData, int priority, bool persistent)
+        public static bool Show(GeoRuntime rt, byte modalType, object modalData, int priority, bool persistent)
         {
             try
             {
                 Ensure();
-                if (!_ready) return;
+                if (!_ready) return false;
                 var view = GetView(rt);
-                if (view == null) return;
+                if (view == null) return false;
                 var query = _switchQueryField.GetValue(view);
-                if (query == null) return;
+                if (query == null) return false;
 
                 // Idempotence guard for the BLOCKING modal (ambush brief): a duplicate Show for the SAME
                 // uncloseable window would stack a second locked state the client could never leave. Report
@@ -146,7 +148,7 @@ namespace Multiplayer.Network.Sync.State
                 {
                     Debug.Log("[Multiplayer] GeoModalDisplay.Show modalType=" + modalType +
                               " skipped (same blocking modal already current — duplicate mirror push)");
-                    return;
+                    return false;
                 }
 
                 object modalTypeEnum = Enum.ToObject(_modalTypeEnum, (int)modalType);
@@ -165,8 +167,10 @@ namespace Multiplayer.Network.Sync.State
                 _queryStateSwitch.Invoke(query, new[] { request });
                 Debug.Log("[Multiplayer] GeoModalDisplay.Show modalType=" + modalType + " persistent=" + persistent +
                           " priority=" + priority + " hasData=" + (modalData != null) + " → queued");
+                return true;
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.Show best-effort failed: " + ex.Message); }
+            return false;
         }
 
         /// <summary>

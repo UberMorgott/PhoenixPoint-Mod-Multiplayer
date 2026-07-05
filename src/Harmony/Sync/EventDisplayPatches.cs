@@ -134,11 +134,22 @@ namespace Multiplayer.Harmony.Sync
                 // to "" on the client, so the client prefers these non-empty wire strings over its local def.
                 string wireTitle = EventReflection.ResolveLiveTitle(geoEvent);
                 string wireNarrative = EventReflection.ResolveLiveNarrative(geoEvent);
+                // Batch-3 P4: consume the display-order stamp recorded by ViewSwitchQueryStampPatch when the
+                // native OnGeoscapeEventRaised body pushed the UIState(Marketplace)GeoscapeEvent — same call
+                // stack, so the wire carries the exact seq + native priority (TriggeredByEvent 10 / plain 0 /
+                // completed-upgrade 15) the host's own queue used. Fallback (stamp patch unbound): a fresh seq
+                // at broadcast time keeps a consistent FIFO order, priority 0.
+                uint displaySeq = 0;
+                int nativePriority = 0;
+                if (Multiplayer.Network.Sync.DisplaySequencerGate.Enabled
+                    && !Multiplayer.Network.Sync.State.DisplayStamp.TryTake("GeoscapeEvent", out displaySeq, out nativePriority))
+                    displaySeq = Multiplayer.Network.Sync.State.DisplaySequence.NextSeq();
                 Debug.Log("[Multiplayer] HOST BroadcastEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " hasIdentity=" + identity.HasValue +
                           " singleChoice=" + singleChoice + " oneWindow=" + oneWindow +
-                          " titleLen=" + (wireTitle?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0));
-                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative);
+                          " titleLen=" + (wireTitle?.Length ?? 0) + " narrLen=" + (wireNarrative?.Length ?? 0) +
+                          " displaySeq=" + displaySeq + " nativePriority=" + nativePriority);
+                engine.Sync?.BroadcastEventRaised(occId, eventId, siteId, vehicleId, identity, singleChoice, oneWindow, wireTitle, wireNarrative, displaySeq, nativePriority);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventRaisedDisplayPatch failed: " + ex.Message); }
         }
