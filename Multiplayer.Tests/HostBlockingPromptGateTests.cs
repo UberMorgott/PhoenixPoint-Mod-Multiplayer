@@ -57,6 +57,29 @@ public class HostBlockingPromptGateTests
         Assert.True(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
     }
 
+    // ── site-mission briefs (scavenge/ancient) ride the SAME gate: arm on open, release on the host's
+    // Confirm/Cancel resolve (ModalResultCallback) — host cancel must fully unblock the relay again. ──
+    [Theory]
+    [InlineData(4)]    // GeoScavengeBrief
+    [InlineData(26)]   // AncientSiteAttackBrief
+    [InlineData(28)]   // AncientSiteDefenceBrief
+    public void SiteMissionBrief_ArmRejects_ReleaseUnblocks(int modalType)
+    {
+        HostBlockingPromptGate.Arm(modalType);
+        Assert.True(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+        HostBlockingPromptGate.Release(modalType);   // host CANCEL (or Confirm) → normal flow resumes
+        Assert.False(HostBlockingPromptGate.IsArmed);
+        Assert.False(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+    }
+
+    [Fact]
+    public void SiteMissionBrief_StrayAmbushRelease_StaysBlocked()
+    {
+        HostBlockingPromptGate.Arm(4);        // scavenge brief pending
+        HostBlockingPromptGate.Release(15);   // stray ambush resolve elsewhere
+        Assert.True(HostBlockingPromptGate.ShouldRejectIntent(isHost: true, isActiveSession: true));
+    }
+
     [Fact]
     public void Rearm_IsIdempotent_SingleReleaseUnblocks()
     {

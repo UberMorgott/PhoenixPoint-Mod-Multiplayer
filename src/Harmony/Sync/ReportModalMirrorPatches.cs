@@ -30,11 +30,12 @@ namespace Multiplayer.Harmony.Sync
     /// "new research available" line, whose visibility is <c>ResearchElement.UnlocksResearches</c> — deterministic
     /// per def) is identical with the gate ON or OFF. Never move host work into the Prefix or mutate any arg here.
     ///
-    /// CHANNEL OWNERSHIP (S3 invariant): this channel carries ONLY GeoscapeView modal openers (ModalType 6/14/25/38).
-    /// Geoscape EVENT windows are owned by the separate 0x65/0x66 event-replication channel and do NOT flow through
-    /// GeoscapeView.OpenModal/ModalType at all (they push a state-stack state — UIStateGeoscapeEvent — and have no
-    /// ModalType entry), so 0x69 can never carry an event window and the two channels cannot double-show. The tight
-    /// 4-type whitelist (<see cref="ReportModalClassifier"/>) enforces this; keep event types out of it.
+    /// CHANNEL OWNERSHIP (S3 invariant): this channel carries ONLY GeoscapeView modal openers (the
+    /// <see cref="ReportModalClassifier"/> whitelist: reports 6/14/25/38 + the mirrored mission briefs
+    /// 15/4/26/28). Geoscape EVENT windows are owned by the separate 0x65/0x66 event-replication channel and do
+    /// NOT flow through GeoscapeView.OpenModal/ModalType at all (they push a state-stack state —
+    /// UIStateGeoscapeEvent — and have no ModalType entry), so 0x69 can never carry an event window and the two
+    /// channels cannot double-show. The tight whitelist enforces this; keep event types out of it.
     ///
     /// Args are taken positionally as boxed objects (<c>__0</c> = ModalType enum, etc.) so the mod needs NO
     /// compile-time game-enum reference — the same boxing-injection pattern used by
@@ -129,10 +130,10 @@ namespace Multiplayer.Harmony.Sync
             try
             {
                 int modalType = Convert.ToInt32(modalTypeBoxed);
-                // ARM the authoritative intent gate for a BLOCKING prompt (ambush brief) BEFORE any mirror
-                // gating: the host is natively modal-locked the instant this window opens, so in-flight client
-                // intents must reject even if the client mirror is off or its payload read degrades. Released in
-                // BlockingModalReleasePatch (ModalResultCallback — every close path funnels there).
+                // ARM the authoritative intent gate for a BLOCKING prompt (ambush/site-mission brief) BEFORE any
+                // mirror gating: the host is natively modal-locked the instant this window opens, so in-flight
+                // client intents must reject even if the client mirror is off or its payload read degrades.
+                // Released in BlockingModalReleasePatch (ModalResultCallback — every close path funnels there).
                 if (ReportModalClassifier.IsBlockingModal(modalType)) HostBlockingPromptGate.Arm(modalType);
                 if (!ReportMirrorGate.Enabled) return;
                 if (SyncApplyScope.IsApplying) return;        // never re-broadcast a reconstructed window
@@ -151,10 +152,12 @@ namespace Multiplayer.Harmony.Sync
     /// HOST release of the blocking-prompt lock. Postfix on the native modal-resolve funnel
     /// <c>GeoscapeView.ModalResultCallback(ModalType, ModalResult, object)</c> (GeoscapeView.cs:799) — EVERY
     /// close of an OpenModalPersistent window lands there (<c>UIStateGeoModal.FinishDialog</c> invokes the
-    /// opener's handler; <c>ExitState</c> falls back to handler(Close)). For a BLOCKING modal (ambush brief)
-    /// it: (1) releases <see cref="HostBlockingPromptGate"/> so client intents relay again, and (2) broadcasts
-    /// <c>ReportModalHide</c> so every client closes its mirrored view-locked copy — on Confirm the native
-    /// LaunchMission already ran inside the callback and the tactical co-op deploy flow takes over as today.
+    /// opener's handler; <c>ExitState</c> falls back to handler(Close)). For a BLOCKING modal (ambush or
+    /// site-mission brief) it: (1) releases <see cref="HostBlockingPromptGate"/> so client intents relay again,
+    /// and (2) broadcasts <c>ReportModalHide</c> so every client closes its mirrored view-locked copy — on
+    /// Confirm the native LaunchMission already ran inside the callback and the tactical co-op deploy flow takes
+    /// over as today; on CANCEL the mission is cancelled host-side and the explicit hide (not an exclusion)
+    /// guarantees the client is never left with a lingering prompt (the 9e80b24 goal, kept).
     /// Host-only + active session; the client's mirrored modal has a NULL DialogCallback so this never fires
     /// there for it. Non-blocking modals are untouched (pure observe). Best-effort; reflective target.
     /// </summary>

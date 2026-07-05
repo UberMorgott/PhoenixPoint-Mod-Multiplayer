@@ -1017,6 +1017,13 @@ namespace Multiplayer.Network.Sync
                         modalData = State.ReportModalReflection.BuildAmbushMission(rt, p.SiteId, p.DefId);
                         if (modalData == null) return;   // unresolved site/def → don't show an empty brief
                         break;
+                    case State.ReportModalVariant.SiteMissionBrief:
+                        // Same display-only rebuild contract as AmbushBrief, concrete class by modalType
+                        // (scavenge / ancient-site deploy briefs). View-locked; closes on the host's resolve
+                        // (Confirm → tactical co-op deploy flow; Cancel → ReportModalHide) — never locally.
+                        modalData = State.ReportModalReflection.BuildSiteMissionBrief(rt, p.ModalType, p.SiteId, p.DefId);
+                        if (modalData == null) return;   // unresolved site/def → don't show an empty brief
+                        break;
                     default:
                         return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
                 }

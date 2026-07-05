@@ -80,6 +80,25 @@ public class ReportModalProtocolTests
         Assert.Empty(d.ExtraIds);
     }
 
+    [Theory]
+    [InlineData(4)]    // GeoScavengeBrief (resource-site "МЕСТНОСТЬ С РЕСУРСАМИ" deploy brief)
+    [InlineData(26)]   // AncientSiteAttackBrief
+    [InlineData(28)]   // AncientSiteDefenceBrief
+    public void SiteMissionBrief_RoundTrips(int modalType)
+    {
+        // Same wire shape as AmbushBrief: siteId = mission.Site.SiteId, defId = mission.MissionDef.Guid,
+        // priority 0 (ShowMissionBriefing → OpenModalPersistent(missionBriefModal, mission, 0), GeoscapeView.cs:1903).
+        var p = new ReportModalPayload((byte)modalType, ReportModalVariant.SiteMissionBrief, 512, 0, 0, "MISSION_DEF_GUID", null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(modalType, d.ModalType);
+        Assert.Equal(ReportModalVariant.SiteMissionBrief, d.Variant);
+        Assert.Equal(512, d.SiteId);
+        Assert.Equal(0, d.Priority);
+        Assert.Equal("MISSION_DEF_GUID", d.DefId);
+        Assert.Empty(d.ExtraIds);
+    }
+
     // ── ReportModalHide (0x6C): the host resolved its BLOCKING modal → clients close the mirror ──
     [Fact]
     public void ReportModalHide_RoundTrips()

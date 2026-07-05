@@ -17,6 +17,12 @@ namespace Multiplayer.Network.Sync.State
     ///                                  defId (mission.MissionDef.Guid); the client rebuilds a display-only
     ///                                  GeoAmbushMission(site, missionDef) and shows the SAME native modal,
     ///                                  view-locked (see BlockingModalClientLockPatches).
+    ///   • <see cref="SiteMissionBrief"/> — modalData is a site-visit deploy-brief GeoMission
+    ///                                  (GeoScavengeBrief 4 / AncientSiteAttackBrief 26 / AncientSiteDefenceBrief
+    ///                                  28). Same wire shape as AmbushBrief (siteId + missionDef guid); the
+    ///                                  client rebuilds the matching display-only mission class
+    ///                                  (ReportModalReflection.BuildSiteMissionBrief) and shows the SAME native
+    ///                                  brief, view-locked until the host's Confirm/Cancel (ReportModalHide).
     /// </summary>
     public enum ReportModalVariant : byte
     {
@@ -26,6 +32,7 @@ namespace Multiplayer.Network.Sync.State
         Diplomacy = 3,
         MissionOutcome = 4,   // Phase-B placeholder (do not emit in Phase-A)
         AmbushBrief = 5,      // mandatory ambush prompt mirror (view-only + blocking on the client)
+        SiteMissionBrief = 6, // optional site deploy briefs (scavenge/ancient) — mirrored view-only + blocking
     }
 
     /// <summary>

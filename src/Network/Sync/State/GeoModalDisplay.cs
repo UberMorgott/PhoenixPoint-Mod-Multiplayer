@@ -12,7 +12,8 @@ namespace Multiplayer.Network.Sync.State
     /// <c>UIStateGeoModal</c>, reconstructing the modalData from synced ids (<see cref="ReportModalReflection"/>).
     ///
     /// CHANNEL OWNERSHIP (do not blur): this is the REPORT-WINDOW channel (0x69 ReportModalShow). It carries ONLY
-    /// the whitelisted <c>GeoscapeView.OpenModal</c>/<c>OpenModalPersistent</c> report modals (ModalType 6/14/25/38).
+    /// the whitelisted <c>GeoscapeView.OpenModal</c>/<c>OpenModalPersistent</c> modals (reports 6/14/25/38 +
+    /// the mirrored mission briefs 15/4/26/28 — <see cref="ReportModalClassifier"/>).
     /// Geoscape EVENT windows (<c>UIStateGeoscapeEvent : UIStateBaseGeoscapeEvent&lt;&gt;</c>) are owned by a SEPARATE
     /// channel (0x65/0x66 EventRaised/Dismiss, occurrence-id FIFO deduped) and are NEVER routed here — they do not
     /// even go through the OpenModal chokepoint (they push a state-stack state via

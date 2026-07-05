@@ -51,6 +51,11 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _missionDefProp;     // GeoMission.MissionDef (public property, GeoMission.cs:204)
         private static ConstructorInfo _ambushCtor;      // GeoAmbushMission(GeoSite, TacMissionTypeDef, MissionParams)
 
+        // ── SiteMissionBrief members (own lazy gate — a miss degrades ONLY that brief's mirror) ──
+        private static bool _siteMissionEnsured;
+        private static ConstructorInfo _scavengeCtor;    // GeoScavengingMission(GeoSite, TacMissionTypeDef, MissionParams)
+        private static ConstructorInfo _ancientCtor;     // GeoAncientSiteMission(GeoSite, TacMissionTypeDef)
+
         private static void Ensure(GeoRuntime rt)
         {
             if (_ready) return;
@@ -158,7 +163,9 @@ namespace Multiplayer.Network.Sync.State
                     extraIds = extraIds ?? new List<string>();
                     break;
                 case ReportModalVariant.AmbushBrief:
-                    // modalData is the live GeoAmbushMission → Site.SiteId + MissionDef.Guid.
+                case ReportModalVariant.SiteMissionBrief:
+                    // modalData is the live GeoMission (ambush / scavenge / ancient-site) →
+                    // Site.SiteId + MissionDef.Guid off the GeoMission base properties.
                     ReadAmbushBrief(modalData, out siteId, out defId);
                     break;
                 case ReportModalVariant.NullData:
@@ -378,6 +385,85 @@ namespace Multiplayer.Network.Sync.State
                 return _ambushCtor.Invoke(new object[] { site, missionDef, null });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildAmbushMission failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// Lazy bind of the site-mission-brief ctors (separate gate, mirroring <see cref="EnsureAmbush"/> so a
+        /// miss can never regress the other variants). Verified against the decompile (2026-07-05):
+        ///   • <c>GeoScavengingMission(GeoSite site, TacMissionTypeDef missionType, MissionParams missionParams
+        ///     = null)</c> (GeoScavengingMission.cs:23) — EXACT 3-param match (harmony-accesstools-exact-param-
+        ///     match; the [Obsolete] 4-param and private 2-param overloads must not be picked). Pure base-ctor
+        ///     (field assignment only, GeoMission.cs:214-220).
+        ///   • <c>GeoAncientSiteMission(GeoSite site, TacMissionTypeDef missionType)</c>
+        ///     (GeoAncientSiteMission.cs:30) — EXACT 2-param match; empty body over the pure base-ctor.
+        /// </summary>
+        private static void EnsureSiteMission()
+        {
+            if (_siteMissionEnsured) return;
+            _siteMissionEnsured = true;   // one attempt; every user null-guards
+            var missionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
+            var siteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            var tacMissionDefType = AccessTools.TypeByName("PhoenixPoint.Common.Levels.Missions.TacMissionTypeDef");
+            var scavType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoScavengingMission");
+            var ancientType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoAncientSiteMission");
+            if (missionType == null || siteType == null || tacMissionDefType == null) return;
+
+            var missionParamsType = AccessTools.Inner(missionType, "MissionParams");
+            if (scavType != null && missionParamsType != null)
+                _scavengeCtor = AccessTools.Constructor(scavType, new[] { siteType, tacMissionDefType, missionParamsType });
+            if (ancientType != null)
+                _ancientCtor = AccessTools.Constructor(ancientType, new[] { siteType, tacMissionDefType });
+        }
+
+        /// <summary>
+        /// Client: rebuild the DISPLAY-ONLY site-visit deploy-brief mission for a mirrored SiteMissionBrief
+        /// modal — the concrete class selected by <paramref name="modalType"/> (GeoScavengeBrief 4 →
+        /// GeoScavengingMission; AncientSiteAttackBrief 26 / AncientSiteDefenceBrief 28 → GeoAncientSiteMission),
+        /// the site resolved by id, the <c>TacMissionTypeDef</c> by guid. Same contract as
+        /// <see cref="BuildAmbushMission"/>: the ctor is pure field assignment, the mission is NEVER attached to
+        /// the site (no SetActiveMission, no producers on the frozen client sim) — it only feeds the native
+        /// brief's data bind (ScavengeBriefDataBind / AncientSiteBriefDataBind: Site + MissionDef-derived reads
+        /// only). Returns null on ANY unresolved piece (caller skips the show; the host intent gate stays armed
+        /// independently).
+        /// </summary>
+        public static object BuildSiteMissionBrief(GeoRuntime rt, byte modalType, int siteId, string missionDefGuid)
+        {
+            try
+            {
+                EnsureSiteMission();
+                ConstructorInfo ctor;
+                bool withParams;
+                switch (modalType)
+                {
+                    case ReportModalClassifier.GeoScavengeBrief:
+                        ctor = _scavengeCtor; withParams = true; break;
+                    case ReportModalClassifier.AncientSiteAttackBrief:
+                    case ReportModalClassifier.AncientSiteDefenceBrief:
+                        ctor = _ancientCtor; withParams = false; break;
+                    default:
+                        Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief: unmapped modalType " + modalType + " (skipping show)");
+                        return null;
+                }
+                if (ctor == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief: ctor unbound for modalType " + modalType + " (skipping show)");
+                    return null;
+                }
+                var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                if (site == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief: siteId " + siteId + " did not resolve (skipping show)");
+                    return null;
+                }
+                var missionDef = DefReflection.GetDefByGuid(missionDefGuid);
+                if (missionDef == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief: missionDef guid '" + missionDefGuid + "' did not resolve (skipping show)");
+                    return null;
+                }
+                return ctor.Invoke(withParams ? new object[] { site, missionDef, null } : new object[] { site, missionDef });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief failed: " + ex.Message); return null; }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>
