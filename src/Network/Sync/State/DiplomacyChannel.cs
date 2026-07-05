@@ -11,16 +11,20 @@ namespace Multiplayer.Network.Sync.State
     ///
     /// Dirty triggers: the faction research-complete event (the reputation reward runs in research
     /// completion — same trigger as ch2/ch3) PLUS the hourly tick (diplomacy also shifts from the daily
-    /// update / missions; the value mirror re-converges within an in-game hour). The snapshot is a handful
-    /// of int relations → cheap to re-send.
+    /// update / missions; the value mirror re-converges within an in-game hour) PLUS — WA-3 —
+    /// <c>FactionDiplomacy.OnFactionDiplomacyStateChanged</c> on every faction (fired by the forced-state
+    /// writer <c>SetMaxDiplomacyState</c>, FactionDiplomacy.cs:50/79: event outcomes / faction rewards
+    /// declaring war or locking an alliance), so a forced flip mirrors immediately, not an hour later.
+    /// The snapshot is a handful of int relations (+1 state byte each) → cheap to re-send.
     /// </summary>
     public sealed class DiplomacyChannel : IStateChannel
     {
         public byte ChannelId => 4;
 
-        private object _token;     // opaque faction research-event token (Start/Complete)
-        private object _hourToken; // opaque hourly-tick token (diplomacy heartbeat)
-        private object _faction;   // bound faction instance (rebind guard)
+        private object _token;      // opaque faction research-event token (Start/Complete)
+        private object _hourToken;  // opaque hourly-tick token (diplomacy heartbeat)
+        private object _stateToken; // opaque per-faction OnFactionDiplomacyStateChanged token (WA-3 forced state)
+        private object _faction;    // bound faction instance (rebind guard)
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -54,6 +58,9 @@ namespace Multiplayer.Network.Sync.State
                 GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             _hourToken = ResearchStateReflection.SubscribeHourlyTick(
                 GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
+            // WA-3: forced war/alliance flips (SetMaxDiplomacyState) re-snapshot immediately.
+            _stateToken = DiplomacyReflection.SubscribeFactionDiplomacyStateChanged(
+                GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             // Seed clients with the authoritative diplomacy table the moment we bind.
             eng.MarkChannelDirty(id);
         }
@@ -62,8 +69,10 @@ namespace Multiplayer.Network.Sync.State
         {
             if (_token != null) ResearchStateReflection.Unsubscribe(_token);
             if (_hourToken != null) ResearchStateReflection.Unsubscribe(_hourToken);
+            if (_stateToken != null) DiplomacyReflection.UnsubscribeStateChanged(_stateToken);
             _token = null;
             _hourToken = null;
+            _stateToken = null;
             _faction = null;
         }
     }
