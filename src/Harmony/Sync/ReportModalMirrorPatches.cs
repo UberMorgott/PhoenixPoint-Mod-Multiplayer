@@ -124,13 +124,18 @@ namespace Multiplayer.Harmony.Sync
         /// </summary>
         public static void HostBroadcast(object modalTypeBoxed, object modalData, int priority)
         {
-            if (!ReportMirrorGate.Enabled) return;
-            if (SyncApplyScope.IsApplying) return;            // never re-broadcast a reconstructed window
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
             try
             {
                 int modalType = Convert.ToInt32(modalTypeBoxed);
+                // ARM the authoritative intent gate for a BLOCKING prompt (ambush brief) BEFORE any mirror
+                // gating: the host is natively modal-locked the instant this window opens, so in-flight client
+                // intents must reject even if the client mirror is off or its payload read degrades. Released in
+                // BlockingModalReleasePatch (ModalResultCallback — every close path funnels there).
+                if (ReportModalClassifier.IsBlockingModal(modalType)) HostBlockingPromptGate.Arm(modalType);
+                if (!ReportMirrorGate.Enabled) return;
+                if (SyncApplyScope.IsApplying) return;        // never re-broadcast a reconstructed window
                 if (!ReportModalClassifier.IsReportModal(modalType)) return;
                 if (!ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) return;
                 Debug.Log("[Multiplayer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
@@ -139,6 +144,53 @@ namespace Multiplayer.Harmony.Sync
                 engine.Sync?.BroadcastReportModal(payload);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalMirror.HostBroadcast failed: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// HOST release of the blocking-prompt lock. Postfix on the native modal-resolve funnel
+    /// <c>GeoscapeView.ModalResultCallback(ModalType, ModalResult, object)</c> (GeoscapeView.cs:799) — EVERY
+    /// close of an OpenModalPersistent window lands there (<c>UIStateGeoModal.FinishDialog</c> invokes the
+    /// opener's handler; <c>ExitState</c> falls back to handler(Close)). For a BLOCKING modal (ambush brief)
+    /// it: (1) releases <see cref="HostBlockingPromptGate"/> so client intents relay again, and (2) broadcasts
+    /// <c>ReportModalHide</c> so every client closes its mirrored view-locked copy — on Confirm the native
+    /// LaunchMission already ran inside the callback and the tactical co-op deploy flow takes over as today.
+    /// Host-only + active session; the client's mirrored modal has a NULL DialogCallback so this never fires
+    /// there for it. Non-blocking modals are untouched (pure observe). Best-effort; reflective target.
+    /// </summary>
+    [HarmonyPatch]
+    public static class BlockingModalReleasePatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var viewT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+            var modalTypeT = AccessTools.TypeByName("PhoenixPoint.Common.Utils.ModalType");
+            var modalResultT = AccessTools.TypeByName("PhoenixPoint.Common.Utils.ModalResult");
+            if (viewT == null || modalTypeT == null || modalResultT == null) return false;
+            // EXACT param match (harmony-accesstools-exact-param-match): (ModalType, ModalResult, object).
+            _target = AccessTools.Method(viewT, "ModalResultCallback", new[] { modalTypeT, modalResultT, typeof(object) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // __0 = modalType (ModalType enum, boxed); result/modalData not needed — ANY resolve releases.
+        public static void Postfix(object __0)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                int modalType = Convert.ToInt32(__0);
+                if (!ReportModalClassifier.IsBlockingModal(modalType)) return;
+                HostBlockingPromptGate.Release(modalType);
+                engine.Sync?.BroadcastReportModalHide((byte)modalType);
+                Debug.Log("[Multiplayer] HOST blocking modal resolved modalType=" + modalType +
+                          " → gate released + ReportModalHide broadcast");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalReleasePatch failed: " + ex.Message); }
         }
     }
 }

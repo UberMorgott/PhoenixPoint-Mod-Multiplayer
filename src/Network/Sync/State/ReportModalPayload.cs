@@ -12,6 +12,11 @@ namespace Multiplayer.Network.Sync.State
     ///   • <see cref="Diplomacy"/>    — modalData is DiplomacyResearchRewardData (DiplomacyResearchBrief).
     ///                                  carries factionDefGuid + researchID[] + shareLevel.
     ///   • <see cref="MissionOutcome"/> — RESERVED for Phase-B (mission-outcome modals); NOT emitted this phase.
+    ///   • <see cref="AmbushBrief"/>  — modalData is a GeoAmbushMission (GeoAmbushBrief 15, the mandatory
+    ///                                  "You've been ambushed!" prompt). carries siteId (mission.Site.SiteId) +
+    ///                                  defId (mission.MissionDef.Guid); the client rebuilds a display-only
+    ///                                  GeoAmbushMission(site, missionDef) and shows the SAME native modal,
+    ///                                  view-locked (see BlockingModalClientLockPatches).
     /// </summary>
     public enum ReportModalVariant : byte
     {
@@ -20,6 +25,7 @@ namespace Multiplayer.Network.Sync.State
         Research = 2,
         Diplomacy = 3,
         MissionOutcome = 4,   // Phase-B placeholder (do not emit in Phase-A)
+        AmbushBrief = 5,      // mandatory ambush prompt mirror (view-only + blocking on the client)
     }
 
     /// <summary>

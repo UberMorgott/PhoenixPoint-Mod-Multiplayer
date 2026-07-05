@@ -160,6 +160,21 @@ namespace Multiplayer.Network.Sync
             // arrives twice. Apply each (peerId, nonce) exactly once on the authority; drop the repeat.
             if (_seenRequests.IsDuplicate(senderPeerId, nonce)) return;
 
+            // A BLOCKING host prompt is pending (mandatory ambush brief): natively the whole geoscape is modal —
+            // NOTHING may happen until it resolves. The client's mirrored modal is view-locked too, but an intent
+            // may already be in flight when the prompt raised (UI lock is raceable) → authoritative belt: reject
+            // EVERY client intent while armed. Armed in ReportModalMirror.HostBroadcast (modal open), released in
+            // BlockingModalReleasePatch (ModalResultCallback — mission start or any other resolve); normal relay
+            // flow resumes after. The rejected client action stays suppressed locally (standard reject path).
+            if (HostBlockingPromptGate.ShouldRejectIntent(_engine.IsHost, _engine.IsActiveSession))
+            {
+                Debug.Log("[Multiplayer] HOST reject ActionRequest id=" + id + " (blocking prompt pending, modalType="
+                          + HostBlockingPromptGate.ArmedModalType + ")");
+                _engine.SendToClient(senderPeerId, new NetworkMessage(PacketType.ActionReject,
+                    SyncProtocol.EncodeActionReject(nonce, 2, "host blocking prompt (ambush) pending")));
+                return;
+            }
+
             var action = ReadAction(id, payload);
             if (action == null) return;
 
@@ -657,6 +672,9 @@ namespace Multiplayer.Network.Sync
             _queuedRaises.Clear();
             _bufferedRewards.Clear();
             State.EventDisplay.ResetOpenOccurrence();
+            // Boundary belt: a save-transfer/reload must never inherit a stale blocking-prompt arm (the modal it
+            // guarded is gone with the old geoscape). Re-arms naturally if the restored host reopens the prompt.
+            HostBlockingPromptGate.Reset();
         }
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
@@ -985,6 +1003,14 @@ namespace Multiplayer.Network.Sync
                     case State.ReportModalVariant.Diplomacy:
                         modalData = State.ReportModalReflection.BuildDiplomacyData(rt, p.DefId, p.ExtraIds, p.ShareLevel);
                         break;
+                    case State.ReportModalVariant.AmbushBrief:
+                        // Rebuild a DISPLAY-ONLY GeoAmbushMission(site, missionDef) — never attached to the site
+                        // (no SetActiveMission / no producers on the frozen client sim); it only feeds the native
+                        // modal's data bind. The window is view-locked client-side (BlockingModalClientLockPatches)
+                        // and closes solely on the host's resolve (ReportModalHide) or the tactical transition.
+                        modalData = State.ReportModalReflection.BuildAmbushMission(rt, p.SiteId, p.DefId);
+                        if (modalData == null) return;   // unresolved site/def → don't show an empty brief
+                        break;
                     default:
                         return;   // Phase-B (MissionOutcome) / unknown variant → ignore this phase
                 }
@@ -997,6 +1023,37 @@ namespace Multiplayer.Network.Sync
                     State.GeoModalDisplay.Show(rt, p.ModalType, modalData, p.Priority, persistent);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalShow failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Host: the blocking report modal (ambush brief) just RESOLVED on the authority (ModalResultCallback —
+        /// Confirm→LaunchMission or any other result). Tell every client to close its mirrored view-locked copy
+        /// so normal flow resumes (on Confirm the tactical co-op deploy flow takes over as today). No-op off-host.
+        /// </summary>
+        public void BroadcastReportModalHide(byte modalType)
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.ReportModalHide,
+                SyncProtocol.EncodeReportModalHide(modalType)));
+        }
+
+        /// <summary>
+        /// Client: the host resolved its blocking modal → close the mirrored copy IF it is the currently-shown
+        /// modal of that type (type-matched inside <see cref="State.GeoModalDisplay.CloseBlocking"/> so a stray
+        /// hide never pops an unrelated window). Idempotent: nothing open → no-op. Runs under
+        /// <see cref="SyncApplyScope"/> so the client-side view-lock (which passes engine-driven closes) stays out
+        /// of the way and no patched opener re-broadcasts.
+        /// </summary>
+        public void OnReportModalHide(byte[] data)
+        {
+            if (_engine.IsHost) return;   // authority closed natively; it never applies its own broadcast
+            if (!SyncProtocol.TryDecodeReportModalHide(data, out var modalType)) return;
+            try
+            {
+                using (SyncApplyScope.Enter())
+                    State.GeoModalDisplay.CloseBlocking(GeoRuntime.Instance, modalType);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnReportModalHide failed: " + ex.Message); }
         }
 
         // The host's own event-choice click is PURE NATIVE — the click patch lets the native

@@ -69,6 +69,12 @@
     <Compile Include="..\src\Network\Sync\ReportMirrorGate.cs"><Link>Sync\ReportMirrorGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalPayload.cs"><Link>Sync\State\ReportModalPayload.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ReportModalClassifier.cs"><Link>Sync\State\ReportModalClassifier.cs</Link></Compile>
+    <!-- Blocking-prompt (ambush brief) mirror: pure host intent gate + client view-lock decisions (Unity-free).
+         The Harmony glue (BlockingModalClientLockPatches / BlockingModalReleasePatch) and the reflection
+         rebuild (ReportModalReflection.BuildAmbushMission / GeoModalDisplay.CloseBlocking) bind game types
+         and are NOT linked (in-game verified), mirroring the rest of the report channel. -->
+    <Compile Include="..\src\Network\Sync\HostBlockingPromptGate.cs"><Link>Sync\HostBlockingPromptGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\BlockingModalLockDecision.cs"><Link>Sync\BlockingModalLockDecision.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Sync\ISyncedAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Sync\PermissionGate.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Sync\GeoRuntime.cs</Link></Compile>

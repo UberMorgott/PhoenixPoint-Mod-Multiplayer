@@ -579,6 +579,12 @@ namespace Multiplayer.Network
                     Sync?.OnReportModalShow(msg.Payload);
                     break;
 
+                case PacketType.ReportModalHide:
+                    // Host->all: the blocking report modal (ambush brief) resolved on the host. Clients close
+                    // their mirrored view-locked copy (type-matched; idempotent no-op when nothing is open).
+                    Sync?.OnReportModalHide(msg.Payload);
+                    break;
+
                 case PacketType.SyncEnvelope:
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).

@@ -44,6 +44,12 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _factionsField;         // GeoLevelController.Factions
         private static PropertyInfo _factionDefProp;     // GeoFaction.Def
 
+        // ── AmbushBrief members (own lazy gate — a miss degrades ONLY the ambush mirror, never the channel) ──
+        private static bool _ambushEnsured;
+        private static PropertyInfo _missionSiteProp;    // GeoMission.Site (public property, GeoMission.cs:136)
+        private static PropertyInfo _missionDefProp;     // GeoMission.MissionDef (public property, GeoMission.cs:204)
+        private static ConstructorInfo _ambushCtor;      // GeoAmbushMission(GeoSite, TacMissionTypeDef, MissionParams)
+
         private static void Ensure(GeoRuntime rt)
         {
             if (_ready) return;
@@ -84,6 +90,33 @@ namespace Multiplayer.Network.Sync.State
                      && _researchElementType != null;
         }
 
+        /// <summary>
+        /// Lazy bind of the ambush-brief members (separate from <see cref="Ensure"/> so a miss here can never
+        /// regress the four verified Phase-A modals). Verified against the decompile (2026-07-05):
+        ///   • <c>GeoMission.Site</c> public property (GeoMission.cs:136); <c>GeoMission.MissionDef</c> public
+        ///     property (GeoMission.cs:204) — read host-side off the live GeoAmbushMission modalData.
+        ///   • <c>GeoAmbushMission(GeoSite site, TacMissionTypeDef missionType, MissionParams missionParams =
+        ///     null)</c> (GeoAmbushMission.cs:24) — EXACT 3-param match (harmony-accesstools-exact-param-match;
+        ///     the obsolete 4-param and private 2-param overloads must not be picked). MissionParams is the
+        ///     NESTED <c>GeoMission+MissionParams</c> → resolved via <c>AccessTools.Inner</c>.
+        /// </summary>
+        private static void EnsureAmbush()
+        {
+            if (_ambushEnsured) return;
+            _ambushEnsured = true;   // one attempt; every user null-guards
+            var missionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
+            var ambushType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoAmbushMission");
+            var siteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            var tacMissionDefType = AccessTools.TypeByName("PhoenixPoint.Common.Levels.Missions.TacMissionTypeDef");
+            if (missionType == null || ambushType == null || siteType == null || tacMissionDefType == null) return;
+
+            _missionSiteProp = AccessTools.Property(missionType, "Site");
+            _missionDefProp = AccessTools.Property(missionType, "MissionDef");
+            var missionParamsType = AccessTools.Inner(missionType, "MissionParams");
+            if (missionParamsType != null)
+                _ambushCtor = AccessTools.Constructor(ambushType, new[] { siteType, tacMissionDefType, missionParamsType });
+        }
+
         // ─── HOST read ────────────────────────────────────────────────────
 
         /// <summary>
@@ -119,6 +152,10 @@ namespace Multiplayer.Network.Sync.State
                     ReadDiplomacy(modalData, out defId, out extraIds, out shareLevel);
                     defId = defId ?? "";
                     extraIds = extraIds ?? new List<string>();
+                    break;
+                case ReportModalVariant.AmbushBrief:
+                    // modalData is the live GeoAmbushMission → Site.SiteId + MissionDef.Guid.
+                    ReadAmbushBrief(modalData, out siteId, out defId);
                     break;
                 case ReportModalVariant.NullData:
                 default:
@@ -180,6 +217,31 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadDiplomacy failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Host: read the ambush brief's wire identity off its live <c>GeoAmbushMission</c> modalData —
+        /// <c>Site.SiteId</c> + <c>MissionDef.Guid</c>. Best-effort: a miss leaves the degraded defaults
+        /// (siteId -1 / defId "") and the client skips the show (never a crash; the host intent gate is armed
+        /// independently in <c>ReportModalMirror.HostBroadcast</c>).
+        /// </summary>
+        public static void ReadAmbushBrief(object ambushMission, out int siteId, out string missionDefGuid)
+        {
+            siteId = -1;
+            missionDefGuid = "";
+            try
+            {
+                EnsureAmbush();
+                if (ambushMission == null) return;
+                if (_missionSiteProp != null)
+                {
+                    var site = _missionSiteProp.GetValue(ambushMission, null);
+                    if (site != null) siteId = GeoSiteReflection.GetSiteId(site);
+                }
+                if (_missionDefProp != null)
+                    missionDefGuid = DefReflection.GetGuid(_missionDefProp.GetValue(ambushMission, null)) ?? "";
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.ReadAmbushBrief failed: " + ex.Message); }
         }
 
         // ─── CLIENT rebuild ───────────────────────────────────────────────
@@ -246,6 +308,42 @@ namespace Multiplayer.Network.Sync.State
                 return data;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildDiplomacyData failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// Client: rebuild a DISPLAY-ONLY <c>GeoAmbushMission(site, missionDef)</c> for the mirrored
+        /// GeoAmbushBrief modal — the site resolved by id, the <c>TacMissionTypeDef</c> by guid off the shared
+        /// <c>DefRepository</c>. The 3-param ctor is pure field assignment (GeoMission.cs:214-220 — Site/_squad/
+        /// MissionDef/MissionData only); the mission is NEVER attached to the site (no SetActiveMission, no
+        /// events, no producers on the frozen client sim) — it only feeds the native modal's data bind
+        /// (AmbushDataBind → CommonMissionDataController.SetData: threat level, site local-time light, mist —
+        /// all read-only off the synced site + def). Returns null on ANY unresolved piece (caller skips the show).
+        /// </summary>
+        public static object BuildAmbushMission(GeoRuntime rt, int siteId, string missionDefGuid)
+        {
+            try
+            {
+                EnsureAmbush();
+                if (_ambushCtor == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildAmbushMission: GeoAmbushMission ctor unbound (skipping show)");
+                    return null;
+                }
+                var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                if (site == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildAmbushMission: siteId " + siteId + " did not resolve (skipping show)");
+                    return null;
+                }
+                var missionDef = DefReflection.GetDefByGuid(missionDefGuid);
+                if (missionDef == null)
+                {
+                    Debug.LogWarning("[Multiplayer] ReportModalReflection.BuildAmbushMission: missionDef guid '" + missionDefGuid + "' did not resolve (skipping show)");
+                    return null;
+                }
+                return _ambushCtor.Invoke(new object[] { site, missionDef, null });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildAmbushMission failed: " + ex.Message); return null; }
         }
 
         /// <summary>Find the live <c>GeoFaction</c> whose <c>Def.Guid</c> equals <paramref name="guid"/>, or null.</summary>

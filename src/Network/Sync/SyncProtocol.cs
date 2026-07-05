@@ -547,6 +547,20 @@ namespace Multiplayer.Network.Sync
             catch { return false; }
         }
 
+        /// <summary>
+        /// Host → all: close the mirrored BLOCKING report modal (ambush brief) on clients — the host resolved
+        /// it (ModalResultCallback: Confirm→LaunchMission / any other result). Wire: [modalType:u8].
+        /// </summary>
+        public static byte[] EncodeReportModalHide(byte modalType) => new[] { modalType };
+
+        public static bool TryDecodeReportModalHide(byte[] data, out byte modalType)
+        {
+            modalType = 0;
+            if (data == null || data.Length < 1) return false;
+            modalType = data[0];
+            return true;
+        }
+
         // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
         // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;
         // kind (SyncKind) selects request/apply/snapshot/delta. The inner payload is the surface's

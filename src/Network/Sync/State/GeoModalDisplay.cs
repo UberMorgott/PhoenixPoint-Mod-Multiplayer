@@ -53,6 +53,11 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _persistentField;      // UIStateGeoModal.Persistent (bool)
         private static Type _modalTypeEnum;             // PhoenixPoint.Common.Utils.ModalType
         private static MethodInfo _toResearchState;     // GeoscapeView.ToResearchState() — client "new research available" nav
+        // Blocking-modal (ambush brief) close path — all best-effort, mirrors EventDisplay.Dismiss:
+        private static Type _uiStateGeoModalType;       // UIStateGeoModal (current-state type match)
+        private static PropertyInfo _uiStateModalTypeProp; // UIStateGeoModal.ModalType (public property, :63)
+        private static FieldInfo _currentRequestField;  // GeoscapeViewSwitchQuery._currentStateSwitchRequest
+        private static MethodInfo _finishQueriedState;  // GeoscapeView.FinishQueriedState()
 
         private static void Ensure()
         {
@@ -78,6 +83,11 @@ namespace Multiplayer.Network.Sync.State
             _persistentField = AccessTools.Field(uiStateType, "Persistent");
             // Best-effort (NOT part of _ready): the client's "new research available" click nav (GeoscapeView.cs:696).
             _toResearchState = AccessTools.Method(viewType, "ToResearchState", Type.EmptyTypes);
+            // Best-effort (NOT part of _ready): blocking-modal (ambush) duplicate-show guard + host-driven close.
+            _uiStateGeoModalType = uiStateType;
+            _uiStateModalTypeProp = AccessTools.Property(uiStateType, "ModalType");
+            _currentRequestField = AccessTools.Field(queryType, "_currentStateSwitchRequest");
+            _finishQueriedState = AccessTools.Method(viewType, "FinishQueriedState", Type.EmptyTypes);
 
             _ready = _viewField != null && _switchQueryField != null && _queryStateSwitch != null
                      && _requestStateField != null && _requestCtor != null && _uiStateCtor != null;
@@ -107,6 +117,16 @@ namespace Multiplayer.Network.Sync.State
                 var query = _switchQueryField.GetValue(view);
                 if (query == null) return;
 
+                // Idempotence guard for the BLOCKING modal (ambush brief): a duplicate Show for the SAME
+                // uncloseable window would stack a second locked state the client could never leave. Report
+                // modals stay unguarded (a second research popup for a different element is legitimate).
+                if (ReportModalClassifier.IsBlockingModal(modalType) && IsCurrentGeoModalOfType(query, modalType))
+                {
+                    Debug.Log("[Multiplayer] GeoModalDisplay.Show modalType=" + modalType +
+                              " skipped (same blocking modal already current — duplicate mirror push)");
+                    return;
+                }
+
                 object modalTypeEnum = Enum.ToObject(_modalTypeEnum, (int)modalType);
                 object uiState = _uiStateCtor.Invoke(new object[] { modalTypeEnum, null, modalData });
                 if (persistent && _persistentField != null) _persistentField.SetValue(uiState, true);
@@ -119,6 +139,54 @@ namespace Multiplayer.Network.Sync.State
                           " priority=" + priority + " hasData=" + (modalData != null) + " → queued");
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.Show best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Client: the host RESOLVED its blocking modal (ambush brief) → close the mirrored view-locked copy.
+        /// Type-matched against the CURRENT queried state (same request-read as <see cref="EventDisplay"/>'s
+        /// Dismiss): only when it is a <c>UIStateGeoModal</c> whose <c>ModalType</c> equals
+        /// <paramref name="modalType"/> do we drive the native <c>GeoscapeView.FinishQueriedState()</c> — the
+        /// exact pop <c>UIStateGeoModal.FinishDialog</c> performs (its null client DialogCallback makes ExitState
+        /// side-effect free; the modal module hides + button lock restores via the Hide postfix). A stray or late
+        /// hide with a different/absent window is a logged no-op (idempotent).
+        /// </summary>
+        public static void CloseBlocking(GeoRuntime rt, byte modalType)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || _finishQueriedState == null) return;
+                var view = GetView(rt);
+                if (view == null) return;
+                var query = _switchQueryField.GetValue(view);
+                if (query == null) return;
+                if (!IsCurrentGeoModalOfType(query, modalType))
+                {
+                    Debug.Log("[Multiplayer] GeoModalDisplay.CloseBlocking modalType=" + modalType +
+                              " → no matching modal current (already closed / never shown) — no-op");
+                    return;
+                }
+                _finishQueriedState.Invoke(view, null);
+                Debug.Log("[Multiplayer] GeoModalDisplay.CloseBlocking modalType=" + modalType +
+                          " → FinishQueriedState (host resolved its blocking prompt)");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.CloseBlocking best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>True iff the switch query's CURRENT state is a <c>UIStateGeoModal</c> showing <paramref name="modalType"/>.</summary>
+        private static bool IsCurrentGeoModalOfType(object query, byte modalType)
+        {
+            try
+            {
+                if (_currentRequestField == null || _requestStateField == null
+                    || _uiStateGeoModalType == null || _uiStateModalTypeProp == null) return false;
+                var req = _currentRequestField.GetValue(query);
+                if (req == null) return false;
+                var state = _requestStateField.GetValue(req);
+                if (state == null || !_uiStateGeoModalType.IsInstanceOfType(state)) return false;
+                return Convert.ToInt32(_uiStateModalTypeProp.GetValue(state, null)) == modalType;
+            }
+            catch { return false; }
         }
 
         /// <summary>

@@ -65,6 +65,37 @@ public class ReportModalProtocolTests
     }
 
     [Fact]
+    public void AmbushBrief_RoundTrips()
+    {
+        // GeoAmbushBrief (15): siteId = mission.Site.SiteId, defId = mission.MissionDef.Guid, priority 0
+        // (ShowMissionBriefing → OpenModalPersistent(missionBriefModal, mission, 0), GeoscapeView.cs:1903).
+        var p = new ReportModalPayload(15, ReportModalVariant.AmbushBrief, 777, 0, 0, "AMBUSH_DEF_GUID", null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(15, d.ModalType);
+        Assert.Equal(ReportModalVariant.AmbushBrief, d.Variant);
+        Assert.Equal(777, d.SiteId);
+        Assert.Equal(0, d.Priority);
+        Assert.Equal("AMBUSH_DEF_GUID", d.DefId);
+        Assert.Empty(d.ExtraIds);
+    }
+
+    // ── ReportModalHide (0x6C): the host resolved its BLOCKING modal → clients close the mirror ──
+    [Fact]
+    public void ReportModalHide_RoundTrips()
+    {
+        var bytes = SyncProtocol.EncodeReportModalHide(15);
+        Assert.True(SyncProtocol.TryDecodeReportModalHide(bytes, out var modalType));
+        Assert.Equal(15, modalType);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(new byte[0])]
+    public void ReportModalHide_EmptyOrNull_DecodesFalse(byte[] data)
+        => Assert.False(SyncProtocol.TryDecodeReportModalHide(data, out _));
+
+    [Fact]
     public void NullDefId_EncodesEmpty()
     {
         var p = new ReportModalPayload(6, ReportModalVariant.NullData, -1, 0, 0, null, null);
