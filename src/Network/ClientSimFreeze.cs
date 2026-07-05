@@ -2,19 +2,19 @@ using System;
 
 namespace Multiplayer.Network
 {
-    // Inc4 S0: feature flag + pure gate for the CLIENT geoscape sim-freeze. Design spec:
-    // docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md §3.4.
-    // NetworkEngine has no config system, so the flag is a plain static (default-OFF); every freeze
-    // injection point reads it. S0 ships THIS flag + the empty guarded freeze-activate patch
-    // (ClientGeoSimFreezePatch) — inert while OFF, byte-unchanged in-game. The freeze MECHANISM
-    // (Timing.Paused=true re-assert, WriteClock Paused pin, glyph decouple) lands in S1 behind this same
-    // flag; the legacy producer-table + event-suppress path stays until S4 so flag-OFF = known-good rollback.
+    // Inc4 feature flag + pure gate for the CLIENT geoscape sim-freeze. Design spec:
+    // docs/superpowers/specs/2026-07-02-multiplayer-inc4-client-sim-freeze-design.md §3.4, §6.
+    // NetworkEngine has no config system, so the flag is a plain static; every freeze injection point
+    // reads it. The freeze MECHANISM (Timing.Paused=true re-assert, WriteClock Paused pin, glyph
+    // decouple) rides behind this flag; the legacy producer-table + event-suppress path stays until S4
+    // so flipping the flag OFF (+ rebuild) is a known-good rollback with zero code revert.
     public static class ClientSimFreeze
     {
-        // Default-OFF by design. FLIPPED ON here for the Inc4 S1 in-game gate — this is the single,
-        // revertable "enable" commit (rollback = `git revert` it → back to default-OFF → legacy suppress
-        // path fully restored, no behaviour change). Do NOT treat flag-ON as permanent; S3 makes it the
-        // committed default only after the S1+S2 gates pass.
+        // COMMITTED DEFAULT-ON (Inc4 S3). S1 (clock-freeze) + S2 (host-driven travel mirror) both passed
+        // their in-game gates, so the client sim-freeze is the shipped default — this ON value is now
+        // permanent, not the temporary S1-gate flip it began as. Rollback until S4 retires the legacy
+        // gates: set this false and rebuild → the producer-table + event-suppress path is fully restored
+        // (both paths still present) → HEAD behaviour, no code revert.
         public static bool Enabled = true;
 
         // Pure, Unity-free freeze-decision gate (mirrors ClientTftvAircraftFreezeGate.ShouldRunTftvNormally

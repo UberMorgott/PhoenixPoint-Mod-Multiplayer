@@ -24,9 +24,9 @@ namespace Multiplayer.Harmony
     /// Body (S1): on the client, <see cref="Multiplayer.Network.TimeSync.TimeSyncManager.FreezeClientGeoSim"/>
     /// sets the live geoscape <c>Timing.Paused = true</c> via the setter (<c>RescheduleForTiming</c> Max's every
     /// already-Started producer; a paused source ⇒ <c>NextUpdate.ConvertToTiming</c> returns Max). Gated on
-    /// <see cref="ClientSimFreeze.ShouldFreeze"/> (flag default-OFF) — when OFF it early-returns before any clock
-    /// mutation, so the class is byte-unchanged in-game (the legacy producer-table + event-suppress path stays
-    /// as the flag-OFF rollback until S4). Rollback = flip <c>ClientSimFreeze.Enabled=false</c>.
+    /// <see cref="ClientSimFreeze.ShouldFreeze"/> (flag-gated; default-ON since S3) — when OFF it early-returns
+    /// before any clock mutation, so the class is byte-unchanged in-game (the legacy producer-table +
+    /// event-suppress path stays as the flag-OFF rollback until S4). Rollback = flip <c>ClientSimFreeze.Enabled=false</c>.
     ///
     /// Verified vs decompile (2026-07-02): <c>GeoscapeEventSystem.OnLevelStart()</c> parameterless
     /// (GeoscapeEventSystem.cs:118) — the same target the precedent resolves. Reflection target so an engine

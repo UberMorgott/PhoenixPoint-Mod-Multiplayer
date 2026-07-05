@@ -28,7 +28,7 @@ namespace Multiplayer.Harmony
     /// the setter's <c>OnPausedEvent</c> at the load-time freeze re-assert — so the glyph tracks the host on
     /// every change WITHOUT per-frame cost (steady state arms no flag → these postfixes don't run).
     ///
-    /// Gated on <see cref="ClientSimFreeze.ShouldFreeze"/> (flag default-OFF): when OFF the postfix returns
+    /// Gated on <see cref="ClientSimFreeze.ShouldFreeze"/> (flag-gated; default-ON since S3): when OFF the postfix returns
     /// before touching anything → the widget's native pause/speed sync stands unchanged (byte-identical
     /// in-game). Reflection targets so an engine rename never PatchAll-bombs; best-effort try/catch — never
     /// throws into game code. HOST / single-player never reach the freeze gate.

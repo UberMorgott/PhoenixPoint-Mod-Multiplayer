@@ -6,7 +6,7 @@ using Xunit;
 // (ClientGeoSimFreezePatch postfix on GeoscapeEventSystem.OnLevelStart) is not unit-testable, but the
 // decision — "should the client geoscape sim be frozen?" — is extracted into ClientSimFreeze.ShouldFreeze
 // (mirroring ClientTftvAircraftFreezeGate) so the truth table is asserted directly. Freeze ONLY on:
-// flag ON + active session + NOT host. Also pins the S0 invariant that the flag ships default-OFF (inert).
+// flag ON + active session + NOT host. Also pins the committed default: the flag ships ON (Inc4 S3).
 public class ClientSimFreezeGateTests
 {
     [Fact]
@@ -45,12 +45,12 @@ public class ClientSimFreezeGateTests
     }
 
     [Fact]
-    public void FlagEnabledForS1InGameGate()
+    public void FlagDefaultsOn_S3Committed()
     {
-        // The flag is DESIGNED default-OFF (inert scaffolding), but it is FLIPPED ON for the Inc4 S1 in-game
-        // gate by the single revertable "enable" commit. This test pins that live state: `git revert` of that
-        // commit restores `Enabled = false` AND this assertion (back to `Assert.False`) together — clean
-        // rollback. It flips back to the committed default at S3 only after the S1+S2 gates pass.
+        // Inc4 S3: the client sim-freeze flag ships ON as the committed default — S1 (clock-freeze) and
+        // S2 (host-driven travel mirror) both passed their in-game gates, so the earlier "temporary,
+        // revert-me" S1-gate flip is now permanent. Rollback until S4 is a source toggle (set
+        // Enabled=false + rebuild → legacy suppress path restored), NOT a `git revert` of an enable commit.
         Assert.True(ClientSimFreeze.Enabled);
     }
 
