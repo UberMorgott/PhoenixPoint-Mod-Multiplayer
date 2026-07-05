@@ -167,6 +167,7 @@ public class ResearchChannelTests
         Assert.Equal("a", snap.Queue[0].id);
         Assert.Equal(5.0f, snap.Queue[0].progress);
         Assert.Empty(snap.States);
+        Assert.Null(snap.HourlyRate);           // v1 carries no rate block either
     }
 
     [Fact]
@@ -187,8 +188,8 @@ public class ResearchChannelTests
     [Fact]
     public void Encode_StableWireBytes_Pinned()
     {
-        // Pin the EXACT v2 wire layout so an accidental format change is caught. Snapshot:
-        //   Completed = ["AB"]; Queue = [("C", 2.0f)]; States = [("D", 2)].
+        // Pin the EXACT wire layout so an accidental format change is caught. Snapshot:
+        //   Completed = ["AB"]; Queue = [("C", 2.0f)]; States = [("D", 2)]; no rate.
         var snap = new ResearchSnapshot();
         snap.Completed.Add("AB");
         snap.Queue.Add(("C", 2.0f));
@@ -206,6 +207,104 @@ public class ResearchChannelTests
             0x01, 0x00,                         // stateCount = 1
             0x01, 0x00, 0x44,                   // idLen=1, "D"
             0x02,                               // state byte = 2 (Unlocked)
+            0x00,                               // hasRate = 0 (v3 block, no rate)
+        };
+        Assert.Equal(expected, bytes);
+    }
+
+    // ─── RATE sync: v3 hourly-rate block (host ETA rate → client) ──────────────
+
+    [Fact]
+    public void Snapshot_RoundTrips_HourlyRate()
+    {
+        var snap = new ResearchSnapshot();
+        snap.Completed.Add("PX_AlienBiology_ResearchDef");
+        snap.Queue.Add(("PX_Vehicles_ResearchDef", 125.5f));
+        snap.States.Add(("PX_LaserTech_ResearchDef", 2));
+        snap.HourlyRate = 42.5f;
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt);
+        Assert.Equal(42.5f, rt.HourlyRate);
+        Assert.Single(rt.Completed);
+        Assert.Single(rt.Queue);
+        Assert.Single(rt.States);
+    }
+
+    [Fact]
+    public void Snapshot_RoundTrips_ZeroRate_DistinctFromAbsent()
+    {
+        // A legitimate 0 rate (no labs) must survive the round-trip as 0, NOT collapse to null —
+        // the presence byte keeps them distinguishable.
+        var snap = new ResearchSnapshot();
+        snap.HourlyRate = 0f;
+        var rt = RoundTrip(snap);
+        Assert.NotNull(rt);
+        Assert.Equal(0f, rt.HourlyRate);
+    }
+
+    [Fact]
+    public void Snapshot_RoundTrips_NoRate_AsNull()
+    {
+        var rt = RoundTrip(new ResearchSnapshot());
+        Assert.NotNull(rt);
+        Assert.Null(rt.HourlyRate);
+    }
+
+    [Fact]
+    public void Decode_V2Payload_NoRateBlock_DecodesAsNullRate()
+    {
+        // Backward compatibility: a v2 wire payload (completed+queue+states, NO trailing rate block)
+        // must decode cleanly with HourlyRate = null. Hand-build a v2 payload:
+        //   completedCount=0, queueCount=0, stateCount=1, id "D" state 2 — and NOTHING after.
+        var v2 = new byte[]
+        {
+            0x00, 0x00,                         // completedCount = 0
+            0x00, 0x00,                         // queueCount = 0
+            0x01, 0x00,                         // stateCount = 1
+            0x01, 0x00, 0x44,                   // idLen=1, "D"
+            0x02,                               // state byte = 2 (Unlocked)
+            // (no trailing rate block — v2)
+        };
+        var snap = ResearchSnapshot.Decode(v2);
+        Assert.NotNull(snap);
+        Assert.Single(snap.States);
+        Assert.Null(snap.HourlyRate);
+    }
+
+    [Fact]
+    public void Decode_RejectsTruncatedRateBlock_ReturnsNull()
+    {
+        // hasRate=1 but only 2 of the 4 f32 bytes follow → ReadSingle throws → whole payload rejected
+        // (all-or-nothing, mirroring the truncated-string/state-block contract).
+        var truncated = new byte[]
+        {
+            0x00, 0x00,             // completedCount = 0
+            0x00, 0x00,             // queueCount = 0
+            0x00, 0x00,             // stateCount = 0
+            0x01,                   // hasRate = 1
+            0x00, 0x20,             // only 2 of 4 rate bytes — truncated
+        };
+        Assert.Null(ResearchSnapshot.Decode(truncated));
+    }
+
+    [Fact]
+    public void Encode_StableWireBytes_WithRate_Pinned()
+    {
+        // Pin the EXACT v3 wire layout including the rate block. Snapshot: empty lists, rate 2.5f.
+        var snap = new ResearchSnapshot();
+        snap.HourlyRate = 2.5f;
+
+        var bytes = ResearchSnapshot.Encode(snap);
+
+        var expected = new byte[]
+        {
+            0x00, 0x00,                         // completedCount = 0
+            0x00, 0x00,                         // queueCount = 0
+            0x00, 0x00,                         // stateCount = 0
+            0x01,                               // hasRate = 1
+            0x00, 0x00, 0x20, 0x40,             // rate 2.5f LE
         };
         Assert.Equal(expected, bytes);
     }

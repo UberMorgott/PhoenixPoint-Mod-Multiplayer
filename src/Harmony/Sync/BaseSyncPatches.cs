@@ -189,7 +189,18 @@ namespace Multiplayer.Harmony.Sync
         public static void Postfix(ISyncedAction __state)
         {
             if (__state == null) return;
-            try { NetworkEngine.Instance?.Sync?.BroadcastHostAction(__state); }
+            try
+            {
+                var sync = NetworkEngine.Instance?.Sync;
+                sync?.BroadcastHostAction(__state);
+                // A completed facility (construction OR repair) changes the faction's hourly research
+                // production the moment it turns Functioning (a new/repaired lab starts producing). The ch2
+                // snapshot carries that rate (v3 block), but its next scheduled send is the HOURLY heartbeat
+                // — mark ch2 dirty now so the client's research ETA refreshes instantly instead (coalesced
+                // flush; mirrors the AddResearchToQueuePatch postfix precedent). Facility DAMAGE is not
+                // hooked — the hourly heartbeat converges that within the hour.
+                sync?.MarkChannelDirty(2);
+            }
             catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }

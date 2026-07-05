@@ -15,6 +15,7 @@ namespace Multiplayer.Network.Sync.State
     ///   [u16 completedCount]{[u16 idLen][id utf8]}*
     ///   [u16 queueCount]{[u16 idLen][id utf8][f32 progress]}*
     ///   [u16 stateCount]{[u16 idLen][id utf8][u8 state]}*        ← OPTIONAL trailing block (v2)
+    ///   [u8 hasRate]([f32 rate] iff hasRate==1)                  ← OPTIONAL trailing block (v3)
     ///
     /// The third (state) block is TRAILING + length-tolerant: a v1 payload (no block) is read as zero
     /// states (the decoder only reads the block when bytes remain), and a v1 decoder reading a v2 payload
@@ -23,6 +24,13 @@ namespace Multiplayer.Network.Sync.State
     /// elements live in <see cref="Completed"/>, queued elements in <see cref="Queue"/>). This lets the
     /// client mirror the host's Available (left) list reactively: Revealed shows without the "research now"
     /// affordance, Unlocked shows with it.
+    ///
+    /// The fourth (rate, v3) block follows the same versioning precedent: TRAILING + length-tolerant
+    /// (a v2 payload without it decodes as <see cref="HourlyRate"/> = null; a v2 decoder ignores the
+    /// trailing bytes). It carries the host's EFFECTIVE hourly research production so the client's ETA
+    /// (<c>Research.GetTotalTimeLeft</c> = remaining cost / hourly rate) matches the host's — the rate is
+    /// otherwise computed LOCALLY from facility production, which diverges between host and client. The
+    /// presence byte distinguishes "host couldn't compute a rate" (absent) from a legitimate 0 rate.
     /// </summary>
     public sealed class ResearchSnapshot
     {
@@ -30,6 +38,9 @@ namespace Multiplayer.Network.Sync.State
         public readonly List<(string id, float progress)> Queue = new List<(string, float)>();
         // Non-completed, non-queued elements the host has Revealed/Unlocked, with the authoritative state byte.
         public readonly List<(string id, byte state)> States = new List<(string, byte)>();
+        // v3: the host's effective hourly research production (Research.GetHourlyResearchProduction incl.
+        // any mod postfix, e.g. TFTV Void Omen 6 ×1.5). Null = not carried (old payload / host bind failure).
+        public float? HourlyRate;
 
         public static byte[] Encode(ResearchSnapshot snap)
         {
@@ -52,6 +63,10 @@ namespace Multiplayer.Network.Sync.State
                     WriteStr(w, id);
                     w.Write(state);
                 }
+                // v3 trailing block. Always written (no rate → just the 0 presence byte) so the wire is
+                // stable; the presence byte keeps a legitimate 0 rate distinguishable from "unavailable".
+                w.Write((byte)(snap.HourlyRate.HasValue ? 1 : 0));
+                if (snap.HourlyRate.HasValue) w.Write(snap.HourlyRate.Value);
                 return ms.ToArray();
             }
         }
@@ -87,6 +102,13 @@ namespace Multiplayer.Network.Sync.State
                             byte state = r.ReadByte();
                             snap.States.Add((id, state));
                         }
+                    }
+                    // v3 trailing block — same length-tolerant contract: a v2 payload (no block) decodes as
+                    // HourlyRate = null. A truncated f32 after hasRate==1 throws EndOfStreamException via
+                    // ReadSingle → whole payload rejected (null), preserving the all-or-nothing contract.
+                    if (ms.Position < ms.Length)
+                    {
+                        if (r.ReadByte() == 1) snap.HourlyRate = r.ReadSingle();
                     }
                     return snap;
                 }

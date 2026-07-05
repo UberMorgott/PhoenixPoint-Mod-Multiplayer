@@ -101,6 +101,8 @@
     <!-- Research state channel codec (pure) + reflection bridge (GeoRuntime/AccessTools only, no SyncEngine). -->
     <Compile Include="..\src\Network\Sync\State\ResearchSnapshot.cs"><Link>Sync\State\ResearchSnapshot.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\ResearchStateReflection.cs"><Link>Sync\State\ResearchStateReflection.cs</Link></Compile>
+    <!-- Client research-RATE store + override gate (pure, Unity-free): rate block (v3) of the ch2 codec. -->
+    <Compile Include="..\src\Network\Sync\State\ClientResearchRate.cs"><Link>Sync\State\ClientResearchRate.cs</Link></Compile>
     <!-- Unlock (#3) + Diplomacy (#4) state-channel codecs (pure, Unity-free) for wire round-trip tests.
          The channel + reflection-bridge classes touch SyncEngine/Unity and are NOT linked (mirrors
          InventoryChannel/ResearchChannel, which are also unlinked — only their pure codecs are). -->

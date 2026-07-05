@@ -75,6 +75,7 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _stateField;             // ResearchElement._state (private ResearchState backing field)
         private static FieldInfo _inProgressBackingField; // ResearchElement.<IsInProgress>k__BackingField (bool)
         private static PropertyInfo _researchCostProp;    // ResearchElement.ResearchCost (int => ResearchDef.ResearchCost)
+        private static MethodInfo _getHourlyProduction;   // Research.GetHourlyResearchProduction(ResearchDef) — PRIVATE (Research.cs:649)
         private static object _completedStateValue;       // ResearchState.Completed enum value (boxed)
         private static object _unlockedStateValue;         // ResearchState.Unlocked enum value (boxed)
         private static object _revealedStateValue;         // ResearchState.Revealed enum value (boxed)
@@ -112,6 +113,11 @@ namespace Multiplayer.Network.Sync.State
             _stateField = AccessTools.Field(_researchElementType, "_state");
             _inProgressBackingField = AccessTools.Field(_researchElementType, "<IsInProgress>k__BackingField");
             _researchCostProp = AccessTools.Property(_researchElementType, "ResearchCost");
+            // RATE sync: Research.GetHourlyResearchProduction(ResearchDef) (Research.cs:649) — bound by
+            // NAME ONLY (single overload). Deliberate: AccessTools.Method(type, name, Type[]) does EXACT
+            // param matching, so passing a mismatched ResearchDef Type would return null SILENTLY. Not in
+            // the _ready gate (additive — a rename must never regress the core start/cancel/converge path).
+            _getHourlyProduction = AccessTools.Method(_researchType, "GetHourlyResearchProduction");
             _researchStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchState");
             if (_researchStateType != null && _researchStateType.IsEnum)
             {
@@ -202,6 +208,11 @@ namespace Multiplayer.Network.Sync.State
                     }
                     catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Snapshot Visible failed (skipped): " + ex.Message); }
                 }
+
+                // RATE sync: carry the host's effective hourly research production so the client's ETA
+                // (GetTotalTimeLeft = remaining cost / rate) matches the host's. Best-effort additive —
+                // null (bind failure) simply means the block is absent and the client keeps its last value.
+                snap.HourlyRate = GetHourlyRate(research);
 
                 return snap;
             }
@@ -622,6 +633,29 @@ namespace Multiplayer.Network.Sync.State
                 return v is int i ? i : 0;
             }
             catch { return 0; }
+        }
+
+        /// <summary>
+        /// Host: the Phoenix faction's EFFECTIVE hourly research production, or null. Computed by CALLING
+        /// the native <c>Research.GetHourlyResearchProduction(ResearchDef)</c> (Research.cs:649 —
+        /// <c>Faction.ResourceIncome.GetTotalResouce(Research).RoundedValue</c>) rather than reading
+        /// <c>ResourceIncome</c> directly, so any Harmony postfix a mod layers on the method is included
+        /// (TFTV Void Omen 6 ×1.5, TFTVVoidOmens.cs:1027). The ResearchDef param is IGNORED by the
+        /// implementation (flat faction-wide rate) → pass null. On the host our own client-side rate
+        /// override postfix (<c>ClientResearchRatePatch</c>) is inert, so this reads the true native value.
+        /// Known accepted edge: <c>GetTotalTimeLeft</c> ALSO adds <c>GetAlliesContribution</c>
+        /// (Research.cs:705) when an NPC ally researches the same def — that ally term stays client-local
+        /// and may diverge slightly; rare and minor, deliberately not mirrored here.
+        /// </summary>
+        private static float? GetHourlyRate(object research)
+        {
+            if (_getHourlyProduction == null || research == null) return null;
+            try
+            {
+                var v = _getHourlyProduction.Invoke(research, new object[] { null });
+                return v is float f ? f : (float?)null;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.GetHourlyRate failed: " + ex.Message); return null; }
         }
 
         /// <summary>

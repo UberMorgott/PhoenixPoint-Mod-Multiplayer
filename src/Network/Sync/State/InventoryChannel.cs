@@ -20,7 +20,6 @@ namespace Multiplayer.Network.Sync.State
         // ─── host subscription state (mirrors WalletWatcher) ───────────────
         private Delegate _handler;
         private object _storage;
-        private bool _bound;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -50,7 +49,9 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;                                  // bound; skip the per-frame reflection
+            // NO hard "already bound" gate — rebind when the LIVE storage instance changes (geoscape reload builds
+            // a fresh one; the old `if (_bound) return;` left this channel on the dead instance forever — the
+            // WalletWatcher lesson, WalletWatcher.cs:20-28). Instance check keeps the per-frame cost tiny.
             if (eng == null) return;
             var storage = ItemStorageReflection.GetStorage(GeoRuntime.Instance);
             if (storage == null) return;                         // not in geoscape yet / mid-load
@@ -63,7 +64,6 @@ namespace Multiplayer.Network.Sync.State
                 storage, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             // Seed clients with the authoritative inventory the moment we bind.
             eng.MarkChannelDirty(id);
-            _bound = true;
         }
 
         public void DetachHost()
@@ -72,7 +72,6 @@ namespace Multiplayer.Network.Sync.State
                 ItemStorageReflection.Unsubscribe(_storage, _handler);
             _storage = null;
             _handler = null;
-            _bound = false;
         }
 
         private static List<(string guid, int count)> Decode(byte[] data)

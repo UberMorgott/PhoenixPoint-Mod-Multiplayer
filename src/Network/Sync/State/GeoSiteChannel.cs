@@ -25,7 +25,6 @@ namespace Multiplayer.Network.Sync.State
 
         private object _token;   // opaque GeoMap site-event subscription token
         private object _map;     // bound GeoMap instance (rebind guard)
-        private bool _bound;
 
         // Site ids changed since the last flush. Guarded by its own lock: the site events fire on the host
         // sim and the Snapshot flush drains it; a swap-under-lock keeps the encode consistent.
@@ -46,6 +45,9 @@ namespace Multiplayer.Network.Sync.State
             if (sites == null || sites.Count == 0) return null;
             var snap = new GeoSiteSnapshot();
             snap.Sites.AddRange(sites);
+            // DIAG (site channel): one line per flush (site-event driven — rare). The whole host→client site
+            // path was previously silent end-to-end, which made the explored-state desync invisible in logs.
+            Debug.Log("[Multiplayer] GeoSiteChannel flush sites=" + sites.Count + " [" + string.Join(",", snap.Sites) + "]");
             return GeoSiteSnapshot.Encode(snap);
         }
 
@@ -53,6 +55,11 @@ namespace Multiplayer.Network.Sync.State
         {
             var snap = GeoSiteSnapshot.Decode(data);
             if (snap == null) return;
+            // Bind the reflection bridge BEFORE the first resolve: on a fresh client the first payload otherwise
+            // hits ResolveSiteById with _allSitesProp still null → every site "unresolved" → mis-routed to the
+            // Case-B spawn path. GetMapPublic runs Ensure and is idempotent.
+            GeoSiteReflection.GetMapPublic(rt);
+            Debug.Log("[Multiplayer] GeoSiteChannel apply sites=" + snap.Sites.Count);
             foreach (var dto in snap.Sites)
             {
                 var site = GeoSiteReflection.ResolveSiteById(rt, dto.SiteId);
@@ -73,14 +80,19 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;                  // bound; skip the per-frame reflection
+            // NO hard "already bound" gate: resolve the LIVE GeoMap every frame and decide off the
+            // current-vs-bound INSTANCE (the WalletWatcher lesson, WalletWatcher.cs:20-28). A geoscape reload
+            // (tactical round-trip, co-op save-reload) builds a FRESH GeoMap with no mid-session Detach; the old
+            // `if (_bound) return;` gate left the channel subscribed to the now-DEAD map forever → zero site
+            // sync after the first mission (soak 2026-07-05: host POI explorations after the 654s reload never
+            // reached the client). The instance check keeps the per-frame cost to two cached reflection reads.
             if (eng == null) return;
             var rt = GeoRuntime.Instance;
             var map = GeoSiteReflection.GetMapPublic(rt);
             if (map == null) return;             // not in geoscape yet / mid-load
             if (ReferenceEquals(map, _map)) return; // already bound to this GeoMap
 
-            DetachHost();                        // drop any stale binding
+            DetachHost();                        // drop any stale (dead-map) binding
             _map = map;
             byte id = ChannelId;
             // Each site event hands us the changed GeoSite; mark its id dirty + the channel dirty.
@@ -92,7 +104,7 @@ namespace Multiplayer.Network.Sync.State
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(id);
             });
             if (_token == null) { _map = null; return; } // no event bound → retry next frame
-            _bound = true;
+            Debug.Log("[Multiplayer] GeoSiteChannel: subscribed site events on live GeoMap (rebind-safe)");
         }
 
         public void DetachHost()
@@ -100,7 +112,6 @@ namespace Multiplayer.Network.Sync.State
             if (_token != null) GeoSiteReflection.Unsubscribe(_token);
             _token = null;
             _map = null;
-            _bound = false;
             lock (_dirtyLock) { _dirty.Clear(); }
         }
     }

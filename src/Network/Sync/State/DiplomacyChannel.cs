@@ -21,7 +21,6 @@ namespace Multiplayer.Network.Sync.State
         private object _token;     // opaque faction research-event token (Start/Complete)
         private object _hourToken; // opaque hourly-tick token (diplomacy heartbeat)
         private object _faction;   // bound faction instance (rebind guard)
-        private bool _bound;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
@@ -39,7 +38,10 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;
+            // NO hard "already bound" gate — rebind when the LIVE faction instance changes (geoscape reload builds
+            // a fresh GeoPhoenixFaction with no mid-session Detach; the old `if (_bound) return;` left this channel
+            // subscribed to the dead one forever → diplomacy sync silently stopped after the first tactical
+            // round-trip). The WalletWatcher lesson (WalletWatcher.cs:20-28) applied to every event channel.
             if (eng == null) return;
             var fac = GeoRuntime.Instance.PhoenixFaction();
             if (fac == null) return;                          // not in geoscape yet / mid-load
@@ -54,7 +56,6 @@ namespace Multiplayer.Network.Sync.State
                 GeoRuntime.Instance, () => NetworkEngine.Instance?.Sync?.MarkChannelDirty(id));
             // Seed clients with the authoritative diplomacy table the moment we bind.
             eng.MarkChannelDirty(id);
-            _bound = true;
         }
 
         public void DetachHost()
@@ -64,7 +65,6 @@ namespace Multiplayer.Network.Sync.State
             _token = null;
             _hourToken = null;
             _faction = null;
-            _bound = false;
         }
     }
 }

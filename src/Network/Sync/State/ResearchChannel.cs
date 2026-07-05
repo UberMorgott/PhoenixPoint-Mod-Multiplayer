@@ -36,6 +36,11 @@ namespace Multiplayer.Network.Sync.State
         {
             var snap = ResearchSnapshot.Decode(data);
             if (snap == null) return;
+            // RATE sync: record the host's effective hourly research rate BEFORE the reconcile + the
+            // research-screen refresh that follows in OnStateSync, so the rebuilt ETA rows already read
+            // the synced value via the ClientResearchRatePatch postfix. Apply only runs on the client
+            // (OnStateSync is host-guarded), so this never touches the host's authoritative rate.
+            ClientResearchRate.OnSnapshotApplied(snap.HourlyRate);
             ResearchStateReflection.Apply(rt, snap);
         }
 

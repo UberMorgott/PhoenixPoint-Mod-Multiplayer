@@ -74,6 +74,11 @@ namespace Multiplayer.Network.Sync.State
         private static Type _siteStateEnum;          // GeoSiteState (for byte<->enum)
         private static MethodInfo _getInspectedMethod;  // GeoSite.GetInspected(GeoFaction) → bool (per-faction reveal, GeoSite.cs:398)
         private static MethodInfo _setInspectedMethod;  // GeoSite.SetInspected(GeoFaction, bool)      (GeoSite.cs:403)
+        private static MethodInfo _getVisibleMethod;    // GeoSite.GetVisible(GeoFaction) → bool  (GeoSite.cs:387)
+        private static MethodInfo _setVisibleMethod;    // GeoSite.SetVisible(GeoFaction, bool)   (GeoSite.cs:392)
+        private static MethodInfo _getVisitedMethod;    // GeoSite.GetVisited(GeoFaction) → bool  (GeoSite.cs:370)
+        private static MethodInfo _getFactionDataMethod;   // GeoSite.GetFactionData(GeoFaction) PRIVATE (GeoSite.cs:420) — client no-event Visited write
+        private static FieldInfo _factionDataVisitedField; // GeoSiteFactionData.Visited public field (GeoSiteFactionData.cs:19)
         private static PropertyInfo _viewerFactionProp; // GeoLevelController.ViewerFaction (the display/player faction)
         private static MethodInfo _refreshVisualsMethod; // GeoSite.RefreshVisuals() → _visuals.Refresh()             (GeoSite.cs:915)
         // ─── Case-B inert mirror-site spawn (client) ───
@@ -82,13 +87,16 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _siteMappingInstanceProp; // GeoSiteTypeMappingDef.Instance (static)
         private static MethodInfo _getSiteTemplateMethod;     // GeoSiteTypeMappingDef.GetSiteTemplate(GeoSiteType) → ComponentSetDef
 
-        // The 6 aggregate site events on GeoMap, by name. SiteAdded/SiteRemoved are bound for symmetry
+        // The 7 aggregate site events on GeoMap, by name. SiteAdded/SiteRemoved are bound for symmetry
         // (Case A only updates existing sites; an add/remove still re-snapshots so an in-play identity flip
         // converges, and a removed/added id absent on the client is harmlessly skipped in Apply).
+        // SiteFirstTimeVisited (GeoMap.cs:263, fired by GeoSite.SiteVisited on the FIRST SetVisited(true)) covers
+        // a site whose ONLY change is the Visited flip (plain first arrival at an already-inspected site) — without
+        // it that flip never dirty-marks and the client's Visited state silently diverges.
         private static readonly string[] SiteEventNames =
         {
             "SiteOwnerChanged", "SiteStateChanged", "SiteVisibilityChanged",
-            "SiteInspectedChanged", "SiteAdded", "SiteRemoved",
+            "SiteInspectedChanged", "SiteFirstTimeVisited", "SiteAdded", "SiteRemoved",
         };
 
         private static void Ensure(GeoRuntime rt)
@@ -131,6 +139,18 @@ namespace Multiplayer.Network.Sync.State
             // both instances of a shared co-op campaign) that the host reads + the client writes the reveal for.
             _getInspectedMethod = AccessTools.Method(geoSiteType, "GetInspected");
             _setInspectedMethod = AccessTools.Method(geoSiteType, "SetInspected");
+            // Explored-state family siblings (same single-overload name-only binding; same best-effort contract).
+            // Visible: native SetVisible is display-safe on the client — its VisibleChanged→GeoMap.SiteVisibilityChanged
+            // cascade only reaches GeoscapeView's display re-raise (GeoscapeView.cs:1681-1687), no sim.
+            _getVisibleMethod = AccessTools.Method(geoSiteType, "GetVisible");
+            _setVisibleMethod = AccessTools.Method(geoSiteType, "SetVisible");
+            // Visited: native SetVisited is NOT client-safe (SiteVisited→GeoMap.SiteFirstTimeVisited reaches
+            // GeoPhoenixFaction.OnSiteFirstTimeVisited → HavenResearchManager + GeoscapeEventSystem — sim!), so the
+            // client writes the per-faction GeoSiteFactionData.Visited FIELD directly (no event, pure mirror).
+            _getVisitedMethod = AccessTools.Method(geoSiteType, "GetVisited");
+            _getFactionDataMethod = AccessTools.Method(geoSiteType, "GetFactionData");
+            var factionDataType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Sites.GeoSiteFactionData");
+            if (factionDataType != null) _factionDataVisitedField = AccessTools.Field(factionDataType, "Visited");
             _viewerFactionProp = AccessTools.Property(geoLevelType, "ViewerFaction");
             // Native marker repaint (GeoSite.RefreshVisuals → GeoSiteVisualsController.Refresh → _refresh=true →
             // its Unity Update() → RefreshSiteVisuals, which reads GetInspected(Viewer)). We write Owner/Type/State
@@ -328,8 +348,8 @@ namespace Multiplayer.Network.Sync.State
             try { encounterId = _encounterIdField.GetValue(site) as string ?? ""; }
             catch { encounterId = ""; }
 
-            // Per-faction reveal (exploration outcome). Best-effort: unbound method / null viewer → false (the site
-            // still mirrors its identity, the reveal simply doesn't carry).
+            // Per-faction explored-state family (exploration outcome). Best-effort: unbound method / null viewer →
+            // false (the site still mirrors its identity, the flag simply doesn't carry).
             bool inspected = false;
             try
             {
@@ -338,7 +358,23 @@ namespace Multiplayer.Network.Sync.State
             }
             catch { inspected = false; }
 
-            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected);
+            bool visible = false;
+            try
+            {
+                if (_getVisibleMethod != null && viewerFaction != null)
+                    visible = (bool)_getVisibleMethod.Invoke(site, new[] { viewerFaction });
+            }
+            catch { visible = false; }
+
+            bool visited = false;
+            try
+            {
+                if (_getVisitedMethod != null && viewerFaction != null)
+                    visited = (bool)_getVisitedMethod.Invoke(site, new[] { viewerFaction });
+            }
+            catch { visited = false; }
+
+            return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited);
         }
 
         /// <summary>
@@ -398,19 +434,42 @@ namespace Multiplayer.Network.Sync.State
                     catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity encounter failed (skipped): " + ex.Message); }
                 }
 
-                // Per-faction REVEAL (exploration outcome). Drive the NATIVE SetInspected(ViewerFaction, value) so
-                // the site flips to inspected on the sim-frozen client exactly as the host did — this is what makes
-                // a client-relayed "Explore POI" order visibly reveal the site. SetInspected only sets the flag +
-                // fires the display-only InspectedChanged event (no sim advance, no reward cascade); the client
-                // channel is host-attach-only so it never re-broadcasts. Host-authoritative (matches the host's value).
-                if (_setInspectedMethod != null)
+                // Per-faction EXPLORED-STATE FAMILY (exploration outcome) — Visible + Inspected + Visited.
+                // Visible FIRST (an invisible site renders no marker at all, GeoSiteVisualsController.cs:195):
+                // native SetVisible(ViewerFaction, value) is display-safe on the client (VisibleChanged →
+                // GeoMap.SiteVisibilityChanged → GeoscapeView display re-raise only). This is what makes the POIs
+                // the host's exploration REVEALED AROUND the explored site appear on the sim-frozen client.
+                var viewer = GetViewerFaction(rt);
+                if (_setVisibleMethod != null && viewer != null)
+                {
+                    try { _setVisibleMethod.Invoke(site, new object[] { viewer, dto.Visible }); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity visible failed (skipped): " + ex.Message); }
+                }
+
+                // Inspected: drive the NATIVE SetInspected(ViewerFaction, value) so the site flips to inspected on
+                // the sim-frozen client exactly as the host did — this is what makes an exploration (host-own or
+                // client-relayed) visibly reveal the site. SetInspected only sets the flag + fires the display-only
+                // InspectedChanged event (no sim advance, no reward cascade); the client channel is host-attach-only
+                // so it never re-broadcasts. Host-authoritative (matches the host's value).
+                if (_setInspectedMethod != null && viewer != null)
+                {
+                    try { _setInspectedMethod.Invoke(site, new object[] { viewer, dto.Inspected }); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
+                }
+
+                // Visited: native SetVisited would fire SiteVisited → GeoMap.SiteFirstTimeVisited →
+                // GeoPhoenixFaction.OnSiteFirstTimeVisited (HavenResearchManager.UpdateHavenResearch,
+                // GeoPhoenixFaction.cs:1163-1170) + GeoscapeEventSystem event triggers — SIM on a frozen client. So
+                // write the per-faction GeoSiteFactionData.Visited FIELD directly (no event — the same no-cascade
+                // discipline as the Owner/Type/State backing-field writes above).
+                if (_getFactionDataMethod != null && _factionDataVisitedField != null && viewer != null)
                 {
                     try
                     {
-                        var viewer = GetViewerFaction(rt);
-                        if (viewer != null) _setInspectedMethod.Invoke(site, new object[] { viewer, dto.Inspected });
+                        var factionData = _getFactionDataMethod.Invoke(site, new[] { viewer });
+                        if (factionData != null) _factionDataVisitedField.SetValue(factionData, dto.Visited);
                     }
-                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity visited failed (skipped): " + ex.Message); }
                 }
 
                 // Owner/Type/State were written via backing fields (no change cascade) and SetInspected fires
@@ -445,9 +504,18 @@ namespace Multiplayer.Network.Sync.State
                 Ensure(rt);
                 if (!_ready) return null;
 
-                // Idempotent: never double-add a site that already exists on this client.
+                // Idempotent: never double-add a site that already exists on this client. STILL apply the carried
+                // identity to it: GeoSiteChannel.Apply routes here whenever its own resolve failed — including the
+                // FIRST payload after a client (re)load, where ResolveSiteById ran before Ensure had bound
+                // _allSitesProp and returned null for a site that IS present. Returning without applying silently
+                // dropped that payload's identity + explored-state flags (the "host-explored POI never flips on the
+                // client" hole). ApplyIdentity is idempotent, so a genuine double-show stays a no-op.
                 var existing = ResolveSiteById(rt, identity.SiteId);
-                if (existing != null) return existing;
+                if (existing != null)
+                {
+                    ApplyIdentity(rt, existing, identity);
+                    return existing;
+                }
 
                 if (_spawnActorGeoSite == null || _siteMappingInstanceProp == null
                     || _getSiteTemplateMethod == null || _siteTypeEnum == null
