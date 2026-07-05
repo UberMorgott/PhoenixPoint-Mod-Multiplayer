@@ -42,6 +42,15 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>Drop per-session state (recreated per session in the <see cref="SyncEngine"/> ctor).</summary>
         public static void ResetForNewSession() { _lastSig.Clear(); _clientExploring.Clear(); }
 
+        /// <summary>CLIENT stale-state hygiene — drop ONLY the mirrored per-vehicle exploring flags (host signature
+        /// cache untouched). Called at every client geoscape (re)load (<c>ClientGeoSimFreezePatch</c>). The set is
+        /// cleared ONLY by an explicit host <c>Exploring=false</c> delta today, so a host clear that never arrives
+        /// (vehicle removed mid-explore → host stale-sig cleanup drops it WITHOUT shipping a clear; a dropped/stale
+        /// seq; a level transition) would leave a flag stuck TRUE — permanently greying the client's ONLY explore
+        /// affordance (the always-shown-but-greyed-when-!CanActivate context-menu item), i.e. "can't explore" (S1).
+        /// A fresh geoscape load starts clean; a still-live exploration re-ships its <c>Exploring=true</c> at once.</summary>
+        public static void ClearClientExploring() => _clientExploring.Clear();
+
         /// <summary>CLIENT read: is the vehicle behind <paramref name="key"/> currently exploring per the mirrored
         /// 0xA7 state? Used by the explore-button disable patch on an active client.</summary>
         public static bool IsExploringMirrored(long key) => _clientExploring.Contains(key);

@@ -75,6 +75,7 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _getInspectedMethod;  // GeoSite.GetInspected(GeoFaction) → bool (per-faction reveal, GeoSite.cs:398)
         private static MethodInfo _setInspectedMethod;  // GeoSite.SetInspected(GeoFaction, bool)      (GeoSite.cs:403)
         private static PropertyInfo _viewerFactionProp; // GeoLevelController.ViewerFaction (the display/player faction)
+        private static MethodInfo _refreshVisualsMethod; // GeoSite.RefreshVisuals() → _visuals.Refresh()             (GeoSite.cs:915)
         // ─── Case-B inert mirror-site spawn (client) ───
         private static Type _geoSiteType;            // PhoenixPoint.Geoscape.Entities.GeoSite (MakeGenericMethod + AllSites.Add)
         private static MethodInfo _spawnActorGeoSite; // ActorSpawner.SpawnActor<GeoSite>(BaseDef, ActorInstanceData, bool) closed generic
@@ -131,6 +132,13 @@ namespace Multiplayer.Network.Sync.State
             _getInspectedMethod = AccessTools.Method(geoSiteType, "GetInspected");
             _setInspectedMethod = AccessTools.Method(geoSiteType, "SetInspected");
             _viewerFactionProp = AccessTools.Property(geoLevelType, "ViewerFaction");
+            // Native marker repaint (GeoSite.RefreshVisuals → GeoSiteVisualsController.Refresh → _refresh=true →
+            // its Unity Update() → RefreshSiteVisuals, which reads GetInspected(Viewer)). We write Owner/Type/State
+            // via private backing fields WITHOUT the change cascade (pure mirror), so the site's PropertyChanged —
+            // the ONLY thing GeoSiteVisualsController listens to for a repaint — never fires; the client's map icon
+            // therefore stayed on its stale (un-inspected) art after a mirrored exploration (S3). Best-effort +
+            // OUTSIDE the _ready gate: a miss only disables the forced repaint, never breaks identity mirroring.
+            _refreshVisualsMethod = AccessTools.Method(geoSiteType, "RefreshVisuals", Type.EmptyTypes);
 
             // Case-B inert mirror-site spawn members (client). Best-effort and DELIBERATELY OUTSIDE the _ready
             // gate below: a miss here only disables Case-B spawn (the event degrades to siteless render), it
@@ -203,6 +211,17 @@ namespace Multiplayer.Network.Sync.State
             }
             catch { }
             return null;
+        }
+
+        /// <summary>Force the native map-marker repaint for a live <c>GeoSite</c> after a pure-mirror identity write.
+        /// <c>GeoSite.RefreshVisuals()</c> flips <c>GeoSiteVisualsController._refresh</c> so its (frame-driven, NOT
+        /// sim-frozen) <c>Update()</c> re-renders the icon from <c>GetInspected(Viewer)</c> — the repaint the bypassed
+        /// <c>PropertyChanged</c> would normally trigger. Best-effort no-op if unbound; never throws.</summary>
+        private static void RefreshSiteVisuals(object site)
+        {
+            if (site == null || _refreshVisualsMethod == null) return;
+            try { _refreshVisualsMethod.Invoke(site, null); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.RefreshSiteVisuals failed: " + ex.Message); }
         }
 
         /// <summary>Resolve a live <c>GeoSite</c> by its <c>SiteId</c> via <c>GeoMap.AllSites</c> (mirrors
@@ -393,6 +412,11 @@ namespace Multiplayer.Network.Sync.State
                     }
                     catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity inspected failed (skipped): " + ex.Message); }
                 }
+
+                // Owner/Type/State were written via backing fields (no change cascade) and SetInspected fires
+                // PropertyChanged ONLY on a genuine flip — so force the native marker repaint unconditionally here
+                // to render the freshly-mirrored inspected/identity (S3: client POI stuck on un-inspected art).
+                RefreshSiteVisuals(site);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyIdentity failed: " + ex.Message); }
         }

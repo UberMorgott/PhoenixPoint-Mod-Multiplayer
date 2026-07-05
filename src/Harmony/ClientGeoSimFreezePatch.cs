@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
 namespace Multiplayer.Harmony
@@ -63,8 +64,17 @@ namespace Multiplayer.Harmony
                 // Telemetry (client only) — proves the re-assert hook fires each load. Strip before publish
                 // (spec §8). Host / single-player: silent, untouched.
                 if (onActiveClient)
+                {
+                    // Stale-state hygiene (S1): a fresh geoscape (re)load must start with NO leftover mirrored
+                    // "exploring" flag, or a host clear that never arrived would keep the explore context-item
+                    // greyed forever (can't explore). Clears only the client mirror set; a still-live exploration
+                    // re-ships its Exploring=true immediately. Runs regardless of the freeze flag (the set is only
+                    // ever populated on the frozen client, so this is a no-op when the flag is OFF).
+                    GeoVehicleExploreMirror.ClearClientExploring();
                     Debug.Log("[Multiplayer] ClientGeoSimFreezePatch reached (client geoscape load); "
-                        + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze);
+                        + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze
+                        + " (client explore-mirror flags cleared)");
+                }
 
                 if (!freeze) return; // flag OFF -> byte-unchanged, no clock pause (legacy suppress path stands)
 
