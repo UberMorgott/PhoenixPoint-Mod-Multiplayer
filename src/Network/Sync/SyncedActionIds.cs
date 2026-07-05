@@ -24,5 +24,8 @@ namespace Multiplayer.Network.Sync
         // Vehicles / geoscape travel 40-49
         public const ushort MoveVehicle = 40;
         public const ushort ExploreSite = 41;
+
+        // Presentation / narrative 50-59
+        public const ushort PlayCutscene = 50;
     }
 }

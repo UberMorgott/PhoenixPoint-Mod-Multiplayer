@@ -37,6 +37,9 @@ namespace Multiplayer.Network.Sync
             // Vehicles / geoscape travel
             SyncedActionRegistry.Register(SyncedActionIds.MoveVehicle, MoveVehicleAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.ExploreSite, ExploreSiteAction.Read);
+
+            // Presentation / narrative
+            SyncedActionRegistry.Register(SyncedActionIds.PlayCutscene, PlayCutsceneAction.Read);
         }
     }
 }
