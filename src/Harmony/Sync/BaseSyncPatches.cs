@@ -138,6 +138,82 @@ namespace Multiplayer.Harmony.Sync
     }
 
     /// <summary>
+    /// Relay interceptor for facility DEMOLITION (and cancel-construction — same native chokepoint):
+    /// <c>GeoPhoenixBase.RemoveFacility(GeoPhoenixFacility, bool scrap = false)</c> (GeoPhoenixBase.cs:277),
+    /// driven by the base-layout UI via <c>UIModuleBaseLayout.DemolishFacility</c> →
+    /// <c>PxBase.RemoveFacility(facility, scrap: true)</c> (UIModuleBaseLayout.cs:773). Client → relay +
+    /// block; host → broadcast + run. Also fires per facility on the internal site-destroyed drain
+    /// (<c>Site_StateChanged</c>, :762, scrap:false) — those replays converge the client layout the same way.
+    /// </summary>
+    [HarmonyPatch]
+    public static class RemoveFacilityPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase");
+            var facT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility");
+            if (t == null || facT == null) return false;
+            _target = AccessTools.Method(t, "RemoveFacility", new[] { facT, typeof(bool) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // __instance = GeoPhoenixBase; facility = GeoPhoenixFacility; scrap = wallet-refund flag.
+        // __state carries the host action to broadcast AFTER the original succeeds (Postfix) — a throwing
+        // original (e.g. CannotDemolish) skips the Postfix → no false echo, no desync.
+        public static bool Prefix(object __instance, object facility, bool scrap, out ISyncedAction __state)
+        {
+            __state = null;
+            if (SyncApplyScope.IsApplying) return true;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;
+
+            if (!PermissionGate.Check(ActionCategory.BaseConstruction))
+            {
+                PermissionGate.Notify(ActionCategory.BaseConstruction);
+                return false;
+            }
+
+            try
+            {
+                string baseId = BaseReflection.GetBaseId(__instance);
+                string facId = BaseReflection.GetFacilityId(facility);
+                Vector2Int pos = BaseReflection.GetGridPosition(facility);
+                if (string.IsNullOrEmpty(baseId)) return true;
+                var action = new RemoveFacilityAction(baseId, facId, pos.x, pos.y, scrap);
+                // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
+                if (engine.IsHost) { __state = action; return true; }
+                engine.Sync.SendActionRequest(action);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] RemoveFacilityPatch failed: " + ex.Message);
+                return true;
+            }
+        }
+
+        // Host-only (via __state) and only on a normal return of the original → broadcast the confirmed removal.
+        public static void Postfix(ISyncedAction __state)
+        {
+            if (__state == null) return;
+            try
+            {
+                var sync = NetworkEngine.Instance?.Sync;
+                sync?.BroadcastHostAction(__state);
+                // Demolishing a FUNCTIONING lab drops the faction's hourly research production the moment
+                // it leaves the layout — mirror the CompleteFacilityPatch precedent and mark ch2 dirty so
+                // the client's research ETA refreshes now instead of on the hourly heartbeat.
+                sync?.MarkChannelDirty(2);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RemoveFacilityPatch postfix broadcast failed: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
     /// Relay interceptor for facility COMPLETION: <c>GeoPhoenixFacility.CompleteFacility()</c>
     /// (GeoPhoenixFacility.cs:347). Host → broadcast completion + run; client → suppress self-completion.
     /// </summary>

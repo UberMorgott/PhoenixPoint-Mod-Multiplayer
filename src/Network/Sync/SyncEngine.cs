@@ -96,6 +96,10 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             SyncRegistration.RegisterAll();   // registers every action reader (legacy 0x60/0x61 relay)
+            // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
+            // authoritative host (client replays are structural-only; refund converges via 0xA0).
+            // The action file itself is NetworkEngine-free (linked into the pure test build).
+            Actions.RemoveFacilityAction.IsAuthoritativeHost = () => _engine != null && _engine.IsHost;
             // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
             // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
             // (0xA1) now ride this envelope rail ONLY (host emits them unconditionally; see BroadcastFullWallet/

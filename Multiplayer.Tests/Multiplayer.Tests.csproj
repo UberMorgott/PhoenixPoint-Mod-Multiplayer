@@ -195,6 +195,9 @@
     <Compile Include="..\src\Network\Sync\Actions\ConstructFacilityAction.cs"><Link>Sync\Actions\ConstructFacilityAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\RepairFacilityAction.cs"><Link>Sync\Actions\RepairFacilityAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\FacilityCompletedAction.cs"><Link>Sync\Actions\FacilityCompletedAction.cs</Link></Compile>
+    <!-- Facility demolition/cancel-construction sync (pure wire + ReplayScrap decision). NetworkEngine-free:
+         host-authority arrives via the IsAuthoritativeHost provider, wired at runtime by SyncEngine (unlinked). -->
+    <Compile Include="..\src\Network\Sync\Actions\RemoveFacilityAction.cs"><Link>Sync\Actions\RemoveFacilityAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\AnswerEventAction.cs"><Link>Sync\Actions\AnswerEventAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\MoveVehicleAction.cs"><Link>Sync\Actions\MoveVehicleAction.cs</Link></Compile>
     <!-- Explore-POI relay intent (pure wire round-trip). Apply binds game types via VehicleTravelReflection

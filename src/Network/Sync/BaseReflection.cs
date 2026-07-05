@@ -15,6 +15,8 @@ namespace Multiplayer.Network.Sync
     ///                <c>PhoenixBaseLayoutRotation</c> enum (Rot0..Rot270 = 0..3), not an int.
     ///   • repair:    <c>GeoPhoenixBase.RepairFacility(GeoPhoenixFacility)</c> (:263).
     ///   • complete:  <c>GeoPhoenixFacility.CompleteFacility()</c> (GeoPhoenixFacility.cs:347).
+    ///   • remove:    <c>GeoPhoenixBase.RemoveFacility(GeoPhoenixFacility, bool scrap = false)</c> (:277)
+    ///                — demolition AND cancel-construction (one chokepoint for both).
     ///   • bases:     <c>GeoPhoenixFaction.Bases</c> (IEnumerable&lt;GeoPhoenixBase&gt;, :194).
     ///   • base id:   <c>GeoPhoenixBase.Site.SiteId</c> (int, GeoSite.cs:45, serialized/stable).
     ///   • layout:    <c>GeoPhoenixBase.Layout</c> (:95) → <c>GeoPhoenixBaseLayout.Facilities</c> (:62) +
@@ -33,6 +35,7 @@ namespace Multiplayer.Network.Sync
         private static MethodInfo _construct;    // ConstructFacility(PhoenixFacilityDef, Vector2Int, PhoenixBaseLayoutRotation)
         private static MethodInfo _repair;       // RepairFacility(GeoPhoenixFacility)
         private static MethodInfo _complete;     // GeoPhoenixFacility.CompleteFacility()
+        private static MethodInfo _remove;       // RemoveFacility(GeoPhoenixFacility, bool scrap) — demolition/cancel-construction (GeoPhoenixBase.cs:277)
         private static MethodInfo _getFacAtPos;  // GeoPhoenixBaseLayout.GetFacilityAtPosition(Vector2Int)
         private static PropertyInfo _layoutProp;     // GeoPhoenixBase.Layout
         private static PropertyInfo _facilitiesProp; // GeoPhoenixBaseLayout.Facilities
@@ -59,6 +62,8 @@ namespace Multiplayer.Network.Sync
                 new[] { _facilityDefType, typeof(Vector2Int), _rotationType });
             _repair = AccessTools.Method(_baseType, "RepairFacility", new[] { _facilityType });
             _complete = AccessTools.Method(_facilityType, "CompleteFacility", new Type[0]);
+            // NOTE exact param match required (AccessTools.Method): signature is (GeoPhoenixFacility, bool).
+            _remove = AccessTools.Method(_baseType, "RemoveFacility", new[] { _facilityType, typeof(bool) });
             _getFacAtPos = AccessTools.Method(layoutType, "GetFacilityAtPosition", new[] { typeof(Vector2Int) });
             _layoutProp = AccessTools.Property(_baseType, "Layout");
             _facilitiesProp = AccessTools.Property(layoutType, "Facilities");
@@ -68,7 +73,7 @@ namespace Multiplayer.Network.Sync
             _gridPosProp = AccessTools.Property(_facilityType, "GridPosition");
             _facDefProp = AccessTools.Property(_facilityType, "Def");
 
-            _ready = _construct != null && _repair != null && _complete != null
+            _ready = _construct != null && _repair != null && _complete != null && _remove != null
                      && _layoutProp != null && _facilitiesProp != null && _siteProp != null
                      && _siteIdField != null && _facilityIdField != null;
         }
@@ -253,6 +258,28 @@ namespace Multiplayer.Network.Sync
                 _complete.Invoke(facility, null);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.Complete failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Demolish/cancel-construction: <c>GeoPhoenixBase.RemoveFacility(facility, scrap)</c>.
+        /// Idempotent — a facility already absent (id unmatched + nothing at the grid position)
+        /// resolves to null → no-op. A CannotDemolish facility makes the native call throw; that is
+        /// swallowed here (host only ever broadcasts after ITS original succeeded, so this can only
+        /// trip on a genuinely divergent replayer, where a no-op is the safe outcome).
+        /// </summary>
+        public static void Remove(GeoRuntime rt, string baseId, string facilityId, int x, int y, bool scrap)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready) return;
+                var geoBase = ResolveBase(rt, baseId);
+                if (geoBase == null) return;
+                var facility = ResolveFacility(geoBase, facilityId, x, y, useGrid: true);
+                if (facility == null) return;   // already removed → idempotent no-op
+                _remove.Invoke(geoBase, new object[] { facility, scrap });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.Remove failed: " + ex.Message); }
         }
     }
 }

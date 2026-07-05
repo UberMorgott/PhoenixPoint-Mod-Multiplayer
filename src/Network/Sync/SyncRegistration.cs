@@ -26,10 +26,11 @@ namespace Multiplayer.Network.Sync
             SyncedActionRegistry.Register(SyncedActionIds.QueueManufacture, QueueManufactureAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.ManufactureCompleted, ManufactureCompletedAction.Read);
 
-            // Base construction / repair
+            // Base construction / repair / demolition
             SyncedActionRegistry.Register(SyncedActionIds.ConstructFacility, ConstructFacilityAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.RepairFacility, RepairFacilityAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.FacilityCompleted, FacilityCompletedAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.RemoveFacility, RemoveFacilityAction.Read);
 
             // Events / dialogs
             SyncedActionRegistry.Register(SyncedActionIds.AnswerEvent, AnswerEventAction.Read);

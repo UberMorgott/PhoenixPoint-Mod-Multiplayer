@@ -17,6 +17,7 @@ namespace Multiplayer.Network.Sync
         public const ushort ConstructFacility = 20;
         public const ushort RepairFacility = 21;
         public const ushort FacilityCompleted = 22;
+        public const ushort RemoveFacility = 23;   // demolition + cancel-construction (same native chokepoint)
 
         // Events 30-39
         public const ushort AnswerEvent = 30;

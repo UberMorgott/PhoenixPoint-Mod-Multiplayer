@@ -18,6 +18,7 @@ namespace Multiplayer.Network.Sync
         public const byte ConstructFacility = 20;
         public const byte RepairFacility = 21;
         public const byte FacilityCompleted = 22;
+        public const byte RemoveFacility = 23;   // demolition + cancel-construction (mirrors SyncedActionIds.RemoveFacility)
         public const byte AnswerEvent = 30;
 
         // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
