@@ -10,10 +10,15 @@ using UnityEngine;
 namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
-    /// CLIENT view-lock for a mirrored BLOCKING report modal (the mandatory ambush brief, GeoAmbushBrief=15 —
-    /// <c>ReportModalClassifier.IsBlockingModal</c>). Native single-player semantics: the fullscreen ambush
-    /// prompt blocks EVERYTHING until the host starts the mission. The client renders the SAME native modal
-    /// (report-mirror rail, 0x69) but as a mirror of a HOST-pending decision it must be fully inert:
+    /// CLIENT view-lock for a mirrored MANDATORY blocking modal (ambush 15 / base defense 11 / ancient
+    /// defence 28 — <c>ReportModalClassifier.IsMandatoryBrief</c>). Native single-player semantics: the
+    /// fullscreen mandatory prompt blocks EVERYTHING until the host starts the mission. OPTIONAL mirrored
+    /// briefs (scavenge 4, ancient attack 26, ActiveMissionBrief family) are NOT locked — their native CLOSE
+    /// performs a pure local dismiss (null mirror DialogCallback; the HOST intent gate, armed for ALL blocking
+    /// briefs, alone prevents racing the host's decision). Soak 2026-07-05: the wider Batch-1 lock left the
+    /// scavenge brief's CLOSE dead on the client for as long as the host kept its copy open. The client
+    /// renders the SAME native modal (report-mirror rail, 0x69) but as a mirror of a HOST-pending decision a
+    /// MANDATORY one must be fully inert:
     ///   • <see cref="BlockingModalFinishDialogLockPatch"/> — swallow <c>UIStateGeoModal.FinishDialog</c>
     ///     (every modal button — Confirm/Close/Cancel — routes there via <c>UIModal._handler</c>): the client's
     ///     "begin mission" click does NOTHING (mission start is host-authoritative).
@@ -107,7 +112,7 @@ namespace Multiplayer.Harmony.Sync
                 if (!BlockingModalLockDecision.ShouldGreyButtons(
                         engine != null && engine.IsHost,
                         engine != null && engine.IsActiveSession,
-                        ReportModalClassifier.IsBlockingModal(modalType),
+                        ReportModalClassifier.IsMandatoryBrief(modalType),   // optional brief → native CLOSE stays live
                         BlockingModalMirrorRegistry.IsMirrorShown(modalType))) return;   // native-origin / already-hidden → never greyed
                 BlockingModalClientLock.SetModalInteractable(__instance, modalType, false);
             }
@@ -203,7 +208,7 @@ namespace Multiplayer.Harmony.Sync
                     engine != null && engine.IsHost,
                     engine != null && engine.IsActiveSession,
                     SyncApplyScope.IsApplying,
-                    ReportModalClassifier.IsBlockingModal(modalType),
+                    ReportModalClassifier.IsMandatoryBrief(modalType),   // optional brief → native CLOSE stays live
                     BlockingModalMirrorRegistry.IsMirrorShown(modalType));   // native-origin / already-hidden → native close runs
             }
             catch (Exception ex)

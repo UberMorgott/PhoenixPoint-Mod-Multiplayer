@@ -136,9 +136,10 @@ namespace Multiplayer.Network.Sync.State
                 object request = _requestCtor.Invoke(new object[] { uiState, priority });
                 // pause arrives via time-sync; do NOT pause here (avoids a pause-relay loop).
                 _requestPauseField?.SetValue(request, false);
-                // ORIGIN TAG: only a MIRROR-shown blocking modal is view-locked (BlockingModalClientLockPatches).
-                // Tagged at queue time — the lock patches consult it when the window actually enters; a
-                // ReportModalHide that lands first clears it (hide-before-show race → window enters unlocked).
+                // ORIGIN TAG: only a MIRROR-shown MANDATORY brief is view-locked (BlockingModalClientLockPatches;
+                // optional briefs keep their native CLOSE — the tag is still set for them but the lock decisions
+                // ignore it). Tagged at queue time — the lock patches consult it when the window actually enters;
+                // a ReportModalHide that lands first clears it (hide-before-show race → window enters unlocked).
                 if (ReportModalClassifier.IsBlockingModal(modalType))
                     BlockingModalMirrorRegistry.MarkMirrorShown(modalType);
                 _queryStateSwitch.Invoke(query, new[] { request });

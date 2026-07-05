@@ -88,6 +88,34 @@ public class ReportModalClassifierTests
             Assert.Equal(blocking.Contains(modalType), ReportModalClassifier.IsBlockingModal(modalType));
     }
 
+    // ── client view-lock classification: ONLY the mandatory briefs (native PauseGame + IsMandatoryMission —
+    // no native decline) lock the client's mirror. Every OPTIONAL blocking brief (scavenge 4, ancient attack
+    // 26, ActiveMissionBrief family) keeps its native CLOSE on the client (pure local dismiss; the HOST intent
+    // gate — armed for ALL blocking briefs — prevents racing). 2026-07-05 soak fix: the wider lock left the
+    // scavenge brief's CLOSE dead on the client while the host's copy stayed open.
+    [Fact]
+    public void IsMandatoryBrief_OnlyAmbushBaseDefenseAncientDefence_AcrossEntireModalTypeEnum()
+    {
+        var mandatory = new System.Collections.Generic.HashSet<int>
+        {
+            ReportModalClassifier.GeoAmbushBrief,             // 15
+            ReportModalClassifier.GeoPhoenixBaseDefenseBrief, // 11
+            ReportModalClassifier.AncientSiteDefenceBrief,    // 28
+        };
+        foreach (var modalType in EnumerateModalTypeValues())
+            Assert.Equal(mandatory.Contains(modalType), ReportModalClassifier.IsMandatoryBrief(modalType));
+    }
+
+    [Fact]
+    public void EveryMandatoryBrief_IsAlsoBlocking()
+    {
+        // The client lock (IsMandatoryBrief) must never cover a window the host gate + hide-release rails
+        // (IsBlockingModal) do not — a locked mirror without a host ReportModalHide would never release.
+        foreach (var modalType in EnumerateModalTypeValues())
+            if (ReportModalClassifier.IsMandatoryBrief(modalType))
+                Assert.True(ReportModalClassifier.IsBlockingModal(modalType));
+    }
+
     [Fact]
     public void EveryBlockingModal_IsAlsoWhitelisted()
     {

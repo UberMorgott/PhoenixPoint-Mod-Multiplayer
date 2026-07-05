@@ -54,11 +54,13 @@ namespace Multiplayer.Network.Sync.State
     /// DEGRADED FALLBACK (spec P1/P2 invariant): a failed rebuild (dangling site id / class mismatch / 34)
     /// shows a notify-only native text prompt instead of the brief — and the HOST blocking gate is armed from
     /// the 0x69 SHOW regardless, so client intents can never race the host's pending decision.
-    /// <see cref="IsBlockingModal"/> marks every mirrored brief BLOCKING: the client's mirror is view-locked
-    /// (inert buttons, no local close) and the host rejects client intents while it is pending
-    /// (HostBlockingPromptGate) — for the mandatory briefs (ambush 15, base defense 11, ancient defence 28)
-    /// that is native semantics (PauseGame + IsMandatoryMission); for the optional briefs it
-    /// mirrors the host's own modal-lock (the host player is deciding; a client action would race the decision).
+    /// <see cref="IsBlockingModal"/> marks every mirrored brief BLOCKING: the host rejects client intents while
+    /// it is pending (HostBlockingPromptGate) and its resolve broadcasts ReportModalHide. The CLIENT view-lock
+    /// (inert buttons, no local close) applies only to the MANDATORY subset (<see cref="IsMandatoryBrief"/> —
+    /// ambush 15, base defense 11, ancient defence 28: native semantics, PauseGame + IsMandatoryMission); an
+    /// OPTIONAL brief's mirror stays locally dismissible (null DialogCallback → pure local pop; the armed host
+    /// gate alone prevents racing the host's decision — 2026-07-05 soak: the wider Batch-1 lock made the
+    /// scavenge brief's CLOSE dead on the client for as long as the host left its copy open).
     ///
     /// The live modalData read (host) + reconstruct (client) lives in <see cref="ReportModalReflection"/>
     /// (reflection-bound, not unit-testable); this class is the pure boundary that drives it.
@@ -163,15 +165,15 @@ namespace Multiplayer.Network.Sync.State
 
         /// <summary>
         /// True iff <paramref name="modalType"/> is a BLOCKING host prompt: a window during which the host's own
-        /// geoscape is modal-locked and the co-op session must not advance under it. Drives BOTH ends of the
-        /// lock: the client's mirrored modal is view-locked (BlockingModalClientLockPatches — inert buttons,
-        /// no local close, released only by the host's resolve → ReportModalHide) and the host rejects every
-        /// in-flight client intent while it is pending (HostBlockingPromptGate in SyncEngine.OnActionRequest).
-        /// = the mandatory ambush brief + every mirrored MISSION BRIEF — the SiteMissionBrief family
+        /// geoscape is modal-locked and the co-op session must not advance under it. Drives the HOST end of the
+        /// lock — the host rejects every in-flight client intent while it is pending (HostBlockingPromptGate in
+        /// SyncEngine.OnActionRequest) and broadcasts ReportModalHide on resolve so a still-open client mirror
+        /// closes. = the mandatory ambush brief + every mirrored MISSION BRIEF — the SiteMissionBrief family
         /// {4,26,28} and the ActiveMissionBrief family {0,2,11,20,34,36} (host Confirm → tactical co-op
         /// deploy flow; host Cancel → ReportModalHide closes the client copy, normal flow resumes). The gate
         /// arms from the 0x69 SHOW itself, NOT from a successful client rebuild — a degraded notify-only
-        /// fallback still leaves the host rejecting intents (spec P2 hard invariant). PURE.
+        /// fallback still leaves the host rejecting intents (spec P2 hard invariant). The CLIENT view-lock is
+        /// the NARROWER <see cref="IsMandatoryBrief"/> (soak 2026-07-05 dead-CLOSE fix). PURE.
         /// </summary>
         public static bool IsBlockingModal(int modalType)
         {
@@ -187,6 +189,32 @@ namespace Multiplayer.Network.Sync.State
                 case GeoPhoenixBaseInfestationBrief:
                 case BehemothAttackBrief:
                 case InfestedHavenBrief:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// True iff the CLIENT's mirrored copy of <paramref name="modalType"/> must be VIEW-LOCKED (inert
+        /// buttons, no local close — BlockingModalClientLockPatches): ONLY the MANDATORY briefs, whose native
+        /// window is unskippable single-player-wise (MissionDef.MandatoryMission → PauseGame + no decline;
+        /// GeoscapeView.ShowMissionBriefing :1899): ambush 15, phoenix-base defense 11, ancient-site defence 28.
+        /// The OPTIONAL mirrored briefs (scavenge 4, ancient attack 26, ActiveMissionBrief family 0/2/20/34/36)
+        /// natively HAVE a working CLOSE — the client copy keeps it: closing is a pure local dismiss (the
+        /// mirror's DialogCallback is null — UIStateGeoModal.FinishDialog :86 just pops the state) and can
+        /// never race the host's pending decision because <see cref="IsBlockingModal"/> keeps the HOST intent
+        /// gate armed for ALL blocking briefs until the host resolves. Fix for the 2026-07-05 soak bug: the
+        /// Batch-1 lock covered every blocking brief, so the scavenge brief's CLOSE was dead on the client for
+        /// as long as the host left its copy open. PURE.
+        /// </summary>
+        public static bool IsMandatoryBrief(int modalType)
+        {
+            switch (modalType)
+            {
+                case GeoAmbushBrief:
+                case GeoPhoenixBaseDefenseBrief:
+                case AncientSiteDefenceBrief:
                     return true;
                 default:
                     return false;
