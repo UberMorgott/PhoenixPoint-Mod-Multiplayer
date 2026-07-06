@@ -331,6 +331,11 @@
          binds game types via reflection + the SetVoxelType funnel and is NOT linked (in-game verified). -->
     <Compile Include="..\src\Sync\Tactical\TacticalSurfaceCodec.cs"><Link>Sync\Tactical\TacticalSurfaceCodec.cs</Link></Compile>
     <Compile Include="..\src\Harmony\Tactical\ClientSurfaceInertGate.cs"><Link>Harmony\Tactical\ClientSurfaceInertGate.cs</Link></Compile>
+    <!-- TS4 mission-conclusion mirror (0x95): pure, Unity-free wire codec + the client conclusion-handoff decisions
+         (close-once / no-double-outcome / objective-apply mapping). The engine glue (TacticalMissionEndSync +
+         MissionEndPatches) binds game types via reflection + the GameOver() chokepoint and is NOT linked (in-game verified). -->
+    <Compile Include="..\src\Sync\Tactical\TacticalMissionEndCodec.cs"><Link>Sync\Tactical\TacticalMissionEndCodec.cs</Link></Compile>
+    <Compile Include="..\src\Sync\Tactical\TacticalMissionEndGate.cs"><Link>Sync\Tactical\TacticalMissionEndGate.cs</Link></Compile>
     <!-- Feature A: pure, Unity-free CLIENT enemy-turn presentation gate (enter UIStateOtherFactionTurn for a
          non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
          engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->

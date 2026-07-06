@@ -935,6 +935,16 @@ namespace Multiplayer.Sync.Tactical
                 try { TacticalSurfaceSync.HandleSurface(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.surface failed: " + ex); }
                 return true;
             }
+
+            // ─── TS4: MISSION-CONCLUSION mirror (evac + objectives + outcome / game-over) ──────────
+            // Host→all reliable conclusion push; client-only apply (side-gated internally, so a stray envelope on the
+            // host is a clean no-op). The client repaints objective state + rides the native game-over flow back to
+            // geoscape; the outcome MODAL stays owned by the geoscape popup-mirror (0x69) → no double-outcome.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacMissionEnd)
+            {
+                try { TacticalMissionEndSync.HandleMissionEnd(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.missionend failed: " + ex); }
+                return true;
+            }
             return false;
         }
 

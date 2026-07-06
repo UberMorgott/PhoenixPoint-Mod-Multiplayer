@@ -148,6 +148,20 @@ namespace Multiplayer.Sync.Tactical
         //   surface (0x94): [seq][opCount]{[op spawn/remove][voxelType][cellCount]{xyz}} — voxelType (not a def
         //   guid) is TFTV-tolerant by construction. See TacticalSurfaceSync / TacticalSurfaceCodec. Next free 0x94.
         public const ushort TacSurface = 0x94;           // 148: host→all     "ground fire/goo/acid/mist voxel op(s)"    (carries seq)
+
+        // ─── TS4: MISSION-CONCLUSION mirror (evac + objectives + outcome / game-over) ────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL (3+ player safe), RELIABLE,
+        // carries its own TacticalLiveSeq (last-writer-wins). Closes the audit gap "the battle can't END in sync":
+        // the host broadcasts the game-over/result + evac-zone + in-battle objective state at the native
+        // TacticalLevelController.GameOver() chokepoint (fires GameWrappingUpEvent then GameOverEvent), so the client
+        // leaves the battle when the host does — RIDING the native end-of-mission flow (it just flips the native
+        // IsGameOver flag the tactical View state machine + mirror turn-loop already watch; no custom teardown).
+        //   missionend (0x95): [seq][phase wrappingup/gameover][outcome][TacMissionResult blob][evac list][objective
+        //   list]. The blob rides the ONE game Serializer (TacticalDeploySync.SerializeGraph). The post-mission
+        //   GEOSCAPE result modal stays owned by the geoscape popup-mirror rail (MissionOutcome 0x69, deferred +
+        //   non-occupying) — TS4 shows NO modal of its own → no double-outcome. See TacticalMissionEndSync /
+        //   TacticalMissionEndCodec / TacticalMissionEndGate. Next free 0x95.
+        public const ushort TacMissionEnd = 0x95;         // 149: host→all     "mission conclusion: game-over + result + evac/objectives" (carries seq)
     }
 
     /// <summary>
