@@ -22,7 +22,9 @@ namespace Multiplayer.Network.Sync.State
     ///
     /// JOIN / full-sync semantics: every vehicle a joining peer needs already rides the full join save-blob
     /// (host-authoritative full-state replication). <see cref="AttachHost"/> SEEDS the vehicles present at bind
-    /// as KNOWN (no emit) for exactly that reason; only genuinely post-bind creations become resident. The
+    /// as KNOWN (no emit) for exactly that reason — and RESETS + RE-SEEDS whenever the live GeoMap INSTANCE
+    /// changes (co-op F2 load / tactical round-trip rebuild the map with no mid-session Detach; stale
+    /// tombstones/residents describe the dead level) — only genuinely post-(re)bind creations become resident. The
     /// initial-snapshot path (<c>BroadcastAllChannels</c> → Snapshot) re-ships the resident + tombstone sets to a
     /// late joiner — all no-ops there (post-bind creations are in its join save; tombstoned keys aren't live).
     ///
@@ -41,7 +43,7 @@ namespace Multiplayer.Network.Sync.State
 
         private readonly GeoVehicleIdentityTracker _tracker = new GeoVehicleIdentityTracker();
         private readonly object _lock = new object();
-        private bool _bound;   // host: seeded the pre-existing vehicles (bind-once)
+        private object _map;   // host: the GeoMap instance the seed pass ran against (rebind guard)
         private byte _lastBehemothStatus = byte.MaxValue;   // host: WA-1 behemoth status edge-detect (255 = none seen)
 
         // PS1 crew tail: last-observed ordered GeoUnitIds per live PHOENIX vehicle key (poll-detect in
@@ -264,19 +266,34 @@ namespace Multiplayer.Network.Sync.State
 
         public void AttachHost(SyncEngine eng)
         {
-            if (_bound) return;                          // seeded; nothing per-frame to do
+            // NO hard "already bound" gate — resolve the LIVE GeoMap every tick and decide off the
+            // current-vs-bound INSTANCE (the WalletWatcher lesson, WalletWatcher.cs:20-28; same idiom as
+            // GeoSiteChannel.AttachHost). A geoscape reload (co-op F2 load, tactical round-trip) builds a
+            // FRESH GeoMap with no mid-session Detach; the old `if (_bound) return;` kept the pre-reload
+            // known/resident/tombstone/crew/loadout sets forever — a stale tombstone would despawn a craft
+            // that EXISTS in the reloaded save on every flush. ReferenceEquals keeps the per-tick cost to
+            // two cached reflection reads.
             if (eng == null) return;
-            if (GeoRuntime.Instance?.GeoLevel() == null) return;   // not in geoscape yet / mid-load → retry next frame
+            var map = GeoSiteReflection.GetMapPublic(GeoRuntime.Instance);
+            if (map == null) return;                     // not in geoscape yet / mid-load → retry next frame
+            if (ReferenceEquals(map, _map)) return;      // already seeded against this instance
 
-            // Seed the vehicles present at bind as KNOWN WITHOUT emitting them: they already ride the join save to
-            // every client. Only genuinely post-bind creations become "new". (Empty when vehicles not yet loaded —
-            // a late-loading vehicle would then emit once and be a harmless idempotent no-op on clients.)
+            // Fresh map → drop ALL per-map state (it describes the dead level), then seed the vehicles present
+            // NOW as KNOWN WITHOUT emitting them: they already ride the join save / reloaded save to every
+            // client. Only genuinely post-(re)bind creations become "new". (Empty when vehicles not yet
+            // loaded — a late-loading vehicle would then emit once and be a harmless idempotent no-op on
+            // clients.) Cleared crew/loadout maps re-fill on the next HostObserve poll; the re-emitted full
+            // maps are value-idempotent on clients.
             lock (_lock)
             {
+                _tracker.Clear();
+                _crew.Clear();
+                _loadout.Clear();
+                _lastBehemothStatus = byte.MaxValue;
                 foreach (var key in GeoVehicleIdentityReflection.ResolveLiveKeys(GeoRuntime.Instance))
                     _tracker.MarkKnown(key);
             }
-            _bound = true;
+            _map = map;
         }
 
         public void DetachHost()
@@ -288,7 +305,7 @@ namespace Multiplayer.Network.Sync.State
                 _loadout.Clear();
                 _lastBehemothStatus = byte.MaxValue;
             }
-            _bound = false;
+            _map = null;
         }
     }
 }

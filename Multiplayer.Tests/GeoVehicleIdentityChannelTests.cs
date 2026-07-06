@@ -234,6 +234,34 @@ public class GeoVehicleIdentityChannelTests
         }
     }
 
+    // ─── reload rebind (co-op F2 load / tactical round-trip: fresh GeoMap ⇒ AttachHost reset + reseed) ─────────
+
+    [Fact]
+    public void Tracker_RebindReset_DropsStaleStateAndReseedsWithoutEmitting()
+    {
+        // GeoVehicleChannel.AttachHost's instance-compare rebind path: a FRESH GeoMap means the pre-reload
+        // known/resident/tombstone sets describe a DEAD level — a stale tombstone would despawn a craft that
+        // EXISTS in the reloaded save on every flush. The rebind must Clear() then MarkKnown(live keys):
+        // nothing stale left to emit, reloaded vehicles seeded (they ride the transferred save), and only
+        // genuinely post-rebind creations become new.
+        var t = new GeoVehicleIdentityTracker();
+        var preReload = Id(1, 1, "fA", "sA");
+        var destroyedPreReload = Id(2, 1, "fB", "sB");
+        t.TryMarkNew(preReload);
+        t.TryMarkNew(destroyedPreReload);
+        t.Prune(new HashSet<long> { preReload.Key });     // destroyed before the reload → tombstoned
+
+        // Reload an OLDER save where the "destroyed" craft exists again → rebind = reset + reseed.
+        t.Clear();
+        t.MarkKnown(preReload.Key);
+        t.MarkKnown(destroyedPreReload.Key);
+
+        Assert.False(t.HasPayload);                       // no stale resident/tombstone survives the rebind
+        Assert.Empty(t.GetTombstones());                  // the stale despawn can never ship
+        Assert.False(t.TryMarkNew(destroyedPreReload));   // reloaded craft = seeded, never re-emitted as "new"
+        Assert.True(t.TryMarkNew(Id(3, 1, "fC", "sC")));  // genuinely new post-rebind craft still detected
+    }
+
     // ─── client apply-idempotence (spawn + despawn decisions) ───────────────────────────────────────────────────
 
     [Fact]
