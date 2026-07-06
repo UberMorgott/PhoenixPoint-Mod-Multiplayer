@@ -51,27 +51,13 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 - 🟢 **LICENSE** — DONE (PolyForm Noncommercial 1.0.0 with a `Required Notice:` line).
   - Verify the `Required Notice:` copyright line at the top of `LICENSE` has the real
     author name/handle + repo URL (replace any placeholder).
-- 🟢 **README license block** — add a `## License` section: state PolyForm-NC-1.0.0
-  (noncommercial, attribution required), link `LICENSE`, and add the DISCLAIMER
-  (requires a legally owned copy of Phoenix Point; built on the official Snapshot Games
-  modding framework; not affiliated with Snapshot Games).
-- 🟢 **License badge** — add a shields.io static badge to README (GitHub will not auto-name
-  this license): `![License: PolyForm-NC-1.0.0](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue)`.
-- 🟢 **Remove Goldberg from the public repo.**
-  - `git rm` the following and scrub references: `tools/goldberg/steam_interfaces.txt`,
-    `tools/SECOND-INSTANCE-SETUP.md`, `tools/install-goldberg-dll.bat`,
-    `tools/launch-second-copy.bat`, `tools/make-second-copy.bat`, `tools/launch-coop-test.ps1`
-    (keep `tools/COOP-TESTING.md` only after stripping Goldberg mentions).
-  - Replace with a neutral one-liner in dev docs: local two-instance testing requires the
-    developer's own second Steam-API session; no tool named or linked.
-  - Rationale: repo owns no emulator binary/game code, but the *mention* pattern-matches as
-    piracy-adjacent (reputational/publisher risk). The mod license is unaffected.
-- 🟢 **Reorder docs in README** — list as-built (`docs/engine/`) FIRST; move the
-  SUPERSEDED `docs/specs/01-design.md` into a "design history / lineage" subsection so new
-  contributors don't read the stale architecture first.
-- 🟢 **Add `CONTRIBUTING.md`** — one page: the sync canon (one rail, surfaces, "converge
-  don't multiply"), where to add new synced state, and the branch/build split (Core builds
-  anywhere; full mod needs game DLLs). Distill from `CLAUDE.md`.
+- 🟢 **README license block** — DONE (commit bd66aa5; `## License` section + disclaimer in Status).
+  - `## License` states PolyForm-NC-1.0.0, links `LICENSE`, notes attribution.
+  - Disclaimer (legally owned copy, not affiliated with Snapshot Games) in Status section.
+- 🟢 **License badge** — DONE (commit bd66aa5; shields.io badge present in README header).
+- 🟢 **Remove Goldberg from the public repo** — DONE (commit c8872ea; `tools/` Goldberg files + `SECOND-INSTANCE-SETUP.md` removed).
+- 🟢 **Reorder docs in README** — REMAINING (no docs listing in README; delegates to `docs/README.md` link only).
+- 🟢 **Add `CONTRIBUTING.md`** — DONE (commit 18d7c83; sync canon + build split + contribution guide).
 
 ---
 
