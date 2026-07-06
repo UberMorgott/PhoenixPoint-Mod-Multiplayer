@@ -543,20 +543,11 @@ namespace Multiplayer.Network
                     break;
 
                 // ─── Action-sync engine (discrete-command relay + currency echo). ────
-                case PacketType.ActionRequest:
-                    // Client->host discrete action request. Host validates + sequences + broadcasts apply.
-                    Sync?.OnActionRequest(msg.SenderSteamId, msg.Payload);
-                    break;
-
-                case PacketType.ActionApply:
-                    // Host->all authoritative apply. Clients replay under the re-entrancy guard.
-                    Sync?.OnActionApply(msg.Payload);
-                    break;
-
-                case PacketType.ActionReject:
-                    // Host->originator rejection (permission / validation). v1: log + drop pending.
-                    Sync?.OnActionReject(msg.Payload);
-                    break;
+                // Envelope cutover: the legacy raw 0x60 ActionRequest / 0x61 ActionApply / 0x62 ActionReject inbound
+                // routes are RETIRED — the geoscape action relay now rides the unified 0x67 SyncEnvelope rail
+                // (GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4), dispatched by Sync.OnSyncEnvelope ->
+                // SurfaceRouter -> HandleGeoscapeEnvelope, which reaches the SAME OnActionRequest / OnActionApply /
+                // OnActionReject appliers. Zero senders remain for 0x60/0x61/0x62.
 
                 // Rail-unify phase 1: the legacy raw 0x63 WalletSync / 0x64 StateSync inbound routes are RETIRED —
                 // wallet + state now ride the unified 0x67 SyncEnvelope rail (GeoWallet 0xA0 / GeoState 0xA1),

@@ -57,9 +57,9 @@ namespace Multiplayer.Network.MessageLayer
                                 // No payload — keyed by sender. See SaveTransferCoordinator on-demand-join path.
 
         // ActionSync 0x60-0x6F
-        ActionRequest = 0x60,   // client -> host
-        ActionApply   = 0x61,   // host -> all
-        ActionReject  = 0x62,   // host -> originator
+        // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the
+        // geoscape action relay rides the 0x67 SyncEnvelope on GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4.
+        // See the tombstone block below. Do NOT reuse the ids.
         // 0x63 (WalletSync) + 0x64 (StateSync) RETIRED — see the tombstone block below. Do NOT reuse the ids.
         EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
         EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
@@ -85,6 +85,8 @@ namespace Multiplayer.Network.MessageLayer
         //   0x25, 0x26       — EndTurnRequest/Accepted → now envelope TacIntentEndTurn 0x84 / TacTurn 0x85
         //   0x33, 0x34       — CampaignActionResult/CampaignStateUpdate (never sent, no handler)
         //   0x35, 0x36       — GeoStateDiff/GeoEntityOp (orphan; the diff codec they fronted is gone)
+        //   0x60, 0x61, 0x62 — ActionRequest/ActionApply/ActionReject → action relay rides 0x67 SyncEnvelope
+        //                      GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4
         //   0x63             — WalletSync → wallet rides 0x67 SyncEnvelope GeoWallet 0xA0 surface
         //   0x64             — StateSync → per-channel state rides 0x67 SyncEnvelope GeoState 0xA1 surface
         //   0x68             — ChoiceClaim → event-choice resolution rides AnswerEventAction (occId on the action wire)

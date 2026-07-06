@@ -5,16 +5,14 @@ namespace Multiplayer.Network.Sync
     /// <summary>
     /// SHARED intent de-duplicator (unified backbone spec §2.2, "ONE intent Dedup"). The reliable transport
     /// can double-send a client intent envelope; a double-applied intent would mutate twice. Keyed by the
-    /// intent's (peerId, surfaceId, nonce) — the peer discriminator mirrors the geoscape RequestDedup:
-    /// client nonces are client-LOCAL monotonic counters, so with 2+ clients both emit nonce 1,2,3… on the
-    /// same surface and a (surfaceId, nonce)-only key would silently drop the later client's intents.
-    /// A bounded ring drops the oldest so memory stays flat over a long session. PURE (no engine types)
-    /// → unit-tested.
+    /// intent's (peerId, surfaceId, nonce) — the peer discriminator handles that client nonces are client-LOCAL
+    /// monotonic counters, so with 2+ clients both emit nonce 1,2,3… on the same surface and a (surfaceId, nonce)-
+    /// only key would silently drop the later client's intents. A bounded ring drops the oldest so memory stays
+    /// flat over a long session. PURE (no engine types) → unit-tested.
     ///
     /// Lifted verbatim from the tactical-only TacticalIntentDedup (capacity floor 16); TacticalIntentDedup now
-    /// derives from this. NOTE: the geoscape RequestDedup is keyed by (peerId, nonce) — a DIFFERENT abstraction
-    /// tied to the legacy action relay — and is left untouched here; it is retired in a later slice when the
-    /// geoscape intent surface adopts this shared dedup.
+    /// derives from this. The geoscape action-intent surface (GeoIntent 0xA2) also uses this shared dedup after
+    /// the envelope cutover retired the legacy (peerId, nonce)-keyed RequestDedup it previously used.
     /// </summary>
     public class IntentDedup
     {

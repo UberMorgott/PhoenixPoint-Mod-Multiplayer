@@ -60,12 +60,11 @@ namespace Multiplayer.Network.Sync
         // packets (0x63 WalletSync / 0x64 StateSync) were retired a4781ae.
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
         public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
-        // ─── Geoscape action-relay envelope cutover (spec 2026-07-02) ───
-        // The discrete-command action relay (client intent → host outcome → originator reject) migrated off the
-        // raw 0x60/0x61/0x62 packets onto these three enveloped surfaces on the 0x67 rail. The inner action bytes
-        // are byte-for-byte the same as the legacy packets carried; only the outer packet header changes. Live vs
-        // legacy is selected by the ONE GeoActionRelay.UseEnvelope gate (atomic flip; legacy stays intact behind
-        // the flag). Guard convergence: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
+        // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) ───
+        // The discrete-command action relay (client intent → host outcome → originator reject) rides these three
+        // enveloped surfaces on the 0x67 rail — the SOLE action rail after the cutover deleted the legacy raw
+        // 0x60/0x61/0x62 packets (the inner action bytes are byte-for-byte what those packets carried; only the
+        // outer packet header changed). Guard: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
         public const byte GeoIntent = 0xA2;   // client→host action REQUEST (inner = EncodeActionRequest(actionId,nonce,payload))
         public const byte GeoOutcome = 0xA3;  // host→all authoritative APPLY (inner = EncodeActionApply(actionId,seq,payload); seq = SurfaceSeq.Next(0xA3))
         public const byte GeoReject = 0xA4;   // host→originator REJECT (inner = EncodeActionReject(nonce,code,reason); nonce-correlated, idempotent)

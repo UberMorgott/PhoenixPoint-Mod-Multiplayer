@@ -8,12 +8,10 @@ namespace Multiplayer.Network.Sync
     /// any envelope the tactical hook does not consume is dropped (forward-compat). PURE: references no
     /// transport / Unity / HarmonyLib type, so it is unit-tested in isolation like every other sync primitive.
     ///
-    /// NOTE: the geoscape ACTION relay rides the LEGACY 0x60/0x61/0x62 path in <c>SyncEngine</c>
-    /// (OnActionRequest / OnActionApply / OnActionReject) by default; under the <c>GeoActionRelay.UseEnvelope</c>
-    /// cutover gate it instead rides the geoscape action surfaces GeoIntent/GeoOutcome/GeoReject (0xA2-0xA4)
-    /// through THIS router (SyncEngine.HandleGeoscapeEnvelope). Exactly one rail is live per build (both peers
-    /// run the same DLL) — never both, so no double-apply. The old dead 0x67 action-relay arms
-    /// (HandleActionRequest/HandleActionApply + the SurfaceRegistry coupling) were never wired and removed.
+    /// NOTE: the geoscape ACTION relay rides THIS router on the geoscape action surfaces
+    /// GeoIntent/GeoOutcome/GeoReject (0xA2-0xA4) via SyncEngine.HandleGeoscapeEnvelope (OnActionRequest /
+    /// OnActionApply / OnActionReject); the legacy raw 0x60/0x61/0x62 packets were deleted at the envelope cutover.
+    /// Both peers run the same DLL, so there is exactly ONE rail — no double-apply.
     /// </summary>
     public sealed class SurfaceRouter
     {
@@ -49,7 +47,7 @@ namespace Multiplayer.Network.Sync
             // Tactical fast-path: a tactical surface is consumed here (tracker-free, idempotent host→all
             // push). Inert unless tactical init armed the hook; any envelope the tactical hook declines falls
             // through to the geoscape hook below (wallet/state/vehicle surfaces, plus the action-relay
-            // GeoIntent/GeoOutcome/GeoReject surfaces when the GeoActionRelay.UseEnvelope cutover is flipped on).
+            // GeoIntent/GeoOutcome/GeoReject surfaces).
             var tac = TacticalInbound;
             if (tac != null && tac(senderPeerId, surfaceId, payload)) return;
             // Geoscape fast-path (additive, instance-bound): a geoscape envelope surface (0xA0-0xBF) is

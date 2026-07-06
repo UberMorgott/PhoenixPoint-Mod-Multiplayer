@@ -54,13 +54,14 @@ public class PersonnelEditPermissionTests
     [Fact]
     public void IntentDedup_PeerKeyed_NoCrossTalkBetweenClients()
     {
-        // The host dedups incoming intents by (peerId, nonce). Two clients both start their local nonce
-        // counters at 1 — a (nonce)-only key would silently drop the second client's first edit. Peer-keyed:
-        // both pass; a genuine transport-duplicate (same peer, same nonce) is dropped.
-        var dedup = new RequestDedup(16);
-        Assert.False(dedup.IsDuplicate(1001UL, 1));   // client A, nonce 1 — new
-        Assert.False(dedup.IsDuplicate(1002UL, 1));   // client B, nonce 1 — new (no cross-talk)
-        Assert.True(dedup.IsDuplicate(1001UL, 1));    // client A, nonce 1 again — transport double, dropped
-        Assert.False(dedup.IsDuplicate(1002UL, 2));   // client B, nonce 2 — new
+        // The host dedups incoming intents by (peerId, surfaceId, nonce) via the shared IntentDedup. Two clients
+        // both start their local nonce counters at 1 — a (nonce)-only key would silently drop the second client's
+        // first edit. Peer-keyed: both pass; a genuine transport-duplicate (same peer, same nonce) is dropped.
+        // IsNew returns TRUE the first sighting, FALSE on any repeat.
+        var dedup = new IntentDedup(16);
+        Assert.True(dedup.IsNew(1001UL, SurfaceIds.GeoIntent, 1));    // client A, nonce 1 — new
+        Assert.True(dedup.IsNew(1002UL, SurfaceIds.GeoIntent, 1));    // client B, nonce 1 — new (no cross-talk)
+        Assert.False(dedup.IsNew(1001UL, SurfaceIds.GeoIntent, 1));   // client A, nonce 1 again — transport double, dropped
+        Assert.True(dedup.IsNew(1002UL, SurfaceIds.GeoIntent, 2));    // client B, nonce 2 — new
     }
 }

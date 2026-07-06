@@ -103,10 +103,13 @@ namespace Multiplayer.Bridge.Tests
                 long before = c.Client(0).Sink.Counter;
                 int appliesBefore = c.Client(0).Sink.AppliedTags.Count;
 
-                // Re-encode seq 1 (already applied; lastApplied is now 2) with a fresh delta+tag. The
-                // client's SequenceTracker must drop seq<=lastApplied, so the sink must NOT change.
+                // Re-encode seq 1 (already applied; lastApplied is now 2) with a fresh delta+tag. The client's
+                // GeoOutcome SurfaceSeq guard must drop seq<=lastApplied, so the sink must NOT change.
                 var stalePayload = EncodeCounterApply(seq: 1, delta: 99, tag: 999);
-                var staleMsg = new NetworkMessage(PacketType.ActionApply, stalePayload);
+                // Envelope cutover: the outcome rides the 0x67 SyncEnvelope on GeoOutcome (the legacy raw 0x61
+                // ActionApply packet was deleted), so a stale replay is injected the same way the host broadcasts.
+                var staleMsg = new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoOutcome, SyncKind.ActionApply, stalePayload));
                 FeedToClientInbound(c, clientIndex: 0, msg: staleMsg);
                 c.Pump();
 

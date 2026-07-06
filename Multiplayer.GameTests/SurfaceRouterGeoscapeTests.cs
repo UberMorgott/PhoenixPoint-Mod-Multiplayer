@@ -110,7 +110,7 @@ public class SurfaceRouterGeoscapeTests
     public void GeoActionSurfaces_RouteToGeoscapeHook_WhenTacticalDeclines(byte surfaceId)
     {
         // The three action-relay envelope surfaces (0xA2/0xA3/0xA4) fall through the tactical fast-path to the
-        // geoscape hook (which under the cutover gate dispatches them to OnActionRequest/OnActionApply/OnActionReject).
+        // geoscape hook (which dispatches them to OnActionRequest/OnActionApply/OnActionReject — the sole rail).
         SurfaceRouter.TacticalInbound = (peer, sid, pl) => false;   // tactical declines
         try
         {
