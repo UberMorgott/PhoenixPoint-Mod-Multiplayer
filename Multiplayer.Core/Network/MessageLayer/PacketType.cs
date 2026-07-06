@@ -60,8 +60,7 @@ namespace Multiplayer.Network.MessageLayer
         ActionRequest = 0x60,   // client -> host
         ActionApply   = 0x61,   // host -> all
         ActionReject  = 0x62,   // host -> originator
-        WalletSync    = 0x63,   // RETIRED (rail-unify phase 1): wallet now rides 0x67 SyncEnvelope GeoWallet 0xA0 surface; no senders
-        StateSync     = 0x64,   // RETIRED (rail-unify phase 1): per-channel state now rides 0x67 SyncEnvelope GeoState 0xA1 surface; no senders
+        // 0x63 (WalletSync) + 0x64 (StateSync) RETIRED — see the tombstone block below. Do NOT reuse the ids.
         EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
         EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
         SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]
@@ -77,5 +76,17 @@ namespace Multiplayer.Network.MessageLayer
 
         // Transport-specific (STUN hole punch, etc.)
         TransportInternal = 0xF0
+
+        // ─── RETIRED / RESERVED wire ids — permanent tombstones, do NOT reuse ─────────────────
+        // These ids were live in earlier revisions and have been removed. Their receivers are
+        // gone; a new sender on any of them would be a silent-desync bug. Kept here (not as enum
+        // members) so the ranges stay reserved and greppable.
+        //   0x21-0x24, 0x27  — legacy tactical approve/reject/result/broadcast/turn-state path
+        //   0x25, 0x26       — EndTurnRequest/Accepted → now envelope TacIntentEndTurn 0x84 / TacTurn 0x85
+        //   0x33, 0x34       — CampaignActionResult/CampaignStateUpdate (never sent, no handler)
+        //   0x35, 0x36       — GeoStateDiff/GeoEntityOp (orphan; the diff codec they fronted is gone)
+        //   0x63             — WalletSync → wallet rides 0x67 SyncEnvelope GeoWallet 0xA0 surface
+        //   0x64             — StateSync → per-channel state rides 0x67 SyncEnvelope GeoState 0xA1 surface
+        //   0x68             — ChoiceClaim → event-choice resolution rides AnswerEventAction (occId on the action wire)
     }
 }
