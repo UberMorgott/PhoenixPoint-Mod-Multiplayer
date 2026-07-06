@@ -182,6 +182,58 @@ public class ReflectionGuardCoreTests
             ReflectionGuardCore.BuildStartupReport(new[] { "GeoSite.SiteId", "GeoLevelController.Map" }));
     }
 
+    // ---- Phase 5b soft-gate: compat predicate + report reuse the co-op gate latches on ----
+    // The startup self-check now decides compatible/incompatible from UnresolvedMembers(...).Count
+    // (dropping the Evaluate re-iteration), and persists BuildStartupReport(...) as the gate's reason.
+    // These pin that the new predicate agrees with Evaluate and that the persisted report is built
+    // from the SAME unresolved list — so the firing simplification is behavior-preserving.
+
+    [Fact]
+    public void UnresolvedCount_AgreesWith_EvaluateCompatible()
+    {
+        var allResolved = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", true),
+            new CriticalBinding("B.b", true),
+        };
+        var someUnresolved = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", true),
+            new CriticalBinding("B.b", false),
+        };
+
+        // compatible  <=>  no unresolved members
+        Assert.Equal(ReflectionGuardCore.Evaluate(allResolved).Compatible,
+                     ReflectionGuardCore.UnresolvedMembers(allResolved).Count == 0);
+        Assert.Equal(ReflectionGuardCore.Evaluate(someUnresolved).Compatible,
+                     ReflectionGuardCore.UnresolvedMembers(someUnresolved).Count == 0);
+    }
+
+    [Fact]
+    public void GateReport_NullWhenCompatible_BuiltFromUnresolvedWhenNot()
+    {
+        var allResolved = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", true),
+        };
+        var someUnresolved = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", false),
+            new CriticalBinding("B.b", false),
+        };
+
+        // Compatible install → nothing to persist for the gate (no report).
+        Assert.Null(ReflectionGuardCore.BuildStartupReport(
+            ReflectionGuardCore.UnresolvedMembers(allResolved)));
+
+        // Incompatible install → the gate's persisted reason is the report of the unresolved list.
+        var report = ReflectionGuardCore.BuildStartupReport(
+            ReflectionGuardCore.UnresolvedMembers(someUnresolved));
+        Assert.NotNull(report);
+        Assert.Contains("A.a", report);
+        Assert.Contains("B.b", report);
+    }
+
     // ---- ValidateLabels: dev-facing integrity check of the curated list itself ----
 
     [Fact]

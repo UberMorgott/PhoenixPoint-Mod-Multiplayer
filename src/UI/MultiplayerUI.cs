@@ -181,6 +181,30 @@ namespace Multiplayer.UI
             StartHostAndOpenLobby();
         }
 
+        // Phase 5b version-guard co-op gate: when the startup reflection guard latched an
+        // incompatibility (ReflectionGuard.IsCompatible == false), refuse to host or join a co-op
+        // session — the spec intent "disable networking rather than proceeding". INERT on a green
+        // install (all curated bindings resolve → IsCompatible stays true), so zero behavior change on
+        // the current PP build. Returns true when the attempt must be aborted; NEVER throws.
+        private bool CoopGuardBlocks(string action)
+        {
+            if (ReflectionGuard.IsCompatible)
+                return false;
+            try
+            {
+                MultiplayerMain.Log?.LogError(
+                    $"[Multiplayer][guard] refusing to {action} - reflection version-guard failed at startup:\n"
+                    + ReflectionGuard.FailureReport);
+                // Reuse the game's own message box (native UI — no custom widget) to tell the player why.
+                GameUtl.GetMessageBox()?.ShowSimplePrompt(
+                    "Multiplayer is disabled: this mod is not compatible with the installed Phoenix Point "
+                    + "version. Update the mod.",
+                    MessageBoxIcon.Error, MessageBoxButtons.OK, null, this);
+            }
+            catch { /* the gate must never throw — aborting the attempt is the only guarantee it owes */ }
+            return true;
+        }
+
         // Default DirectIP listen port for the host (matches the client connect default).
         private const int DefaultDirectPort = 14242;
 
@@ -192,6 +216,8 @@ namespace Multiplayer.UI
         // Steam unavailable) does not abort the others.
         private void StartHostAndOpenLobby()
         {
+            if (CoopGuardBlocks("host a co-op session"))
+                return;
             NetworkEngine.Create();
             var composite = new CompositeTransport(new ITransport[]
             {
@@ -380,6 +406,8 @@ namespace Multiplayer.UI
         // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
         public void OnLobbyJoin(string input)
         {
+            if (CoopGuardBlocks("join a co-op session"))
+                return;
             var target = SmartJoinParser.Parse(input ?? "");
             if (target.Kind == JoinKind.Invalid)
             {

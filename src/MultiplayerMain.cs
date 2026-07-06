@@ -13,6 +13,11 @@ namespace Multiplayer
         public static new MultiplayerMain Instance { get; private set; }
         public override bool CanSafelyDisable => false;
 
+        // Exposes the base ModMain logger (otherwise protected) so the co-op host/join gate can report
+        // the reflection version-guard failure through the same log the startup self-check uses. Null
+        // before OnModEnabled / after OnModDisabled — callers null-check.
+        public static ModLogger Log => Instance?.Logger;
+
         private MultiplayerUI _ui;
 
         public override void OnModEnabled()

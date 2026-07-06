@@ -112,10 +112,28 @@ namespace Multiplayer.Network
         }
 
         /// <summary>
+        /// Startup compatibility verdict, latched by <see cref="RunStartupSelfCheck"/>: true until the
+        /// self-check finds an unresolved critical binding, then false for the process lifetime.
+        /// Defaults to true so the co-op host/join gate is INERT unless the guard actually ran AND
+        /// failed (a green install — all curated bindings resolve — and any code path that reads this
+        /// before the self-check both see "compatible", i.e. zero behavior change).
+        /// </summary>
+        public static bool IsCompatible { get; private set; } = true;
+
+        /// <summary>
+        /// The stored multi-line startup report naming every unresolved binding (see
+        /// <see cref="ReflectionGuardCore.BuildStartupReport"/>), or null while compatible. Latched
+        /// alongside <see cref="IsCompatible"/> so the co-op gate can surface the SAME diagnosable text
+        /// the startup log showed, at host/join time, without recomputing it.
+        /// </summary>
+        public static string FailureReport { get; private set; }
+
+        /// <summary>
         /// Startup self-check: resolve every curated critical binding and, if any fail to resolve,
-        /// log ONE prominent error naming each broken binding. No-op-visible (a single "version OK"
-        /// info line) when all resolve. NEVER throws — a fault here just means no self-check this run,
-        /// and the mod proceeds exactly as before.
+        /// log ONE prominent error naming each broken binding and latch <see cref="IsCompatible"/>
+        /// false + <see cref="FailureReport"/> so the co-op host/join gate can refuse networking.
+        /// No-op-visible (a single "version OK" info line) when all resolve. NEVER throws — a fault
+        /// here just means no self-check this run, and the mod proceeds exactly as before.
         /// </summary>
         public static void RunStartupSelfCheck(ModLogger logger)
         {
@@ -139,15 +157,18 @@ namespace Multiplayer.Network
                     results.Add(new CriticalBinding(binding.Label, resolved));
                 }
 
-                var verdict = ReflectionGuardCore.Evaluate(results);
-                if (verdict.Compatible)
+                var unresolved = ReflectionGuardCore.UnresolvedMembers(results);
+                if (unresolved.Count == 0)
                 {
                     logger.LogInfo($"[Multiplayer][guard] all {results.Count} critical reflection bindings resolved - version OK");
                     return;
                 }
 
-                var report = ReflectionGuardCore.BuildStartupReport(ReflectionGuardCore.UnresolvedMembers(results));
-                logger.LogError(report);
+                // Latch the incompatibility so the co-op host/join gate refuses networking and reuses
+                // this exact report as the user-facing reason (see MultiplayerUI co-op entry points).
+                FailureReport = ReflectionGuardCore.BuildStartupReport(unresolved);
+                IsCompatible = false;
+                logger.LogError(FailureReport);
             }
             catch (Exception e)
             {
