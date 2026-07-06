@@ -117,6 +117,13 @@ namespace Multiplayer.Network.Sync
         // Tick belt: last-seen geoscape-view liveness, to free a queue slot orphaned by a view teardown.
         private bool _geoViewWasLive;
 
+        // ─── rca-3 reload-boundary sweep ───────────────────────────────────
+        // ONE aggregated, idempotent reset for every in-flight engine-state holder that can wedge sync across
+        // a mid-session save-load / co-op save-transfer (this engine is NOT recreated then — only on full
+        // session teardown). Registered ONCE in the ctor (fixed audited list, per-entry exception isolation);
+        // driven from SaveTransferCoordinator.PrepareEntryFromBlobCrt via ResetForReloadBoundary().
+        private readonly ReloadBoundaryReset _reloadReset = new ReloadBoundaryReset();
+
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
@@ -145,6 +152,52 @@ namespace Multiplayer.Network.Sync
             // router seam; a fresh session's SyncEngine re-installs the hook (stale-engine calls fail closed on
             // the instance checks inside EnqueueCutsceneDisplay).
             State.CutsceneDisplayRouter.Enqueue = EnqueueCutsceneDisplay;
+
+            // ─── rca-3: the reload-boundary sweep — the audited registration list ───
+            // Every entry is IDEMPOTENT and safe for a first-time on-demand joiner (empty state → no-op).
+            // DELIBERATELY NOT REGISTERED (version/nonce CONTINUITY, pinned by
+            // ReloadBoundaryVersionContinuityTests): _tracker (client wallet/channel last-seen), _geoLiveSeq
+            // (host Next counters + client marks for 0xA3/0xA5/0xA6/0xA7), _walletVersion, _channelVersion,
+            // _nonceCounter. The engine persists across a mid-session reload on BOTH sides, so continuity
+            // holds symmetrically; resetting host counters would wedge every persisting client (strict-greater
+            // guard drops all flushes = "guard=stale-version" sync death) and clearing client last-seen alone
+            // would re-apply a reliable-transport double-send straddling the boundary.
+            // Host-side first-click-wins claims of the dead geoscape's occIds (a stale resolved entry would
+            // make a legit post-reload CompleteEvent lose its first-claim and skip the native grant).
+            _reloadReset.Register("choice-arbiter", () => _choiceArbiter.Reset());
+            // Client-side event mirror + display queue + dedups (see ResetEventMirror doc — semantics untouched).
+            _reloadReset.Register("event-mirror", ResetEventMirror);
+            // Host-side geoscape intent windows: stale (peer, surface, nonce) entries of the dead geoscape.
+            // Safe here — every peer is quiesced at this barrier (loading the same blob), so no straddling
+            // double-send can re-apply; the mid-session REJOIN case is per-peer (ResetIntentDedupForPeer).
+            _reloadReset.Register("geo-intent-dedup", () => _intentDedup.Reset());
+            // Client-side reject-correlation stash: its ISyncedActions reference the pre-reload geoscape.
+            _reloadReset.Register("pending-actions", () => { _pending.Clear(); _pendingOrder.Clear(); });
+            // Host-side wallet coalesce marks: the dirty flag + poll baseline describe the dead wallet
+            // instance. Null baseline = the first post-reload poll re-fires one full flush (idempotent,
+            // version-guarded) — convergence, never a wedge. The watcher rebind re-seeds anyway.
+            _reloadReset.Register("wallet-coalesce", () => { _walletDirty = false; _lastWalletBroadcast = null; });
+            // Host-side channel coalesce marks: same rationale; every channel re-seeds on AttachHost rebind
+            // against the fresh GeoMap/faction instances (each marks itself dirty at bind).
+            _reloadReset.Register("channel-dirty", () => _channelDirty.Clear());
+            // Vehicle mirrors (0xA5/0xA6/0xA7): host signature caches (a reload to an OLDER save must re-emit
+            // identities/placements — cleared sigs force one idempotent re-emission) + client interpolation
+            // buffers/live-object caches that point at the DEAD GeoMap's vehicle instances. The GeoVehicleChannel
+            // known-key seed set self-heals separately (AttachHost reseeds on the fresh GeoMap instance).
+            _reloadReset.Register("vehicle-mirrors", () =>
+            {
+                State.GeoVehicleMirror.ResetForNewSession();
+                State.GeoVehicleTravelMirror.ResetForNewSession();
+                State.GeoVehicleExploreMirror.ResetForNewSession();
+            });
+            // Tactical per-mission state: a host mid-battle LOAD tears the level down WITHOUT the mission-end
+            // path that normally drives OnMissionExit — sweep it here so pending buffers/mirror-arm/live rails
+            // never leak into the reloaded session. Documented idempotent (no-op when already exited/never armed).
+            _reloadReset.Register("tactical-mission-state", Multiplayer.Sync.Tactical.TacticalDeploySync.OnMissionExit);
+            // Client clock re-arm (audit d — did NOT fire on this boundary before): re-burst pings, accept the
+            // host's next anchor unconditionally and HARD-SET the display across the reload's game-time jump
+            // (no lerp from the dead save's clock); re-pushes the pause/speed widgets. Self-guarded no-op on host.
+            _reloadReset.Register("time-sync-client", () => _engine?.TimeSync?.ResetClientState());
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -778,6 +831,29 @@ namespace Multiplayer.Network.Sync
             State.DisplaySequence.Reset();
             State.DisplayStamp.Reset();
         }
+
+        /// <summary>
+        /// rca-3: THE aggregated save-load / co-op save-transfer boundary sweep — the single reset entry point
+        /// driven from <c>SaveTransferCoordinator.PrepareEntryFromBlobCrt</c> (the SHARED host+client
+        /// reload-entry hook, incl. the on-demand join path). Runs the audited registration list from the ctor
+        /// (choice arbiter, event mirror, geo intent dedup, pending/coalesce marks, vehicle mirrors, tactical
+        /// mission state, client time-sync re-arm) — each entry exactly once, per-entry exception isolation,
+        /// idempotent, first-time-joiner-safe. Version counters / last-seen trackers deliberately PERSIST
+        /// (symmetric continuity — see the ctor note + ReloadBoundaryVersionContinuityTests).
+        /// </summary>
+        public void ResetForReloadBoundary()
+            => _reloadReset.RunAll((name, ex) =>
+                Debug.LogError("[Multiplayer] ResetForReloadBoundary entry '" + name + "' failed: " + ex));
+
+        /// <summary>
+        /// Host: drop ONE peer's geoscape intent-dedup window when it re-reaches the live geoscape
+        /// (<c>SaveTransferCoordinator.OnJoinReady</c>). The peer id is the STABLE Steam id, so a client that
+        /// disconnects and REJOINS mid-session comes back with the same key but a fresh engine whose
+        /// client-local nonce counter restarts at 1 — without this its own pre-rejoin (peer, surface, nonce)
+        /// entries silently eat its first post-join intents. Per-peer, so a still-connected client's window
+        /// (and its double-send protection) stays intact. No-op for a first-time joiner (no entries).
+        /// </summary>
+        public void ResetIntentDedupForPeer(ulong peerId) => _intentDedup.ResetPeer(peerId);
 
         // Build + show a host-raised geoscape-event dialog (shared by the in-order ShowDialog path and the released
         // deferred path). Spawns an inert mirror site first when the in-play site is absent on this sim-frozen client

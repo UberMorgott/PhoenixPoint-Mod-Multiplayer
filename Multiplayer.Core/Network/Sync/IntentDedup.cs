@@ -41,5 +41,23 @@ namespace Multiplayer.Network.Sync
             _seen.Clear();
             _order.Clear();
         }
+
+        /// <summary>
+        /// Drop ONE peer's remembered window, leaving every other peer's intact. Rejoin case (rca-3 audit b):
+        /// the peer id is the STABLE Steam id, so a client that disconnects and rejoins mid-session comes back
+        /// with the SAME peerId but a FRESH engine whose client-local nonce counter restarts at 1 — without
+        /// this, its own pre-rejoin (peer, surface, nonce) entries silently eat its first post-join intents.
+        /// Per-peer (not <see cref="Reset"/>) so a straddling reliable double-send from a still-connected
+        /// OTHER client can never re-apply.
+        /// </summary>
+        public void ResetPeer(ulong peerId)
+        {
+            if (_seen.RemoveWhere(k => k.Item1 == peerId) == 0) return;
+            var kept = new List<(ulong, ulong)>(_order.Count);
+            foreach (var k in _order)
+                if (k.Item1 != peerId) kept.Add(k);
+            _order.Clear();
+            foreach (var k in kept) _order.Enqueue(k);
+        }
     }
 }

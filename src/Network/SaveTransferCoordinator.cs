@@ -592,6 +592,11 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost) return;
             Debug.Log($"[Multiplayer] OnJoinReady from {msg.SenderSteamId} → re-seed wallet + channels.");
+            // Rejoin belt (rca-3 audit b): the joiner's Steam id is STABLE, but its fresh engine restarts the
+            // intent nonce counter at 1 — drop ITS old (peer, surface, nonce) dedup window so its first
+            // post-join intents aren't eaten as "duplicates". Per-peer: every other client's window (and its
+            // reliable double-send protection) stays intact. No-op for a first-time joiner.
+            _engine.Sync?.ResetIntentDedupForPeer(msg.SenderSteamId);
             _engine.Sync?.BroadcastFullWallet();
             _engine.Sync?.BroadcastAllChannels();
         }
@@ -792,22 +797,16 @@ namespace Multiplayer.Network
         {
             Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: start");
 
-            // Save-load / co-op save-transfer boundary: forget every resolved event-choice occurrence id.
-            // This coroutine is the SHARED host+client reload-entry hook (host: HostSerializeAndSendCrt,
-            // client: ClientLoadCrt), and the SyncEngine — hence its ChoiceArbiter — is NOT recreated on a
-            // mid-session reload (only on full session teardown). The engine REUSES occIds across a reload,
-            // so a stale resolved entry from before the reload would otherwise make a legit post-reload host
-            // CompleteEvent LOSE its first-claim (Claim → false) and skip the native grant. Mirrors the
-            // per-load _tracker.Reset() already done on this boundary. No-op on a client (it never claims).
-            _engine.Sync?.Arbiter?.Reset();
-
-            // Same reload boundary, CLIENT side: the SyncEngine's event-mirror (occId EventCorrelator + the
-            // deferred-raise build stash + the buffered-reward stash) is likewise NOT recreated on a mid-session
-            // reload. occIds are process-lifetime MONOTONIC (never reused — EventOccurrenceIds._counter never
-            // resets in production), so the hazard is NOT id collision but STALE IN-FLIGHT display state: a busy
-            // single slot / deferred-raise queue whose dismisses will never arrive post-reload → every post-reload
-            // raise defers forever → the client stops showing ALL events. Mirror the Arbiter reset. No-op on the host.
-            _engine.Sync?.ResetEventMirror();
+            // Save-load / co-op save-transfer boundary: this coroutine is the SHARED host+client reload-entry
+            // hook (host: HostSerializeAndSendCrt, client: ClientLoadCrt incl. the on-demand join path), and
+            // the SyncEngine is NOT recreated on a mid-session reload (only on full session teardown) — so
+            // every in-flight engine-state holder that references the dying geoscape resets HERE, in the ONE
+            // aggregated rca-3 sweep (choice arbiter + event mirror + geo intent dedup + pending/coalesce
+            // marks + vehicle mirrors + tactical mission state + client time-sync re-arm; the audited list
+            // lives in the SyncEngine ctor). Every entry is idempotent and safe for a first-time on-demand
+            // joiner (empty state → no-op). Version counters / last-seen trackers deliberately PERSIST on
+            // both sides — symmetric continuity, pinned by ReloadBoundaryVersionContinuityTests.
+            _engine.Sync?.ResetForReloadBoundary();
 
             var serializer = game.SaveManager.Serializer;
             var slice = new TimeSlice(serializer.SerializeTimeSlice);
