@@ -208,6 +208,7 @@ public class ResearchChannelTests
             0x01, 0x00, 0x44,                   // idLen=1, "D"
             0x02,                               // state byte = 2 (Unlocked)
             0x00,                               // hasRate = 0 (v3 block, no rate)
+            0x00,                               // availableAuthoritative = 0 (v4 block)
         };
         Assert.Equal(expected, bytes);
     }
@@ -305,7 +306,50 @@ public class ResearchChannelTests
             0x00, 0x00,                         // stateCount = 0
             0x01,                               // hasRate = 1
             0x00, 0x00, 0x20, 0x40,             // rate 2.5f LE
+            0x00,                               // availableAuthoritative = 0 (v4 block)
         };
         Assert.Equal(expected, bytes);
+    }
+
+    // ─── v4 available-authoritative flag (stale-Available downgrade gate) ──────────
+
+    [Fact]
+    public void Snapshot_RoundTrips_AvailableAuthoritative()
+    {
+        var snap = new ResearchSnapshot();
+        snap.States.Add(("PX_LaserTech_ResearchDef", 2));
+        snap.AvailableAuthoritative = true;
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt);
+        Assert.True(rt.AvailableAuthoritative);
+    }
+
+    [Fact]
+    public void Snapshot_AvailableAuthoritative_DefaultsFalse_AndRoundTrips()
+    {
+        // A fresh snapshot (host Visible read never ran / failed) stays false → the client keeps its
+        // additive-only behavior and never wipes the Available list.
+        Assert.False(new ResearchSnapshot().AvailableAuthoritative);
+        Assert.False(RoundTrip(new ResearchSnapshot()).AvailableAuthoritative);
+    }
+
+    [Fact]
+    public void Decode_V3Payload_NoAuthoritativeByte_DecodesAsFalse()
+    {
+        // Backward compatibility: a v3 wire payload (…+rate block, NO trailing v4 byte) must decode with
+        // AvailableAuthoritative = false — a legacy host never triggers the client downgrade.
+        var v3 = new byte[]
+        {
+            0x00, 0x00,             // completedCount = 0
+            0x00, 0x00,             // queueCount = 0
+            0x00, 0x00,             // stateCount = 0
+            0x00,                   // hasRate = 0
+            // (no trailing v4 byte — v3)
+        };
+        var snap = ResearchSnapshot.Decode(v3);
+        Assert.NotNull(snap);
+        Assert.False(snap.AvailableAuthoritative);
     }
 }

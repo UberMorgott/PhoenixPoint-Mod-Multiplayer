@@ -400,9 +400,16 @@ namespace Multiplayer.Network.Sync.State
             GeoAttackTail attack = null;
             try { attack = ReadAttackTail(GeoRuntime.Instance, site); }
             catch { attack = null; }
+            // gap 6f weather + expiring-timer tails: best-effort — a miss carries null (Clear / no timer).
+            GeoWeatherTail weather = null;
+            try { weather = ReadWeatherTail(site); }
+            catch { weather = null; }
+            GeoExpiringTimerTail expiringTimer = null;
+            try { expiringTimer = ReadExpiringTimerTail(site); }
+            catch { expiringTimer = null; }
 
             return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited,
-                mission, haven, alienBase, excavation, attack);
+                mission, haven, alienBase, excavation, attack, weather, expiringTimer);
         }
 
         /// <summary>
@@ -1873,6 +1880,117 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.RaiseSiteAttackScheduled failed: " + ex.Message); }
+        }
+
+
+        // ─── weather + expiring-timer tails (gap 6f weather mirror + expiring-countdown mirror) ───
+        // Both are plain per-site display fields the sim-frozen client never derives; the host reads them off
+        // the live GeoSite, the client stamps the backing field value-only. Reuse the shared TimeUnit bridge
+        // (_timeUnitTimeSpanProp / _timeUnitFromTimeSpan) bound by EnsureExcavationTail for the timer.
+        private static bool _envTailEnsured;
+        private static FieldInfo _weatherField;        // GeoSite._weather (GeoSiteWeather enum)
+        private static Type _weatherEnumType;          // GeoSiteWeather (byte<->enum)
+        private static FieldInfo _expiringTimerField;  // GeoSite._expiringTimerAt (TimeUnit)
+        private const byte WeatherClear = 1;           // GeoSiteWeather.Clear (None=0,Clear=1,Mist=2,Overcast=3,Storm=4)
+
+        private static void EnsureEnvironmentTail()
+        {
+            if (_envTailEnsured) return;
+            _envTailEnsured = true;    // one attempt; every user null-guards
+            EnsureExcavationTail();    // binds the shared TimeUnit bridge (_timeUnitTimeSpanProp / _timeUnitFromTimeSpan)
+            var geoSiteT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            if (geoSiteT == null) return;
+            _weatherField = AccessTools.Field(geoSiteT, "_weather");
+            _weatherEnumType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Sites.GeoSiteWeather");
+            _expiringTimerField = AccessTools.Field(geoSiteT, "_expiringTimerAt");
+        }
+
+        /// <summary>Host: read the site's WEATHER as an optional tail. Null when weather is Clear (the default)
+        /// — the no-tail wire stays byte-identical and the client resets to Clear on an absent tail.</summary>
+        public static GeoWeatherTail ReadWeatherTail(object site)
+        {
+            try
+            {
+                EnsureEnvironmentTail();
+                if (site == null || _weatherField == null) return null;
+                byte w;
+                try { w = (byte)Convert.ToInt32(_weatherField.GetValue(site)); } catch { return null; }
+                return w == WeatherClear ? null : new GeoWeatherTail(w);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ReadWeatherTail failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>Host: read the site's EXPIRING-TIMER as an optional tail. Null when the timer is Zero (no
+        /// timer) — the no-tail wire stays byte-identical and the client clears on an absent tail.</summary>
+        public static GeoExpiringTimerTail ReadExpiringTimerTail(object site)
+        {
+            try
+            {
+                EnsureEnvironmentTail();
+                if (site == null || _expiringTimerField == null || _timeUnitTimeSpanProp == null) return null;
+                long ticks;
+                try
+                {
+                    var tu = _expiringTimerField.GetValue(site);
+                    ticks = tu == null ? 0L : ((TimeSpan)_timeUnitTimeSpanProp.GetValue(tu, null)).Ticks;
+                }
+                catch { return null; }
+                return ticks == 0L ? null : new GeoExpiringTimerTail(ticks);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ReadExpiringTimerTail failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// CLIENT: stamp the site's WEATHER value-only. A NULL tail means the host weather is Clear (the tail is
+        /// omitted only when Clear) → reset to Clear; a non-null tail stamps its raw enum value. Writes the
+        /// <c>GeoSite._weather</c> backing field directly (no PropertyChanged cascade) and repaints ON CHANGE
+        /// only. Called for EVERY snapshotted site so a drifted client weather converges to the host.
+        /// </summary>
+        public static void ApplyWeatherTail(GeoRuntime rt, object site, GeoWeatherTail tail)
+        {
+            if (site == null) return;
+            try
+            {
+                EnsureEnvironmentTail();
+                if (_weatherField == null || _weatherEnumType == null) return;
+                byte target = tail == null ? WeatherClear : tail.Weather;
+                byte current;
+                try { current = (byte)Convert.ToInt32(_weatherField.GetValue(site)); } catch { current = WeatherClear; }
+                if (current == target) return;   // idempotent — no redundant write / repaint
+                _weatherField.SetValue(site, Enum.ToObject(_weatherEnumType, (int)target));
+                RefreshSiteVisuals(site);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyWeatherTail failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// CLIENT: stamp the site's EXPIRING-TIMER value-only. A NULL tail means the host timer is Zero (the tail
+        /// is omitted only when unarmed) → clear it (TimeUnit.Zero); a non-null tail stamps its ticks. Writes the
+        /// <c>GeoSite._expiringTimerAt</c> backing field directly (bypasses the native setter's RefreshVisuals)
+        /// and repaints ON CHANGE only. The countdown then ticks natively under the client freeze (display
+        /// Timing.Now tracks the host anchor). TFTV-absent → the tail is never armed host-side → this no-ops.
+        /// </summary>
+        public static void ApplyExpiringTimerTail(GeoRuntime rt, object site, GeoExpiringTimerTail tail)
+        {
+            if (site == null) return;
+            try
+            {
+                EnsureEnvironmentTail();
+                if (_expiringTimerField == null || _timeUnitTimeSpanProp == null || _timeUnitFromTimeSpan == null) return;
+                long target = tail?.ExpiringTicks ?? 0L;
+                long current;
+                try
+                {
+                    var tu = _expiringTimerField.GetValue(site);
+                    current = tu == null ? 0L : ((TimeSpan)_timeUnitTimeSpanProp.GetValue(tu, null)).Ticks;
+                }
+                catch { current = 0L; }
+                if (current == target) return;   // idempotent
+                object value = _timeUnitFromTimeSpan.Invoke(null, new object[] { TimeSpan.FromTicks(target) });
+                _expiringTimerField.SetValue(site, value);
+                RefreshSiteVisuals(site);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExpiringTimerTail failed: " + ex.Message); }
         }
 
         /// <summary>The owning <c>GeoSite</c> of a live <c>GeoMission</c> (<c>GeoMission.Site</c>,

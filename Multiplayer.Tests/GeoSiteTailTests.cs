@@ -136,21 +136,21 @@ public class GeoSiteTailTests
     }
 
     [Fact]
-    public void ExtrasRecord_UnknownFutureBits_SkippedNotRejected()
+    public void ExtrasRecord_UnknownTrailingBytes_SkippedNotRejected()
     {
-        // Forward-compat contract: a record whose flags carry an UNKNOWN higher bit (future tail) with its
-        // payload bytes after the known ones must still parse the known tails and skip the rest via recLen.
+        // Forward-compat contract (now that all 8 tail-flag bits are assigned — bit6 weather, bit7 expiring):
+        // a FUTURE format may APPEND extra bytes AFTER the known payloads and grow recLen; a current decoder
+        // reads the known tails and skips the trailing bytes via the length-prefixed record slice — never
+        // rejecting the payload.
         var known = new GeoSiteSnapshot();
         known.Sites.Add(Site(1, new GeoHavenTail(500, false)));
         var bytes = GeoSiteSnapshot.Encode(known);
 
-        // Rewrite the extras record: flags |= bit6 (unknown), append 3 payload bytes, recLen 5 → 8.
+        // Grow the extras record by 3 trailing bytes (recLen 5 → 8) without touching the flags byte.
         var patched = new byte[bytes.Length + 3];
         System.Array.Copy(bytes, patched, bytes.Length);
         int recLenAt = 19 + 2 + 4;              // after record array + extrasCount + siteId
-        patched[recLenAt] = 0x08;               // recLen = 8
-        patched[recLenAt + 2] |= 0x40;          // flags |= unknown bit6
-        // 3 unknown payload bytes appended at the end (they belong to the record slice).
+        patched[recLenAt] = 0x08;               // recLen = 8 (flags + i32 population + 3 future bytes)
         patched[bytes.Length] = 0xDE; patched[bytes.Length + 1] = 0xAD; patched[bytes.Length + 2] = 0xBF;
 
         var snap = GeoSiteSnapshot.Decode(patched);
@@ -398,6 +398,113 @@ public class GeoSiteTailTests
         var snap = new GeoSiteSnapshot();
         snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
             attack: new GeoAttackTail(new[] { new GeoAttackEntry("ALN", 1L, long.MaxValue) })));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        var truncated = new byte[bytes.Length - 4];   // cut inside the trailing i64
+        System.Array.Copy(bytes, truncated, truncated.Length);
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
+    }
+
+    // ─── weather tail (gap 6f, bit6) + expiring-timer tail (bit7) ───────────────────────────────
+
+    [Theory]
+    [InlineData(0)]     // None
+    [InlineData(2)]     // Mist
+    [InlineData(3)]     // Overcast
+    [InlineData(4)]     // Storm
+    public void WeatherTail_RoundTrips(byte weather)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(7, "o", 20, 1, "n", "e", weather: new GeoWeatherTail(weather)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Weather);
+        Assert.Equal(weather, rt.Sites[0].Weather.Weather);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Theory]
+    [InlineData(1L)]
+    [InlineData(637500000000000000L)]
+    [InlineData(long.MaxValue)]
+    public void ExpiringTimerTail_RoundTrips(long ticks)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(8, "o", 10, 1, "n", "e", expiringTimer: new GeoExpiringTimerTail(ticks)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].ExpiringTimer);
+        Assert.Equal(ticks, rt.Sites[0].ExpiringTimer.ExpiringTicks);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void WeatherAndExpiringTimer_CoexistWithAllOtherTails()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 20, 1, "n", "e",
+            haven: new GeoHavenTail(1200, true),
+            alienBase: new GeoAlienBaseTail("TYPE", new[] { "ADDON" }),
+            excavation: new GeoExcavationTail(true, 42L),
+            attack: new GeoAttackTail(new[] { new GeoAttackEntry("ALN", 1L, 2L) }),
+            weather: new GeoWeatherTail(4),
+            expiringTimer: new GeoExpiringTimerTail(9999L)));
+        snap.Sites.Add(new GeoSiteState(2, "o", 10, 1, "n", "e", weather: new GeoWeatherTail(2)));   // weather only
+        snap.Sites.Add(new GeoSiteState(3, "o", 10, 1, "n", "e"));                                    // no tail at all
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.Equal(4, rt.Sites[0].Weather.Weather);
+        Assert.Equal(9999L, rt.Sites[0].ExpiringTimer.ExpiringTicks);
+        Assert.NotNull(rt.Sites[1].Weather);
+        Assert.Null(rt.Sites[1].ExpiringTimer);
+        Assert.Null(rt.Sites[2].Weather);
+        Assert.Null(rt.Sites[2].ExpiringTimer);
+    }
+
+    [Fact]
+    public void WeatherExpiringTimer_ParticipateInEquality()
+    {
+        var baseline = Site(3);
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 20, 1, "n", "e", weather: new GeoWeatherTail(4)));
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 20, 1, "n", "e", expiringTimer: new GeoExpiringTimerTail(1)));
+        Assert.NotEqual(new GeoWeatherTail(4), new GeoWeatherTail(2));
+        Assert.Equal(new GeoWeatherTail(4), new GeoWeatherTail(4));
+        Assert.NotEqual(new GeoExpiringTimerTail(1), new GeoExpiringTimerTail(2));
+        Assert.Equal(new GeoExpiringTimerTail(1), new GeoExpiringTimerTail(1));
+    }
+
+    [Fact]
+    public void WeatherExpiringTimer_WireBytes_Pinned()
+    {
+        // Pin the EXACT bits-6/7 extras layout: flags=0xC0, then the lower-bit payloads (none) followed by
+        // [u8 weather][i64 expiringTicks] in ascending bit order.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "A", 20, 1, "B", "C",
+            weather: new GeoWeatherTail(4), expiringTimer: new GeoExpiringTimerTail(1)));
+
+        var bytes = GeoSiteSnapshot.Encode(snap);
+
+        var extras = new byte[]
+        {
+            0x01, 0x00,                                     // extrasCount = 1
+            0x01, 0x00, 0x00, 0x00,                         // siteId = 1 (i32 LE)
+            0x0A, 0x00,                                     // recLen = 10 (flags + u8 weather + i64 ticks)
+            0xC0,                                           // tailFlags = bit6 HasWeather | bit7 HasExpiringTimer
+            0x04,                                           // weather = 4 (Storm)
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // expiringTicks = 1 (i64 LE)
+        };
+        Assert.Equal(19 + extras.Length, bytes.Length);
+        Assert.Equal(extras, bytes.Skip(19).ToArray());
+    }
+
+    [Fact]
+    public void ExpiringTimerTail_TruncatedInsideTicks_RejectsWholePayload()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", expiringTimer: new GeoExpiringTimerTail(long.MaxValue)));
         var bytes = GeoSiteSnapshot.Encode(snap);
         var truncated = new byte[bytes.Length - 4];   // cut inside the trailing i64
         System.Array.Copy(bytes, truncated, truncated.Length);

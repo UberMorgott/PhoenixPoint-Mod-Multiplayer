@@ -111,6 +111,11 @@ namespace Multiplayer.Network.Sync.State
                 // re-raises the native SiteAttackScheduled (SuppressEvents-guarded) so the vanilla warning
                 // toast + status-bar countdown render natively; empty tail = clear (attack fired/cancelled).
                 GeoSiteReflection.ApplyAttackTail(rt, site, dto.Attack);
+                // gap 6f weather + expiring-timer tails: value-only display stamps. Called even when the tail
+                // is NULL — for these two a null tail on a snapshotted site is a meaningful default (weather
+                // Clear / timer Zero), so the client RESETS to it (converges a drifted value), never "no change".
+                GeoSiteReflection.ApplyWeatherTail(rt, site, dto.Weather);
+                GeoSiteReflection.ApplyExpiringTimerTail(rt, site, dto.ExpiringTimer);
             }
         }
 

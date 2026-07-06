@@ -16,6 +16,7 @@ namespace Multiplayer.Network.Sync.State
     ///   [u16 queueCount]{[u16 idLen][id utf8][f32 progress]}*
     ///   [u16 stateCount]{[u16 idLen][id utf8][u8 state]}*        ← OPTIONAL trailing block (v2)
     ///   [u8 hasRate]([f32 rate] iff hasRate==1)                  ← OPTIONAL trailing block (v3)
+    ///   [u8 availableAuthoritative]                              ← OPTIONAL trailing block (v4)
     ///
     /// The third (state) block is TRAILING + length-tolerant: a v1 payload (no block) is read as zero
     /// states (the decoder only reads the block when bytes remain), and a v1 decoder reading a v2 payload
@@ -41,6 +42,10 @@ namespace Multiplayer.Network.Sync.State
         // v3: the host's effective hourly research production (Research.GetHourlyResearchProduction incl.
         // any mod postfix, e.g. TFTV Void Omen 6 ×1.5). Null = not carried (old payload / host bind failure).
         public float? HourlyRate;
+        // v4: true iff the host authoritatively read its Available (Visible) set this snapshot — gates the
+        // client's stale-entry DOWNGRADE (elements the client still shows as Revealed/Unlocked that the host
+        // no longer does → Hidden). Default false = additive-only, never wipe the list on a degraded snapshot.
+        public bool AvailableAuthoritative;
 
         public static byte[] Encode(ResearchSnapshot snap)
         {
@@ -67,6 +72,9 @@ namespace Multiplayer.Network.Sync.State
                 // stable; the presence byte keeps a legitimate 0 rate distinguishable from "unavailable".
                 w.Write((byte)(snap.HourlyRate.HasValue ? 1 : 0));
                 if (snap.HourlyRate.HasValue) w.Write(snap.HourlyRate.Value);
+                // v4 trailing block. Always written (one presence byte) so the wire is stable; gates the
+                // client's stale-Available downgrade (see class remarks).
+                w.Write((byte)(snap.AvailableAuthoritative ? 1 : 0));
                 return ms.ToArray();
             }
         }
@@ -110,6 +118,10 @@ namespace Multiplayer.Network.Sync.State
                     {
                         if (r.ReadByte() == 1) snap.HourlyRate = r.ReadSingle();
                     }
+                    // v4 trailing block — same length-tolerant contract: a v3 payload (no byte) decodes as
+                    // AvailableAuthoritative = false (additive-only, legacy-safe).
+                    if (ms.Position < ms.Length)
+                        snap.AvailableAuthoritative = r.ReadByte() == 1;
                     return snap;
                 }
             }

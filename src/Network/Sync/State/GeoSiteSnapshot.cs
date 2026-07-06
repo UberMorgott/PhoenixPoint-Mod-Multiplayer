@@ -377,6 +377,50 @@ namespace Multiplayer.Network.Sync.State
     }
 
     /// <summary>
+    /// PURE optional-tail record of one site's WEATHER (audit gap 6f; <c>GeoSite._weather</c>, enum
+    /// <c>GeoSiteWeather</c> {None=0, Clear=1, Mist=2, Overcast=3, Storm=4}, GeoSite.cs:61/201/869). The host
+    /// re-rolls per-site weather once an in-game hour (<c>GeoLevelController</c>:894 <c>DetermineWeather</c>
+    /// over <c>_updateSites</c>); the sim-frozen client never re-rolls, so its weather DRIFTS from the host
+    /// after join. Carried ONLY when weather is non-Clear, so a null tail on a snapshotted site means "host
+    /// weather is Clear" and the client RESETS to Clear — this keeps the no-tail wire byte-identical for the
+    /// common Clear case (the WA-2 byte-identical pins hold). Client stamps the <c>GeoSite._weather</c>
+    /// backing field value-only (no PropertyChanged cascade) — pure display mirror.
+    /// </summary>
+    public sealed class GeoWeatherTail : IEquatable<GeoWeatherTail>
+    {
+        public readonly byte Weather;   // raw GeoSiteWeather enum value (never Clear=1 on a live record)
+
+        public GeoWeatherTail(byte weather) { Weather = weather; }
+
+        public bool Equals(GeoWeatherTail other) => other != null && Weather == other.Weather;
+        public override bool Equals(object obj) => obj is GeoWeatherTail o && Equals(o);
+        public override int GetHashCode() => Weather;
+        public override string ToString() => $"Weather({Weather})";
+    }
+
+    /// <summary>
+    /// PURE optional-tail record of one site's EXPIRING-TIMER countdown (<c>GeoSite._expiringTimerAt</c>,
+    /// TimeUnit; GeoSite.cs:121/1498). Set host-side by an expiring-encounter site or TFTV's pandoran
+    /// base-attack countdown (TFTVBaseDefenseGeoscape) and read by <c>GeoSiteVisualsController</c> for the
+    /// ticking status-bar timer; the sim-frozen client never derives it. Carried ONLY when the timer is armed
+    /// (ticks != 0), so a null tail on a snapshotted site means "host timer is Zero" and the client CLEARS it —
+    /// the no-tail wire stays byte-identical for the common no-timer case. Client stamps the
+    /// <c>GeoSite._expiringTimerAt</c> backing field value-only; TFTV-absent → the field is never armed
+    /// host-side → the tail is never carried (no-op).
+    /// </summary>
+    public sealed class GeoExpiringTimerTail : IEquatable<GeoExpiringTimerTail>
+    {
+        public readonly long ExpiringTicks;   // ExpiringTimerAt.TimeSpan.Ticks (0 = no timer; never 0 on a live record)
+
+        public GeoExpiringTimerTail(long expiringTicks) { ExpiringTicks = expiringTicks; }
+
+        public bool Equals(GeoExpiringTimerTail other) => other != null && ExpiringTicks == other.ExpiringTicks;
+        public override bool Equals(object obj) => obj is GeoExpiringTimerTail o && Equals(o);
+        public override int GetHashCode() => ExpiringTicks.GetHashCode();
+        public override string ToString() => $"ExpiringTimer({ExpiringTicks})";
+    }
+
+    /// <summary>
     /// One site's mirrored IDENTITY: the fields the geoscape-event card / native art collection reads off
     /// <c>Context.Site</c> (Owner / Type / State / EncounterID, plus the site name loc-key for token text).
     /// A pure value type with structural equality so the codec round-trip is directly assertable.
@@ -420,12 +464,15 @@ namespace Multiplayer.Network.Sync.State
         public readonly GeoAlienBaseTail AlienBase;     // WA-2 alien-base tail; null = not carried
         public readonly GeoExcavationTail Excavation;   // WA-2 excavation tail; null = not carried
         public readonly GeoAttackTail Attack;           // pre-attack schedule tail (gap 6b); null = not carried
+        public readonly GeoWeatherTail Weather;         // weather tail (gap 6f, bit6); null = host weather is Clear (client resets)
+        public readonly GeoExpiringTimerTail ExpiringTimer; // expiring-timer tail (bit7); null = host timer is Zero (client clears)
 
         public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID,
                             bool inspected = false, bool visible = false, bool visited = false,
                             GeoMissionRecord mission = null, GeoHavenTail haven = null,
                             GeoAlienBaseTail alienBase = null, GeoExcavationTail excavation = null,
-                            GeoAttackTail attack = null)
+                            GeoAttackTail attack = null, GeoWeatherTail weather = null,
+                            GeoExpiringTimerTail expiringTimer = null)
         {
             SiteId = siteId;
             // Normalize null → "" so equality + the wire are stable (the codec also coalesces, this keeps
@@ -443,6 +490,8 @@ namespace Multiplayer.Network.Sync.State
             AlienBase = alienBase;
             Excavation = excavation;
             Attack = attack;
+            Weather = weather;
+            ExpiringTimer = expiringTimer;
         }
 
         public bool Equals(GeoSiteState other)
@@ -459,7 +508,9 @@ namespace Multiplayer.Network.Sync.State
                && (Haven == null ? other.Haven == null : Haven.Equals(other.Haven))
                && (AlienBase == null ? other.AlienBase == null : AlienBase.Equals(other.AlienBase))
                && (Excavation == null ? other.Excavation == null : Excavation.Equals(other.Excavation))
-               && (Attack == null ? other.Attack == null : Attack.Equals(other.Attack));
+               && (Attack == null ? other.Attack == null : Attack.Equals(other.Attack))
+               && (Weather == null ? other.Weather == null : Weather.Equals(other.Weather))
+               && (ExpiringTimer == null ? other.ExpiringTimer == null : ExpiringTimer.Equals(other.ExpiringTimer));
 
         public override bool Equals(object obj) => obj is GeoSiteState o && Equals(o);
 
@@ -481,12 +532,14 @@ namespace Multiplayer.Network.Sync.State
                 h = (h * 397) ^ (AlienBase?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (Excavation?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (Attack?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (Weather?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (ExpiringTimer?.GetHashCode() ?? 0);
                 return h;
             }
         }
 
         public override string ToString()
-            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())} attack={(Attack == null ? "none" : Attack.ToString())})";
+            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())} attack={(Attack == null ? "none" : Attack.ToString())} weather={(Weather == null ? "none" : Weather.ToString())} expTimer={(ExpiringTimer == null ? "none" : ExpiringTimer.ToString())})";
     }
 
     /// <summary>
@@ -516,7 +569,10 @@ namespace Multiplayer.Network.Sync.State
     ///              bit2 = excavation tail  → payload [i64 endDateTicks]; bit5 = Excavating VALUE (no payload).
     ///              bit3 = attack-schedule tail → payload [u8 n]{[str attackerGuid][i64 atTicks][i64 forTicks]}*
     ///                     (gap 6b pre-attack countdown; n=0 = honest clear).
-    ///              bits 6/7 RESERVED for future tails (higher bits, payloads appended after known ones).
+    ///              bit6 = weather tail        → payload [u8 weather] (gap 6f; carried only when non-Clear —
+    ///                     a snapshotted site WITHOUT this bit means host weather is Clear → client resets).
+    ///              bit7 = expiring-timer tail → payload [i64 expiringTicks] (carried only when armed — a
+    ///                     snapshotted site WITHOUT this bit means host timer is Zero → client clears).
     ///   An extras record for a siteId absent from the record array is skipped (join-by-id, never a throw).
     ///
     /// Case A only: this mirrors EXISTING client sites (resolved by SiteId). Vanilla never creates sites
@@ -532,6 +588,8 @@ namespace Multiplayer.Network.Sync.State
         private const byte TailHasAttack = 1 << 3;      // payload: [u8 n]{[str attackerGuid][i64 atTicks][i64 forTicks]}*
         private const byte TailInfested = 1 << 4;       // value bit (meaningful only with TailHasHaven)
         private const byte TailExcavating = 1 << 5;     // value bit (meaningful only with TailHasExcavation)
+        private const byte TailHasWeather = 1 << 6;     // payload: [u8 weather] (gap 6f; carried only when non-Clear)
+        private const byte TailHasExpiringTimer = 1 << 7; // payload: [i64 expiringTicks] (carried only when armed)
 
         public readonly List<GeoSiteState> Sites = new List<GeoSiteState>();
 
@@ -597,7 +655,8 @@ namespace Multiplayer.Network.Sync.State
         }
 
         private static bool HasTail(GeoSiteState s)
-            => s.Haven != null || s.AlienBase != null || s.Excavation != null || s.Attack != null;
+            => s.Haven != null || s.AlienBase != null || s.Excavation != null || s.Attack != null
+               || s.Weather != null || s.ExpiringTimer != null;
 
         /// <summary>[u8 tailFlags][payloads in ascending bit order] for one site's carried tails.</summary>
         private static byte[] EncodeTailRecord(GeoSiteState s)
@@ -618,6 +677,8 @@ namespace Multiplayer.Network.Sync.State
                     if (s.Excavation.Excavating) flags |= TailExcavating;
                 }
                 if (s.Attack != null) flags |= TailHasAttack;
+                if (s.Weather != null) flags |= TailHasWeather;
+                if (s.ExpiringTimer != null) flags |= TailHasExpiringTimer;
                 w.Write(flags);
                 if (s.Haven != null) w.Write(s.Haven.Population);
                 if (s.AlienBase != null)
@@ -640,6 +701,9 @@ namespace Multiplayer.Network.Sync.State
                         w.Write(s.Attack.Entries[i].ScheduledForTicks);
                     }
                 }
+                // bits 6/7 payloads trail the lower-bit ones (ascending bit order = parse-known-then-skip).
+                if (s.Weather != null) w.Write(s.Weather.Weather);
+                if (s.ExpiringTimer != null) w.Write(s.ExpiringTimer.ExpiringTicks);
                 return ms.ToArray();
             }
         }
@@ -709,7 +773,8 @@ namespace Multiplayer.Network.Sync.State
                                 if (!tails.TryGetValue(s.SiteId, out var set)) continue;
                                 snap.Sites[i] = new GeoSiteState(s.SiteId, s.OwnerFactionDefGuid, s.SiteType,
                                     s.State, s.SiteName, s.EncounterID, s.Inspected, s.Visible, s.Visited,
-                                    s.Mission, set.Haven, set.AlienBase, set.Excavation, set.Attack);
+                                    s.Mission, set.Haven, set.AlienBase, set.Excavation, set.Attack,
+                                    set.Weather, set.ExpiringTimer);
                             }
                     }
                     return snap;
@@ -726,7 +791,10 @@ namespace Multiplayer.Network.Sync.State
             public GeoAlienBaseTail AlienBase;
             public GeoExcavationTail Excavation;
             public GeoAttackTail Attack;
-            public bool Any => Haven != null || AlienBase != null || Excavation != null || Attack != null;
+            public GeoWeatherTail Weather;
+            public GeoExpiringTimerTail ExpiringTimer;
+            public bool Any => Haven != null || AlienBase != null || Excavation != null || Attack != null
+                               || Weather != null || ExpiringTimer != null;
         }
 
         /// <summary>
@@ -767,6 +835,10 @@ namespace Multiplayer.Network.Sync.State
                     }
                     set.Attack = new GeoAttackTail(entries);
                 }
+                if ((flags & TailHasWeather) != 0)
+                    set.Weather = new GeoWeatherTail(r.ReadByte());
+                if ((flags & TailHasExpiringTimer) != 0)
+                    set.ExpiringTimer = new GeoExpiringTimerTail(r.ReadInt64());
                 return set.Any ? set : null;
             }
         }

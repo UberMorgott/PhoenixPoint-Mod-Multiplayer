@@ -79,6 +79,7 @@ namespace Multiplayer.Network.Sync.State
         private static object _completedStateValue;       // ResearchState.Completed enum value (boxed)
         private static object _unlockedStateValue;         // ResearchState.Unlocked enum value (boxed)
         private static object _revealedStateValue;         // ResearchState.Revealed enum value (boxed)
+        private static object _hiddenStateValue;           // ResearchState.Hidden enum value (boxed) — stale-Available downgrade target
         private static Type _researchStateType;            // PhoenixPoint...Research.ResearchState (enum), for byte<->enum
 
         private static void Ensure()
@@ -130,6 +131,10 @@ namespace Multiplayer.Network.Sync.State
                 // Revealed value: needed to mirror the host's Revealed-but-not-yet-Unlocked elements onto the
                 // client (FIX#2 state block). Not gated by _ready — best-effort additive mirror.
                 try { _revealedStateValue = Enum.Parse(_researchStateType, "Revealed"); } catch { _revealedStateValue = null; }
+                // Hidden value: the DOWNGRADE target for a stale client Available entry the host no longer
+                // shows (never sent on the wire — the host only omits it; the client derives it). Not gated
+                // by _ready — best-effort; a miss disables only the stale-Available downgrade.
+                try { _hiddenStateValue = Enum.Parse(_researchStateType, "Hidden"); } catch { _hiddenStateValue = null; }
             }
 
             _ready = _completedProp != null && _queueProp != null && _getById != null
@@ -205,6 +210,10 @@ namespace Multiplayer.Network.Sync.State
                                 try { state = (byte)Convert.ToInt32(_stateField.GetValue(el)); } catch { continue; }
                                 snap.States.Add((id, state));
                             }
+                        // The Visible enumeration completed WITHOUT throwing → States is the authoritative
+                        // Available list (even if empty). Only now may the client downgrade stale entries.
+                        // Set AFTER the loop so a mid-enumeration throw (caught below) leaves it false.
+                        snap.AvailableAuthoritative = true;
                     }
                     catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Snapshot Visible failed (skipped): " + ex.Message); }
                 }
@@ -363,6 +372,16 @@ namespace Multiplayer.Network.Sync.State
                 // entry is never also a Queue entry. Guards: skip completed (monotonic — never downgrade a
                 // client Completed) and skip queued (those get their state from the add path). Best-effort.
                 MirrorStates(research, target);
+
+                // (6) REMOVE stale Available entries. The host's snapshot is the COMPLETE picture of every
+                // non-Hidden element (Completed ∪ Queue ∪ States/Visible); a client element still shown as
+                // Revealed/Unlocked (i.e. in the client's own Visible/Available list) whose id is in NONE of
+                // those sets is one the host has since HIDDEN (a mutually-exclusive research pick, a mod that
+                // pulled it, etc.) — its Available row would otherwise linger forever (the client is a pure
+                // mirror and never re-derives visibility). Downgrade it to Hidden so the client's Available
+                // list exactly matches the host's. GATED on target.AvailableAuthoritative so a legacy/partial
+                // snapshot (Visible read failed → additive-only) never wipes the list. Best-effort.
+                if (target.AvailableAuthoritative) RemoveStaleAvailable(research, target);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.Apply failed: " + ex.Message); }
         }
@@ -427,6 +446,58 @@ namespace Multiplayer.Network.Sync.State
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.MirrorStates '" + id + "' failed (skipped): " + ex.Message); }
             }
+        }
+
+        /// <summary>
+        /// FIX (stale-Available): DOWNGRADE to Hidden every element in the CLIENT's own Available (Visible)
+        /// list whose id the host's snapshot does NOT vouch for — i.e. it is absent from Completed, Queue AND
+        /// States. Those are elements the host has since made Hidden (or pulled from availability) that a pure
+        /// mirror would otherwise show forever (a mutually-exclusive research pick, a mod removal, …). Writes
+        /// the private <c>_state</c> backing field directly to Hidden (bypassing the State setter → no event
+        /// cascade, no rewards — same reflection bypass as <see cref="CompleteEchoOnly"/>/<see cref="MirrorStates"/>).
+        /// Guards: never downgrade a Completed (monotonic) or queued element. The caller gates on
+        /// <c>AvailableAuthoritative</c>, so this only runs on a FULL host snapshot — a degraded/partial one
+        /// (Visible read failed) never reaches here and the list stays additive-only. No-op if the Hidden enum
+        /// value or the Visible property is unavailable; per-element guarded so one bad element never aborts the rest.
+        /// </summary>
+        private static void RemoveStaleAvailable(object research, ResearchSnapshot target)
+        {
+            if (research == null || target == null || _hiddenStateValue == null || _visibleProp == null) return;
+            try
+            {
+                // The union of ids the host vouches for as non-Hidden this snapshot (anything here stays).
+                var keep = new HashSet<string>();
+                foreach (var id in target.Completed) keep.Add(id);
+                foreach (var (id, _) in target.Queue) keep.Add(id);
+                foreach (var (id, _) in target.States) keep.Add(id);
+
+                // Snapshot the client's live Available (Visible) set FIRST — writing _state mutates Visible
+                // membership (a Hidden element drops out), so we must not enumerate it while mutating it.
+                var stale = new List<object>();
+                if (_visibleProp.GetValue(research, null) is IEnumerable visible)
+                    foreach (var el in visible)
+                    {
+                        string id = _researchIdField.GetValue(el) as string;
+                        if (string.IsNullOrEmpty(id) || keep.Contains(id)) continue;
+                        stale.Add(el);
+                    }
+
+                int downgraded = 0;
+                foreach (var el in stale)
+                {
+                    try
+                    {
+                        if (IsCompleted(el)) continue;          // monotonic: never downgrade a completed element
+                        if (InQueue(research, el)) continue;    // queued elements are legitimately not in the host's Visible
+                        _stateField.SetValue(el, _hiddenStateValue);
+                        downgraded++;
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.RemoveStaleAvailable element failed (skipped): " + ex.Message); }
+                }
+                if (downgraded > 0)
+                    Debug.Log("[Multiplayer] ResearchStateReflection.RemoveStaleAvailable downgraded " + downgraded + " stale Available entr" + (downgraded == 1 ? "y" : "ies") + " to Hidden");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchStateReflection.RemoveStaleAvailable failed: " + ex.Message); }
         }
 
         /// <summary>Host apply for the client cancel intent: <c>Research.Cancel(resolve(id))</c>.</summary>

@@ -280,4 +280,49 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] CompleteFacilityPatch postfix broadcast failed: " + ex.Message); }
         }
     }
+
+
+    /// <summary>
+    /// Host-only ch2 (research) dirty hook for facility POWER changes:
+    /// <c>GeoPhoenixFacility.SetPowered(bool)</c> (GeoPhoenixFacility.cs:317). Research production is derived
+    /// LIVE from the faction's powered labs (<c>Faction.ResourceIncome</c> → <c>GetHourlyResearchProduction</c>),
+    /// so a power-plant loss/restore — or any facility power flip — changes the hourly rate the instant it
+    /// lands, yet nothing dirties ch2 until the hourly heartbeat, leaving the client's research ETA date stale
+    /// for up to an in-game hour (audit follow-up: worker/power changes don't mark ch2 dirty). Mirror the
+    /// <see cref="CompleteFacilityPatch"/>/<see cref="RemoveFacilityPatch"/> precedent: on the host, mark ch2
+    /// dirty after every <c>SetPowered</c> so the client's ETA refreshes on the next coalesced flush. Harmless
+    /// over-fire — a base-wide power recompute calls <c>SetPowered</c> per facility, but <c>MarkChannelDirty</c>
+    /// only sets a flag flushed once next tick. Pure observe (never blocks/mutates the native call);
+    /// client / single-player = no-op. Vanilla research has NO per-lab worker assignment (passive lab income),
+    /// so power is the operative mid-hour rate trigger; facility DAMAGE stays hourly-converged, exactly as
+    /// <see cref="CompleteFacilityPatch"/> already documents. Reflective target (Prepare false → PatchAll skips).
+    /// </summary>
+    [HarmonyPatch]
+    public static class FacilityPowerResearchDirtyPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var facT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility");
+            if (facT == null) return false;
+            _target = AccessTools.Method(facT, "SetPowered", new[] { typeof(bool) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // Pure observe: after the host toggles a facility's power, mark ch2 dirty so the client's research
+        // ETA rate refreshes on the next coalesced flush instead of waiting for the hourly heartbeat.
+        public static void Postfix()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                engine.Sync?.MarkChannelDirty(2);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] FacilityPowerResearchDirtyPatch failed: " + ex.Message); }
+        }
+    }
 }
