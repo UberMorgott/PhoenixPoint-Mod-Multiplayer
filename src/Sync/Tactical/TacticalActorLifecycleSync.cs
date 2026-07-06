@@ -1,0 +1,450 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
+using UnityEngine;
+
+namespace Multiplayer.Sync.Tactical
+{
+    /// <summary>
+    /// Mid-battle actor SPAWN / DESPAWN mirror (spec TS1, surfaces <c>tac.actor.spawn</c> 0x92 +
+    /// <c>tac.actor.despawn</c> 0x93). Closes the structural blind spot "things that are NOT deploy-time actors":
+    /// reinforcements, egg hatch, siren summon, turret/shield deploy, resurrect, morph — everything that ADDS an
+    /// actor after the turn-0 deploy snapshot. The frozen client never runs the spawning ability, so it must be
+    /// TOLD to materialize the actor; once materialized it joins the 0x8F delta + tac.damage streams like any
+    /// other mirror actor.
+    ///
+    /// HOST authority (never suppressed):
+    ///   • <see cref="HostOnActorEnteredPlay"/> — postfix on <c>TacticalLevelController.ActorEnteredPlay</c>:
+    ///     for a POST-DEPLOY actor not already in the registry, mint its netId (registry is the sole minter) and
+    ///     broadcast the spawn blob.
+    ///   • <see cref="HostSweepDespawns"/> — folded into the 0x8F flush heartbeat: any registered actor no longer
+    ///     in the live map set (evac / morph-consume / off-map-depart / expiry) → broadcast a despawn + registry
+    ///     remove. Reuses the heartbeat, no separate loop.
+    ///   • <see cref="HostOnActorDied"/> — postfix on <c>TacticalLevelController.ActorDied</c>: registry cleanup
+    ///     for a damage-death (the death VISUAL already mirrors via tac.damage 0x88 — this is NOT a second death
+    ///     path, only so a re-minted netId can't collide the dead one).
+    ///
+    /// CLIENT apply (display-only, under <see cref="SyncApplyScope"/> + the tactical remote-apply guard):
+    ///   • <see cref="HandleActorSpawn"/> — reconstruct the actor from the blobs and
+    ///     <c>ActorSpawner.SpawnActor&lt;TacticalActor&gt;(componentSetDef, instanceData, callEnterPlayOnActor:true)</c>
+    ///     (the exact native path, SpawnActorAbility.cs:131), then bind the host netId. Enter-play is frozen-safe:
+    ///     enemy AI is globally suppressed and the null-faction vision throw is guarded (NullFactionEnterPlayPatch).
+    ///   • <see cref="HandleActorDespawn"/> — remove the mirror (native <c>ActorSpawner.DestroyActor</c>) + registry
+    ///     cleanup. Idempotent.
+    ///
+    /// R1 (verified before coding): the def a spawned actor was built from is a RUNTIME <c>ComponentSetDef</c>
+    /// (<c>GenerateInstanceComponentSetDef → CreateRuntimeDef</c>) whose guid is NOT resolvable on the client. So
+    /// the spawn blob carries the actor's <c>ActorCreateData</c> (its <c>ActorSetDef</c> = that runtime def)
+    /// serialized with <c>BaseDef.SerializeDefContents=true</c> — the native save mechanism that embeds a runtime
+    /// def BY VALUE (SerializationComponent.cs:573). The client's game Serializer rebuilds the def locally, exactly
+    /// as a mid-battle save reloads a spawned Pandoran. Blobs ride the ONE configured game Serializer via
+    /// <c>TacticalDeploySync.SerializeGraph/DeserializeGraph</c>; the wire framing is the engine-free, unit-tested
+    /// <see cref="TacticalActorLifecycleCodec"/>. Degrade-to-notify on any blob/def resolution failure (log + skip,
+    /// never crash, never desync). All broadcasts are host→ALL (3+ player safe); every apply is seq-guarded
+    /// (last-writer-wins) + idempotent.
+    /// </summary>
+    public static class TacticalActorLifecycleSync
+    {
+        // ─── HOST: spawn detection (ActorEnteredPlay postfix) ───────────────────────────────────────────
+
+        /// <summary>HOST postfix on <c>TacticalLevelController.ActorEnteredPlay(TacticalActorBase)</c>: broadcast a
+        /// spawn mirror for a MID-BATTLE actor. Gates: host + active session + not client-mirroring + not inside a
+        /// remote apply + deploy already captured (so deploy-time actors — which ride the 0x80 snapshot — never
+        /// double-emit) + the actor not already registered. Mints the netId FIRST (registry is the sole minter)
+        /// so the client binds the host id and never mints. No-op off-host / single-player.</summary>
+        public static void HostOnActorEnteredPlay(object actor)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            if (TacticalDeploySync.LiveTlc == null || actor == null) return;
+            // Pure gate: deploy captured (post-deploy actors only) AND not already registered AND not inside a
+            // remote apply (our own client materialize must never re-emit).
+            if (!TacticalActorLifecycleGate.ShouldBroadcastSpawn(
+                    TacticalDeploySync.HostHasBroadcastDeploy, IsActorRegistered(actor),
+                    TacticalActorStateSync.IsApplyingRemote))
+                return;
+
+            try
+            {
+                int netId = TacticalDeploySync.Registry.AssignHost(new TacticalActorAdapter(actor));
+                HostBroadcastSpawn(actor, netId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnActorEnteredPlay failed: " + ex); }
+        }
+
+        /// <summary>HOST postfix on <c>TacticalLevelController.ActorDied(DeathReport)</c>: registry cleanup ONLY.
+        /// The death VISUAL already mirrors via tac.damage (0x88); this just frees the dead actor's netId so a
+        /// later mint can't collide it (and keeps the despawn sweep from re-broadcasting a damage-death).</summary>
+        public static void HostOnActorDied(object deathReport)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            try
+            {
+                object deadActor = ReadDeathReportActor(deathReport);
+                if (deadActor == null) return;
+                int netId = TacticalDeploySync.NetIdForLiveActor(deadActor);
+                if (netId >= 0)
+                {
+                    TacticalDeploySync.Registry.Remove(netId);
+                    Debug.Log("[Multiplayer][tac] HOST registry cleanup on death netId=" + netId +
+                              " (death visual owned by tac.damage)");
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnActorDied failed: " + ex); }
+        }
+
+        /// <summary>HOST: build + broadcast the spawn blob for one actor at the minted netId. Serializes the actor's
+        /// <c>ActorCreateData</c> (ComponentSetDef embedded by value) + <c>SerializationData</c> (state) via the game
+        /// Serializer. Degrade-to-notify: a non-spawned actor (null ActorSetDef) or a failed serialize logs + skips
+        /// (the actor still rides the 0x8F delta on the host, just no client mirror).</summary>
+        public static void HostBroadcastSpawn(object actor, int netId)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            try
+            {
+                object createData = GetProp(actor, "ActorCreateData");
+                object instData = GetProp(actor, "SerializationData");
+                if (createData == null || instData == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
+                                   ": null ActorCreateData/SerializationData — skip spawn mirror");
+                    return;
+                }
+                object setDef = ReadActorSetDef(createData);
+                if (setDef == null)
+                {
+                    // IsSpawned==false → ActorSetDef is null (scene-placed actor). A mid-battle spawn should be
+                    // IsSpawned; if not, we cannot rebuild it client-side → degrade-to-notify.
+                    Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
+                                   ": ActorSetDef null (actor not IsSpawned?) — skip spawn mirror");
+                    return;
+                }
+
+                byte[] createBlob, instBlob;
+                SetDefContents(true);
+                try
+                {
+                    createBlob = TacticalDeploySync.SerializeGraph(new[] { createData }, quiet: true);
+                    instBlob = TacticalDeploySync.SerializeGraph(new[] { instData }, quiet: true);
+                }
+                finally { SetDefContents(false); }
+
+                if (createBlob == null || createBlob.Length == 0 || instBlob == null || instBlob.Length == 0)
+                {
+                    Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
+                                   ": serialize produced empty blob — skip spawn mirror");
+                    return;
+                }
+
+                Vector3 pos = ReadPos(actor);
+                int faction = ReadFactionIndex(actor);
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorSpawn);
+                byte[] bytes = TacticalActorLifecycleCodec.EncodeSpawn(
+                    new TacticalActorLifecycleCodec.SpawnPayload(seq, netId, faction, pos.x, pos.y, pos.z,
+                        createBlob, instBlob));
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacActorSpawn, bytes);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.actor.spawn netId=" + netId + " seq=" + seq +
+                          " faction=" + faction + " createLen=" + createBlob.Length + " instLen=" + instBlob.Length);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn failed: " + ex); }
+        }
+
+        /// <summary>HOST: broadcast a despawn (host→all). Reason is diagnostic; the client always removes the mirror.</summary>
+        public static void HostBroadcastDespawn(int netId, byte reason)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            try
+            {
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorDespawn);
+                byte[] bytes = TacticalActorLifecycleCodec.EncodeDespawn(seq, netId, reason);
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacActorDespawn, bytes);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.actor.despawn netId=" + netId +
+                          " seq=" + seq + " reason=" + reason);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastDespawn failed: " + ex); }
+        }
+
+        /// <summary>HOST (folded into the 0x8F flush heartbeat): any REGISTERED actor no longer present in the live
+        /// map set is a NON-DAMAGE despawn (evac / morph-consume / off-map-depart / expiry) — broadcast a despawn +
+        /// remove it from the registry. Damage-deaths are already removed by <see cref="HostOnActorDied"/> before a
+        /// sweep can see them, so this never double-fires a death (which tac.damage owns). Snapshots the despawn set
+        /// BEFORE mutating the registry (no mutate-during-enumeration).</summary>
+        public static void HostSweepDespawns()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            var reg = TacticalDeploySync.Registry;
+            if (reg == null) return;
+            try
+            {
+                var liveSet = new HashSet<object>();
+                foreach (var a in TacticalDeploySync.HostLiveActorObjects())
+                    if (a != null) liveSet.Add(a);
+
+                // Snapshot (netId → wrapped actor) BEFORE the pure sweep so the registry is not mutated mid-walk.
+                var registered = new List<KeyValuePair<int, object>>();
+                foreach (var kv in reg.Entries)
+                {
+                    object actor = (kv.Value is TacticalActorAdapter ad) ? ad.Actor : null;
+                    if (actor != null) registered.Add(new KeyValuePair<int, object>(kv.Key, actor));
+                }
+
+                var despawned = TacticalActorLifecycleGate.ComputeDespawnedNetIds(registered, liveSet);
+                foreach (var netId in despawned)
+                {
+                    HostBroadcastDespawn(netId, TacticalActorLifecycleCodec.ReasonRemoved);
+                    reg.Remove(netId);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostSweepDespawns failed: " + ex); }
+        }
+
+        // ─── CLIENT: apply ──────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>CLIENT inbound (<c>tac.actor.spawn</c> 0x92): seq-guard, then reconstruct + materialize the mirror
+        /// actor under the apply scope, and bind the host netId. Idempotent: an already-present netId (reliable
+        /// double-send, or a post-reload rebind) is marked + skipped. No-op on host. Degrade-to-notify on any
+        /// deserialize / def / spawn failure.</summary>
+        public static void HandleActorSpawn(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalActorLifecycleCodec.TryDecodeSpawn(payload, out var p))
+            { Debug.LogError("[Multiplayer][tac] tac.actor.spawn decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorSpawn, p.Seq)) return;
+
+            try
+            {
+                // Idempotent: already materialized (double-send / post-reload native load) → mark + skip.
+                if (TacticalDeploySync.ResolveLiveActor(p.NetId) != null)
+                {
+                    TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorSpawn, p.Seq);
+                    return;
+                }
+
+                object createData = TacticalDeploySync.DeserializeGraph(p.CreateBlob, ActorCreateDataType(), quiet: true);
+                object instData = TacticalDeploySync.DeserializeGraph(p.InstBlob, ActorInstanceDataType(), quiet: true);
+                if (createData == null || instData == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] HandleActorSpawn netId=" + p.NetId +
+                                   ": deserialize returned null (create=" + (createData != null) +
+                                   " inst=" + (instData != null) + ") — skip");
+                    return;
+                }
+                object setDef = ReadActorSetDef(createData);
+                if (setDef == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] HandleActorSpawn netId=" + p.NetId +
+                                   ": reconstructed ActorSetDef null — skip");
+                    return;
+                }
+
+                object spawned;
+                using (SyncApplyScope.Enter())
+                using (TacticalActorStateSync.EnterApplyScope())
+                {
+                    spawned = InvokeSpawnActor(setDef, instData);
+                }
+                if (spawned == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] HandleActorSpawn netId=" + p.NetId +
+                                   ": ActorSpawner.SpawnActor returned null — skip");
+                    return;
+                }
+
+                TacticalDeploySync.Registry.Register(p.NetId, new TacticalActorAdapter(spawned));
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorSpawn, p.Seq);
+                Debug.Log("[Multiplayer][tac] CLIENT materialized tac.actor.spawn netId=" + p.NetId +
+                          " seq=" + p.Seq + " faction=" + p.FactionIndex);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorSpawn failed: " + ex); }
+        }
+
+        /// <summary>CLIENT inbound (<c>tac.actor.despawn</c> 0x93): seq-guard, then remove the mirror actor (native
+        /// DestroyActor under the apply scope) + registry cleanup. Idempotent (an already-gone actor is a registry-only
+        /// remove). No-op on host.</summary>
+        public static void HandleActorDespawn(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalActorLifecycleCodec.TryDecodeDespawn(payload, out var p))
+            { Debug.LogError("[Multiplayer][tac] tac.actor.despawn decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorDespawn, p.Seq)) return;
+
+            try
+            {
+                object actor = TacticalDeploySync.ResolveLiveActor(p.NetId);
+                if (actor != null)
+                {
+                    using (SyncApplyScope.Enter())
+                    using (TacticalActorStateSync.EnterApplyScope())
+                    {
+                        InvokeDestroyActor(actor);
+                    }
+                }
+                TacticalDeploySync.Registry.Remove(p.NetId);   // idempotent registry cleanup
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorDespawn, p.Seq);
+                Debug.Log("[Multiplayer][tac] CLIENT removed tac.actor.despawn netId=" + p.NetId +
+                          " reason=" + p.Reason + " (mirror " + (actor != null ? "destroyed" : "already gone") + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorDespawn failed: " + ex); }
+        }
+
+        // ─── Helpers ─────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>Is this exact live actor already bound in the registry? Keyed on the WRAPPED actor object's
+        /// reference identity (the adapter has no value-equality), so a fresh adapter never false-matches.</summary>
+        private static bool IsActorRegistered(object actor)
+        {
+            var reg = TacticalDeploySync.Registry;
+            if (reg == null || actor == null) return false;
+            foreach (var kv in reg.Entries)
+                if (kv.Value is TacticalActorAdapter a && ReferenceEquals(a.Actor, actor)) return true;
+            return false;
+        }
+
+        // Reflection cache — bound lazily (TypeByName), like the sibling tactical sync classes.
+        private static Type _actorCreateDataType;
+        private static Type _actorInstanceDataType;
+        private static Type _tacActorType;
+        private static MethodInfo _spawnActorMethod;   // ActorSpawner.SpawnActor<TacticalActor>(BaseDef, ActorInstanceData, bool)
+        private static MethodInfo _destroyActorMethod; // ActorSpawner.DestroyActor(ActorComponent)
+        private static FieldInfo _actorSetDefField;    // ActorCreateData.ActorSetDef
+        private static FieldInfo _serializeDefContentsField; // BaseDef.SerializeDefContents (static)
+        private static bool _defContentsResolved;
+
+        private static Type ActorCreateDataType()
+            => _actorCreateDataType ?? (_actorCreateDataType = AccessTools.TypeByName("Base.Entities.ActorCreateData"));
+
+        private static Type ActorInstanceDataType()
+            => _actorInstanceDataType ?? (_actorInstanceDataType = AccessTools.TypeByName("Base.Entities.ActorInstanceData"));
+
+        /// <summary>Read <c>ActorCreateData.ActorSetDef</c> (the ComponentSetDef; null for a non-spawned actor).</summary>
+        private static object ReadActorSetDef(object createData)
+        {
+            if (createData == null) return null;
+            if (_actorSetDefField == null || _actorSetDefField.DeclaringType == null ||
+                !_actorSetDefField.DeclaringType.IsInstanceOfType(createData))
+                _actorSetDefField = AccessTools.Field(createData.GetType(), "ActorSetDef");
+            return _actorSetDefField?.GetValue(createData);
+        }
+
+        /// <summary>Set <c>BaseDef.SerializeDefContents</c> so a runtime def in the write graph serializes BY VALUE
+        /// (the native save mechanism). Silent no-op if the field can't be resolved (the serialize then falls back
+        /// to guid-only — HandleActorSpawn's degrade-to-notify catches the resulting empty def on the client).</summary>
+        private static void SetDefContents(bool value)
+        {
+            if (!_defContentsResolved)
+            {
+                _defContentsResolved = true;
+                var t = AccessTools.TypeByName("Base.Defs.BaseDef");
+                _serializeDefContentsField = t != null ? AccessTools.Field(t, "SerializeDefContents") : null;
+                if (_serializeDefContentsField == null)
+                    Debug.LogError("[Multiplayer][tac] BaseDef.SerializeDefContents not found — runtime def will not embed by value");
+            }
+            _serializeDefContentsField?.SetValue(null, value);
+        }
+
+        /// <summary>Invoke <c>ActorSpawner.SpawnActor&lt;TacticalActor&gt;(componentSetDef, instanceData,
+        /// callEnterPlayOnActor:true)</c> — the exact native spawn path (SpawnActorAbility.cs:131). Returns the
+        /// spawned actor object, or null.</summary>
+        private static object InvokeSpawnActor(object componentSetDef, object instanceData)
+        {
+            if (_spawnActorMethod == null)
+            {
+                var spawnerType = AccessTools.TypeByName("Base.Entities.ActorSpawner");
+                _tacActorType = _tacActorType ?? AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActor");
+                var open = spawnerType != null ? AccessTools.Method(spawnerType, "SpawnActor") : null;
+                if (open == null || _tacActorType == null || !open.IsGenericMethodDefinition)
+                {
+                    Debug.LogError("[Multiplayer][tac] ActorSpawner.SpawnActor<TacticalActor> not resolvable");
+                    return null;
+                }
+                _spawnActorMethod = open.MakeGenericMethod(_tacActorType);
+            }
+            return _spawnActorMethod.Invoke(null, new object[] { componentSetDef, instanceData, true });
+        }
+
+        /// <summary>Invoke native <c>ActorSpawner.DestroyActor(ActorComponent)</c> (OnExitPlay + Destroy GameObject) —
+        /// the same removal the deploy hydrate uses for client-only extras.</summary>
+        private static void InvokeDestroyActor(object actor)
+        {
+            if (_destroyActorMethod == null)
+            {
+                var spawnerType = AccessTools.TypeByName("Base.Entities.ActorSpawner");
+                _destroyActorMethod = spawnerType != null ? AccessTools.Method(spawnerType, "DestroyActor") : null;
+                if (_destroyActorMethod == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] ActorSpawner.DestroyActor not found — mirror not removed natively");
+                    return;
+                }
+            }
+            _destroyActorMethod.Invoke(null, new[] { actor });
+        }
+
+        /// <summary>Best-effort DIAGNOSTIC faction index (position of the actor's faction in the live TLC's Factions
+        /// list). The authoritative faction rides the instance-data blob (restored on enter-play); this is only a
+        /// wire diagnostic / display hint. Returns -1 on any failure.</summary>
+        private static int ReadFactionIndex(object actor)
+        {
+            try
+            {
+                object faction = GetProp(actor, "TacticalFaction");
+                if (faction == null) return -1;
+                object factions = GetProp(TacticalDeploySync.LiveTlc, "Factions");
+                if (factions is IEnumerable en)
+                {
+                    int i = 0;
+                    foreach (var f in en)
+                    {
+                        if (ReferenceEquals(f, faction)) return i;
+                        i++;
+                    }
+                }
+            }
+            catch { }
+            return -1;
+        }
+
+        private static Vector3 ReadPos(object actor)
+        {
+            try
+            {
+                object pos = GetProp(actor, "Pos");
+                if (pos is Vector3 v) return v;
+            }
+            catch { }
+            return Vector3.zero;
+        }
+
+        private static object ReadDeathReportActor(object deathReport)
+        {
+            if (deathReport == null) return null;
+            // DeathReport.Actor is a public FIELD (TacticalActorBase Actor).
+            var f = AccessTools.Field(deathReport.GetType(), "Actor");
+            return f?.GetValue(deathReport);
+        }
+
+        private static readonly Dictionary<string, PropertyInfo> _propCache = new Dictionary<string, PropertyInfo>();
+        private static object GetProp(object obj, string name)
+        {
+            if (obj == null) return null;
+            string key = obj.GetType().FullName + "::" + name;
+            if (!_propCache.TryGetValue(key, out var pi))
+            {
+                pi = AccessTools.Property(obj.GetType(), name);
+                _propCache[key] = pi;
+            }
+            return pi?.GetValue(obj, null);
+        }
+    }
+}

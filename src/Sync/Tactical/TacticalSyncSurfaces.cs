@@ -111,6 +111,21 @@ namespace Multiplayer.Sync.Tactical
         // only — the client replays a STUB no-op (logs); the BashCrt-shaped replay + damage/cost neuter is a
         // follow-on. Wire = tac.fire.start MINUS shotCount (a melee is one swing). Takes the next free id 0x91.
         public const ushort TacMeleeStart = 0x91;        // 145: host→all     "actor netId begins melee swing@guid at target" (start, carries seq)
+
+        // ─── TS1: mid-battle actor SPAWN / DESPAWN mirror ─────────────────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Closes the structural blind spot
+        // "things that are NOT deploy-time actors" (reinforcements, egg hatch, siren summon, turret/shield deploy,
+        // resurrect, morph). Both host→ALL (3+ player safe), carry their own TacticalLiveSeq (last-writer-wins).
+        //   • spawn (0x92): [seq][netId][faction][pos][ActorCreateData blob][ActorInstanceData blob] — the client
+        //     materializes a mirror actor via ActorSpawner.SpawnActor and binds the host netId; it then joins the
+        //     0x8F delta + tac.damage streams. The ComponentSetDef rides the ActorCreateData blob BY VALUE
+        //     (BaseDef.SerializeDefContents), since a spawned actor's def is a runtime def (R1). See
+        //     TacticalActorLifecycleSync / TacticalActorLifecycleCodec.
+        //   • despawn (0x93): [seq][netId][reason] — non-damage removal (evac/morph/off-map/expiry); the client
+        //     removes the mirror + registry cleanup. Damage-death stays owned by tac.damage (0x88).
+        // 0x8E stays RESERVED for the future generic ability-INTENT (TS2). These take the next free ids 0x92/0x93.
+        public const ushort TacActorSpawn = 0x92;        // 146: host→all     "materialize mid-battle actor@netId (blob)" (carries seq)
+        public const ushort TacActorDespawn = 0x93;      // 147: host→all     "remove actor@netId (non-damage despawn)"   (carries seq)
     }
 
     /// <summary>

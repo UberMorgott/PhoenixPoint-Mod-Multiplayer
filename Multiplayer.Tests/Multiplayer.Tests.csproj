@@ -288,6 +288,11 @@
          patches) are NOT linked — they bind game types and are in-game verified. -->
     <Compile Include="..\src\Sync\Tactical\TacticalActorRegistry.cs"><Link>Sync\Tactical\TacticalActorRegistry.cs</Link></Compile>
     <Compile Include="..\src\Sync\Tactical\TacticalSyncSurfaces.cs"><Link>Sync\Tactical\TacticalSyncSurfaces.cs</Link></Compile>
+    <!-- TS1 mid-battle actor spawn/despawn mirror: pure, Unity-free wire codec (0x92/0x93) + host spawn-gate /
+         despawn-sweep decision core. The engine glue (TacticalActorLifecycleSync + ActorLifecyclePatches) binds
+         game types via reflection + the game Serializer and is NOT linked (in-game verified). -->
+    <Compile Include="..\src\Sync\Tactical\TacticalActorLifecycleCodec.cs"><Link>Sync\Tactical\TacticalActorLifecycleCodec.cs</Link></Compile>
+    <Compile Include="..\src\Sync\Tactical\TacticalActorLifecycleGate.cs"><Link>Sync\Tactical\TacticalActorLifecycleGate.cs</Link></Compile>
     <!-- Host deploy-capture READINESS gate (pure): defer the snapshot until the level is turn-0 ready
          (HasAnyTurnStarted) so RecordInstanceData doesn't NRE on a half-built level. RCA 2026-06-18. -->
     <Compile Include="..\src\Sync\Tactical\TacticalDeployReadinessGate.cs"><Link>Sync\Tactical\TacticalDeployReadinessGate.cs</Link></Compile>

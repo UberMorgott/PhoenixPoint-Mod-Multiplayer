@@ -68,6 +68,10 @@ namespace Multiplayer.Sync.Tactical
         // so the network-driven move/turn appliers can reach Factions/_currentFactionIndex without a fresh
         // scene scan. Cleared on mission exit.
         public static object LiveTlc { get; private set; }
+        // TS1 gate: true once the host has captured + broadcast the turn-0 deploy snapshot for the current
+        // mission, so the ActorEnteredPlay chokepoint only mirrors POST-deploy actors (deploy-time actors ride
+        // the 0x80 snapshot). Reset with _lastBroadcastSiteId on mission exit.
+        public static bool HostHasBroadcastDeploy => _lastBroadcastSiteId != int.MinValue;
         // Host: monotonic per-surface seq source for tac.move / tac.turn. Client: last-writer-wins guard.
         public static TacticalLiveSeq LiveSeq { get; private set; } = new TacticalLiveSeq();
         // Host: drops a double-sent client intent (move/end-turn) so it never applies twice.
@@ -895,6 +899,20 @@ namespace Multiplayer.Sync.Tactical
                 try { TacticalActorStateSync.HandleActorState(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.actorstate failed: " + ex); }
                 return true;
             }
+
+            // ─── TS1: mid-battle actor SPAWN / DESPAWN mirror ─────────────────────────────────────
+            // Host→all outcome pushes; client-only apply (each handler is side-gated internally, so a stray
+            // envelope on the host is a clean no-op).
+            if (surfaceId == (byte)TacticalSurfaceIds.TacActorSpawn)
+            {
+                try { TacticalActorLifecycleSync.HandleActorSpawn(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.actor.spawn failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacActorDespawn)
+            {
+                try { TacticalActorLifecycleSync.HandleActorDespawn(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.actor.despawn failed: " + ex); }
+                return true;
+            }
             return false;
         }
 
@@ -1175,6 +1193,18 @@ namespace Multiplayer.Sync.Tactical
             foreach (var a in actors)
                 if (a != null) list.Add(new TacticalActorAdapter(a));
             return list;
+        }
+
+        /// <summary>TS1: enumerate the LIVE map actor objects (unwrapped <c>TacticalActorBase</c>) for the current
+        /// mission — the reference set the despawn sweep compares the registry against. Empty off-mission.</summary>
+        public static List<object> HostLiveActorObjects()
+        {
+            var result = new List<object>();
+            object tlc = LiveTlc;
+            if (tlc == null) return result;
+            foreach (var aref in EnumerateActorRefs(tlc))
+                if (aref is TacticalActorAdapter ad && ad.Actor != null) result.Add(ad.Actor);
+            return result;
         }
 
         /// <summary>

@@ -70,6 +70,19 @@ namespace Multiplayer.Sync.Tactical
         [ThreadStatic] private static bool _applyingRemote;
         public static bool IsApplyingRemote => _applyingRemote;
 
+        /// <summary>Enter the tactical remote-apply re-entrancy scope (sets <see cref="IsApplyingRemote"/> for the
+        /// scope lifetime, restoring the prior value on dispose — nestable). Used by sibling tactical sync classes
+        /// (e.g. <c>TacticalActorLifecycleSync</c> spawn/despawn materialize) so their causally-required native
+        /// applies are guarded exactly like this delta apply.</summary>
+        public static IDisposable EnterApplyScope() => new ApplyScope();
+
+        private sealed class ApplyScope : IDisposable
+        {
+            private readonly bool _prev;
+            public ApplyScope() { _prev = _applyingRemote; _applyingRemote = true; }
+            public void Dispose() { _applyingRemote = _prev; }
+        }
+
         // The TLC the active flush coroutine is bound to (so a re-deploy / mission-exit makes the old loop exit).
         private static object _flushBoundTlc;
         private static bool _flushRunning;
@@ -249,6 +262,12 @@ namespace Multiplayer.Sync.Tactical
                 foreach (var id in _lastSig.Keys) if (!liveNetIds.Contains(id)) stale.Add(id);
                 foreach (var id in stale) _lastSig.Remove(id);
             }
+
+            // TS1 (despawn): fold the mid-battle actor-removal sweep into this heartbeat — any REGISTERED actor no
+            // longer in the live map (non-damage despawn: evac / morph-consume / off-map-depart / expiry) is
+            // broadcast + registry-removed. Runs AFTER the walk (it mutates the registry). Damage-deaths are already
+            // cleaned by the ActorDied postfix (tac.damage owns the death visual), so this never double-fires them.
+            TacticalActorLifecycleSync.HostSweepDespawns();
 
             if (changed.Count == 0) return;
 
