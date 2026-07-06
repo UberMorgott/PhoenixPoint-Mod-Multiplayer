@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 
 namespace Multiplayer.Network
 {
@@ -100,6 +101,85 @@ namespace Multiplayer.Network
             }
 
             return new GuardVerdict(true, null, null);
+        }
+
+        /// <summary>
+        /// Collects the labels of ALL unresolved bindings, in input order. <see cref="Evaluate"/>
+        /// stops at the FIRST failure (a deterministic verdict + one actionable message); this
+        /// companion enumerates EVERY failure so the startup self-check can list every broken binding
+        /// in a single log line — a game update can drop several members at once. null/empty input →
+        /// empty list.
+        /// </summary>
+        public static IReadOnlyList<string> UnresolvedMembers(IEnumerable<CriticalBinding> bindings)
+        {
+            var missing = new List<string>();
+            if (bindings != null)
+            {
+                foreach (var binding in bindings)
+                {
+                    if (!binding.Resolved)
+                        missing.Add(binding.Name);
+                }
+            }
+            return missing;
+        }
+
+        /// <summary>
+        /// Builds the ONE prominent, multi-line startup report that names every unresolved critical
+        /// binding, or null when nothing is unresolved (compatible → no report to show). Single source
+        /// of truth for the report wording so the firing code and the tests agree byte-for-byte.
+        /// </summary>
+        public static string BuildStartupReport(IReadOnlyList<string> unresolvedMembers)
+        {
+            if (unresolvedMembers == null || unresolvedMembers.Count == 0)
+                return null;
+
+            int n = unresolvedMembers.Count;
+            string rule = new string('=', 60);
+            var sb = new StringBuilder();
+            sb.Append(rule).Append('\n');
+            sb.Append("Multiplayer mod: INCOMPATIBLE Phoenix Point version.").Append('\n');
+            sb.Append(n)
+              .Append(n == 1 ? " critical reflection binding" : " critical reflection bindings")
+              .Append(" failed to resolve - co-op sync WILL break. Update the mod.").Append('\n');
+            sb.Append("Missing:").Append('\n');
+            foreach (var member in unresolvedMembers)
+                sb.Append("  - ").Append(member).Append('\n');
+            sb.Append(rule);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Validates the curated critical-binding label list itself — a dev-facing integrity check on
+        /// the list, NOT a game-version check: the list must be non-null and non-empty, and every label
+        /// must be non-blank and unique (a blank or duplicated label would make the missing-binding
+        /// report ambiguous). Returns the problems found (empty ⇒ the list is well-formed). Pure so the
+        /// rules are unit-tested here; the startup self-check runs it and logs any problem without
+        /// throwing.
+        /// </summary>
+        public static IReadOnlyList<string> ValidateLabels(IEnumerable<string> labels)
+        {
+            var problems = new List<string>();
+            if (labels == null)
+            {
+                problems.Add("binding label list is null");
+                return problems;
+            }
+
+            var seen = new HashSet<string>();
+            int count = 0;
+            foreach (var label in labels)
+            {
+                if (string.IsNullOrWhiteSpace(label))
+                    problems.Add($"binding label at index {count} is null or blank");
+                else if (!seen.Add(label))
+                    problems.Add($"duplicate binding label '{label}'");
+                count++;
+            }
+            if (count == 0)
+                problems.Add("binding label list is empty");
+
+            return problems;
         }
     }
 }

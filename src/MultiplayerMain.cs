@@ -38,6 +38,13 @@ namespace Multiplayer
                 Logger.LogWarning("[Multiplayer] PatchAll failed: " + e.Message);
             }
 
+            // Phase 5 version-guard: resolve a curated set of the CRITICAL reflection bindings co-op
+            // sync depends on. If a Phoenix Point update silently renamed/removed any, log ONE prominent
+            // error naming each broken binding so the incompatibility is diagnosable up front instead of
+            // surfacing as a mid-game desync. Self-contained and never throws (no behavior change when
+            // all bindings resolve).
+            ReflectionGuard.RunStartupSelfCheck(Logger);
+
             _ui = ModGO.AddComponent<MultiplayerUI>();
             Logger.LogInfo("[Multiplayer] UI initialized");
 

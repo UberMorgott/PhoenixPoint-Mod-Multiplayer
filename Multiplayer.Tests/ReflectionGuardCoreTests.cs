@@ -104,4 +104,123 @@ public class ReflectionGuardCoreTests
             "Multiplayer mod: incompatible Phoenix Point version (missing SomeType.SomeMember). Update the mod.",
             ReflectionGuardCore.BuildMessage("SomeType.SomeMember"));
     }
+
+    // ---- UnresolvedMembers: enumerate EVERY failure (companion to Evaluate's first-only verdict) ----
+
+    [Fact]
+    public void UnresolvedMembers_AllResolved_IsEmpty()
+    {
+        var bindings = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", true),
+            new CriticalBinding("B.b", true),
+        };
+
+        Assert.Empty(ReflectionGuardCore.UnresolvedMembers(bindings));
+    }
+
+    [Fact]
+    public void UnresolvedMembers_ListsAllUnresolvedInOrder()
+    {
+        var bindings = new List<CriticalBinding>
+        {
+            new CriticalBinding("A.a", true),
+            new CriticalBinding("B.b", false),
+            new CriticalBinding("C.c", true),
+            new CriticalBinding("D.d", false),
+        };
+
+        Assert.Equal(new[] { "B.b", "D.d" }, ReflectionGuardCore.UnresolvedMembers(bindings));
+    }
+
+    [Fact]
+    public void UnresolvedMembers_NullOrEmpty_IsEmpty()
+    {
+        Assert.Empty(ReflectionGuardCore.UnresolvedMembers(null));
+        Assert.Empty(ReflectionGuardCore.UnresolvedMembers(new List<CriticalBinding>()));
+    }
+
+    // ---- BuildStartupReport: the ONE prominent multi-binding log block ----
+
+    [Fact]
+    public void BuildStartupReport_NullOrEmpty_ReturnsNull()
+    {
+        Assert.Null(ReflectionGuardCore.BuildStartupReport(null));
+        Assert.Null(ReflectionGuardCore.BuildStartupReport(new List<string>()));
+    }
+
+    [Fact]
+    public void BuildStartupReport_SingleMember_ExactBlock_Singular()
+    {
+        string rule = new string('=', 60);
+        string expected =
+            rule + "\n" +
+            "Multiplayer mod: INCOMPATIBLE Phoenix Point version.\n" +
+            "1 critical reflection binding failed to resolve - co-op sync WILL break. Update the mod.\n" +
+            "Missing:\n" +
+            "  - GeoSite.SiteId\n" +
+            rule;
+
+        Assert.Equal(expected, ReflectionGuardCore.BuildStartupReport(new[] { "GeoSite.SiteId" }));
+    }
+
+    [Fact]
+    public void BuildStartupReport_MultipleMembers_ExactBlock_Plural_InOrder()
+    {
+        string rule = new string('=', 60);
+        string expected =
+            rule + "\n" +
+            "Multiplayer mod: INCOMPATIBLE Phoenix Point version.\n" +
+            "2 critical reflection bindings failed to resolve - co-op sync WILL break. Update the mod.\n" +
+            "Missing:\n" +
+            "  - GeoSite.SiteId\n" +
+            "  - GeoLevelController.Map\n" +
+            rule;
+
+        Assert.Equal(
+            expected,
+            ReflectionGuardCore.BuildStartupReport(new[] { "GeoSite.SiteId", "GeoLevelController.Map" }));
+    }
+
+    // ---- ValidateLabels: dev-facing integrity check of the curated list itself ----
+
+    [Fact]
+    public void ValidateLabels_WellFormedList_NoProblems()
+    {
+        var labels = new[] { "PhoenixSaveManager.LatestLoad", "GeoSite.SiteId", "Serializer" };
+
+        Assert.Empty(ReflectionGuardCore.ValidateLabels(labels));
+    }
+
+    [Fact]
+    public void ValidateLabels_NullList_ReportsProblem()
+    {
+        Assert.Single(ReflectionGuardCore.ValidateLabels(null));
+    }
+
+    [Fact]
+    public void ValidateLabels_EmptyList_ReportsProblem()
+    {
+        Assert.Single(ReflectionGuardCore.ValidateLabels(new string[0]));
+    }
+
+    [Fact]
+    public void ValidateLabels_BlankLabel_ReportsProblem()
+    {
+        var labels = new[] { "GeoSite.SiteId", "  " };
+
+        var problems = ReflectionGuardCore.ValidateLabels(labels);
+
+        Assert.Contains(problems, p => p.Contains("index 1"));
+    }
+
+    [Fact]
+    public void ValidateLabels_DuplicateLabel_ReportsProblem()
+    {
+        var labels = new[] { "GeoSite.SiteId", "GeoSite.SiteId" };
+
+        var problems = ReflectionGuardCore.ValidateLabels(labels);
+
+        Assert.Contains(problems, p => p.Contains("duplicate") && p.Contains("GeoSite.SiteId"));
+    }
 }
