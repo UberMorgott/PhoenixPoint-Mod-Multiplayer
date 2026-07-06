@@ -16,7 +16,8 @@ namespace Multiplayer.Network.Sync
         Dialogs,
         TimeControl,
         VehicleTravel,
-        ControlSoldiers   // PS4 soldier-owned edits (transfer / dismiss / rename) — capability bit + per-soldier ownership (Validate)
+        ControlSoldiers,  // PS4 soldier-owned edits (transfer / dismiss / rename) — capability bit + per-soldier ownership (Validate)
+        GeoAbility        // geoscape sim-mutating ability activation (harvest/excavate/repair/scan/probe/activate-base/guard) — default FullCommander, like VehicleTravel
     }
 
     /// <summary>

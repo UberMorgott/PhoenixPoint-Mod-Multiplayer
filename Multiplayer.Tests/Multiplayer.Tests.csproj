@@ -233,6 +233,12 @@
     <!-- Explore-POI relay intent (pure wire round-trip). Apply binds game types via VehicleTravelReflection
          (already linked) and is never invoked in tests. -->
     <Compile Include="..\src\Network\Sync\Actions\ExploreSiteAction.cs"><Link>Sync\Actions\ExploreSiteAction.cs</Link></Compile>
+    <!-- Generic geoscape ability relay (ONE GeoAbility.Activate layer): pure allowlist + pure Write/Read
+         round-trip. The action's Apply is wired at runtime to GeoAbilityRelayReflection (game-bound, NOT linked)
+         via the ApplyProvider seam, so the action file stays game-glue-free — same split as RemoveFacilityAction's
+         IsAuthoritativeHost provider. The Harmony patch (GeoAbilityActivatePatch) is also NOT linked. -->
+    <Compile Include="..\src\Sync\Geoscape\GeoAbilityRelay.cs"><Link>Sync\Geoscape\GeoAbilityRelay.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\GeoAbilityActivateAction.cs"><Link>Sync\Actions\GeoAbilityActivateAction.cs</Link></Compile>
     <!-- Geoscape cutscene mirror (host→client): pure wire round-trip for PlayCutsceneAction. Its Apply binds game
          types via CutsceneReflection (compiles against 0Harmony + UnityEngine.CoreModule, never invoked in tests). -->
     <Compile Include="..\src\Network\Sync\CutsceneReflection.cs"><Link>Sync\CutsceneReflection.cs</Link></Compile>

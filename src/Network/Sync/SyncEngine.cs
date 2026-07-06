@@ -133,6 +133,11 @@ namespace Multiplayer.Network.Sync
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
             // The action file itself is NetworkEngine-free (linked into the pure test build).
             Actions.RemoveFacilityAction.IsAuthoritativeHost = () => _engine != null && _engine.IsHost;
+            // Generic geoscape ability relay: wire the host-apply to the reflection resolver (the action file is
+            // game-glue-free so the pure wire tests can link it, mirroring the RemoveFacility seam above).
+            Actions.GeoAbilityActivateAction.ApplyProvider = (rt, a) => GeoAbilityRelayReflection.Activate(rt,
+                a.ActorKind, a.ActorOwnerId, a.ActorVehicleId, a.ActorSiteId, a.AbilityDefGuid, a.TargetKind,
+                a.TargetSiteId, a.TargetOwnerId, a.TargetVehicleId, a.TX, a.TY, a.TZ, a.TargetFactionGuid);
             // Rail-unify: arm the SurfaceRouter geoscape fast-path so a geoscape envelope surface (0xA0+) routes
             // to this engine's appliers. Phase 1 retired the legacy 0x63/0x64 sends, so wallet (0xA0) + state
             // (0xA1) now ride this envelope rail ONLY (host emits them unconditionally; see BroadcastFullWallet/

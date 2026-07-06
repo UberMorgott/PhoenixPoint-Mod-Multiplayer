@@ -37,5 +37,9 @@ namespace Multiplayer.Network.Sync
         public const ushort TransferSoldier = 63;  // native RemoveCharacter(src)+AddCharacter(dst) between Phoenix containers
         public const ushort DismissSoldier = 64;   // GeoFaction.KillCharacter(soldier, Dismissed)
         public const ushort RenameSoldier = 65;    // GeoCharacter.Rename(newName)
+
+        // Geoscape sim-mutating abilities 80-89 (ONE generic GeoAbility.Activate relay — client suppress + relay
+        // intent, host authoritative Activate; result mirrors on the existing geoscape state channels)
+        public const ushort GeoAbilityActivate = 80; // Harvest/Excavate/EmergencyRepair/Scan/AncientSiteProbe/ActivateBase/AncientGuardianGuard
     }
 }

@@ -49,6 +49,9 @@ namespace Multiplayer.Network.Sync
             SyncedActionRegistry.Register(SyncedActionIds.TransferSoldier, TransferSoldierAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.DismissSoldier, DismissSoldierAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.RenameSoldier, RenameSoldierAction.Read);
+
+            // Geoscape sim-mutating abilities (ONE generic GeoAbility.Activate relay)
+            SyncedActionRegistry.Register(SyncedActionIds.GeoAbilityActivate, GeoAbilityActivateAction.Read);
         }
     }
 }
