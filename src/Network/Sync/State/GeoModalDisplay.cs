@@ -293,6 +293,21 @@ namespace Multiplayer.Network.Sync.State
                       "Any salvage and aircraft damage are already reflected on your side.",
                 "ShowInterceptionNotice modalType=" + modalType + " pending=" + pending);
 
+        /// <summary>
+        /// Client: the HOST's campaign ended (feat-campaign-end) but the native outro replay FAILED —
+        /// degrade to the notify-only prompt (ReportMirrorGate degrade-to-notify precedent) with the ending
+        /// kind; the caller then returns to the main menu (notice ALWAYS precedes the teardown —
+        /// <c>CampaignEndFlow.ClientSteps</c> pinned ordering). Best-effort: a MessageBox miss just logs.
+        /// </summary>
+        public static void ShowCampaignEndNotice(bool victory)
+            => ShowNoticePrompt(
+                victory
+                    ? "The campaign has been WON.\n" +
+                      "The co-op session is over — returning to the main menu."
+                    : "The campaign has been LOST.\n" +
+                      "The co-op session is over — returning to the main menu.",
+                "ShowCampaignEndNotice victory=" + victory);
+
         /// <summary>Shared notify-only native text prompt (GameUtl.GetMessageBox().ShowSimplePrompt) — the
         /// degrade surface every unbuildable mirrored window funnels through. Never throws.</summary>
         private static void ShowNoticePrompt(string text, string logTag)

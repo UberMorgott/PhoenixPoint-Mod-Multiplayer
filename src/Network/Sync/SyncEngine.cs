@@ -1361,6 +1361,25 @@ namespace Multiplayer.Network.Sync
             try
             {
                 var rt = GeoRuntime.Instance;
+                // CAMPAIGN END (feat-campaign-end, synthetic sentinel 255): the host hit the ONE geoscape
+                // endgame chokepoint (GeoLevelController.TriggerGameOver — victory outro / defeat collapse /
+                // TFTV ending). Own path FIRST: it is not an OpenModal replay at all. Consecutive-dup belt
+                // (occId dedup already ran upstream) + queue-don't-drop while this client is still in
+                // tactical (Batch-2 outcome-queue precedent — the geoscape drain re-runs it once live).
+                if (p.Variant == State.ReportModalVariant.CampaignEnd)
+                {
+                    if (!_outcomeDedup.ShouldShow(data))
+                    {
+                        Debug.Log("[Multiplayer] CLIENT OnReportModalShow campaign-end → IGNORED (duplicate delivery)");
+                        return false;
+                    }
+                    if (!State.GeoModalDisplay.CanShow(rt))
+                    {
+                        QueuePendingOutcome(p);
+                        return false;   // deferred to the geoscape-return drain — must not hold the queue
+                    }
+                    return ShowCampaignEnd(rt, p);
+                }
                 // INTERCEPTION NOTICE (WA-3 gap 5c, modals 32/33): the client never rebuilds the native window
                 // (live-aircraft binds — classifier INTERCEPTION FAMILY note); it shows the notify-only prompt.
                 // Same consecutive-dup guard as outcomes (0x69 has no occId yet; STUN reliable sends twice).
@@ -1496,9 +1515,57 @@ namespace Multiplayer.Network.Sync
             }
             foreach (var p in pending)
             {
-                try { ShowMissionOutcome(rt, p); }
+                try
+                {
+                    // The queue is shared with the campaign-end notice (same queue-don't-drop semantics);
+                    // dispatch by variant — everything else queued here is a mission outcome.
+                    if (p.Variant == State.ReportModalVariant.CampaignEnd) ShowCampaignEnd(rt, p);
+                    else ShowMissionOutcome(rt, p);
+                }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.DrainPendingOutcomes failed: " + ex.Message); }
             }
+        }
+
+        /// <summary>
+        /// Client executor for a received CAMPAIGN-END notice (feat-campaign-end). Runs the pinned
+        /// <see cref="State.CampaignEndFlow.ClientSteps"/> order (CampaignEndFlowTests — notice-before-teardown):
+        ///   1. pre-consume the F3 host-leave latch — the host tears its transport down after ITS outro, and
+        ///      that drop must not fire the "Host ended the session" prompt over this client's own ending;
+        ///   2. release client view-locks — a defeat can land while a mirrored blocking brief is up
+        ///      (view-locked, close swallowed) and would smother the outro's view-switch;
+        ///   3. replay the SAME native ending under <see cref="SyncApplyScope"/> (TriggerGameOver with the
+        ///      victory-mapped faction; the cinematic def is the view's own local field — nothing on the wire);
+        ///   4. on replay failure: degrade to the notify prompt, THEN return to the main menu via the
+        ///      host-leave menu path (the existing FinishLevelAndGoToLobby teardown patch closes the session).
+        /// Never occupies the unified display queue (the session is ending; no close signal would follow).
+        /// </summary>
+        private bool ShowCampaignEnd(GeoRuntime rt, State.ReportModalPayload p)
+        {
+            bool victory = State.CampaignEndFlow.IsVictory(p.ShareLevel);
+            Debug.Log("[Multiplayer] CLIENT campaign END received (victory=" + victory
+                      + " victorGuid=" + p.DefId + ") → replaying the native outro");
+            Multiplayer.Network.HostLeaveHandler.SuppressForCampaignEnd();
+            try
+            {
+                State.BlockingModalMirrorRegistry.Reset();
+                if (_currentReportModalType != 0)
+                {
+                    var lockedType = _currentReportModalType;
+                    using (SyncApplyScope.Enter())
+                        State.GeoModalDisplay.CloseBlocking(rt, lockedType);
+                    OnClientModalClosed(lockedType);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.ShowCampaignEnd view-lock release failed: " + ex.Message); }
+            bool replayed;
+            using (SyncApplyScope.Enter())
+                replayed = State.CampaignEndReflection.ReplayCampaignEnd(rt, victory);
+            if (!replayed)
+            {
+                State.GeoModalDisplay.ShowCampaignEndNotice(victory);
+                Multiplayer.Network.HostLeaveHandler.ReturnToMainMenuForCampaignEnd();
+            }
+            return false;   // ends the session — never occupies the display queue
         }
 
         private bool ShowMissionOutcome(GeoRuntime rt, State.ReportModalPayload p)

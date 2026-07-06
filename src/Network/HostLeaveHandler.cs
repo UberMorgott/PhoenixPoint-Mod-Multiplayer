@@ -85,6 +85,43 @@ namespace Multiplayer.Network
         /// <summary>True once this session's host-leave has been handled (the menu return fired).</summary>
         public static bool AlreadyHandled => _latch.Handled;
 
+        /// <summary>
+        /// Campaign-end (feat-campaign-end): the session is ending by CAMPAIGN CONCLUSION — the client is
+        /// about to play its own native outro / GameOver screen, and the host will tear its transport down
+        /// after ITS outro. Pre-consume the same one-shot latch <see cref="HandleHostLeft"/> uses so that
+        /// later transport drop / graceful HostDisconnected / heartbeat timeout is a silent no-op (no
+        /// "Host ended the session" prompt, no forced menu-return yanking the client out of the outro).
+        /// The latch re-arms on the next session's <see cref="AttachTo"/> as usual. Idempotent.
+        /// </summary>
+        public static void SuppressForCampaignEnd()
+        {
+            if (_latch.TryHandle())
+                Debug.Log("[Multiplayer] campaign end: F3 host-leave latch pre-consumed — the host's "
+                          + "post-outro teardown will not interrupt this client's ending.");
+        }
+
+        /// <summary>
+        /// Campaign-end DEGRADE teardown (notice shown first — CampaignEndFlow.ClientSteps ordering): the
+        /// native outro replay failed, so return to the Main Menu via the SAME native quit-to-menu
+        /// chokepoint <see cref="HandleHostLeft"/> uses. The existing FinishLevelAndGoToLobbyTearDownPatch
+        /// postfix auto-runs NetworkEngine.TearDown(); the defensive TearDown belt mirrors HandleHostLeft.
+        /// </summary>
+        public static void ReturnToMainMenuForCampaignEnd()
+        {
+            try
+            {
+                var game = GameUtl.GameComponent<PhoenixGame>();
+                game?.FinishLevelAndGoToLobby();
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end return-to-menu failed: " + e.Message); }
+            try { NetworkEngine.Instance?.TearDown(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end TearDown failed: " + e.Message); }
+            // Same Fix #5 remainder as HandleHostLeft: reset the UI lobby FSM + clear the chosen save so
+            // the next host/join never inherits a stale ClientLobby state. Null-safe.
+            try { Multiplayer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end UI teardown failed: " + e.Message); }
+        }
+
         // ONE handler for both triggers. Idempotent (one-shot latch): a graceful HostDisconnected packet
         // followed by the transport drop of the same host must return to the menu only once.
         private static void HandleHostLeft()

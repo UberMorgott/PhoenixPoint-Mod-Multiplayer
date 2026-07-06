@@ -45,6 +45,14 @@ namespace Multiplayer.Network.Sync.State
     ///                                  client NEVER rebuilds the native window: it always shows the notify-only
     ///                                  text prompt (32 = pending-decision text + host gate armed; 33 = resolved
     ///                                  text, non-blocking). No ids carried — all fields stay defaults.
+    ///   • <see cref="CampaignEnd"/>  — the CAMPAIGN ended on the host (feat-campaign-end): victory outro /
+    ///                                  defeat by Phoenix collapse / TFTV custom ending — all through the ONE
+    ///                                  native chokepoint GeoLevelController.TriggerGameOver. NOT an OpenModal
+    ///                                  window: ModalType carries the synthetic CampaignEndFlow.SentinelModalType
+    ///                                  (255), ShareLevel the victory|defeat flag, DefId the victor faction's
+    ///                                  Def.Guid (ending id). The client replays the SAME native outro
+    ///                                  (cinematic def resolved locally — never on the wire) or degrades to a
+    ///                                  notify prompt + menu return. See <see cref="CampaignEndFlow"/>.
     /// </summary>
     public enum ReportModalVariant : byte
     {
@@ -57,6 +65,7 @@ namespace Multiplayer.Network.Sync.State
         SiteMissionBrief = 6, // optional site deploy briefs (scavenge/ancient) — mirrored view-only + blocking
         ActiveMissionBrief = 7, // LIVE→site-id briefs off the P1-mirrored site.ActiveMission — blocking + degradable
         InterceptionNotice = 8, // interception brief/outcome (32/33) — ALWAYS notify-only on the client (WA-3)
+        CampaignEnd = 9,      // campaign conclusion notice (synthetic sentinel 255) — outro replay / degrade+teardown
     }
 
     /// <summary>
