@@ -336,6 +336,9 @@
          MissionEndPatches) binds game types via reflection + the GameOver() chokepoint and is NOT linked (in-game verified). -->
     <Compile Include="..\src\Sync\Tactical\TacticalMissionEndCodec.cs"><Link>Sync\Tactical\TacticalMissionEndCodec.cs</Link></Compile>
     <Compile Include="..\src\Sync\Tactical\TacticalMissionEndGate.cs"><Link>Sync\Tactical\TacticalMissionEndGate.cs</Link></Compile>
+    <!-- TS6 struct-damage: pure wire codec + the pure no-double-actor-damage decision -->
+    <Compile Include="..\src\Sync\Tactical\TacticalStructDamageCodec.cs"><Link>Sync\Tactical\TacticalStructDamageCodec.cs</Link></Compile>
+    <Compile Include="..\src\Harmony\Tactical\ClientStructDamageInertGate.cs"><Link>Harmony\Tactical\ClientStructDamageInertGate.cs</Link></Compile>
     <!-- Feature A: pure, Unity-free CLIENT enemy-turn presentation gate (enter UIStateOtherFactionTurn for a
          non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
          engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->

@@ -162,6 +162,21 @@ namespace Multiplayer.Sync.Tactical
         //   non-occupying) — TS4 shows NO modal of its own → no double-outcome. See TacticalMissionEndSync /
         //   TacticalMissionEndCodec / TacticalMissionEndGate. Next free 0x95.
         public const ushort TacMissionEnd = 0x95;         // 149: host→all     "mission conclusion: game-over + result + evac/objectives" (carries seq)
+
+        // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ───────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL (3+ player safe), carries its
+        // own TacticalLiveSeq (last-writer-wins). Closes the audit gap "client walls/floors stay solid → cover /
+        // line-of-fire / navigation diverge". Mirrors destruction EVENTS: the host postfixes the combat-damage funnel
+        // DestructableDamageReceiver.ApplyDamage (each hit TILE of a Destructable + the single receiver of a Breakable
+        // — DISJOINT from TS3's TacticalVoxel.SetVoxelType, a DIFFERENT system → 0x94/0x96 never touch the same leaf),
+        // buffers the hits per flush, and broadcasts them here; the client re-applies the SAME native damage to the
+        // SAME destructible → the native destruction cascade runs identically (cover removed, LoS opened, nav updated).
+        // Deterministic cross-side identity = DestructableBase.GuidInScene (SceneObjectId.GuidString — the game's OWN
+        // destructible save key), so a given wall's guid matches host↔client on a shared map (R2 resolved).
+        //   structdamage (0x96): [seq][hitCount]{[recLen][targetKind 1=destructible][guidLen][guid][point xyz][healthDamage]}.
+        //   recLen frames each record (backward/forward-tolerant skip of an unknown kind). See TacticalStructDamageSync
+        //   / TacticalStructDamageCodec. Next free 0x96.
+        public const ushort TacStructDamage = 0x96;       // 150: host→all     "structural/voxel destruction event (re-applied natively)" (carries seq)
     }
 
     /// <summary>

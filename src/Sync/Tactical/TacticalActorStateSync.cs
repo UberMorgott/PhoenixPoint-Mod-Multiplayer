@@ -285,6 +285,12 @@ namespace Multiplayer.Sync.Tactical
             // when no actor drifted this tick.
             TacticalSurfaceSync.HostFlushSurfaces(engine);
 
+            // TS6 (structural destruction): fold the destructible-damage flush into this heartbeat — the host
+            // DestructableDamageReceiver.ApplyDamage postfix buffers each combat hit to a wall/floor/prop; drain +
+            // broadcast them here as 0x96. Independent of the per-actor `changed` batch below (its own surface + seq),
+            // so it must run even when no actor drifted this tick.
+            TacticalStructDamageSync.HostFlushStructDamage(engine);
+
             if (changed.Count == 0) return;
 
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorState);

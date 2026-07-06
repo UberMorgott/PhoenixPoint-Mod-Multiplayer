@@ -744,6 +744,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalSurfaceSync.Reset(); }                                   // TS3: drop the pending ground-surface coalesce buffer
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalStructDamageSync.Reset(); }                              // TS6: drop the pending struct-damage buffer
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
@@ -943,6 +945,16 @@ namespace Multiplayer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacMissionEnd)
             {
                 try { TacticalMissionEndSync.HandleMissionEnd(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.missionend failed: " + ex); }
+                return true;
+            }
+
+            // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ──────────────
+            // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is a
+            // clean no-op). The client re-applies the SAME native damage to the SAME destructible (resolved by its
+            // deterministic SceneObjectId guid) → native destruction cascade; DAMAGE to actors stays on tac.damage (0x88).
+            if (surfaceId == (byte)TacticalSurfaceIds.TacStructDamage)
+            {
+                try { TacticalStructDamageSync.HandleStructDamage(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.structdamage failed: " + ex); }
                 return true;
             }
             return false;
