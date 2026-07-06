@@ -14,6 +14,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/UberMorgott/PhoenixPoint-Mod-Multiplayer/ci.yml?style=flat-square&label=CI)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/actions)
 [![Tests](https://img.shields.io/badge/tests-1625%20green-2ea043?style=flat-square)](Multiplayer.Tests)
 [![License](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue?style=flat-square)](LICENSE)
+[![Built for TFTV](https://img.shields.io/badge/built%20for-TFTV-e8590c?style=flat-square)](#tftv)
 
 [![Report a bug](https://img.shields.io/badge/%F0%9F%90%9E%20report-a%20bug-d1242f?style=for-the-badge)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new?labels=bug)
 [![Request a feature](https://img.shields.io/badge/%E2%9C%A8%20request-a%20feature-8957e5?style=for-the-badge)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new?labels=enhancement)
@@ -23,11 +24,15 @@
 
 ## The pitch
 
-Phoenix Point is a brilliant, brutal little turn-based strategy game. It is also stubbornly single player. My friends and I wanted the obvious thing: run one campaign together, take a base each, argue over who gets the next research slot, and lose soldiers as a team instead of alone.
+Phoenix Point is a brilliant, brutal little turn-based strategy game. It is also stubbornly single player. My friends and I wanted the obvious thing: one shared campaign where each of us sits at home, in our own chair, at our own PC, running exactly the soldiers and the jobs the group agreed to hand us. No passing a single mouse around the sofa, no taking turns at one keyboard. You argue over who gets the next research slot, then you command your own part of the war from your own machine.
 
 That mode does not exist. Snapshot never shipped it. So we are writing it ourselves, one reverse-engineered Harmony patch at a time.
 
-This is that mod. It turns a solo Phoenix Point campaign into a shared one where two or more people run the same Geoscape and fight the same tactical battles at once. No new servers, no rewritten game logic, just the real game with a lot of careful wiring bolted onto the side.
+This is that mod. It turns a solo Phoenix Point campaign into a shared one: two or more people run the same Geoscape and fight the same tactical battles together, each from their own machine.
+
+One nice bonus falls straight out of building it for co-op. In a tactical mission your soldiers do not wait for a strict one-after-another turn order. Everyone acts at the same time, so a fight with a full squad stays snappy instead of turning into a slideshow.
+
+No new servers, no rewritten game logic, just the real game with a lot of careful wiring bolted onto the side.
 
 ## How the co-op actually works
 
@@ -38,6 +43,13 @@ There is exactly one source of truth: the **host**. The host runs the real, unmo
 - Your screen updates to match. So does everyone else's.
 
 That one rule (the host decides, clients display) is what stops four people from quietly drifting into four different campaigns. The whole mod is really just the long, stubborn job of making every screen in the game obey it.
+
+<a name="tftv"></a>
+## Built for Terror From The Void
+
+A heads-up that matters: this mod is developed hand in hand with **TFTV (Terror From The Void)**, the big community overhaul, and is tightly integrated with it. That is the target setup and the way it actually gets played and tested.
+
+Honestly, I have not even checked whether it runs on vanilla Phoenix Point, and I do not plan to. I am not going back to vanilla without TFTV anyway. So if you want the intended experience, run this with TFTV. Vanilla is untested territory, here be dragons.
 
 ## Status, and the honest disclaimer
 
@@ -157,44 +169,47 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 <summary><b>⚔️ Tactical</b></summary>
 
 **Getting onto the field**
-- [x] 🧪 Full deploy snapshot, with chunking for oversized squads
+- [x] ✅ Full deploy snapshot, with chunking for oversized squads
 
 **Moving**
-- [x] 🧪 Move intent to authoritative outcome
-- [x] 🧪 Concurrent move animation (everyone moves at once, no waiting your turn)
-- [x] 🧪 Position and facing deltas
+- [x] ✅ Move intent to authoritative outcome
+- [x] ✅ Concurrent move animation (everyone moves at once, no waiting your turn)
+- [x] ✅ Position and facing deltas
 
 **Fighting**
-- [x] 🧪 Shoot and melee damage intents
-- [x] 🧪 Authoritative damage resolution (the host does the maths)
-- [x] 🧪 Generic ability relay (heal, will-recover, rally, psychic scream, reload, interact)
-- [x] 🧪 Weapon and equipment swaps
-- [x] 🧪 Overwatch arm, clear, and cone
+- [x] ✅ Shooting and melee attacks
+- [x] ✅ Aimed shots that land on the real aim point
+- [x] ✅ Grenades and thrown weapons
+- [x] ✅ Authoritative damage resolution (the host does the maths)
+- [x] ✅ Medkits, plus heal, will-recover, rally, psychic scream, reload, interact
+- [x] ✅ Weapon and equipment swaps
+- [x] ✅ Overwatch arm, clear, and cone
 - [ ] ⬜ Deploy-turret and open-crate abilities (parked)
 
 **Seeing**
 - [x] 🧪 Player-faction vision reconcile
 
 **The battlefield itself**
+- [x] ✅ Structural destruction, including blowing things up with grenades
 - [x] 🧪 Ground surfaces and volumes (fire, goo, acid, mist)
-- [x] 🧪 Structural destruction and destructibles
 - [ ] ⬜ Window-break geometry capture (parked)
 
 **Unit state**
-- [x] 🧪 Per-actor action points, will points, and status effects
-- [x] 🧪 Ammo and mind-control display
+- [x] ✅ Per-actor action points, will points, and status effects (yours and the enemy's)
+- [x] ✅ Ammo and reloads
+- [x] ✅ Mind-control display
 - [x] 🧪 Mid-battle spawns and despawns (reinforcements, eggs, turrets, loot)
 
 **Turns**
-- [x] 🧪 End-turn intent to outcome
-- [x] 🧪 Per-player intent dedup for three-plus player games
+- [x] ✅ End-turn intent to outcome
+- [x] ✅ Per-player intent dedup for three-plus player games
 
 **Ending a mission**
 - [x] 🧪 Mission-conclusion mirror
 - [ ] ⬜ Evac-zone list population (parked)
 
 **Making it look good**
-- [x] 🧪 Fire and melee-swing animations
+- [x] ✅ Fire and melee-swing animations
 - [x] ✅ Enemy-turn camera chase
 - [x] 🧪 Area-effect and explosion VFX replay
 
