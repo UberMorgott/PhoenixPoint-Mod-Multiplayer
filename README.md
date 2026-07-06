@@ -110,13 +110,14 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 - [x] ✅ Start and cancel research
 - [x] ✅ Research completion sync
 - [x] ✅ Reordering the research queue
-- [x] ✅ Research rate and time-remaining mirror
+- [x] ✅ Research speed multiplier from labs and other modules, plus time remaining
 - [x] ✅ Unlock availability (what a finished tech opens up)
 - [x] 🧪 "Available research" reconcile after a project finishes
 
 **Manufacturing and crafting**
 - [x] ✅ Queue an item for manufacture
 - [x] ✅ Manufacture completion sync
+- [x] ✅ Scrapping items back down into resources
 - [x] 🧪 Marketplace offers and selection mirror
 
 **Base and facilities**
@@ -143,16 +144,20 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 - [x] 🧪 Recruit pool mirror (available, unarmed, and captured units)
 
 **Events and choices**
-- [x] ✅ Event popups raised and dismissed for everyone
-- [x] ✅ Choice arbitration when two people answer at once (first click wins)
+- [x] ✅ Events with answer choices, shown to everyone at once
+- [x] ✅ Choice arbitration when two people answer together (first click wins)
 - [x] ✅ Single-choice prompt advance
+- [x] 🧪 Ambush events, including the blocking brief that locks the screen
+- [x] 🧪 Point-of-interest exploration (scan, probe, excavate)
+- [x] 🧪 Resource harvesting
+- [x] 🧪 Quest missions with cutscenes
+- [x] 🧪 A display queue for when several popups stack up at once
 - [x] 🧪 Objectives and quest-line state (including DLC and critical path)
 
 **Report modals**
-- [x] 🧪 Mission-brief mirror (including blocking ambush briefs)
+- [x] 🧪 Mission-brief mirror
 - [x] 🧪 Mission-outcome report mirror
 - [x] 🧪 Interception notices
-- [x] 🧪 One ordered display queue so popups do not stampede each other
 
 **The rest of the world**
 - [x] ✅ Diplomacy and reputation
@@ -161,7 +166,11 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 - [x] 🧪 Mist and fog field mirror
 - [x] 🧪 Site identity and world-activity tails (havens, alien bases, excavations, weather, timers)
 - [x] 🧪 Behemoth presence and status
-- [x] 🧪 Generic Geoscape ability relay (harvest, excavate, repair, scan, probe, activate, guard)
+- [x] 🧪 One shared relay behind the Geoscape abilities (scan, probe, repair, activate, guard, and the rest)
+
+**Campaign start and finish**
+- [ ] ⬜ New-game start and intro
+- [ ] ⬜ Campaign end, win or lose
 
 </details>
 
@@ -206,10 +215,12 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 
 **Ending a mission**
 - [x] 🧪 Mission-conclusion mirror
+- [ ] ⬜ Scripted story-mission triggers (not sure yet whether these are wired)
 - [ ] ⬜ Evac-zone list population (parked)
 
 **Making it look good**
 - [x] ✅ Fire and melee-swing animations
+- [x] ✅ Cover snapping (soldiers crouch into cover instead of just standing there)
 - [x] ✅ Enemy-turn camera chase
 - [x] 🧪 Area-effect and explosion VFX replay
 
@@ -256,6 +267,19 @@ The code is split deliberately, partly because the machine writing most of it do
 - **The full mod** references the real game DLLs (Assembly-CSharp, the modding framework, Unity, HarmonyLib) and can only be compiled on a machine with a legal Phoenix Point install.
 
 CI builds and tests the game-free half on every push. The game-facing half is built and verified separately, by a human who owns the game. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full picture and [`docs/README.md`](docs/README.md) for the design and as-built documentation.
+
+## About this project
+
+This is also, frankly, a portfolio piece, and the kind of problem I enjoy. Take a closed-source, shipping Unity game with no multiplayer hooks of its own, decompile it to understand how it really works, and bolt a deterministic, host-authoritative co-op layer onto the side without touching a line of its source.
+
+What that involved, in short:
+
+- A clean-room sync protocol built around one unified wire rail and a host-authoritative router, instead of a pile of per-feature hacks.
+- Heavy reflection and Harmony patching to hook the exact methods where the game makes its decisions, with a version guard so a game update fails loudly instead of silently desyncing.
+- A pure logic core (`Multiplayer.Core`) with zero game or engine dependencies, so more than 1600 tests build and run on any machine, in CI, with the game nowhere in sight.
+- Somewhere north of 80k lines of C# and counting, most of it the unglamorous, careful work of making every screen agree with every other screen.
+
+If you are an employer or a fellow tinkerer poking around, the interesting reading is `Multiplayer.Core`, the [`docs/`](docs/README.md) folder, and the netcode section above.
 
 ## License
 
