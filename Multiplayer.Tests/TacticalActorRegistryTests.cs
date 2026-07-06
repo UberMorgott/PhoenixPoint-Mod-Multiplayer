@@ -329,4 +329,66 @@ public class TacticalActorRegistryTests
         Assert.False(reg.TryLazyRebind(200, hasPos: true, new ActorPos(0, 0, 0), new List<IActorRef>()));
         Assert.False(reg.TryGet(200, out _));
     }
+
+    // ─── TS5b: ground / loot entities (dropped ItemContainer, crate/console StructuralTarget) ────────────
+    // Ground entities are TacticalActorBase with GeoUnitId 0, so they ride the SAME netId registry as any
+    // minted (Pandoran/spawned) actor — no separate registry. These assert the create/remove mirror units the
+    // loot flow depends on: a dropped container mints a host id, resolves, is removed on pickup, and its freed
+    // id can be re-minted for a NEW drop with no collision.
+
+    [Fact]
+    public void GroundLoot_Container_Mints_Resolves_ThenRemovedOnPickup()
+    {
+        var reg = new TacticalActorRegistry();
+        var container = new FakeActor(0, 12f, 0f, 8f);   // dropped ItemContainer (GeoUnitId 0 → minted)
+
+        int netId = reg.AssignHost(container);
+        Assert.True(netId >= TacticalActorRegistry.MintBase);
+        Assert.True(reg.TryGet(netId, out var got));
+        Assert.Same(container, got);
+
+        // Last item picked up → container destroyed (ItemContainer.OnItemRemovedFromContainer → DestroyActor);
+        // the TS1 despawn sweep removes it from the registry.
+        reg.Remove(netId);
+        Assert.False(reg.TryGet(netId, out _));
+        Assert.Equal(0, reg.Count);
+    }
+
+    [Fact]
+    public void GroundLoot_ReminesAfterRemoval_NoCollisionWithFreedId()
+    {
+        // A container is dropped, picked up (removed), then a NEW item is dropped. The new container must mint a
+        // FRESH id that never re-uses a live id (the mint counter does not rewind below a still-live entry).
+        var reg = new TacticalActorRegistry();
+        var stillLive = new FakeActor(0, 1f, 0f, 0f);
+        int liveId = reg.AssignHost(stillLive);          // MintBase
+        var firstDrop = new FakeActor(0, 2f, 0f, 0f);
+        int firstId = reg.AssignHost(firstDrop);         // MintBase + 1
+
+        reg.Remove(firstId);                             // picked up
+        var secondDrop = new FakeActor(0, 3f, 0f, 0f);
+        int secondId = reg.AssignHost(secondDrop);       // fresh mint
+
+        Assert.NotEqual(secondId, liveId);               // never collides the still-live container
+        Assert.True(reg.TryGet(secondId, out var got));
+        Assert.Same(secondDrop, got);
+        Assert.True(reg.TryGet(liveId, out _));          // the live one is untouched
+    }
+
+    [Fact]
+    public void DeployPlacedInteractable_ClientBindsByPosition_LikeAPandoran()
+    {
+        // A deploy-placed console/crate (StructuralTarget, GeoUnitId 0) rides the deploy actor-table: the host
+        // mints its id + ships its position; the client position-matches it (identical from the shared map seed).
+        // This is what makes the client's interact intent carry a netId the host can resolve.
+        var host = new TacticalActorRegistry();
+        var table = host.BuildActorTable(new List<IActorRef> { new FakeActor(0, 33f, 0f, 17f) });
+
+        var client = new TacticalActorRegistry();
+        int matched = client.MatchAndRegister(table, new List<IActorRef> { new FakeActor(0, 33f, 0f, 17f) });
+
+        Assert.Equal(1, matched);
+        Assert.True(client.TryGet(TacticalActorRegistry.MintBase, out var crate));
+        Assert.Equal(33f, ((FakeActor)crate).Position.x);
+    }
 }

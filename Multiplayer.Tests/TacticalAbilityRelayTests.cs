@@ -61,13 +61,15 @@ public class TacticalAbilityRelayTests
     [InlineData("OverwatchAbility")]  // OverwatchAbilityActivatePatch suppresses Activate (dedicated arm-sync)
     [InlineData("ShootAbility")]      // AbilityActivateRelayPatch suppresses Activate (generic relay)
     [InlineData("BashAbility")]       // AbilityActivateRelayPatch suppresses Activate (generic relay)
+    [InlineData("ReloadAbility")]     // TS5b: now on the 0x8E generic relay → client-suppressed
+    [InlineData("InteractWithObjectAbility")] // TS5b: now on the 0x8E generic relay → client-suppressed
     public void Suppressed_Activations_AreDetected(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation(typeName));
     }
 
     [Theory]
-    [InlineData("ReloadAbility")]     // deferred (slot target needs the TS5 ammo surface) — runs locally, NOT intercepted
+    [InlineData("OpenCrateAbility")]  // deferred: host InventoryAbility.Activate would hijack the host view; auto-open rides the move
     [InlineData("ApplyStatusAbility")]
     [InlineData("EndTurnAbility")]
     [InlineData("SomeFutureUnknownAbility")]
@@ -140,15 +142,17 @@ public class TacticalAbilityRelayTests
     [InlineData("RecoverWillAbility")]    // self → WP via 0x8F Wp
     [InlineData("RallyAbility")]          // self/squad → WP via 0x8F Wp
     [InlineData("PsychicScreamAbility")]  // self AoE → damage via tac.damage 0x88
+    [InlineData("ReloadAbility")]         // TS5b: equip-slot target → ammo via 0x8F (self) / actor (reload-others)
+    [InlineData("InteractWithObjectAbility")] // TS5b: ground-object target → console status via 0x8F + objective via TS4
     public void GenericRelayable_ActiveSet_IsRelayed(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsGenericRelayable(typeName));
     }
 
     [Theory]
-    [InlineData("ReloadAbility")]         // deferred: slot target needs the TS5 ammo surface
     [InlineData("DeployTurretAbility")]   // deferred: pos target + SpawnActorAbility base-Activate binding
-    [InlineData("InteractWithObjectAbility")] // deferred: object target needs the TS5 loot registry
+    [InlineData("OpenCrateAbility")]      // deferred: host InventoryAbility.Activate hijacks host view; auto-open rides the move
+    [InlineData("DropItemAbility")]       // deferred: item (not object-netId) target; dropped container rides TS1 spawn
     [InlineData("MindControlAbility")]    // deferred: faction display needs the TS5 faction bit
     [InlineData("ShootAbility")]          // 0x87 damage relay, not the 0x8E generic relay
     [InlineData("MoveAbility")]           // dedicated move-sync

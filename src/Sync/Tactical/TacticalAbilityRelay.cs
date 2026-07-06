@@ -44,14 +44,17 @@ namespace Multiplayer.Sync.Tactical
             "BashAbility",    // melee
         };
 
-        /// <summary>Type NAMES explicitly kept OFF the generic relay (dedicated path / wrong target shape).
-        /// Documentation + asserted by tests so a future edit can't silently add a double-handled ability.</summary>
+        /// <summary>Type NAMES explicitly kept OFF the 0x87 shoot/melee DAMAGE relay (dedicated path / not a
+        /// damage-dealer). Asserted by tests (never in <see cref="IsRelayable"/>) so a future edit can't silently
+        /// add a double-handled ability to the 0x87 set. NOTE: Reload/Heal are excluded from 0x87 but DO ride the
+        /// SEPARATE 0x8E generic relay (<see cref="RelayableGenericAbilityTypeNames"/>) — the two relays are
+        /// disjoint by surface, so an entry here can legitimately appear in the generic set.</summary>
         public static readonly string[] ExcludedAbilityTypeNames =
         {
             "MoveAbility",       // dedicated move command-sync + animation
             "OverwatchAbility",  // dedicated 0x8C/0x8D arm + cone
-            "ReloadAbility",     // equipment/ammo-clip target — not actor/pos; rides the actor-state delta
-            "HealAbility",       // Health.Add(...) directly (no tac.damage); no health surface yet — pending
+            "ReloadAbility",     // not a 0x87 damage-dealer — rides the 0x8E generic relay (ammo via 0x8F)
+            "HealAbility",       // Health.Add(...) directly (no tac.damage) — rides the 0x8E generic relay (HP via 0x8F)
         };
 
         private static readonly HashSet<string> _relayable =
@@ -74,18 +77,28 @@ namespace Multiplayer.Sync.Tactical
         ///     targets → the host reproduces them identically from the shared sim state; no per-target payload).
         ///   • <c>PsychicScreamAbility</c>— an <c>IDamageDealer</c> AoE: its damage/WP/status ride tac.damage (0x88)
         ///     + 0x8F, exactly like a shot, so the host activate replicates fully.
+        ///   • <c>ReloadAbility</c>    — (TS5b) reload-self mirrors the reloaded weapon's charges via the 0x8F
+        ///     <c>ActorFieldAmmo</c> bit; reload-others (an ally's weapon) rides the same relay as an ACTOR intent,
+        ///     the host re-deriving the ally's weapon+ammo (ReloadAbility.GetReloadOthersWeaponTargets).
+        ///   • <c>InteractWithObjectAbility</c> — (TS5b) activates a console/crate StructuralTarget; the applied
+        ///     console status mirrors via the 0x8F status delta and objective progress via TS4. Its target is a
+        ///     ground OBJECT resolved through the shared actor registry (StructuralTarget is a TacticalActorBase).
         /// Each of these DECLARES its own <c>Activate(object)</c> override (verified vs the decompile), so the
         /// generic Harmony patch binds each type EXACTLY (no base-method over-patch). Abilities whose outcome
-        /// needs a not-yet-shipped surface (reload→ammo/TS5, deploy-turret→pos/SpawnActorAbility base binding,
-        /// interact/crate/drop→object-registry/TS5, mind-control→faction/TS5) are DELIBERATELY absent from this
-        /// active set — they are KNOWN to <see cref="GenericTargetKindFor"/> (wire + host build support their
-        /// kind) but stay OFF the relay until their outcome surface lands (degrade-to-notify meanwhile, spec R1).</summary>
+        /// needs a not-yet-shipped surface or has a UI/authority hazard (deploy-turret→pos/SpawnActorAbility base
+        /// binding, open-crate→host InventoryAbility.Activate would hijack the HOST into the inventory view +
+        /// auto-open already rides the relayed move, drop→object-registry, mind-control→faction/TS5) are
+        /// DELIBERATELY absent from this active set — they are KNOWN to <see cref="GenericTargetKindFor"/> (wire +
+        /// host build support their kind) but stay OFF the relay until safe (degrade-to-notify meanwhile, spec R1).</summary>
         public static readonly string[] RelayableGenericAbilityTypeNames =
         {
-            "HealAbility",           // actor target → HP via 0x8F Health
-            "RecoverWillAbility",    // self         → WP via 0x8F Wp
-            "RallyAbility",          // self/squad   → WP via 0x8F Wp
-            "PsychicScreamAbility",  // self AoE     → damage via tac.damage 0x88
+            "HealAbility",              // actor target → HP via 0x8F Health
+            "RecoverWillAbility",       // self         → WP via 0x8F Wp
+            "RallyAbility",             // self/squad   → WP via 0x8F Wp
+            "PsychicScreamAbility",     // self AoE     → damage via tac.damage 0x88
+            // TS5b: ground-registry-backed target kinds now shipped (slot + object builds in TacticalCombatSync).
+            "ReloadAbility",            // equip-slot target → ammo via 0x8F (self weapon; ally reload-others → actor)
+            "InteractWithObjectAbility",// ground-object target → console status via 0x8F + objective via TS4
         };
 
         private static readonly HashSet<string> _genericRelayable =

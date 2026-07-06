@@ -340,10 +340,12 @@ namespace Multiplayer.Sync.Tactical
             }
         }
 
-        /// <summary>Build the wire intent from the client's <c>TacticalAbilityTarget</c> parameter per target-kind.
-        /// None → no target (self-derived). Actor → the target actor's netId (must resolve). Pos → PositionToApply.
-        /// Slot/Object are DEFERRED (their outcome surface — TS5 ammo / loot registry — is not shipped) → false
-        /// (the caller degrades-to-notify). Returns false for a KNOWN kind whose target could not be read.</summary>
+        /// <summary>Build the wire intent from the client's <c>TacticalAbilityTarget</c> parameter per target-kind
+        /// (TS5b completes Slot + Object). None → no target (self-derived). Actor → the target actor's netId (must
+        /// resolve). Pos → PositionToApply. Slot → RELOAD: reload-others (an ally actor) rides an ACTOR intent so the
+        /// host re-derives weapon+ammo, while reload-self carries the caster's own weapon equipment-slot index (or -1
+        /// = the selected weapon). Object → INTERACT/CRATE: the ground object's shared registry netId. Returns false
+        /// for a KNOWN kind whose target could not be read (caller degrades-to-notify).</summary>
         private static bool TryBuildGenericIntent(int actorNetId, string guid, byte kind, object parameter,
             out TacticalGenericIntentCodec.GenericIntent intent)
         {
@@ -367,8 +369,37 @@ namespace Multiplayer.Sync.Tactical
                     intent = TacticalGenericIntentCodec.Pos(actorNetId, guid, pos.x, pos.y, pos.z, nonce);
                     return true;
                 }
+                case TacticalGenericIntentCodec.KindSlot:
+                {
+                    // Reload — two native shapes. reload-OTHERS (ability def Origin.TargetResult==Actor) targets an
+                    // ALLY actor; the host re-derives that ally's weapon+ammo from GetReloadOthersWeaponTargets, so
+                    // it needs ONLY the target actor → emit an ACTOR intent (reuses the KindActor host build).
+                    // reload-SELF carries the caster's OWN weapon equipment-slot index (or -1 = the currently
+                    // selected weapon, which ReloadCrt.ChooseEquipmentAndAmmo self-derives).
+                    ReadTarget(parameter, out int reloadTargetNetId, out _);
+                    if (reloadTargetNetId >= 0 && reloadTargetNetId != actorNetId)
+                    {
+                        intent = TacticalGenericIntentCodec.Actor(actorNetId, guid, reloadTargetNetId, nonce);
+                        return true;
+                    }
+                    int slotIndex = ReadEquipmentSlotIndex(actorNetId, parameter);
+                    intent = TacticalGenericIntentCodec.Slot(actorNetId, guid, slotIndex, nonce);
+                    return true;
+                }
+                case TacticalGenericIntentCodec.KindObject:
+                {
+                    // Interact / crate — resolve the ground OBJECT actor's shared registry netId. The object is a
+                    // TacticalActorBase (StructuralTarget for a console/crate, ItemContainer for ground loot), so it
+                    // rides the SAME actor registry as any mirror actor: deploy-placed interactables register in the
+                    // deploy actor-table, dropped loot via the TS1 spawn mirror. A client that never learned the
+                    // object's netId (not on this side) returns -1 → false → degrade-to-notify (never guess an id).
+                    int objNetId = ReadObjectNetId(parameter);
+                    if (objNetId < 0) return false;
+                    intent = TacticalGenericIntentCodec.Object(actorNetId, guid, objNetId, nonce);
+                    return true;
+                }
                 default:
-                    return false;   // KindSlot / KindObject / KindUnknown → deferred / unmapped → degrade-to-notify
+                    return false;   // KindUnknown → unmapped → degrade-to-notify
             }
         }
 
@@ -427,10 +458,12 @@ namespace Multiplayer.Sync.Tactical
         }
 
         /// <summary>Build the <c>TacticalAbilityTarget</c> the host passes to a relayed generic <c>Activate</c>,
-        /// per target-kind. None → null (the ability self-derives its targets from the host sim). Actor → an actor
-        /// target (Actor + DamageReceiver + aim-point PositionToApply). Pos → a bare-position target. Slot/Object
-        /// are DEFERRED (TS5) → false. Returns false for a KNOWN kind whose target could not be resolved
-        /// (e.g. the actor already left play), so the caller degrades-to-notify.</summary>
+        /// per target-kind (TS5b completes Slot + Object). None → null (the ability self-derives). Actor → an actor
+        /// target (Actor + DamageReceiver + aim-point). Pos → a bare-position target. Slot → RELOAD-self: a target
+        /// carrying the caster's own weapon Equipment at the slot index (or a BARE target for slot &lt; 0 → ReloadCrt
+        /// self-derives the selected weapon). Object → INTERACT: an actor target for the ground object (the ability
+        /// reads target.Actor as the StructuralTarget). Returns false for a KNOWN kind whose target could not be
+        /// resolved (the actor/object already left play / is not on this side), so the caller degrades-to-notify.</summary>
         private static bool TryBuildGenericTarget(TacticalGenericIntentCodec.GenericIntent intent, out object target)
         {
             target = null;
@@ -449,8 +482,27 @@ namespace Multiplayer.Sync.Tactical
                 case TacticalGenericIntentCodec.KindPos:
                     target = BuildPositionAbilityTarget(new Vector3(intent.TX, intent.TY, intent.TZ));
                     return target != null;
+                case TacticalGenericIntentCodec.KindSlot:
+                {
+                    // Reload-self: resolve the caster and target its OWN weapon Equipment at the slot index. slot < 0
+                    // ⇒ a bare (empty) target that ReloadCrt.ChooseEquipmentAndAmmo self-derives from the selected
+                    // weapon. NEVER null for a resolvable caster (ReloadCrt dereferences action.Param for a self-reload).
+                    object caster = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
+                    target = BuildReloadSlotTarget(caster, intent.SlotIndex);
+                    return target != null;
+                }
+                case TacticalGenericIntentCodec.KindObject:
+                {
+                    // Interact: resolve the ground-object actor from the shared registry and hand the ability an
+                    // actor target (InteractWithObjectAbility reads target.Actor as the StructuralTarget). Not on
+                    // this side / already gone → false → degrade-to-notify.
+                    object obj = TacticalDeploySync.ResolveLiveActor(intent.TargetNetId);
+                    if (obj == null) return false;
+                    target = BuildActorAbilityTarget(obj);
+                    return target != null;
+                }
                 default:
-                    return false;   // KindSlot / KindObject / unknown → deferred / degrade
+                    return false;   // KindUnknown → degrade
             }
         }
 
@@ -503,6 +555,93 @@ namespace Multiplayer.Sync.Tactical
             object target = Activator.CreateInstance(targetType);
             AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
             return target;
+        }
+
+        // ─── TS5b: reload (equipment-slot) + interact (ground-object) target helpers ─────────────────
+        /// <summary>CLIENT: the equipment-slot index of a reload-self target's OWN weapon — the position of
+        /// <c>parameter.Equipment</c> in the caster's <c>Equipments.Equipments</c> list, so the host reloads the
+        /// EXACT weapon (a soldier may carry several). Returns <see cref="TacticalGenericIntentCodec.SlotIndexNone"/>
+        /// (-1) when the parameter carries no specific weapon (auto-reload of the selected weapon), or the caster /
+        /// slot can't be read — the host then self-derives the selected weapon (ReloadCrt.ChooseEquipmentAndAmmo).</summary>
+        private static int ReadEquipmentSlotIndex(int casterNetId, object parameter)
+        {
+            try
+            {
+                object equipment = GetField(parameter, "Equipment");
+                if (equipment == null) return TacticalGenericIntentCodec.SlotIndexNone;
+                object caster = TacticalDeploySync.ResolveLiveActor(casterNetId);
+                if (caster == null) return TacticalGenericIntentCodec.SlotIndexNone;
+                if (GetProp(GetProp(caster, "Equipments"), "Equipments") is IEnumerable equipments)
+                {
+                    int i = 0;
+                    foreach (var e in equipments)
+                    {
+                        if (ReferenceEquals(e, equipment)) return i;
+                        i++;
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadEquipmentSlotIndex failed: " + ex); }
+            return TacticalGenericIntentCodec.SlotIndexNone;
+        }
+
+        /// <summary>HOST: build the reload-self <c>TacticalAbilityTarget</c> for the caster's weapon at
+        /// <paramref name="slotIndex"/> (its position in <c>Equipments.Equipments</c>). slot &gt;= 0 sets
+        /// <c>Equipment</c> so ReloadCrt reloads THAT weapon; slot &lt; 0 / out-of-range returns a BARE (empty)
+        /// target so ReloadCrt.ChooseEquipmentAndAmmo self-derives the selected weapon. NEVER null for a resolvable
+        /// caster (ReloadCrt dereferences action.Param.Equipment for a self-reload — a null param would NRE);
+        /// null ONLY when the caster itself is null → caller degrades-to-notify.</summary>
+        private static object BuildReloadSlotTarget(object caster, int slotIndex)
+        {
+            if (caster == null) return null;
+            var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+            if (targetType == null) return null;
+            object target = Activator.CreateInstance(targetType);
+            if (slotIndex >= 0)
+            {
+                try
+                {
+                    if (GetProp(GetProp(caster, "Equipments"), "Equipments") is IEnumerable equipments)
+                    {
+                        int i = 0;
+                        foreach (var e in equipments)
+                        {
+                            if (i == slotIndex) { AccessTools.Field(targetType, "Equipment")?.SetValue(target, e); break; }
+                            i++;
+                        }
+                    }
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildReloadSlotTarget slot read failed: " + ex); }
+            }
+            return target;   // bare target for slot < 0 (or unresolved slot) → ReloadCrt reloads the selected weapon
+        }
+
+        /// <summary>CLIENT: resolve the shared registry netId of the ground OBJECT a generic object-target ability
+        /// (interact / crate) points at. The object is a <c>TacticalActorBase</c> (a StructuralTarget for a
+        /// console/crate, an ItemContainer for ground loot), so it rides the SAME actor registry as any mirror
+        /// actor. Reads the two native <c>TacticalAbilityTarget</c> shapes: <c>Actor</c> (interact StructuralTarget)
+        /// then <c>ItemContainer</c> (crate/loot container actor). Returns -1 when nothing resolves (the object is
+        /// not registered on this side) → the caller degrades-to-notify (a client must not guess an unshared id).</summary>
+        private static int ReadObjectNetId(object parameter)
+        {
+            if (parameter == null) return -1;
+            try
+            {
+                object actor = GetField(parameter, "Actor");
+                if (actor != null)
+                {
+                    int net = TacticalDeploySync.NetIdForLiveActor(actor);
+                    if (net >= 0) return net;
+                }
+                object container = GetField(parameter, "ItemContainer");
+                if (container != null)
+                {
+                    int net = TacticalDeploySync.NetIdForLiveActor(container);
+                    if (net >= 0) return net;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadObjectNetId failed: " + ex); }
+            return -1;
         }
 
         /// <summary>Degrade-to-notify for the generic relay (spec §1 "degrade-to-notify, never silent desync,
