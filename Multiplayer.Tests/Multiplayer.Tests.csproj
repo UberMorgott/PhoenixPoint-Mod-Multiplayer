@@ -243,6 +243,17 @@
          AccessTools (never invoked in tests) but MUST be linked because the linked VehicleTravelReflection calls it. -->
     <Compile Include="..\src\Network\Sync\State\GeoSiteContextMenuDecision.cs"><Link>Sync\State\GeoSiteContextMenuDecision.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\State\GeoSiteContextMenu.cs"><Link>Sync\State\GeoSiteContextMenu.cs</Link></Compile>
+    <!-- PS4 personnel client-edit intents (pure Write/Read round-trips + IHostOnlyApply). PersonnelEditReflection
+         is SELF-CONTAINED (DefReflection + PermissionManager + GeoRuntime only, all linked) so Apply/Validate
+         compile against 0Harmony + UnityEngine.CoreModule and are never invoked in tests (MoveVehicleAction pattern). -->
+    <Compile Include="..\src\Network\Sync\State\PersonnelEditReflection.cs"><Link>Sync\State\PersonnelEditReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\PersonnelActionWire.cs"><Link>Sync\Actions\PersonnelActionWire.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\EquipSoldierAction.cs"><Link>Sync\Actions\EquipSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\AugmentSoldierAction.cs"><Link>Sync\Actions\AugmentSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\HireRecruitAction.cs"><Link>Sync\Actions\HireRecruitAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\TransferSoldierAction.cs"><Link>Sync\Actions\TransferSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\DismissSoldierAction.cs"><Link>Sync\Actions\DismissSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\RenameSoldierAction.cs"><Link>Sync\Actions\RenameSoldierAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Sync\SyncRegistration.cs</Link></Compile>
     <Compile Include="..\src\Validation\PermissionManager.cs"><Link>PermissionManager.cs</Link></Compile>
     <Compile Include="..\src\Network\ClientIdentity.cs"><Link>ClientIdentity.cs</Link></Compile>

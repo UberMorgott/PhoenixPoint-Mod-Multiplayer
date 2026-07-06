@@ -41,6 +41,14 @@ namespace Multiplayer.Network.Sync
 
             // Presentation / narrative
             SyncedActionRegistry.Register(SyncedActionIds.PlayCutscene, PlayCutsceneAction.Read);
+
+            // Personnel client-edit intents (PS4)
+            SyncedActionRegistry.Register(SyncedActionIds.EquipSoldier, EquipSoldierAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.AugmentSoldier, AugmentSoldierAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.HireRecruit, HireRecruitAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.TransferSoldier, TransferSoldierAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.DismissSoldier, DismissSoldierAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.RenameSoldier, RenameSoldierAction.Read);
         }
     }
 }

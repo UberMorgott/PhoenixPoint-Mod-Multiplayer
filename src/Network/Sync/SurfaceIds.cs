@@ -20,6 +20,13 @@ namespace Multiplayer.Network.Sync
         public const byte FacilityCompleted = 22;
         public const byte RemoveFacility = 23;   // demolition + cancel-construction (mirrors SyncedActionIds.RemoveFacility)
         public const byte AnswerEvent = 30;
+        // Personnel client-edit intents 60-79 (mirror SyncedActionIds — PS4 client→host relay)
+        public const byte EquipSoldier = 60;
+        public const byte AugmentSoldier = 61;
+        public const byte HireRecruit = 62;
+        public const byte TransferSoldier = 63;
+        public const byte DismissSoldier = 64;
+        public const byte RenameSoldier = 65;
 
         // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
         public const byte InventoryChannel = 1;   // distinct id-space from actions (kind disambiguates)

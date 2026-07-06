@@ -15,7 +15,8 @@ namespace Multiplayer.Network.Sync
         Equip,
         Dialogs,
         TimeControl,
-        VehicleTravel
+        VehicleTravel,
+        ControlSoldiers   // PS4 soldier-owned edits (transfer / dismiss / rename) — capability bit + per-soldier ownership (Validate)
     }
 
     /// <summary>
@@ -41,6 +42,7 @@ namespace Multiplayer.Network.Sync
                 case ActionCategory.BaseRepair: return CampaignPermission.ManageBases;
                 case ActionCategory.Recruitment: return CampaignPermission.ManageRecruitment;
                 case ActionCategory.Equip: return CampaignPermission.ManageEquipment;
+                case ActionCategory.ControlSoldiers: return CampaignPermission.ControlSoldiers;
                 case ActionCategory.Dialogs: return CampaignPermission.ManageDialogs;
                 case ActionCategory.TimeControl: return CampaignPermission.ControlTime;
                 default: return CampaignPermission.FullCommander;

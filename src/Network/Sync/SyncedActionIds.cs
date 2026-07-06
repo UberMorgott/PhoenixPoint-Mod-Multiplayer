@@ -28,5 +28,14 @@ namespace Multiplayer.Network.Sync
 
         // Presentation / narrative 50-59
         public const ushort PlayCutscene = 50;
+
+        // Personnel client-edit intents 60-79 (PS4 — client manages OWN soldiers; each is a
+        // permission-gated IHostOnlyApply intent whose authoritative result mirrors back on #6/#9/#10)
+        public const ushort EquipSoldier = 60;     // GeoCharacter.SetItems full-loadout replace (also carries augment bodyparts)
+        public const ushort AugmentSoldier = 61;   // GeoCharacter.SetItems bodypart(armour)-only swap
+        public const ushort HireRecruit = 62;      // GeoPhoenixFaction.HireNakedRecruit (haven or naked pool → base)
+        public const ushort TransferSoldier = 63;  // native RemoveCharacter(src)+AddCharacter(dst) between Phoenix containers
+        public const ushort DismissSoldier = 64;   // GeoFaction.KillCharacter(soldier, Dismissed)
+        public const ushort RenameSoldier = 65;    // GeoCharacter.Rename(newName)
     }
 }
