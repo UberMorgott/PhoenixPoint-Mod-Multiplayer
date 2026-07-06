@@ -125,7 +125,7 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 4 — Legacy cleanup ("shlack")  (🟡 mostly; enum/const files are 🟢)
 
-**— PARTIAL/DEFERRED.** PacketType tombstones DONE @bfd6863. SurfaceIds: typed-wrapper rejected (churn); per-kind uniqueness guard test + doc comment added @5d55b99. **WARNING:** legacy 0x60/0x61/0x62 rail + RequestDedup are the LIVE DEFAULT (`GeoActionRelay.UseEnvelope=false`, `GeoActionRelay.cs:34`) — deletion FORBIDDEN until envelope cutover is flipped + in-game verified; plan precondition unmet.
+**— PARTIAL/DEFERRED.** PacketType tombstones DONE @bfd6863. SurfaceIds: typed-wrapper rejected (churn); per-kind uniqueness guard test + doc comment added @5d55b99. **ENVELOPE CUTOVER DONE @7e4076b:** the `0x67` SyncEnvelope is now the SOLE geoscape action rail — the legacy raw 0x60/0x61/0x62 packets, the `GeoActionRelay.UseEnvelope` gate, and the (peerId, nonce)-keyed `RequestDedup` were all DELETED at cutover; dedup rides the shared peer-aware `IntentDedup` only.
 
 > The team already annotates dead code accurately; now delete it physically. 26
 > `RETIRED / no senders / never wired / removed` markers across 10 files.
@@ -135,9 +135,9 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
   Retired: `WalletSync 0x63`, `StateSync 0x64`, tactical `0x21-0x24`, `0x27`.
 - 🟡 `SyncEngine.cs` — confirm the dead `0x67` action-relay has **no remaining receiver**
   (not just no sender); delete both sides if present.
-- 🟡 `SyncEngine.cs` — once `GeoActionRelay.UseEnvelope` is effectively always-on across
-  paths, delete the legacy `RequestDedup` + the `UseEnvelope` flag; keep only the shared
-  peer-aware `IntentDedup`. (Two dedup mechanisms = double the bug surface.)
+- 🟢 `SyncEngine.cs` — DONE @7e4076b: envelope is always-on across all paths; the legacy
+  `RequestDedup` + the `UseEnvelope` flag were deleted, leaving only the shared peer-aware
+  `IntentDedup`. (Two dedup mechanisms = double the bug surface — now one.)
 - 🟡 `SyncEngine.cs` — finish folding the legacy `0x60/0x61/0x62` geoscape action rail into
   the unified `0x67` surface router per `COOP-SYNC-ROADMAP.md`, then delete the legacy
   branch entirely.
