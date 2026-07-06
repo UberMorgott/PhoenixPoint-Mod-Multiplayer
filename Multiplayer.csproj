@@ -19,6 +19,13 @@
          (they reference xUnit, which the mod does not — and must not — reference). -->
     <Compile Remove="Multiplayer.Tests\**\*.cs" />
     <Compile Remove="Multiplayer.Bridge.Tests\**\*.cs" />
+    <Compile Remove="Multiplayer.GameTests\**\*.cs" />
+    <!-- The pure (BCL-only) logic now lives in Multiplayer.Core and is brought in via the
+         ProjectReference below — the SINGLE source of truth. Do not also glob it into the mod. -->
+    <Compile Remove="Multiplayer.Core\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="Multiplayer.Core\Multiplayer.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp">

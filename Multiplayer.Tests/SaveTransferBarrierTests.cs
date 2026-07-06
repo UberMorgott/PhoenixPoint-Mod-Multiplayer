@@ -1,3 +1,4 @@
+using Multiplayer.Network;
 using Xunit;
 
 namespace Multiplayer.Tests
@@ -6,31 +7,18 @@ namespace Multiplayer.Tests
     /// Load-barrier release counting + host-sentinel + malformed-chunk rejection for the co-op
     /// save-transfer load barrier (review fixes #1, #2, #4).
     ///
-    /// NOTE ON LINKAGE: <c>SaveTransferCoordinator</c> references <c>NetworkEngine</c>, UnityEngine and
-    /// game save types, so it is NOT (and cannot be) linked into this Unity-free pure test assembly
-    /// (Multiplayer.Tests.csproj uses EnableDefaultCompileItems=false and links only pure files). The two
-    /// predicates under test are therefore tiny PURE one-liners on the coordinator; this test mirrors the
-    /// EXACT same formulas here so the intended behavior is pinned and regression-guarded. The mirrors
-    /// (<see cref="BarrierReleased"/> / <see cref="TryChunkIndex"/>) MUST stay byte-identical to
-    /// SaveTransferCoordinator.BarrierReleased / SaveTransferCoordinator.TryChunkIndex.
+    /// The two predicates under test were extracted from the game-bound <c>SaveTransferCoordinator</c>
+    /// into the pure <c>Multiplayer.Network.SaveTransferMath</c> (in Multiplayer.Core), which the
+    /// coordinator now forwards to. This test exercises the REAL Core symbols directly (single source of
+    /// truth) — no mirrored copies to drift out of sync.
     /// </summary>
     public class SaveTransferBarrierTests
     {
-        // ─── Mirrors of SaveTransferCoordinator pure helpers (keep in sync) ───────────────────────────
-        // Mirror of SaveTransferCoordinator.BarrierReleased(bool, int, int).
         private static bool BarrierReleased(bool hostLoaded, int loadedClientCount, int expectedClientCount)
-            => hostLoaded && loadedClientCount >= expectedClientCount;
+            => SaveTransferMath.BarrierReleased(hostLoaded, loadedClientCount, expectedClientCount);
 
-        // Mirror of SaveTransferCoordinator.TryChunkIndex(long, int, int, int, out int).
         private static bool TryChunkIndex(long offset, int chunkLen, int totalLen, int chunkSize, out int index)
-        {
-            index = -1;
-            if (chunkSize <= 0 || chunkLen < 0) return false;
-            if (offset < 0 || offset % chunkSize != 0) return false;
-            if (offset + chunkLen > totalLen) return false;
-            index = (int)(offset / chunkSize);
-            return true;
-        }
+            => SaveTransferMath.TryChunkIndex(offset, chunkLen, totalLen, chunkSize, out index);
 
         // ─── Fix #1/#2: barrier release counting ──────────────────────────────────────────────────────
 

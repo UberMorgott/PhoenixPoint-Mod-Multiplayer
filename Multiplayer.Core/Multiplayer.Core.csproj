@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Multiplayer.Core</AssemblyName>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Owns its own .cs files under this directory. This assembly is STRICTLY BCL-only:
+         no UnityEngine, no HarmonyLib/0Harmony, no game (Assembly-CSharp) reference.
+         The compiler is the guardrail — if a type needs a game/Unity type it does NOT
+         belong here; leave it in the mod project (Multiplayer.csproj). -->
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+</Project>

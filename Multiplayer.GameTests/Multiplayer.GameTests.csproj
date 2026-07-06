@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <!-- GAME-BOUND test project. It links the mod source files that bind game types via
+         HarmonyLib/AccessTools + UnityEngine, so it needs 0Harmony + UnityEngine.CoreModule at
+         compile time. It is EXPECTED NOT to build on a machine without a Phoenix Point install;
+         build/run it on the game machine. The pure logic it also uses comes from Multiplayer.Core. -->
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Multiplayer.Core\Multiplayer.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Game-bound mod cores compiled directly (bind game types lazily; never invoked in tests). -->
+    <Compile Include="..\src\Network\Sync\State\GeoUiRefresh.cs"><Link>Network\Sync\State\GeoUiRefresh.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ISyncSink.cs"><Link>Network\Sync\ISyncSink.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SurfaceRouter.cs"><Link>Network\Sync\SurfaceRouter.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncedActionRegistry.cs"><Link>Network\Sync\SyncedActionRegistry.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ISyncedAction.cs"><Link>Network\Sync\ISyncedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\PermissionGate.cs"><Link>Network\Sync\PermissionGate.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\GeoRuntime.cs"><Link>Network\Sync\GeoRuntime.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\DefReflection.cs"><Link>Network\Sync\DefReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ResearchReflection.cs"><Link>Network\Sync\ResearchReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\ManufactureReflection.cs"><Link>Network\Sync\ManufactureReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\BaseReflection.cs"><Link>Network\Sync\BaseReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\EventReflection.cs"><Link>Network\Sync\EventReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\VehicleTravelReflection.cs"><Link>Network\Sync\VehicleTravelReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\StartResearchAction.cs"><Link>Network\Sync\Actions\StartResearchAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ResearchCompletedAction.cs"><Link>Network\Sync\Actions\ResearchCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\CancelResearchAction.cs"><Link>Network\Sync\Actions\CancelResearchAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ReorderResearchAction.cs"><Link>Network\Sync\Actions\ReorderResearchAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\ResearchStateReflection.cs"><Link>Network\Sync\State\ResearchStateReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\EventDisplay.cs"><Link>Network\Sync\State\EventDisplay.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\QueueManufactureAction.cs"><Link>Network\Sync\Actions\QueueManufactureAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ManufactureCompletedAction.cs"><Link>Network\Sync\Actions\ManufactureCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ConstructFacilityAction.cs"><Link>Network\Sync\Actions\ConstructFacilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\RepairFacilityAction.cs"><Link>Network\Sync\Actions\RepairFacilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\FacilityCompletedAction.cs"><Link>Network\Sync\Actions\FacilityCompletedAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\RemoveFacilityAction.cs"><Link>Network\Sync\Actions\RemoveFacilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\AnswerEventAction.cs"><Link>Network\Sync\Actions\AnswerEventAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\MoveVehicleAction.cs"><Link>Network\Sync\Actions\MoveVehicleAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\ExploreSiteAction.cs"><Link>Network\Sync\Actions\ExploreSiteAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\GeoAbilityActivateAction.cs"><Link>Network\Sync\Actions\GeoAbilityActivateAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\CutsceneReflection.cs"><Link>Network\Sync\CutsceneReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\PlayCutsceneAction.cs"><Link>Network\Sync\Actions\PlayCutsceneAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\VehicleEmitScheduler.cs"><Link>Network\Sync\VehicleEmitScheduler.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\GeoSiteContextMenu.cs"><Link>Network\Sync\State\GeoSiteContextMenu.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\State\PersonnelEditReflection.cs"><Link>Network\Sync\State\PersonnelEditReflection.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\EquipSoldierAction.cs"><Link>Network\Sync\Actions\EquipSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\AugmentSoldierAction.cs"><Link>Network\Sync\Actions\AugmentSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\HireRecruitAction.cs"><Link>Network\Sync\Actions\HireRecruitAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\TransferSoldierAction.cs"><Link>Network\Sync\Actions\TransferSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\DismissSoldierAction.cs"><Link>Network\Sync\Actions\DismissSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\RenameSoldierAction.cs"><Link>Network\Sync\Actions\RenameSoldierAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Network\Sync\SyncRegistration.cs</Link></Compile>
+    <Compile Include="..\src\Network\ClientIdentity.cs"><Link>Network\ClientIdentity.cs</Link></Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile-time only: game DLLs (absent on a non-game machine). -->
+    <Reference Include="0Harmony">
+      <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>

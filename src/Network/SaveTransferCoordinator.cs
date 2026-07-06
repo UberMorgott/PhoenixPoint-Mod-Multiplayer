@@ -924,7 +924,7 @@ namespace Multiplayer.Network
         /// live <paramref name="expectedClientCount"/>, so the barrier releases early with the rest.
         /// </summary>
         internal static bool BarrierReleased(bool hostLoaded, int loadedClientCount, int expectedClientCount)
-            => hostLoaded && loadedClientCount >= expectedClientCount;
+            => SaveTransferMath.BarrierReleased(hostLoaded, loadedClientCount, expectedClientCount);
 
         /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
         public void SendLoadComplete()
@@ -1393,14 +1393,7 @@ namespace Multiplayer.Network
         /// all hold; rejects (false, index=-1) a malformed/out-of-range offset instead of mis-mapping it.
         /// </summary>
         internal static bool TryChunkIndex(long offset, int chunkLen, int totalLen, int chunkSize, out int index)
-        {
-            index = -1;
-            if (chunkSize <= 0 || chunkLen < 0) return false;
-            if (offset < 0 || offset % chunkSize != 0) return false;        // off the grid
-            if (offset + chunkLen > totalLen) return false;                 // out of bounds
-            index = (int)(offset / chunkSize);
-            return true;
-        }
+            => SaveTransferMath.TryChunkIndex(offset, chunkLen, totalLen, chunkSize, out index);
 
         // CRC-32 (IEEE 802.3, reflected) — small local impl, no external dependency.
         private static readonly uint[] _crcTable = BuildCrcTable();
