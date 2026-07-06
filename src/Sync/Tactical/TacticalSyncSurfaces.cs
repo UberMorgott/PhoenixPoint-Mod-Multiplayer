@@ -136,6 +136,18 @@ namespace Multiplayer.Sync.Tactical
         // 0x8E stays RESERVED for the future generic ability-INTENT (TS2). These take the next free ids 0x92/0x93.
         public const ushort TacActorSpawn = 0x92;        // 146: host→all     "materialize mid-battle actor@netId (blob)" (carries seq)
         public const ushort TacActorDespawn = 0x93;      // 147: host→all     "remove actor@netId (non-damage despawn)"   (carries seq)
+
+        // ─── TS3: GROUND-SURFACE / VOLUME mirror (fire / goo / acid / mist) ────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL (3+ player safe), carries
+        // its own TacticalLiveSeq (last-writer-wins). Mirrors the ground hazard voxels the frozen client can't see
+        // (on-ACTOR fire/goo already ride 0x8F; TS3 owns the GROUND volume). The one native funnel
+        // TacticalVoxel.SetVoxelType (fire/goo/acid/mist spawn + removal — structural destruction is a DIFFERENT
+        // system, so TS3/TS6 stay disjoint) is host-postfixed, coalesced per flush, and broadcast here; the client
+        // re-applies the SAME leaf at the mirrored cells → correct display + LoS. DAMAGE stays host-owned
+        // (tac.damage 0x88 / 0x8F); the client volume is PRESENTATION + LoS only (ClientSurfaceInertGuards).
+        //   surface (0x94): [seq][opCount]{[op spawn/remove][voxelType][cellCount]{xyz}} — voxelType (not a def
+        //   guid) is TFTV-tolerant by construction. See TacticalSurfaceSync / TacticalSurfaceCodec. Next free 0x94.
+        public const ushort TacSurface = 0x94;           // 148: host→all     "ground fire/goo/acid/mist voxel op(s)"    (carries seq)
     }
 
     /// <summary>

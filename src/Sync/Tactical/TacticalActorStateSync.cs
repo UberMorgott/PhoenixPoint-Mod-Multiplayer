@@ -269,6 +269,12 @@ namespace Multiplayer.Sync.Tactical
             // cleaned by the ActorDied postfix (tac.damage owns the death visual), so this never double-fires them.
             TacticalActorLifecycleSync.HostSweepDespawns();
 
+            // TS3 (ground surfaces): fold the fire/goo/acid/mist voxel-change flush into this heartbeat — the host
+            // SetVoxelType postfix coalesces changed cells into a pending buffer; drain + broadcast them here as
+            // 0x94. Independent of the per-actor `changed` batch below (its own surface + seq), so it must run even
+            // when no actor drifted this tick.
+            TacticalSurfaceSync.HostFlushSurfaces(engine);
+
             if (changed.Count == 0) return;
 
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorState);

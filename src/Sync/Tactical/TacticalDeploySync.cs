@@ -742,6 +742,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalMeleeAnimSync.Reset(); }                                 // Feature C (melee): symmetry (Phase 1 stateless)
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalSurfaceSync.Reset(); }                                   // TS3: drop the pending ground-surface coalesce buffer
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
@@ -921,6 +923,16 @@ namespace Multiplayer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacActorDespawn)
             {
                 try { TacticalActorLifecycleSync.HandleActorDespawn(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.actor.despawn failed: " + ex); }
+                return true;
+            }
+
+            // ─── TS3: GROUND-SURFACE / VOLUME mirror (fire / goo / acid / mist) ────────────────────
+            // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is
+            // a clean no-op). The client re-applies the native voxel type at the mirrored cells (display + LoS);
+            // DAMAGE stays on tac.damage (0x88) / 0x8F.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacSurface)
+            {
+                try { TacticalSurfaceSync.HandleSurface(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.surface failed: " + ex); }
                 return true;
             }
             return false;

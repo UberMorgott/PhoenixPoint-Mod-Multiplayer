@@ -326,6 +326,11 @@
          (TacticalCombatSync.ClientInterceptGenericAbility / HostOnGenericIntent + GenericAbilityRelayPatches)
          binds game types and is NOT linked (in-game verified). -->
     <Compile Include="..\src\Sync\Tactical\TacticalGenericIntentCodec.cs"><Link>Sync\Tactical\TacticalGenericIntentCodec.cs</Link></Compile>
+    <!-- TS3 ground-surface / volume mirror (0x94): pure, Unity-free wire codec + coalesce/group logic, and the
+         Unity-free CLIENT inert-suppress decision. The engine glue (TacticalSurfaceSync + SurfaceEffectPatches)
+         binds game types via reflection + the SetVoxelType funnel and is NOT linked (in-game verified). -->
+    <Compile Include="..\src\Sync\Tactical\TacticalSurfaceCodec.cs"><Link>Sync\Tactical\TacticalSurfaceCodec.cs</Link></Compile>
+    <Compile Include="..\src\Harmony\Tactical\ClientSurfaceInertGate.cs"><Link>Harmony\Tactical\ClientSurfaceInertGate.cs</Link></Compile>
     <!-- Feature A: pure, Unity-free CLIENT enemy-turn presentation gate (enter UIStateOtherFactionTurn for a
          non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
          engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->
