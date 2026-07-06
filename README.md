@@ -47,9 +47,11 @@ That one rule (the host decides, clients display) is what stops four people from
 <a name="tftv"></a>
 ## Built for Terror From The Void
 
-A heads-up that matters: this mod is developed hand in hand with **TFTV (Terror From The Void)**, the big community overhaul, and is tightly integrated with it. That is the target setup and the way it actually gets played and tested.
+A heads-up that matters: this mod is developed hand in hand with **[TFTV (Terror From The Void)](https://github.com/Voland163/TFTV)**, the big community overhaul, and is tightly integrated with it. That is the target setup and the way it actually gets played and tested.
 
 Honestly, I have not even checked whether it runs on vanilla Phoenix Point, and I do not plan to. I am not going back to vanilla without TFTV anyway. So if you want the intended experience, run this with TFTV. Vanilla is untested territory, here be dragons.
+
+Get TFTV: [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=2872311902) · [GitHub (Epic / GOG)](https://github.com/Voland163/TFTV)
 
 ## Status, and the honest disclaimer
 
