@@ -862,11 +862,26 @@ namespace Multiplayer.Sync.Tactical
             }
 
             // ─── Feature C (melee): client-side MELEE ANIMATION rail (tac.melee.start) ────────────────
-            // Host→all START push; client-only play (Phase 1 = STUB decode+log, no replay). DAMAGE stays on
-            // tac.damage (0x88). Side-gated internally, so a stray envelope on the host is a clean no-op.
+            // Host→all START push; client-only play (replays the native BashCrt swing, damage/return-fire/charge
+            // neutered). DAMAGE stays on tac.damage (0x88). Side-gated internally, so a stray envelope on the host
+            // is a clean no-op.
             if (surfaceId == (byte)TacticalSurfaceIds.TacMeleeStart)
             {
                 try { TacticalMeleeAnimSync.ClientOnMeleeStart(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.melee.start failed: " + ex); }
+                return true;
+            }
+
+            // ─── TS7: PRESENTATION polish rail (enemy-turn camera follow + AoE/explosion VFX) ─────────
+            // Host→all outcome pushes; client-only play (each handler is side-gated internally, so a stray envelope
+            // on the host is a clean no-op). PRESENTATION ONLY — no state; damage already mirrors via tac.damage.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacCameraHint)
+            {
+                try { TacticalEnemyTurnCamera.ClientOnCameraHint(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.camerahint failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacVfx)
+            {
+                try { TacticalVfxSync.HandleVfx(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.vfx failed: " + ex); }
                 return true;
             }
 

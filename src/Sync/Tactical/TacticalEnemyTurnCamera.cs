@@ -1,6 +1,8 @@
 using System;
+using System.Collections;
 using System.Reflection;
 using HarmonyLib;
+using Multiplayer.Network;
 using UnityEngine;
 
 namespace Multiplayer.Sync.Tactical
@@ -14,9 +16,72 @@ namespace Multiplayer.Sync.Tactical
     /// PlanarScrollCamera.Chase path the native camera uses
     /// (CameraDirector.Hint(CameraHint, object) -> CameraManager -> HandleHint -> Chase).
     /// Best-effort: any reflection failure is swallowed and never breaks the mirror.
+    ///
+    /// TS7 adds a WIRE-driven follow (<c>tac.camerahint</c> 0x97): the per-action replay chases only cover
+    /// move/fire/melee, so an enemy activating any OTHER camera-tracked ability (psychic, summon, deploy, …) was
+    /// never followed. The host tags the acting ENEMY (native TrackWithCamera decision) — but ONLY when it is
+    /// VISIBLE to the player faction ("no fog reveals") — and the client chases it (follow=true), gated to its
+    /// enemy turn. This funnels through the SAME <see cref="ChaseActor"/> path as the per-action chases.
     /// </summary>
     public static class TacticalEnemyTurnCamera
     {
+        // ─── HOST: an enemy actor camera-tracked an ability → broadcast tac.camerahint (0x97) ────────
+        /// <summary>HOST: from the postfix on <c>TacticalAbility.Activate</c> (the native site that fires
+        /// <c>CameraDirectorHint.AbilityActivated</c> when <c>TrackWithCamera</c>). Broadcast <c>tac.camerahint</c>
+        /// with the acting actor's netId ONLY when the native camera would move (<c>TrackWithCamera</c>), the actor
+        /// is an ENEMY (not a player-controlled faction — friendly reactions already ride fire/melee-start), and the
+        /// actor is VISIBLE to the player faction (revealed/located → "no fog reveals"). PRESENTATION ONLY. Fail-open:
+        /// any failure is logged + swallowed so the native activation always proceeds.</summary>
+        public static void HostBroadcastCameraHint(object ability)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || !engine.IsHost) return;
+                if (TacticalDeploySync.IsClientMirroring) return;
+                if (ability == null) return;
+
+                // Cheap gates first (per-activation hot path): only the visible-check walks the faction/vision state.
+                bool trackWithCamera = GetProp(ability, "TrackWithCamera") is bool tb && tb;
+                if (!trackWithCamera) return;
+                object actor = GetProp(ability, "TacticalActorBase");
+                if (actor == null) return;
+                bool isPlayerFaction = FactionIsControlledByPlayer(GetProp(actor, "TacticalFaction"));
+                if (isPlayerFaction) return;   // friendly / player action — client owns its own-turn camera
+
+                bool isVisible = IsActorVisibleToPlayerFaction(actor);
+                if (!ClientEnemyTurnCameraGate.ShouldBroadcastEnemyCameraHint(trackWithCamera, isPlayerFaction, isVisible))
+                    return;
+
+                int netId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (netId < 0) return;
+
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacCameraHint);
+                byte[] payload = TacticalLiveCodec.EncodeCameraHint(seq, netId);
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacCameraHint, payload);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.camerahint seq=" + seq + " enemy=" + netId +
+                          " ability=" + ability.GetType().Name);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastCameraHint failed: " + ex); }
+        }
+
+        // ─── CLIENT: follow the acting enemy (follow=true), gated to the client's enemy turn ──────────
+        /// <summary>CLIENT inbound (<c>tac.camerahint</c>): resolve the enemy actor and chase it (follow=true) so
+        /// the camera tracks it through its action. No-op off-client / off-session / stale seq / not the client's
+        /// enemy turn (ClientEnemyTurnCameraGate — never fights the client's own-turn input). Idempotent.</summary>
+        public static void ClientOnCameraHint(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeCameraHint(payload, out var hint)) { Debug.LogError("[Multiplayer][tac] tac.camerahint decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacCameraHint, hint.Seq)) return;
+
+            object actor = TacticalDeploySync.ResolveLiveActor(hint.ActorNetId);
+            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null))
+                ChaseActor(actor, follow: true);
+            TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacCameraHint, hint.Seq);
+        }
+
         private static bool _resolved;
         private static bool _resolveFailed;
         private static Type _chaseParamsType;
@@ -104,6 +169,43 @@ namespace Multiplayer.Sync.Tactical
         {
             object p = GetProp(actor, "Pos");
             return p is Vector3 v ? v : Vector3.zero;
+        }
+
+        private static bool FactionIsControlledByPlayer(object faction)
+            => faction != null && GetProp(faction, "IsControlledByPlayer") is bool b && b;
+
+        /// <summary>HOST: is <paramref name="actor"/> currently VISIBLE (revealed or located) to the shared player
+        /// faction? Resolves the player faction off the live TLC, reads its <c>Vision.IsRevealed/IsLocated(actor)</c>.
+        /// Fails CLOSED (returns false → no broadcast) on any resolution failure so a hidden enemy is never revealed
+        /// by the camera. Mirrors the vision read in <see cref="TacticalVisionSync"/> (kept local — camera-scoped).</summary>
+        private static bool IsActorVisibleToPlayerFaction(object actor)
+        {
+            try
+            {
+                object tlc = TacticalDeploySync.LiveTlc;
+                if (tlc == null) return false;
+                var factions = GetProp(tlc, "Factions") as IEnumerable;
+                if (factions == null) return false;
+                object playerFaction = null;
+                foreach (var f in factions)
+                {
+                    if (f != null && FactionIsControlledByPlayer(f)) { playerFaction = f; break; }
+                }
+                if (playerFaction == null) return false;
+                object vision = GetProp(playerFaction, "Vision");
+                if (vision == null) return false;
+                return InvokeBool(vision, "IsRevealed", actor) || InvokeBool(vision, "IsLocated", actor);
+            }
+            catch { return false; }
+        }
+
+        private static bool InvokeBool(object obj, string method, object arg)
+        {
+            if (obj == null) return false;
+            var m = AccessTools.Method(obj.GetType(), method);
+            if (m == null) return false;
+            object r = m.Invoke(obj, new[] { arg });
+            return r is bool b && b;
         }
     }
 }

@@ -117,9 +117,9 @@ namespace Multiplayer.Sync.Tactical
         // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The MELEE counterpart of
         // tac.fire.start (0x90): the host broadcasts this at the MOMENT an actor BEGINS a melee swing
         // (BashAbility — which animates via its OWN BashCrt, NOT FireWeaponAtTargetCrt, so it needs its own
-        // surface). ANIMATION-ONLY: DAMAGE stays owned by tac.damage (0x88). Phase 1 is the WIRE FOUNDATION
-        // only — the client replays a STUB no-op (logs); the BashCrt-shaped replay + damage/cost neuter is a
-        // follow-on. Wire = tac.fire.start MINUS shotCount (a melee is one swing). Takes the next free id 0x91.
+        // surface). ANIMATION-ONLY: DAMAGE stays owned by tac.damage (0x88). The client REPLAYS the native
+        // BashAbility.BashCrt swing with damage/return-fire/known-counter/charge neutered (TacticalMeleeAnimSync
+        // + MeleeAnimSyncPatches). Wire = tac.fire.start MINUS shotCount (a melee is one swing). Id 0x91.
         public const ushort TacMeleeStart = 0x91;        // 145: host→all     "actor netId begins melee swing@guid at target" (start, carries seq)
 
         // ─── TS1: mid-battle actor SPAWN / DESPAWN mirror ─────────────────────────────────────────────────
@@ -177,6 +177,22 @@ namespace Multiplayer.Sync.Tactical
         //   recLen frames each record (backward/forward-tolerant skip of an unknown kind). See TacticalStructDamageSync
         //   / TacticalStructDamageCodec. Next free 0x96.
         public const ushort TacStructDamage = 0x96;       // 150: host→all     "structural/voxel destruction event (re-applied natively)" (carries seq)
+
+        // ─── TS7: PRESENTATION polish (enemy-turn camera follow + AoE / explosion VFX) ───────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Both host→ALL (3+ player safe), carry
+        // their own TacticalLiveSeq (last-writer-wins). PRESENTATION ONLY — no sim mutation; damage already mirrors
+        // via tac.damage (0x88) / 0x8F. Degrade silently (unresolvable actor/def → skip, no notify spam).
+        //   • camerahint (0x97): [seq][actorNetId] — during an enemy turn the frozen client can't run the native
+        //     camera follow (the enemy replay coroutines bypass Activate), so the host tags the acting ENEMY the
+        //     player can SEE (native TacticalAbility.Activate → AbilityActivated hint, gated TrackWithCamera; VISIBLE-
+        //     only host-side → no fog reveals). The client chases it (follow=true), gated to its enemy turn
+        //     (ClientEnemyTurnCameraGate). See TacticalEnemyTurnCamera / EnemyTurnCameraHintPatch.
+        //   • vfx (0x98): [seq][vfxDefGuid][pos][actorNetId] — the ExplosionEffect/VolumeEffect blast prefab draws
+        //     host-only (the client applies flattened damage, never runs the effect), so the client replays the SAME
+        //     ObjectToSpawn prefab at the mirrored cell — a particle/FX object that applies NO damage. Fire/goo/acid
+        //     voxel volumes ride TS3 (0x94). See TacticalVfxSync / VfxBroadcastPatch. Next free ids 0x97/0x98.
+        public const ushort TacCameraHint = 0x97;          // 151: host→all     "enemy-turn camera-follow target (visible enemy netId)" (carries seq)
+        public const ushort TacVfx = 0x98;                 // 152: host→all     "AoE/explosion presentation VFX@def at pos"            (carries seq)
     }
 
     /// <summary>
