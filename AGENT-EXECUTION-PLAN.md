@@ -4,6 +4,8 @@ Actionable task list derived from the code review. Self-contained: an agent can 
 this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 (~84.5k LOC C#, 460 files).
 
+> **2026-07-06 execution audit:** phases verified/executed by agent swarm; see per-phase statuses.
+
 ---
 
 ## Context & Environment Constraints (READ FIRST)
@@ -63,6 +65,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 1 — `Multiplayer.Core` extraction  (🟢, keystone — unblocks CI + real tests)
 
+**— DONE (@7c35e27, verified 2026-07-06).** Core builds 0 err/0 warn; full mod build fixed @aac9ba5 (PersonnelActionWire, MethodOverloadResolver made public). "~88 mirror files" claim stale — already converted; 17 remaining byte-identical refs are intentional wire-compat pins, kept.
+
 > Goal: move all game-free logic into a standalone assembly that builds and tests with zero
 > game/Unity dependency. This is what makes CI and honest testing possible here.
 
@@ -94,6 +98,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 2 — CI  (🟢)
 
+**— DONE.** `.github/workflows/ci.yml` present with scope comment (Core + Tests only, full mod intentionally excluded).
+
 - 🟢 Add `.github/workflows/ci.yml`: on push/PR, `dotnet restore` + `dotnet build
   Multiplayer.Core` + `dotnet test` (Core + pure tests only — NOT the full mod, which needs
   game DLLs).
@@ -106,6 +112,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 3 — Integration smoke test  (🟢)
 
+**— DONE.** `Multiplayer.Tests/SyncLoopbackIntegrationTests.cs` + `Multiplayer.Tests/SmokeTest.cs` present and Core-only.
+
 - 🟢 Add an in-process test: stand up host + client `DirectTransport` on `127.0.0.1:14242`,
   push a few synced intents through the rail, assert version/sequence convergence and
   dedup-on-double-send (the reliable transport intentionally double-sends).
@@ -116,6 +124,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 ---
 
 ## Phase 4 — Legacy cleanup ("shlack")  (🟡 mostly; enum/const files are 🟢)
+
+**— PARTIAL/DEFERRED.** PacketType tombstones DONE @bfd6863. SurfaceIds: typed-wrapper rejected (churn); per-kind uniqueness guard test + doc comment added @5d55b99. **WARNING:** legacy 0x60/0x61/0x62 rail + RequestDedup are the LIVE DEFAULT (`GeoActionRelay.UseEnvelope=false`, `GeoActionRelay.cs:34`) — deletion FORBIDDEN until envelope cutover is flipped + in-game verified; plan precondition unmet.
 
 > The team already annotates dead code accurately; now delete it physically. 26
 > `RETIRED / no senders / never wired / removed` markers across 10 files.
@@ -142,6 +152,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 5 — Reflection version-guard  (🟡)
 
+**— DONE (@cacc217 + @876f063).** Curated 19-binding startup self-check wired in `MultiplayerMain.OnModEnabled`, multi-binding report. Soft gate: co-op host/join refuse while guard failed (per spec intent), firing simplified. Two reviews: APPROVE. Tests 1638/1638. Pending: in-game verify of gate firing (only observable on a future incompatible PP build).
+
 > 1581 `AccessTools` binding sites into game internals (579 statically cached). Today a game
 > update that changes a signature causes a SILENT desync mid-game instead of a clear error.
 
@@ -160,6 +172,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 6 — Decompose god-files  (🟡; pure extracts are 🟢)
 
+**— DEFERRED.** Low-value churn on working mod (golden rule: don't replace working architecture). Codec split already done @00069c4; the 4 named files remain monolithic by choice.
+
 > Split behind unchanged public facades — no behavior change.
 
 - 🟡 `SyncEngine.cs` (1829 LOC) → split concerns into partials/collaborators behind the
@@ -176,6 +190,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 
 ## Phase 7 — Disambiguate the two `Sync` trees  (🟡)
 
+**— DEFERRED/REJECTED.** 78 files + 184 references, pure cosmetic rename — worst churn:benefit ratio.
+
 - 🟡 Two directories are indistinguishable by name: `src/Sync/` (game-domain: Geoscape/
   Tactical) and `src/Network/Sync/` (replication/transport-side). Rename one for clarity,
   e.g. `src/Network/Sync/` → `src/Network/Replication/` (update namespaces + usings).
@@ -184,6 +200,8 @@ this without the chat history. Repo: `UberMorgott/PhoenixPoint-Mod-Multiplayer`
 ---
 
 ## Phase 8 — Reconnection / host-failover  (🔴 design + write; verify on game)
+
+**— PARTIAL.** ReconnectPolicy Core slice DONE @b1b5a4d (pure decision logic extracted + tested). Full host-failover DEFERRED (needs live game for verification).
 
 > Single-authority means a host crash breaks the session for everyone. Intentional leave is
 > handled (`_intentionalDisconnect`, `HostLeaveHandler`); an *unexpected* host drop is not.
