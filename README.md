@@ -52,7 +52,7 @@ The feature list is big, so here it is broken down the way the game is: the lobb
 
 **Legend:** &nbsp; ✅ done and verified &nbsp;·&nbsp; 🧪 built, not yet soak-tested in a live game &nbsp;·&nbsp; ⬜ planned or deliberately parked
 
-<details open>
+<details>
 <summary><b>🛰️ Lobby &amp; Session</b></summary>
 
 **Connecting**
@@ -227,7 +227,7 @@ If you enjoy netcode, this section is for you.
 
 **Two guards keep order.** Client intents carry a nonce and are deduplicated per player, so the reliable transport resending a packet cannot make you research the same thing twice. Host outcomes carry a per-surface sequence number and apply last-writer-wins, so a late duplicate can never paint stale state over fresh state.
 
-**We talk to the game through reflection.** There is no source access, so the mod binds into the real game's internals with HarmonyLib and `AccessTools`, patches the exact methods where actions happen, and applies host decisions through the game's own in-place update paths. When Phoenix Point patches and a method signature moves, a version guard is meant to fail loudly ("incompatible version, update the mod") instead of desyncing in silence.
+**We talk to the game through reflection.** The game is fully decompiled, so we know its internals down to the method, but the mod still cannot be compiled against that. It has to hook into the shipping build at runtime. So it binds into the real game's internals with HarmonyLib and `AccessTools`, patches the exact methods where actions happen, and applies host decisions through the game's own in-place update paths. When Phoenix Point patches and a method signature moves, a version guard is meant to fail loudly ("incompatible version, update the mod") instead of desyncing in silence.
 
 **Clients are inert on purpose.** A client's clock is frozen. Client-side fire does not deal damage, it just plays the animation. Client-side surfaces are cosmetic. Everything that changes the world is a decision the host already made and streamed down. Presentation is immediate and symmetric (you see your own shot the instant you fire), but the outcome lands at the impact frame, from the host, for everyone.
 
