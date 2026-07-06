@@ -67,8 +67,7 @@ public class TacticalAbilityRelayTests
     }
 
     [Theory]
-    [InlineData("ReloadAbility")]     // NO suppression patch — runs locally; must NOT be intercepted
-    [InlineData("HealAbility")]       // NO suppression patch — runs locally; must NOT be intercepted
+    [InlineData("ReloadAbility")]     // deferred (slot target needs the TS5 ammo surface) — runs locally, NOT intercepted
     [InlineData("ApplyStatusAbility")]
     [InlineData("EndTurnAbility")]
     [InlineData("SomeFutureUnknownAbility")]
@@ -132,5 +131,94 @@ public class TacticalAbilityRelayTests
         // The whole bug: the aim sub-states are distinct from the control state the guarded reset checks for.
         foreach (var s in TacticalAbilityRelay.AimSubStateViewNames)
             Assert.NotEqual("UIStateCharacterSelected", s);
+    }
+
+    // ── TS2: GENERIC (non shoot/melee) ability-intent relay on 0x8E ─────────────────────────────────
+
+    [Theory]
+    [InlineData("HealAbility")]           // actor target → HP via 0x8F Health
+    [InlineData("RecoverWillAbility")]    // self → WP via 0x8F Wp
+    [InlineData("RallyAbility")]          // self/squad → WP via 0x8F Wp
+    [InlineData("PsychicScreamAbility")]  // self AoE → damage via tac.damage 0x88
+    public void GenericRelayable_ActiveSet_IsRelayed(string typeName)
+    {
+        Assert.True(TacticalAbilityRelay.IsGenericRelayable(typeName));
+    }
+
+    [Theory]
+    [InlineData("ReloadAbility")]         // deferred: slot target needs the TS5 ammo surface
+    [InlineData("DeployTurretAbility")]   // deferred: pos target + SpawnActorAbility base-Activate binding
+    [InlineData("InteractWithObjectAbility")] // deferred: object target needs the TS5 loot registry
+    [InlineData("MindControlAbility")]    // deferred: faction display needs the TS5 faction bit
+    [InlineData("ShootAbility")]          // 0x87 damage relay, not the 0x8E generic relay
+    [InlineData("MoveAbility")]           // dedicated move-sync
+    [InlineData("SomeFutureUnknownAbility")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void GenericRelayable_OffList_IsNotRelayed(string typeName)
+    {
+        Assert.False(TacticalAbilityRelay.IsGenericRelayable(typeName));
+    }
+
+    [Fact]
+    public void GenericRelay_IsDisjointFrom_ShootMeleeRelay_And_DedicatedPaths()
+    {
+        // No ability is handled by BOTH the 0x87 shoot/melee relay AND the 0x8E generic relay (a Harmony
+        // double-prefix / double-handle would result). Also disjoint from the dedicated Move/Overwatch patches.
+        foreach (var g in TacticalAbilityRelay.RelayableGenericAbilityTypeNames)
+        {
+            Assert.False(TacticalAbilityRelay.IsRelayable(g),
+                "Generic-relay ability " + g + " must not also ride the 0x87 shoot/melee relay.");
+            Assert.NotEqual("MoveAbility", g);
+            Assert.NotEqual("OverwatchAbility", g);
+        }
+    }
+
+    [Fact]
+    public void GenericRelaySet_IsSuppressedActivation()
+    {
+        // Every generic-relayed ability is client-suppressed (so the view-freeze recovery covers it).
+        foreach (var g in TacticalAbilityRelay.RelayableGenericAbilityTypeNames)
+            Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation(g));
+    }
+
+    // ── GenericTargetKindFor: the ability→target-KIND map (client writes / host reads the discriminator) ──
+
+    [Theory]
+    [InlineData("HealAbility", TacticalGenericIntentCodec.KindActor)]         // needs a specific target actor
+    [InlineData("InstilFrenzyAbility", TacticalGenericIntentCodec.KindActor)]
+    [InlineData("MindControlAbility", TacticalGenericIntentCodec.KindActor)]
+    [InlineData("RecoverWillAbility", TacticalGenericIntentCodec.KindNone)]   // self-derives
+    [InlineData("RallyAbility", TacticalGenericIntentCodec.KindNone)]         // self-derives its squad (spec "actor-or-self" → none)
+    [InlineData("PsychicScreamAbility", TacticalGenericIntentCodec.KindNone)] // self AoE
+    [InlineData("DeployTurretAbility", TacticalGenericIntentCodec.KindPos)]
+    [InlineData("ThrowTurretAbility", TacticalGenericIntentCodec.KindPos)]
+    [InlineData("ReloadAbility", TacticalGenericIntentCodec.KindSlot)]
+    [InlineData("InteractWithObjectAbility", TacticalGenericIntentCodec.KindObject)]
+    [InlineData("OpenCrateAbility", TacticalGenericIntentCodec.KindObject)]
+    [InlineData("DropItemAbility", TacticalGenericIntentCodec.KindObject)]
+    public void GenericTargetKindFor_MapsAbilityToKind(string typeName, byte expectedKind)
+    {
+        Assert.Equal(expectedKind, TacticalAbilityRelay.GenericTargetKindFor(typeName));
+    }
+
+    [Theory]
+    [InlineData("ShootAbility")]   // not a generic ability — has no generic target-kind
+    [InlineData("EndTurnAbility")]
+    [InlineData("SomeFutureUnknownAbility")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void GenericTargetKindFor_UnknownAbility_IsKindUnknown(string typeName)
+    {
+        Assert.Equal(TacticalGenericIntentCodec.KindUnknown, TacticalAbilityRelay.GenericTargetKindFor(typeName));
+    }
+
+    [Fact]
+    public void GenericActiveSet_AllHaveAKnownTargetKind()
+    {
+        // Guard: an ability on the ACTIVE relay allowlist must resolve to a real (non-unknown) target kind,
+        // else the client would send an unresolvable intent instead of relaying.
+        foreach (var g in TacticalAbilityRelay.RelayableGenericAbilityTypeNames)
+            Assert.NotEqual(TacticalGenericIntentCodec.KindUnknown, TacticalAbilityRelay.GenericTargetKindFor(g));
     }
 }

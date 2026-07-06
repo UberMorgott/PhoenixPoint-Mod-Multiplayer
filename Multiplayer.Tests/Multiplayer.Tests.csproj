@@ -322,6 +322,10 @@
          excluding Move/Overwatch/Reload. The engine glue (TacticalCombatSync + the AbilityActivateRelayPatch
          Harmony patch) binds game types and is NOT linked. -->
     <Compile Include="..\src\Sync\Tactical\TacticalAbilityRelay.cs"><Link>Sync\Tactical\TacticalAbilityRelay.cs</Link></Compile>
+    <!-- TS2 generic ability-intent relay (0x8E): pure, Unity-free target-kind-union wire codec. The engine glue
+         (TacticalCombatSync.ClientInterceptGenericAbility / HostOnGenericIntent + GenericAbilityRelayPatches)
+         binds game types and is NOT linked (in-game verified). -->
+    <Compile Include="..\src\Sync\Tactical\TacticalGenericIntentCodec.cs"><Link>Sync\Tactical\TacticalGenericIntentCodec.cs</Link></Compile>
     <!-- Feature A: pure, Unity-free CLIENT enemy-turn presentation gate (enter UIStateOtherFactionTurn for a
          non-player handoff target; clear the outgoing non-player faction's manually-set IsPlayingTurn). The
          engine glue (TacticalTurnSync.ClientOnTurn) binds game types via reflection and is NOT linked. -->

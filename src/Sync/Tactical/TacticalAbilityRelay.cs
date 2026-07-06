@@ -63,6 +63,83 @@ namespace Multiplayer.Sync.Tactical
         public static bool IsRelayable(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _relayable.Contains(abilityTypeName);
 
+        // ─── TS2: GENERIC (non shoot/melee) ability-intent relay on 0x8E ──────────────────────────────
+        /// <summary>Type NAMES of the OWN-soldier abilities (beyond the 0x87 shoot/melee damage-dealers) a
+        /// mirroring client SUPPRESSES + relays via the generic <c>tac.intent.generic</c> (0x8E). These are the
+        /// abilities whose OUTCOME already rides an ALREADY-SHIPPED surface, so the host runs them
+        /// authoritatively and every peer converges with no new outcome path:
+        ///   • <c>HealAbility</c>        — target actor's HP mirrors via the 0x8F <c>ActorFieldHealth</c> bit (live).
+        ///   • <c>RecoverWillAbility</c> — the caster's WP mirrors via the 0x8F <c>ActorFieldWp</c> bit (live).
+        ///   • <c>RallyAbility</c>       — the squad's WP mirrors via 0x8F WP (the ability self-derives its friend
+        ///     targets → the host reproduces them identically from the shared sim state; no per-target payload).
+        ///   • <c>PsychicScreamAbility</c>— an <c>IDamageDealer</c> AoE: its damage/WP/status ride tac.damage (0x88)
+        ///     + 0x8F, exactly like a shot, so the host activate replicates fully.
+        /// Each of these DECLARES its own <c>Activate(object)</c> override (verified vs the decompile), so the
+        /// generic Harmony patch binds each type EXACTLY (no base-method over-patch). Abilities whose outcome
+        /// needs a not-yet-shipped surface (reload→ammo/TS5, deploy-turret→pos/SpawnActorAbility base binding,
+        /// interact/crate/drop→object-registry/TS5, mind-control→faction/TS5) are DELIBERATELY absent from this
+        /// active set — they are KNOWN to <see cref="GenericTargetKindFor"/> (wire + host build support their
+        /// kind) but stay OFF the relay until their outcome surface lands (degrade-to-notify meanwhile, spec R1).</summary>
+        public static readonly string[] RelayableGenericAbilityTypeNames =
+        {
+            "HealAbility",           // actor target → HP via 0x8F Health
+            "RecoverWillAbility",    // self         → WP via 0x8F Wp
+            "RallyAbility",          // self/squad   → WP via 0x8F Wp
+            "PsychicScreamAbility",  // self AoE     → damage via tac.damage 0x88
+        };
+
+        private static readonly HashSet<string> _genericRelayable =
+            new HashSet<string>(RelayableGenericAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>True when an OWN-soldier ability rides the generic 0x8E relay (client suppress + send intent →
+        /// host authoritative Activate). DISJOINT from <see cref="IsRelayable"/> (the 0x87 shoot/melee set) — an
+        /// ability is never handled by both relays (asserted by tests). Unknown / off-list types return false.</summary>
+        public static bool IsGenericRelayable(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _genericRelayable.Contains(abilityTypeName);
+
+        /// <summary>PURE ability→target-KIND map for the 0x8E generic intent (the discriminator the client writes +
+        /// the host reads to build the <c>TacticalAbilityTarget</c>). Covers the ACTIVE relay set AND the
+        /// deferred-but-known abilities (so the wire is complete + the map is unit-testable ahead of activation):
+        ///   Heal → actor; RecoverWill / Rally / PsychicScream → none(self); DeployTurret / ThrowTurret → pos;
+        ///   Reload → slot; Interact / OpenCrate / DropItem → object; MindControl / InstilFrenzy → actor.
+        /// Returns <see cref="TacticalGenericIntentCodec.KindUnknown"/> for anything unmapped — the client then
+        /// degrades-to-notify (never sends an unresolvable intent). Kept in sync with the audit's ability domains
+        /// (D8 heal/support, D10 psychic, D12 deployables, D18 loot, D13 mind-control). NOTE: the spec groups
+        /// "heal/rally→actor-or-self"; grounded per-ability it is Heal→actor (needs a specific target) and
+        /// Rally→none (self-derives its squad), which this map encodes precisely.</summary>
+        public static byte GenericTargetKindFor(string abilityTypeName)
+        {
+            if (string.IsNullOrEmpty(abilityTypeName)) return TacticalGenericIntentCodec.KindUnknown;
+            switch (abilityTypeName)
+            {
+                // none / self (no target payload — the ability self-derives)
+                case "RecoverWillAbility":
+                case "RallyAbility":
+                case "PsychicScreamAbility":
+                    return TacticalGenericIntentCodec.KindNone;
+                // actor target
+                case "HealAbility":
+                case "InstilFrenzyAbility":
+                case "MindControlAbility":
+                    return TacticalGenericIntentCodec.KindActor;
+                // position target (deploy cell)
+                case "DeployTurretAbility":
+                case "ThrowTurretAbility":
+                case "DeployShieldAbility":
+                    return TacticalGenericIntentCodec.KindPos;
+                // equipment-slot target (reload — TS5 ammo surface)
+                case "ReloadAbility":
+                    return TacticalGenericIntentCodec.KindSlot;
+                // ground-object target (loot / crate — TS5 object registry)
+                case "InteractWithObjectAbility":
+                case "OpenCrateAbility":
+                case "DropItemAbility":
+                    return TacticalGenericIntentCodec.KindObject;
+                default:
+                    return TacticalGenericIntentCodec.KindUnknown;
+            }
+        }
+
         /// <summary>Ability type NAMES whose <c>Activate(object)</c> a mirroring client SUPPRESSES via a dedicated
         /// Harmony prefix that is NOT the generic relay: <c>MoveAbility</c> (<c>MoveAbilityActivatePatch</c>) and
         /// <c>OverwatchAbility</c> (<c>OverwatchAbilityActivatePatch</c>). Combined with
@@ -82,16 +159,21 @@ namespace Multiplayer.Sync.Tactical
         {
             foreach (var n in RelayableAbilityTypeNames) _clientSuppressed.Add(n);
             foreach (var n in DedicatedSuppressedAbilityTypeNames) _clientSuppressed.Add(n);
+            // TS2: the generic 0x8E relay set is ALSO client-suppressed (the client sends the intent + suppresses),
+            // so the SuppressedAbilityViewClearPatch HUD/camera recovery covers them too (they confirm from the
+            // pushed UIStateAbilitySelected aim sub-state, whose guarded reset would otherwise no-op → wedge).
+            foreach (var n in RelayableGenericAbilityTypeNames) _clientSuppressed.Add(n);
         }
 
         /// <summary>True when a mirroring client SUPPRESSES this ability's local <c>Activate(object)</c> (relays an
-        /// intent to the host instead) — the exact union of the generic relay set (<see cref="IsRelayable"/>:
-        /// ShootAbility, BashAbility) and the dedicated-patch set (MoveAbility, OverwatchAbility). This is the
-        /// predicate the CLIENT view-freeze prefix (<c>SuppressedAbilityViewClearPrefix</c>) reuses to decide
-        /// whether the native post-Activate <c>ClearStackAndPush</c> must be skipped (the suppressed Activate left
-        /// the stack unchanged, so the native clear would empty the bare control state → HUD-less wedge). Unknown /
-        /// non-suppressed types (Reload/Heal/EndTurn/…) return false — their Activate runs locally and legitimately
-        /// drives the view, so it must NOT be intercepted.</summary>
+        /// intent to the host instead) — the exact union of the 0x87 shoot/melee relay set (<see cref="IsRelayable"/>:
+        /// ShootAbility, BashAbility), the 0x8E generic relay set (<see cref="IsGenericRelayable"/>: Heal / RecoverWill /
+        /// Rally / PsychicScream) and the dedicated-patch set (MoveAbility, OverwatchAbility). This is the predicate the
+        /// CLIENT view-freeze prefix (<c>SuppressedAbilityViewClearPrefix</c>) reuses to decide whether the native
+        /// post-Activate <c>ClearStackAndPush</c> must be skipped (the suppressed Activate left the stack unchanged, so
+        /// the native clear would empty the bare control state → HUD-less wedge). Unknown / non-suppressed types
+        /// (Reload/EndTurn/… — abilities with no suppression patch) return false — their Activate runs locally and
+        /// legitimately drives the view, so it must NOT be intercepted.</summary>
         public static bool IsClientSuppressedActivation(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _clientSuppressed.Contains(abilityTypeName);
 

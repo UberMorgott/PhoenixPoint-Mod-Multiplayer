@@ -276,6 +276,246 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnAbilityIntent exec failed: " + ex); }
         }
 
+        // ─── TS2: GENERIC (non shoot/melee) ability-intent relay (0x8E) ─────────────────────────────
+        /// <summary>CLIENT (mirroring) entry from <c>GenericAbilityRelayPatch</c> (the <c>Activate(object)</c>
+        /// prefix on the generic allowlist types — Heal/RecoverWill/Rally/PsychicScream, see
+        /// <see cref="TacticalAbilityRelay.RelayableGenericAbilityTypeNames"/>). Captures {casterNetId,
+        /// abilityDefGuid, target-by-kind} and relays ONE <c>tac.intent.generic</c> (0x8E) to the host, then
+        /// SUPPRESSES the local activation (returns false) so the frozen client never runs the ability — the host
+        /// runs it authoritatively and its outcome rides 0x8F (AP/WP/Health/status) + tac.damage + TS1 spawn.
+        /// Returns true (run native) only when this is NOT a mirroring client, or the runtime type is not actually
+        /// on the active allowlist (defends against the Harmony patch binding an inherited base <c>Activate</c> for
+        /// an off-list sibling). A mirroring client SUPPRESSES even on a read-failure / unknown-kind
+        /// (degrade-to-notify) — it must never execute the ability on the frozen sim.</summary>
+        public static bool ClientInterceptGenericAbility(object ability, object parameter)
+        {
+            if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player: native runs
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return true;
+
+            string typeName = ability != null ? ability.GetType().Name : "";
+            // Only intercept abilities actually on the ACTIVE generic allowlist. (If the patch bound an inherited
+            // base Activate shared with an off-list sibling, that sibling runs native — never suppressed.)
+            if (!TacticalAbilityRelay.IsGenericRelayable(typeName)) return true;
+
+            try
+            {
+                object actor = GetProp(ability, "TacticalActorBase");
+                if (actor == null)
+                {
+                    NotifyGenericDegrade(typeName, "no caster actor");
+                    return false;
+                }
+                int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (actorNetId < 0)
+                {
+                    NotifyGenericDegrade(typeName, "unknown caster netId");
+                    return false;
+                }
+                string abilityGuid = DefReflection.GetGuid(GetProp(ability, "BaseDef"));
+                if (string.IsNullOrEmpty(abilityGuid))
+                {
+                    NotifyGenericDegrade(typeName, "no ability def guid");
+                    return false;
+                }
+
+                byte kind = TacticalAbilityRelay.GenericTargetKindFor(typeName);
+                if (!TryBuildGenericIntent(actorNetId, abilityGuid, kind, parameter, out var intent))
+                {
+                    NotifyGenericDegrade(typeName, "unsupported/unreadable target kind=" + kind);
+                    return false;   // suppress + notify (never run on the frozen sim), never send a junk intent
+                }
+
+                byte[] payload = TacticalGenericIntentCodec.Encode(intent);
+                TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacIntentGeneric, payload);
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.generic actor=" + actorNetId +
+                          " type=" + typeName + " ability=" + abilityGuid + " kind=" + kind +
+                          " targetNetId=" + intent.TargetNetId + " nonce=" + intent.Nonce);
+                return false;   // suppress local activation (host is authoritative)
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] ClientInterceptGenericAbility failed: " + ex);
+                return false;   // a mirroring client must not run a local ability even on error
+            }
+        }
+
+        /// <summary>Build the wire intent from the client's <c>TacticalAbilityTarget</c> parameter per target-kind.
+        /// None → no target (self-derived). Actor → the target actor's netId (must resolve). Pos → PositionToApply.
+        /// Slot/Object are DEFERRED (their outcome surface — TS5 ammo / loot registry — is not shipped) → false
+        /// (the caller degrades-to-notify). Returns false for a KNOWN kind whose target could not be read.</summary>
+        private static bool TryBuildGenericIntent(int actorNetId, string guid, byte kind, object parameter,
+            out TacticalGenericIntentCodec.GenericIntent intent)
+        {
+            intent = default(TacticalGenericIntentCodec.GenericIntent);
+            uint nonce = NextNonce();
+            switch (kind)
+            {
+                case TacticalGenericIntentCodec.KindNone:
+                    intent = TacticalGenericIntentCodec.None(actorNetId, guid, nonce);
+                    return true;
+                case TacticalGenericIntentCodec.KindActor:
+                {
+                    ReadTarget(parameter, out int targetNetId, out _);
+                    if (targetNetId < 0) return false;   // actor kind needs a resolvable target actor
+                    intent = TacticalGenericIntentCodec.Actor(actorNetId, guid, targetNetId, nonce);
+                    return true;
+                }
+                case TacticalGenericIntentCodec.KindPos:
+                {
+                    ReadTarget(parameter, out _, out Vector3 pos);
+                    intent = TacticalGenericIntentCodec.Pos(actorNetId, guid, pos.x, pos.y, pos.z, nonce);
+                    return true;
+                }
+                default:
+                    return false;   // KindSlot / KindObject / KindUnknown → deferred / unmapped → degrade-to-notify
+            }
+        }
+
+        /// <summary>HOST inbound (<c>tac.intent.generic</c> 0x8E): peer-dedup → resolve caster + ability(by guid) →
+        /// build the target per kind → <c>Activate</c> authoritatively (held under the host camera-follow guard so
+        /// the relayed activation can't fly the host camera to the client's actor). The outcome replicates via the
+        /// existing surfaces (0x8F AP/WP/Health/status flush, tac.damage, TS1 spawn). Unknown/unsupported kind or
+        /// unresolvable guid → degrade-to-notify (no crash, no local run — the client already suppressed). No-op
+        /// off-host / off-session.</summary>
+        public static void HostOnGenericIntent(ulong senderPeerId, byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (!TacticalGenericIntentCodec.TryDecode(payload, out var intent)) { Debug.LogError("[Multiplayer][tac] generic intent decode failed"); return; }
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentGeneric, intent.Nonce)) return;
+
+            object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] generic intent: no caster for netId " + intent.ActorNetId); return; }
+
+            try
+            {
+                object ability = ResolveAbilityByGuid(actor, intent.AbilityDefGuid);
+                if (ability == null) { Debug.LogError("[Multiplayer][tac] generic intent: caster has no ability with guid " + intent.AbilityDefGuid); return; }
+
+                // Defense-in-depth: only Activate an ability that is on the generic allowlist (never blindly run an
+                // arbitrary relayed guid). A guid that resolves to an off-list ability → degrade-to-notify.
+                string typeName = ability.GetType().Name;
+                if (!TacticalAbilityRelay.IsGenericRelayable(typeName))
+                {
+                    NotifyGenericDegrade(typeName, "resolved ability not on the generic allowlist");
+                    return;
+                }
+
+                if (!TryBuildGenericTarget(intent, out object target))
+                {
+                    NotifyGenericDegrade(typeName, "unsupported target kind=" + intent.TargetKind + " on host");
+                    return;
+                }
+
+                var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
+                if (activate == null) { Debug.LogError("[Multiplayer][tac] generic intent: Activate(object) not found on " + typeName); return; }
+
+                // Hold the host camera-follow guard across the relayed Activate (BUG2 pattern from the shoot relay):
+                // the synchronous Activate camera hint must not fly the host camera to the client's actor.
+                FireReplayGate.EnterHostApply();
+                try { activate.Invoke(ability, new[] { target }); }
+                finally { FireReplayGate.ExitHostApply(); }
+                Debug.Log("[Multiplayer][tac] HOST executed generic ability " + typeName +
+                          " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ActorNetId + " kind=" + intent.TargetKind);
+
+                // The host ran this relayed CLIENT action programmatically (never UI-selected the soldier), so re-grey
+                // its ability bar if the host UI currently has it selected — same as the shoot relay. No-op otherwise.
+                TacticalActorStateSync.RefreshHostSelectedBarForActor(intent.ActorNetId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnGenericIntent exec failed: " + ex); }
+        }
+
+        /// <summary>Build the <c>TacticalAbilityTarget</c> the host passes to a relayed generic <c>Activate</c>,
+        /// per target-kind. None → null (the ability self-derives its targets from the host sim). Actor → an actor
+        /// target (Actor + DamageReceiver + aim-point PositionToApply). Pos → a bare-position target. Slot/Object
+        /// are DEFERRED (TS5) → false. Returns false for a KNOWN kind whose target could not be resolved
+        /// (e.g. the actor already left play), so the caller degrades-to-notify.</summary>
+        private static bool TryBuildGenericTarget(TacticalGenericIntentCodec.GenericIntent intent, out object target)
+        {
+            target = null;
+            switch (intent.TargetKind)
+            {
+                case TacticalGenericIntentCodec.KindNone:
+                    target = null;   // Activate(null) — RecoverWill/Rally/PsychicScream self-derive
+                    return true;
+                case TacticalGenericIntentCodec.KindActor:
+                {
+                    object targetActor = TacticalDeploySync.ResolveLiveActor(intent.TargetNetId);
+                    if (targetActor == null) return false;
+                    target = BuildActorAbilityTarget(targetActor);
+                    return target != null;
+                }
+                case TacticalGenericIntentCodec.KindPos:
+                    target = BuildPositionAbilityTarget(new Vector3(intent.TX, intent.TY, intent.TZ));
+                    return target != null;
+                default:
+                    return false;   // KindSlot / KindObject / unknown → deferred / degrade
+            }
+        }
+
+        /// <summary>Build an ACTOR-target <c>TacticalAbilityTarget</c> (Actor + DamageReceiver + aim-point
+        /// PositionToApply). Typed 3-arg ctor first (like <see cref="BuildShootTarget"/>), default-ctor + field-set
+        /// fallback. Used for Heal (and future actor-target generic abilities).</summary>
+        private static object BuildActorAbilityTarget(object targetActor)
+        {
+            var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+            if (targetType == null) return null;
+            Vector3 aim = GetActorAimPosition(targetActor, Vector3.zero);
+            try
+            {
+                var actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
+                var attackType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.AttackType");
+                var ctor = (actorBaseType != null && attackType != null)
+                    ? targetType.GetConstructor(new[] { actorBaseType, typeof(Vector3), attackType })
+                    : null;
+                if (ctor != null)
+                {
+                    object t = ctor.Invoke(new[] { targetActor, aim, DefaultAttackType(attackType) });
+                    AccessTools.Field(targetType, "DamageReceiver")?.SetValue(t, targetActor);
+                    return t;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildActorAbilityTarget ctor failed, falling back: " + ex); }
+
+            object target = Activator.CreateInstance(targetType);
+            AccessTools.Field(targetType, "Actor")?.SetValue(target, targetActor);
+            AccessTools.Field(targetType, "DamageReceiver")?.SetValue(target, targetActor);
+            object go = GetProp(targetActor, "gameObject");
+            if (go != null) AccessTools.Field(targetType, "GameObject")?.SetValue(target, go);
+            if (GetProp(targetActor, "Pos") is Vector3 ap) AccessTools.Field(targetType, "ActorGridPosition")?.SetValue(target, ap);
+            AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, aim);
+            return target;
+        }
+
+        /// <summary>Build a bare-POSITION <c>TacticalAbilityTarget</c> (Vector3 ctor first, field-set fallback).
+        /// Used for pos-target generic abilities (deploy-turret etc. — deferred allowlist, wire+build ready).</summary>
+        private static object BuildPositionAbilityTarget(Vector3 pos)
+        {
+            var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+            if (targetType == null) return null;
+            try
+            {
+                var posCtor = targetType.GetConstructor(new[] { typeof(Vector3) });
+                if (posCtor != null) return posCtor.Invoke(new object[] { pos });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildPositionAbilityTarget ctor failed, falling back: " + ex); }
+            object target = Activator.CreateInstance(targetType);
+            AccessTools.Field(targetType, "PositionToApply")?.SetValue(target, pos);
+            return target;
+        }
+
+        /// <summary>Degrade-to-notify for the generic relay (spec §1 "degrade-to-notify, never silent desync,
+        /// never crash"): a clear, taggable WARNING a UI layer can surface. Used when a generic ability's target
+        /// kind is unsupported/unreadable (client suppresses without sending; host skips the Activate). The client
+        /// already suppressed the local run, so this NEVER leaves the frozen sim executing the ability.</summary>
+        private static void NotifyGenericDegrade(string abilityTypeName, string reason)
+        {
+            Debug.LogWarning("[Multiplayer][tac] generic ability relay DEGRADED (notify): type=" +
+                             (abilityTypeName ?? "?") + " — " + reason +
+                             " — suppressed locally, not executed (no desync).");
+        }
+
         // ─── HOST: ApplyDamage funneled → broadcast the FINAL applied DamageResult ─────────────────
         /// <summary>HOST postfix on <c>TacticalActorBase.ApplyDamage(DamageResult)</c>: flatten the FINAL
         /// applied result + broadcast <c>tac.damage</c> to all peers. Gated: only on the host, only in a live

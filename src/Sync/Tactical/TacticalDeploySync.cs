@@ -838,6 +838,16 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── TS2: GENERIC (non shoot/melee) ability-INTENT rail (0x8E) ────────────────────────────
+            // Client→host generic ability intent (heal/recover-will/rally/psychic-scream/…). Lands on the host;
+            // it re-resolves the ability by def guid + Activates it authoritatively (outcome rides 0x8F + tac.damage
+            // + TS1 spawn). Side-gated internally, so a stray envelope on a client is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacIntentGeneric)
+            {
+                try { TacticalCombatSync.HostOnGenericIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.generic failed: " + ex); }
+                return true;
+            }
+
             // ─── Feature C: client-side ATTACK ANIMATION rail (tac.fire.start) ────────────────────────
             // Host→all START push; client-only play (the handler is side-gated internally, so a stray
             // envelope on the host is a clean no-op). DAMAGE stays on tac.damage (0x88).

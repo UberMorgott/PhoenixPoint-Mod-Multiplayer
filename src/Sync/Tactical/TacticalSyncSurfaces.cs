@@ -81,6 +81,17 @@ namespace Multiplayer.Sync.Tactical
         public const ushort TacIntentOverwatch = 0x8C;   // 140: client→host  "actor netId arms overwatch watching cone" (intent, carries nonce + cone)
         public const ushort TacOverwatchState = 0x8D;    // 141: host→all     "actor netId overwatch armed(with cone)/cleared" (state, carries seq)
 
+        // ─── TS2: GENERIC (non shoot/melee) ability-INTENT relay ──────────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Where 0x87 tac.intent.ability is the
+        // shoot/melee DAMAGE-DEALER relay (limb-snap-tuned, UNTOUCHED), 0x8E is the RICHER generic client→host
+        // intent for OWN-soldier abilities BEYOND shoot/bash (heal, recover-will, rally, psychic scream, …). It
+        // carries a target-KIND discriminator (none/self · actor · pos · equipment-slot · object) so ONE surface
+        // expresses every non-damage ability's target shape. The client SUPPRESSES the local Activate (frozen sim)
+        // and relays this intent; the host re-resolves the ability by def guid + Activates it authoritatively; the
+        // outcome rides the ALREADY-SHIPPED surfaces (0x8F AP/WP/Health/status + tac.damage 0x88 + TS1 spawn).
+        // Peer-keyed IntentDedup (like 0x87). See TacticalGenericIntentCodec / TacticalCombatSync.HostOnGenericIntent.
+        public const ushort TacIntentGeneric = 0x8E;     // 142: client→host  "actor netId activates ability@guid on <target-kind>" (intent, carries nonce)
+
         // ─── Inc T1: GENERIC per-actor STATE-DELTA spine (state-spine design §9) ────────────────────────
         // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. The REUSABLE spine: a per-actor
         // STATE-DELTA (host→all) that mirrors mutable actor fields so any field/stat/status syncs by default.
@@ -90,8 +101,7 @@ namespace Multiplayer.Sync.Tactical
         // flush tick and broadcasts ONLY changed actors (idle actor = 0 bytes); client applies ABSOLUTE values
         // under a re-entrancy flag. Runs ALONGSIDE the existing per-action surfaces (additive convergence layer
         // — the AP/WP + targeted statuses it carries have no existing owner, so no conflict). Self-contained
-        // tactical seq (last-writer-wins) like the other live surfaces. 0x8E is RESERVED for the future generic
-        // ability-INTENT (state-spine §3) — do NOT reuse it here.
+        // tactical seq (last-writer-wins) like the other live surfaces. (0x8E = TacIntentGeneric, TS2 — allocated above.)
         public const ushort TacActorState = 0x8F;        // 143: host→all     "per-actor AP/WP + status-set delta" (state, carries seq)
 
         // ─── Feature C: client-side ATTACK ANIMATION (tac.fire.start) ────────────────────────────────────
@@ -99,8 +109,8 @@ namespace Multiplayer.Sync.Tactical
         // MOMENT an actor BEGINS a shoot/grenade attack (ShootAbility — melee is a documented follow-on), so the
         // client mirror plays the shooting/throw animation CONCURRENTLY with the host. ANIMATION-ONLY: DAMAGE stays owned by tac.damage
         // (0x88); the client replays FireWeaponAtTargetCrt with AttackType.Synced + a neutered FireProjectile
-        // (no projectile → ZERO client damage) under a camera-hint guard (no camera fly). 0x8E is RESERVED for
-        // the future generic ability-INTENT; 0x8F is TacActorState → this takes the next free id 0x90.
+        // (no projectile → ZERO client damage) under a camera-hint guard (no camera fly). (0x8E = TacIntentGeneric
+        // TS2; 0x8F = TacActorState → this takes the next free id 0x90.)
         public const ushort TacFireStart = 0x90;         // 144: host→all     "actor netId begins attack@guid at target" (start, carries seq)
 
         // ─── Feature C (melee): client-side MELEE ATTACK ANIMATION (tac.melee.start) ──────────────────────
