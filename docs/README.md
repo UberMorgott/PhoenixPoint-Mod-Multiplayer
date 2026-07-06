@@ -1,28 +1,58 @@
-# Multiplayer — Cooperative Multiplayer Mod (Documentation)
+# Multiplayer — Cooperative Multiplayer Mod (Documentation Index)
 
-Local docs are the **single source of truth** for the Multiplayer cooperative-multiplayer mod for Phoenix Point.
+These docs are the **single source of truth** for the Multiplayer cooperative-campaign mod
+for Phoenix Point.
 
 - A **cooperative campaign** mod built on the official **SDK** + **Harmony** patches.
 - **Not** a traditional turn-based PvP / wait-for-each-other mode.
 - One shared campaign; multiple players co-control a single faction by **ownership + permissions**.
-- **Authoritative host** model (not lockstep): the host runs all logic + RNG + AI; clients send actions and reproduce validated results.
+- **Authoritative host** model (not lockstep): the host runs all logic + RNG + AI; clients send
+  actions and reproduce validated results — clients never simulate.
 
-> **Where are we now?** → [research/00-current-state.md](research/00-current-state.md) — branch HEAD, what's built vs stub, undocumented-but-shipped working-tree changes, active next step, deferred scope, in-game test status. Read this first.
+> **Where are we now (current status)?** → [COOP-SYNC-ROADMAP.md](COOP-SYNC-ROADMAP.md) — the living
+> roadmap + status tracker (read the STATUS table + CURRENT POSITION first). This is the authoritative
+> "what is built / what is next" record. The older per-arc status note
+> [research/00-current-state.md](research/00-current-state.md) is **SUPERSEDED** (kept for lineage only).
 
-## Document Map
+## How to read this tree (status legend)
 
-### `specs/` — Design
+A new contributor should read top-to-bottom: the first two groups are **current truth**, the rest is
+**history**. Nothing below the Roadmap is maintained as current — it is kept for rationale and lineage.
+
+| Group | What it is | Trust as current? |
+|-------|------------|-------------------|
+| **1. Engine — as-built** | How the shipped mod actually works today | ✅ Yes — current truth |
+| **2. Research — reference** | Source-dive notes on the Phoenix Point engine | ✅ Yes — stable reference |
+| **3. Roadmap & status** | Living tracker of built vs. next | ✅ Yes — current status |
+| **4. Design history / lineage** | Original design + early build plans | ⚠️ Superseded — rationale only |
+| **5. Development history** | Dated session working-notes / plans / patches | 🕘 Point-in-time — not maintained |
+
+---
+
+## 1. Engine — as-built implementation (CURRENT TRUTH)
+
+The current source of truth for how the mod works today.
 
 | Doc | Scope |
 |-----|-------|
-| [specs/01-design.md](specs/01-design.md) | Project goal & co-op concept; authoritative-host architecture; class diagrams; network protocol; Harmony patch plan; risk + desync assessment; implementation order; PoC roadmap; key file refs |
-| [specs/02-session-lifecycle-and-player-management.md](specs/02-session-lifecycle-and-player-management.md) | Lobby & peer identity; session-start save transfer + barrier sync; MP state vs vanilla save (ownership model); player-management UI + permission persistence + transport-independent `playerGUID` |
-| [specs/03-open-questions-sdk.md](specs/03-open-questions-sdk.md) | Items needing PP source/SDK to verify; deferred scope (join-in-progress, host migration) |
+| [engine/01-networking-core.md](engine/01-networking-core.md) | `NetworkEngine` singleton + lifecycle, message routing, `PacketType`, binary message formats, `SessionManager` (heartbeat, ready-state), reliable message flow |
+| [engine/02-transport-layer.md](engine/02-transport-layer.md) | `ITransport` + three transports (Steam P2P / Direct TCP / STUN UDP), comparison table, message envelope + message-type catalog by phase, reliability |
+| [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection, native Load-screen intercept for the co-op "Choose save" |
 
-### `research/` — Source-Dive & Concurrency Design
+> **Command-sync / state-sync layer (as-built code, no dedicated engine doc yet):** the
+> host-authoritative sync backbone lives under `src/Network/` (`SyncEngine`, `SurfaceRouter`,
+> state channels, geoscape/tactical surfaces). Its design is in the sync-canon docs (group 5);
+> its current shape + the full channel/surface catalog live in [COOP-SYNC-ROADMAP.md](COOP-SYNC-ROADMAP.md)
+> and the Quick Reference below.
+
+## 2. Research — source-dive & reference material
+
+Decompile-grounded notes on the Phoenix Point engine. Reference material — nothing compiles against
+these; they inform where and how to patch.
 
 | Doc | Scope |
 |-----|-------|
+| [research/00-current-state.md](research/00-current-state.md) | **⚠ SUPERSEDED status note** (thin-client vehicle-sync era, 2026-06). Superseded 2026-07-02 by the Roadmap; the co-op **loading-screen internals** section is still accurate, treat the rest as history |
 | [research/01-tactical-action-pipeline.md](research/01-tactical-action-pipeline.md) | Tactical class hierarchy, action execution flow, `ActivateAbility` chokepoint, turn system, stable actor IDs, candidate Harmony patch sites |
 | [research/02-rng-analysis.md](research/02-rng-analysis.md) | RNG sources (`SharedData.Random` + `UnityEngine.Random`), combat determinism, host-only-randomness decision, hidden RNG risks |
 | [research/03-campaign-layer.md](research/03-campaign-layer.md) | Campaign subsystem entry points (research/manufacturing/base/aircraft/soldier), permission injection points, authoritative `CampaignPermission` set |
@@ -31,51 +61,115 @@ Local docs are the **single source of truth** for the Multiplayer cooperative-mu
 | [research/06-harmony-patterns.md](research/06-harmony-patterns.md) | Reusable Harmony patterns from existing mods: lifecycle, patch types, internal-type patching, field access, event subscription |
 | [research/07-tactical-concurrency.md](research/07-tactical-concurrency.md) | Simultaneous play, same-tile conflict, host receipt-order authority, destination reservation, turn-end ready-gate |
 | [research/08-geoscape-concurrency.md](research/08-geoscape-concurrency.md) | Two state layers, shared clock, events (informational vs decision), forced state transitions (yank-to-briefing) |
-| [research/09-disconnect-reconnect.md](research/09-disconnect-reconnect.md) | Orphan takeover, reconnect resync via the start-barrier, mid-battle-save caveat, host-loss, toasts |
+| [research/09-disconnect-reconnect.md](research/09-disconnect-reconnect.md) | Orphan takeover, reconnect resync via the start-barrier, mid-battle-save caveat, host-loss, toasts, co-op loading overlay |
 | [research/10-messagebox-input-prompt.md](research/10-messagebox-input-prompt.md) | Native message-box / text-input prompt API for in-game co-op dialogs |
 | [research/11-console-hotkey-suppress.md](research/11-console-hotkey-suppress.md) | Console / hotkey suppression seam |
-| [research/12-time-flow-and-sync-seams.md](research/12-time-flow-and-sync-seams.md) | Geoscape time-flow API + host-authoritative clock sync seams (grounding for Stage-2 time sync): clock owner, pause/speed API, auto-pause sites, `RecordInstanceData`/`ProcessInstanceData` settability, hook points, risks R1–R8 |
-| [research/00-current-state.md](research/00-current-state.md) | **Status note** — as-built state, branch HEAD, built-vs-stub, active/deferred work, in-game test status |
+| [research/12-time-flow-and-sync-seams.md](research/12-time-flow-and-sync-seams.md) | Geoscape time-flow API + host-authoritative clock sync seams: clock owner, pause/speed API, auto-pause sites, `RecordInstanceData`/`ProcessInstanceData` settability, hook points, risks R1–R8 |
 
-### `superpowers/` — Approved Designs & Staged Plans
-
-| Doc | Scope |
-|-----|-------|
-| [superpowers/specs/2026-06-12-geoscape-command-sync-design.md](superpowers/specs/2026-06-12-geoscape-command-sync-design.md) | Host-authoritative command-result relay — architecture index, module map (CommandRelay/Codec/HostArbiter/ClientApplier/InterceptRegistry/PermissionGate), broad-intercept registry, staging (Stage 1 commands / Stage 2 time / Stage 3 events) |
-| [superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md](superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md) | Stage-1 implementation plan — command actions + real per-GUID permissions, first vertical proof `GeoVehicle.StartTravel`. **(Implemented; see 00-current-state.)** |
-| [superpowers/plans/2026-06-13-time-sync-stage2-increment1.md](superpowers/plans/2026-06-13-time-sync-stage2-increment1.md) | **Active** — Stage-2 Increment-1 host-authoritative time: `SetTimeState` action, client pause/speed intercepts, client hourly-sim suppression, continuous `0x34` clock mirror |
-| [superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md](superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md) + [plans/…-coop-loading-screen-overlay.md](superpowers/plans/2026-06-12-coop-loading-screen-overlay.md) | Co-op loading-screen roster overlay (separate milestone) |
-| [superpowers/specs/2026-06-13-coop-state-replication-design.md](superpowers/specs/2026-06-13-coop-state-replication-design.md) | **Host-authoritative geoscape state replication (SD-AIDR)** — slaved-clock spectator-drive + native InstanceData-diff stream; supersedes per-action StartTravel intercept; verified seams (clock C1/travel-render C3/entity-lifecycle C7/input-funnel C9/reload C14), 13-producer client-suppress set, 3 travel emitters, launch-loop gating, `0x35`/`0x36` packets, 5-increment rollout |
-| [superpowers/plans/2026-06-13-replication-increment1-client-inert.md](superpowers/plans/2026-06-13-replication-increment1-client-inert.md) | **SD-AIDR INC-1** plan — client inert + slaved-clock travel mirror: pure auditable 13-producer table (TDD), `ClientGeoSimSuppressPatch` (each producer → `NextUpdate.Never`, client-only), `ClientTravelEmitterSuppressPatch` (3 `GeoVehicle` emitters, render-only), verify `0x34` clock advances. 5 tasks; patches build-verified + in-game 2-instance checkpoint |
-| [superpowers/plans/2026-06-13-replication-increment2-entity-lifecycle.md](superpowers/plans/2026-06-13-replication-increment2-entity-lifecycle.md) | **SD-AIDR INC-2** plan — entity lifecycle `0x36 GeoEntityOp` (reliable): pure `GeoEntityOpCodec` (4 op-types, TDD) + `EntityReplicationScope` guard (TDD), `HostEntityOpBroadcastPatch` (host postfix on `CreateVehicle`/`CreateVehicleAtPosition`/`UnregisterVehicle`/`DestroySite`), `ClientEntityOpApplier` (native `CreateVehicle` lifecycle replay + `VehicleID`/`_lastVehicleIndex` reconcile). Fixes host-created "vehicle N not found"; SiteCreated + arrival authority deferred to INC-3. 8 tasks; codec TDD + patches build-verified + in-game checkpoint |
-| [superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md](superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md) | **SD-AIDR INC-3** design — generic host→client geoscape state mirror over a single scope-keyed packet `0x35 GeoStateDiff` (generalizes the `0x34` clock mirror from one Timing object to N entities). Host walks all factions × vehicles, native `RecordInstanceData` snapshot → diff → broadcasts only CHANGED records (UNRELIABLE continuous pos/rot/range + RELIABLE discrete Travelling/CurrentSite/DestinationSites). Client is a PURE mirror keyed by stable `(factionGuid,VehicleID)` (THE live movement-bug fix — replaces Phoenix-only `FindVehicleById`), seq-guarded, applied under `EntityReplicationScope`. Scope enum `Vehicle=1`(INC-3a)/Site/MarketPrice(INC-3b)/Faction(INC-3c)/`Checksum=255`. Retires per-action `StartTravel` command-replay, keeps client→host input relay. CRC detector + targeted single-entity self-heal (full save-reload = INC-5) |
-| [superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md](superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md) | **Session handoff 2026-07-03** — Fable re-review fix wave `fc2c8b5`→`ace79ae` (native-advance reflection ROOT CAUSE `Base.UI.GeoscapeModulesData`, host-resolved event texts / VoidOmen fix, correlator hardening, `0x6B` advance-request, wallet diag, sim-freeze anchor relay); deployed DLL `15f9a08e…`, in-game verified (wallet converges) vs pending verification list, known open issues, next arcs |
-| [superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md](superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md) | **SD-AIDR INC-3a** plan — all-factions vehicle state mirror (first `0x35` scope; unblocks the locked host→client movement bug): pure `GeoStateScope` enum + `GeoStateDiffCodec` (generic scope/seq/mask envelope, TDD) + `GeoVehicleStateDiffer` (epsilon diff + monotonic per-identity seq + continuous/discrete channel split, TDD); `GeoBridge` `FindVehicleByFactionAndId`(bug fix)/`RecordVehicleState`/`ApplyVehicleState`(light setters)/`ApplyVehicleStateFull`(`ProcessInstanceData`); `GeoStateSyncBroadcaster` (host snapshot+diff, ticked from `NetworkEngine.Update`); `BroadcastGeoStateDiff` + route `0x35` → `ClientGeoStateApplier`; RETIRE `StartTravel` command-replay, KEEP client→host relay. Two-phase DIAG (Task 0 all-factions `DescribeVehicles` now / Task 13 revert `b753111`+`fbfb3f9` after verify). 14 tasks; pure cores TDD + engine seams build-verified + in-game GATE (host moves Phoenix Manticore + NJ Thunderbird → both mirror) |
-| [superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md](superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md) | **Session handoff 2026-07-05** — Inc4 S2 travel mirror (17 commits `0d38d20`->`9e80b24`): composite-key ROOT CAUSE, snapshot interpolation, MoveVehicle+ExploreSite relays, report-mirror gate-ON, project rename Multipleer->Multiplayer |
-| *(outer)* [specs/2026-07-05-multiplayer-unified-popup-mirror-design.md](../../docs/superpowers/specs/2026-07-05-multiplayer-unified-popup-mirror-design.md) | **Unified popup-mirror design** — pillars P1-P7: mission-state mirror, universal blocking, outcome modals, unified sequencer, occId dedup, resource-harvest float, objectives channel; world-activity batches WA-1..4; marketplace; personnel sync PS1-PS4 |
-| *(outer)* [specs/2026-07-05-multiplayer-personnel-sync-design.md](../../docs/superpowers/specs/2026-07-05-multiplayer-personnel-sync-design.md) | **Personnel sync design** — personnel edit intents 60-65, PersonnelChannel #9, RecruitPoolChannel #10, GeoVehicleChannel crew/loadout tails, ResearchSnapshot v4 AvailableAuthoritative |
-| *(outer)* [specs/2026-07-06-multiplayer-tactical-closure-design.md](../../docs/superpowers/specs/2026-07-06-multiplayer-tactical-closure-design.md) | **Tactical closure design** — surfaces 0x92-0x98: actor spawn/despawn, ability-intent relay, ground surfaces, mission conclusion, ammo/MC mask bits, destructibles, enemy-turn camera, AoE/VFX replay |
-| *(outer)* [research/2026-07-05-geoscape-personnel-native-taxonomy.md](../../docs/superpowers/research/2026-07-05-geoscape-personnel-native-taxonomy.md) | Personnel native taxonomy — GeoCharacter live-state blobs, GeoUnitId keying, roster membership |
-| *(outer)* [research/2026-07-05-multiplayer-personnel-coverage-audit.md](../../docs/superpowers/research/2026-07-05-multiplayer-personnel-coverage-audit.md) | Personnel coverage audit — equipment/augment/hire/transfer/dismiss/rename coverage |
-| *(outer)* [research/2026-07-05-geoscape-full-coverage-gap-audit.md](../../docs/superpowers/research/2026-07-05-geoscape-full-coverage-gap-audit.md) | Geoscape full-coverage gap audit — every unsynced surface categorized |
-| *(outer)* [research/2026-07-05-multiplayer-three-player-audit.md](../../docs/superpowers/research/2026-07-05-multiplayer-three-player-audit.md) | Three-player topology audit — 3+ player dedup, peer-keyed IntentDedup, mid-session join |
-| *(outer)* [research/2026-07-06-tactical-full-coverage-gap-audit.md](../../docs/superpowers/research/2026-07-06-tactical-full-coverage-gap-audit.md) | Tactical full-coverage gap audit — every unsynced tactical surface categorized |
-
-### `engine/` — As-Built Implementation
+## 3. Roadmap & current status
 
 | Doc | Scope |
 |-----|-------|
-| [engine/01-networking-core.md](engine/01-networking-core.md) | `NetworkEngine` singleton + lifecycle, message routing, `PacketType`, binary message formats, `SessionManager` (heartbeat, ready-state), reliable message flow |
-| [engine/02-transport-layer.md](engine/02-transport-layer.md) | `ITransport` + three transports (Steam P2P / Direct TCP / STUN UDP), comparison table, message envelope + message-type catalog by phase, reliability |
-| [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection design; **native Load-screen intercept** for the co-op "Choose save" (open native `UIStateHomeLoadGame` + Prefix `UIModuleSaveGame.OnLoadGamePressed` to capture-and-return without loading) |
+| [COOP-SYNC-ROADMAP.md](COOP-SYNC-ROADMAP.md) | **Living roadmap + status tracker.** Vision, invariants, out-of-scope decisions, the 2026-06-17 full-geoscape-replication architecture decision, the decomposed sub-projects (#0–#5 / Inc1–Inc5), the STATUS table (every batch: geoscape channels, world-activity, popup-mirror, personnel, tactical surfaces), and CURRENT POSITION / next actions. **Start here for status.** |
 
-> **Command-sync layer (as-built code, no dedicated engine doc yet):** `src/Network/CommandSync/` — the host-authoritative command relay built from the [geoscape-command-sync design](superpowers/specs/2026-06-12-geoscape-command-sync-design.md). Module map + line refs live in [research/00-current-state.md](research/00-current-state.md).
+## 4. Design history / lineage (SUPERSEDED originals)
 
-### `diagrams/`
+> These describe the **original** architecture and design intent, plus the early build/UI plans.
+> Kept for lineage and rationale, **not** current truth — for what is actually built, read groups 1–3.
 
-Reserved for diagram assets (currently empty).
+### `specs/` — original design (superseded)
 
-## Quick Reference
+| Doc | Scope |
+|-----|-------|
+| [specs/01-design.md](specs/01-design.md) | Full original design: project goal & co-op concept, authoritative-host architecture, class diagrams, network protocol, Harmony patch plan, risk/desync assessment, implementation order, PoC roadmap (**superseded** by the engine docs + Roadmap) |
+| [specs/02-session-lifecycle-and-player-management.md](specs/02-session-lifecycle-and-player-management.md) | Lobby & peer identity, session-start save transfer + barrier sync, MP state vs vanilla save (ownership model), player-management UI + permission persistence + transport-independent `playerGUID` |
+| [specs/03-open-questions-sdk.md](specs/03-open-questions-sdk.md) | Items needing PP source/SDK to verify; deferred scope (join-in-progress, host migration) |
+
+### `plans/` — early build & UI plans (superseded)
+
+| Doc | Scope |
+|-----|-------|
+| [plans/foundation-build-plan.md](plans/foundation-build-plan.md) | Source-grounded build spec for foundation work-items (lobby / identity / save-transfer / permissions) |
+| [plans/flow-reconciliation-plan.md](plans/flow-reconciliation-plan.md) | Reconcile the existing mod into the canonical lobby-first flow from `specs/02` |
+| [plans/native-lobby-ui-plan.md](plans/native-lobby-ui-plan.md) | Replace the from-code uGUI overlay with cloned **native** Phoenix Point widgets for the lobby + save-picker |
+| [plans/responsive-layout-refactor.md](plans/responsive-layout-refactor.md) | Responsive "rubber" layout refactor for the co-op lobby (removes manual-coordinate code) |
+
+## 5. Development history (point-in-time working notes — NOT maintained)
+
+> Dated session artifacts under `docs/superpowers/` and the raw patches under `docs/lineage/`.
+> These are **snapshots from the day they were written** — session handoffs, per-increment
+> implementation plans, design specs, and system-map research. They record how the project got
+> here and are kept for lineage. They are **not** updated and may contradict current truth;
+> when in doubt, groups 1–3 win.
+>
+> Note: some of these notes reference now-removed local two-instance testing scripts
+> (`make-second-copy.bat` / `launch-second-copy.bat`, etc.). Current local-testing guidance lives in
+> `tools/COOP-TESTING.md` (a developer's own second Steam-API session; no emulator tool is bundled).
+
+### Session handoffs (`superpowers/*.md`)
+
+| Doc | Scope |
+|-----|-------|
+| [superpowers/2026-06-13-EOD-replication-handoff.md](superpowers/2026-06-13-EOD-replication-handoff.md) | SD-AIDR replication + the host→client movement blocker; next-session pickup |
+| [superpowers/2026-06-13-EOD-thin-client-vehicle-sync-handoff.md](superpowers/2026-06-13-EOD-thin-client-vehicle-sync-handoff.md) | Thin-client vehicle sync + snapshot interpolation; next-session pickup |
+| [superpowers/2026-06-20-multiplayer-tactical-handoff.md](superpowers/2026-06-20-multiplayer-tactical-handoff.md) | Tactical battle replication — next-session handoff |
+| [superpowers/2026-06-20-multiplayer-tactical-mirror-handoff.md](superpowers/2026-06-20-multiplayer-tactical-mirror-handoff.md) | Tactical full-mirror arc — night-session handoff |
+| [superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md](superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md) | Fable re-review fix wave (native-advance reflection root cause, host-resolved event texts, correlator hardening, `0x6B` advance-request, wallet convergence) |
+| [superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md](superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md) | Inc4 S2 travel mirror: composite-key root cause, snapshot interpolation, MoveVehicle/ExploreSite relays, report-mirror gate-ON, project rename Multipleer→Multiplayer |
+
+### Implementation plans (`superpowers/plans/`)
+
+| Doc | Scope |
+|-----|-------|
+| [superpowers/plans/2026-06-12-coop-loading-screen-overlay.md](superpowers/plans/2026-06-12-coop-loading-screen-overlay.md) | Co-op loading-screen roster overlay build plan |
+| [superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md](superpowers/plans/2026-06-12-geoscape-command-sync-stage1.md) | Stage-1 command actions + per-GUID permissions; first vertical proof `GeoVehicle.StartTravel` |
+| [superpowers/plans/2026-06-13-replication-increment1-client-inert.md](superpowers/plans/2026-06-13-replication-increment1-client-inert.md) | SD-AIDR INC-1: client inert + slaved-clock travel mirror (13-producer suppress table, travel-emitter suppress) |
+| [superpowers/plans/2026-06-13-replication-increment2-entity-lifecycle.md](superpowers/plans/2026-06-13-replication-increment2-entity-lifecycle.md) | SD-AIDR INC-2: entity lifecycle `0x36 GeoEntityOp` (create/destroy replay + VehicleID reconcile) |
+| [superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md](superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md) | SD-AIDR INC-3a: all-factions vehicle state mirror (`0x35 GeoStateDiff`; `(factionGuid,VehicleID)` resolver unblocks host→client movement) |
+| [superpowers/plans/2026-06-13-thin-client-vehicle-sync-increments.md](superpowers/plans/2026-06-13-thin-client-vehicle-sync-increments.md) | Thin-client vehicle sync — snapshot-interpolation increment plan |
+| [superpowers/plans/2026-06-13-time-sync-stage2-increment1.md](superpowers/plans/2026-06-13-time-sync-stage2-increment1.md) | Stage-2 Inc-1 host-authoritative time: `SetTimeState`, client pause/speed intercepts, hourly-sim suppression, `0x34` clock mirror |
+| [superpowers/plans/2026-06-15-coop-action-sync-engine.md](superpowers/plans/2026-06-15-coop-action-sync-engine.md) | Co-op action-sync & permission engine — implementation plan |
+| [superpowers/plans/2026-06-16-coop-sync-v2-state-echo.md](superpowers/plans/2026-06-16-coop-sync-v2-state-echo.md) | Co-op sync v2: host-authoritative state echo (frozen-client model) |
+| [superpowers/plans/2026-06-25-multiplayer-tactical-fullstate-spine-roadmap.md](superpowers/plans/2026-06-25-multiplayer-tactical-fullstate-spine-roadmap.md) | Tactical full-state spine roadmap + Inc2 implementation plan |
+| [superpowers/plans/2026-06-26-multiplayer-event-window-mirror.md](superpowers/plans/2026-06-26-multiplayer-event-window-mirror.md) | Host→client report/event-window mirror — implementation plan |
+| [superpowers/plans/2026-06-26-multiplayer-inc1-rail-unification.md](superpowers/plans/2026-06-26-multiplayer-inc1-rail-unification.md) | Increment 1 rail unification (slice 1): fold legacy rails onto the `0x67` envelope |
+| [superpowers/plans/2026-06-27-inc3-tactical-combat-camera.md](superpowers/plans/2026-06-27-inc3-tactical-combat-camera.md) | Inc3: combat outcome + explosion VFX + enemy-turn camera — implementation plan |
+| [superpowers/plans/2026-06-27-multiplayer-sync-canon-rollout.md](superpowers/plans/2026-06-27-multiplayer-sync-canon-rollout.md) | Sync-canon rollout — implementation plan (converge side-rails onto the one canon) |
+
+### Design specs (`superpowers/specs/`)
+
+| Doc | Scope |
+|-----|-------|
+| [superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md](superpowers/specs/2026-06-12-coop-loading-screen-overlay-design.md) | Co-op loading-screen roster overlay — design |
+| [superpowers/specs/2026-06-12-geoscape-command-sync-design.md](superpowers/specs/2026-06-12-geoscape-command-sync-design.md) | Host-authoritative command-result relay: module map (CommandRelay/Codec/HostArbiter/ClientApplier/InterceptRegistry/PermissionGate), broad-intercept registry, staging |
+| [superpowers/specs/2026-06-13-coop-state-replication-design.md](superpowers/specs/2026-06-13-coop-state-replication-design.md) | Host-authoritative geoscape state replication (SD-AIDR): slaved-clock spectator-drive + native InstanceData-diff stream; supersedes the per-action StartTravel intercept |
+| [superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md](superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md) | SD-AIDR INC-3 design: generic host→client state mirror over `0x35 GeoStateDiff` (scope-keyed, seq-guarded, `(factionGuid,VehicleID)` resolver) |
+| [superpowers/specs/2026-06-13-thin-client-vehicle-sync-snapshot-interpolation.md](superpowers/specs/2026-06-13-thin-client-vehicle-sync-snapshot-interpolation.md) | Thin-client vehicle sync — snapshot-interpolation re-architecture (client render half of the `0x35` mirror) |
+| [superpowers/specs/2026-06-19-multiplayer-tactical-generic-state-spine-design.md](superpowers/specs/2026-06-19-multiplayer-tactical-generic-state-spine-design.md) | Tactical generic state-spine design (host↔client full-state replication; read-only investigation) |
+| [superpowers/specs/2026-06-26-multiplayer-unified-sync-backbone-design.md](superpowers/specs/2026-06-26-multiplayer-unified-sync-backbone-design.md) | Unified co-op sync backbone — design spec |
+| [superpowers/specs/2026-06-27-inc3-tactical-combat-camera-design.md](superpowers/specs/2026-06-27-inc3-tactical-combat-camera-design.md) | Inc3: combat outcome + explosion VFX + enemy-turn camera — design |
+| [superpowers/specs/2026-06-27-multiplayer-sync-canon-design.md](superpowers/specs/2026-06-27-multiplayer-sync-canon-design.md) | The sync canon: one host↔client synchronization pattern for all sync (the basis of `CLAUDE.md` / `CONTRIBUTING.md`) |
+
+### System-map research (`superpowers/research/`)
+
+| Doc | Scope |
+|-----|-------|
+| [superpowers/research/2026-06-26-event-window-mirror-system-map.md](superpowers/research/2026-06-26-event-window-mirror-system-map.md) | Geoscape event-window mirror — system map |
+| [superpowers/research/2026-06-27-save-load-robustness-map.md](superpowers/research/2026-06-27-save-load-robustness-map.md) | Save/load robustness map (basis of the Save/Load Gate Matrix below) |
+
+### Raw patches (`lineage/`)
+
+Point-in-time git patches from superseded pivots. **Historical diffs, not applied** — kept for lineage
+of two abandoned netcode directions. Do not apply against current source.
+
+| Patch | What it was |
+|-------|-------------|
+| [lineage/command-replication-pivot-2026-06-14.patch](lineage/command-replication-pivot-2026-06-14.patch) | The command-replication pivot (travel-emitter suppression era) |
+| [lineage/transform-streaming-netcode-2026-06-14.patch](lineage/transform-streaming-netcode-2026-06-14.patch) | The ~15 Hz transform-streaming client-interpolation netcode (abandoned — see the Roadmap "prior wipe context") |
+
+---
+
+## Quick Reference (as-built)
 
 - **Source of truth:** host only. Clients send actions, receive validated results; they reproduce, never recompute.
 - **Sync:** world-changing actions only (move/shoot/reload/ability/inventory/world-interact). **Never sync:** camera, selection, cursor, UI navigation.
@@ -84,8 +178,8 @@ Reserved for diagram assets (currently empty).
 - **Lobby-first:** create → lobby → all ready → host picks save → gzip transfer → **barrier sync** (all `LOADED` → `BEGIN`) → play. On-disk save = single source of truth at start.
 - **Identity:** persistent client-generated `playerGUID` (the only persistence key) + per-session `peerID` + mutable nickname; ownership/permissions bind to `playerGUID`/`peerID`, never the nickname.
 - **Vanilla save untouched:** ownership/nicks/permissions = mod runtime-state, reconciled each session, never written into the PP save.
-- **Top desync risk:** RNG + hidden game systems → [research/02-rng-analysis](research/02-rng-analysis.md).
-- **Blocked on SDK:** UI injection, Steam availability, save/load API, loading-progress hook, 2nd-instance, mid-battle save → [specs/03-open-questions-sdk](specs/03-open-questions-sdk.md).
+- **Top desync risk:** RNG + hidden game systems → [research/02-rng-analysis.md](research/02-rng-analysis.md).
+- **Blocked on SDK:** UI injection, Steam availability, save/load API, loading-progress hook, 2nd-instance, mid-battle save → [specs/03-open-questions-sdk.md](specs/03-open-questions-sdk.md).
 
 ### State Channels (on GeoState `0xA1`)
 
@@ -95,7 +189,7 @@ Reserved for diagram assets (currently empty).
 | 2 | Research | `ResearchChannel` (single-source-of-truth); v4 `AvailableAuthoritative` invalidation reconcile; extra dirty trigger `SetPowered` |
 | 3 | Unlock | Faction unlocks |
 | 4 | Diplomacy | Faction diplomacy + forced `PartyDiplomacyState` byte tail |
-| 5 | GeoSite | Site records + extras block: bit0 haven (population/infested), bit1 alien-base (type/addons), bit2 excavation, bit3 attack-schedule, bit4 ActiveMission (`GeoMissionRecord`), bit6 weather, bit7 `ExpiringTimerAt` |
+| 5 | GeoSite | Site records + extras: bit0 haven (population/infested), bit1 alien-base (type/addons), bit2 excavation, bit3 attack-schedule, bit4 ActiveMission (`GeoMissionRecord`), bit6 weather, bit7 `ExpiringTimerAt` |
 | 6 | GeoVehicle | Vehicle identity/spawn + crew `GeoUnitId[]` + aircraft loadout (weapons/modules) |
 | 7 | Objectives | `GeoFaction.Objectives` (4 classes) + `GeoscapeEventSystem` variables + marketplace offers |
 | 8 | Mist | `MistRendererSystem` hourly deflate snapshot (chunked 24 KB) |
@@ -124,14 +218,11 @@ Reserved for diagram assets (currently empty).
 | 0x97 | Enemy-turn camera hint | Camera focus during enemy turn |
 | 0x98 | AoE/volume VFX replay | Area-of-effect visual replay |
 
-### Display Rail
+### Display Rail & Networking
 
 - Unified `displaySeq` sequencer (P4): host stamps at `GeoscapeViewSwitchQuery`; client queue prio DESC / seq ASC, one-at-a-time; flag `DisplaySequencerGate` default ON.
 - `0x69`/`0x6C` occId dedup (P5) — eliminates STUN reliable-transport double-display.
 - Marketplace `UIStateMarketplaceGeoscapeEvent` selection mirror.
-
-### Networking
-
 - Tactical `IntentDedup` peer-keyed `(peerId, surfaceId, nonce)` — 3+ players unblocked.
 - P1 mid-session join geoscape-only (`JoinReady` 0x45, per-peer unicast save-transfer via `AutosaveGame`, live-battle join rejected with notice).
 - Inc3 action-relay envelope `0xA2`-`0xA4` behind `GeoActionRelay.UseEnvelope` flag DEFAULT OFF (legacy path byte-identical; flip after in-game verify).
@@ -144,20 +235,23 @@ Who can load, when, and what blocks it.
 |---|---|---|---|
 | **Non-co-op** (mod installed, no active session) | **YES** — untouched | Gate returns `true` (`SaveLoadInterceptPatch.cs:441`); all suppress/curtain patches no-op when `engine==null \|\| !IsActive` | Normal SP load is fully clean; zero mod interference |
 | **Host — lobby, session NOT started** | **NO** — captured | Pick captured as lobby base save via `ShouldCaptureAsLobbyPick` (`SessionLifecycle.cs:75`; `SaveLoadInterceptPatch.cs:181`,`:375`) | Save becomes the co-op session seed, not a live load |
-| **Host — session started, ≥1 client** | **Rerouted** (conditionally) | CONTINUE / Quickload / pause-LOAD rerouted to F2 host-authoritative in-session reload (`HostStartSessionInGame`) when `HostLoadGuard` open (no transfer in flight); else **BLOCKED** (`SaveLoadInterceptPatch.cs:383-419`; `SessionLifecycle.cs:52`) | Re-runs chunked save transfer + barrier so every client reloads in sync |
+| **Host — session started, ≥1 client** | **Rerouted** (conditionally) | CONTINUE / Quickload / pause-LOAD rerouted to F2 host-authoritative in-session reload (`HostStartSessionInGame`) when `HostLoadGuard` open; else **BLOCKED** (`SaveLoadInterceptPatch.cs:383-419`; `SessionLifecycle.cs:52`) | Re-runs chunked save transfer + barrier so every client reloads in sync |
 | **Host — session started, 0 clients** | **YES** | `HostInSessionHasNoClients` (`SessionLifecycle.cs:111`; `:390`) | No peers to desync; vanilla solo load allowed |
 | **Client — active session** | **BLOCKED** | `ShouldBlockClientLoad` (`SessionLifecycle.cs:131`; `:427`) — messagebox "Only the host can load" | Host-authoritative by design; client pulled in only via host transfer |
-| **Mid-tactical host load** | **Highest risk** | Gate does not distinguish tactical vs geoscape; reroutes through `HostStartSessionInGame` | Full host→client tactical state replication still incomplete; geoscape-anytime is safe; tactical reload deferred behind full-state tactical spine convergence |
+| **Mid-tactical host load** | **Highest risk** | Gate does not distinguish tactical vs geoscape; reroutes through `HostStartSessionInGame` | Geoscape-anytime is safe; tactical reload deferred behind full-state tactical spine convergence |
 
 - **Summary:** HOST can load anytime (lobby pick / mid-session reload / clientless solo). CLIENT cannot load by design. NON-co-op player is completely unaffected.
 
 ### Save-data poisoning verdict
 
-**Multiplayer writes NOTHING into the savegame graph.** A save written with the mod active is a plain PP/TFTV save and loads cleanly without the mod installed.
+**Multiplayer writes NOTHING into the savegame graph.** A save written with the mod active is a plain
+PP/TFTV save and loads cleanly without the mod installed.
 
 - **No save-WRITE hook** — no Harmony patch on `WriteSavegame*`/`SaveGame`/serializer write path.
-- **No persisted custom state** — no `ISerializable`, no custom `GameComponentDef`/`GameTagDef` registered into the persisted graph. `DefReflection` only resolves defs, never mutates/adds.
+- **No persisted custom state** — no `ISerializable`, no custom `GameComponentDef`/`GameTagDef` registered into the persisted graph.
 - **All co-op runtime state is transient** — network messages, reassembly buffers, live engine fields; none reach disk.
-- The only savegame serialization is read-only on the host: `SaveTransferCoordinator.HostSerializeAndSendCrt` reads the host's existing vanilla save to a `byte[]` for network transfer (`SaveTransferCoordinator.cs:403`). No write/inject.
+- The only savegame serialization is read-only on the host: `SaveTransferCoordinator.HostSerializeAndSendCrt` reads the host's existing vanilla save to a `byte[]` for network transfer.
 
 > Full detail: [superpowers/research/2026-06-27-save-load-robustness-map.md](superpowers/research/2026-06-27-save-load-robustness-map.md)
+</content>
+</invoke>

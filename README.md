@@ -9,6 +9,11 @@ The host runs authoritative game logic; clients send actions and receive validat
 
 ## Documents
 
+See [`docs/README.md`](docs/README.md) for the full, status-grouped documentation index.
+
+**Current status:** [`docs/COOP-SYNC-ROADMAP.md`](docs/COOP-SYNC-ROADMAP.md) is the living roadmap +
+status tracker — start there for what is built vs. next.
+
 ### Engine — as-built implementation
 
 The current source of truth for how the mod actually works today.
@@ -23,7 +28,7 @@ The current source of truth for how the mod actually works today.
 
 | File | Description |
 |------|-------------|
-| `docs/research/00-current-state.md` | Status note: as-built state, branch HEAD, built-vs-stub, active/deferred work, in-game test status |
+| `docs/research/00-current-state.md` | **Superseded** status note (thin-client vehicle-sync era); loading-screen internals still accurate, rest is history — for current status use the Roadmap above |
 | `docs/research/01-tactical-action-pipeline.md` | Tactical combat action flow, turn system, ability execution |
 | `docs/research/02-rng-analysis.md` | RNG implementation, combat calculations, randomness sources |
 | `docs/research/03-campaign-layer.md` | Research, manufacturing, base, aircraft, soldier systems |
