@@ -1,0 +1,50 @@
+# CI — game-free build + tests only.
+#
+# SCOPE: This workflow builds and tests ONLY the parts of the repo that have zero
+# dependency on Phoenix Point / Unity assemblies:
+#   - Multiplayer.Core   (strictly BCL-only; builds anywhere)
+#   - Multiplayer.Tests  (pure xUnit tests; references Multiplayer.Core only)
+#
+# INTENTIONALLY OUT OF CI SCOPE: the full mod build (Multiplayer.csproj) and
+# Multiplayer.GameTests. Those reference copyrighted Phoenix Point game DLLs
+# (Assembly-CSharp.dll, PhoenixPoint.Modding, UnityEngine.*, HarmonyLib) which
+# CANNOT be uploaded to a public runner. That build is performed on a
+# developer / self-hosted machine that owns a legal copy of Phoenix Point.
+# Never `dotnet build` the repo root or a solution here — that would drag the
+# game-facing project into CI and fail on the missing game references.
+#
+# RUNNER: windows-latest — Multiplayer.Core and Multiplayer.Tests target net472,
+# which builds reliably against the .NET Framework reference assemblies that ship
+# preinstalled on the Windows runner. The .NET SDK (setup-dotnet) drives the build.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      # Restore only the two game-free projects, never the solution/root.
+      - name: Restore Multiplayer.Core
+        run: dotnet restore Multiplayer.Core/Multiplayer.Core.csproj
+
+      - name: Restore Multiplayer.Tests
+        run: dotnet restore Multiplayer.Tests/Multiplayer.Tests.csproj
+
+      - name: Build Multiplayer.Core
+        run: dotnet build Multiplayer.Core/Multiplayer.Core.csproj -c Release --no-restore
+
+      - name: Test Multiplayer.Tests
+        run: dotnet test Multiplayer.Tests/Multiplayer.Tests.csproj -c Release
