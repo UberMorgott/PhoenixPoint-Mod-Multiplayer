@@ -132,6 +132,41 @@ namespace Multiplayer.Network
         {
             return isActiveSession && !isHost;
         }
+
+        /// <summary>
+        /// Mid-session on-demand-join gate (P1). True iff the host may kick a PER-PEER save transfer to a
+        /// brand-new peer that connected AFTER the session started: we are the host, the co-op session is
+        /// already started (the joiner missed the lobby start), the host is in the live GEOSCAPE (a joiner
+        /// can only be reproduced from a geoscape save — the tactical deploy snapshot is turn-0, so an
+        /// in-progress battle cannot be joined; see <see cref="ShouldRejectMidSessionJoin"/>), and no full
+        /// save transfer is already in flight (<paramref name="transferActive"/> == false) so the on-demand
+        /// unicast never overlaps a global F2 re-transfer that is already reseeding every peer.
+        ///
+        /// The trigger is per-peer + unicast, so it must NOT touch the global LOADED barrier or any host
+        /// monotonic counter — already-connected clients are untouched by a join. Pure + Unity-free.
+        /// </summary>
+        public static bool MidSessionJoinGuard(bool isHost, bool sessionStarted, bool geoscapeActive,
+            bool transferActive)
+        {
+            return isHost
+                && sessionStarted
+                && geoscapeActive
+                && !transferActive;
+        }
+
+        /// <summary>
+        /// Mid-session join REJECTION gate (P1 boundary). True iff a NEW peer's JOIN must be rejected with a
+        /// user-visible notice because the host cannot onboard it right now: the session has already started
+        /// (mid-session) but the host is NOT in the live geoscape — i.e. a tactical battle is in progress or
+        /// the host is mid-load. The tactical deploy snapshot is turn-0 (audit §5: a live mission cannot be
+        /// joined mid-fight), so the joiner is bounced with "wait until the host is back on the Geoscape"
+        /// rather than dropped into an inconsistent state. Before session start (lobby) this is false — the
+        /// normal lobby join/start path owns that case. Pure + Unity-free.
+        /// </summary>
+        public static bool ShouldRejectMidSessionJoin(bool sessionStarted, bool geoscapeActive)
+        {
+            return sessionStarted && !geoscapeActive;
+        }
     }
 
     /// <summary>

@@ -237,7 +237,8 @@ namespace Multiplayer.Network.MessageLayer
         }
 
         // SAVE_DONE (SaveDone): transfer complete; client verifies length/crc.
-        public static byte[] SerializeSaveDone(Guid transferId, long totalBytes, string fileExtension, uint crc32)
+        public static byte[] SerializeSaveDone(Guid transferId, long totalBytes, string fileExtension, uint crc32,
+            bool onDemandJoin = false)
         {
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
@@ -246,11 +247,16 @@ namespace Multiplayer.Network.MessageLayer
                 bw.Write(totalBytes);
                 bw.Write(fileExtension ?? ".zsav");
                 bw.Write(crc32);
+                // Trailing versioned flag (append-only, backward-compatible): true marks a MID-SESSION
+                // on-demand joiner transfer — the receiver enters the level immediately + reveals
+                // natively (no lobby BEGIN barrier, no co-op RevealAll hold). A pre-flag 4-field SaveDone
+                // (or an explicit false) deserializes to onDemandJoin=false = the unchanged lobby/F2 path.
+                bw.Write(onDemandJoin);
                 return ms.ToArray();
             }
         }
 
-        public static (Guid transferId, long totalBytes, string fileExtension, uint crc32) DeserializeSaveDone(byte[] data)
+        public static (Guid transferId, long totalBytes, string fileExtension, uint crc32, bool onDemandJoin) DeserializeSaveDone(byte[] data)
         {
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
@@ -259,7 +265,10 @@ namespace Multiplayer.Network.MessageLayer
                 var total = br.ReadInt64();
                 var ext = br.ReadString();
                 var crc = br.ReadUInt32();
-                return (id, total, ext, crc);
+                // Backward-compatible read: the onDemandJoin flag is a trailing append. Only read it when
+                // the stream still has a byte, so a legacy 4-field SaveDone parses with onDemandJoin=false.
+                var onDemandJoin = ms.Position < ms.Length && br.ReadBoolean();
+                return (id, total, ext, crc, onDemandJoin);
             }
         }
 

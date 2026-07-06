@@ -515,6 +515,11 @@ namespace Multiplayer.Network
                     SaveTransfer?.OnLoadComplete(msg);
                     break;
 
+                case PacketType.JoinReady:
+                    // Client->host: a mid-session on-demand joiner reached the live geoscape; host re-seeds it.
+                    SaveTransfer?.OnJoinReady(msg);
+                    break;
+
                 // ─── Geoscape time sync (host-authoritative anchor clock + offset ping/pong). ─
                 case PacketType.TimeAnchor:
                     // Host->all authoritative anchor. Clients derive (host ignores its own).

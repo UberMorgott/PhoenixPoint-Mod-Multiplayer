@@ -159,6 +159,15 @@ namespace Multiplayer.Network
         private bool _revealed;
         private bool _revealAllSent;
 
+        // ─── P1 mid-session on-demand joiner (CLIENT side) ─────────────────
+        // True on a brand-new peer that joined AFTER the session started and is being onboarded via the
+        // per-peer on-demand transfer (SaveDone.onDemandJoin). Such a joiner does NOT wait for a lobby
+        // BEGIN and does NOT hold for a co-op RevealAll — it enters the level as soon as its blob is
+        // prepared and reveals natively when its own load finishes (there is no simultaneity to honour;
+        // the already-connected peers are long past their reveal). Set in ClientLoadCrt for a join
+        // transfer, reset per-transfer in OnSaveChunk's first-chunk branch. Host is never a joiner.
+        private bool _onDemandJoiner;
+
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
 
@@ -456,6 +465,137 @@ namespace Multiplayer.Network
             Debug.Log("[Multiplayer] SendBlob: all chunks + SaveDone broadcast sent");
         }
 
+        // ══════════════════════════════════════════════════════════════════
+        //  HOST: P1 mid-session on-demand join — unicast the CURRENT state to ONE new peer
+        // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Onboard a brand-new peer that connected AFTER the session started (P1 fix #2). Captures the
+        /// host's CURRENT live state (autosave → read back to bytes) and UNICASTS it to just this peer,
+        /// tagged as an on-demand join so the joiner enters + reveals on its own. Deliberately does NOT
+        /// open the global LOADED barrier and does NOT reset any host counter/tracker — the already-
+        /// connected peers are untouched by a join (invariant: existing clients see no re-transfer, no
+        /// reset, no modal replay). The caller (SessionManager.HandleConnectionRequest) has already
+        /// enforced the geoscape boundary; the guard is re-checked here as defense-in-depth. Returns true
+        /// iff the capture+send coroutine launched.
+        /// </summary>
+        public bool HostOnDemandJoin(ulong peerId)
+        {
+            bool geoscape = Sync.GeoRuntime.Instance.IsGeoscapeActive;
+            if (!SessionLifecycle.MidSessionJoinGuard(
+                    isHost: _engine.IsHost,
+                    sessionStarted: SessionStarted,
+                    geoscapeActive: geoscape,
+                    transferActive: TransferActive))
+            {
+                Debug.LogWarning($"[Multiplayer] HostOnDemandJoin({peerId}) blocked: guard closed " +
+                    $"(host={_engine.IsHost}, started={SessionStarted}, geoscape={geoscape}, " +
+                    $"transferActive={TransferActive}); the peer is not onboarded.");
+                return false;
+            }
+
+            PhoenixGame game;
+            PhoenixSaveManager saveManager;
+            if (!TryGetGame(out game, out saveManager)) return false;
+            var timing = GetTiming();
+            if (timing == null) return false;
+
+            Debug.Log($"[Multiplayer] HostOnDemandJoin({peerId}): capturing current state → per-peer transfer.");
+            timing.Start(HostOnDemandJoinCrt(peerId, saveManager));
+            return true;
+        }
+
+        // Coroutine: autosave the CURRENT live state, read those bytes back, then unicast them to the joiner
+        // tagged onDemandJoin. AutosaveGame (showCurtain:false) is the game's own state-capture path — it
+        // does NOT flash the host screen, unlike QuickSave. On a fresh capture SaveManager.AutoSave is a NEW
+        // metadata instance; if it did not advance (ironman substitutes an ironman save, or the write failed)
+        // we abort + log rather than ship a stale blob (degrade-to-notify — the joiner must rejoin from a
+        // manual save). Reuses ReadSavegameBinary exactly like the lobby/F2 HostSerializeAndSendCrt.
+        private IEnumerator<NextUpdate> HostOnDemandJoinCrt(ulong peerId, PhoenixSaveManager saveManager)
+        {
+            var oldAutoSave = saveManager.AutoSave;
+            var ex = new ByRef<Exception>();
+            yield return Timing.Current.CallSafe(saveManager.AutosaveGame(), ex);
+            if (ex.Value != null)
+            {
+                Debug.LogError("[Multiplayer] HostOnDemandJoin: autosave capture failed: " + ex.Value.Message);
+                yield break;
+            }
+
+            var meta = saveManager.AutoSave;
+            if (meta == null || ReferenceEquals(meta, oldAutoSave))
+            {
+                Debug.LogError("[Multiplayer] HostOnDemandJoin: no fresh autosave captured (ironman mode or a " +
+                               "write failure) — cannot onboard the mid-session joiner; it must rejoin from a manual save.");
+                yield break;
+            }
+
+            var result = new ByRef<byte[]>();
+            yield return Timing.Current.Call(saveManager.Serializer.ReadSavegameBinary(meta, result));
+            var blob = result.Value;
+            if (blob == null || blob.Length == 0)
+            {
+                Debug.LogError("[Multiplayer] HostOnDemandJoin: captured save produced no bytes; aborting join transfer.");
+                yield break;
+            }
+
+            var ext = System.IO.Path.GetExtension(meta.Path);
+            if (string.IsNullOrEmpty(ext)) ext = SerializationComponent.DefaultExtension;
+
+            var joinTransferId = Guid.NewGuid();
+            SendBlobTo(peerId, blob, ext, joinTransferId, onDemandJoin: true);
+            Debug.Log($"[Multiplayer] HostOnDemandJoin({peerId}): unicast current-state blob sent (bytes={blob.Length}).");
+        }
+
+        // Per-peer UNICAST variant of SendBlob (P1): split the blob into SaveChunk messages + a SaveDone,
+        // addressed to ONE peer only (SendToClient), tagged onDemandJoin so the joiner enters immediately +
+        // reveals natively. Uses an EXPLICIT transferId param (NOT the global barrier _transferId field) so a
+        // join never disturbs the lobby/F2 barrier state or the already-connected peers.
+        private void SendBlobTo(ulong peerId, byte[] blob, string ext, Guid transferId, bool onDemandJoin)
+        {
+            var crc = Crc32(blob);
+            var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
+            Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: bytes={blob.Length} chunks={chunkCount} " +
+                      $"crc=0x{crc:X8} join={onDemandJoin}");
+
+            long offset = 0;
+            while (offset < blob.Length)
+            {
+                var len = (int)Math.Min(ChunkSize, blob.Length - offset);
+                var chunk = new byte[len];
+                Array.Copy(blob, offset, chunk, 0, len);
+
+                var msg = new SaveChunkMessage
+                {
+                    TransferId = transferId,
+                    TotalBytes = blob.Length,
+                    Offset = offset,
+                    Chunk = chunk
+                };
+                var payload = MessageSerializer.SerializeSaveChunk(msg);
+                _engine.SendToClient(peerId, new NetworkMessage(PacketType.SaveChunk, payload));
+                offset += len;
+            }
+
+            var donePayload = MessageSerializer.SerializeSaveDone(transferId, blob.Length, ext, crc, onDemandJoin);
+            _engine.SendToClient(peerId, new NetworkMessage(PacketType.SaveDone, donePayload));
+            Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: all chunks + SaveDone unicast sent");
+        }
+
+        /// <summary>
+        /// Host: a mid-session on-demand joiner reached the live geoscape (JoinReady) → re-seed it with the
+        /// current authoritative wallet + every state channel. Both are versioned ABSOLUTE snapshots, so the
+        /// already-connected clients re-apply the same state idempotently (no modal replay, no reset) — the
+        /// same convergence the lobby ready re-broadcast already relies on (SessionManager.SetClientReady).
+        /// </summary>
+        public void OnJoinReady(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+            Debug.Log($"[Multiplayer] OnJoinReady from {msg.SenderSteamId} → re-seed wallet + channels.");
+            _engine.Sync?.BroadcastFullWallet();
+            _engine.Sync?.BroadcastAllChannels();
+        }
+
         private void OpenBarrier()
         {
             _barrierOpen = true;
@@ -516,6 +656,7 @@ namespace Multiplayer.Network
                 _reachedPlaying = false;
                 _revealed = false;
                 _revealAllSent = false;
+                _onDemandJoiner = false;   // P1: fresh transfer; set true only if this SaveDone tags a join
                 _pendingResult = null;
                 // Reset symmetry (overlay robustness fix): mirror the host's OpenBarrier reset on the CLIENT
                 // transfer-entry path so a 2nd consecutive client load starts clean. Without this the phase-2
@@ -567,7 +708,7 @@ namespace Multiplayer.Network
         public void OnSaveDone(NetworkMessage msg)
         {
             if (_engine.IsHost) return;
-            var (transferId, totalBytes, ext, crc32) = MessageSerializer.DeserializeSaveDone(msg.Payload);
+            var (transferId, totalBytes, ext, crc32, onDemandJoin) = MessageSerializer.DeserializeSaveDone(msg.Payload);
 
             Debug.Log($"[Multiplayer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
 
@@ -612,16 +753,31 @@ namespace Multiplayer.Network
 
             var timing = GetTiming();
             if (timing == null) { SendLoaded(transferId, false); return; }
-            Debug.Log("[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt");
-            timing.Start(ClientLoadCrt(game, blob, loadExt, transferId));
+            Debug.Log($"[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt (onDemandJoin={onDemandJoin})");
+            timing.Start(ClientLoadCrt(game, blob, loadExt, transferId, onDemandJoin));
         }
 
-        private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId)
+        private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId, bool onDemandJoin)
         {
-            Debug.Log("[Multiplayer] ClientLoadCrt: preparing entry");
+            Debug.Log($"[Multiplayer] ClientLoadCrt: preparing entry (onDemandJoin={onDemandJoin})");
             yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
             var ok = _pendingResult != null;
+
+            // P1 mid-session join: there is NO lobby BEGIN barrier and NO co-op RevealAll hold — the
+            // already-connected peers are long past their synchronized entry, so there is nothing to
+            // synchronize with. Enter the level immediately; the native curtain lifts + the overlay hides
+            // on our OWN load finish (OnReachedPlaying, join branch), which also pings JoinReady so the host
+            // re-seeds our wallet + channels onto the now-live geoscape.
+            if (onDemandJoin)
+            {
+                _onDemandJoiner = true;
+                Debug.Log($"[Multiplayer] ClientLoadCrt: on-demand join prepared ok={ok} → EnterLevel (no barrier)");
+                if (ok) EnterLevel();
+                else Debug.LogError("[Multiplayer] on-demand join: entry prepare FAILED; joiner cannot enter the level.");
+                yield break;
+            }
+
             Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendLoaded(transferId, ok);
@@ -798,6 +954,19 @@ namespace Multiplayer.Network
             if (_reachedPlaying) return;
             _reachedPlaying = true;
             _revealHoldStartedMs = NowMs();
+
+            // P1 mid-session join: reveal on our OWN load finish — there is no host RevealAll to wait for
+            // (the already-connected peers revealed long ago). Lift immediately + tell the host we are live
+            // (JoinReady) so it re-seeds our wallet + channels onto the now-live geoscape.
+            if (_onDemandJoiner)
+            {
+                Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} (on-demand join) " +
+                          "→ reveal now + JoinReady");
+                PerformDeferredLift();
+                _engine.SendToHost(new NetworkMessage(PacketType.JoinReady));
+                return;
+            }
+
             Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
                       $"→ hold + SendLoadComplete");
             // Idempotent: guarantees done is reported even if LoadingProgress never went null.

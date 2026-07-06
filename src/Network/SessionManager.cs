@@ -246,6 +246,23 @@ namespace Multiplayer.Network
                 return;
             }
 
+            // P1 mid-session join boundary: a peer that connects AFTER the session started can only be
+            // onboarded while the host is in the live GEOSCAPE (the joiner is reproduced from a geoscape
+            // save; the tactical deploy snapshot is turn-0, so an in-progress battle cannot be joined). If a
+            // battle is live (or the host is mid-load) reject with a user-visible reason instead of adding a
+            // stateless peer. Pre-start (lobby) this is false — the normal lobby join/start path owns it.
+            bool sessionStarted = _engine.SaveTransfer?.SessionStarted == true;
+            if (SessionLifecycle.ShouldRejectMidSessionJoin(sessionStarted, Sync.GeoRuntime.Instance.IsGeoscapeActive))
+            {
+                Debug.LogWarning($"[Multiplayer] Rejecting mid-session JOIN from {clientId}: host is not on the " +
+                                 "Geoscape (a battle is in progress or the host is loading).");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "Cannot join right now — a battle is in progress. Try again once the host is back on the Geoscape."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+
             AddClient(clientId, $"Steam({clientId})");
 
             // Bind peerID <-> playerGUID.
@@ -280,6 +297,12 @@ namespace Multiplayer.Network
             ReplayChatHistoryTo(clientId);
 
             SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} joined —");
+
+            // P1: if this peer joined AFTER the session started, kick a PER-PEER on-demand save transfer so
+            // it converges to the host's current state. Unicast + no barrier/counter reset, so the already-
+            // connected peers are untouched. A lobby (pre-start) join is handled by the normal start path.
+            if (sessionStarted)
+                _engine.SaveTransfer?.HostOnDemandJoin(clientId);
         }
 
         public void HandleConnectionAccepted(NetworkMessage msg)

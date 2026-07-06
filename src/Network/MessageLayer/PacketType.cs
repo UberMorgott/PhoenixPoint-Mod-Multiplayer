@@ -52,6 +52,9 @@ namespace Multiplayer.Network.MessageLayer
         PlayerListUpdate = 0x42,
         SetSave = 0x43,
         ClientUnready = 0x44,   // client->host: un-ready toggle (pair of ClientReady=0x14; no payload, keyed by sender)
+        JoinReady = 0x45,       // client->host: a MID-SESSION on-demand joiner reached the live geoscape (Playing) and
+                                // is ready to be re-seeded; host replies with BroadcastFullWallet + BroadcastAllChannels.
+                                // No payload — keyed by sender. See SaveTransferCoordinator on-demand-join path.
 
         // ActionSync 0x60-0x6F
         ActionRequest = 0x60,   // client -> host
