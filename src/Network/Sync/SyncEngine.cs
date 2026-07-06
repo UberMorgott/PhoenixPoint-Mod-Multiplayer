@@ -43,8 +43,14 @@ namespace Multiplayer.Network.Sync
         // Host: inbound-request dedup keyed by (peerId, nonce). The reliable transport deliberately sends
         // every reliable packet TWICE, so each client ActionRequest arrives twice and would otherwise be
         // applied twice on the authority (double manufacture/answer/construct). Bounded FIFO. See RequestDedup.
+        // LEGACY-RAIL dedup: used only while GeoActionRelay.UseEnvelope is OFF (raw 0x60 relay).
         private const int MaxPending = 512;
         private readonly RequestDedup _seenRequests = new RequestDedup(512);
+        // ENVELOPE-RAIL intent dedup (GeoActionRelay.UseEnvelope ON): the SHARED peer-aware IntentDedup keyed by
+        // (peerId, GeoIntent, nonce) — the convergence target replacing the legacy RequestDedup (spec §4b). Peer
+        // in the key so 2+ clients' client-LOCAL nonces never collide. The action OUTCOME seq converges onto the
+        // existing shared _geoLiveSeq (SurfaceSeq) on the GeoOutcome surface; no separate action-seq field.
+        private readonly IntentDedup _intentDedup = new IntentDedup(512);
 
         // ─── Generic state-channel echo (StateChannel infra) ───────────────
         private readonly StateChannelRegistry _channels = new StateChannelRegistry();
@@ -156,19 +162,21 @@ namespace Multiplayer.Network.Sync
                 _pending.Remove(old);
             }
             var payload = WriteAction(a);
-            _engine.SendToHost(new NetworkMessage(PacketType.ActionRequest,
-                SyncProtocol.EncodeActionRequest(a.ActionId, nonce, payload)));
+            // Cutover gate: envelope GeoIntent(0xA2) on the 0x67 rail when flipped on, else the legacy raw
+            // ActionRequest(0x60) packet. Same inner bytes either way (byte-identical when off).
+            _engine.SendToHost(GeoActionRelay.BuildIntent(GeoActionRelay.UseEnvelope, a.ActionId, nonce, payload));
         }
 
         /// <summary>Host: the local interceptor will let the original run; sequence + broadcast the apply to all.</summary>
         public void BroadcastHostAction(ISyncedAction a)
         {
             if (a == null) return;
-            ulong seq = ++_hostSequence;
-            _tracker.Mark(seq);
+            // Cutover gate: author the outcome seq from the shared SurfaceSeq on the GeoOutcome(0xA3) surface when
+            // enveloped, else the legacy global host action counter. One monotonic stream over the reliable ORDERED
+            // transport ⇒ strict-greater on the client is a sufficient last-writer-wins guard (spec §4a).
+            ulong seq = NextOutcomeSeq();
             var payload = WriteAction(a);
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.ActionApply,
-                SyncProtocol.EncodeActionApply(a.ActionId, seq, payload)));
+            _engine.BroadcastToAll(GeoActionRelay.BuildOutcome(GeoActionRelay.UseEnvelope, a.ActionId, seq, payload));
             // Host-LOCAL vehicle order (travel/explore) just changed authoritative travel state → ship the mirror
             // now instead of waiting up to a full poll interval (route line + first placement feel instant).
             if (VehicleEmitScheduler.TriggersImmediateEmit(a.Category)) RequestImmediateVehicleEmit();
@@ -185,6 +193,20 @@ namespace Multiplayer.Network.Sync
             _vehiclePollTick = VehicleEmitScheduler.ArmImmediate(VehiclePollTickInterval);
         }
 
+        /// <summary>Author the next authoritative action-OUTCOME sequence for the GeoOutcome(0xA3) surface.
+        /// Cutover gate: the shared <see cref="SurfaceSeq"/> stream when enveloped (converges the action seq onto
+        /// SurfaceSeq, spec §4a), else the legacy global host counter (also marked on the legacy tracker so its
+        /// client guard stays consistent). ONE monotonic stream for ALL action types — cross-action apply order is
+        /// held by the reliable ORDERED transport; the strict-greater seq is only the stale/duplicate drop.</summary>
+        private ulong NextOutcomeSeq()
+        {
+            if (GeoActionRelay.UseEnvelope)
+                return _geoLiveSeq.Next(SurfaceIds.GeoOutcome);
+            ulong seq = ++_hostSequence;
+            _tracker.Mark(seq);
+            return seq;
+        }
+
         // ─── Inbound: host ────────────────────────────────────────────────
 
         public void OnActionRequest(ulong senderPeerId, byte[] data)
@@ -194,7 +216,16 @@ namespace Multiplayer.Network.Sync
 
             // Host-side dedup: the reliable transport sends every packet twice, so the same request
             // arrives twice. Apply each (peerId, nonce) exactly once on the authority; drop the repeat.
-            if (_seenRequests.IsDuplicate(senderPeerId, nonce)) return;
+            // Cutover gate: the shared peer-aware IntentDedup on GeoIntent(0xA2) when enveloped (spec §4b), else
+            // the legacy RequestDedup. Both key by peer so 2+ clients' client-local nonces never collide.
+            if (GeoActionRelay.UseEnvelope)
+            {
+                if (!_intentDedup.IsNew(senderPeerId, SurfaceIds.GeoIntent, nonce)) return;
+            }
+            else
+            {
+                if (_seenRequests.IsDuplicate(senderPeerId, nonce)) return;
+            }
 
             // A BLOCKING host prompt is pending (mandatory ambush brief): natively the whole geoscape is modal —
             // NOTHING may happen until it resolves. The client's mirrored modal is view-locked too, but an intent
@@ -206,8 +237,8 @@ namespace Multiplayer.Network.Sync
             {
                 Debug.Log("[Multiplayer] HOST reject ActionRequest id=" + id + " (blocking prompt pending, modalType="
                           + HostBlockingPromptGate.ArmedModalType + ")");
-                _engine.SendToClient(senderPeerId, new NetworkMessage(PacketType.ActionReject,
-                    SyncProtocol.EncodeActionReject(nonce, 2, "host blocking prompt (ambush) pending")));
+                _engine.SendToClient(senderPeerId, GeoActionRelay.BuildReject(GeoActionRelay.UseEnvelope,
+                    nonce, 2, "host blocking prompt (ambush) pending"));
                 return;
             }
 
@@ -225,8 +256,8 @@ namespace Multiplayer.Network.Sync
                              || PermissionGate.CheckFor(actor, action.Category);
             if (actor == Guid.Empty || !permitted || !action.Validate(rt, actor))
             {
-                _engine.SendToClient(senderPeerId, new NetworkMessage(PacketType.ActionReject,
-                    SyncProtocol.EncodeActionReject(nonce, 1, "rejected")));
+                _engine.SendToClient(senderPeerId, GeoActionRelay.BuildReject(GeoActionRelay.UseEnvelope,
+                    nonce, 1, "rejected"));
                 return;
             }
 
@@ -283,10 +314,8 @@ namespace Multiplayer.Network.Sync
             // the host's open base grid too.
             GeoUiRefresh.RefreshNeedsKick(rt);
 
-            ulong seq = ++_hostSequence;
-            _tracker.Mark(seq);
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.ActionApply,
-                SyncProtocol.EncodeActionApply(id, seq, payload)));
+            ulong seq = NextOutcomeSeq();
+            _engine.BroadcastToAll(GeoActionRelay.BuildOutcome(GeoActionRelay.UseEnvelope, id, seq, payload));
             // Client-relayed vehicle order (travel/explore) just applied authoritatively → ship the mirror now
             // instead of waiting up to a full poll interval (tightens the click→visible-motion latency).
             if (VehicleEmitScheduler.TriggersImmediateEmit(action.Category)) RequestImmediateVehicleEmit();
@@ -298,8 +327,20 @@ namespace Multiplayer.Network.Sync
         {
             if (_engine.IsHost) return;   // host is the authority; it never replays its own broadcast echo
             if (!SyncProtocol.TryDecodeActionApply(data, out var id, out var seq, out var payload)) return;
-            if (!_tracker.ShouldApply(seq)) return;   // last-writer-wins / dedupe
-            _tracker.Mark(seq);
+            // Cutover gate: the shared SurfaceSeq guard on GeoOutcome(0xA3) when enveloped (the host authored the
+            // seq from SurfaceSeq.Next as a u32 stored losslessly in the u64 apply field — cast back to compare),
+            // else the legacy global SequenceTracker. Last-writer-wins / dedupe; marked here (placement identical
+            // to the legacy flow) so a suppressed IHostOnlyApply below still consumes the seq (ordering preserved).
+            if (GeoActionRelay.UseEnvelope)
+            {
+                if (!_geoLiveSeq.ShouldApply(SurfaceIds.GeoOutcome, (uint)seq)) return;
+                _geoLiveSeq.Mark(SurfaceIds.GeoOutcome, (uint)seq);
+            }
+            else
+            {
+                if (!_tracker.ShouldApply(seq)) return;
+                _tracker.Mark(seq);
+            }
             var action = ReadAction(id, payload);
             if (action == null) return;
             // Host-only-apply actions (e.g. event-answer outcomes): the client must NOT replay the
@@ -1616,9 +1657,40 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>SurfaceRouter geoscape fast-path: returns true if this surface is a geoscape surface it
         /// consumed (so the router stops). Mirrors the tactical HandleTacticalEnvelope switch. The inner payload
-        /// is the surface's own bytes (e.g. EncodeWalletSync output), routed to the EXISTING applier.</summary>
-        private bool HandleGeoscapeEnvelope(byte surfaceId, byte[] payload)
+        /// is the surface's own bytes (e.g. EncodeWalletSync output), routed to the EXISTING applier. senderPeerId
+        /// is used only by the action-INTENT surface (GeoIntent 0xA2, cutover) for actor-resolve + per-peer dedup;
+        /// the wallet/state/vehicle surfaces ignore it.</summary>
+        private bool HandleGeoscapeEnvelope(ulong senderPeerId, byte surfaceId, byte[] payload)
         {
+            // ─── Action-relay envelope cutover (spec 2026-07-02) — LIVE only when GeoActionRelay.UseEnvelope is
+            // flipped on; else these three surfaces never arrive (same-build peers all emit the legacy 0x60/0x61/
+            // 0x62 relay) and are ignored here, so flag-OFF inbound behavior is byte-and-behavior-identical. Each
+            // arm routes to the SAME inbound handler the legacy path uses (its IsHost/seq/dedup guards read the
+            // same gate), so exactly one rail is ever live. ───
+            if (GeoActionRelay.UseEnvelope)
+            {
+                if (surfaceId == SurfaceIds.GeoIntent)
+                {
+                    // Client→host action REQUEST (0xA2). Host-guarded + per-peer IntentDedup inside OnActionRequest.
+                    try { OnActionRequest(senderPeerId, payload); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo intent envelope failed: " + ex.Message); }
+                    return true;
+                }
+                if (surfaceId == SurfaceIds.GeoOutcome)
+                {
+                    // Host→all authoritative APPLY (0xA3). Client-guarded + SurfaceSeq(0xA3) inside OnActionApply.
+                    try { OnActionApply(payload); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo outcome envelope failed: " + ex.Message); }
+                    return true;
+                }
+                if (surfaceId == SurfaceIds.GeoReject)
+                {
+                    // Host→originator REJECT (0xA4). Nonce-correlated _pending.Remove — idempotent.
+                    try { OnActionReject(payload); }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo reject envelope failed: " + ex.Message); }
+                    return true;
+                }
+            }
             if (surfaceId == SurfaceIds.GeoWallet)
             {
                 // Behavior-identical to the legacy 0x63 path: OnWalletSync is host-guarded + version-guarded, so

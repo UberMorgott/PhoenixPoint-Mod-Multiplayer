@@ -9,9 +9,11 @@ namespace Multiplayer.Network.Sync
     /// transport / Unity / HarmonyLib type, so it is unit-tested in isolation like every other sync primitive.
     ///
     /// NOTE: the geoscape ACTION relay rides the LEGACY 0x60/0x61/0x62 path in <c>SyncEngine</c>
-    /// (OnActionRequest / OnActionApply / OnActionReject) — NOT this router. The dead 0x67 action-relay arms
-    /// (HandleActionRequest/HandleActionApply + the SurfaceRegistry/SequenceTracker/RequestDedup coupling)
-    /// were never wired (zero senders) and have been removed; this router now services tactical only.
+    /// (OnActionRequest / OnActionApply / OnActionReject) by default; under the <c>GeoActionRelay.UseEnvelope</c>
+    /// cutover gate it instead rides the geoscape action surfaces GeoIntent/GeoOutcome/GeoReject (0xA2-0xA4)
+    /// through THIS router (SyncEngine.HandleGeoscapeEnvelope). Exactly one rail is live per build (both peers
+    /// run the same DLL) — never both, so no double-apply. The old dead 0x67 action-relay arms
+    /// (HandleActionRequest/HandleActionApply + the SurfaceRegistry coupling) were never wired and removed.
     /// </summary>
     public sealed class SurfaceRouter
     {
@@ -33,25 +35,28 @@ namespace Multiplayer.Network.Sync
         /// Geoscape envelope surfaces (spec §2.1 partition 0xA0-0xBF, e.g. <c>GeoWallet</c>) ride the SAME 0x67
         /// chokepoint as tactical. INSTANCE-bound (the geoscape handler is an instance method on SyncEngine that
         /// reaches that engine's applier state). Consulted AFTER the tactical fast-path so a tactical surface
-        /// always wins its own id range. NULL by default → inert (additive). Signature:
-        /// <c>(surfaceId, payload) -&gt; handled?</c>.
+        /// always wins its own id range. NULL by default → inert (additive). The senderPeerId is threaded through
+        /// (mirrors <see cref="TacticalInbound"/>) so the geoscape action-INTENT surface (0xA2, action-relay
+        /// envelope cutover) can resolve the actor + dedup per-peer; the wallet/state/vehicle surfaces ignore it.
+        /// Signature: <c>(senderPeerId, surfaceId, payload) -&gt; handled?</c>.
         /// </summary>
-        public System.Func<byte, byte[], bool> GeoscapeInbound;
+        public System.Func<ulong, byte, byte[], bool> GeoscapeInbound;
 
         /// <summary>Decode + route one inbound envelope to the tactical fast-path. Never throws (forward-compat: drop).</summary>
         public void OnInbound(ulong senderPeerId, byte[] data, ISyncSink sink)
         {
             if (!SyncProtocol.TryDecodeEnvelope(data, out var surfaceId, out var kind, out var payload)) return;
             // Tactical fast-path: a tactical surface is consumed here (tracker-free, idempotent host→all
-            // push). Inert unless tactical init armed the hook; any non-tactical envelope is dropped (the
-            // geoscape action relay rides the legacy 0x60/0x61/0x62 path in SyncEngine, not this router).
+            // push). Inert unless tactical init armed the hook; any envelope the tactical hook declines falls
+            // through to the geoscape hook below (wallet/state/vehicle surfaces, plus the action-relay
+            // GeoIntent/GeoOutcome/GeoReject surfaces when the GeoActionRelay.UseEnvelope cutover is flipped on).
             var tac = TacticalInbound;
             if (tac != null && tac(senderPeerId, surfaceId, payload)) return;
             // Geoscape fast-path (additive, instance-bound): a geoscape envelope surface (0xA0-0xBF) is
             // consumed here. Inert unless the owning SyncEngine armed the hook; consulted AFTER tactical so a
             // tactical surface always wins its own id range.
             var geo = GeoscapeInbound;
-            if (geo != null && geo(surfaceId, payload)) return;
+            if (geo != null && geo(senderPeerId, surfaceId, payload)) return;
         }
     }
 }

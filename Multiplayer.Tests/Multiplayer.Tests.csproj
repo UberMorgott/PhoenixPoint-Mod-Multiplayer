@@ -24,6 +24,10 @@
     <Compile Include="..\src\Util\TftvLogRedirect.cs"><Link>TftvLogRedirect.cs</Link></Compile>
     <Compile Include="..\src\UI\ChatLog.cs"><Link>ChatLog.cs</Link></Compile>
     <Compile Include="..\src\Network\MessageLayer\MessageSerializer.cs"><Link>MessageSerializer.cs</Link></Compile>
+    <!-- Pure, Unity-free packet-type enum + NetworkMessage DTO (System-only). Linked so the GeoActionRelay
+         cutover wire builders (returning NetworkMessage with a PacketType) are unit-testable. -->
+    <Compile Include="..\src\Network\MessageLayer\PacketType.cs"><Link>MessageLayer\PacketType.cs</Link></Compile>
+    <Compile Include="..\src\Network\MessageLayer\NetworkMessage.cs"><Link>MessageLayer\NetworkMessage.cs</Link></Compile>
     <Compile Include="..\src\Network\TimeSync\TimeSyncProtocol.cs"><Link>TimeSyncProtocol.cs</Link></Compile>
     <Compile Include="..\src\Network\TimeSync\AnchorClock.cs"><Link>AnchorClock.cs</Link></Compile>
     <Compile Include="..\src\Network\TimeSync\ClockOffsetEstimator.cs"><Link>ClockOffsetEstimator.cs</Link></Compile>
@@ -58,6 +62,10 @@
     <!-- Inc1 rail-unify: shared domain-agnostic seq/dedup primitives (pure). -->
     <Compile Include="..\src\Network\Sync\SurfaceSeq.cs"><Link>Sync\SurfaceSeq.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\IntentDedup.cs"><Link>Sync\IntentDedup.cs</Link></Compile>
+    <!-- Geoscape action-relay envelope cutover (spec 2026-07-02): the ONE gate + pure wire builders
+         (envelope 0xA2/0xA3/0xA4 vs legacy 0x60/0x61/0x62). Pure → the atomic-flip + byte-identical-when-off
+         guarantees are unit-tested. The senders/guards that READ the gate live in SyncEngine (game-bound, unlinked). -->
+    <Compile Include="..\src\Network\Sync\GeoActionRelay.cs"><Link>Sync\GeoActionRelay.cs</Link></Compile>
     <!-- Default-OFF gate for the client geoscape event-window desync fixes (occId-keyed result page + burst-safe
          reward arming). Pure; linked for the default-OFF pin test. The fixes themselves live in EventDisplay /
          SyncEngine / RewardDisplayReflection (game-bound, unlinked). -->

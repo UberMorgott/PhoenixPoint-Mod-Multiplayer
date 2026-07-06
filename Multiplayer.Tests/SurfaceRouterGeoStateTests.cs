@@ -48,7 +48,7 @@ public class SurfaceRouterGeoStateTests
         {
             var router = new SurfaceRouter();
             byte gotSid = 0; byte[] gotInner = null; int calls = 0;
-            router.GeoscapeInbound = (sid, pl) => { gotSid = sid; gotInner = pl; calls++; return true; };
+            router.GeoscapeInbound = (peer, sid, pl) => { gotSid = sid; gotInner = pl; calls++; return true; };
 
             var inner = SyncProtocol.EncodeStateSync(3, 1, new byte[] { 1, 2 });
             router.OnInbound(7UL, GeoStateEnvelope(3, 1, new byte[] { 1, 2 }), null);
@@ -68,7 +68,7 @@ public class SurfaceRouterGeoStateTests
         {
             var router = new SurfaceRouter();
             int geoCalls = 0;
-            router.GeoscapeInbound = (sid, pl) => { geoCalls++; return true; };
+            router.GeoscapeInbound = (peer, sid, pl) => { geoCalls++; return true; };
 
             router.OnInbound(7UL, GeoStateEnvelope(5, 1, new byte[] { 9 }), null);
 

@@ -47,8 +47,15 @@ namespace Multiplayer.Network.Sync
         // packets (0x63 WalletSync / 0x64 StateSync) were retired a4781ae.
         public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
         public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
-        // 0xA2-0xA4 RESERVED for the geoscape action-relay → envelope cutover (GeoIntent/GeoOutcome/GeoReject,
-        // spec 2026-07-02-multiplayer-action-relay-envelope-cutover-design) — do NOT reuse.
+        // ─── Geoscape action-relay envelope cutover (spec 2026-07-02) ───
+        // The discrete-command action relay (client intent → host outcome → originator reject) migrated off the
+        // raw 0x60/0x61/0x62 packets onto these three enveloped surfaces on the 0x67 rail. The inner action bytes
+        // are byte-for-byte the same as the legacy packets carried; only the outer packet header changes. Live vs
+        // legacy is selected by the ONE GeoActionRelay.UseEnvelope gate (atomic flip; legacy stays intact behind
+        // the flag). Guard convergence: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
+        public const byte GeoIntent = 0xA2;   // client→host action REQUEST (inner = EncodeActionRequest(actionId,nonce,payload))
+        public const byte GeoOutcome = 0xA3;  // host→all authoritative APPLY (inner = EncodeActionApply(actionId,seq,payload); seq = SurfaceSeq.Next(0xA3))
+        public const byte GeoReject = 0xA4;   // host→originator REJECT (inner = EncodeActionReject(nonce,code,reason); nonce-correlated, idempotent)
         public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
         public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
         public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)
