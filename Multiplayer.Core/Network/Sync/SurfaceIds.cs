@@ -6,6 +6,19 @@ namespace Multiplayer.Network.Sync
     /// <see cref="SyncedActionIds"/> exactly so the migration is byte-for-byte stable; state-channel
     /// surface ids reuse the channel's existing <c>ChannelId</c> (registered in a later phase).
     /// </summary>
+    /// <remarks>
+    /// Id spaces are scoped PER KIND, not globally. There are three kinds, told apart by the naming
+    /// convention (which the comment sections below mirror):
+    ///   • Action surfaces        — plain names (mirror <see cref="SyncedActionIds"/>); ids 1-30 / 60-79.
+    ///   • State-channel surfaces  — names suffixed <c>Channel</c>; ids 1-10.
+    ///   • Geoscape envelope surfaces — names prefixed <c>Geo</c> (and NOT suffixed <c>Channel</c>); ids 0xA0-0xBF.
+    /// A value may repeat ACROSS kinds (e.g. <see cref="StartResearch"/>=1 and <see cref="InventoryChannel"/>=1):
+    /// the surface KIND disambiguates on the wire, so that is fine and expected. A value repeated WITHIN a
+    /// single kind is a BUG — it would silently mis-route sync. Note the precedence: <c>GeoSiteChannel</c> /
+    /// <c>GeoVehicleChannel</c> are prefixed <c>Geo</c> yet are STATE CHANNELS, so the <c>Channel</c> suffix
+    /// wins over the <c>Geo</c> prefix. <c>SurfaceIdsUniquenessTests</c> enforces per-kind uniqueness by
+    /// reflection off these naming conventions — keep the suffix/prefix so a new id lands in the right kind.
+    /// </remarks>
     public static class SurfaceIds
     {
         // Action surfaces (mirror SyncedActionIds) ─────────────────────────
