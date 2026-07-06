@@ -75,6 +75,70 @@ public class ObjectivesChannelTests
         Assert.Equal(("Voided_1", 3), rt.Variables[0]);
     }
 
+    // ─── AB marketplace offers (optional trailing section) ────
+
+    [Fact]
+    public void Snapshot_RoundTrips_MarketplaceOffers_WithObjectivesAndVariables()
+    {
+        var snap = new ObjectivesSnapshot();
+        snap.Objectives.Add(Rec(ObjectivesSnapshot.DiscEvent, payload: "SDI_07"));
+        snap.Variables.Add(("NumberOfDLC5MissionsCompletedVariable", 2));
+        snap.MarketplaceOffers.Add(new ObjectivesSnapshot.MarketplaceOfferRecord
+            { Kind = ObjectivesSnapshot.OfferItem, OfferGuid = "item-guid-A", Price = 250f });
+        snap.MarketplaceOffers.Add(new ObjectivesSnapshot.MarketplaceOfferRecord
+            { Kind = ObjectivesSnapshot.OfferResearch, OfferGuid = "PX_Research_Id", Price = 0f });
+        snap.MarketplaceOffers.Add(new ObjectivesSnapshot.MarketplaceOfferRecord
+            { Kind = ObjectivesSnapshot.OfferUnit, OfferGuid = "unit-guid-C", Price = 900f });
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt);
+        Assert.Single(rt.Objectives);
+        Assert.Single(rt.Variables);
+        Assert.Equal(3, rt.MarketplaceOffers.Count);
+        Assert.Equal(ObjectivesSnapshot.OfferItem, rt.MarketplaceOffers[0].Kind);
+        Assert.Equal("item-guid-A", rt.MarketplaceOffers[0].OfferGuid);
+        Assert.Equal(250f, rt.MarketplaceOffers[0].Price);
+        Assert.Equal(ObjectivesSnapshot.OfferResearch, rt.MarketplaceOffers[1].Kind);
+        Assert.Equal("PX_Research_Id", rt.MarketplaceOffers[1].OfferGuid);
+        Assert.Equal(ObjectivesSnapshot.OfferUnit, rt.MarketplaceOffers[2].Kind);
+        Assert.Equal(900f, rt.MarketplaceOffers[2].Price);
+    }
+
+    [Fact]
+    public void MarketplaceOffers_OmittedWhenEmpty_PreAbWireDecodesEmpty()
+    {
+        // No offers → the trailing section is NOT written; a snapshot with only objectives+variables must
+        // decode with an empty offer list (backward tolerance — a pre-AB peer never wrote the section).
+        var snap = new ObjectivesSnapshot();
+        snap.Objectives.Add(Rec(ObjectivesSnapshot.DiscEvent, payload: "E"));
+        snap.Variables.Add(("V", 1));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt);
+        Assert.Empty(rt.MarketplaceOffers);
+        // Byte-identity of the no-offers wire is guarded by Encode_StableWireBytes_Pinned (offers write
+        // zero bytes when empty), so a pre-AB decoder never trips over a trailing section.
+    }
+
+    [Fact]
+    public void MarketplaceOffers_OnlyOffers_NoObjectivesNoVariables_RoundTrips()
+    {
+        var snap = new ObjectivesSnapshot();
+        snap.MarketplaceOffers.Add(new ObjectivesSnapshot.MarketplaceOfferRecord
+            { Kind = ObjectivesSnapshot.OfferItem, OfferGuid = "g", Price = 42f });
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt);
+        Assert.Empty(rt.Objectives);
+        Assert.Empty(rt.Variables);
+        Assert.Single(rt.MarketplaceOffers);
+        Assert.Equal("g", rt.MarketplaceOffers[0].OfferGuid);
+        Assert.Equal(42f, rt.MarketplaceOffers[0].Price);
+    }
+
     [Fact]
     public void UnknownDisc_DecodesFine_ApplySkipsIt()
     {

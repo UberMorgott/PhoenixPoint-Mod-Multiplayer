@@ -49,6 +49,10 @@ namespace Multiplayer.Network.Sync.State
         // The FULL map re-emits every flush (resident-style heal on the unacked rail); pruned with liveKeys.
         private readonly Dictionary<long, long[]> _crew = new Dictionary<long, long[]>();
 
+        // U loadout tail: last-observed ordered weapon/module slot def guids per live PHOENIX aircraft key
+        // (same poll-detect + full-map re-emit + liveKeys prune as _crew). Empty "" entry = an empty slot.
+        private readonly Dictionary<long, (string[] w, string[] m)> _loadout = new Dictionary<long, (string[], string[])>();
+
         public GeoVehicleChannel() => _live = this;
 
         // ─── HOST: new-key detection hooks called from GeoVehicleMirror.HostPollAndBroadcast ───────────────────
@@ -74,6 +78,21 @@ namespace Multiplayer.Network.Sync.State
                     if (crewDirty) self._crew[placement.Key] = crew;
                 }
                 if (crewDirty)
+                    NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
+            }
+            // U loadout tail: same per-vehicle poll-detect as crew — a pre-bind aircraft never re-emits an
+            // identity, but the host still re-equips it. Value-compare vs the last-observed ordered slot sets;
+            // a change stores + dirties (next flush ships the full loadout map). Non-Phoenix craft → false.
+            if (GeoVehicleLoadoutReflection.TryReadLoadout(GeoRuntime.Instance, vehicle, out var lw, out var lm))
+            {
+                bool loadDirty;
+                lock (self._lock)
+                {
+                    self._loadout.TryGetValue(placement.Key, out var prevL);
+                    loadDirty = !GeoVehicleLoadout.SameLoadout(prevL.w, prevL.m, lw, lm);
+                    if (loadDirty) self._loadout[placement.Key] = (lw, lm);
+                }
+                if (loadDirty)
                     NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
             }
             lock (self._lock)
@@ -128,6 +147,16 @@ namespace Multiplayer.Network.Sync.State
                     if (dead != null)
                         foreach (var k in dead) self._crew.Remove(k);
                 }
+                // U: drop loadout entries of dead keys the same way (the tombstone removes the craft).
+                if (self._loadout.Count > 0)
+                {
+                    List<long> deadL = null;
+                    foreach (var k in self._loadout.Keys)
+                        if (!liveKeys.Contains(k))
+                            (deadL = deadL ?? new List<long>()).Add(k);
+                    if (deadL != null)
+                        foreach (var k in deadL) self._loadout.Remove(k);
+                }
             }
             if (pruned)
                 NetworkEngine.Instance?.Sync?.MarkChannelDirty(self.ChannelId);
@@ -143,9 +172,10 @@ namespace Multiplayer.Network.Sync.State
             List<GeoVehicleIdentity> resident;
             List<long> tombstones;
             List<GeoVehicleCrewRecord> crew = null;
+            List<GeoVehicleLoadoutRecord> loadout = null;
             lock (_lock)
             {
-                if (!_tracker.HasPayload && _crew.Count == 0) return null;   // nothing to mirror → no payload (FlushChannel no-ops)
+                if (!_tracker.HasPayload && _crew.Count == 0 && _loadout.Count == 0) return null;   // nothing to mirror → no payload (FlushChannel no-ops)
                 resident = _tracker.GetResident();
                 tombstones = _tracker.GetTombstones();
                 if (_crew.Count > 0)
@@ -155,18 +185,26 @@ namespace Multiplayer.Network.Sync.State
                     crew = new List<GeoVehicleCrewRecord>(_crew.Count);
                     foreach (var kv in _crew) crew.Add(new GeoVehicleCrewRecord(kv.Key, kv.Value));
                 }
+                if (_loadout.Count > 0)
+                {
+                    // U: FULL loadout map every flush (resident-style — same heal + idempotent value-stamp).
+                    loadout = new List<GeoVehicleLoadoutRecord>(_loadout.Count);
+                    foreach (var kv in _loadout) loadout.Add(new GeoVehicleLoadoutRecord(kv.Key, kv.Value.w, kv.Value.m));
+                }
             }
             var snap = new GeoVehicleIdentitySnapshot();
             snap.Vehicles.AddRange(resident);
             snap.Tombstones.AddRange(tombstones);
             if (crew != null) snap.Crew.AddRange(crew);
+            if (loadout != null) snap.Loadouts.AddRange(loadout);
             return GeoVehicleIdentitySnapshot.Encode(snap);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = GeoVehicleIdentitySnapshot.Decode(data);
-            if (snap == null || (snap.Vehicles.Count == 0 && snap.Tombstones.Count == 0 && snap.Crew.Count == 0)) return;
+            if (snap == null || (snap.Vehicles.Count == 0 && snap.Tombstones.Count == 0
+                                 && snap.Crew.Count == 0 && snap.Loadouts.Count == 0)) return;
             var liveKeys = GeoVehicleIdentityReflection.ResolveLiveKeys(rt);
             foreach (var id in snap.Vehicles)
             {
@@ -209,6 +247,19 @@ namespace Multiplayer.Network.Sync.State
                 }
                 PersonnelReflection.ApplyVehicleCrew(rt, vehicle, c.UnitIds);
             }
+            // U loadout tail — applied AFTER crew, resolve-by-key (same as crew). Value-only equipment
+            // reconcile; an unresolvable vehicle key (mid-load / failed spawn) logs + skips — the full-map
+            // re-emission heals on the next flush.
+            foreach (var l in snap.Loadouts)
+            {
+                var vehicle = GeoVehicleIdentityReflection.ResolveVehicleByKey(rt, l.Key);
+                if (vehicle == null)
+                {
+                    Debug.Log("[Multiplayer] GeoVehicleChannel: loadout apply skipped — vehicle key=" + l.Key.ToString("X") + " not live on this client");
+                    continue;
+                }
+                GeoVehicleLoadoutReflection.ApplyLoadout(rt, vehicle, l.Weapons, l.Modules);
+            }
         }
 
         public void AttachHost(SyncEngine eng)
@@ -234,6 +285,7 @@ namespace Multiplayer.Network.Sync.State
             {
                 _tracker.Clear();
                 _crew.Clear();
+                _loadout.Clear();
                 _lastBehemothStatus = byte.MaxValue;
             }
             _bound = false;

@@ -77,8 +77,31 @@ namespace Multiplayer.Network.Sync.State
                 => Disc + "|" + GivenByGuid + "|" + Payload + "|" + Aux + "|" + TitleKey;
         }
 
+        // ─── marketplace offer kinds (audit AB — DLC5 Kaos "The Marketplace" offer list) ───
+        public const byte OfferItem = 1;      // GeoMarketplaceInstanceData.MarketplaceOption.Offer is an ItemDef
+        public const byte OfferResearch = 2;  //   … a ResearchDef
+        public const byte OfferUnit = 3;      //   … a TacCharacterDef (ground-vehicle unit)
+
+        /// <summary>
+        /// One The-Marketplace offer — exactly <c>GeoMarketplaceInstanceData.MarketplaceOption</c>
+        /// (price + one item/research/unit guid). The frozen client never re-runs the host's RNG
+        /// <c>GeoMarketplace.UpdateOptions</c>, so without a mirror its offer list drifts from the host's
+        /// (stale/empty shop). Rebuilt client-side into <c>GeoMarketplace.MarketplaceChoices</c>.
+        /// </summary>
+        public sealed class MarketplaceOfferRecord
+        {
+            public byte Kind;              // OfferItem / OfferResearch / OfferUnit (0 = unknown → skipped at apply)
+            public string OfferGuid = "";  // BaseDef.Guid of the offered ItemDef / ResearchDef / TacCharacterDef
+            public float Price;            // GeoEventChoice.Requirments.Resources[0].Value (Materials)
+        }
+
         public readonly List<ObjectiveRecord> Objectives = new List<ObjectiveRecord>();
         public readonly List<(string name, int value)> Variables = new List<(string, int)>();
+
+        /// <summary>AB: the DLC5 Kaos "The Marketplace" offer list (empty when no DLC5 / no offers). An
+        /// OPTIONAL trailing section on the wire (written only when non-empty, read only if bytes remain)
+        /// so the pre-AB objectives+variables pins stay byte-identical.</summary>
+        public readonly List<MarketplaceOfferRecord> MarketplaceOffers = new List<MarketplaceOfferRecord>();
 
         /// <summary>PURE apply decision: is this a discriminator the client knows how to rebuild?
         /// Unknown (future/foreign) values are skipped at apply, never rejected at decode.</summary>
@@ -106,6 +129,19 @@ namespace Multiplayer.Network.Sync.State
                 {
                     WriteStr(w, name);
                     w.Write(value);
+                }
+                // AB marketplace offers — OPTIONAL trailing section, written ONLY when ≥1 offer is carried
+                // so the pre-AB wire (objectives + variables) stays byte-identical (existing pins hold; an
+                // older decoder never reads past the variable table).
+                if (snap.MarketplaceOffers.Count > 0)
+                {
+                    w.Write((ushort)snap.MarketplaceOffers.Count);
+                    foreach (var o in snap.MarketplaceOffers)
+                    {
+                        w.Write(o.Kind);
+                        WriteStr(w, o.OfferGuid);
+                        w.Write(o.Price);
+                    }
                 }
                 return ms.ToArray();
             }
@@ -141,6 +177,19 @@ namespace Multiplayer.Network.Sync.State
                         string name = ReadStr(r);
                         int value = r.ReadInt32();
                         snap.Variables.Add((name, value));
+                    }
+                    // AB marketplace offers — read ONLY if bytes remain after the variable table (a pre-AB
+                    // payload ends there). A truncated section throws → whole payload rejected.
+                    if (ms.Position < ms.Length)
+                    {
+                        int no = r.ReadUInt16();
+                        for (int i = 0; i < no; i++)
+                        {
+                            byte kind = r.ReadByte();
+                            string guid = ReadStr(r);
+                            float price = r.ReadSingle();
+                            snap.MarketplaceOffers.Add(new MarketplaceOfferRecord { Kind = kind, OfferGuid = guid, Price = price });
+                        }
                     }
                     return snap;
                 }

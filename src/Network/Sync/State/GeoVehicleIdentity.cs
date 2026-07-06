@@ -135,6 +135,68 @@ namespace Multiplayer.Network.Sync.State
     }
 
     /// <summary>
+    /// PURE record of one PHOENIX aircraft's mirrored LOADOUT — the ordered weapon-slot and module-slot
+    /// def guids of its <c>_weapons</c>/<c>_modules</c> lists (audit item U: aircraft weapon/module
+    /// loadout, which affects interception outcome). Keyed by the SAME composite key as the identity /
+    /// crew records so it resolves BOTH a mirror-spawned craft and a join-save-loaded pre-existing one.
+    /// SLOT ORDER is wire truth (weapon in slot 0 vs 1) and an EMPTY slot is a "" entry (the native
+    /// <c>AddNullWeapon</c>/<c>AddNullModule</c> placeholder) — never dropped, so the client rebuilds the
+    /// exact slot layout. Structural equality for codec round-trip tests.
+    /// </summary>
+    public sealed class GeoVehicleLoadoutRecord : IEquatable<GeoVehicleLoadoutRecord>
+    {
+        public readonly long Key;          // composite (OwnerId, VehicleId) key — GeoVehiclePos.MakeKey
+        public readonly string[] Weapons;  // ordered weapon-slot GeoVehicleEquipmentDef guids ("" = empty/null slot)
+        public readonly string[] Modules;  // ordered module-slot GeoVehicleEquipmentDef guids ("" = empty/null slot)
+
+        public GeoVehicleLoadoutRecord(long key, string[] weapons, string[] modules)
+        {
+            Key = key;
+            Weapons = weapons ?? new string[0];
+            Modules = modules ?? new string[0];
+        }
+
+        public bool Equals(GeoVehicleLoadoutRecord other)
+            => other != null && Key == other.Key
+               && GeoVehicleLoadout.SameLoadout(Weapons, Modules, other.Weapons, other.Modules);
+
+        public override bool Equals(object obj) => obj is GeoVehicleLoadoutRecord o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = Key.GetHashCode();
+                foreach (var g in Weapons) h = (h * 397) ^ (g?.GetHashCode() ?? 0);
+                foreach (var g in Modules) h = (h * 397) ^ (g?.GetHashCode() ?? 0);
+                return h;
+            }
+        }
+
+        public override string ToString()
+            => $"Loadout(key={Key:X} w=[{string.Join(",", Weapons)}] m=[{string.Join(",", Modules)}])";
+    }
+
+    /// <summary>PURE ordered loadout comparison (host poll change-detect + record equality). A null and an
+    /// empty list compare EQUAL per side, and "" (empty slot) is a distinct value from a real guid — so a
+    /// slot going empty↔filled or two slots swapping registers as a change. Both weapon and module lists
+    /// must match for the loadout to be unchanged.</summary>
+    public static class GeoVehicleLoadout
+    {
+        public static bool SameLoadout(string[] aW, string[] aM, string[] bW, string[] bM)
+            => SameList(aW, bW) && SameList(aM, bM);
+
+        private static bool SameList(string[] a, string[] b)
+        {
+            int na = a?.Length ?? 0, nb = b?.Length ?? 0;
+            if (na != nb) return false;
+            for (int i = 0; i < na; i++)
+                if (!string.Equals(a[i] ?? "", b[i] ?? "", StringComparison.Ordinal)) return false;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Decoded GeoVehicle CREATION/DESTRUCTION batch (mid-session vehicle-creation channel #6): the FULL resident
     /// identity set (every post-bind creation, re-emitted each flush — the unacked transport heals lost flushes /
     /// failed applies through the client's key-idempotent apply) plus the FULL tombstone key set (vehicles the
@@ -151,20 +213,32 @@ namespace Multiplayer.Network.Sync.State
     /// tombstone section is unconditional (no legacy-format branch).
     ///
     /// PS1 CREW BLOCK (versioned optional tail, the GeoSiteSnapshot WA-2 extras precedent): appended AFTER the
-    /// tombstone section, and ONLY when ≥1 crew record is carried — a no-crew payload stays byte-identical to
-    /// the pre-PS1 wire (existing pins hold; an older decoder never reads past the tombstones). Keyed by the
-    /// composite key (NOT a field of the identity record: crew changes on PRE-EXISTING vehicles too, whose
-    /// identity never re-emits — the key join covers both). Layout:
+    /// tombstone section, and ONLY when ≥1 crew OR loadout record is carried — a no-extras payload stays
+    /// byte-identical to the pre-PS1 wire (existing pins hold; an older decoder never reads past the
+    /// tombstones). Keyed by the composite key (NOT a field of the identity record: crew changes on
+    /// PRE-EXISTING vehicles too, whose identity never re-emits — the key join covers both). Layout:
     ///   [u16 crewCount] { [i64 compositeKey] [u16 recLen] [u8 tailFlags] [payloads in bit order…] }*
     ///   recLen = byte length of tailFlags + payloads (skip-a-record contract for unknown future bits).
     ///   tailFlags: bit0 = crew tail → payload [u16 nUnits][i64 GeoUnitId × nUnits] (ordered).
     ///              bits 1-7 RESERVED (higher bits, payloads appended after known ones).
     /// Applied AFTER the resident spawn loop (spawn-then-crew ordering within Apply, spec §2.3).
+    ///
+    /// U LOADOUT BLOCK (audit item U — a SECOND versioned extras block, the crew block is its exact precedent):
+    /// appended AFTER the crew block and ONLY when ≥1 loadout record is carried. To keep the two optional
+    /// blocks positionally unambiguous, the crew block's [u16 crewCount] marker is ALWAYS written whenever
+    /// EITHER block is present (a loadout-only payload writes crewCount=0 then the loadout block) — so the
+    /// crew-only / no-extras wires stay byte-identical to pre-U. Same key-joined recLen/tailFlags record shape:
+    ///   [u16 loadoutCount] { [i64 compositeKey] [u16 recLen] [u8 tailFlags] [payload] }*
+    ///   tailFlags: bit0 = loadout tail → payload [u16 nW]{[u16 len][utf8 guid]} [u16 nM]{[u16 len][utf8 guid]}
+    ///              (weapon-slot then module-slot def guids, ordered; "" = empty/null slot). bits 1-7 RESERVED.
+    /// Applied AFTER the crew apply loop (resolve-by-key, value-only equipment reconcile).
     /// </summary>
     public sealed class GeoVehicleIdentitySnapshot
     {
         // PS1 crew-block tailFlags bits. New tails MUST take new HIGHER bits (parse-known-then-skip).
         private const byte TailHasCrew = 1 << 0;   // payload: [u16 nUnits][i64 GeoUnitId × nUnits]
+        // U loadout-block tailFlags bits (independent of the crew block's — its own record namespace).
+        private const byte TailHasLoadout = 1 << 0; // payload: [u16 nW]{str} [u16 nM]{str}
 
         public readonly List<GeoVehicleIdentity> Vehicles = new List<GeoVehicleIdentity>();
 
@@ -175,6 +249,10 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>PS1: the FULL crew set of every live Phoenix vehicle (re-emitted each flush, resident-style
         /// — the unacked rail heals through the client's idempotent value-only reconcile).</summary>
         public readonly List<GeoVehicleCrewRecord> Crew = new List<GeoVehicleCrewRecord>();
+
+        /// <summary>U: the FULL loadout set of every live Phoenix aircraft (re-emitted each flush, resident-style
+        /// — the client value-stamps _weapons/_modules idempotently).</summary>
+        public readonly List<GeoVehicleLoadoutRecord> Loadouts = new List<GeoVehicleLoadoutRecord>();
 
         public static byte[] Encode(GeoVehicleIdentitySnapshot snap)
         {
@@ -194,15 +272,28 @@ namespace Multiplayer.Network.Sync.State
                 }
                 w.Write((ushort)snap.Tombstones.Count);
                 foreach (var key in snap.Tombstones) w.Write(key);
-                // PS1 crew block — written ONLY when ≥1 record is carried, so a no-crew payload stays
-                // byte-identical to the pre-PS1 wire (legacy pins hold; older decoders ignore the block).
-                if (snap.Crew.Count > 0)
+                // PS1 crew block — written when ≥1 crew OR loadout record is carried (the crewCount marker
+                // must precede any loadout block so the two optional blocks are positionally unambiguous). A
+                // no-extras payload writes neither block → byte-identical to the pre-PS1 wire (legacy pins hold).
+                if (snap.Crew.Count > 0 || snap.Loadouts.Count > 0)
                 {
                     w.Write((ushort)snap.Crew.Count);
                     foreach (var c in snap.Crew)
                     {
                         w.Write(c.Key);
                         var rec = EncodeCrewRecord(c);
+                        w.Write((ushort)rec.Length);
+                        w.Write(rec);
+                    }
+                }
+                // U loadout block — written ONLY when ≥1 record is carried (crew-only wire stays byte-identical).
+                if (snap.Loadouts.Count > 0)
+                {
+                    w.Write((ushort)snap.Loadouts.Count);
+                    foreach (var l in snap.Loadouts)
+                    {
+                        w.Write(l.Key);
+                        var rec = EncodeLoadoutRecord(l);
                         w.Write((ushort)rec.Length);
                         w.Write(rec);
                     }
@@ -223,6 +314,26 @@ namespace Multiplayer.Network.Sync.State
                 for (int i = 0; i < n; i++) w.Write(c.UnitIds[i]);
                 return ms.ToArray();
             }
+        }
+
+        /// <summary>[u8 tailFlags][u16 nW]{str}[u16 nM]{str} for one aircraft's loadout record.</summary>
+        private static byte[] EncodeLoadoutRecord(GeoVehicleLoadoutRecord l)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(TailHasLoadout);
+                WriteGuidList(w, l.Weapons);
+                WriteGuidList(w, l.Modules);
+                return ms.ToArray();
+            }
+        }
+
+        private static void WriteGuidList(BinaryWriter w, string[] guids)
+        {
+            int n = guids.Length > ushort.MaxValue ? ushort.MaxValue : guids.Length;
+            w.Write((ushort)n);
+            for (int i = 0; i < n; i++) WriteStr(w, guids[i]);
         }
 
         public static GeoVehicleIdentitySnapshot Decode(byte[] data)
@@ -265,6 +376,22 @@ namespace Multiplayer.Network.Sync.State
                             if (crew != null) snap.Crew.Add(crew);
                         }
                     }
+                    // U loadout block — read ONLY if bytes still remain after the crew block (a pre-U payload
+                    // ends at the crew block). Same recLen skip-a-record contract for unknown future bits.
+                    if (ms.Position < ms.Length)
+                    {
+                        int nLoad = r.ReadUInt16();
+                        for (int i = 0; i < nLoad; i++)
+                        {
+                            long key = r.ReadInt64();
+                            int recLen = r.ReadUInt16();
+                            var rec = r.ReadBytes(recLen);
+                            if (rec.Length != recLen)
+                                throw new EndOfStreamException("GeoVehicleIdentitySnapshot: truncated loadout record");
+                            var load = DecodeLoadoutRecord(key, rec);
+                            if (load != null) snap.Loadouts.Add(load);
+                        }
+                    }
                     return snap;
                 }
             }
@@ -289,6 +416,30 @@ namespace Multiplayer.Network.Sync.State
                 for (int i = 0; i < n; i++) ids[i] = r.ReadInt64();
                 return new GeoVehicleCrewRecord(key, ids);
             }
+        }
+
+        /// <summary>Parse one loadout record ([u8 tailFlags][u16 nW]{str}[u16 nM]{str}). A record with NO
+        /// known bit (only future higher bits) returns null (skipped via its recLen); a KNOWN bit whose
+        /// payload is truncated throws → payload rejected. Mirrors <see cref="DecodeCrewRecord"/>.</summary>
+        private static GeoVehicleLoadoutRecord DecodeLoadoutRecord(long key, byte[] rec)
+        {
+            using (var ms = new MemoryStream(rec))
+            using (var r = new BinaryReader(ms, Encoding.UTF8))
+            {
+                byte flags = r.ReadByte();
+                if ((flags & TailHasLoadout) == 0) return null;   // only unknown future bits → skip record
+                var weapons = ReadGuidList(r);
+                var modules = ReadGuidList(r);
+                return new GeoVehicleLoadoutRecord(key, weapons, modules);
+            }
+        }
+
+        private static string[] ReadGuidList(BinaryReader r)
+        {
+            int n = r.ReadUInt16();
+            var guids = new string[n];
+            for (int i = 0; i < n; i++) guids[i] = ReadStr(r);
+            return guids;
         }
 
         private static void WriteStr(BinaryWriter w, string s)

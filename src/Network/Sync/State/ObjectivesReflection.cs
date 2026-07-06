@@ -190,6 +190,9 @@ namespace Multiplayer.Network.Sync.State
                         snap.Variables.Add((name, value));
                     }
                 }
+                // AB: the DLC5 marketplace offer list rides THIS channel too (its offer-tier variable is
+                // already in the table above) — one atomic snapshot, no offers-vs-tier tear. No-op off-DLC5.
+                MarketplaceReflection.SnapshotOffers(rt, snap);
                 return snap;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ObjectivesReflection.Snapshot failed: " + ex.Message); return null; }
@@ -292,6 +295,11 @@ namespace Multiplayer.Network.Sync.State
                     foreach (var (name, value) in target.Variables)
                         if (name != null) vars[name] = value;
                 }
+
+                // 1b) AB MARKETPLACE OFFERS — value-only rebuild of GeoMarketplace.MarketplaceChoices (no-op
+                // when unchanged / no DLC5). Runs after the variable overwrite so the offer-tier variable the
+                // native offer maths reads is already host-truth.
+                MarketplaceReflection.ApplyOffers(rt, target);
 
                 // 2) OBJECTIVES — reconcile carried classes only.
                 var pool = new List<(object obj, string key)>();   // client's current carried objectives
