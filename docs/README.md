@@ -51,6 +51,15 @@ Local docs are the **single source of truth** for the Multiplayer cooperative-mu
 | [superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md](superpowers/specs/2026-06-13-coop-state-replication-inc3-geostatediff.md) | **SD-AIDR INC-3** design — generic host→client geoscape state mirror over a single scope-keyed packet `0x35 GeoStateDiff` (generalizes the `0x34` clock mirror from one Timing object to N entities). Host walks all factions × vehicles, native `RecordInstanceData` snapshot → diff → broadcasts only CHANGED records (UNRELIABLE continuous pos/rot/range + RELIABLE discrete Travelling/CurrentSite/DestinationSites). Client is a PURE mirror keyed by stable `(factionGuid,VehicleID)` (THE live movement-bug fix — replaces Phoenix-only `FindVehicleById`), seq-guarded, applied under `EntityReplicationScope`. Scope enum `Vehicle=1`(INC-3a)/Site/MarketPrice(INC-3b)/Faction(INC-3c)/`Checksum=255`. Retires per-action `StartTravel` command-replay, keeps client→host input relay. CRC detector + targeted single-entity self-heal (full save-reload = INC-5) |
 | [superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md](superpowers/2026-07-03-multiplayer-fable-rereview-fixes-handoff.md) | **Session handoff 2026-07-03** — Fable re-review fix wave `fc2c8b5`→`ace79ae` (native-advance reflection ROOT CAUSE `Base.UI.GeoscapeModulesData`, host-resolved event texts / VoidOmen fix, correlator hardening, `0x6B` advance-request, wallet diag, sim-freeze anchor relay); deployed DLL `15f9a08e…`, in-game verified (wallet converges) vs pending verification list, known open issues, next arcs |
 | [superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md](superpowers/plans/2026-06-13-replication-increment3a-vehicle-state-mirror.md) | **SD-AIDR INC-3a** plan — all-factions vehicle state mirror (first `0x35` scope; unblocks the locked host→client movement bug): pure `GeoStateScope` enum + `GeoStateDiffCodec` (generic scope/seq/mask envelope, TDD) + `GeoVehicleStateDiffer` (epsilon diff + monotonic per-identity seq + continuous/discrete channel split, TDD); `GeoBridge` `FindVehicleByFactionAndId`(bug fix)/`RecordVehicleState`/`ApplyVehicleState`(light setters)/`ApplyVehicleStateFull`(`ProcessInstanceData`); `GeoStateSyncBroadcaster` (host snapshot+diff, ticked from `NetworkEngine.Update`); `BroadcastGeoStateDiff` + route `0x35` → `ClientGeoStateApplier`; RETIRE `StartTravel` command-replay, KEEP client→host relay. Two-phase DIAG (Task 0 all-factions `DescribeVehicles` now / Task 13 revert `b753111`+`fbfb3f9` after verify). 14 tasks; pure cores TDD + engine seams build-verified + in-game GATE (host moves Phoenix Manticore + NJ Thunderbird → both mirror) |
+| [superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md](superpowers/2026-07-05-multiplayer-inc4-s2-travel-mirror-handoff.md) | **Session handoff 2026-07-05** — Inc4 S2 travel mirror (17 commits `0d38d20`->`9e80b24`): composite-key ROOT CAUSE, snapshot interpolation, MoveVehicle+ExploreSite relays, report-mirror gate-ON, project rename Multipleer->Multiplayer |
+| *(outer)* [specs/2026-07-05-multiplayer-unified-popup-mirror-design.md](../../docs/superpowers/specs/2026-07-05-multiplayer-unified-popup-mirror-design.md) | **Unified popup-mirror design** — pillars P1-P7: mission-state mirror, universal blocking, outcome modals, unified sequencer, occId dedup, resource-harvest float, objectives channel; world-activity batches WA-1..4; marketplace; personnel sync PS1-PS4 |
+| *(outer)* [specs/2026-07-05-multiplayer-personnel-sync-design.md](../../docs/superpowers/specs/2026-07-05-multiplayer-personnel-sync-design.md) | **Personnel sync design** — personnel edit intents 60-65, PersonnelChannel #9, RecruitPoolChannel #10, GeoVehicleChannel crew/loadout tails, ResearchSnapshot v4 AvailableAuthoritative |
+| *(outer)* [specs/2026-07-06-multiplayer-tactical-closure-design.md](../../docs/superpowers/specs/2026-07-06-multiplayer-tactical-closure-design.md) | **Tactical closure design** — surfaces 0x92-0x98: actor spawn/despawn, ability-intent relay, ground surfaces, mission conclusion, ammo/MC mask bits, destructibles, enemy-turn camera, AoE/VFX replay |
+| *(outer)* [research/2026-07-05-geoscape-personnel-native-taxonomy.md](../../docs/superpowers/research/2026-07-05-geoscape-personnel-native-taxonomy.md) | Personnel native taxonomy — GeoCharacter live-state blobs, GeoUnitId keying, roster membership |
+| *(outer)* [research/2026-07-05-multiplayer-personnel-coverage-audit.md](../../docs/superpowers/research/2026-07-05-multiplayer-personnel-coverage-audit.md) | Personnel coverage audit — equipment/augment/hire/transfer/dismiss/rename coverage |
+| *(outer)* [research/2026-07-05-geoscape-full-coverage-gap-audit.md](../../docs/superpowers/research/2026-07-05-geoscape-full-coverage-gap-audit.md) | Geoscape full-coverage gap audit — every unsynced surface categorized |
+| *(outer)* [research/2026-07-05-multiplayer-three-player-audit.md](../../docs/superpowers/research/2026-07-05-multiplayer-three-player-audit.md) | Three-player topology audit — 3+ player dedup, peer-keyed IntentDedup, mid-session join |
+| *(outer)* [research/2026-07-06-tactical-full-coverage-gap-audit.md](../../docs/superpowers/research/2026-07-06-tactical-full-coverage-gap-audit.md) | Tactical full-coverage gap audit — every unsynced tactical surface categorized |
 
 ### `engine/` — As-Built Implementation
 
@@ -77,6 +86,55 @@ Reserved for diagram assets (currently empty).
 - **Vanilla save untouched:** ownership/nicks/permissions = mod runtime-state, reconciled each session, never written into the PP save.
 - **Top desync risk:** RNG + hidden game systems → [research/02-rng-analysis](research/02-rng-analysis.md).
 - **Blocked on SDK:** UI injection, Steam availability, save/load API, loading-progress hook, 2nd-instance, mid-battle save → [specs/03-open-questions-sdk](specs/03-open-questions-sdk.md).
+
+### State Channels (on GeoState `0xA1`)
+
+| Ch# | Name | Scope |
+|-----|------|-------|
+| 1 | Inventory | Faction inventory |
+| 2 | Research | `ResearchChannel` (single-source-of-truth); v4 `AvailableAuthoritative` invalidation reconcile; extra dirty trigger `SetPowered` |
+| 3 | Unlock | Faction unlocks |
+| 4 | Diplomacy | Faction diplomacy + forced `PartyDiplomacyState` byte tail |
+| 5 | GeoSite | Site records + extras block: bit0 haven (population/infested), bit1 alien-base (type/addons), bit2 excavation, bit3 attack-schedule, bit4 ActiveMission (`GeoMissionRecord`), bit6 weather, bit7 `ExpiringTimerAt` |
+| 6 | GeoVehicle | Vehicle identity/spawn + crew `GeoUnitId[]` + aircraft loadout (weapons/modules) |
+| 7 | Objectives | `GeoFaction.Objectives` (4 classes) + `GeoscapeEventSystem` variables + marketplace offers |
+| 8 | Mist | `MistRendererSystem` hourly deflate snapshot (chunked 24 KB) |
+| 9 | Personnel | Roster membership + whole-`GeoCharacter` live-state blobs, key `GeoUnitId` |
+| 10 | RecruitPool | Haven `AvailableRecruit` + `_nakedRecruits` + `_capturedUnits` |
+
+### Geoscape Actions Relayed
+
+| Id | Action | Notes |
+|----|--------|-------|
+| 40 | MoveVehicle | `StartTravel` intercept |
+| 41 | ExploreSite | `StartExploringCurrentSite` |
+| 60-65 | Personnel edits | Equip / augment / hire / transfer / dismiss / rename (permission + ownership gated) |
+| 80 | GeoAbilityActivateAction | Harvest / Excavate / EmergencyRepair / Scan / AncientSiteProbe / ActivateBase / AncientGuardianGuard (allowlist, `ActionCategory.GeoAbility`) |
+
+### Tactical Surfaces
+
+| Packet | Surface | Notes |
+|--------|---------|-------|
+| 0x8E | Ability-intent relay | Active allowlist: Heal, RecoverWill, Rally, PsychicScream, Reload, Interact; DeployTurret/OpenCrate deferred |
+| 0x8F | Actor state delta | Position (0x0008) + facing (0x0010) + ammo (0x0400) + mind-control faction display (0x0800) |
+| 0x92/0x93 | Actor spawn/despawn | Mid-battle reinforcements, eggs, turrets, loot containers — ground entities reuse actor registry |
+| 0x94 | Ground surfaces | Fire / goo / acid / mist (`SetVoxelType` leaf funnel) |
+| 0x95 | Mission conclusion | `GameOver` chokepoint; client flips `IsGameOver`; outcome modal stays on geoscape 0x69 path |
+| 0x96 | Destructibles | `DestructableDamageReceiver.ApplyDamage` mirror, `SceneObjectId` guid key |
+| 0x97 | Enemy-turn camera hint | Camera focus during enemy turn |
+| 0x98 | AoE/volume VFX replay | Area-of-effect visual replay |
+
+### Display Rail
+
+- Unified `displaySeq` sequencer (P4): host stamps at `GeoscapeViewSwitchQuery`; client queue prio DESC / seq ASC, one-at-a-time; flag `DisplaySequencerGate` default ON.
+- `0x69`/`0x6C` occId dedup (P5) — eliminates STUN reliable-transport double-display.
+- Marketplace `UIStateMarketplaceGeoscapeEvent` selection mirror.
+
+### Networking
+
+- Tactical `IntentDedup` peer-keyed `(peerId, surfaceId, nonce)` — 3+ players unblocked.
+- P1 mid-session join geoscape-only (`JoinReady` 0x45, per-peer unicast save-transfer via `AutosaveGame`, live-battle join rejected with notice).
+- Inc3 action-relay envelope `0xA2`-`0xA4` behind `GeoActionRelay.UseEnvelope` flag DEFAULT OFF (legacy path byte-identical; flip after in-game verify).
 
 ## Save / Load Gate Matrix
 
