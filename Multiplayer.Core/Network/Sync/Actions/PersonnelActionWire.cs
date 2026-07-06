@@ -8,7 +8,7 @@ namespace Multiplayer.Network.Sync.Actions
     /// (u16 count, then each guid as a length-prefixed UTF8 string via <see cref="BinaryWriter.Write(string)"/>).
     /// Payloads key by GeoUnitId + stable def guids only — never object graphs (spec §5.2).
     /// </summary>
-    internal static class PersonnelActionWire
+    public static class PersonnelActionWire
     {
         public static void WriteGuids(BinaryWriter w, string[] guids)
         {

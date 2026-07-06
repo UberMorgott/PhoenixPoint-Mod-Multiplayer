@@ -12,7 +12,7 @@ namespace Multiplayer.Network.Sync.State
     /// overloads and throws <see cref="AmbiguousMatchException"/>. This resolver enumerates the candidates and
     /// selects by name + arity (generic vs not) + a single <c>string</c> parameter, so it never throws.
     /// </summary>
-    internal static class MethodOverloadResolver
+    public static class MethodOverloadResolver
     {
         /// <summary>
         /// Returns the GENERIC method definition named <paramref name="name"/> on <paramref name="type"/> that
