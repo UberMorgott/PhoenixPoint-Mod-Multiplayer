@@ -59,6 +59,7 @@ namespace Multiplayer.UI
         private Text _railStunValue;
         private Text _railSaveValue;
         private Button _chooseSaveBtn;
+        private Button _newCampaignBtn;
         private Button _inviteBtn;
         // Connect-rail SHARE + SAVE section roots (host-only): gated on/off per frame like _chooseSaveBtn.
         // The JOIN section (and its button) stay always-visible. Section roots own the header + body so
@@ -371,6 +372,21 @@ namespace Multiplayer.UI
                     Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
                     () => _owner.OnLobbyChooseSave());
                 LE(_chooseSaveBtn.gameObject).preferredHeight = RailButtonSize.y;
+            }
+
+            // P0 new-campaign bootstrap: start a FRESH campaign instead of picking a save (host runs
+            // the native new-game flow; clients auto-join at the first geoscape frame). Lives in the
+            // host-gated SAVE section, so it inherits the host-only visibility.
+            _newCampaignBtn = NativeWidgetFactory.CloneMenuButton(_saveSection.transform, "NewCampaignBtn",
+                "NEW CAMPAIGN…", () => _owner.OnLobbyNewCampaign());
+            if (_newCampaignBtn != null)
+                AddCloneLayoutElement(_newCampaignBtn, _saveSection.transform, RailButtonSize.x, RailButtonSize.y);
+            else
+            {
+                _newCampaignBtn = UiToolkit.CreateButton(_saveSection, "NewCampaignBtn", "NEW CAMPAIGN…",
+                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
+                    () => _owner.OnLobbyNewCampaign());
+                LE(_newCampaignBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
 
             // ── SECTION "JOIN" (always): join someone else's game ───────────────

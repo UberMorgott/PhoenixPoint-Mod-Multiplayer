@@ -167,6 +167,40 @@ namespace Multiplayer.Network
         {
             return sessionStarted && !geoscapeActive;
         }
+
+        /// <summary>
+        /// New-campaign co-op bootstrap ARM gate (P0). True iff the HOST may run the NATIVE
+        /// new-campaign flow as a co-op bootstrap: we are the host, the co-op lobby is up (active
+        /// session) and the session has NOT started yet (still in the lobby), and no save transfer is
+        /// already in flight. Deliberately does NOT require a connected/ready client: the transfer
+        /// fires only later, at the first playable geoscape frame, and a host who bootstraps alone
+        /// simply starts the campaign — later peers onboard via the P1 mid-session join. The
+        /// mid-session "second fresh campaign" case (sessionStarted == true) is owned by the EXISTING
+        /// <see cref="HostLoadGuard"/> (it is exactly an F2 host reload with a to-be-created save).
+        /// Pure + Unity-free.
+        /// </summary>
+        public static bool NewCampaignArmGuard(bool isHost, bool isActiveSession, bool sessionStarted,
+            bool transferActive)
+        {
+            return isHost
+                && isActiveSession
+                && !sessionStarted
+                && !transferActive;
+        }
+
+        /// <summary>
+        /// Autosave-meta handoff check, shared by the P1 on-demand join capture and the P0
+        /// new-campaign bootstrap. The game's <c>AutosaveGame</c> produces a NEW
+        /// <c>SavegameMetaData</c> instance on a successful capture, so a capture is FRESH iff the
+        /// post-save <c>SaveManager.AutoSave</c> is non-null and not the SAME instance as before the
+        /// save (ironman substitution or a write failure leaves the old instance in place — the
+        /// caller must abort rather than ship a stale blob). Pure + Unity-free (reference identity).
+        /// </summary>
+        public static bool FreshAutosaveCaptured(object previousAutosaveMeta, object capturedAutosaveMeta)
+        {
+            return capturedAutosaveMeta != null
+                && !ReferenceEquals(capturedAutosaveMeta, previousAutosaveMeta);
+        }
     }
 
     /// <summary>

@@ -111,7 +111,15 @@ namespace Multiplayer.Harmony
         /// Returns false if the live HomeScreenView / its state stack could not be reached (caller
         /// surfaces a warning — there is NO custom-window fallback).
         /// </summary>
-        public static bool OpenNativeLoadScreen()
+        public static bool OpenNativeLoadScreen() => PushHomeScreenState(new UIStateHomeLoadGame());
+
+        /// <summary>
+        /// Shared home-screen state push (also used by NewCampaignInterceptPatch to open the native
+        /// new-game settings screen): find the LIVE HomeScreenView's private state stack and push the
+        /// given state on top — exactly what the native menu button handlers do. Returns false if the
+        /// live view / stack could not be reached (caller surfaces a warning; no custom fallback).
+        /// </summary>
+        internal static bool PushHomeScreenState(object state)
         {
             try
             {
@@ -119,7 +127,7 @@ namespace Multiplayer.Harmony
                 var stackField = AccessTools.Field(typeof(HomeScreenView), "_statesStack");
                 if (stackField == null)
                 {
-                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: HomeScreenView._statesStack field not found.");
+                    Debug.LogError("[Multiplayer] PushHomeScreenState: HomeScreenView._statesStack field not found.");
                     return false;
                 }
 
@@ -135,25 +143,25 @@ namespace Multiplayer.Harmony
                 }
                 if (stack == null)
                 {
-                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: no live HomeScreenView with an initialized state stack.");
+                    Debug.LogError("[Multiplayer] PushHomeScreenState: no live HomeScreenView with an initialized state stack.");
                     return false;
                 }
 
-                // Push UIStateHomeLoadGame on top exactly like UIStateMainMenu.OnLoadGameButtonClicked.
+                // Push the state on top exactly like the native menu handlers (e.g. UIStateMainMenu.
+                // OnLoadGameButtonClicked / OnNewGeoscape, UIStateMainMenu.cs:113-116,134-137).
                 var switchToState = AccessTools.Method(stack.GetType(), "SwitchToState");
                 if (switchToState == null)
                 {
-                    Debug.LogError("[Multiplayer] OpenNativeLoadScreen: StateStack.SwitchToState not found.");
+                    Debug.LogError("[Multiplayer] PushHomeScreenState: StateStack.SwitchToState not found.");
                     return false;
                 }
 
-                var loadState = new UIStateHomeLoadGame();
-                switchToState.Invoke(stack, new object[] { loadState, StateStackAction.PushOnTop });
+                switchToState.Invoke(stack, new object[] { state, StateStackAction.PushOnTop });
                 return true;
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] OpenNativeLoadScreen failed: " + e.Message);
+                Debug.LogError("[Multiplayer] PushHomeScreenState failed: " + e.Message);
                 return false;
             }
         }

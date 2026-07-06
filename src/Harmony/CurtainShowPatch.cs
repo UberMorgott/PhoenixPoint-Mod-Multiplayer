@@ -74,6 +74,12 @@ namespace Multiplayer.Harmony
 
                     if (state == "Playing")
                     {
+                        // P0 new-campaign bootstrap: this peer reached a PLAYABLE frame. No-op unless
+                        // the HOST armed the bootstrap at the native new-game confirm; on the first
+                        // playable GEOSCAPE frame it autosaves + re-runs the existing chunked transfer
+                        // (single consumption point — see SaveTransferCoordinator.OnNewCampaignPlayableFrame).
+                        engine.SaveTransfer?.OnNewCampaignPlayableFrame();
+
                         // Native curtain auto-lifted (LiftCurtain on Loaded→Playing). In a co-op
                         // session HOLD our own synced overlay until the RevealAll second barrier;
                         // outside co-op, drop it immediately (unchanged behaviour).

@@ -535,7 +535,7 @@ namespace Multiplayer.Network
             }
 
             var meta = saveManager.AutoSave;
-            if (meta == null || ReferenceEquals(meta, oldAutoSave))
+            if (!SessionLifecycle.FreshAutosaveCaptured(oldAutoSave, meta))
             {
                 Debug.LogError("[Multiplayer] HostOnDemandJoin: no fresh autosave captured (ironman mode or a " +
                                "write failure) — cannot onboard the mid-session joiner; it must rejoin from a manual save.");
@@ -611,6 +611,129 @@ namespace Multiplayer.Network
             _engine.Sync?.ResetIntentDedupForPeer(msg.SenderSteamId);
             _engine.Sync?.BroadcastFullWallet();
             _engine.Sync?.BroadcastAllChannels();
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  HOST: P0 new-campaign co-op bootstrap — native new game runs to the first playable
+        //  geoscape frame, then autosave + the SAME chunked transfer + 2-phase barrier as any start
+        // ══════════════════════════════════════════════════════════════════
+
+        // Pure single-shot latch (Core, pinned by NewCampaignBootstrapTests): armed at the native
+        // new-game CONFIRM (NewCampaignInterceptPatch), consumed exactly once at the first playable
+        // geoscape frame (CurtainShowPatch "Playing" seam → OnNewCampaignPlayableFrame).
+        private readonly NewCampaignBootstrap _newCampaign = new NewCampaignBootstrap();
+
+        /// <summary>True while a host new-campaign bootstrap is armed (native confirm ran, geoscape
+        /// not reached yet). Read by NewCampaignInterceptPatch to force the tutorial OFF on the
+        /// campaign being created (the bootstrap waits for a GEOSCAPE playable frame).</summary>
+        public bool NewCampaignPending => _newCampaign.Armed;
+
+        /// <summary>
+        /// Arm the bootstrap: the HOST is creating a fresh campaign through the NATIVE new-game flow;
+        /// when it reaches its first playable geoscape frame the coordinator autosaves and re-runs the
+        /// EXISTING transfer + barrier so every client loads the byte-identical campaign start. The
+        /// caller (NewCampaignInterceptPatch) owns the guard (NewCampaignArmGuard for the lobby start,
+        /// the EXISTING HostLoadGuard for a mid-session second fresh campaign); this only latches and
+        /// notifies the waiting clients over the existing chat rail. Re-arming is idempotent (TFTV's
+        /// warning flow can re-invoke the native confirm) — the notice is sent once per arm edge.
+        /// </summary>
+        public void ArmNewCampaignBootstrap()
+        {
+            if (!_newCampaign.Armed)
+                _engine.Session?.SystemChat(NewCampaignCreatingNotice);
+            _newCampaign.Arm();
+            Debug.Log("[Multiplayer] New-campaign co-op bootstrap ARMED — native campaign creation " +
+                      "runs on the host; transfer fires at the first playable geoscape frame.");
+        }
+
+        /// <summary>The lobby system-chat line clients see while the host creates the campaign.</summary>
+        public const string NewCampaignCreatingNotice =
+            "— host is creating a new campaign; you will join automatically when it is ready —";
+
+        /// <summary>Drop a pending bootstrap (host backed out of the native new-game settings).</summary>
+        public void DisarmNewCampaignBootstrap()
+        {
+            if (!_newCampaign.Armed) return;
+            _newCampaign.Disarm();
+            Debug.Log("[Multiplayer] New-campaign co-op bootstrap disarmed.");
+        }
+
+        /// <summary>
+        /// CurtainShowPatch "Playing" seam: this peer just reached a playable frame. Single
+        /// consumption point of the armed bootstrap: on the first playable GEOSCAPE frame the latch
+        /// disarms and — when the fire guard is open (still host, session live, no transfer in
+        /// flight) — the host autosaves the freshly created campaign and feeds that autosave into the
+        /// EXISTING chunked transfer + LOADED/BEGIN barrier (LaunchTransfer), exactly like a lobby
+        /// start / F2 reload. Non-geoscape playable frames (a tutorial mission would be one — the
+        /// intercept forces the tutorial off; this is belt+braces) keep the latch armed until the
+        /// geoscape is reached. No-op on every peer that never armed (clients, single-player).
+        /// </summary>
+        public void OnNewCampaignPlayableFrame()
+        {
+            if (!_newCampaign.Armed) return;
+            bool geoscape = Sync.GeoRuntime.Instance.IsGeoscapeActive;
+            // Captured BEFORE the transfer resets _begun: a mid-session second fresh campaign is an
+            // F2-analog reload (clients hold pre-existing channel state) → arm the rca-4 re-seed.
+            bool wasStarted = SessionStarted;
+            if (!_newCampaign.TryFire(_engine.IsHost, _engine.IsActiveSession, geoscape, TransferActive))
+            {
+                if (geoscape)
+                    Debug.LogWarning("[Multiplayer] New-campaign bootstrap reached the geoscape but the " +
+                                     "fire guard is closed (transfer in flight or session gone) — dropped.");
+                return;
+            }
+
+            PhoenixGame game;
+            PhoenixSaveManager saveManager;
+            if (!TryGetGame(out game, out saveManager)) return;
+            var timing = GetTiming();
+            if (timing == null) return;
+
+            Debug.Log("[Multiplayer] New-campaign bootstrap: first playable geoscape frame → autosave + transfer.");
+            timing.Start(NewCampaignAutosaveAndTransferCrt(saveManager, reseedAfterReveal: wasStarted));
+        }
+
+        // Coroutine: autosave the freshly created campaign (AutosaveGame, the game's own state-capture
+        // path — same as the P1 on-demand join capture), verify a FRESH autosave was produced
+        // (SessionLifecycle.FreshAutosaveCaptured — never ship a stale blob), then hand its meta to
+        // the EXISTING LaunchTransfer: the same chunked broadcast + LOADED/BEGIN barrier +
+        // synchronized reveal every other session start uses. The host itself re-enters via the
+        // barrier (PrepareEntryFromBlobCrt + FinishLevel on BEGIN), so every peer — host included —
+        // starts from the byte-identical autosave. reseedAfterReveal: only the mid-session second
+        // fresh campaign arms the rca-4 post-reveal re-seed; on a lobby FIRST start the transferred
+        // save itself is the seed (same rule as HostStartSession vs HostStartSessionInGame).
+        private IEnumerator<NextUpdate> NewCampaignAutosaveAndTransferCrt(
+            PhoenixSaveManager saveManager, bool reseedAfterReveal)
+        {
+            var oldAutoSave = saveManager.AutoSave;
+            var ex = new ByRef<Exception>();
+            yield return Timing.Current.CallSafe(saveManager.AutosaveGame(), ex);
+            if (ex.Value != null)
+            {
+                Debug.LogError("[Multiplayer] New-campaign bootstrap: autosave capture failed: " + ex.Value.Message);
+                yield break;
+            }
+
+            var meta = saveManager.AutoSave;
+            if (!SessionLifecycle.FreshAutosaveCaptured(oldAutoSave, meta))
+            {
+                Debug.LogError("[Multiplayer] New-campaign bootstrap: no fresh autosave captured (write " +
+                               "failure?) — clients were NOT started; use CHOOSE SAVE with a manual save instead.");
+                yield break;
+            }
+
+            // Same terminal-flag reset as HostStartSessionInGame: a mid-session second fresh campaign
+            // re-runs the SAME barrier/reveal state machine; on a lobby first start these are already
+            // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier.
+            _begun = false;
+            _loadCompleteSent = false;
+            _revealAllSent = false;
+            if (!LaunchTransfer(meta))
+            {
+                Debug.LogError("[Multiplayer] New-campaign bootstrap: transfer launch failed (see prior log).");
+                yield break;
+            }
+            if (reseedAfterReveal) _reseedGate.Arm();
         }
 
         private void OpenBarrier()

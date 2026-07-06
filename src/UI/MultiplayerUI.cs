@@ -689,6 +689,41 @@ namespace Multiplayer.UI
             }
         }
 
+        // ─── New campaign (host only, P0 co-op bootstrap) ───────────────────
+
+        // Host rail "New campaign…": open the game's OWN native new-game settings screen (difficulty /
+        // DLC choices stay host-only, native). This button is pure NAVIGATION — the co-op arming
+        // happens at the native CONFIRM chokepoint (NewCampaignInterceptPatch, a durable gate that
+        // also covers any other native route to that screen), and BACK returns to the lobby via the
+        // OnSettingsBackClicked postfix. After confirm the campaign is created natively; at its first
+        // playable geoscape frame the coordinator autosaves + re-runs the EXISTING chunked transfer.
+        public void OnLobbyNewCampaign()
+        {
+            var engine = NetworkEngine.Instance;
+            var coord = engine?.SaveTransfer;
+            if (engine == null || coord == null || !engine.IsHost) return;
+
+            // Press-time projection of the SAME Core gate the confirm intercept arms under — the
+            // button never opens a screen whose confirm would be refused.
+            if (!SessionLifecycle.NewCampaignArmGuard(engine.IsHost, engine.IsActiveSession,
+                    coord.SessionStarted, coord.TransferActive))
+            {
+                Debug.LogWarning("[Multiplayer] New-campaign bootstrap unavailable (session started or transfer in flight).");
+                return;
+            }
+
+            _lobby?.HideForNativeScreen();
+            if (!NewCampaignInterceptPatch.OpenNativeNewGameScreen())
+            {
+                _lobby?.Show();
+                Debug.LogWarning("[Multiplayer] Could not open the native New Game screen; try again.");
+            }
+        }
+
+        /// <summary>Re-show the lobby overlay (host backed out of the native new-game settings —
+        /// NewCampaignInterceptPatch.SettingsBack_Postfix). Idempotent.</summary>
+        public void ShowLobby() => _lobby?.Show();
+
         // Two picked saves are the SAME selection iff they reference the same on-disk save, identified
         // by the filesystem Path (unique, set when the meta is loaded). If Path is unset/empty on either
         // side the identity is unknown, so the saves are treated as DIFFERENT (never equal by name/time).
