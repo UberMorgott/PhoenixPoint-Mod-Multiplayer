@@ -16,17 +16,15 @@ running the Multiplayer mod — to watch host UI and client UI at the same time.
 - `ClientIdentity.Load()` first checks env var `MULTIPLAYER_IDENTITY`: if it parses to a
   non-empty GUID, that GUID is used and the file is NOT read/written (process-scoped,
   never persisted). If unset/invalid, normal identity.json logic runs unchanged.
-- The launch script sets `MULTIPLAYER_IDENTITY` for instance #2 (CLIENT) only; instance
-  #1 (HOST) launches WITHOUT it and uses the real identity.json.
+- For a second local instance, set `MULTIPLAYER_IDENTITY` for the CLIENT process only; the
+  HOST process launches WITHOUT it and uses the real identity.json.
 
 ## Steps
 - Deploy the mod:
   - `pwsh -NoProfile -File .\deploy.ps1`  (from `E:\DEV\PhoenixPoint\Multiplayer`)
 - Launch both windows:
-  - `pwsh -NoProfile -File .\tools\launch-coop-test.ps1`
-  - Optional sizing: `-Width 960 -Height 1080` (defaults; half a 1920-wide screen).
-  - Script ensures `steam_appid.txt` (839770) exists in the game folder (created only if
-    missing) so the exe inits Steamworks without the Steam relauncher.
+  - Local two-instance testing requires the developer's own second Steam-API session; no
+    emulator tool is provided or endorsed by this repo.
 - In-game:
   - HOST (#1): create or load a campaign -> it starts hosting on `:14242`.
   - CLIENT (#2): Multiplayer -> Direct Connect -> `127.0.0.1:14242`.
