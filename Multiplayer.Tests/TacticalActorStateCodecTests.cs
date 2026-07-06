@@ -545,4 +545,196 @@ public class TacticalActorStateCodecTests
             Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
         }
     }
+
+    // ─── TS5 (a): per-weapon AMMO field (0x0400) + (b): faction DISPLAY field (0x0800) round-trip ────────
+    //
+    // Ammo (0x0400) and faction (0x0800) are the two HIGHEST bits we emit → encoded LAST, ascending bit order
+    // AFTER bodypart-HP (0x0200): Ammo then Faction. These tests pin the new fields AND assert the extension is
+    // BACKWARD-TOLERANT (a record WITHOUT the new bits keeps its old byte layout + decodes with them absent).
+
+    private const ushort Am = TacticalLiveCodec.ActorFieldAmmo;
+    private const ushort Fc = TacticalLiveCodec.ActorFieldFaction;
+
+    private static TacticalLiveCodec.WeaponAmmo Wa(int slot, int charges)
+        => new TacticalLiveCodec.WeaponAmmo(slot, charges);
+
+    private static TacticalLiveCodec.ActorStateRecord RecAmmoFac(int netId, ushort mask, int faction,
+        params TacticalLiveCodec.WeaponAmmo[] ammo)
+    {
+        var r = new TacticalLiveCodec.ActorStateRecord { NetId = netId, FieldMask = mask, Faction = faction };
+        if (ammo != null) r.Ammo.AddRange(ammo);
+        return r;
+    }
+
+    [Fact]
+    public void AmmoOnly_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(40u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            { RecAmmoFac(42, Am, 0, Wa(0, 6), Wa(2, 12)) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasAmmo);
+        Assert.False(a.HasFaction);
+        Assert.False(a.HasAp);
+        Assert.Equal(2, a.Ammo.Count);
+        Assert.Equal(0, a.Ammo[0].SlotIndex);
+        Assert.Equal(6, a.Ammo[0].Charges);
+        Assert.Equal(2, a.Ammo[1].SlotIndex);
+        Assert.Equal(12, a.Ammo[1].Charges);
+    }
+
+    [Fact]
+    public void AmmoZeroCount_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(41u,
+            new List<TacticalLiveCodec.ActorStateRecord> { RecAmmoFac(1, Am, 0) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasAmmo);
+        Assert.Empty(a.Ammo);
+    }
+
+    [Fact]
+    public void FactionOnly_RoundTrips()
+    {
+        var batch = new TacticalLiveCodec.ActorStateBatch(42u,
+            new List<TacticalLiveCodec.ActorStateRecord> { RecAmmoFac(9, Fc, 3) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasFaction);
+        Assert.False(a.HasAmmo);
+        Assert.Equal(3, a.Faction);
+    }
+
+    [Fact]
+    public void AmmoAndFaction_RoundTrips_AscendingBitOrder()
+    {
+        // Both new bits on one record → Ammo(0x0400) then Faction(0x0800) in ascending order. A misordered
+        // read would misalign (faction int consumed as an ammo pair or vice-versa).
+        var batch = new TacticalLiveCodec.ActorStateBatch(43u,
+            new List<TacticalLiveCodec.ActorStateRecord>
+            { RecAmmoFac(5, (ushort)(Am | Fc), 2, Wa(1, 4)) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.True(a.HasAmmo);
+        Assert.True(a.HasFaction);
+        Assert.Equal(1, Assert.Single(a.Ammo).SlotIndex);
+        Assert.Equal(4, a.Ammo[0].Charges);
+        Assert.Equal(2, a.Faction);
+    }
+
+    [Fact]
+    public void AllFields_WithAmmoAndFaction_RoundTrip_FullAscendingBitOrder()
+    {
+        // Every emitted bit on ONE record → the full ascending order AP,WP,STATUSES,POS,FACING,HEALTH,
+        // BODYPARTHP,AMMO,FACTION with ammo+faction as the two highest tail fields.
+        var r = new TacticalLiveCodec.ActorStateRecord
+        {
+            NetId = 3,
+            FieldMask = (ushort)(Ap | Wp | St | Po | Fa | He | Bp | Am | Fc),
+            Ap = 2f, Wp = 5f, Health = 64.25f,
+            PosX = 11f, PosY = 2f, PosZ = 33f, FacingX = 0f, FacingY = 0f, FacingZ = 1f,
+            Faction = 4,
+        };
+        r.Statuses.Add(Stat("g-bleed", 7, 4f));
+        r.BodyParts.Add(Part("Head", 40f));
+        r.Ammo.Add(Wa(0, 9));
+        r.Ammo.Add(Wa(3, 1));
+        var batch = new TacticalLiveCodec.ActorStateBatch(44u,
+            new List<TacticalLiveCodec.ActorStateRecord> { r });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.Equal(33f, a.PosZ);
+        Assert.Equal(1f, a.FacingZ);
+        Assert.Equal(64.25f, a.Health);
+        Assert.Equal("Head", a.BodyParts[0].SlotName);
+        Assert.Equal(2, a.Ammo.Count);
+        Assert.Equal(9, a.Ammo[0].Charges);
+        Assert.Equal(3, a.Ammo[1].SlotIndex);
+        Assert.Equal(4, a.Faction);
+    }
+
+    [Fact]
+    public void LegacyMask_NoAmmoNoFaction_ByteLayoutUnchanged_AndDecodes()
+    {
+        // BACKWARD-TOLERANCE PIN: a record whose mask omits the new bits must be BYTE-IDENTICAL to the
+        // pre-TS5 layout (no ammo/faction bytes leak). An Ap-only record is exactly seq(4)+count(4)+netId(4)
+        // +mask(2)+ap(4) = 18 bytes — unchanged by the extension.
+        var batch = new TacticalLiveCodec.ActorStateBatch(1u,
+            new List<TacticalLiveCodec.ActorStateRecord> { Rec(42, Ap, 3.5f, 0f) });
+        byte[] bytes = TacticalLiveCodec.EncodeActorState(batch);
+        Assert.Equal(18, bytes.Length);
+        Assert.True(TacticalLiveCodec.TryDecodeActorState(bytes, out var got));
+        var a = Assert.Single(got.Actors);
+        Assert.False(a.HasAmmo);
+        Assert.False(a.HasFaction);
+        Assert.Empty(a.Ammo);
+    }
+
+    [Fact]
+    public void LegacyBuffer_OldDecoderLayout_DecodesCleanWithNewBitsAbsent()
+    {
+        // A hand-written buffer produced by an OLDER peer (mask=Ap|Wp|Health, NO ammo/faction tail) decodes
+        // green on the extended decoder with the new bits reported absent — proving the mask extension does
+        // not break an old-mask frame.
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(2u);                        // seq
+            w.Write(1);                         // 1 actor
+            w.Write(7);                         // netId
+            w.Write((ushort)(Ap | Wp | He));    // legacy mask, ascending: ap, wp, health
+            w.Write(4f);                        // ap
+            w.Write(6f);                        // wp
+            w.Write(88f);                       // health
+            Assert.True(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out var got));
+            var a = Assert.Single(got.Actors);
+            Assert.True(a.HasAp); Assert.True(a.HasWp); Assert.True(a.HasHealth);
+            Assert.False(a.HasAmmo); Assert.False(a.HasFaction);
+            Assert.Equal(88f, a.Health);
+        }
+    }
+
+    [Fact]
+    public void AmmoTruncated_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u); w.Write(1); w.Write(5);
+            w.Write(Am);          // ammo bit, but NO count follows → safe false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
+
+    [Fact]
+    public void AmmoCountAbsurd_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u); w.Write(1); w.Write(5);
+            w.Write(Am);
+            w.Write(int.MaxValue);// weaponCount → exceeds cap → false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
+
+    [Fact]
+    public void FactionTruncated_ReturnsFalse()
+    {
+        using (var ms = new System.IO.MemoryStream())
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write(1u); w.Write(1); w.Write(5);
+            w.Write(Fc);          // faction bit, but NO i32 follows → safe false
+            Assert.False(TacticalLiveCodec.TryDecodeActorState(ms.ToArray(), out _));
+        }
+    }
 }

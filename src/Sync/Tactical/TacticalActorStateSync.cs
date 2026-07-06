@@ -198,9 +198,17 @@ namespace Multiplayer.Sync.Tactical
                             + forward.y.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ","
                             + forward.z.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                     : "";
+                // TS5 (a): per-equipped-weapon magazine charges (keyed by equipment index). TS5 (b): the actor's
+                // current faction index (display-only). Both ride AP/WP (core state, NOT gated by SyncStatuses) →
+                // always in the signature so a reload or a mind-control faction flip re-broadcasts.
+                var ammo = new List<TacticalLiveCodec.WeaponAmmo>();
+                ReadWeaponAmmo(actor, ammo);
+                int factionIdx = ReadActorFactionIndex(actor);
+                string ammoSig = TacticalActorStateDiff.AmmoSignature(ammo);
+                string factionSig = factionIdx >= 0 ? "$fac=" + factionIdx : "";
                 string sig = (SyncStatuses
                     ? TacticalActorStateDiff.Signature(ap, wp, statuses) + BodyPartSig(bodyParts)
-                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig + posSig + facingSig;
+                    : TacticalActorStateDiff.Signature(ap, wp, null)) + healthSig + posSig + facingSig + ammoSig + factionSig;
                 if (_lastSig.TryGetValue(netId, out var prev) && prev == sig)
                     continue;   // unchanged since last flush → skip (idle = 0 bytes)
                 _lastSig[netId] = sig;
@@ -226,11 +234,11 @@ namespace Multiplayer.Sync.Tactical
                 // SyncStatuses (core presentation state, like Pos). The client applies it via ActorComponent.SetForward
                 // (skip-while-navigating) — see TacticalMoveSync.ApplyMirrorFacing.
                 if (hasFacing) mask |= TacticalLiveCodec.ActorFieldFacing;
-                if (SyncStatuses)
-                {
-                    mask |= TacticalLiveCodec.ActorFieldStatuses;
-                    if (bodyParts.Count > 0) mask |= TacticalLiveCodec.ActorFieldBodyPartHp;
-                }
+                // TS5 (a): ship the ammo bit whenever the actor carries any magazine-bearing weapon. TS5 (b): ship
+                // the faction bit whenever the actor has a readable faction index (>= 0). Both core state (like
+                // Health/Pos), NOT gated by SyncStatuses.
+                if (ammo.Count > 0) mask |= TacticalLiveCodec.ActorFieldAmmo;
+                if (factionIdx >= 0) mask |= TacticalLiveCodec.ActorFieldFaction;
                 var rec = new TacticalLiveCodec.ActorStateRecord
                 {
                     NetId = netId,
@@ -244,7 +252,9 @@ namespace Multiplayer.Sync.Tactical
                     FacingX = forward.x,
                     FacingY = forward.y,
                     FacingZ = forward.z,
+                    Faction = factionIdx,
                 };
+                if (ammo.Count > 0) rec.Ammo.AddRange(ammo);
                 if (SyncStatuses)
                 {
                     foreach (var s in statuses)
@@ -296,7 +306,7 @@ namespace Multiplayer.Sync.Tactical
             { Debug.LogError("[Multiplayer][tac] tac.actorstate decode failed"); return; }
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacActorState, batch.Seq)) return;
 
-            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, sRef = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0;
+            int applied = 0, apwp = 0, sAdd = 0, sRem = 0, sRef = 0, bp = 0, hp = 0, posCnt = 0, facingCnt = 0, ammoCnt = 0, facCnt = 0;
             // TASK 3: netIds whose AP/WP this batch actually wrote — used AFTER the apply loop to re-grey the ability bar
             // if the client's currently-selected actor is among them (the async AP delta arrives after the activation-time
             // re-grey, so the bar can otherwise stay lit). Collected under the apply, acted on once below.
@@ -361,6 +371,20 @@ namespace Multiplayer.Sync.Tactical
                             if (TacticalMoveSync.ApplyMirrorPosition(
                                     actor, new Vector3(rec.PosX, rec.PosY, rec.PosZ))) posCnt++;
                         }
+                        // TS5 (a): value-write per-weapon magazine charges (host-authoritative ammo mirror). Absolute
+                        // + idempotent (a converged weapon is a no-op). Applied under _applyingRemote like the rest.
+                        if (rec.HasAmmo)
+                        {
+                            if (ApplyWeaponAmmo(actor, rec.Ammo)) ammoCnt++;
+                        }
+                        // TS5 (b): DISPLAY-only faction stamp (mind-control / zombify side repaint). Sets the actor's
+                        // TacticalFaction property DIRECTLY + fires the display FactionChangedEvent for the healthbar
+                        // recolor — NEVER the native SetFaction (which would re-home the actor in the sim). Change-gated
+                        // (ShouldApplyFactionDisplay) so an unchanged 4 Hz re-apply never repaints.
+                        if (rec.HasFaction)
+                        {
+                            if (ApplyFactionDisplay(actor, rec.Faction)) facCnt++;
+                        }
                     }
                 }
                 finally { _applyingRemote = false; }
@@ -371,10 +395,11 @@ namespace Multiplayer.Sync.Tactical
                 ReGreySelectedBarAfterApDelta(apAppliedNetIds);
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorState, batch.Seq);
-                if (applied > 0 || sAdd > 0 || sRem > 0 || sRef > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0)
+                if (applied > 0 || sAdd > 0 || sRem > 0 || sRef > 0 || bp > 0 || hp > 0 || posCnt > 0 || facingCnt > 0 || ammoCnt > 0 || facCnt > 0)
                     Debug.Log("[Multiplayer][tac] CLIENT applied tac.actorstate seq=" + batch.Seq +
                               " actors=" + applied + " apwpSet=" + apwp + " status+" + sAdd + " status-" + sRem +
-                              " status~" + sRef + " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt);
+                              " status~" + sRef + " limbHp=" + bp + " hp=" + hp + " pos=" + posCnt + " facing=" + facingCnt +
+                              " ammo=" + ammoCnt + " faction=" + facCnt);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorState failed: " + ex); }
         }
@@ -661,6 +686,185 @@ namespace Multiplayer.Sync.Tactical
                 sb.Append(p.SlotName ?? "").Append('=')
                   .Append(p.Hp.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
             return sb.ToString();
+        }
+
+        // ─── TS5: per-weapon ammo + mind-control faction DISPLAY (read + apply) ───────────────────────────
+
+        /// <summary>HOST read (TS5 a): per-equipped-weapon MAGAZINE charges. Walks the actor's ordered
+        /// <c>Equipments.Equipments</c> list (the SAME index the equip surface + the client apply key on) and
+        /// records {slotIndex, CurrentCharges} for every FINITE-charge equipment (skips infinite-charge weapons —
+        /// no meaningful magazine count). <c>CommonItemData.CurrentCharges</c> = <c>Ammo?.CurrentCharges ?? _charges</c>
+        /// (ReloadAbility.cs:47), so a magazine weapon reports its clip and a grenade/medkit its uses. Best-effort;
+        /// a non-equipment actor (turret/destructible) yields an empty list.</summary>
+        private static void ReadWeaponAmmo(object actor, List<TacticalLiveCodec.WeaponAmmo> outList)
+        {
+            try
+            {
+                object equipComp = GetProp(actor, "Equipments");                       // TacticalActor.Equipments : EquipmentComponent
+                if (equipComp == null) return;
+                if (!(GetProp(equipComp, "Equipments") is IEnumerable list)) return;   // ordered List<Equipment>
+                int index = 0;
+                foreach (var equip in list)
+                {
+                    int slot = index++;                                                // position stays stable across skips
+                    if (equip == null) continue;
+                    object inf = GetProp(equip, "InfiniteCharges");
+                    if (inf is bool b && b) continue;                                  // infinite magazine → no count to mirror
+                    object cid = GetProp(equip, "CommonItemData");
+                    if (cid == null) continue;
+                    object cc = GetProp(cid, "CurrentCharges");
+                    if (cc == null) continue;
+                    int charges;
+                    try { charges = Convert.ToInt32(cc); } catch { continue; }
+                    if (charges < 0) continue;                                         // uninitialized / non-chargeable
+                    outList.Add(new TacticalLiveCodec.WeaponAmmo(slot, charges));
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] actorstate ReadWeaponAmmo failed: " + ex); }
+        }
+
+        /// <summary>Read an actor's CURRENT faction INDEX = the position of its <c>TacticalFaction</c> in the live
+        /// TLC's <c>Factions</c> list (TS5 b + the lifecycle-spawn faction hint use the same scheme). -1 when
+        /// unresolvable (no faction / no live TLC). Used both host-side (to ship the bit) and client-side (to gate
+        /// the display apply on an actual change).</summary>
+        private static int ReadActorFactionIndex(object actor)
+        {
+            try
+            {
+                object faction = GetProp(actor, "TacticalFaction");
+                if (faction == null) return -1;
+                object factions = GetProp(TacticalDeploySync.LiveTlc, "Factions");
+                if (factions is IEnumerable en)
+                {
+                    int i = 0;
+                    foreach (var f in en) { if (ReferenceEquals(f, faction)) return i; i++; }
+                }
+            }
+            catch { }
+            return -1;
+        }
+
+        /// <summary>CLIENT apply (TS5 a): value-write each incoming weapon's ABSOLUTE magazine charges. Resolves the
+        /// equipment by its slot index in <c>Equipments.Equipments</c> (bounds-checked — a stale/desynced index is
+        /// skipped), reads the mirror's current <c>CurrentCharges</c>, and drives it to the host value via
+        /// <c>CommonItemData.ModifyCharges(delta)</c> (the native charge mutator, ReloadAbility.cs:187). Idempotent:
+        /// a converged weapon (delta 0) is a no-op. Returns true if any weapon was changed.</summary>
+        private static bool ApplyWeaponAmmo(object actor, List<TacticalLiveCodec.WeaponAmmo> incoming)
+        {
+            if (incoming == null || incoming.Count == 0) return false;
+            object equipComp = GetProp(actor, "Equipments");
+            if (equipComp == null) return false;
+            if (!(GetProp(equipComp, "Equipments") is System.Collections.IList list)) return false;   // List<Equipment> — indexable
+            bool any = false;
+            foreach (var wa in incoming)
+            {
+                if (wa.SlotIndex < 0 || wa.SlotIndex >= list.Count) continue;         // stale/desynced index → skip
+                object equip = list[wa.SlotIndex];
+                if (equip == null) continue;
+                object cid = GetProp(equip, "CommonItemData");
+                if (cid == null) continue;
+                int current;
+                try { current = Convert.ToInt32(GetProp(cid, "CurrentCharges") ?? 0); } catch { continue; }
+                int delta = wa.Charges - current;
+                if (delta == 0) continue;                                             // converged → no-op (idempotent)
+                if (InvokeModifyCharges(cid, delta)) any = true;
+            }
+            return any;
+        }
+
+        /// <summary>Invoke <c>CommonItemData.ModifyCharges(int chargesDelta, bool canCreateMagazines=false)</c> (the
+        /// native magazine mutator) with the absolute-converging delta. Two-arg overload preferred; one-arg
+        /// fallback. Best-effort (logs + false on miss).</summary>
+        private static bool InvokeModifyCharges(object commonItemData, int delta)
+        {
+            try
+            {
+                var m2 = AccessTools.Method(commonItemData.GetType(), "ModifyCharges", new[] { typeof(int), typeof(bool) });
+                if (m2 != null) { m2.Invoke(commonItemData, new object[] { delta, false }); return true; }
+                var m1 = AccessTools.Method(commonItemData.GetType(), "ModifyCharges", new[] { typeof(int) });
+                if (m1 != null) { m1.Invoke(commonItemData, new object[] { delta }); return true; }
+                Debug.LogError("[Multiplayer][tac] actorstate: CommonItemData.ModifyCharges not found");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ModifyCharges failed: " + ex); }
+            return false;
+        }
+
+        /// <summary>CLIENT apply (TS5 b): DISPLAY-ONLY faction stamp for a mind-control / zombify flip. Change-gated
+        /// (<see cref="TacticalActorStateDiff.ShouldApplyFactionDisplay"/>) so it repaints ONCE, not every flush.
+        /// R3 (verified vs decompile): the actor's rendered "side" is derived PURELY from the sim
+        /// <c>TacticalFaction</c> (<c>IsFromViewerFaction</c> / <c>RelationTo</c>, TacticalActorBase.cs:186/655),
+        /// with NO separate display field — so the minimal display override is to set the <c>TacticalFaction</c>
+        /// PROPERTY DIRECTLY (the protected setter) and fire ONLY the per-actor <c>FactionChangedEvent</c> that the
+        /// healthbar recolors off (HealthbarUIActorElement.cs:201). We deliberately DO NOT call the native
+        /// <c>SetFaction</c> — its re-home (<c>TacticalLevel.ActorFactionChanged</c>, TacticalActorBase.cs:651)
+        /// re-buckets faction actor lists / AI-control / turn membership, which must never run on the frozen mirror.
+        /// Returns true if the display was flipped.</summary>
+        private static bool ApplyFactionDisplay(object actor, int factionIndex)
+        {
+            int current = ReadActorFactionIndex(actor);
+            if (!TacticalActorStateDiff.ShouldApplyFactionDisplay(current, factionIndex)) return false;
+            object faction = ResolveFactionByIndex(factionIndex);
+            if (faction == null) return false;
+            object oldFaction = GetProp(actor, "TacticalFaction");
+            if (!SetFactionPropertyDirect(actor, faction)) return false;
+            FireFactionChangedEvent(actor, oldFaction, faction);   // display repaint only (no sim re-home)
+            Debug.Log("[Multiplayer][tac] CLIENT faction display stamp netId=" +
+                      TacticalDeploySync.NetIdForLiveActor(actor) + " " + current + "->" + factionIndex +
+                      " (display-only, no sim re-home)");
+            return true;
+        }
+
+        /// <summary>Resolve the <c>TacticalFaction</c> at <paramref name="index"/> in the live TLC's
+        /// <c>Factions</c> list (the inverse of <see cref="ReadActorFactionIndex"/>). Null on out-of-range /
+        /// no live TLC.</summary>
+        private static object ResolveFactionByIndex(int index)
+        {
+            if (index < 0) return null;
+            object factions = GetProp(TacticalDeploySync.LiveTlc, "Factions");
+            if (factions is IEnumerable en)
+            {
+                int i = 0;
+                foreach (var f in en) { if (i == index) return f; i++; }
+            }
+            return null;
+        }
+
+        /// <summary>Write <c>TacticalActorBase.TacticalFaction</c> DIRECTLY via its protected setter (auto-property
+        /// backing-field fallback) — NOT <c>SetFaction</c> (which additionally fires the sim re-home). This is the
+        /// display stamp: <c>RelationTo</c> / <c>IsFromViewerFaction</c> then read the new side. Best-effort.</summary>
+        private static bool SetFactionPropertyDirect(object actor, object faction)
+        {
+            try
+            {
+                var p = AccessTools.Property(actor.GetType(), "TacticalFaction");
+                if (p != null && p.GetSetMethod(true) != null) { p.GetSetMethod(true).Invoke(actor, new[] { faction }); return true; }
+                var bf = AccessTools.Field(actor.GetType(), "<TacticalFaction>k__BackingField");
+                if (bf != null) { bf.SetValue(actor, faction); return true; }
+                Debug.LogError("[Multiplayer][tac] actorstate: TacticalFaction setter not found — display flip skipped");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] SetFactionPropertyDirect failed: " + ex); }
+            return false;
+        }
+
+        /// <summary>Fire ONLY the per-actor <c>FactionChangedEvent</c> multicast (the display repaint the healthbar
+        /// subscribes to, HealthbarUIActorElement.cs:201) — NOT <c>TacticalLevel.ActorFactionChanged</c> (the sim
+        /// re-home). The event's other subscriber (<c>TacAIActor.FactionChangedEventHandler</c>) only toggles alert
+        /// status / AI event subscriptions and drives no action on the frozen mirror (the AI decision coroutine is
+        /// globally suppressed). Best-effort: a throwing display subscriber must never abort the apply (the side is
+        /// already stamped on the property).</summary>
+        private static void FireFactionChangedEvent(object actor, object oldFaction, object newFaction)
+        {
+            try
+            {
+                var f = AccessTools.Field(actor.GetType(), "FactionChangedEvent");   // field-like event backing delegate
+                var del = f?.GetValue(actor) as Delegate;
+                if (del == null) return;
+                del.DynamicInvoke(oldFaction, newFaction);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] FireFactionChangedEvent failed (display stamp already applied): " + ex);
+            }
         }
 
         // ─── CLIENT apply helpers ───────────────────────────────────────────────────────────────────────

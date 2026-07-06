@@ -449,4 +449,59 @@ public class TacticalActorStateDiffTests
             12f, 12f + TacticalActorStateDiff.StatusMagnitudeEpsilon * 0.5f));
         Assert.False(TacticalActorStateDiff.ShouldRefreshMagnitude(12f, 12.001f));
     }
+
+    // ─── TS5 (a): per-weapon ammo signature fragment ──────────────────────────────────────────────────
+
+    [Fact]
+    public void AmmoSignature_EmptyOrNull_IsEmpty()
+    {
+        Assert.Equal("", TacticalActorStateDiff.AmmoSignature(null));
+        Assert.Equal("", TacticalActorStateDiff.AmmoSignature(new List<TacticalLiveCodec.WeaponAmmo>()));
+    }
+
+    [Fact]
+    public void AmmoSignature_ReflectsAChargeChange()
+    {
+        // A reload (magazine 0 → 6 on slot 1) MUST drift the signature so the host re-broadcasts the actor.
+        string before = TacticalActorStateDiff.AmmoSignature(new List<TacticalLiveCodec.WeaponAmmo>
+        { new TacticalLiveCodec.WeaponAmmo(1, 0) });
+        string after = TacticalActorStateDiff.AmmoSignature(new List<TacticalLiveCodec.WeaponAmmo>
+        { new TacticalLiveCodec.WeaponAmmo(1, 6) });
+        Assert.NotEqual(before, after);
+    }
+
+    [Fact]
+    public void AmmoSignature_IsOrderStable()
+    {
+        // Same multiset in different enumeration order → identical signature (no spurious re-broadcast).
+        string a = TacticalActorStateDiff.AmmoSignature(new List<TacticalLiveCodec.WeaponAmmo>
+        { new TacticalLiveCodec.WeaponAmmo(2, 12), new TacticalLiveCodec.WeaponAmmo(0, 6) });
+        string b = TacticalActorStateDiff.AmmoSignature(new List<TacticalLiveCodec.WeaponAmmo>
+        { new TacticalLiveCodec.WeaponAmmo(0, 6), new TacticalLiveCodec.WeaponAmmo(2, 12) });
+        Assert.Equal(a, b);
+    }
+
+    // ─── TS5 (b): mind-control faction DISPLAY-apply decision (display-only, change-gated) ───────────────
+
+    [Fact]
+    public void ShouldApplyFactionDisplay_OnActualChange_True()
+    {
+        // A mind-control flip (was faction 0, host now says 1) repaints.
+        Assert.True(TacticalActorStateDiff.ShouldApplyFactionDisplay(0, 1));
+    }
+
+    [Fact]
+    public void ShouldApplyFactionDisplay_Unchanged_NoOp()
+    {
+        // The 4 Hz re-apply of an already-flipped unit must NOT repaint again (no FactionChangedEvent churn).
+        Assert.False(TacticalActorStateDiff.ShouldApplyFactionDisplay(1, 1));
+    }
+
+    [Fact]
+    public void ShouldApplyFactionDisplay_NegativeIncoming_NoOp()
+    {
+        // No real target faction (-1) → never stamp a display faction.
+        Assert.False(TacticalActorStateDiff.ShouldApplyFactionDisplay(0, -1));
+        Assert.False(TacticalActorStateDiff.ShouldApplyFactionDisplay(-1, -1));
+    }
 }

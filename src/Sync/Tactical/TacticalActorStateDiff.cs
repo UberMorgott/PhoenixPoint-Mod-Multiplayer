@@ -344,6 +344,39 @@ namespace Multiplayer.Sync.Tactical
             return AllowedStatusTypeNames.Contains(simpleTypeName);
         }
 
+        // ─── TS5 (a): per-weapon ammo signature fragment ──────────────────────────────────────────────────
+
+        /// <summary>Order-stable signature fragment over the per-weapon ammo set (sorted by slot index) so a
+        /// reload / ammo change re-broadcasts the actor. Appended to the AP/WP/status signature (like
+        /// <c>BodyPartSig</c>). Empty set → empty string (no signature contribution). Unit-tested.</summary>
+        public static string AmmoSignature(IEnumerable<TacticalLiveCodec.WeaponAmmo> ammo)
+        {
+            if (ammo == null) return "";
+            var list = new List<TacticalLiveCodec.WeaponAmmo>(ammo);
+            if (list.Count == 0) return "";
+            list.Sort((a, b) => a.SlotIndex.CompareTo(b.SlotIndex));
+            var sb = new StringBuilder("&");
+            foreach (var w in list) sb.Append(w.SlotIndex).Append('=').Append(w.Charges).Append(';');
+            return sb.ToString();
+        }
+
+        // ─── TS5 (b): mind-control faction DISPLAY-apply decision (PURE, display-only) ──────────────────────
+
+        /// <summary>Sentinel faction index for "no readable faction" (the host ships the bit only when &gt;= 0).</summary>
+        public const int FactionIndexNone = -1;
+
+        /// <summary>PURE decision for the DISPLAY-only faction mirror (TS5 b): should the client stamp the incoming
+        /// faction index on the mirror actor? TRUE iff the incoming index is a real faction (&gt;= 0) AND it DIFFERS
+        /// from the actor's current faction index — so a mind-control flip repaints ONCE and an unchanged 4 Hz
+        /// re-apply is a no-op (no repaint churn, no repeated FactionChangedEvent). The apply itself is display-only
+        /// by construction (the engine glue sets the TacticalFaction property directly, never the native SetFaction
+        /// sim re-home). Unit-tested.</summary>
+        public static bool ShouldApplyFactionDisplay(int currentFactionIndex, int incomingFactionIndex)
+        {
+            if (incomingFactionIndex < 0) return false;                 // no real target faction → skip
+            return currentFactionIndex != incomingFactionIndex;         // apply only on an actual change (idempotent)
+        }
+
         // ─── Per-actor change signature ─────────────────────────────────────────────────────────────────
 
         /// <summary>Order-stable per-actor change signature over {ap, wp, status set}. Two states with the same

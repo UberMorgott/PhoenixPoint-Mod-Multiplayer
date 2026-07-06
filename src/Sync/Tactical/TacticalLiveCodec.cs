@@ -882,6 +882,17 @@ namespace Multiplayer.Sync.Tactical
         // (limb-disable is NOT a status). Encoded in ascending bit order AFTER statuses (it is the highest bit
         // we emit; the reserved bits between are never set by us).
         public const ushort ActorFieldBodyPartHp = 0x0200;  // i32 count then per part: [slotName:string][hp:f32]
+        // TS5 (a): per-equipped-weapon MAGAZINE charges. Keyed by the equipment's INDEX in the actor's ordered
+        // Equipments.Equipments list (the SAME stable host↔client key the equip surface 0x8A/0x8B uses — both sides
+        // build the list from the shared save). The client value-writes each weapon's CurrentCharges so a host
+        // reload / any host-side ammo change converges (magazine count matches on both). Encoded AFTER bodypart-HP
+        // (0x0200) in ascending bit order. ABSOLUTE (re-apply = idempotent). i32 count then per weapon [slotIndex:i32][charges:i32].
+        public const ushort ActorFieldAmmo      = 0x0400;   // i32 count then per weapon: [slotIndex:i32][charges:i32]
+        // TS5 (b): actor CURRENT faction INDEX (position in TacticalLevelController.Factions). DISPLAY-ONLY mirror of
+        // a mind-control / zombify faction flip — the client stamps the display faction so the unit's side/healthbar
+        // repaints, WITHOUT the native SetFaction sim re-home (TacticalLevel.ActorFactionChanged). Encoded LAST
+        // (highest bit we emit, ascending order) as a single i32. ABSOLUTE (re-apply gated to on-change → no churn).
+        public const ushort ActorFieldFaction   = 0x0800;   // i32 faction index (display-only)
 
         /// <summary>One synced status on the wire (T1): def guid + source-actor netId (-1 = none) + value.</summary>
         public struct ActorStatus
@@ -903,6 +914,16 @@ namespace Multiplayer.Sync.Tactical
             public BodyPartHp(string slotName, float hp) { SlotName = slotName ?? ""; Hp = hp; }
         }
 
+        /// <summary>One per-weapon ammo entry on the wire (TS5 a): the equipment's index in the actor's ordered
+        /// Equipments.Equipments list (stable host↔client key, like the equip surface) + the weapon's absolute
+        /// current magazine charges. The client value-writes this so a reload / ammo change converges.</summary>
+        public struct WeaponAmmo
+        {
+            public int SlotIndex;
+            public int Charges;
+            public WeaponAmmo(int slotIndex, int charges) { SlotIndex = slotIndex; Charges = charges; }
+        }
+
         /// <summary>One per-actor state record. Only the fields whose <see cref="FieldMask"/> bit is set are
         /// valid on the wire (and were read from the host actor).</summary>
         public sealed class ActorStateRecord
@@ -914,8 +935,10 @@ namespace Multiplayer.Sync.Tactical
             public float Health;   // Feature D: absolute current HP (valid only when HasHealth)
             public float PosX, PosY, PosZ;   // Inc1 full-state: absolute world position (valid only when HasPos)
             public float FacingX, FacingY, FacingZ;   // Inc2: absolute world forward vector (valid only when HasFacing)
+            public int Faction;    // TS5 (b): absolute faction index (display-only, valid only when HasFaction)
             public List<ActorStatus> Statuses = new List<ActorStatus>();
             public List<BodyPartHp> BodyParts = new List<BodyPartHp>();
+            public List<WeaponAmmo> Ammo = new List<WeaponAmmo>();   // TS5 (a): per-weapon magazine charges (valid only when HasAmmo)
 
             public bool HasAp => (FieldMask & ActorFieldAp) != 0;
             public bool HasWp => (FieldMask & ActorFieldWp) != 0;
@@ -924,6 +947,8 @@ namespace Multiplayer.Sync.Tactical
             public bool HasFacing => (FieldMask & ActorFieldFacing) != 0;
             public bool HasHealth => (FieldMask & ActorFieldHealth) != 0;
             public bool HasBodyParts => (FieldMask & ActorFieldBodyPartHp) != 0;
+            public bool HasAmmo => (FieldMask & ActorFieldAmmo) != 0;
+            public bool HasFaction => (FieldMask & ActorFieldFaction) != 0;
         }
 
         public sealed class ActorStateBatch
@@ -939,6 +964,7 @@ namespace Multiplayer.Sync.Tactical
         public const int ActorStateMaxActors = 4096;
         public const int ActorStateMaxStatusesPerActor = 1024;
         public const int ActorStateMaxBodyPartsPerActor = 256;
+        public const int ActorStateMaxWeaponsPerActor = 256;   // TS5 (a): guard the per-actor ammo count
 
         public static byte[] EncodeActorState(ActorStateBatch batch)
         {
@@ -986,7 +1012,6 @@ namespace Multiplayer.Sync.Tactical
                     // HEALTH (0x0020) — Feature D. Encoded AFTER statuses (0x0004), BEFORE bodypart-HP (0x0200),
                     // i.e. ascending bit order. Absolute current HP (float).
                     if ((a.FieldMask & ActorFieldHealth) != 0) w.Write(a.Health);
-                    // BODYPARTHP is the highest bit we emit → encoded LAST (ascending bit order).
                     if ((a.FieldMask & ActorFieldBodyPartHp) != 0)
                     {
                         var parts = a.BodyParts ?? new List<BodyPartHp>();
@@ -997,6 +1022,20 @@ namespace Multiplayer.Sync.Tactical
                             w.Write(p.Hp);
                         }
                     }
+                    // AMMO (0x0400) — TS5 (a). Encoded AFTER bodypart-HP (0x0200), BEFORE faction (0x0800),
+                    // i.e. ascending bit order. i32 count then per weapon [slotIndex:i32][charges:i32].
+                    if ((a.FieldMask & ActorFieldAmmo) != 0)
+                    {
+                        var ammo = a.Ammo ?? new List<WeaponAmmo>();
+                        w.Write(ammo.Count);
+                        foreach (var wa in ammo)
+                        {
+                            w.Write(wa.SlotIndex);
+                            w.Write(wa.Charges);
+                        }
+                    }
+                    // FACTION (0x0800) — TS5 (b) is the highest bit we emit → encoded LAST (ascending bit order).
+                    if ((a.FieldMask & ActorFieldFaction) != 0) w.Write(a.Faction);
                 }
                 return ms.ToArray();
             }
@@ -1076,7 +1115,6 @@ namespace Multiplayer.Sync.Tactical
                             if (ms.Length - ms.Position < 4) return false;
                             rec.Health = r.ReadSingle();
                         }
-                        // BODYPARTHP decoded LAST (ascending bit order), only if its bit is set.
                         if ((rec.FieldMask & ActorFieldBodyPartHp) != 0)
                         {
                             if (ms.Length - ms.Position < 4) return false;
@@ -1090,6 +1128,27 @@ namespace Multiplayer.Sync.Tactical
                                 float hp = r.ReadSingle();
                                 rec.BodyParts.Add(new BodyPartHp(slot, hp));
                             }
+                        }
+                        // AMMO (0x0400) — TS5 (a). Decoded AFTER bodypart-HP, BEFORE faction (ascending bit
+                        // order), only if its bit is set. i32 count then per weapon 2×i32 = 8 bytes, guarded.
+                        if ((rec.FieldMask & ActorFieldAmmo) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            int wc = r.ReadInt32();
+                            if (wc < 0 || wc > ActorStateMaxWeaponsPerActor) return false;
+                            if ((long)wc * 8 > ms.Length - ms.Position) return false;
+                            for (int j = 0; j < wc; j++)
+                            {
+                                int slotIndex = r.ReadInt32();
+                                int charges = r.ReadInt32();
+                                rec.Ammo.Add(new WeaponAmmo(slotIndex, charges));
+                            }
+                        }
+                        // FACTION (0x0800) — TS5 (b) decoded LAST (ascending bit order), only if its bit is set.
+                        if ((rec.FieldMask & ActorFieldFaction) != 0)
+                        {
+                            if (ms.Length - ms.Position < 4) return false;
+                            rec.Faction = r.ReadInt32();
                         }
                         result.Actors.Add(rec);
                     }
