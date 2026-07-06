@@ -7,34 +7,6 @@ namespace Multiplayer.Network.MessageLayer
 {
     public static class MessageSerializer
     {
-        // ─── Permission Messages ──────────────────────────────────────────
-
-        // PERMISSION (reshaped): per-flag toggle keyed by playerGUID.
-        // flagBit = the bit index (0..9) of the CampaignPermission flag, NOT a mask.
-        public static byte[] SerializePermissionUpdate(Guid playerGuid, byte flagBit, bool value)
-        {
-            using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                bw.Write(playerGuid.ToByteArray());
-                bw.Write(flagBit);
-                bw.Write((byte)(value ? 1 : 0));
-                return ms.ToArray();
-            }
-        }
-
-        public static (Guid playerGuid, byte flagBit, bool value) DeserializePermissionUpdate(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                var guid = new Guid(br.ReadBytes(16));
-                var flagBit = br.ReadByte();
-                var value = br.ReadByte() != 0;
-                return (guid, flagBit, value);
-            }
-        }
-
         // ─── Lobby / Identity Messages ─────────────────────────────────────
 
         // JOIN (reuses ConnectionRequest payload): persistent identity on connect.
@@ -423,31 +395,6 @@ namespace Multiplayer.Network.MessageLayer
             }
         }
 
-        // ─── Ownership Messages ────────────────────────────────────────────
-
-        // ASSIGN_OWNER (SoldierAssignment): soldierID→playerGUID ownership.
-        // Guid.Empty owner = unassign.
-        public static byte[] SerializeAssignOwner(int geoUnitId, Guid ownerPlayerGuid)
-        {
-            using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                bw.Write(geoUnitId);
-                bw.Write(ownerPlayerGuid.ToByteArray());
-                return ms.ToArray();
-            }
-        }
-
-        public static (int geoUnitId, Guid ownerPlayerGuid) DeserializeAssignOwner(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                var id = br.ReadInt32();
-                var owner = new Guid(br.ReadBytes(16));
-                return (id, owner);
-            }
-        }
     }
 
     // ─── Action Data Types ─────────────────────────────────────────────────

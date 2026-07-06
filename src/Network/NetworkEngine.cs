@@ -445,16 +445,8 @@ namespace Multiplayer.Network
                     Session.HandleRename(msg);
                     break;
 
-                case PacketType.PermissionUpdate:
-                    Session.HandlePermissionUpdate(msg);
-                    break;
-
                 case PacketType.PlayerListUpdate:
                     Session.HandlePeerList(msg);
-                    break;
-
-                case PacketType.SoldierAssignment:
-                    Session.HandleAssignOwner(msg);
                     break;
 
                 case PacketType.ChatMessage:
@@ -469,15 +461,6 @@ namespace Multiplayer.Network
                 case PacketType.ClientUnready:
                 case PacketType.AllClientsReady:
                     Session.HandleReadyState(msg);
-                    break;
-
-                case PacketType.InitialGameState:
-                    Session.HandleInitialGameState(msg);
-                    break;
-
-                case PacketType.StateSyncRequest:
-                case PacketType.StateSyncResponse:
-                    Session.HandleStateSync(msg);
                     break;
 
                 // ─── Save transfer + barrier (Phase B — SaveTransferCoordinator). ─────
@@ -591,16 +574,6 @@ namespace Multiplayer.Network
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).
                     Sync?.OnSyncEnvelope(msg.SenderSteamId, msg.Payload);
-                    break;
-
-                // ─── STUB + TODO: members no longer silently fall through. ───────────
-                case PacketType.GameStateDelta:
-                    // TODO(delta-sync): geoscape/tactical delta application.
-                    break;
-
-                case PacketType.PauseRequest:
-                case PacketType.PauseAccepted:
-                    // TODO(pause): cooperative pause feature.
                     break;
 
                 default:

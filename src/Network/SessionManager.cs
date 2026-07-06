@@ -56,8 +56,6 @@ namespace Multiplayer.Network
 
         public event Action OnAllClientsReady;
         public event Action<ulong> OnClientReady;
-        public event Action<Guid, CampaignPermission, bool> OnPermissionUpdated;
-        public event Action<byte[]> OnInitialGameStateReceived;
         public event Action OnHostDisconnected;
         public event Action<string, string, bool> OnChatReceived;   // (senderNick, text, isSystem)
         public event Action<string, string> OnChosenSaveChanged;    // (saveName, saveMeta)
@@ -418,30 +416,6 @@ namespace Multiplayer.Network
             }
         }
 
-        // ─── Permission Updates ───────────────────────────────────────────
-
-        public void HandlePermissionUpdate(NetworkMessage msg)
-        {
-            var (guid, flagBit, value) =
-                MessageSerializer.DeserializePermissionUpdate(msg.Payload);
-
-            var flag = (CampaignPermission)(1 << flagBit);
-            PermissionManager.SetPermission(guid, flag, value);
-
-            // Mirror the resulting mask onto the matching ClientInfo (looked up by GUID).
-            var mask = PermissionManager.GetPermissions(guid);
-            foreach (var client in _clients.Values)
-            {
-                if (client.PlayerGuid == guid)
-                {
-                    client.Permissions = mask;
-                    break;
-                }
-            }
-
-            OnPermissionUpdated?.Invoke(guid, flag, value);
-        }
-
         // ─── Lobby Roster / Identity ──────────────────────────────────────
 
         // PEER_LIST (H→all): authoritative lobby roster broadcast. Build from _clients.
@@ -560,22 +534,6 @@ namespace Multiplayer.Network
                 _clients.Remove(stale);
                 _lastHeartbeat.Remove(stale);
                 _readyClients.Remove(stale);
-            }
-        }
-
-        // ASSIGN_OWNER (H→all): soldierID→playerGUID ownership (Guid.Empty = unassign).
-        public void HandleAssignOwner(NetworkMessage msg)
-        {
-            var (geoUnitId, owner) = MessageSerializer.DeserializeAssignOwner(msg.Payload);
-            if (owner == Guid.Empty)
-            {
-                var current = PermissionManager.GetOwnerOfSoldier(geoUnitId);
-                if (current.HasValue)
-                    PermissionManager.UnassignSoldier(current.Value, geoUnitId);
-            }
-            else
-            {
-                PermissionManager.AssignSoldier(owner, geoUnitId);
             }
         }
 
@@ -747,18 +705,6 @@ namespace Multiplayer.Network
         {
             Debug.LogWarning("[Multiplayer] Host disconnected — session ended");
             OnHostDisconnected?.Invoke();
-        }
-
-        // ─── Game State Sync ──────────────────────────────────────────────
-
-        public void HandleInitialGameState(NetworkMessage msg)
-        {
-            OnInitialGameStateReceived?.Invoke(msg.Payload);
-        }
-
-        public void HandleStateSync(NetworkMessage msg)
-        {
-            // Will be expanded for delta state sync
         }
     }
 
