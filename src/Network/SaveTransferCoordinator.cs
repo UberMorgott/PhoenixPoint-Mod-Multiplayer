@@ -159,6 +159,12 @@ namespace Multiplayer.Network
         private bool _revealed;
         private bool _revealAllSent;
 
+        // ─── rca-4: host post-reload full re-seed (once per F2 mid-session reload) ───
+        // Armed ONLY when HostStartSessionInGame actually launches a reload transfer; consumed ONCE at the
+        // RevealAll moment (HostReseedAfterReveal). The lobby FIRST start never arms it — the transferred
+        // save itself is the seed there. Pure once-latch (Core), pinned by SaveTransferBarrierTests.
+        private readonly ReseedOnceGate _reseedGate = new ReseedOnceGate();
+
         // ─── P1 mid-session on-demand joiner (CLIENT side) ─────────────────
         // True on a brand-new peer that joined AFTER the session started and is being onboarded via the
         // per-peer on-demand transfer (SaveDone.onDemandJoin). Such a joiner does NOT wait for a lobby
@@ -358,7 +364,13 @@ namespace Multiplayer.Network
             _begun = false;
             _loadCompleteSent = false;
             _revealAllSent = false;
-            return LaunchTransfer(chosen);
+            bool launched = LaunchTransfer(chosen);
+            // rca-4: arm the post-reload full re-seed for THIS reload only when the transfer is actually in
+            // flight; it is consumed once at the RevealAll moment (HostReseedAfterReveal). Channels converge
+            // only lazily on the next dirty-mark after a reload, so any host state the save-load itself did
+            // not carry perfectly would otherwise stay stale on clients until then.
+            if (launched) _reseedGate.Arm();
+            return launched;
         }
 
         // Shared launch tail for both the lobby start and the mid-session load: warn on the best-effort
@@ -1198,6 +1210,7 @@ namespace Multiplayer.Network
                     PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                 _loadPhaseActive = false;
                 PerformDeferredLift();
+                HostReseedAfterReveal(); // rca-4: forced-reveal path still re-seeds a reloaded session
             }
             // Per-peer self-reveal: this peer is holding (reached Playing) but the RevealAll never
             // arrived (dead host). After the hold timeout, reveal locally so it isn't stuck forever.
@@ -1238,6 +1251,7 @@ namespace Multiplayer.Network
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                     PerformDeferredLift(); // host reveals at the same instant
+                    HostReseedAfterReveal(); // rca-4: every peer entered the loaded level → re-seed now
                 }
             }
 
@@ -1267,6 +1281,29 @@ namespace Multiplayer.Network
         // ══════════════════════════════════════════════════════════════════
         //  Helpers
         // ══════════════════════════════════════════════════════════════════
+
+        // rca-4 (P0): host full-channel re-seed after a mid-session F2 reload. The save blob carries most
+        // state, but any host-side channel state the save-load did not carry perfectly converges only
+        // lazily on the next dirty-mark — stale on clients until then. Fire the SAME idempotent versioned
+        // ABSOLUTE snapshots the mid-session joiner path already relies on (OnJoinReady): full wallet +
+        // every state channel, plus a fresh reliable time anchor so clients derive the loaded save's clock
+        // immediately (not on the next scrub-detect heartbeat). Runs at the RevealAll moment, i.e. AFTER
+        // every peer entered the loaded level (never during phase-2 native load); safe repeats for
+        // already-connected peers by construction (versioned snapshots). A save that landed in TACTICAL
+        // has no live geoscape wallet/channels/clock — each call self-guards to a no-op — and instead the
+        // tactical deploy seed re-runs against the live tactical level (rca-6 coordination seam).
+        // Once-latched per reload: the lobby FIRST start never arms the gate (the save itself is the
+        // seed), and the double reveal-release cannot double-reseed (SaveTransferBarrierTests).
+        private void HostReseedAfterReveal()
+        {
+            if (!_engine.IsHost || !_reseedGate.TryConsume()) return;
+            Debug.Log("[Multiplayer] post-reload re-seed → full wallet + all channels + time re-anchor (+ tactical seed if tactical)");
+            _engine.Sync?.BroadcastFullWallet();
+            _engine.Sync?.BroadcastAllChannels();
+            _engine.TimeSync?.HostReAnchorNow();
+            try { Multiplayer.Sync.Tactical.TacticalDeploySync.HostReseedAfterLoad(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] post-reload tactical re-seed failed: " + e.Message); }
+        }
 
         // Serialize the host's current per-slot aggregate and broadcast it unreliably to all peers.
         private void BroadcastSnapshot()

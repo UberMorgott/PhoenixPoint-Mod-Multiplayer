@@ -116,5 +116,45 @@ namespace Multiplayer.Tests
             // On-grid but writing past the buffer end (offset + len > total).
             Assert.False(TryChunkIndex(3L * chunkSize, chunkSize, total, chunkSize, out _));
         }
+
+        // ─── rca-4: post-reload full re-seed once-latch (ReseedOnceGate) ──────────────────────────────
+        // The coordinator arms the gate ONLY when an F2 mid-session reload transfer launches and consumes
+        // it ONCE at the RevealAll moment. These pin the arm/consume-once contract on the REAL Core symbol.
+
+        [Fact]
+        public void Reseed_Not_Armed_By_Default_So_Lobby_First_Start_Does_Not_Reseed()
+        {
+            // Lobby FIRST start / joiner path: nothing arms the gate → the reveal moment consumes nothing.
+            var gate = new ReseedOnceGate();
+            Assert.False(gate.Pending);
+            Assert.False(gate.TryConsume());
+        }
+
+        [Fact]
+        public void Reseed_Armed_By_MidSession_Reload_Is_Consumed_Exactly_Once()
+        {
+            // F2 mid-session reload launched → armed; the reveal consumes it once.
+            var gate = new ReseedOnceGate();
+            gate.Arm();
+            Assert.True(gate.Pending);
+            Assert.True(gate.TryConsume());
+            Assert.False(gate.Pending);
+
+            // Double release (e.g. a second reveal path firing) must NOT double-reseed.
+            Assert.False(gate.TryConsume());
+        }
+
+        [Fact]
+        public void Reseed_ReArm_On_Next_Reload_Fires_Again()
+        {
+            // A second F2 reload re-arms the same gate instance and fires exactly once again.
+            var gate = new ReseedOnceGate();
+            gate.Arm();
+            Assert.True(gate.TryConsume());
+
+            gate.Arm();
+            Assert.True(gate.TryConsume());
+            Assert.False(gate.TryConsume());
+        }
     }
 }

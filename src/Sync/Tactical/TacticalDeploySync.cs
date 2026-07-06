@@ -279,6 +279,23 @@ namespace Multiplayer.Sync.Tactical
         }
 
         /// <summary>
+        /// HOST: an F2 mid-session save-load landed in TACTICAL (rca-4 post-reload re-seed; coordination
+        /// seam for rca-6 tactical save-load bind) — re-run the level-ready capture/broadcast seed against
+        /// the LIVE tactical level, exactly like the normal launch postfix. The reload boundary already ran
+        /// <see cref="OnMissionExit"/> (via <c>SyncEngine.ResetForReloadBoundary</c>), so the per-mission
+        /// once-guards (<c>_lastBroadcastSiteId</c>/<c>_captureScheduledSiteId</c>) are clear and the seed
+        /// fires fresh; the readiness gate then defers the capture until the loaded level is turn-0 ready.
+        /// No-op when the current level is not tactical, off-host, or off-session (HostOnLevelReady guards).
+        /// </summary>
+        public static void HostReseedAfterLoad()
+        {
+            var tlc = LiveTacticalLevelController();
+            if (tlc == null) return; // loaded save is not tactical — nothing to seed here
+            Debug.Log("[Multiplayer][tac] HostReseedAfterLoad: reloaded save is TACTICAL → re-run level-ready seed");
+            HostOnLevelReady(tlc);
+        }
+
+        /// <summary>
         /// HOST: start a game coroutine on the tactical level's Timing that polls
         /// <see cref="TacticalDeployReadinessGate"/> each frame and fires the capture once the level is ready
         /// (or a bounded fail-safe timeout elapses). Returns false if no Timing could be resolved.

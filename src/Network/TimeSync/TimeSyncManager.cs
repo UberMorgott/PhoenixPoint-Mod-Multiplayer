@@ -435,6 +435,27 @@ namespace Multiplayer.Network.TimeSync
             else _engine.BroadcastUnreliable(msg);
         }
 
+        /// <summary>
+        /// Host: pin + broadcast a FRESH reliable anchor at THIS instant (rca-4 post-reload re-seed).
+        /// After an F2 mid-session load the geoscape game-time jumps to the loaded save's clock; the
+        /// per-frame scrub detector would re-anchor eventually, but the re-seed moment wants a
+        /// deterministic reliable anchor NOW so clients derive from the new clock immediately. No-op
+        /// off-host / outside geoscape (a tactical save has no geo Timing; the normal change-detect
+        /// re-anchors on the next geoscape entry). Never throws into the caller.
+        /// </summary>
+        public void HostReAnchorNow()
+        {
+            if (_engine == null || !_engine.IsHost) return;
+            var timing = GetTiming();
+            if (timing == null) return; // not in geoscape (e.g. tactical save) — nothing to anchor
+            try
+            {
+                CaptureAndBroadcastAnchor(GetPaused(timing), GetSpeedIndex(), GetNowTicks(timing), reliable: true);
+                Debug.Log("[Multiplayer] TimeSync: post-reload re-anchor broadcast (reliable)");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] TimeSync HostReAnchorNow failed: " + ex.Message); }
+        }
+
         /// <summary>Host: send the current anchor (reliable, targeted) to a freshly-connected peer.</summary>
         public void OnPeerConnectedHost(ulong peerId)
         {
