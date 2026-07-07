@@ -175,6 +175,8 @@ namespace Multiplayer.Network.Sync
             _reloadReset.Register("choice-arbiter", () => _choiceArbiter.Reset());
             // Client-side event mirror + display queue + dedups (see ResetEventMirror doc — semantics untouched).
             _reloadReset.Register("event-mirror", ResetEventMirror);
+            // Host-side buffered single-choice advances awaiting a prompt show — the pre-reload occurrences are gone.
+            _reloadReset.Register("host-advance-buffer", State.PendingHostAdvance.Reset);
             // Host-side geoscape intent windows: stale (peer, surface, nonce) entries of the dead geoscape.
             // Safe here — every peer is quiesced at this barrier (loading the same blob), so no straddling
             // double-send can re-apply; the mid-session REJOIN case is per-peer (ResetIntentDedupForPeer).
@@ -364,6 +366,15 @@ namespace Multiplayer.Network.Sync
             // manufacturing + base-layout facility grid) so e.g. a client facility construct/repair rebuilds
             // the host's open base grid too.
             GeoUiRefresh.RefreshNeedsKick(rt);
+            // A client-relayed recruit/containment pool edit (hire/kill/harvest = Recruitment) applied here
+            // mirrors on #10, but the host never applies its OWN #10 echo — so the host's open pool screen would
+            // stay stale. Re-drive it here (gated to fire only while that screen is current), matching the #10
+            // client path in OnStateSync.
+            if (action.Category == ActionCategory.Recruitment)
+            {
+                GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.Containment);
+                GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.Recruits);
+            }
 
             ulong seq = NextOutcomeSeq();
             _engine.BroadcastToAll(GeoActionRelay.BuildOutcome(id, seq, payload));
@@ -604,14 +615,21 @@ namespace Multiplayer.Network.Sync
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;
-            // Best-effort: rebuild the open UI for this channel's screen. Channels 1/2 map to a single
-            // screen (targeted Refresh). The unlock (3) + diplomacy (4) channels span multiple modules (an
-            // unlock shows in BOTH the manufacturing list AND the base-layout facility picker; diplomacy has
-            // no commonly-open module), so drive the full needs-kick fan-out for ids ≥ 3 — each Refresh
-            // no-ops if that module is closed, so a redundant kick is harmless.
-            var screen = _channels.ScreenFor(channelId);
-            if (screen.HasValue) GeoUiRefresh.Refresh(GeoRuntime.Instance, screen.Value);
-            else if (channelId >= 3) GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);
+            // Reactivity everywhere: every non-mist channel apply re-drives the full CHEAP needs-kick fan-out
+            // (Research/Manufacturing/BaseLayout/RosterEquip/RosterOverview) — each screen refresh is IsOpen +
+            // CurrentViewState gated → a no-op when closed, so a redundant kick is harmless. Manufacturing +
+            // Research are IN the fan-out, so the previous per-channel ScreenFor targeting (ch1→Manufacturing,
+            // ch2→Research) is subsumed; routing EVERY channel through it also reaches the roster-family screens
+            // (e.g. the EditSoldier shared-storage list is fed by the item-storage channel #1, not just #9).
+            GeoUiRefresh.RefreshNeedsKick(GeoRuntime.Instance);
+            // Recruit/containment POOL screens (#10) have no in-place refresh — their only native idiom is a full
+            // state re-enter, too heavy for the universal fan-out above. Drive them TARGETED here on their #10
+            // carrier channel; each is gated to fire only while that screen is the CurrentViewState.
+            if (channelId == SurfaceIds.RecruitPoolChannel)
+            {
+                GeoUiRefresh.Refresh(GeoRuntime.Instance, GeoUiRefresh.Screen.Containment);
+                GeoUiRefresh.Refresh(GeoRuntime.Instance, GeoUiRefresh.Screen.Recruits);
+            }
             // The persistent bottom section bar's Research progress segment (UIModuleGeoSectionBar) +
             // the top resource bar repaint only from native model events / the hourly progress coroutine,
             // which the reflective channel apply doesn't trip — so research progress + any resource refund
@@ -1183,9 +1201,32 @@ namespace Multiplayer.Network.Sync
             if (!SyncProtocol.TryDecodeEventDismiss(data, out var occId, out var eventId, out _)) return;
             try
             {
+                // Already advanced (host click or an earlier driven request won first) → idempotent no-op, and make
+                // sure no stale buffered advance lingers for it.
+                if (Multiplayer.Harmony.Sync.EventOccurrenceIds.WasAdvanced(occId))
+                {
+                    State.PendingHostAdvance.Remove(occId);
+                    Debug.Log("[Multiplayer] HOST OnEventAdvanceRequest occId=" + occId + " eventId=" + eventId +
+                              " → no-op (already advanced)");
+                    return;
+                }
                 bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);
+                if (drove)
+                {
+                    State.PendingHostAdvance.Remove(occId);
+                }
+                else
+                {
+                    // Host is NOT yet showing this occurrence's window-1 prompt (its dialog is queued behind a
+                    // cutscene / higher-priority display in the native view-switch queue). Buffer the request so
+                    // EncounterHostAdvanceReplayPatch replays it the moment the host shows the prompt — otherwise
+                    // the client (which already local-closed its mirrored prompt) never gets window-2 unless the
+                    // host player independently clicks. Bounded FIFO; cleared at the reload boundary.
+                    State.PendingHostAdvance.Buffer(occId, eventId);
+                }
                 Debug.Log("[Multiplayer] HOST OnEventAdvanceRequest occId=" + occId + " eventId=" + eventId +
-                          " → " + (drove ? "drove native prompt→result advance" : "no-op (not showing / already advanced)"));
+                          " → " + (drove ? "drove native prompt→result advance"
+                                         : "buffered (host not showing yet — replay on prompt show)"));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventAdvanceRequest failed: " + ex.Message); }
         }
@@ -1265,6 +1306,35 @@ namespace Multiplayer.Network.Sync
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EventAdvanceResult,
                 SyncProtocol.EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null, siteId)));
+        }
+
+        // ─── Geoscape LOG toast mirror (host->all) ─────────────────────────────────────────────────
+        // The client geoscape sim is frozen and domain state arrives via silent state-channel writes, so the
+        // native GeoscapeLog handlers (SiteMissionEnded/haven+base destroyed, alien raids, research/manufacture/
+        // interception/diplomacy, …) never fire client-side and the small toasts are simply missing. The host
+        // mirrors each entry it logs as a pre-resolved line; the client suppresses its own (rare, channel-driven)
+        // native raises and shows only these, keeping the log a pure host mirror (GeoscapeLogMirrorPatches).
+
+        /// <summary>Host: mirror one geoscape-log toast (pre-resolved text) to every peer. No-op off-host.</summary>
+        public void BroadcastGeoLogNotice(string text, bool highPriority)
+        {
+            if (!_engine.IsHost) return;
+            if (string.IsNullOrEmpty(text)) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.GeoLogNotice,
+                SyncProtocol.EncodeGeoLogNotice(text, highPriority)));
+        }
+
+        /// <summary>Client: a host geoscape-log toast arrived → replay it into the client's own GeoscapeLog so the
+        /// native notification + log panel render it. Host ignores (it raised it locally).</summary>
+        public void OnGeoLogNotice(byte[] data)
+        {
+            if (_engine.IsHost) return;
+            if (!SyncProtocol.TryDecodeGeoLogNotice(data, out var text, out var highPriority)) return;
+            try
+            {
+                Multiplayer.Harmony.Sync.GeoscapeLogMirror.ApplyMirroredEntry(GeoRuntime.Instance, text, highPriority);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnGeoLogNotice failed: " + ex.Message); }
         }
 
         // ─── Geoscape report-window mirror (host->all show, Phase-A) ───────

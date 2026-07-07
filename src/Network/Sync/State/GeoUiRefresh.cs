@@ -32,8 +32,10 @@ namespace Multiplayer.Network.Sync.State
     public static class GeoUiRefresh
     {
         /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C);
-        /// BaseLayout = facility grid; RosterEquip = the soldier-equipment/inventory edit screen (UIStateEditSoldier).</summary>
-        public enum Screen { Manufacturing, Research, BaseLayout, RosterEquip }
+        /// BaseLayout = facility grid; RosterEquip = soldier-equipment/inventory/progression edit screen
+        /// (UIStateEditSoldier); RosterOverview = soldier roster list (UIStateGeoRoster); Containment =
+        /// alien-containment (UIStateRosterAliens); Recruits = recruit-hire (UIStateRosterRecruits).</summary>
+        public enum Screen { Manufacturing, Research, BaseLayout, RosterEquip, RosterOverview, Containment, Recruits }
 
         private static bool _ready;
         private static FieldInfo _viewField;          // GeoLevelController.View
@@ -157,15 +159,22 @@ namespace Multiplayer.Network.Sync.State
                     case Screen.Research: RefreshResearch(rt); break;
                     case Screen.BaseLayout: RefreshBaseLayout(rt); break;
                     case Screen.RosterEquip: RefreshRosterEquip(rt); break;
+                    case Screen.RosterOverview: RefreshRosterOverview(rt); break;
+                    case Screen.Containment: RefreshContainment(rt); break;
+                    case Screen.Recruits: RefreshRecruits(rt); break;
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
         }
 
         /// <summary>
-        /// Single fan-out over every "needs-kick" geoscape module (those that rebuild only on Init, not from
-        /// model events): Research + Manufacturing + BaseLayout. Both host and client drive this after a synced
+        /// Single fan-out over every CHEAP "needs-kick" geoscape screen (those that rebuild only on Init, not
+        /// from model events): Research + Manufacturing + BaseLayout + RosterEquip (soldier equip/storage/
+        /// progression) + RosterOverview (soldier roster list). Both host and client drive this after a synced
         /// apply. Add one line here to cover a new needs-kick screen everywhere. Each Refresh no-ops if closed.
+        /// NOTE: the two POOL screens (Containment / Recruits) are deliberately NOT here — their only native
+        /// refresh idiom is a full state re-enter (too heavy to run on every action/channel apply); they are
+        /// driven targeted on their #10 carrier channel + the host's Recruitment-category apply instead.
         /// </summary>
         public static void RefreshNeedsKick(GeoRuntime rt)
         {
@@ -173,6 +182,7 @@ namespace Multiplayer.Network.Sync.State
             Refresh(rt, Screen.Manufacturing);
             Refresh(rt, Screen.BaseLayout);
             Refresh(rt, Screen.RosterEquip);
+            Refresh(rt, Screen.RosterOverview);
         }
 
         /// <summary>
@@ -321,38 +331,61 @@ namespace Multiplayer.Network.Sync.State
             _baseLayoutInit.Invoke(module, args);
         }
 
-        // ─── Roster soldier-equipment screen (UIStateEditSoldier) ─────────────────────────────────────
-        // The geoscape roster equip/inventory screen (UIStateEditSoldier) is an EDITOR-BUFFER screen: its item
-        // grids (UIModuleSoldierEquip) are a working copy populated from the model on open / soldier-switch
-        // (UIStateEditSoldier.DisplaySoldier → UIModuleSoldierEquip.UpdateData) and it subscribes to NO model
-        // item-changed event — so a mirrored personnel-state write (#9 blob ApplySoldierState, or the host's
-        // authoritative relayed-equip SetItems) is invisible until the player switches soldier or reopens. We
-        // re-drive the panel's OWN read path (UpdateData with the soldier's live item lists) so an open screen
-        // repaints from the freshly-stamped model — decompile-verified 2026-07-07:
-        //   • GeoscapeView.CurrentViewState (public getter, GeoscapeView.cs:193) → active GeoscapeViewState.
-        //   • GeoscapeModulesData.SoldierEquipModule (public field, :110) → UIModuleSoldierEquip.
-        //   • UIStateEditSoldier._currentCharacter (private GeoCharacter, :44) = the exact soldier being edited.
-        //   • repaint = UIModuleSoldierEquip.UpdateData(inv, ready, armour, storage, slots) (:626), exactly the
-        //     call DisplaySoldier makes (:582), inventory=InventoryItems ready=EquipmentItems armour=ArmourItems.
-        // READ-ONLY + echo-safe: UpdateData rebuilds the UI lists via UIInventoryList.SetItems (:118), which does
-        // NOT fire OnSlotItemChanged and NEVER calls GeoCharacter.SetItems — so it can never re-enter the client
-        // edit-relay (SetItemsEditRelayPatch), unlike the deferred UIStateEditSoldier→UpdateSoldierEquipment flush.
-        // SoldierEquipModule is SHARED with the vehicle-edit screen (UIStateEditVehicle also drives it), so we gate
-        // on CurrentViewState actually being UIStateEditSoldier before touching it. Best-effort; any miss no-ops.
-        private static bool _rosterEquipEnsured;
+        // ─── Roster family screens (UIStateEditSoldier / UIStateGeoRoster / RosterAliens / RosterRecruits) ───
+        // These are EDITOR-BUFFER / read-on-open screens that subscribe to NO model change-event, so a mirrored
+        // personnel/pool write (#9 blob ApplySoldierState, host relayed SetItems/progression, #10 pool) is
+        // invisible until the player switches soldier / reopens. We re-drive each screen's OWN native read path
+        // so an open screen repaints from the freshly-stamped model. Decompile-verified 2026-07-07:
+        //   • GeoscapeView.CurrentViewState (getter, GeoscapeView.cs:193); GeoscapeModulesData fields
+        //     SoldierEquipModule (:110) / CharacterProgressionModule (:38) / ActorCycleModule (:114).
+        //   • EditSoldier equip: UIModuleSoldierEquip.UpdateData(inv,ready,armour,storage,slots) (:626) — as
+        //     DisplaySoldier (:582); echo-safe (UIInventoryList.SetItems (:118) never fires OnSlotItemChanged /
+        //     GeoCharacter.SetItems → cannot re-enter SetItemsEditRelayPatch). Storage: state RefreshStorage()
+        //     (:587) after _refreshStorage=true forces a model re-read of the faction/site ItemStorage (#1).
+        //   • EditSoldier progression: UIModuleCharacterProgression.SetCharacterProgression(GeoFaction,char)
+        //     (:463) re-reads model; it RESETS the edit buffer, so SKIP when the viewer has an unconfirmed local
+        //     allocation — IsCharacterChanged() (:358, pure) or _boughtAbilitySlot!=null (:241). Never-silent.
+        //   • EditSoldier header: UIModuleActorCycle.RefreshSoldierInfo() (:514) — cheap name/class/level/
+        //     corruption + button costs, no animation reset. The 3D armour mesh (DisplaySoldier, resets pose)
+        //     is intentionally NOT re-driven (visible glitch every peer edit > slightly-stale mesh).
+        //   • Roster list: UIStateGeoRoster.OnActorStatChanged (:364) re-Inits the portrait/HP-bar list +
+        //     unit-stats; the reflective HP write never fires Health.StatChangeEvent so it never runs. Args ignored.
+        //   • Pool screens have NO in-place refresh — the game's own idiom is a full state re-enter:
+        //     GeoscapeView.ToAlienContainmentState(bool)/ToPhoenixRecruitsState(bool) (:608/:639), used verbatim
+        //     after kill/harvest (UIStateRosterAliens.cs:260/280/301). Gated so it only fires while that screen
+        //     is current (never opens it). SoldierEquipModule is SHARED with UIStateEditVehicle, so every path
+        //     gates on the exact CurrentViewState type first. Best-effort; any miss no-ops.
+        private static bool _rosterFamilyEnsured;
         private static PropertyInfo _currentViewStateProp;   // GeoscapeView.CurrentViewState (getter)
         private static Type _editSoldierType;                // UIStateEditSoldier
         private static FieldInfo _editSoldierCharField;      // UIStateEditSoldier._currentCharacter (private GeoCharacter)
+        private static FieldInfo _editSoldierRefreshNeededField; // UIStateEditSoldier._uiRefreshNeeded (unflushed local equip edit)
+        private static FieldInfo _editSoldierRefreshStorageField; // UIStateEditSoldier._refreshStorage
+        private static MethodInfo _editSoldierRefreshStorage;    // UIStateEditSoldier.RefreshStorage()
         private static FieldInfo _soldierEquipModuleField;   // GeoscapeModulesData.SoldierEquipModule
         private static MethodInfo _soldierEquipUpdateData;   // UIModuleSoldierEquip.UpdateData(inv,ready,armour,storage,slots)
         private static PropertyInfo _charInventoryItemsProp; // GeoCharacter.InventoryItems
         private static PropertyInfo _charEquipmentItemsProp; // GeoCharacter.EquipmentItems
         private static PropertyInfo _charArmourItemsProp;    // GeoCharacter.ArmourItems
+        private static FieldInfo _progModuleField;           // GeoscapeModulesData.CharacterProgressionModule
+        private static MethodInfo _isCharacterChanged;       // UIModuleCharacterProgression.IsCharacterChanged()
+        private static FieldInfo _boughtAbilitySlotField;    // UIModuleCharacterProgression._boughtAbilitySlot
+        private static MethodInfo _setCharacterProgression;  // UIModuleCharacterProgression.SetCharacterProgression(GeoFaction,char)
+        private static PropertyInfo _viewerFactionProp;      // GeoLevelController.ViewerFaction
+        private static FieldInfo _actorCycleModuleField;     // GeoscapeModulesData.ActorCycleModule
+        private static MethodInfo _refreshSoldierInfo;       // UIModuleActorCycle.RefreshSoldierInfo()
+        private static Type _rosterOverviewType;             // UIStateGeoRoster
+        private static MethodInfo _onActorStatChanged;       // UIStateGeoRoster.OnActorStatChanged(BaseStat,StatChangeType,float,float)
+        private static object _statChangeTypeZero;           // boxed StatChangeType default (the handler ignores its args)
+        private static Type _rosterAliensType;               // UIStateRosterAliens
+        private static MethodInfo _toAlienContainment;       // GeoscapeView.ToAlienContainmentState(bool)
+        private static Type _rosterRecruitsType;             // UIStateRosterRecruits
+        private static MethodInfo _toPhoenixRecruits;        // GeoscapeView.ToPhoenixRecruitsState(bool)
 
-        private static void EnsureRosterEquip()
+        private static void EnsureRosterFamily()
         {
-            if (_rosterEquipEnsured) return;
-            _rosterEquipEnsured = true;
+            if (_rosterFamilyEnsured) return;
+            _rosterFamilyEnsured = true;
             try
             {
                 var viewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
@@ -363,45 +396,174 @@ namespace Multiplayer.Network.Sync.State
                 if (viewType == null || modulesType == null || soldierEquipType == null || _editSoldierType == null || charType == null) return;
                 _currentViewStateProp = AccessTools.Property(viewType, "CurrentViewState");
                 _editSoldierCharField = AccessTools.Field(_editSoldierType, "_currentCharacter");
+                _editSoldierRefreshNeededField = AccessTools.Field(_editSoldierType, "_uiRefreshNeeded");
+                _editSoldierRefreshStorageField = AccessTools.Field(_editSoldierType, "_refreshStorage");
+                _editSoldierRefreshStorage = AccessTools.Method(_editSoldierType, "RefreshStorage");
                 _soldierEquipModuleField = AccessTools.Field(modulesType, "SoldierEquipModule");
                 _soldierEquipUpdateData = AccessTools.Method(soldierEquipType, "UpdateData");
                 _charInventoryItemsProp = AccessTools.Property(charType, "InventoryItems");
                 _charEquipmentItemsProp = AccessTools.Property(charType, "EquipmentItems");
                 _charArmourItemsProp = AccessTools.Property(charType, "ArmourItems");
+
+                // progression panel (best-effort; absence must not break the equip re-drive)
+                var progType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+                if (progType != null)
+                {
+                    _progModuleField = AccessTools.Field(modulesType, "CharacterProgressionModule");
+                    _isCharacterChanged = AccessTools.Method(progType, "IsCharacterChanged");
+                    _boughtAbilitySlotField = AccessTools.Field(progType, "_boughtAbilitySlot");
+                    _setCharacterProgression = AccessTools.Method(progType, "SetCharacterProgression");
+                }
+                var geoType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+                if (geoType != null) _viewerFactionProp = AccessTools.Property(geoType, "ViewerFaction");
+
+                // soldier header (best-effort)
+                var actorCycleType = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewModules.UIModuleActorCycle");
+                if (actorCycleType != null)
+                {
+                    _actorCycleModuleField = AccessTools.Field(modulesType, "ActorCycleModule");
+                    _refreshSoldierInfo = AccessTools.Method(actorCycleType, "RefreshSoldierInfo");
+                }
+
+                // roster list (best-effort)
+                _rosterOverviewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoRoster");
+                if (_rosterOverviewType != null) _onActorStatChanged = AccessTools.Method(_rosterOverviewType, "OnActorStatChanged");
+                var statChangeType = AccessTools.TypeByName("Base.Entities.Statuses.StatChangeType");
+                if (statChangeType != null) { try { _statChangeTypeZero = Enum.ToObject(statChangeType, 0); } catch { _statChangeTypeZero = null; } }
+
+                // pool screens (best-effort)
+                _rosterAliensType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateRosterAliens");
+                _toAlienContainment = AccessTools.Method(viewType, "ToAlienContainmentState", new[] { typeof(bool) });
+                _rosterRecruitsType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateRosterRecruits");
+                _toPhoenixRecruits = AccessTools.Method(viewType, "ToPhoenixRecruitsState", new[] { typeof(bool) });
             }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureRosterEquip failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureRosterFamily failed: " + ex.Message); }
+        }
+
+        /// <summary>Resolve the active geoscape view state (null when no geoscape view / not resolved).</summary>
+        private static object CurrentViewState(GeoRuntime rt)
+        {
+            if (_currentViewStateProp == null || _viewField == null) return null;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return null;
+            var view = _viewField.GetValue(geo);
+            return view == null ? null : _currentViewStateProp.GetValue(view, null);
         }
 
         private static void RefreshRosterEquip(GeoRuntime rt)
         {
-            EnsureRosterEquip();
-            if (_currentViewStateProp == null || _editSoldierType == null || _editSoldierCharField == null
-                || _soldierEquipModuleField == null || _soldierEquipUpdateData == null
-                || _charInventoryItemsProp == null || _charEquipmentItemsProp == null || _charArmourItemsProp == null
-                || _viewField == null || _modulesField == null) return;
+            EnsureRosterFamily();
+            if (_editSoldierType == null || _editSoldierCharField == null || _soldierEquipModuleField == null
+                || _soldierEquipUpdateData == null || _charInventoryItemsProp == null || _charEquipmentItemsProp == null
+                || _charArmourItemsProp == null || _modulesField == null || _viewField == null) return;
             var geo = rt?.GeoLevel();
             if (geo == null) return;
             var view = _viewField.GetValue(geo);
             if (view == null) return;
-            // Gate: the active geoscape view state must be the soldier-equip screen. SoldierEquipModule is shared
-            // with UIStateEditVehicle — repainting soldier item lists onto an open vehicle screen would corrupt it.
-            var state = _currentViewStateProp.GetValue(view, null);
+            // Gate: active view state MUST be the soldier-equip screen (SoldierEquipModule is shared with
+            // UIStateEditVehicle — repainting soldier lists onto an open vehicle screen would corrupt it).
+            var state = _currentViewStateProp?.GetValue(view, null);
             if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;
             var modules = _modulesField.GetValue(view);
             if (modules == null) return;
-            var module = _soldierEquipModuleField.GetValue(modules);
-            if (module == null || !IsOpen(module)) return;
             var character = _editSoldierCharField.GetValue(state);
-            if (character == null) return; // between soldiers / not yet displayed
 
-            // Re-drive UpdateData(inventory, ready, armour, storage:null, inventorySlots:0) exactly as
-            // UIStateEditSoldier.DisplaySoldier does — rebuild the soldier's three item grids from the live
-            // (freshly-mirrored) model. storage:null leaves the shared-stores panel untouched (a separate channel
-            // owns it — audit backlog); the inventorySlots arg is unused by this UpdateData overload (pass 0).
-            object inv = _charInventoryItemsProp.GetValue(character, null);
-            object ready = _charEquipmentItemsProp.GetValue(character, null);
-            object armour = _charArmourItemsProp.GetValue(character, null);
-            _soldierEquipUpdateData.Invoke(module, new object[] { inv, ready, armour, null, 0 });
+            // (A) equip + shared-storage lists. SKIP if the viewer has an unflushed local equipment drag
+            // (_uiRefreshNeeded, UIStateEditSoldier.cs:50 — set on a local slot change until the next UpdateState
+            // flush); re-reading the model here would clobber it. Skip-if-editing (never-silent) beats clobber.
+            var module = _soldierEquipModuleField.GetValue(modules);
+            if (module != null && IsOpen(module) && character != null)
+            {
+                bool equipEditing = _editSoldierRefreshNeededField?.GetValue(state) is bool re && re;
+                if (equipEditing)
+                    Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive SKIPPED — viewer has an unflushed local equipment edit");
+                else
+                {
+                    object inv = _charInventoryItemsProp.GetValue(character, null);
+                    object ready = _charEquipmentItemsProp.GetValue(character, null);
+                    object armour = _charArmourItemsProp.GetValue(character, null);
+                    _soldierEquipUpdateData.Invoke(module, new object[] { inv, ready, armour, null, 0 });
+                    // shared-stores panel: force a model re-read (faction/site ItemStorage, #1). RefreshStorage
+                    // reuses the UI's current items unless _refreshStorage is set, so set it first. Read-only.
+                    if (_editSoldierRefreshStorage != null && _editSoldierRefreshStorageField != null)
+                    {
+                        _editSoldierRefreshStorageField.SetValue(state, true);
+                        _editSoldierRefreshStorage.Invoke(state, null);
+                    }
+                }
+            }
+
+            // (B) progression panel (stats / SP / abilities) — same #9 blob. SKIP when the viewer has an
+            // in-progress unconfirmed allocation (IsCharacterChanged = stat delta; _boughtAbilitySlot = pending
+            // ability buy): SetCharacterProgression re-reads the model and RESETS the edit buffer. Never-silent.
+            if (_progModuleField != null && _isCharacterChanged != null && _setCharacterProgression != null
+                && _viewerFactionProp != null && character != null)
+            {
+                var progModule = _progModuleField.GetValue(modules);
+                if (progModule != null && IsOpen(progModule))
+                {
+                    bool pendingStat = _isCharacterChanged.Invoke(progModule, null) is bool pc && pc;
+                    bool pendingAbility = _boughtAbilitySlotField != null && _boughtAbilitySlotField.GetValue(progModule) != null;
+                    if (pendingStat || pendingAbility)
+                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local stat/ability allocation");
+                    else
+                    {
+                        object viewerFaction = _viewerFactionProp.GetValue(geo, null);
+                        if (viewerFaction != null) _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                    }
+                }
+            }
+
+            // (C) soldier header (name/class/level/corruption + button costs) — cheap, no animation reset, no
+            // editable buffer to clobber. The 3D armour mesh is a documented skip (DisplaySoldier resets pose).
+            if (_actorCycleModuleField != null && _refreshSoldierInfo != null && character != null)
+            {
+                var actorCycle = _actorCycleModuleField.GetValue(modules);
+                if (actorCycle != null && IsOpen(actorCycle))
+                    try { _refreshSoldierInfo.Invoke(actorCycle, null); }
+                    catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh RefreshSoldierInfo skipped: " + ex.Message); }
+            }
+        }
+
+        private static void RefreshRosterOverview(GeoRuntime rt)
+        {
+            EnsureRosterFamily();
+            if (_rosterOverviewType == null || _onActorStatChanged == null || _statChangeTypeZero == null) return;
+            var state = CurrentViewState(rt);
+            if (state == null || !_rosterOverviewType.IsInstanceOfType(state)) return;
+            // Re-invoke the state's own stat-change handler: it re-Inits the roster portrait/HP-bar list +
+            // unit-stats from the model. The reflective #9 blob write never fires Health/Corruption
+            // StatChangeEvent, so this never runs on a mirror apply. The handler ignores its four args.
+            _onActorStatChanged.Invoke(state, new object[] { null, _statChangeTypeZero, 0f, 0f });
+        }
+
+        private static void RefreshContainment(GeoRuntime rt)
+        {
+            EnsureRosterFamily();
+            if (_rosterAliensType == null || _toAlienContainment == null || _viewField == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            var state = _currentViewStateProp?.GetValue(view, null);
+            if (state == null || !_rosterAliensType.IsInstanceOfType(state)) return;
+            // No in-place refresh exists; re-enter the state (the game's own idiom after a kill/harvest) so it
+            // re-reads the captured pool. Gated → only ever fires while containment IS current (never opens it).
+            _toAlienContainment.Invoke(view, new object[] { true });
+        }
+
+        private static void RefreshRecruits(GeoRuntime rt)
+        {
+            EnsureRosterFamily();
+            if (_rosterRecruitsType == null || _toPhoenixRecruits == null || _viewField == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            var state = _currentViewStateProp?.GetValue(view, null);
+            if (state == null || !_rosterRecruitsType.IsInstanceOfType(state)) return;
+            // Re-enter the recruits state (its own refresh idiom) so it re-reads the haven/naked recruit pool.
+            _toPhoenixRecruits.Invoke(view, new object[] { true });
         }
 
         // ─── WA-3: aircraft HP bar (vehicle-selected panel) ──────────────────────────────────────────
