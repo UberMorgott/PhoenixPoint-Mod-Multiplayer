@@ -579,6 +579,12 @@ namespace Multiplayer.Network
                     Sync?.OnReportModalHide(msg.Payload);
                     break;
 
+                case PacketType.GeoLogNotice:
+                    // Host->all: a small geoscape LOG toast the frozen client sim never raises locally. Clients
+                    // replay it into their own GeoscapeLog (native toast + log panel entry).
+                    Sync?.OnGeoLogNotice(msg.Payload);
+                    break;
+
                 case PacketType.SyncEnvelope:
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).

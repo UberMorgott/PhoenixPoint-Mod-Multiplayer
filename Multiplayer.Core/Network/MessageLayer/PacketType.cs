@@ -70,6 +70,9 @@ namespace Multiplayer.Network.MessageLayer
         EventAdvanceResult = 0x6A, // host -> all: single-choice PROMPT->RESULT advance (no native CompleteEvent fires); reuses the EventDismiss codec (occId/eventId/choiceIndex/siteId, no reward blob)
         EventAdvanceRequest = 0x6B, // client -> host: "advance your single-choice PROMPT" (client OK'd its prompt mirror; event already auto-completed at trigger so AnswerEventAction can't drive the host UI); reuses the EventDismiss codec (occId/eventId only); idempotent first-wins on the host
         ReportModalHide = 0x6C, // host -> all: close the mirrored BLOCKING report modal (ambush brief) on clients — the host resolved it [modalType:u8]
+        GeoLogNotice = 0x6D,    // host -> all: mirror a small geoscape LOG toast (GeoscapeLog.AddEntry) — the client sim
+                                // is frozen + domain state arrives via silent channel writes, so the native GeoscapeLog
+                                // handlers never fire client-side; host ships the pre-resolved line [highPriority:u8][text:str]
 
         // Chat
         ChatMessage = 0x50,

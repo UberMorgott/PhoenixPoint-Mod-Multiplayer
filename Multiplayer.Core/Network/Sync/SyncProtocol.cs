@@ -405,6 +405,37 @@ namespace Multiplayer.Network.Sync
             return Encoding.UTF8.GetString(bytes);
         }
 
+        // ─── GeoLogNotice (0x6D) — small geoscape LOG toast mirror ────────────────────────────────────
+        // Payload: [u8 highPriority][u16 len + UTF8 text]. The host ships the PRE-RESOLVED display line
+        // (GeoscapeLogEntry.GenerateMessage()), not a def guid + typed params, because the client sim is frozen
+        // and the native GeoscapeLog handlers never fire client-side — there is nothing to re-localize against.
+        public static byte[] EncodeGeoLogNotice(string text, bool highPriority)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write((byte)(highPriority ? 1 : 0));
+                WriteWireStr(w, text);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeGeoLogNotice(byte[] data, out string text, out bool highPriority)
+        {
+            text = null; highPriority = false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    highPriority = r.ReadByte() != 0;
+                    text = ReadWireStr(r);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
+
         public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1)
             => EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null);
 

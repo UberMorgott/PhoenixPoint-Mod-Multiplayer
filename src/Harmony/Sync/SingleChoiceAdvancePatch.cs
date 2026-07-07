@@ -79,4 +79,67 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] SingleChoiceAdvancePatch failed: " + ex.Message); }
         }
     }
+
+    /// <summary>
+    /// HOST replay of a CLIENT single-choice advance that arrived BEFORE the host displayed the prompt.
+    ///
+    /// A client OK on a mirrored single-choice window-1 prompt relays <c>EventAdvanceRequest</c> (0x6B). If the host
+    /// is not yet showing that occurrence (its native dialog is queued behind a cutscene / higher-priority display
+    /// in the view-switch queue — <c>UIModuleSiteEncounters._geoEvent == null</c>), <c>OnEventAdvanceRequest</c>
+    /// cannot drive it and BUFFERS the request (<see cref="Multiplayer.Network.Sync.State.PendingHostAdvance"/>).
+    /// This Postfix on <c>SetEncounter</c> (the host's window-1 prompt show, decompile UIModuleSiteEncounters.cs:267)
+    /// replays the buffered advance the instant the host reaches that occurrence, so the client's click advances the
+    /// flow for everyone — the host player no longer has to click too. Idempotent first-wins: an already-advanced
+    /// occurrence (host clicked first) just clears its buffer; a still-paging prompt keeps it buffered for the next
+    /// (non-paging) show (<c>TryHostNativeAdvanceSingleChoice</c> re-checks paging itself).
+    ///
+    /// Host-only + not-applying + gate-coupled; best-effort try/catch — never throws into game code.
+    /// </summary>
+    [HarmonyPatch]
+    public static class EncounterHostAdvanceReplayPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
+            var evtT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEvent");
+            if (t == null || evtT == null) return false;
+            // SetEncounter(GeoscapeEvent geoEvent, bool pagingEvent, string overrideText = null)
+            _target = AccessTools.Method(t, "SetEncounter", new[] { evtT, typeof(bool), typeof(string) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // __0 = the GeoscapeEvent whose prompt was just shown on the host.
+        public static void Postfix(object __0)
+        {
+            if (SyncApplyScope.IsApplying) return;   // engine-driven client render → not a host prompt show
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            if (!EventMirrorFixGate.Enabled) return;
+            try
+            {
+                if (__0 == null) return;
+                ushort occId = EventOccurrenceIds.GetOrAssign(__0);   // SAME id as the raise/dismiss/advance wire
+                if (!Multiplayer.Network.Sync.State.PendingHostAdvance.TryGet(occId, out var eventId)) return;
+                // Already advanced (host click or an earlier driven request won the race) → just drop the buffer.
+                if (EventOccurrenceIds.WasAdvanced(occId))
+                {
+                    Multiplayer.Network.Sync.State.PendingHostAdvance.Remove(occId);
+                    return;
+                }
+                bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);
+                if (drove)
+                {
+                    Multiplayer.Network.Sync.State.PendingHostAdvance.Remove(occId);
+                    Debug.Log("[Multiplayer] EncounterHostAdvanceReplayPatch replayed buffered advance occId=" + occId +
+                              " eventId=" + eventId + " → drove native prompt→result (client click advanced the flow)");
+                }
+                // Not driven (still paging) → keep buffered; the next non-paging SetEncounter for this occId replays it.
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterHostAdvanceReplayPatch failed: " + ex.Message); }
+        }
+    }
 }
