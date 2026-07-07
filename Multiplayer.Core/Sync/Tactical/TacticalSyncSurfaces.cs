@@ -208,5 +208,24 @@ namespace Multiplayer.Sync.Tactical
         // tactical, rca-6) re-seeds the full state set with the actor seed. See TacticalObjectiveSync /
         // TacticalObjectiveCodec / TacticalObjectiveGate. Next free 0x99.
         public const ushort TacObjective = 0x99;           // 153: host→all     "objective state/progress + scripted-add mirror"       (carries seq)
+
+        // ─── MID-MISSION INVENTORY-TRANSFER (tactical loot UI re-enable) ──────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Re-enables the client loot/inventory
+        // view (crates / ground containers / dead-body drop containers / soldier↔soldier trades). The native tactical
+        // inventory UI is DEFERRED-COMMIT — every drag commits at once through UIStateInventory.ApplyInventoryActions
+        // → InventoryQuery.SyncItems → InventoryComponent.RemoveItem/AddItem — so ONE commit yields a BATCH of
+        // cross-inventory MOVES. Host-authoritative, spec-canon suppress+relay:
+        //   • intent (0x9A): client→host, carries nonce. The mirroring client SUPPRESSES the local commit and relays
+        //     the batch {actingSoldierNetId, applyCost, moves[]}; a move = {(srcNetId,srcSlot),(dstNetId,dstSlot),
+        //     itemDefGuid, srcDefIndex}. slot 0 = backpack Inventory, 1 = Equipments; a container is slot 0. Item
+        //     identity = (ItemDef guid, index among that def in the source, pre-move) — the host matches BY DEF
+        //     (the DropItem FOLLOW-UP), never a blind slot index. Peer-keyed IntentDedup (like 0x8E).
+        //   • apply (0x9B): host→all, carries seq. The host applies + validates each move against its OWN state, spends
+        //     the inventory ability AP cost on the acting soldier (AP itself rides 0x8F), then broadcasts the SURVIVING
+        //     set; every peer re-runs the SAME native moves under SyncApplyScope (both endpoints update, no
+        //     despawn/respawn churn). The host's OWN looting rides the SAME apply surface (symmetric mirror).
+        // See TacticalInventorySync / TacticalInventoryTransferCodec / InventoryTransferPatches. Next free 0x9A/0x9B.
+        public const ushort TacInventoryIntent = 0x9A;     // 154: client→host  "commit inventory-view loot batch"        (intent, carries nonce)
+        public const ushort TacInventoryApply  = 0x9B;     // 155: host→all     "authoritative inventory-transfer batch"  (outcome, carries seq)
     }
 }

@@ -2,9 +2,10 @@ using Multiplayer.Sync.Tactical;
 using Xunit;
 
 /// <summary>
-/// PURE decision tests for the two tactical inventory-view guards (gap-turret-crate-loot, audit D18).
-/// The Harmony glue (InventoryViewGuardPatches: InventoryAbility.Activate host prefix +
-/// TacticalView.ToInventoryViewState client prefix) is in-game verified; only the decisions are unit-tested.
+/// PURE decision tests for the HOST inventory-view auto-open guard (gap-turret-crate-loot, audit D18).
+/// The Harmony glue (InventoryViewGuardPatches: InventoryAbility.Activate host prefix) is in-game verified;
+/// only the decision is unit-tested. The client view is no longer suppressed — mid-mission looting ships as the
+/// inventory-transfer intent (TacticalInventoryTransferCodecTests covers its wire).
 /// </summary>
 public class TacticalInventoryViewGuardTests
 {
@@ -29,22 +30,7 @@ public class TacticalInventoryViewGuardTests
     [InlineData(false, true)]
     public void NonHost_NeverSuppressedByHostGuard(bool isHost, bool actorIsSelected)
     {
-        // Single-player / client roles never take the HOST guard (the client has its own view-level guard).
+        // Single-player / client roles never take the HOST guard.
         Assert.False(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost, actorIsSelected));
-    }
-
-    // ── CLIENT view guard: a frozen mirror never enters the inventory view (unsynced local item moves) ──
-
-    [Fact]
-    public void ClientMirror_InventoryView_IsSuppressed()
-    {
-        Assert.True(TacticalInventoryViewGuard.ShouldSuppressClientInventoryView(isClientMirroring: true));
-    }
-
-    [Fact]
-    public void NonMirror_InventoryView_RunsNative()
-    {
-        // Host / single-player: the native inventory view is untouched.
-        Assert.False(TacticalInventoryViewGuard.ShouldSuppressClientInventoryView(isClientMirroring: false));
     }
 }

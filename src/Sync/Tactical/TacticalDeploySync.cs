@@ -1002,6 +1002,21 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── MID-MISSION INVENTORY-TRANSFER (tactical loot UI re-enable) ───────────────────────
+            // Intent (client→host) lands on the host; it validates + applies the loot batch natively then broadcasts
+            // the surviving set. Apply (host→all) lands on clients; each re-runs the SAME native moves under the apply
+            // scope. Each handler is side-gated internally, so a stray envelope on the wrong side is a clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacInventoryIntent)
+            {
+                try { TacticalInventorySync.HostOnInventoryIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.intent.inventory failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacInventoryApply)
+            {
+                try { TacticalInventorySync.HandleInventoryApply(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.inventory failed: " + ex); }
+                return true;
+            }
+
             // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ──────────────
             // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is a
             // clean no-op). The client re-applies the SAME native damage to the SAME destructible (resolved by its
