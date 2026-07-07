@@ -255,6 +255,79 @@ public class TacticalObjectiveCodecTests
         Assert.Equal(-1, TacticalObjectiveGate.ResolveAddMatch(unresolvable, candidates));
     }
 
+    // ─── (c2) ZONE_UNLOCK records (audit D20 — scripted zone unlock rides this surface) ─
+
+    [Fact]
+    public void ZoneUnlock_KindConstants_ArePinned()
+    {
+        // Wire-compat pins: a re-numbering silently mis-routes records between peers on different builds.
+        Assert.Equal(0, TacticalObjectiveCodec.KindState);
+        Assert.Equal(1, TacticalObjectiveCodec.KindAdd);
+        Assert.Equal(2, TacticalObjectiveCodec.KindZoneUnlock);
+    }
+
+    [Fact]
+    public void ZoneUnlock_RoundTrips_GuidInDescKey()
+    {
+        var recs = TacticalObjectiveGate.BuildZoneUnlockRecords(new[] { "guid-a", "guid-b" });
+        var d = Decode(TacticalObjectiveCodec.Encode(new TacticalObjectiveCodec.ObjectiveBatch(9u, recs)));
+
+        Assert.Equal(2, d.Records.Count);
+        Assert.All(d.Records, r => Assert.Equal(TacticalObjectiveCodec.KindZoneUnlock, r.Kind));
+        Assert.Equal(new List<string> { "guid-a", "guid-b" },
+            TacticalObjectiveGate.CollectZoneUnlockGuids(d.Records));
+    }
+
+    [Fact]
+    public void BuildZoneUnlockRecords_SkipsEmpty_DedupesPreservingOrder()
+    {
+        var recs = TacticalObjectiveGate.BuildZoneUnlockRecords(
+            new[] { "g1", null, "", "g2", "g1" });
+        Assert.Equal(2, recs.Count);
+        Assert.Equal("g1", recs[0].DescKey);
+        Assert.Equal("g2", recs[1].DescKey);
+
+        Assert.Empty(TacticalObjectiveGate.BuildZoneUnlockRecords(null));
+        Assert.Empty(TacticalObjectiveGate.BuildZoneUnlockRecords(new string[0]));
+    }
+
+    [Fact]
+    public void CollectZoneUnlockGuids_IgnoresOtherKinds_AndEmptyGuids()
+    {
+        var mixed = new List<TacticalObjectiveCodec.ObjectiveRec>
+        {
+            State(0, 1, "WipeEnemyFactionObjective"),
+            new TacticalObjectiveCodec.ObjectiveRec(TacticalObjectiveCodec.KindAdd, 1, 0, "Chained", "KEY", null),
+            new TacticalObjectiveCodec.ObjectiveRec(TacticalObjectiveCodec.KindZoneUnlock, 0, 0, "", "gz", null),
+            new TacticalObjectiveCodec.ObjectiveRec(TacticalObjectiveCodec.KindZoneUnlock, 0, 0, "", "", null),
+            null,
+        };
+        Assert.Equal(new List<string> { "gz" }, TacticalObjectiveGate.CollectZoneUnlockGuids(mixed));
+        Assert.Empty(TacticalObjectiveGate.CollectZoneUnlockGuids(null));
+    }
+
+    [Fact]
+    public void ZoneUnlock_NoRegress_StateAppliesIgnoreIt_AndDiffNeverEmitsIt()
+    {
+        // A ZONE_UNLOCK record must be INVISIBLE to the state-apply resolver: not applied, not "skipped"
+        // (skipped feeds the degrade log — zone unlocks are a first-class kind, not drift).
+        var recs = new List<TacticalObjectiveCodec.ObjectiveRec>
+        {
+            new TacticalObjectiveCodec.ObjectiveRec(TacticalObjectiveCodec.KindZoneUnlock, 0, 0, "", "gz", null),
+            State(0, 1, "WipeEnemyFactionObjective"),
+        };
+        var skipped = new List<TacticalObjectiveCodec.ObjectiveRec>();
+        var applies = TacticalObjectiveGate.ResolveStateApplies(
+            recs, new[] { "WipeEnemyFactionObjective" }, skipped);
+        Assert.Single(applies);
+        Assert.Empty(skipped);
+
+        // And the host objective DIFF never fabricates zone-unlock records (they are event-driven only).
+        var built = TacticalObjectiveGate.BuildRecords(
+            new[] { Snap("A", 1) }, new[] { Snap("A", 0) }, seedAll: false);
+        Assert.All(built, r => Assert.NotEqual(TacticalObjectiveCodec.KindZoneUnlock, r.Kind));
+    }
+
     // ─── (d) surface-id pins ────────────────────────────────────────────
 
     // PacketType wire ids retired forever (PacketType.cs tombstone block) — no surface may be FRONTED on a

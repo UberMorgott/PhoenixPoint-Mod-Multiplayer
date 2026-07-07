@@ -10,7 +10,9 @@ using UnityEngine;
 namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
-    /// LIVE mission-objective mirror (surface <c>tac.objective</c> 0x99, host→all, RELIABLE). Closes the
+    /// LIVE mission-objective mirror (surface <c>tac.objective</c> 0x99, host→all, RELIABLE). Also carries the
+    /// scripted ZONE-UNLOCK mirror (audit D20, <see cref="HostOnZonesUnlocked"/> / <c>ApplyZoneUnlocks</c> —
+    /// same scripted-state family, no separate rail). Closes the
     /// tactical audit gap D21 "in-battle objectives do not sync": scripted/custom missions (story, TFTV) flip
     /// <c>FactionObjective</c> state MID-battle (kill target, reach zone, defend N turns, activate console) —
     /// TS4 (0x95) repaints objectives only at mission END, so the client objective HUD stayed stale for the
@@ -58,6 +60,7 @@ namespace Multiplayer.Sync.Tactical
             _lastSent = new List<TacticalObjectiveGate.ObjSnap>();
             _pendingClient.Clear();
             _warnedSkip = false;
+            _warnedZoneUnlock = false;
         }
 
         // ─── HOST: broadcast ─────────────────────────────────────────────────────────────────────────
@@ -100,6 +103,40 @@ namespace Multiplayer.Sync.Tactical
                 Flush(engine, objectivesManager, seedAll: false);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnObjectivesChanged failed: " + ex); }
+        }
+
+        /// <summary>HOST hook on the two native zone-unlock chokepoints (<c>UnlockZonesEffect.OnApply</c> —
+        /// scripted effect — and <c>ObjectivesManager.UnlockZones</c> — objective completion; audit D20): broadcast
+        /// the unlocked <c>TacticalLevelLockTagDef</c> guids as ZONE_UNLOCK records on this surface (same
+        /// scripted-state family, no separate rail). The frozen client never runs the script/evaluate that
+        /// unlocks its zones, so evac/reinforcement zones would stay locked there. Gates mirror
+        /// <see cref="HostOnObjectivesChanged"/>: host + active session + not client-mirroring + deploy captured
+        /// (mission-SETUP unlocks run natively on both sides). Empty tag set → no-op.</summary>
+        public static void HostOnZonesUnlocked(IEnumerable tagDefs)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            if (!TacticalDeploySync.HostHasBroadcastDeploy) return;   // pre-deploy setup runs natively on both sides
+            if (tagDefs == null) return;
+            try
+            {
+                var guids = new List<string>();
+                foreach (var def in tagDefs)
+                {
+                    string g = Network.Sync.DefReflection.GetGuid(def);
+                    if (!string.IsNullOrEmpty(g)) guids.Add(g);
+                }
+                var records = TacticalObjectiveGate.BuildZoneUnlockRecords(guids);
+                if (records.Count == 0) return;
+
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacObjective);
+                byte[] payload = TacticalObjectiveCodec.Encode(new TacticalObjectiveCodec.ObjectiveBatch(seq, records));
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacObjective, payload);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.objective ZONE_UNLOCK seq=" + seq +
+                          " tags=" + records.Count);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnZonesUnlocked failed: " + ex); }
         }
 
         private static void Flush(NetworkEngine engine, object objectivesManager, bool seedAll)
@@ -165,17 +202,22 @@ namespace Multiplayer.Sync.Tactical
                     return;
                 }
 
-                int stamped, added, skipped;
+                int stamped, added, skipped, unlocked;
                 using (SyncApplyScope.Enter())
                 using (TacticalActorStateSync.EnterApplyScope())
                 {
                     Apply(mgr, batch, out stamped, out added, out skipped);
                     if (stamped + added > 0) FireObjectivesChanged(mgr);   // ONE native HUD kick per batch
+                    // ZONE_UNLOCK records (audit D20): remove the unlocked tags from every deploy/exit zone's
+                    // TacticalObjectiveLock — the exact native UnlockZonesEffect/UnlockZones walk. Idempotent
+                    // (removing an absent tag is a no-op); LockChanged fires natively when a lock empties.
+                    unlocked = ApplyZoneUnlocks(TacticalObjectiveGate.CollectZoneUnlockGuids(batch.Records));
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacObjective, batch.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT applied tac.objective seq=" + batch.Seq +
-                          " stamped=" + stamped + " added=" + added + " skipped=" + skipped);
+                          " stamped=" + stamped + " added=" + added + " skipped=" + skipped +
+                          (unlocked > 0 ? " zoneUnlockTags=" + unlocked : ""));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleObjective failed: " + ex); }
         }
@@ -249,7 +291,91 @@ namespace Multiplayer.Sync.Tactical
                       " idx=" + (rec != null ? rec.Index : -1) + " (logged once)");
         }
 
+        /// <summary>CLIENT: run the native zone-unlock walk for the mirrored tag guids — resolve each
+        /// <c>TacticalLevelLockTagDef</c> by guid, then <c>TacticalObjectiveLock.Unlock(tags)</c> on every
+        /// deploy AND exit zone (the exact <c>UnlockZonesEffect.OnApply</c>/<c>ObjectivesManager.UnlockZones</c>
+        /// shape). Returns the resolved-tag count (0 = nothing to do). Degrade-to-notify on any miss.</summary>
+        private static int ApplyZoneUnlocks(List<string> tagGuids)
+        {
+            if (tagGuids == null || tagGuids.Count == 0) return 0;
+            try
+            {
+                var tagType = LockTagDefType();
+                if (tagType == null) { WarnZoneUnlockOnce("TacticalLevelLockTagDef type unresolved"); return 0; }
+
+                var defs = new List<object>();
+                foreach (var g in tagGuids)
+                {
+                    object def = Network.Sync.DefReflection.GetDefByGuid(g);
+                    if (def != null && tagType.IsInstanceOfType(def)) defs.Add(def);
+                    else WarnZoneUnlockOnce("tag guid unresolved: " + g);
+                }
+                if (defs.Count == 0) return 0;
+
+                // Unlock(IEnumerable<TacticalLevelLockTagDef>) needs a TYPED argument — build a typed array.
+                var typed = Array.CreateInstance(tagType, defs.Count);
+                for (int i = 0; i < defs.Count; i++) typed.SetValue(defs[i], i);
+
+                object tlc = ResolveTlc();
+                object map = GetProp(tlc, "Map");
+                if (map == null) { WarnZoneUnlockOnce("no live map"); return 0; }
+                int zones = 0;
+                zones += UnlockZoneKind(map, "PhoenixPoint.Tactical.Levels.ActorDeployment.TacticalDeployZone", typed);
+                zones += UnlockZoneKind(map, "PhoenixPoint.Tactical.Levels.ActorDeployment.TacticalExitZone", typed);
+                Debug.Log("[Multiplayer][tac] CLIENT zone unlock: tags=" + defs.Count + " lockedComponents=" + zones);
+                return defs.Count;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] ApplyZoneUnlocks failed: " + ex);
+                return 0;
+            }
+        }
+
+        /// <summary>Walk <c>map.GetActors&lt;TZone&gt;()</c> and call <c>Unlock(tags)</c> on each zone's
+        /// <c>TacticalObjectiveLock</c> deployment-lock components. Returns how many lock components were walked.</summary>
+        private static int UnlockZoneKind(object map, string zoneTypeName, Array typedTags)
+        {
+            var zoneType = AccessTools.TypeByName(zoneTypeName);
+            if (zoneType == null) return 0;
+            var getActorsOpen = AccessTools.Method(map.GetType(), "GetActors");
+            if (getActorsOpen == null || !getActorsOpen.IsGenericMethodDefinition) return 0;
+            int walked = 0;
+            var zones = getActorsOpen.MakeGenericMethod(zoneType).Invoke(map, new object[] { null });
+            if (!(zones is IEnumerable zoneEn)) return 0;
+            foreach (var zone in zoneEn)
+            {
+                if (!(GetProp(zone, "DeploymentLocks") is IEnumerable locks)) continue;
+                foreach (var l in locks)
+                {
+                    if (l == null || l.GetType().Name != "TacticalObjectiveLock") continue;
+                    try
+                    {
+                        var unlock = AccessTools.Method(l.GetType(), "Unlock");
+                        unlock?.Invoke(l, new object[] { typedTags });
+                        walked++;
+                    }
+                    catch (Exception ex)
+                    { Debug.LogError("[Multiplayer][tac] zone Unlock failed: " + ex.Message); }
+                }
+            }
+            return walked;
+        }
+
+        private static bool _warnedZoneUnlock;
+        private static void WarnZoneUnlockOnce(string what)
+        {
+            if (_warnedZoneUnlock) return;
+            _warnedZoneUnlock = true;
+            Debug.Log("[Multiplayer][tac] tac.objective ZONE_UNLOCK degrade: " + what + " (logged once)");
+        }
+
         // ─── Reflection boundary ─────────────────────────────────────────────────────────────────────
+
+        private static Type _lockTagDefType;       // PhoenixPoint.Common.Entities.GameTagsTypes.TacticalLevelLockTagDef
+        private static Type LockTagDefType()
+            => _lockTagDefType ?? (_lockTagDefType =
+                AccessTools.TypeByName("PhoenixPoint.Common.Entities.GameTagsTypes.TacticalLevelLockTagDef"));
 
         private static Type _tlcType;              // PhoenixPoint.Tactical.Levels.TacticalLevelController
         private static FieldInfo _objectivesField;  // ObjectivesManager._objectives (List<FactionObjective>)

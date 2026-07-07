@@ -32,9 +32,15 @@ namespace Multiplayer.Sync.Tactical
     {
         /// <summary>Record kind (u8). STATE = value-stamp an existing (index-keyed) objective;
         /// ADD = a mid-mission scripted addition the client mirror-appends (resolved via the shared
-        /// NextOnSuccess/NextOnFail def graph by class name + description key).</summary>
+        /// NextOnSuccess/NextOnFail def graph by class name + description key);
+        /// ZONE_UNLOCK = a scripted deploy/exit-zone unlock (audit D20, <c>UnlockZonesEffect</c> +
+        /// <c>ObjectivesManager.UnlockZones</c>) — same scripted-state family, so it rides this surface
+        /// instead of a new rail. The record reuses the shared body: <c>DescKey</c> carries ONE unlocked
+        /// <c>TacticalLevelLockTagDef</c> guid (one record per tag); Index/State/ClassName/Progress unused.
+        /// The client removes the tag from every zone's <c>TacticalObjectiveLock</c> (idempotent).</summary>
         public const byte KindState = 0;
         public const byte KindAdd = 1;
+        public const byte KindZoneUnlock = 2;
 
         /// <summary>Safety cap on progress ints per record (u8 on the wire; real objectives carry &lt;10).</summary>
         public const int MaxProgress = 32;

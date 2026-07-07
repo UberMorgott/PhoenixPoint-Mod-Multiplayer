@@ -134,6 +134,40 @@ namespace Multiplayer.Sync.Tactical
             return -1;
         }
 
+        /// <summary>HOST: build ZONE_UNLOCK records (audit D20) from the unlocked
+        /// <c>TacticalLevelLockTagDef</c> guids — one record per DISTINCT non-empty guid, order preserved.
+        /// The guid rides <c>DescKey</c> (see <see cref="TacticalObjectiveCodec.KindZoneUnlock"/>); the
+        /// other record fields are unused. An empty/null input yields no records (caller skips the flush).</summary>
+        public static List<TacticalObjectiveCodec.ObjectiveRec> BuildZoneUnlockRecords(IEnumerable<string> tagGuids)
+        {
+            var records = new List<TacticalObjectiveCodec.ObjectiveRec>();
+            if (tagGuids == null) return records;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var g in tagGuids)
+            {
+                if (string.IsNullOrEmpty(g) || !seen.Add(g)) continue;
+                records.Add(new TacticalObjectiveCodec.ObjectiveRec(
+                    TacticalObjectiveCodec.KindZoneUnlock, 0, 0, "", g, null));
+            }
+            return records;
+        }
+
+        /// <summary>CLIENT: collect the DISTINCT unlocked-tag guids from a batch's ZONE_UNLOCK records
+        /// (other kinds and empty guids are ignored). Order preserved.</summary>
+        public static List<string> CollectZoneUnlockGuids(IReadOnlyList<TacticalObjectiveCodec.ObjectiveRec> records)
+        {
+            var guids = new List<string>();
+            if (records == null) return guids;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var r in records)
+            {
+                if (r == null || r.Kind != TacticalObjectiveCodec.KindZoneUnlock) continue;
+                if (string.IsNullOrEmpty(r.DescKey) || !seen.Add(r.DescKey)) continue;
+                guids.Add(r.DescKey);
+            }
+            return guids;
+        }
+
         private static TacticalObjectiveCodec.ObjectiveRec ToRec(byte kind, int index, ObjSnap s)
             => new TacticalObjectiveCodec.ObjectiveRec(kind, index, s.State, s.ClassName, s.DescKey, s.Progress);
 
