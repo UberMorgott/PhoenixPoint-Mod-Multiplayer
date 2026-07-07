@@ -539,6 +539,12 @@ namespace Multiplayer.Sync.Tactical
                     if (string.Equals(typeName, "DropItemAbility", StringComparison.Ordinal))
                     {
                         if (intent.SlotIndex < 0) { target = null; return true; }   // self-derive SelectedEquipment
+                        // KNOWN LIMIT (review 56558d2): the positional index trusts client/host Equipments order,
+                        // but equipment is NOT mirrored mid-mission — a host-side mutation on the same soldier
+                        // (deploy consumed the turret item, retrieve added one) can skew a still-valid index onto
+                        // a DIFFERENT item, and drop is destructive. Mitigations: -1/self-derive is the common
+                        // path, unresolvable degrades below. FOLLOW-UP (with the inventory-transfer intent
+                        // surface): carry the ItemDef guid alongside the index and host-match by def.
                         object item = EquipmentAtSlot(caster, intent.SlotIndex);
                         if (item == null) return false;   // never drop a guessed item → degrade
                         target = BuildDropItemTarget(item);
@@ -571,15 +577,21 @@ namespace Multiplayer.Sync.Tactical
 
         /// <summary>gap-turret-crate-loot: is the resolved ability actually usable on the host right now?
         /// Reflection <c>IsEnabled(filter:null)</c> (TacticalAbility.cs:367 — the same check the native UI runs
-        /// before offering the ability). Fail-OPEN (unreadable → true) so a reflection surprise can never wedge
-        /// a legitimate relayed action; the native Activate is then no worse than before this gate existed.</summary>
+        /// before offering the ability). IsEnabled is declared on the TacticalAbility/Ability BASE — none of the
+        /// gated leaf types (RequiresHostEnabledCheck set) declares or overrides it — so resolution MUST walk base
+        /// types: <c>AccessTools.Method</c> does (FindIncludingBaseTypes); <c>AccessTools.FirstMethod</c> searches
+        /// DECLARED-ONLY methods and returns null on every gated leaf (a silently dead, fail-open gate — the
+        /// review-caught bug). Exactly ONE 1-param IsEnabled overload exists in the hierarchy and its param
+        /// (IAbilityDisabledStatesFilter) is a reference type, so Invoke(null) is safe. Resolution is pinned by
+        /// HostAbilityEnabledResolutionTests (Bridge.Tests, runs against the shipped 0Harmony.dll). Fail-OPEN
+        /// (unreadable → true) so a reflection surprise can never wedge a legitimate relayed action; the native
+        /// Activate is then no worse than before this gate existed.</summary>
         private static bool HostAbilityEnabled(object ability)
         {
             try
             {
-                var m = AccessTools.FirstMethod(ability.GetType(),
-                    x => x.Name == "IsEnabled" && x.GetParameters().Length == 1);
-                if (m == null) return true;   // fail-open
+                var m = AccessTools.Method(ability.GetType(), "IsEnabled");
+                if (m == null || m.GetParameters().Length != 1) return true;   // fail-open
                 return !(m.Invoke(ability, new object[] { null }) is bool b) || b;
             }
             catch (Exception ex)

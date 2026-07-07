@@ -109,6 +109,17 @@ namespace Multiplayer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            byte[] bytes = TryBuildSpawnBytes(actor, netId);
+            if (bytes == null) return;   // already logged — degrade-to-notify, no partial emit
+            SendSpawnBytes(engine, netId, bytes);
+        }
+
+        /// <summary>HOST: build the encoded 0x92 spawn frame for one actor at the minted netId, or null when the
+        /// actor cannot be mirrored (null create/serialization data, null ActorSetDef = scene-placed, empty
+        /// serialize blob) — every failure logs + returns null WITHOUT any wire emit, so callers can validate
+        /// re-spawnability BEFORE sending anything (the refresh path emits its despawn only after this succeeds).</summary>
+        private static byte[] TryBuildSpawnBytes(object actor, int netId)
+        {
             try
             {
                 object createData = GetProp(actor, "ActorCreateData");
@@ -117,7 +128,7 @@ namespace Multiplayer.Sync.Tactical
                 {
                     Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
                                    ": null ActorCreateData/SerializationData — skip spawn mirror");
-                    return;
+                    return null;
                 }
                 object setDef = ReadActorSetDef(createData);
                 if (setDef == null)
@@ -126,7 +137,7 @@ namespace Multiplayer.Sync.Tactical
                     // IsSpawned; if not, we cannot rebuild it client-side → degrade-to-notify.
                     Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
                                    ": ActorSetDef null (actor not IsSpawned?) — skip spawn mirror");
-                    return;
+                    return null;
                 }
 
                 byte[] createBlob, instBlob;
@@ -142,20 +153,34 @@ namespace Multiplayer.Sync.Tactical
                 {
                     Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn netId=" + netId +
                                    ": serialize produced empty blob — skip spawn mirror");
-                    return;
+                    return null;
                 }
 
                 Vector3 pos = ReadPos(actor);
                 int faction = ReadFactionIndex(actor);
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacActorSpawn);
-                byte[] bytes = TacticalActorLifecycleCodec.EncodeSpawn(
+                Debug.Log("[Multiplayer][tac] HOST built tac.actor.spawn netId=" + netId + " seq=" + seq +
+                          " faction=" + faction + " createLen=" + createBlob.Length + " instLen=" + instBlob.Length);
+                return TacticalActorLifecycleCodec.EncodeSpawn(
                     new TacticalActorLifecycleCodec.SpawnPayload(seq, netId, faction, pos.x, pos.y, pos.z,
                         createBlob, instBlob));
-                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacActorSpawn, bytes);
-                Debug.Log("[Multiplayer][tac] HOST broadcast tac.actor.spawn netId=" + netId + " seq=" + seq +
-                          " faction=" + faction + " createLen=" + createBlob.Length + " instLen=" + instBlob.Length);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn failed: " + ex); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn (build) failed: " + ex);
+                return null;
+            }
+        }
+
+        /// <summary>HOST: put a pre-built spawn frame on the wire (see <see cref="TryBuildSpawnBytes"/>).</summary>
+        private static void SendSpawnBytes(NetworkEngine engine, int netId, byte[] bytes)
+        {
+            try
+            {
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacActorSpawn, bytes);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.actor.spawn netId=" + netId + " len=" + bytes.Length);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn (send) failed: " + ex); }
         }
 
         /// <summary>gap-turret-crate-loot HOST: CONTENT-REFRESH a REGISTERED actor's client mirrors — despawn
@@ -163,9 +188,12 @@ namespace Multiplayer.Sync.Tactical
         /// both existing surfaces, both idempotent client-side (the despawn frees the netId so the follow-up
         /// spawn re-materializes instead of skip-marking). Used when a mirrored actor's SERIALIZED state changed
         /// after its 0x92 spawn (a dropped item lands in a ground container AFTER EnterPlay serialized it empty).
-        /// VALIDATES the actor is re-spawnable (ActorSetDef non-null) BEFORE emitting the despawn — a scene-placed
-        /// actor is never destroyed client-side without a replacement. The host registry binding is untouched
-        /// (same netId, same live actor). No-op off-host / unregistered / not-refreshable (log + skip).</summary>
+        /// ATOMIC (review 56558d2): the FULL replacement spawn frame is built + validated FIRST (ActorSetDef,
+        /// serialize, non-empty blobs — <see cref="TryBuildSpawnBytes"/>) and the despawn is emitted ONLY after
+        /// that succeeds — a mirror is never destroyed client-side without its replacement already in hand
+        /// (a checked-then-failed serialize would otherwise leave the client permanently missing the actor).
+        /// The host registry binding is untouched (same netId, same live actor). No-op off-host / unregistered /
+        /// not-refreshable (log + skip, mirror stays stale-but-present).</summary>
         public static void HostRefreshActorMirror(object actor)
         {
             var engine = NetworkEngine.Instance;
@@ -178,14 +206,15 @@ namespace Multiplayer.Sync.Tactical
                     Debug.LogWarning("[Multiplayer][tac] refresh: actor not in the registry — skip (mirror stays stale)");
                     return;
                 }
-                if (ReadActorSetDef(GetProp(actor, "ActorCreateData")) == null)
+                byte[] spawnBytes = TryBuildSpawnBytes(actor, netId);
+                if (spawnBytes == null)
                 {
                     Debug.LogWarning("[Multiplayer][tac] refresh netId=" + netId +
-                                     ": not a spawned actor (scene-placed?) — skip, NO despawn emitted");
+                                     ": replacement spawn not buildable — skip, NO despawn emitted (mirror stays stale)");
                     return;
                 }
                 HostBroadcastDespawn(netId, TacticalActorLifecycleCodec.ReasonRefreshed);
-                HostBroadcastSpawn(actor, netId);
+                SendSpawnBytes(engine, netId, spawnBytes);
                 Debug.Log("[Multiplayer][tac] HOST content-refreshed mirror netId=" + netId);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostRefreshActorMirror failed: " + ex); }
