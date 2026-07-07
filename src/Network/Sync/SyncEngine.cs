@@ -1397,6 +1397,21 @@ namespace Multiplayer.Network.Sync
                         pending: State.ReportModalClassifier.InterceptionNoticeIsPending(p.ModalType));
                     return false;   // notify-only text prompt — never occupies the display queue
                 }
+                // INTEL NOTICE (gap AC, AlienResearchBrief 23): the pandoran-evolution intel report — the
+                // client never rebuilds the native window (live-context 3D-carousel bind — classifier INTEL
+                // FAMILY note); it shows the notify-only prompt. NON-blocking report; same consecutive-dup
+                // guard as the interception pair.
+                if (p.Variant == State.ReportModalVariant.IntelNotice)
+                {
+                    if (!_outcomeDedup.ShouldShow(data))
+                    {
+                        Debug.Log("[Multiplayer] CLIENT OnReportModalShow modalType=" + p.ModalType
+                                  + " → IGNORED (duplicate intel-notice delivery)");
+                        return false;
+                    }
+                    State.GeoModalDisplay.ShowIntelReportNotice(p.ModalType);
+                    return false;   // notify-only text prompt — never occupies the display queue
+                }
                 // MISSION OUTCOME (Batch-2 P3) takes its own path: consecutive-dup guard (0x69 has no occId until
                 // Batch-3 P5; STUN reliable sends twice) + queue-don't-drop when this client is still in tactical
                 // (the host's post-tac rail fires on ITS geoscape re-entry, which can precede ours).

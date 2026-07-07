@@ -182,6 +182,24 @@ public class ReportModalProtocolTests
     }
 
     [Fact]
+    public void IntelNotice_RoundTrips_DefaultsOnly()
+    {
+        // AlienResearchBrief 23 (gap AC): zero-reflection host build (WA-3 precedent) — every field stays at
+        // its default; priority 100 = the native OpenModal default (GeoscapeView.cs:868).
+        var p = new ReportModalPayload(23, ReportModalVariant.IntelNotice, -1, 100, 0, "", null);
+        var bytes = SyncProtocol.EncodeReportModal(p);
+        Assert.True(SyncProtocol.TryDecodeReportModal(bytes, out var d));
+        Assert.Equal(23, d.ModalType);
+        Assert.Equal(ReportModalVariant.IntelNotice, d.Variant);
+        Assert.Equal(-1, d.SiteId);
+        Assert.Equal(100, d.Priority);
+        Assert.Equal("", d.DefId);
+        Assert.Empty(d.ExtraIds);
+        Assert.Equal(0, d.MissionClass);      // no outcome tail on this variant
+        Assert.Empty(d.RewardBlob);
+    }
+
+    [Fact]
     public void MissionOutcome_EmptyReward_RoundTripsEmpty()
     {
         // Cancel-path outcome (mission.Cancel() → fresh empty GeoFactionReward): null blob → empty on decode,

@@ -45,6 +45,13 @@ namespace Multiplayer.Network.Sync.State
     ///                                  client NEVER rebuilds the native window: it always shows the notify-only
     ///                                  text prompt (32 = pending-decision text + host gate armed; 33 = resolved
     ///                                  text, non-blocking). No ids carried — all fields stay defaults.
+    ///   • <see cref="IntelNotice"/>  — the pandoran-evolution intel report (AlienResearchBrief 23, gap AC).
+    ///                                  The bind is UNBUILDABLE client-side (reads the live
+    ///                                  GeoscapeViewContext.Input + live alien-faction ResearchElements for its
+    ///                                  3D mutation carousel — AlienResearchBriefDataBind.cs:250), so the client
+    ///                                  ALWAYS shows the notify-only text prompt (InterceptionNotice precedent).
+    ///                                  Non-blocking report; the diplomacy penalty it reports rides the mirrored
+    ///                                  diplomacy channel (#4). No ids carried — all fields stay defaults.
     ///   • <see cref="CampaignEnd"/>  — the CAMPAIGN ended on the host (feat-campaign-end): victory outro /
     ///                                  defeat by Phoenix collapse / TFTV custom ending — all through the ONE
     ///                                  native chokepoint GeoLevelController.TriggerGameOver. NOT an OpenModal
@@ -66,6 +73,7 @@ namespace Multiplayer.Network.Sync.State
         ActiveMissionBrief = 7, // LIVE→site-id briefs off the P1-mirrored site.ActiveMission — blocking + degradable
         InterceptionNotice = 8, // interception brief/outcome (32/33) — ALWAYS notify-only on the client (WA-3)
         CampaignEnd = 9,      // campaign conclusion notice (synthetic sentinel 255) — outro replay / degrade+teardown
+        IntelNotice = 10,     // pandoran-evolution intel report (23) — ALWAYS notify-only on the client (gap AC)
     }
 
     /// <summary>

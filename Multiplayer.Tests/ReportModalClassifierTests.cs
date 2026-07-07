@@ -54,13 +54,23 @@ public class ReportModalClassifierTests
     public void IsReportModal_InterceptionPair_True(int modalType)
         => Assert.True(ReportModalClassifier.IsReportModal(modalType));
 
+    // ── gap AC (verify-first close 2026-07-07): AlienResearchBrief 23 mirrors as an ALWAYS-notify-only
+    // variant. Verified in refs/TFTV-src: TFTV does NOT suppress the vanilla GeoAlienFaction.UpdateResearch →
+    // OnNewIntelligence → modal-23 path (its UpdateResearch patch is commented out; the ACTIVE
+    // AlienResearchQueueSeeder patch keeps pandoran research running), and TFTV's own SDI/ODI intel rides the
+    // already-mirrored 0x65 event rail (EventSystem.TriggerGeoscapeEvent) — so the vanilla modal still fires
+    // under TFTV and needed the 0x69 whitelist. The bind is unbuildable client-side (live
+    // GeoscapeViewContext.Input + live alien ResearchElements → 3D mutation carousel). ──
+    [Fact]
+    public void IsReportModal_AlienResearchBrief_True()
+        => Assert.True(ReportModalClassifier.IsReportModal(ReportModalClassifier.AlienResearchBrief));
+
     [Theory]
     [InlineData(7)]    // LoadPrompt
     [InlineData(8)]    // SiteEncounter (encounter modal — event-adjacent; MUST stay out of the report channel, S3)
     [InlineData(13)]   // DualClassPicker (decision)
     [InlineData(17)]   // HavenInfiltrateBrief (steal-mission family — outside the P1 class map)
     [InlineData(18)]   // HavenInfiltrateOutcome (steal-mission family — deliberately excluded, Batch-2)
-    [InlineData(23)]   // AlienResearchBrief (deferred — P8 verify-first)
     [InlineData(40)]   // GameDemoEnd
     [InlineData(-1)]   // None
     [InlineData(9999)] // _CustomMission (would alias to a small byte if truncated — must stay false)
@@ -80,6 +90,7 @@ public class ReportModalClassifierTests
             0, 2, 4, 6, 11, 14, 15, 20, 25, 26, 28, 34, 36, 38,       // Phase-A reports + mirrored briefs
             1, 3, 5, 12, 16, 21, 27, 29, 35, 37,                       // Batch-2 P3 mission outcomes
             32, 33,                                                    // WA-3 interception pair (notify-only)
+            23,                                                        // gap AC alien intel report (notify-only)
         };
         // ModalType spans None=-1 and 0..40 (GameHavenAttackBrief..GameDemoEnd), plus _CustomMission=9999.
         foreach (var modalType in EnumerateModalTypeValues())
@@ -185,6 +196,7 @@ public class ReportModalClassifierTests
     [InlineData(37, ReportModalVariant.MissionOutcome)]  // InfestedHavenOutcome
     [InlineData(32, ReportModalVariant.InterceptionNotice)] // InterceptionBrief (WA-3 — always notify-only)
     [InlineData(33, ReportModalVariant.InterceptionNotice)] // InterceptionOutcome (WA-3 — always notify-only)
+    [InlineData(23, ReportModalVariant.IntelNotice)]        // AlienResearchBrief (gap AC — always notify-only)
     public void VariantFor_MapsEachWhitelistedModal(int modalType, ReportModalVariant expected)
         => Assert.Equal(expected, ReportModalClassifier.VariantFor(modalType));
 
@@ -200,6 +212,7 @@ public class ReportModalClassifierTests
     [InlineData(ReportModalVariant.ActiveMissionBrief, true)]
     [InlineData(ReportModalVariant.MissionOutcome, true)]   // post-tac rail + cancel paths: OpenModalPersistent
     [InlineData(ReportModalVariant.InterceptionNotice, false)] // never replays a native modal (notify-only prompt)
+    [InlineData(ReportModalVariant.IntelNotice, false)]        // never replays a native modal (notify-only prompt)
     public void IsPersistent_MatchesNativeOpener(ReportModalVariant variant, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.IsPersistent(variant));
 
@@ -229,6 +242,7 @@ public class ReportModalClassifierTests
     [InlineData(12, false)]   // GeoPhoenixBaseDefenseOutcome
     [InlineData(32, false)]   // InterceptionBrief — blocking, must arm/broadcast synchronously (payload reads nothing)
     [InlineData(33, false)]   // InterceptionOutcome — payload reads nothing, no read-timing hazard
+    [InlineData(23, false)]   // AlienResearchBrief — payload reads nothing (zero reflection), no read-timing hazard
     public void ShouldDeferHostBroadcast_OnlyResearch(int modalType, bool expected)
         => Assert.Equal(expected, ReportModalClassifier.ShouldDeferHostBroadcast(modalType));
 
@@ -255,6 +269,17 @@ public class ReportModalClassifierTests
         // The ActiveMissionBrief degrade decision must NOT claim the interception variant — it has its own
         // always-notify path (ShowInterceptionNotice), pinned here so the two degrade rails stay distinct.
         Assert.False(ReportModalClassifier.ShouldShowDegradedNotice(ReportModalVariant.InterceptionNotice, rebuildSucceeded: false));
+    }
+
+    // ── gap AC: the intel notice is a pure REPORT — never blocking (native OpenModal, no PauseGame), never
+    // mandatory (no view-lock machinery), and never claimed by the ActiveMissionBrief degrade rail (it has
+    // its own always-notify path, ShowIntelReportNotice). Pinned so the notify-only contract stays intact. ──
+    [Fact]
+    public void IntelNotice_NonBlocking_NeverMandatory_NeverDegradedBriefNotice()
+    {
+        Assert.False(ReportModalClassifier.IsBlockingModal(ReportModalClassifier.AlienResearchBrief));
+        Assert.False(ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.AlienResearchBrief));
+        Assert.False(ReportModalClassifier.ShouldShowDegradedNotice(ReportModalVariant.IntelNotice, rebuildSucceeded: false));
     }
 
     // ── ActiveMissionBrief rebuild-vs-degrade decision (Batch-1): the client binds its P1-mirrored

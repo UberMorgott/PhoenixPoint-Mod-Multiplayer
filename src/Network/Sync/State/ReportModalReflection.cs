@@ -189,6 +189,13 @@ namespace Multiplayer.Network.Sync.State
                     // ModalType — so NOTHING is read off the modalData here (zero reflection = zero host-side
                     // failure modes). All payload fields stay defaults.
                     break;
+                case ReportModalVariant.IntelNotice:
+                    // AlienResearchBrief 23 (gap AC): the client NEVER rebuilds the native window (the bind
+                    // reads the live GeoscapeViewContext.Input + live ALIEN-faction ResearchElements for its
+                    // 3D mutation carousel — see the classifier's INTEL FAMILY note), it only shows the
+                    // notify-only prompt — so NOTHING is read off the modalData here (WA-3 zero-reflection
+                    // precedent). The diplomacy penalty rides the mirrored diplomacy channel (#4).
+                    break;
                 case ReportModalVariant.NullData:
                 default:
                     break; // modalType only

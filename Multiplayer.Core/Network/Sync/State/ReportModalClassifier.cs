@@ -97,6 +97,23 @@ namespace Multiplayer.Network.Sync.State
     ///     payload-carried MissionOutcome variant; its bind (InterceptionOutcomeDataBind.DisplayMissionData)
     ///     reads live <c>PlayerAircraft/EnemyAircraft.Vehicle</c> equipment panels + <c>PlayerAircraftCrew</c>
     ///     + <c>Reward</c> — unstampable. NON-blocking (a report): resolved-text notice, no gate, local close.
+    /// INTEL FAMILY (gap AC razvedsvodka, verify-first close 2026-07-07): AlienResearchBrief 23 — the
+    /// pandoran-evolution intel report (<c>GeoAlienFaction.UpdateResearch</c> → <c>OnNewIntelligence</c> →
+    /// <c>GeoscapeView.OnNewAlienIntlligence</c> → OpenModal(23), GeoscapeView.cs:2007-2021) — whitelisted as
+    /// <see cref="ReportModalVariant.IntelNotice"/>, ALWAYS notify-only on the client (WA-3 InterceptionNotice
+    /// precedent). Verification result (refs/TFTV-src, 2026-07-07):
+    ///   • TFTV does NOT suppress the vanilla path — its only UpdateResearch patch is COMMENTED OUT
+    ///     (TFTVExperimental.cs:759) and the ACTIVE <c>AlienResearchQueueSeeder</c> patch
+    ///     (TFTVExperimental.cs:693, Postfix on GeoAlienFaction.OnResearchUpdated) deliberately KEEPS pandoran
+    ///     research running → modal 23 can still fire with TFTV installed (and always fires in vanilla).
+    ///   • TFTV's own SDI/ODI intel events ride <c>GeoscapeEventSystem.TriggerGeoscapeEvent</c>
+    ///     (TFTVODIandVoidOmenRoll.cs:544) → the already-mirrored 0x65 event rail — no work needed there.
+    /// The native bind is UNBUILDABLE from synced ids: it reads the live <c>GeoscapeViewContext.Input</c>
+    /// (AlienResearchBriefDataBind.cs:250 — NRE on a null Context) + live ALIEN-faction ResearchElements for
+    /// its 3D mutation-carousel captures, and the client's alien research sim is not mirrored. NON-blocking
+    /// report (native OpenModal, no PauseGame): no gate, no view-lock, local dismiss; the diplomacy penalty it
+    /// reports (<c>GenerateIgnoredAlienBaseDiplomacyPenalty</c>) rides the mirrored diplomacy channel (#4).
+    /// Host payload build reads NOTHING off the live modalData (zero reflection — WA-3 precedent).
     /// DELIBERATE EXCLUSIONS (verified 2026-07-05):
     ///   • HavenInfiltrateOutcome 18 — the steal-mission classes are outside the P1 class map (no rebuild ctor path).
     ///   • BehemothAttackOutcome 35 IS whitelisted (suppresses a client-local ghost + keeps host authority) but its
@@ -139,6 +156,9 @@ namespace Multiplayer.Network.Sync.State
         public const int InterceptionBrief = 32;               // ModalType.cs:37 — live-aircraft decision brief (blocking)
         public const int InterceptionOutcome = 33;             // ModalType.cs:38 — air-battle result report (non-blocking)
 
+        // ── pandoran-evolution intel report (gap AC; ALWAYS notify-only on the client) ──
+        public const int AlienResearchBrief = 23;              // ModalType.cs:28 — alien intel report (non-blocking)
+
         /// <summary>True iff <paramref name="modalType"/> (native ModalType enum value) is a whitelisted
         /// report modal. Takes the full int value (ModalType is int-backed: None=-1, _CustomMission=9999) so a
         /// non-report id can never alias a whitelisted one. PURE.</summary>
@@ -172,6 +192,7 @@ namespace Multiplayer.Network.Sync.State
                 case InfestedHavenOutcome:
                 case InterceptionBrief:
                 case InterceptionOutcome:
+                case AlienResearchBrief:
                     return true;
                 default:
                     return false;
@@ -213,6 +234,8 @@ namespace Multiplayer.Network.Sync.State
                 case InterceptionBrief:
                 case InterceptionOutcome:
                     return ReportModalVariant.InterceptionNotice;
+                case AlienResearchBrief:
+                    return ReportModalVariant.IntelNotice;
                 case GeoPhoenixBaseOutcome:
                 default:
                     return ReportModalVariant.NullData;
@@ -223,8 +246,8 @@ namespace Multiplayer.Network.Sync.State
         /// opened PERSISTENT natively (OpenModalPersistent — every mission brief via ShowMissionBriefing,
         /// GeoscapeView.cs:1903; every whitelisted outcome via the post-tac rail UIStateInitial.cs:112 and the
         /// cancel paths :1934/:1938); Research/Diplomacy via OpenModal (non-persistent). The client replays with
-        /// the same persistence. InterceptionNotice never replays a native modal at all (the client shows the
-        /// notify-only prompt) → false. PURE.</summary>
+        /// the same persistence. InterceptionNotice/IntelNotice never replay a native modal at all (the client
+        /// shows the notify-only prompt) → false. PURE.</summary>
         public static bool IsPersistent(ReportModalVariant variant)
             => variant == ReportModalVariant.NullData || variant == ReportModalVariant.SiteOnly
                || variant == ReportModalVariant.AmbushBrief || variant == ReportModalVariant.SiteMissionBrief

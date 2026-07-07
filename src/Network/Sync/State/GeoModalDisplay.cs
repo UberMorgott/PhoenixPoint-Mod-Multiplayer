@@ -294,6 +294,21 @@ namespace Multiplayer.Network.Sync.State
                 "ShowInterceptionNotice modalType=" + modalType + " pending=" + pending);
 
         /// <summary>
+        /// Client: the host received the pandoran-evolution INTEL report (AlienResearchBrief 23, gap AC). The
+        /// native window is decompile-verified unbuildable client-side (the bind reads the live
+        /// <c>GeoscapeViewContext.Input</c> — AlienResearchBriefDataBind.cs:250, NRE on a null Context — plus
+        /// live ALIEN-faction ResearchElements for its 3D mutation carousel, and the client's alien research
+        /// sim is not mirrored), so this is the SAME notify-only degrade path as the interception pair.
+        /// NON-blocking report: dismissing is local-only; the diplomacy penalty the report carries is already
+        /// mirrored via the diplomacy channel (#4). Best-effort: a MessageBox miss just logs.
+        /// </summary>
+        public static void ShowIntelReportNotice(byte modalType)
+            => ShowNoticePrompt(
+                "The host received an intel report: the Pandoran threat is evolving.\n" +
+                "Any diplomatic fallout is already reflected on your side.",
+                "ShowIntelReportNotice modalType=" + modalType);
+
+        /// <summary>
         /// Client: the HOST's campaign ended (feat-campaign-end) but the native outro replay FAILED —
         /// degrade to the notify-only prompt (ReportMirrorGate degrade-to-notify precedent) with the ending
         /// kind; the caller then returns to the main menu (notice ALWAYS precedes the teardown —
