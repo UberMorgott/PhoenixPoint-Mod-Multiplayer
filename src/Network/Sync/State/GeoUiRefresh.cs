@@ -31,8 +31,9 @@ namespace Multiplayer.Network.Sync.State
     /// </summary>
     public static class GeoUiRefresh
     {
-        /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C); BaseLayout = facility grid.</summary>
-        public enum Screen { Manufacturing, Research, BaseLayout }
+        /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C);
+        /// BaseLayout = facility grid; RosterEquip = the soldier-equipment/inventory edit screen (UIStateEditSoldier).</summary>
+        public enum Screen { Manufacturing, Research, BaseLayout, RosterEquip }
 
         private static bool _ready;
         private static FieldInfo _viewField;          // GeoLevelController.View
@@ -155,6 +156,7 @@ namespace Multiplayer.Network.Sync.State
                     case Screen.Manufacturing: RefreshManufacturing(rt); break;
                     case Screen.Research: RefreshResearch(rt); break;
                     case Screen.BaseLayout: RefreshBaseLayout(rt); break;
+                    case Screen.RosterEquip: RefreshRosterEquip(rt); break;
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
@@ -170,6 +172,7 @@ namespace Multiplayer.Network.Sync.State
             Refresh(rt, Screen.Research);
             Refresh(rt, Screen.Manufacturing);
             Refresh(rt, Screen.BaseLayout);
+            Refresh(rt, Screen.RosterEquip);
         }
 
         /// <summary>
@@ -316,6 +319,89 @@ namespace Multiplayer.Network.Sync.State
             for (int i = 2; i < ps.Length; i++)
                 args[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
             _baseLayoutInit.Invoke(module, args);
+        }
+
+        // ─── Roster soldier-equipment screen (UIStateEditSoldier) ─────────────────────────────────────
+        // The geoscape roster equip/inventory screen (UIStateEditSoldier) is an EDITOR-BUFFER screen: its item
+        // grids (UIModuleSoldierEquip) are a working copy populated from the model on open / soldier-switch
+        // (UIStateEditSoldier.DisplaySoldier → UIModuleSoldierEquip.UpdateData) and it subscribes to NO model
+        // item-changed event — so a mirrored personnel-state write (#9 blob ApplySoldierState, or the host's
+        // authoritative relayed-equip SetItems) is invisible until the player switches soldier or reopens. We
+        // re-drive the panel's OWN read path (UpdateData with the soldier's live item lists) so an open screen
+        // repaints from the freshly-stamped model — decompile-verified 2026-07-07:
+        //   • GeoscapeView.CurrentViewState (public getter, GeoscapeView.cs:193) → active GeoscapeViewState.
+        //   • GeoscapeModulesData.SoldierEquipModule (public field, :110) → UIModuleSoldierEquip.
+        //   • UIStateEditSoldier._currentCharacter (private GeoCharacter, :44) = the exact soldier being edited.
+        //   • repaint = UIModuleSoldierEquip.UpdateData(inv, ready, armour, storage, slots) (:626), exactly the
+        //     call DisplaySoldier makes (:582), inventory=InventoryItems ready=EquipmentItems armour=ArmourItems.
+        // READ-ONLY + echo-safe: UpdateData rebuilds the UI lists via UIInventoryList.SetItems (:118), which does
+        // NOT fire OnSlotItemChanged and NEVER calls GeoCharacter.SetItems — so it can never re-enter the client
+        // edit-relay (SetItemsEditRelayPatch), unlike the deferred UIStateEditSoldier→UpdateSoldierEquipment flush.
+        // SoldierEquipModule is SHARED with the vehicle-edit screen (UIStateEditVehicle also drives it), so we gate
+        // on CurrentViewState actually being UIStateEditSoldier before touching it. Best-effort; any miss no-ops.
+        private static bool _rosterEquipEnsured;
+        private static PropertyInfo _currentViewStateProp;   // GeoscapeView.CurrentViewState (getter)
+        private static Type _editSoldierType;                // UIStateEditSoldier
+        private static FieldInfo _editSoldierCharField;      // UIStateEditSoldier._currentCharacter (private GeoCharacter)
+        private static FieldInfo _soldierEquipModuleField;   // GeoscapeModulesData.SoldierEquipModule
+        private static MethodInfo _soldierEquipUpdateData;   // UIModuleSoldierEquip.UpdateData(inv,ready,armour,storage,slots)
+        private static PropertyInfo _charInventoryItemsProp; // GeoCharacter.InventoryItems
+        private static PropertyInfo _charEquipmentItemsProp; // GeoCharacter.EquipmentItems
+        private static PropertyInfo _charArmourItemsProp;    // GeoCharacter.ArmourItems
+
+        private static void EnsureRosterEquip()
+        {
+            if (_rosterEquipEnsured) return;
+            _rosterEquipEnsured = true;
+            try
+            {
+                var viewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+                var modulesType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
+                var soldierEquipType = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewModules.UIModuleSoldierEquip");
+                _editSoldierType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateEditSoldier");
+                var charType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter");
+                if (viewType == null || modulesType == null || soldierEquipType == null || _editSoldierType == null || charType == null) return;
+                _currentViewStateProp = AccessTools.Property(viewType, "CurrentViewState");
+                _editSoldierCharField = AccessTools.Field(_editSoldierType, "_currentCharacter");
+                _soldierEquipModuleField = AccessTools.Field(modulesType, "SoldierEquipModule");
+                _soldierEquipUpdateData = AccessTools.Method(soldierEquipType, "UpdateData");
+                _charInventoryItemsProp = AccessTools.Property(charType, "InventoryItems");
+                _charEquipmentItemsProp = AccessTools.Property(charType, "EquipmentItems");
+                _charArmourItemsProp = AccessTools.Property(charType, "ArmourItems");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureRosterEquip failed: " + ex.Message); }
+        }
+
+        private static void RefreshRosterEquip(GeoRuntime rt)
+        {
+            EnsureRosterEquip();
+            if (_currentViewStateProp == null || _editSoldierType == null || _editSoldierCharField == null
+                || _soldierEquipModuleField == null || _soldierEquipUpdateData == null
+                || _charInventoryItemsProp == null || _charEquipmentItemsProp == null || _charArmourItemsProp == null
+                || _viewField == null || _modulesField == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            // Gate: the active geoscape view state must be the soldier-equip screen. SoldierEquipModule is shared
+            // with UIStateEditVehicle — repainting soldier item lists onto an open vehicle screen would corrupt it.
+            var state = _currentViewStateProp.GetValue(view, null);
+            if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return;
+            var module = _soldierEquipModuleField.GetValue(modules);
+            if (module == null || !IsOpen(module)) return;
+            var character = _editSoldierCharField.GetValue(state);
+            if (character == null) return; // between soldiers / not yet displayed
+
+            // Re-drive UpdateData(inventory, ready, armour, storage:null, inventorySlots:0) exactly as
+            // UIStateEditSoldier.DisplaySoldier does — rebuild the soldier's three item grids from the live
+            // (freshly-mirrored) model. storage:null leaves the shared-stores panel untouched (a separate channel
+            // owns it — audit backlog); the inventorySlots arg is unused by this UpdateData overload (pass 0).
+            object inv = _charInventoryItemsProp.GetValue(character, null);
+            object ready = _charEquipmentItemsProp.GetValue(character, null);
+            object armour = _charArmourItemsProp.GetValue(character, null);
+            _soldierEquipUpdateData.Invoke(module, new object[] { inv, ready, armour, null, 0 });
         }
 
         // ─── WA-3: aircraft HP bar (vehicle-selected panel) ──────────────────────────────────────────
