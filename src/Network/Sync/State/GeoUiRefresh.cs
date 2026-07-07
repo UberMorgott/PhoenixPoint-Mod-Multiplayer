@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -34,8 +36,9 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>Screen ids for channel→UI mapping. Inventory→Manufacturing (incr. A); Research (incr. C);
         /// BaseLayout = facility grid; RosterEquip = soldier-equipment/inventory/progression edit screen
         /// (UIStateEditSoldier); RosterOverview = soldier roster list (UIStateGeoRoster); Containment =
-        /// alien-containment (UIStateRosterAliens); Recruits = recruit-hire (UIStateRosterRecruits).</summary>
-        public enum Screen { Manufacturing, Research, BaseLayout, RosterEquip, RosterOverview, Containment, Recruits }
+        /// alien-containment (UIStateRosterAliens); Recruits = recruit-hire (UIStateRosterRecruits);
+        /// VehicleEquip = ground-vehicle equipment edit screen (UIStateEditVehicle).</summary>
+        public enum Screen { Manufacturing, Research, BaseLayout, RosterEquip, RosterOverview, Containment, Recruits, VehicleEquip }
 
         private static bool _ready;
         private static FieldInfo _viewField;          // GeoLevelController.View
@@ -162,6 +165,7 @@ namespace Multiplayer.Network.Sync.State
                     case Screen.RosterOverview: RefreshRosterOverview(rt); break;
                     case Screen.Containment: RefreshContainment(rt); break;
                     case Screen.Recruits: RefreshRecruits(rt); break;
+                    case Screen.VehicleEquip: RefreshVehicleEquip(rt); break;
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.Refresh best-effort failed: " + ex.Message); }
@@ -170,7 +174,8 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>
         /// Single fan-out over every CHEAP "needs-kick" geoscape screen (those that rebuild only on Init, not
         /// from model events): Research + Manufacturing + BaseLayout + RosterEquip (soldier equip/storage/
-        /// progression) + RosterOverview (soldier roster list). Both host and client drive this after a synced
+        /// progression) + VehicleEquip (ground-vehicle equip/storage) + RosterOverview (soldier roster list).
+        /// Both host and client drive this after a synced
         /// apply. Add one line here to cover a new needs-kick screen everywhere. Each Refresh no-ops if closed.
         /// NOTE: the two POOL screens (Containment / Recruits) are deliberately NOT here — their only native
         /// refresh idiom is a full state re-enter (too heavy to run on every action/channel apply); they are
@@ -182,6 +187,7 @@ namespace Multiplayer.Network.Sync.State
             Refresh(rt, Screen.Manufacturing);
             Refresh(rt, Screen.BaseLayout);
             Refresh(rt, Screen.RosterEquip);
+            Refresh(rt, Screen.VehicleEquip);
             Refresh(rt, Screen.RosterOverview);
         }
 
@@ -381,6 +387,22 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _toAlienContainment;       // GeoscapeView.ToAlienContainmentState(bool)
         private static Type _rosterRecruitsType;             // UIStateRosterRecruits
         private static MethodInfo _toPhoenixRecruits;        // GeoscapeView.ToPhoenixRecruitsState(bool)
+        // Ground-vehicle equip screen (UIStateEditVehicle) — shares SoldierEquipModule but drives the VEHICLE
+        // slot layout (weapon/hull/engine) via UpdateVehicleData, so it needs its own re-drive path.
+        private static Type _editVehicleType;                // UIStateEditVehicle
+        private static FieldInfo _editVehicleCharField;      // UIStateEditVehicle._currentCharacter
+        private static FieldInfo _editVehicleRefreshNeededField; // UIStateEditVehicle._uiRefreshNeeded
+        private static FieldInfo _editVehicleRefreshStorageField; // UIStateEditVehicle._refreshStorage
+        private static MethodInfo _editVehicleRefreshStorage;    // UIStateEditVehicle.RefreshStorage()
+        private static MethodInfo _soldierEquipUpdateVehicleData;// UIModuleSoldierEquip.UpdateVehicleData(inv,storage,weapon,hull,engine,slots)
+        private static Type _iCommonItemType;                // PhoenixPoint.Common.Entities.ICommonItem (list element)
+        private static Type _iVehicleEquipmentType;          // Code.PhoenixPoint.Tactical.Entities.Equipments.IVehicleEquipment
+        private static MethodInfo _getEquipmentType;         // IVehicleEquipment.GetEquipmentType() → GroundVehicleEquipmentType
+        private static object _gveWeapon, _gveHull, _gveEngine;  // boxed GroundVehicleEquipmentType values
+        private static Type _geoItemType2;                   // PhoenixPoint.Geoscape.Entities.GeoItem
+        private static PropertyInfo _geoItemDefProp2;        // GeoItem.ItemDef
+        private static PropertyInfo _charStatsProp;          // GeoCharacter.CharacterStats
+        private static MethodInfo _getInventorySlots;        // CharacterStats.GetInventorySlots()
 
         private static void EnsureRosterFamily()
         {
@@ -436,6 +458,32 @@ namespace Multiplayer.Network.Sync.State
                 _toAlienContainment = AccessTools.Method(viewType, "ToAlienContainmentState", new[] { typeof(bool) });
                 _rosterRecruitsType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateRosterRecruits");
                 _toPhoenixRecruits = AccessTools.Method(viewType, "ToPhoenixRecruitsState", new[] { typeof(bool) });
+
+                // ground-vehicle equip screen (best-effort; absence must not break the soldier re-drives)
+                _editVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateEditVehicle");
+                if (_editVehicleType != null)
+                {
+                    _editVehicleCharField = AccessTools.Field(_editVehicleType, "_currentCharacter");
+                    _editVehicleRefreshNeededField = AccessTools.Field(_editVehicleType, "_uiRefreshNeeded");
+                    _editVehicleRefreshStorageField = AccessTools.Field(_editVehicleType, "_refreshStorage");
+                    _editVehicleRefreshStorage = AccessTools.Method(_editVehicleType, "RefreshStorage");
+                    // UIModuleSoldierEquip.UpdateVehicleData(inv, storage, weapon, hull, engine, slots) — 6-arg vehicle layout.
+                    _soldierEquipUpdateVehicleData = AccessTools.Method(soldierEquipType, "UpdateVehicleData");
+                    _iCommonItemType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.ICommonItem");
+                    _iVehicleEquipmentType = AccessTools.TypeByName("Code.PhoenixPoint.Tactical.Entities.Equipments.IVehicleEquipment");
+                    if (_iVehicleEquipmentType != null) _getEquipmentType = AccessTools.Method(_iVehicleEquipmentType, "GetEquipmentType");
+                    var gveEnum = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType");
+                    if (gveEnum != null)
+                    {
+                        try { _gveWeapon = Enum.Parse(gveEnum, "Weapon"); _gveHull = Enum.Parse(gveEnum, "Hull"); _gveEngine = Enum.Parse(gveEnum, "Engine"); }
+                        catch { _gveWeapon = _gveHull = _gveEngine = null; }
+                    }
+                    _geoItemType2 = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoItem");
+                    if (_geoItemType2 != null) _geoItemDefProp2 = AccessTools.Property(_geoItemType2, "ItemDef");
+                    _charStatsProp = AccessTools.Property(charType, "CharacterStats");
+                    var charStatsType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.CharacterStats");
+                    if (charStatsType != null) _getInventorySlots = AccessTools.Method(charStatsType, "GetInventorySlots");
+                }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureRosterFamily failed: " + ex.Message); }
         }
@@ -564,6 +612,95 @@ namespace Multiplayer.Network.Sync.State
             if (state == null || !_rosterRecruitsType.IsInstanceOfType(state)) return;
             // Re-enter the recruits state (its own refresh idiom) so it re-reads the haven/naked recruit pool.
             _toPhoenixRecruits.Invoke(view, new object[] { true });
+        }
+
+        // Ground-vehicle equip screen (UIStateEditVehicle). Reached from the vehicle roster / aircraft bay; it
+        // reuses the SHARED SoldierEquipModule but drives the VEHICLE slot layout (weapon/hull/engine) via
+        // UpdateVehicleData, and its own item edits commit through GeoCharacter.SetItems (a vehicle IS a
+        // GeoCharacter) — so the client edit already rides the existing SetItemsEditRelayPatch and mirrors back
+        // on the #9 blob. What was missing was the REPAINT: RefreshRosterEquip gates to UIStateEditSoldier only,
+        // so a mirrored vehicle-equip write left the open UIStateEditVehicle stale. We re-drive the panel's OWN
+        // vehicle read path (UpdateVehicleData) exactly as UIStateEditVehicle.DisplaySoldier (:346) — model→UI,
+        // never calls SetItems, so it cannot re-enter the edit relay (echo-free). Decompile-verified 2026-07-07.
+        private static void RefreshVehicleEquip(GeoRuntime rt)
+        {
+            EnsureRosterFamily();
+            if (_editVehicleType == null || _editVehicleCharField == null || _soldierEquipModuleField == null
+                || _soldierEquipUpdateVehicleData == null || _charInventoryItemsProp == null
+                || _charEquipmentItemsProp == null || _charArmourItemsProp == null || _iCommonItemType == null
+                || _iVehicleEquipmentType == null || _getEquipmentType == null || _geoItemType2 == null
+                || _geoItemDefProp2 == null || _gveWeapon == null || _gveHull == null || _gveEngine == null
+                || _modulesField == null || _viewField == null || _currentViewStateProp == null) return;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return;
+            // Gate: active view state MUST be the vehicle-equip screen (SoldierEquipModule is shared with
+            // UIStateEditSoldier — driving vehicle slot lists onto an open soldier screen would corrupt it).
+            var state = _currentViewStateProp.GetValue(view, null);
+            if (state == null || !_editVehicleType.IsInstanceOfType(state)) return;
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return;
+            var module = _soldierEquipModuleField.GetValue(modules);
+            if (module == null || !IsOpen(module)) return;
+            var character = _editVehicleCharField.GetValue(state);
+            if (character == null) return;
+
+            // SKIP if the viewer has an unflushed local equipment drag (_uiRefreshNeeded, set until the next
+            // UpdateState flush) — re-reading the model here would clobber it. Skip-if-editing beats clobber.
+            if (_editVehicleRefreshNeededField?.GetValue(state) is bool re && re)
+            {
+                Debug.Log("[Multiplayer] GeoUiRefresh: EditVehicle equip re-drive SKIPPED — viewer has an unflushed local equipment edit");
+                return;
+            }
+
+            object inv = _charInventoryItemsProp.GetValue(character, null);
+            object weapon = FilterVehicleEquip(character, _gveWeapon);
+            object hull = FilterVehicleEquip(character, _gveHull);
+            object engine = FilterVehicleEquip(character, _gveEngine);
+            int slots = 0;
+            if (_charStatsProp != null && _getInventorySlots != null)
+            {
+                var stats = _charStatsProp.GetValue(character, null);
+                if (stats != null) { try { slots = Convert.ToInt32(_getInventorySlots.Invoke(stats, null)); } catch { slots = 0; } }
+            }
+            // UpdateVehicleData(inventory, storage:null, weapon, hull, engine, inventorySlots) — storage stays
+            // null (a separate re-read below owns the shared-stores panel), mirroring DisplaySoldier.
+            _soldierEquipUpdateVehicleData.Invoke(module, new object[] { inv, null, weapon, hull, engine, slots });
+
+            // shared-stores panel: force a model re-read of the faction/site ItemStorage (#1). RefreshStorage
+            // reuses the UI's current items unless _refreshStorage is set, so set it first. Read-only, echo-safe.
+            if (_editVehicleRefreshStorage != null && _editVehicleRefreshStorageField != null)
+            {
+                _editVehicleRefreshStorageField.SetValue(state, true);
+                _editVehicleRefreshStorage.Invoke(state, null);
+            }
+        }
+
+        /// <summary>Build a <c>List&lt;ICommonItem&gt;</c> of the character's equipment/armour GeoItems whose
+        /// ItemDef is an <c>IVehicleEquipment</c> of the given <c>GroundVehicleEquipmentType</c> — the exact
+        /// GetVehicleEquipment filter UIStateEditVehicle uses (:337-342). Typed as ICommonItem so the arg binds
+        /// to UpdateVehicleData's <c>IEnumerable&lt;ICommonItem&gt;</c> slot param.</summary>
+        private static object FilterVehicleEquip(object character, object targetTypeBoxed)
+        {
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(_iCommonItemType));
+            AddMatchingVehicleEquip(_charEquipmentItemsProp.GetValue(character, null), targetTypeBoxed, list);
+            AddMatchingVehicleEquip(_charArmourItemsProp.GetValue(character, null), targetTypeBoxed, list);
+            return list;
+        }
+
+        private static void AddMatchingVehicleEquip(object items, object targetTypeBoxed, IList outList)
+        {
+            if (!(items is IEnumerable en)) return;
+            foreach (var it in en)
+            {
+                if (it == null || !_geoItemType2.IsInstanceOfType(it)) continue;
+                object def = _geoItemDefProp2.GetValue(it, null);
+                if (def == null || !_iVehicleEquipmentType.IsInstanceOfType(def)) continue;
+                object t;
+                try { t = _getEquipmentType.Invoke(def, null); } catch { continue; }
+                if (Equals(t, targetTypeBoxed)) outList.Add(it);
+            }
         }
 
         // ─── WA-3: aircraft HP bar (vehicle-selected panel) ──────────────────────────────────────────
