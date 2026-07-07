@@ -12,7 +12,7 @@
 [![Issues](https://img.shields.io/github/issues/UberMorgott/PhoenixPoint-Mod-Multiplayer?style=flat-square)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues)
 [![Last commit](https://img.shields.io/github/last-commit/UberMorgott/PhoenixPoint-Mod-Multiplayer?style=flat-square)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/commits)
 [![CI](https://img.shields.io/github/actions/workflow/status/UberMorgott/PhoenixPoint-Mod-Multiplayer/ci.yml?style=flat-square&label=CI)](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/actions)
-[![Tests](https://img.shields.io/badge/tests-1625%20green-2ea043?style=flat-square)](Multiplayer.Tests)
+[![Tests](https://img.shields.io/badge/tests-1873%20green-2ea043?style=flat-square)](Multiplayer.Tests)
 [![License](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue?style=flat-square)](LICENSE)
 [![Built for TFTV](https://img.shields.io/badge/built%20for-TFTV-e8590c?style=flat-square)](#tftv)
 
@@ -88,13 +88,15 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ "Everybody ready" start barrier
 - [x] ✅ Chunked save transfer to pull every client onto the host's exact campaign (32 KB chunks, CRC checked)
 - [x] ✅ Load-progress and "I am loaded" barrier
+- [x] 🧪 Starting a brand-new campaign from the lobby (host picks difficulty, everyone loads the same first frame)
+- [x] 🧪 Mid-session save load (host loads another save, every client follows without restarting)
 - [x] 🧪 Mid-session drop-in on the Geoscape (join a game already in progress)
 - [x] 🧪 Three-plus player topology
 - [ ] ⬜ Joining a battle that is already underway (parked on purpose)
 
 **Disconnects**
 - [x] ✅ Clean host-left and client-left signaling
-- [ ] ⬜ Reconnect and self-heal after an unexpected host drop
+- [x] 🧪 A dropped client can rejoin the running session (rides the same drop-in path)
 - [ ] ⬜ Host migration (out of scope for v1)
 
 </details>
@@ -144,6 +146,8 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] 🧪 Full soldier live-state
 - [x] 🧪 Equip, augment, hire, transfer, dismiss, rename (permission and ownership gated)
 - [x] 🧪 Recruit pool mirror (available, unarmed, and captured units)
+- [x] 🧪 Level-up spending from a client (buy abilities, spend stat points)
+- [x] 🧪 Containment actions from a client (kill or harvest captured units)
 
 **Events and choices**
 - [x] ✅ Events with answer choices, shown to everyone at once
@@ -171,8 +175,8 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] 🧪 One shared relay behind the Geoscape abilities (scan, probe, repair, activate, guard, and the rest)
 
 **Campaign start and finish**
-- [ ] ⬜ New-game start and intro
-- [ ] ⬜ Campaign end, win or lose
+- [x] 🧪 New-game start (host starts a fresh campaign, everyone begins on the identical save)
+- [x] 🧪 Campaign end, win or lose (everyone sees the same victory or defeat outro)
 
 </details>
 
@@ -195,7 +199,9 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Medkits, plus heal, will-recover, rally, psychic scream, reload, interact
 - [x] ✅ Weapon and equipment swaps
 - [x] ✅ Overwatch arm, clear, and cone
-- [ ] ⬜ Deploy-turret and open-crate abilities (parked)
+- [x] 🧪 Deploy turret, deploy shield, open crate, drop and retrieve items
+- [x] 🧪 Vehicle mount and dismount
+- [x] 🧪 Mind control, frenzy, jet jump, dash, and the other special moves
 
 **Seeing**
 - [x] 🧪 Player-faction vision reconcile
@@ -203,7 +209,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 **The battlefield**
 - [x] ✅ Structural destruction, including blowing things up with grenades
 - [x] 🧪 Ground surfaces and volumes (fire, goo, acid, mist)
-- [ ] ⬜ Window-break geometry capture (parked)
+- [x] 🧪 Window breaks, including glass smashed by soldiers vaulting through
 
 **Unit state**
 - [x] ✅ Per-actor action points, will points, and status effects (yours and the enemy's)
@@ -217,8 +223,9 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 
 **Ending a mission**
 - [x] 🧪 Mission-conclusion mirror
-- [ ] ⬜ Scripted story-mission triggers (not sure yet whether these are wired)
-- [ ] ⬜ Evac-zone list population (parked)
+- [x] 🧪 Live mission-objective tracking (kill target, survive N turns, activate console)
+- [x] 🧪 Scripted story-mission events (mid-battle spawns, zone unlocks, TFTV script guards)
+- [x] 🧪 Evacuation (exit mission, mounted evac, evac-zone unlocks)
 
 **Presentation**
 - [x] ✅ Fire and melee-swing animations
@@ -237,9 +244,11 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Nonce dedup and per-surface sequencing (safe under a double-sending reliable transport)
 - [x] ✅ Chunked save-transfer barrier with CRC validation
 - [x] ✅ NTP-style clock sync
-- [x] ✅ 1625 game-free tests, green, buildable with zero game DLLs
+- [x] ✅ Startup reflection self-check: an incompatible game version blocks co-op with a clear error instead of desyncing
+- [x] ✅ 1873 game-free tests, green, buildable with zero game DLLs
 - [x] ✅ `Multiplayer.Core`, a pure logic library that builds and tests anywhere
-- [ ] ⬜ Rolling divergence detection and low-frequency resync
+- [x] 🧪 Rolling divergence detection (hourly CRC probes over deterministic state subsets)
+- [ ] ⬜ Automatic resync after a detected divergence
 
 </details>
 
