@@ -322,6 +322,7 @@ namespace Multiplayer.Harmony.Sync
                 if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool pandoran && pandoran)
                 {
                     Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: mutoid (mutagen-cost) progression not relayed — buy suppressed");
+                    ClearBoughtSlot(t, __instance);
                     return false;
                 }
                 object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
@@ -340,12 +341,29 @@ namespace Multiplayer.Harmony.Sync
                 if (slotIndex < 0 || trackSource < 0 || string.IsNullOrEmpty(guid))
                 {
                     Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: slot unresolved — buy suppressed (no relay)");
+                    ClearBoughtSlot(t, __instance);
                     return false;
                 }
-                return PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                bool relayed = PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
                     () => new LevelUpAbilityAction(unitId, (byte)trackSource, slotIndex, guid));
+                // Native BuyAbility clears _boughtAbilitySlot after LearnAbility (UIModuleCharacterProgression.cs:418);
+                // we suppressed the native call, so mirror that clear here — a still-set slot keeps GeoUiRefresh's
+                // progression re-drive permanently skipped ("pending local allocation"), so the host-echoed learn
+                // and its SP deduction never repaint on the client (stale SP → the user then over-spends stats the
+                // host rejects with sp=0). Cleared on BOTH allow and deny so the pending pick never sticks.
+                ClearBoughtSlot(t, __instance);
+                return relayed;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BuyAbilityProgressionRelayPatch failed: " + ex.Message); return true; }
+        }
+
+        /// <summary>Reset the module's pending-ability pick after a client-suppressed buy — the native cancel idiom
+        /// (UIModuleCharacterProgression.ClearBoughtAbility :452 nulls _boughtAbilitySlot + refreshes the tracks).
+        /// Best-effort: a miss must never break the suppress path.</summary>
+        private static void ClearBoughtSlot(Type t, object module)
+        {
+            try { AccessTools.Method(t, "ClearBoughtAbility")?.Invoke(module, null); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BuyAbilityProgressionRelayPatch.ClearBoughtSlot failed: " + ex.Message); }
         }
     }
 

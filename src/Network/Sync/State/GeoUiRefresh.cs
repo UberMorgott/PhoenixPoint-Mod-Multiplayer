@@ -522,9 +522,15 @@ namespace Multiplayer.Network.Sync.State
             var module = _soldierEquipModuleField.GetValue(modules);
             if (module != null && IsOpen(module) && character != null)
             {
-                bool equipEditing = _editSoldierRefreshNeededField?.GetValue(state) is bool re && re;
+                // Skip-if-editing protects only the HOST player's own in-progress drag from a re-read clobber.
+                // On a client the equip screen is a pure mirror (a local SetItems is suppressed + relayed as an
+                // EquipSoldier intent — never a local model write, so there is nothing to clobber), and
+                // _uiRefreshNeeded is ALSO set merely by screen-open (DisplaySoldier) / RequestRefreshCharacterData,
+                // not just a genuine drag — so gating on it client-side ate the authoritative repaint at every #9
+                // apply during a peer's live edit (verified: skip fired 1:1 with each mirrored apply). Host-only.
+                bool equipEditing = IsHostEditingGuardActive() && (_editSoldierRefreshNeededField?.GetValue(state) is bool re && re);
                 if (equipEditing)
-                    Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive SKIPPED — viewer has an unflushed local equipment edit");
+                    Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive SKIPPED — host has an unflushed local equipment edit");
                 else
                 {
                     object inv = _charInventoryItemsProp.GetValue(character, null);
@@ -646,11 +652,13 @@ namespace Multiplayer.Network.Sync.State
             var character = _editVehicleCharField.GetValue(state);
             if (character == null) return;
 
-            // SKIP if the viewer has an unflushed local equipment drag (_uiRefreshNeeded, set until the next
-            // UpdateState flush) — re-reading the model here would clobber it. Skip-if-editing beats clobber.
-            if (_editVehicleRefreshNeededField?.GetValue(state) is bool re && re)
+            // SKIP only for the HOST's own unflushed local equipment drag (_uiRefreshNeeded, set until the next
+            // UpdateState flush) — re-reading the model would clobber the host's in-progress drag. A client is a
+            // pure mirror (its vehicle SetItems is suppressed + relayed), so it must ALWAYS repaint the
+            // authoritative #9/#1 apply — same host-only gate as the soldier-equip path above.
+            if (IsHostEditingGuardActive() && _editVehicleRefreshNeededField?.GetValue(state) is bool re && re)
             {
-                Debug.Log("[Multiplayer] GeoUiRefresh: EditVehicle equip re-drive SKIPPED — viewer has an unflushed local equipment edit");
+                Debug.Log("[Multiplayer] GeoUiRefresh: EditVehicle equip re-drive SKIPPED — host has an unflushed local equipment edit");
                 return;
             }
 
@@ -758,6 +766,18 @@ namespace Multiplayer.Network.Sync.State
             // UIModuleBehavior : MonoBehaviour → ((Component)module).gameObject.activeInHierarchy.
             var comp = module as Component;
             return comp != null && comp.gameObject != null && comp.gameObject.activeInHierarchy;
+        }
+
+        /// <summary>The equip/vehicle "skip-if-locally-editing" guards apply ONLY to the HOST: the host is the
+        /// authority and a mid-drag re-read would clobber the host player's own uncommitted equipment drag. A
+        /// CLIENT's geoscape equip edit is suppressed + relayed as an intent (never a local model write), so its
+        /// open equip screen is a pure display mirror that must ALWAYS repaint from the authoritative #9/#1 apply —
+        /// never gated by _uiRefreshNeeded (also set by screen-open/refresh, not just a real drag). No active MP
+        /// session (single-player) → the mirror re-drive path never reaches these guards, so the value is moot.</summary>
+        private static bool IsHostEditingGuardActive()
+        {
+            var eng = NetworkEngine.Instance;
+            return eng != null && eng.IsActiveSession && eng.IsHost;
         }
     }
 }
