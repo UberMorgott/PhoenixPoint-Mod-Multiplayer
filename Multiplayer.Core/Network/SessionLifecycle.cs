@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 namespace Multiplayer.Network
 {
     /// <summary>
@@ -200,6 +203,35 @@ namespace Multiplayer.Network
         {
             return capturedAutosaveMeta != null
                 && !ReferenceEquals(capturedAutosaveMeta, previousAutosaveMeta);
+        }
+
+        /// <summary>
+        /// Returning-peer rejoin prune decision (Inc5 part 2). A JOIN whose persistent playerGUID is
+        /// ALREADY bound to a roster entry is a RECONNECT of a known player whose previous connection
+        /// died — possibly a death the transport never reported (crash before the 20 s heartbeat
+        /// timeout), possibly over a DIFFERENT transport address, possibly over the SAME reused peer id
+        /// (Steam ids are stable). Returns every connected peer id whose bound identity equals
+        /// <paramref name="joiningGuid"/> — the DEAD connections' residue the host must prune before
+        /// onboarding the returning peer through the normal on-demand join path. Non-empty result ⇔
+        /// returning peer; empty ⇔ brand-new peer (nothing to prune).
+        ///
+        /// A same-id reconnect returns the joining peer's OWN old entry (the caller removes it and the
+        /// JOIN handler re-adds it fresh, dropping stale ready/heartbeat residue). A first-time joiner
+        /// never matches: its pre-JOIN roster entry (added at transport connect) carries
+        /// <see cref="Guid.Empty"/>, and an empty <paramref name="joiningGuid"/> matches nothing
+        /// (defense-in-depth — the JOIN handler already rejects empty identities). Pure + idempotent:
+        /// after the caller removes the returned ids, a second call yields an empty list, so a
+        /// double-reconnect race prunes cleanly both times.
+        /// </summary>
+        public static List<ulong> StaleRejoinPeers(
+            IEnumerable<KeyValuePair<ulong, Guid>> connectedPeerIdentities, Guid joiningGuid)
+        {
+            var stale = new List<ulong>();
+            if (joiningGuid == Guid.Empty || connectedPeerIdentities == null) return stale;
+            foreach (var peer in connectedPeerIdentities)
+                if (peer.Value == joiningGuid)
+                    stale.Add(peer.Key);
+            return stale;
         }
     }
 

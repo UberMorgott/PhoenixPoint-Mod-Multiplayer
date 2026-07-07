@@ -223,6 +223,22 @@ namespace Multiplayer.Network
             TryReleaseBarrier();
         }
 
+        /// <summary>
+        /// Host: drop every per-peer trace of a STALE peer id (Inc5 part 2 — returning-peer rejoin
+        /// prune, SessionManager.HandleConnectionRequest). Mirrors <see cref="OnPeerDisconnectedDuringLoad"/>
+        /// for a death the transport never reported: the dead id's download-progress row and any LOADED
+        /// ack are residue of the old connection. The caller removes the peer from the roster BEFORE
+        /// calling this, so a barrier now releasable with the remaining peers is re-evaluated here
+        /// (TryReleaseBarrier self-guards — no-op when no barrier is open). Idempotent; the returning
+        /// peer's NEW connection re-registers under its own (possibly identical) id from scratch.
+        /// </summary>
+        public void ForgetPeer(ulong peerId)
+        {
+            _peerDownloadPct.Remove(peerId);
+            _loadedPeers.Remove(peerId);
+            TryReleaseBarrier();
+        }
+
         /// <summary>True while a peer has a save prepared but must wait for BEGIN before entering.</summary>
         public bool IsBarrierPending => _pendingResult != null && !_begun;
 

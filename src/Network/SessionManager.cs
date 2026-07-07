@@ -201,6 +201,17 @@ namespace Multiplayer.Network
             return _clients.Keys;
         }
 
+        // (peerId → persistent playerGUID) projection of the live roster, fed to the pure
+        // returning-peer decision (SessionLifecycle.StaleRejoinPeers). Snapshot list, not a lazy
+        // iterator: the caller mutates _clients (RemoveClient) while consuming the result.
+        private List<KeyValuePair<ulong, Guid>> GetClientIdentities()
+        {
+            var ids = new List<KeyValuePair<ulong, Guid>>(_clients.Count);
+            foreach (var c in _clients.Values)
+                ids.Add(new KeyValuePair<ulong, Guid>(c.SteamId, c.PlayerGuid));
+            return ids;
+        }
+
         /// <summary>All slotIndexes currently in the roster (host slot 0 + every connected client).</summary>
         public IEnumerable<byte> GetRosterSlots()
         {
@@ -242,6 +253,30 @@ namespace Multiplayer.Network
                     NetworkMessage.BuildStringPayload("Invalid player identity (empty GUID)."));
                 _engine.SendToClient(clientId, reject);
                 return;
+            }
+
+            // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
+            // in the roster is a reconnect of a known player whose previous connection died (possibly a
+            // death the transport never reported — crash inside the 20 s heartbeat window — and possibly
+            // over a different transport address, or over the SAME reused peer id). Prune the dead
+            // connection's session residue FIRST, so the returning peer onboards through the SAME
+            // on-demand join path as a brand-new peer with nothing stale counted against the LOADED
+            // barrier or the ready gate: its roster entry (ready flag + heartbeat; a same-id reconnect
+            // is re-added fresh by AddClient below), its per-peer geo intent-dedup window (fresh engine
+            // restarts nonces at 1 — OnJoinReady's reset only covers the arrival leg), and its
+            // save-transfer download/loaded rows (ForgetPeer AFTER RemoveClient so a barrier now
+            // releasable with the remaining peers releases immediately). Decision is pure + idempotent
+            // (SessionLifecycle.StaleRejoinPeers — a double-reconnect race prunes cleanly twice); other
+            // clients keep playing untouched. Permissions need no prune: the grant below keys by the
+            // persistent guid (idempotent) and each client re-seeds from the next PEER_LIST broadcast
+            // (HandlePeerList precedent).
+            foreach (var staleId in SessionLifecycle.StaleRejoinPeers(GetClientIdentities(), join.PlayerGuid))
+            {
+                Debug.Log($"[Multiplayer] Returning peer {join.PlayerGuid} (JOIN from {clientId}): " +
+                          $"pruning stale peer {staleId}.");
+                _engine.Sync?.ResetIntentDedupForPeer(staleId);
+                RemoveClient(staleId);
+                _engine.SaveTransfer?.ForgetPeer(staleId);
             }
 
             // P1 mid-session join boundary: a peer that connects AFTER the session started can only be

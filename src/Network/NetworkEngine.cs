@@ -251,6 +251,15 @@ namespace Multiplayer.Network
             if (!IsActive || Transport == null) return;
 
             IsHost = false;
+            // Inc5 part 2 — returning-peer rejoin, CLIENT leg: when this engine PERSISTED across a
+            // connection drop (in-place reconnect — Initialize() early-returns on an active engine, so
+            // Session/SaveTransfer/Sync were NOT recreated), every in-flight sync-state holder still
+            // references the dead session's geoscape. Sweep it through the ONE aggregated rca-3
+            // reload-boundary reset (audited list in the SyncEngine ctor; every entry idempotent — a
+            // fresh first-join engine's empty state makes this a no-op) so the rejoin rides the
+            // on-demand join path with clean local state. Deliberately NOT a second reset aggregation;
+            // version/nonce continuity holds by the same rca-3 contract (host counters kept increasing).
+            Sync?.ResetForReloadBoundary();
             // Defense-in-depth: the transport connect is non-blocking and catches its own socket
             // errors, but ANY exception escaping here (e.g. a malformed address before the socket
             // layer) must surface as a clean connection failure, never an unhandled crash.
