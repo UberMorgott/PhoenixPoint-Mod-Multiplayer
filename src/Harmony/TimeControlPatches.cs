@@ -142,4 +142,50 @@ namespace Multiplayer.Harmony
             return false;                                        // client: block local shared-clock write
         }
     }
+
+    /// <summary>
+    /// Client-side PROGRAMMATIC auto-pause guard (regression fix rca — spontaneous unpause).
+    /// Native geoscape UI states (vehicle-selected, research / manufacturing / replenish / geoscape-log,
+    /// nothing-selected, asset-deployment, …) request a game auto-pause via
+    /// <c>GeoscapeView.RequestGamePause() → RequestPauseCrt()</c>, whose body runs
+    /// <c>SetGamePauseState(true)</c> (already blocked for a client by <see cref="GeoscapeViewPausePatch"/>)
+    /// AND THEN <c>UIModuleTimeControl.SetTimeState(Timing.Paused) → OnPauseTime(...)</c>. Under the Inc4
+    /// client sim-freeze (default-ON since 2026-07-05) the client's local <c>Timing.Paused</c> is PINNED
+    /// true, so that programmatic <c>OnPauseTime</c> lands in <see cref="TimeControlPausePatch"/>, whose
+    /// freeze branch relays <c>!GlyphHostPaused</c> — a TOGGLE against the host, NOT the requested value.
+    /// When the host is already paused that toggle becomes an UNPAUSE, so every client vehicle-select /
+    /// panel-open while paused spuriously RESUMES the shared clock ("game un-pauses by itself").
+    ///
+    /// <c>SetTimeState(bool)</c>'s ONLY caller is <c>RequestPauseCrt</c> (GeoscapeView.cs:1295) — it is
+    /// never the user's pause BUTTON (that is <c>OnPauseTimeKeyPressed → OnPauseTime</c> directly). So
+    /// blocking <c>SetTimeState</c> on a client kills the programmatic poison path (mirroring the
+    /// SetGamePauseState block) while the explicit pause-button relay stays intact — host-authoritative:
+    /// a client's panel/auto-pause never drives the shared clock; only its deliberate pause button does.
+    /// Host / no-session / our own remote-apply pass through unchanged.
+    /// </summary>
+    [HarmonyPatch]
+    public static class TimeControlSetTimeStatePatch
+    {
+        private static Type _targetType;
+        private static MethodBase _targetMethod;
+
+        public static bool Prepare()
+        {
+            _targetType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleTimeControl");
+            if (_targetType == null) return false;
+            _targetMethod = AccessTools.Method(_targetType, "SetTimeState", new[] { typeof(bool) });
+            return _targetMethod != null;
+        }
+
+        public static MethodBase TargetMethod() => _targetMethod;
+
+        public static bool Prefix()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive) return true; // no session → local
+            if (engine.IsHost) return true;                      // host owns the shared clock
+            if (TimeSyncManager.IsApplyingRemote) return true;   // our host-applied path → let through
+            return false;                                        // client: block programmatic auto-pause relay
+        }
+    }
 }
