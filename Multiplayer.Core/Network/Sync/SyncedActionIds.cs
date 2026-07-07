@@ -41,6 +41,8 @@ namespace Multiplayer.Network.Sync
         public const ushort HarvestCapturedUnit = 67; // GeoPhoenixFaction.HarvestCapturedUnit (dismantle for food/mutagens; funnels through KillCapturedUnit)
         public const ushort LevelUpAbility = 68;   // buy a progression-track ability with SP (CharacterProgression.LearnAbility, SP split soldier→faction pool)
         public const ushort SpendStatPoints = 69;  // spend SP on a base stat (CharacterProgression.ModifyBaseStat +delta, per-point native cost)
+        // 70 RESERVED: SecondSpecialization follow-up intent (ChoseSecondSpecialization is currently
+        // suppressed WITHOUT relay on clients — see PersonnelEditPatches + COOP-SYNC-ROADMAP.md).
 
         // Geoscape sim-mutating abilities 80-89 (ONE generic GeoAbility.Activate relay — client suppress + relay
         // intent, host authoritative Activate; result mirrors on the existing geoscape state channels)

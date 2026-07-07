@@ -84,6 +84,10 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _factionSkillpointsField; // GeoPhoenixFaction.Skillpoints (public field)
         private static FieldInfo _trackSlotsField;      // AbilityTrack.AbilitiesByLevel (AbilityTrackSlot[])
         private static FieldInfo _slotAbilityField;     // AbilityTrackSlot.Ability (public field)
+        private static PropertyInfo _sharedDataProp;    // GeoLevelController.SharedData
+        private static FieldInfo _sharedGameTagsField;  // SharedData.SharedGameTags (SharedGameTagsDataDef)
+        private static FieldInfo _mutoidClassTagField;  // SharedGameTagsDataDef.MutoidClassTag (ClassTagDef)
+        private static PropertyInfo _gameTagsProp;      // GeoCharacter.GameTags (GameTagsList)
         private static PropertyInfo _sitesProp;   // GeoFaction.Sites
         private static PropertyInfo _vehiclesProp;// GeoFaction.Vehicles
         private static FieldInfo _mapField;       // GeoLevelController.Map
@@ -332,10 +336,14 @@ namespace Multiplayer.Network.Sync.State
         /// the learned ability + spent SP mirror back on the #9 blob (AddAbility dirty seam).</summary>
         public static void LevelUpAbility(GeoRuntime rt, long unitId, int trackSource, int slotIndex, string abilityGuid)
         {
+            object slot = null;
+            bool assignedHere = false;   // pre-gate personal-pick assign, rolled back on any reject
             try
             {
                 var soldier = ResolveSoldierById(rt, unitId);
                 if (soldier == null) { LogUnresolved("LevelUpAbility", unitId); return; }
+                if (HasPandoranProgression(rt, soldier))
+                { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: unit " + unitId + " has mutoid (mutagen-cost) progression — out of the SP intent family, intent skipped"); return; }
                 object prog = ReadProgression(soldier);
                 if (prog == null) { LogUnresolved("LevelUpAbility(progression)", unitId); return; }
                 EnsureProgressionMembers(prog);
@@ -349,7 +357,7 @@ namespace Multiplayer.Network.Sync.State
                 var slots = _trackSlotsField?.GetValue(track) as Array;
                 if (slots == null || slotIndex < 0 || slotIndex >= slots.Length)
                 { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: slot " + slotIndex + " out of range for unit " + unitId + " — intent skipped"); return; }
-                object slot = slots.GetValue(slotIndex);
+                slot = slots.GetValue(slotIndex);
                 if (slot == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: null slot " + slotIndex + " — intent skipped"); return; }
                 if (_slotAbilityField == null) _slotAbilityField = AccessTools.Field(slot.GetType(), "Ability");
                 object slotAbility = _slotAbilityField?.GetValue(slot);
@@ -357,7 +365,12 @@ namespace Multiplayer.Network.Sync.State
                 {
                     object def = DefReflection.GetDefByGuid(abilityGuid);
                     if (def == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: ability def " + abilityGuid + " unresolved — intent skipped"); return; }
+                    // Native BuyAbility pre-assigns the personal pick (:393-396) and the gates below READ
+                    // slot.Ability (CanLearnAbility level/prereq + GetAbilitySlotCost) — so assign FIRST,
+                    // but roll back on any reject: a dangling slot.Ability lives in _abilityTracks
+                    // ([SerializeMember]), would replicate on #9 and permanently lock the slot's pick.
                     _slotAbilityField.SetValue(slot, def);
+                    assignedHere = true;
                 }
                 else if (DefReflection.GetGuid(slotAbility) != abilityGuid)
                 { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: slot ability drifted (expected " + abilityGuid + ") — intent skipped"); return; }
@@ -365,13 +378,30 @@ namespace Multiplayer.Network.Sync.State
                 // are part of the native signature; current values keep the call honest).
                 object[] canArgs = { slot, GetBaseStatInt(prog, 0), GetBaseStatInt(prog, 1), GetBaseStatInt(prog, 2) };
                 if (!(bool)_canLearnAbility.Invoke(prog, canArgs))
-                { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: CanLearnAbility=false for unit " + unitId + " slot " + slotIndex + " — intent skipped"); return; }
+                {
+                    Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: CanLearnAbility=false for unit " + unitId + " slot " + slotIndex + " — intent skipped");
+                    RollbackSlotAssign(slot, assignedHere);
+                    return;
+                }
                 int cost = (int)_getAbilitySlotCost.Invoke(prog, new[] { slot });
-                if (!TrySpendSkillPoints(rt, prog, cost, "LevelUpAbility", unitId)) return;
+                if (!TrySpendSkillPoints(rt, prog, cost, "LevelUpAbility", unitId)) { RollbackSlotAssign(slot, assignedHere); return; }
                 _learnAbility.Invoke(prog, new[] { slot });
                 Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: unit " + unitId + " learned " + abilityGuid + " (cost " + cost + ")");
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.LevelUpAbility failed: " + ex.Message); }
+            catch (Exception ex)
+            {
+                RollbackSlotAssign(slot, assignedHere);
+                Debug.LogError("[Multiplayer] PersonnelEditReflection.LevelUpAbility failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>Undo the pre-gate personal-pick slot assign when a later gate rejects (all-or-nothing:
+        /// nothing learned + no SP spent must also mean no slot.Ability write survives).</summary>
+        private static void RollbackSlotAssign(object slot, bool assignedHere)
+        {
+            if (!assignedHere || slot == null || _slotAbilityField == null) return;
+            try { _slotAbilityField.SetValue(slot, null); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.RollbackSlotAssign failed: " + ex.Message); }
         }
 
         /// <summary>Spend skill points on ONE base stat, <paramref name="delta"/> single points applied
@@ -387,6 +417,8 @@ namespace Multiplayer.Network.Sync.State
                 if (statId < 0 || statId > 2 || delta <= 0) return;   // action Validate mirrors this
                 var soldier = ResolveSoldierById(rt, unitId);
                 if (soldier == null) { LogUnresolved("SpendStatPoints", unitId); return; }
+                if (HasPandoranProgression(rt, soldier))
+                { Debug.Log("[Multiplayer] PersonnelEditReflection.SpendStatPoints: unit " + unitId + " has mutoid (mutagen-cost) progression — out of the SP intent family, intent skipped"); return; }
                 object prog = ReadProgression(soldier);
                 if (prog == null) { LogUnresolved("SpendStatPoints(progression)", unitId); return; }
                 EnsureProgressionMembers(prog);
@@ -429,6 +461,36 @@ namespace Multiplayer.Network.Sync.State
             _skillPointsField.SetValue(prog, newSp);
             if (newFsp != fsp && fac != null && _factionSkillpointsField != null) _factionSkillpointsField.SetValue(fac, newFsp);
             return true;
+        }
+
+        /// <summary>HOST re-derivation of the UI's <c>_hasPandoranProgression</c> init
+        /// (UIModuleCharacterProgression.cs:467): <c>GeoCharacter.GameTags</c> contains
+        /// <c>GeoLevelController.SharedData.SharedGameTags.MutoidClassTag</c>. Mutoid progression is
+        /// mutagen-funded (Wallet.Take, ConsumeAbilityCost :430-434) — out of the SP intent family, so
+        /// the client suppresses it without relay; a stale/forged intent must not charge SP here either.
+        /// Unresolvable → false (the SP path is correct for every non-mutoid soldier).</summary>
+        private static bool HasPandoranProgression(GeoRuntime rt, object soldier)
+        {
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo == null || soldier == null) return false;
+                if (_sharedDataProp == null) _sharedDataProp = AccessTools.Property(geo.GetType(), "SharedData");
+                object shared = _sharedDataProp?.GetValue(geo, null);
+                if (shared == null) return false;
+                if (_sharedGameTagsField == null) _sharedGameTagsField = AccessTools.Field(shared.GetType(), "SharedGameTags");
+                object sharedTags = _sharedGameTagsField?.GetValue(shared);
+                if (sharedTags == null) return false;
+                if (_mutoidClassTagField == null) _mutoidClassTagField = AccessTools.Field(sharedTags.GetType(), "MutoidClassTag");
+                object mutoidTag = _mutoidClassTagField?.GetValue(sharedTags);
+                if (mutoidTag == null) return false;
+                if (_gameTagsProp == null) _gameTagsProp = AccessTools.Property(soldier.GetType(), "GameTags");
+                if (!(_gameTagsProp?.GetValue(soldier, null) is IEnumerable tags)) return false;
+                foreach (var tag in tags)
+                    if (ReferenceEquals(tag, mutoidTag)) return true;   // defs are singletons
+                return false;
+            }
+            catch { return false; }
         }
 
         /// <summary>The soldier's live <c>GeoCharacter.Progression</c> (CharacterProgression), or null.</summary>

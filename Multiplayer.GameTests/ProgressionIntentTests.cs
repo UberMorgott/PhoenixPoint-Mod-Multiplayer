@@ -217,11 +217,28 @@ public class ProgressionBlobSchemaPinTests
     }
 
     [Fact]
+    public void HostMutoidGuardBindings_AllResolveOnRealAssembly()
+    {
+        // HasPandoranProgression host re-derivation chain (mirror of UIModuleCharacterProgression.cs:467):
+        // GeoLevelController.SharedData → SharedData.SharedGameTags → SharedGameTagsDataDef.MutoidClassTag,
+        // matched against GeoCharacter.GameTags.
+        var geoLevel = T("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+        var sharedProp = geoLevel.GetProperty("SharedData");
+        Assert.NotNull(sharedProp);
+        var sharedTagsField = Field(sharedProp.PropertyType, "SharedGameTags");
+        Field(sharedTagsField.FieldType, "MutoidClassTag");
+        Assert.NotNull(T("PhoenixPoint.Geoscape.Entities.GeoCharacter").GetProperty("GameTags"));
+    }
+
+    [Fact]
     public void ClientInterceptorBindings_AllResolveOnRealAssembly()
     {
         var ui = T("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
         Assert.NotNull(ui.GetMethod("BuyAbility", BindingFlags.Instance | BindingFlags.Public));
         Assert.NotNull(ui.GetMethod("CommitStatChanges", BindingFlags.Instance | BindingFlags.Public));
+        // Second-spec suppress patch targets (relay intent = tracked follow-up, id 70).
+        Assert.NotNull(ui.GetMethod("ChoseSecondSpecialization", BindingFlags.Instance | BindingFlags.Public));
+        Field(ui, "DualClassPopupWindow");
         foreach (var name in new[] { "_character", "_hasPandoranProgression", "_boughtAbilitySlot", "_boughtAbility",
                                      "_currentStrengthStat", "_startingStrengthStat",
                                      "_currentWillStat", "_startingWillStat",

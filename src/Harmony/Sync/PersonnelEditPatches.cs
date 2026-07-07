@@ -43,7 +43,10 @@ namespace Multiplayer.Harmony.Sync
     ///     changed stat (positive deltas only; the host re-derives every point's cost natively). The prefix
     ///     also rolls the module's local current-values back to starting so a repeated commit call in the
     ///     same screen session can never double-relay. Mutoid (mutagen-cost) progression is suppressed
-    ///     without relay on a client (wallet-funded path, out of the SP intent family).
+    ///     without relay on a client (wallet-funded path, out of the SP intent family);
+    ///   • <c>UIModuleCharacterProgression.ChoseSecondSpecialization</c> → suppressed WITHOUT relay on a
+    ///     client (denial notify) so AddSecondaryClass never half-applies locally; the relay intent
+    ///     (SecondSpecialization = 70) is a tracked follow-up (COOP-SYNC-ROADMAP.md).
     ///
     /// Composes with the PS1/PS2 dirty Postfixes on the same methods: on a client our Prefix returns false
     /// (suppress) and those Postfixes are IsHost-gated no-ops; on the host our Prefix passes through (IsHost /
@@ -412,6 +415,40 @@ namespace Multiplayer.Harmony.Sync
             var cf = AccessTools.Field(t, currentField);
             var sf = AccessTools.Field(t, startingField);
             if (cf != null && sf != null) cf.SetValue(inst, sf.GetValue(inst));
+        }
+    }
+
+    [HarmonyPatch]
+    public static class ChoseSecondSpecializationSuppressPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "ChoseSecondSpecialization") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.ChoseSecondSpecialization suppress " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // Second-specialization buy (dual-class popup, UIModuleCharacterProgression.cs:813-824) runs
+        // AddSecondaryClass + ConsumeAbilityCost + CommitStatChanges in one native call. On a client the
+        // inner CommitStatChanges is already suppressed (prefix above), which would leave a PHANTOM local
+        // second class with its SP cost silently discarded — so suppress the WHOLE buy without relay
+        // (denial notify gives feedback; the popup is closed the way the native entry does, :815). The
+        // proper intent (SecondSpecialization = 70) is a tracked follow-up in COOP-SYNC-ROADMAP.md.
+        public static bool Prefix(object __instance)
+        {
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            try
+            {
+                Debug.Log("[Multiplayer] ChoseSecondSpecializationSuppressPatch: second-specialization buy not relayed yet — suppressed on client");
+                PermissionGate.Notify(ActionCategory.ControlSoldiers);
+                var popup = AccessTools.Field(__instance.GetType(), "DualClassPopupWindow")?.GetValue(__instance) as GameObject;
+                popup?.SetActive(false);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ChoseSecondSpecializationSuppressPatch failed: " + ex.Message); }
+            return false;   // never run the frozen local AddSecondaryClass
         }
     }
 
