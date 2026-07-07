@@ -194,6 +194,37 @@ public class TacticalActorStateDiffTests
     public void ShouldMirrorStatus_HiddenWins_OverTypeName()
         => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(0, "BleedStatus"));
 
+    // gap-evac: EvacuatedStatus is force-INCLUDED regardless of the def's healthbar-visibility flag — its
+    // whole client-relevant effect IS its InitVisualState (hide + animator off + vision forget), which the
+    // engine runs even on the inert/deserialize branch. An evacuated actor draws no healthbar, so the
+    // visibility flag is the wrong gate for this stance status.
+    [Theory]
+    [InlineData(0)]   // Hidden — the case the visibility gate alone would wrongly drop
+    [InlineData(1)]   // VisibleWhenSelected
+    [InlineData(5)]   // AlwaysVisible
+    public void ShouldMirrorStatus_Evacuated_AlwaysMirrored(int visibility)
+        => Assert.True(TacticalActorStateDiff.ShouldMirrorStatus(visibility, "EvacuatedStatus"));
+
+    // No-regress sweep around the evac include: hidden UNLISTED statuses stay dropped (default-DENY intact,
+    // incl. the mount bookkeeping the evac flow also touches), and the surface-owned/faction-safety excludes
+    // still win for every visibility value.
+    [Theory]
+    [InlineData("MountedStatus")]        // evac applies it host-side; stays visibility-gated (not force-included)
+    [InlineData("SomeFutureDlcStatus")]
+    [InlineData("StunStatus")]
+    public void ShouldMirrorStatus_HiddenUnlisted_StillDropped(string typeName)
+        => Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(0, typeName));
+
+    [Theory]
+    [InlineData("OverwatchStatus")]
+    [InlineData("MindControlStatus")]
+    [InlineData("ZombifiedStatus")]
+    public void ShouldMirrorStatus_ExcludeStillWins_AtEveryVisibility(string typeName)
+    {
+        foreach (var vis in new[] { 0, 1, 5 })
+            Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(vis, typeName));
+    }
+
     // ─── Feature B PART 1: per-bodypart-HP reconcile diff ─────────────────────────────────────────────
 
     private static TacticalActorStateDiff.BodyPartHpRec B(string slot, float hp)

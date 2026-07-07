@@ -10,12 +10,13 @@ namespace Multiplayer.Harmony.Tactical
     /// TS2 GENERIC (non shoot/melee) ability-intent relay patch. Mirrors <see cref="AbilityActivateRelayPatch"/>
     /// but binds <c>Activate(object)</c> on the GENERIC allowlist types
     /// (<see cref="TacticalAbilityRelay.RelayableGenericAbilityTypeNames"/> — Heal / RecoverWill / Rally /
-    /// PsychicScream), routing them to <see cref="TacticalCombatSync.ClientInterceptGenericAbility"/>:
+    /// PsychicScream / Reload / Interact / ExitMission / EvacuateMounted), routing them to
+    /// <see cref="TacticalCombatSync.ClientInterceptGenericAbility"/>:
     ///   • CLIENT (mirroring): send ONE <c>tac.intent.generic</c> (0x8E) and SUPPRESS the local activation — the
     ///     host runs it authoritatively; the outcome rides 0x8F (AP/WP/Health/status) + tac.damage + TS1 spawn.
     ///   • HOST / single-player: <c>ClientInterceptGenericAbility</c> returns true → the native ability runs
     ///     unchanged (the host is never patched to relay — it is the authority).
-    /// These four types each DECLARE their own <c>Activate(object)</c> override, so each binds EXACTLY (no base
+    /// Every allowlisted type DECLARES its own <c>Activate(object)</c> override, so each binds EXACTLY (no base
     /// over-patch). The 0x87 shoot/melee relay (<see cref="AbilityActivateRelayPatch"/>) is UNTOUCHED and the two
     /// sets are disjoint, so no ability is double-prefixed. Auto-register via PatchAll; reflection targets.
     /// </summary>

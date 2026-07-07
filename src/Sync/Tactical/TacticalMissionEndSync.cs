@@ -31,10 +31,12 @@ namespace Multiplayer.Sync.Tactical
     /// (<see cref="TacticalMissionEndGate.ShouldDisplayOutcome"/> is constant-false) — it only closes the tactical
     /// scene, so the client sees the outcome exactly once via 0x69 once it is back in geoscape.
     ///
-    /// EVAC-ZONE STATE (documented deviation, this cut): no clean native evac-zone-unlock accessor was surfaced, so
-    /// the host currently emits an EMPTY evac list. The wire + codec fully support evac records (unit-tested), so a
-    /// later increment fills them with NO wire break. The evac OUTCOME that matters for parity — which soldiers got
-    /// out / survived — rides the <c>TacMissionResult</c> blob + the TS1 despawn (0x93), not this list.
+    /// EVAC-ZONE STATE: the host emits an EMPTY evac list BY DESIGN (gap-evac closure) — the client evac-zone
+    /// LOCK state is owned live by the 0x99 ZONE_UNLOCK records (<see cref="TacticalObjectiveSync.HostOnZonesUnlocked"/>
+    /// mirrors both native unlock chokepoints in-battle; audit D20), so filling this list too would add a second
+    /// writer for the same field. The wire + codec keep supporting evac records (unit-tested, no wire break) purely
+    /// for compatibility. The evac OUTCOME that matters for parity — which soldiers got out / survived — rides the
+    /// <c>TacMissionResult</c> blob + the 0x8F <c>EvacuatedStatus</c> mirror, not this list.
     ///
     /// All broadcasts host→ALL (3+ player safe), carry LiveSeq (last-writer-wins), per-item try/catch,
     /// degrade-to-notify, TFTV-tolerant (resolve-by-member, skip-on-null). Pure wire + decisions live in the
@@ -196,9 +198,10 @@ namespace Multiplayer.Sync.Tactical
             return list;
         }
 
-        /// <summary>Evac-zone unlock state. DOCUMENTED DEVIATION (this cut): no clean native evac-zone-unlock accessor
-        /// was surfaced, so this returns an EMPTY list — the codec/wire fully support evac records for a later
-        /// increment (no wire break). The evac OUTCOME rides the result blob + TS1 despawn.</summary>
+        /// <summary>Evac-zone unlock state: EMPTY BY DESIGN (gap-evac closure). The client zone-lock state is owned
+        /// live by the 0x99 ZONE_UNLOCK records (<see cref="TacticalObjectiveSync.HostOnZonesUnlocked"/>, audit D20) —
+        /// one writer per field, so this list must stay empty (codec/wire keep supporting evac records, no wire
+        /// break). The evac OUTCOME rides the result blob + the 0x8F EvacuatedStatus mirror.</summary>
         private static List<TacticalMissionEndCodec.EvacRec> ReadEvacZones(object tlc) => EmptyEvac;
 
         // ─── CLIENT applies ──────────────────────────────────────────────────────────────────────────

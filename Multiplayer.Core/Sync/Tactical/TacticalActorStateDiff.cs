@@ -124,17 +124,35 @@ namespace Multiplayer.Sync.Tactical
             "ZombifiedStatus",     // flips faction if the Applied pre-set ever fails
         };
 
+        /// <summary>Status types force-INCLUDED in the mirror regardless of the def's healthbar-visibility flag
+        /// (gap-evac): a STANCE status whose entire client-relevant effect IS its visual init, which the engine
+        /// runs even on the inert/deserialize branch (TacStatus.OnApply: <c>CurrentlyDeserializing</c> →
+        /// <c>InitVisualStateWhenReady</c> → <c>InitVisualState</c>, TacStatus.cs:109/222). <c>EvacuatedStatus</c>
+        /// carries no per-turn tick and no stat/faction mutation — its <c>InitVisualState.HideActor</c>
+        /// (EvacuatedStatus.cs:14: RequestForceHidden + Animator off + CancelAllActions + vision Forget) is
+        /// exactly the native presentation of an evacuated actor, and <c>TacticalActor.IsEvacuated</c>
+        /// (HasStatus) then keeps the mirror out of soldier-cycling/squad UI. Healthbar visibility is the wrong
+        /// gate for it (an evacuated actor is hidden — it draws no healthbar), hence the explicit include. The
+        /// surface-owned EXCLUDE list above still wins (disjoint today; defensive precedence).</summary>
+        private static readonly HashSet<string> AlwaysMirroredStatusTypeNames = new HashSet<string>
+        {
+            "EvacuatedStatus",     // evac stance (gap-evac) — outcome surface of the relayed ExitMission/EvacuateMounted
+        };
+
         /// <summary>PURE mirror decision: a status is mirrored as an INERT healthbar icon iff its host
         /// VisibleOnHealthbar is NOT Hidden (it draws an icon on the host) AND it is not owned by a dedicated
-        /// sync surface (<see cref="SurfaceOwnedStatusTypeNames"/>). Default-DENY: a Hidden status / a non-
+        /// sync surface (<see cref="SurfaceOwnedStatusTypeNames"/>). Stance statuses on
+        /// <see cref="AlwaysMirroredStatusTypeNames"/> (EvacuatedStatus) mirror even when Hidden — their inert
+        /// visual init is the outcome the client needs. Default-DENY otherwise: a Hidden status / a non-
         /// tactical status with no visibility (caller passes Hidden) / a surface-owned status is not mirrored.
         /// Unit-tested.</summary>
         public static bool ShouldMirrorStatus(int healthBarVisibility, string simpleTypeName = null)
         {
-            if (healthBarVisibility == HealthBarVisibilityHidden) return false;
             if (!string.IsNullOrEmpty(simpleTypeName) && SurfaceOwnedStatusTypeNames.Contains(simpleTypeName))
                 return false;
-            return true;
+            if (!string.IsNullOrEmpty(simpleTypeName) && AlwaysMirroredStatusTypeNames.Contains(simpleTypeName))
+                return true;
+            return healthBarVisibility != HealthBarVisibilityHidden;
         }
 
         /// <summary>PURE magnitude→accumulator mapping for the inert status mirror (bug C). The host's carried

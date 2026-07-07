@@ -63,6 +63,8 @@ public class TacticalAbilityRelayTests
     [InlineData("BashAbility")]       // AbilityActivateRelayPatch suppresses Activate (generic relay)
     [InlineData("ReloadAbility")]     // TS5b: now on the 0x8E generic relay → client-suppressed
     [InlineData("InteractWithObjectAbility")] // TS5b: now on the 0x8E generic relay → client-suppressed
+    [InlineData("ExitMissionAbility")]            // gap-evac: 0x8E generic relay → client-suppressed
+    [InlineData("EvacuateMountedActorsAbility")]  // gap-evac: 0x8E generic relay → client-suppressed
     public void Suppressed_Activations_AreDetected(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation(typeName));
@@ -144,6 +146,8 @@ public class TacticalAbilityRelayTests
     [InlineData("PsychicScreamAbility")]  // self AoE → damage via tac.damage 0x88
     [InlineData("ReloadAbility")]         // TS5b: equip-slot target → ammo via 0x8F (self) / actor (reload-others)
     [InlineData("InteractWithObjectAbility")] // TS5b: ground-object target → console status via 0x8F + objective via TS4
+    [InlineData("ExitMissionAbility")]           // gap-evac: self (zone self-derived) → EvacuatedStatus via 0x8F + TS4 end
+    [InlineData("EvacuateMountedActorsAbility")] // gap-evac: self (vehicle + host-derived passengers) → same surfaces
     public void GenericRelayable_ActiveSet_IsRelayed(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsGenericRelayable(typeName));
@@ -195,6 +199,8 @@ public class TacticalAbilityRelayTests
     [InlineData("RecoverWillAbility", TacticalGenericIntentCodec.KindNone)]   // self-derives
     [InlineData("RallyAbility", TacticalGenericIntentCodec.KindNone)]         // self-derives its squad (spec "actor-or-self" → none)
     [InlineData("PsychicScreamAbility", TacticalGenericIntentCodec.KindNone)] // self AoE
+    [InlineData("ExitMissionAbility", TacticalGenericIntentCodec.KindNone)]           // gap-evac: self-derives its exit zone
+    [InlineData("EvacuateMountedActorsAbility", TacticalGenericIntentCodec.KindNone)] // gap-evac: zone + passengers host-derived
     [InlineData("DeployTurretAbility", TacticalGenericIntentCodec.KindPos)]
     [InlineData("ThrowTurretAbility", TacticalGenericIntentCodec.KindPos)]
     [InlineData("ReloadAbility", TacticalGenericIntentCodec.KindSlot)]
@@ -224,5 +230,21 @@ public class TacticalAbilityRelayTests
         // else the client would send an unresolvable intent instead of relaying.
         foreach (var g in TacticalAbilityRelay.RelayableGenericAbilityTypeNames)
             Assert.NotEqual(TacticalGenericIntentCodec.KindUnknown, TacticalAbilityRelay.GenericTargetKindFor(g));
+    }
+
+    [Fact]
+    public void GenericRelayAllowlist_AddOnly_ExactMembershipPin()
+    {
+        // ADD-ONLY pin (gap-evac): silently DROPPING a shipped entry would make a mirroring client run that
+        // ability locally on the frozen sim (divergence), so the exact membership is asserted. New abilities
+        // APPEND here deliberately (with their own kind-map + suppression rows above).
+        Assert.Equal(
+            new[]
+            {
+                "HealAbility", "RecoverWillAbility", "RallyAbility", "PsychicScreamAbility",
+                "ReloadAbility", "InteractWithObjectAbility",
+                "ExitMissionAbility", "EvacuateMountedActorsAbility",
+            },
+            TacticalAbilityRelay.RelayableGenericAbilityTypeNames);
     }
 }

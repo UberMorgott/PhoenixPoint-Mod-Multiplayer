@@ -83,6 +83,15 @@ namespace Multiplayer.Sync.Tactical
         ///   • <c>InteractWithObjectAbility</c> — (TS5b) activates a console/crate StructuralTarget; the applied
         ///     console status mirrors via the 0x8F status delta and objective progress via TS4. Its target is a
         ///     ground OBJECT resolved through the shared actor registry (StructuralTarget is a TacticalActorBase).
+        ///   • <c>ExitMissionAbility</c> — (gap-evac) evacuate ONE soldier standing in an unlocked exit zone. It
+        ///     SELF-DERIVES the zone from the caster's position (ExitMissionAbility.GetZonesContainingActor) →
+        ///     KindNone. Outcome mirrors via already-shipped surfaces: <c>EvacuatedStatus</c> rides the 0x8F inert
+        ///     status delta (force-included — its InitVisualState hides the mirror natively), AP via 0x8F, the
+        ///     client zone-lock state via the 0x99 ZONE_UNLOCK records, mission end via TS4 0x95 (host-authoritative).
+        ///   • <c>EvacuateMountedActorsAbility</c> — (gap-evac) evacuate a vehicle + every mounted passenger in one
+        ///     action. Also self-derives its exit zone → KindNone; the host re-resolves the passengers natively
+        ///     (Vehicle.Passengers), so the relay carries only the acting VEHICLE actor id. Same outcome surfaces
+        ///     (per-passenger + vehicle EvacuatedStatus on 0x8F, TS4 conclusion).
         /// Each of these DECLARES its own <c>Activate(object)</c> override (verified vs the decompile), so the
         /// generic Harmony patch binds each type EXACTLY (no base-method over-patch). Abilities whose outcome
         /// needs a not-yet-shipped surface or has a UI/authority hazard (deploy-turret→pos/SpawnActorAbility base
@@ -99,6 +108,10 @@ namespace Multiplayer.Sync.Tactical
             // TS5b: ground-registry-backed target kinds now shipped (slot + object builds in TacticalCombatSync).
             "ReloadAbility",            // equip-slot target → ammo via 0x8F (self weapon; ally reload-others → actor)
             "InteractWithObjectAbility",// ground-object target → console status via 0x8F + objective via TS4
+            // gap-evac: evacuation intents (both DECLARE their own Activate(object) — ExitMissionAbility.cs:32,
+            // EvacuateMountedActorsAbility.cs:57 — so the generic patch binds each EXACTLY).
+            "ExitMissionAbility",       // self (zone self-derived) → EvacuatedStatus via 0x8F + mission end via TS4
+            "EvacuateMountedActorsAbility", // self (vehicle + passengers, host-derived) → same surfaces
         };
 
         private static readonly HashSet<string> _genericRelayable =
@@ -113,8 +126,9 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>PURE ability→target-KIND map for the 0x8E generic intent (the discriminator the client writes +
         /// the host reads to build the <c>TacticalAbilityTarget</c>). Covers the ACTIVE relay set AND the
         /// deferred-but-known abilities (so the wire is complete + the map is unit-testable ahead of activation):
-        ///   Heal → actor; RecoverWill / Rally / PsychicScream → none(self); DeployTurret / ThrowTurret → pos;
-        ///   Reload → slot; Interact / OpenCrate / DropItem → object; MindControl / InstilFrenzy → actor.
+        ///   Heal → actor; RecoverWill / Rally / PsychicScream / ExitMission / EvacuateMounted → none(self);
+        ///   DeployTurret / ThrowTurret → pos; Reload → slot; Interact / OpenCrate / DropItem → object;
+        ///   MindControl / InstilFrenzy → actor.
         /// Returns <see cref="TacticalGenericIntentCodec.KindUnknown"/> for anything unmapped — the client then
         /// degrades-to-notify (never sends an unresolvable intent). Kept in sync with the audit's ability domains
         /// (D8 heal/support, D10 psychic, D12 deployables, D18 loot, D13 mind-control). NOTE: the spec groups
@@ -129,6 +143,11 @@ namespace Multiplayer.Sync.Tactical
                 case "RecoverWillAbility":
                 case "RallyAbility":
                 case "PsychicScreamAbility":
+                // gap-evac: both evac abilities self-derive their exit zone from the caster's position
+                // (GetZonesContainingActor over the shared map state), and EvacuateMounted re-derives its
+                // passengers from Vehicle.Passengers on the host — nothing to carry beyond the caster.
+                case "ExitMissionAbility":
+                case "EvacuateMountedActorsAbility":
                     return TacticalGenericIntentCodec.KindNone;
                 // actor target
                 case "HealAbility":
