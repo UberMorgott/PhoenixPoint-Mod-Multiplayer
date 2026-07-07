@@ -9,12 +9,24 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<ushort, ActionReader> _readers =
             new Dictionary<ushort, ActionReader>();
 
-        public static void Register(ushort id, ActionReader reader) => _readers[id] = reader;
+        // The dictionary itself guards concurrent writers (xunit parallel test classes race
+        // RegisterAll vs direct Register; in-game registration is single-threaded — the lock is free).
+        public static void Register(ushort id, ActionReader reader)
+        {
+            lock (_readers) _readers[id] = reader;
+        }
 
-        public static bool IsRegistered(ushort id) => _readers.ContainsKey(id);
+        public static bool IsRegistered(ushort id)
+        {
+            lock (_readers) return _readers.ContainsKey(id);
+        }
 
         /// <summary>Reconstruct an action, or null for an unknown id.</summary>
         public static ISyncedAction Read(ushort id, BinaryReader r)
-            => _readers.TryGetValue(id, out var reader) ? reader(r) : null;
+        {
+            ActionReader reader;
+            lock (_readers) _readers.TryGetValue(id, out reader);
+            return reader != null ? reader(r) : null;
+        }
     }
 }

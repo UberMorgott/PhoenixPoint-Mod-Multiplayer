@@ -12,4 +12,11 @@
          belong here; leave it in the mod project (Multiplayer.csproj). -->
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- The game-bound test project asserts internal helpers (VehicleInterpolator.Slerp/LerpAngle);
+         the Core extraction (7c35e27) broke that visibility across the new assembly boundary. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Multiplayer.GameTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>
