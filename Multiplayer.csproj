@@ -20,12 +20,17 @@
     <Compile Remove="Multiplayer.Tests\**\*.cs" />
     <Compile Remove="Multiplayer.Bridge.Tests\**\*.cs" />
     <Compile Remove="Multiplayer.GameTests\**\*.cs" />
-    <!-- The pure (BCL-only) logic now lives in Multiplayer.Core and is brought in via the
-         ProjectReference below — the SINGLE source of truth. Do not also glob it into the mod. -->
+    <!-- Drop Multiplayer.Core from the default glob first (this also excludes its obj/ generated
+         files), then re-add ONLY its real sources so they compile straight into Multiplayer.dll.
+         WHY embed instead of ProjectReference the built Multiplayer.Core.dll: PP's mod loader
+         loads the entry assembly via Assembly.Load(byte[]) (ModSDKContext.LoadModdingAssembly)
+         with NO AppDomain.AssemblyResolve handler, so a referenced sibling Multiplayer.Core.dll
+         can NEVER be resolved at enable time — the loader throws ReflectionTypeLoadException the
+         moment it reads Assembly.ExportedTypes (ModAssembly.Load). A PP mod MUST be a single
+         self-contained assembly. Multiplayer.Core.csproj still builds standalone for the unit
+         tests, so its BCL-only guardrail stays enforced there. -->
     <Compile Remove="Multiplayer.Core\**\*.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="Multiplayer.Core\Multiplayer.Core.csproj" />
+    <Compile Include="Multiplayer.Core\**\*.cs" Exclude="Multiplayer.Core\obj\**\*.cs;Multiplayer.Core\bin\**\*.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
