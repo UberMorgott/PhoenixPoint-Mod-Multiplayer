@@ -65,6 +65,11 @@ public class TacticalAbilityRelayTests
     [InlineData("InteractWithObjectAbility")] // TS5b: now on the 0x8E generic relay → client-suppressed
     [InlineData("ExitMissionAbility")]            // gap-evac: 0x8E generic relay → client-suppressed
     [InlineData("EvacuateMountedActorsAbility")]  // gap-evac: 0x8E generic relay → client-suppressed
+    [InlineData("EnterVehicleAbility")]           // wave-2: 0x8E generic relay → client-suppressed
+    [InlineData("ExitVehicleAbility")]            // wave-2
+    [InlineData("MindControlAbility")]            // wave-2
+    [InlineData("JetJumpAbility")]                // wave-2
+    [InlineData("RepositionAbility")]             // wave-2 (direct Dash relayed; reactions no-op'd by BUG3b patch)
     public void Suppressed_Activations_AreDetected(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation(typeName));
@@ -155,17 +160,27 @@ public class TacticalAbilityRelayTests
     [InlineData("RetrieveShieldAbility")]        // gap-turret-crate-loot: self (own status) → 0x8F status unapply
     [InlineData("OpenCrateAbility")]             // gap-turret-crate-loot: object (CrateComponent) → host-authoritative open
     [InlineData("DropItemAbility")]              // gap-turret-crate-loot: own equipped item (slot) → container via 0x92
+    [InlineData("EnterVehicleAbility")]          // wave-2 D19: actor (the vehicle) → MountedStatus via 0x8F
+    [InlineData("ExitVehicleAbility")]           // wave-2 D19: pos (dismount cell) → status unapply + Pos via 0x8F
+    [InlineData("MindControlAbility")]           // wave-2 D10: actor → host faction AUTHORITY + TS5 0x0800 display flip
+    [InlineData("InstilFrenzyAbility")]          // wave-2 D10: self (ignores param) → FrenzyStatus via 0x8F
+    [InlineData("JetJumpAbility")]               // wave-2 D3: pos (landing) → end position via 0x8F Pos
+    [InlineData("CaterpillarMoveAbility")]       // wave-2 D3: pos; own Activate → no double with the move patch
+    [InlineData("RepositionAbility")]            // wave-2 D3: pos (Dash); direct-activation only
+    [InlineData("RamAbility")]                   // wave-2 D3: pos (charge dir); damage via host tac.damage
     public void GenericRelayable_ActiveSet_IsRelayed(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsGenericRelayable(typeName));
     }
 
     [Theory]
-    [InlineData("MindControlAbility")]    // deferred: faction display needs the TS5 faction bit
     [InlineData("InventoryAbility")]      // never relayed: its Activate IS a local view switch (guard, not relay)
     [InlineData("MorphIntoActorAbility")] // off-list SpawnActorAbility sibling: shares the patched base Activate but runs native
+    [InlineData("SpawnMistAbility")]      // off-list TacticalHurtReactionAbility sibling (shares Reposition's base Activate)
+    [InlineData("StartPreparingAbility")] // off-list TacticalHurtReactionAbility sibling
+    [InlineData("YuggothShieldsAbility")] // off-list TacticalHurtReactionAbility sibling
     [InlineData("ShootAbility")]          // 0x87 damage relay, not the 0x8E generic relay
-    [InlineData("MoveAbility")]           // dedicated move-sync
+    [InlineData("MoveAbility")]           // dedicated move-sync (CaterpillarMoveAbility is relayed, its BASE is not)
     [InlineData("SomeFutureUnknownAbility")]
     [InlineData(null)]
     [InlineData("")]
@@ -200,8 +215,9 @@ public class TacticalAbilityRelayTests
 
     [Theory]
     [InlineData("HealAbility", TacticalGenericIntentCodec.KindActor)]         // needs a specific target actor
-    [InlineData("InstilFrenzyAbility", TacticalGenericIntentCodec.KindActor)]
     [InlineData("MindControlAbility", TacticalGenericIntentCodec.KindActor)]
+    [InlineData("EnterVehicleAbility", TacticalGenericIntentCodec.KindActor)] // wave-2: target = the vehicle actor
+    [InlineData("InstilFrenzyAbility", TacticalGenericIntentCodec.KindNone)]  // wave-2 RE-MAP: Crt ignores param, self-derives (was wrongly "actor" while deferred)
     [InlineData("RecoverWillAbility", TacticalGenericIntentCodec.KindNone)]   // self-derives
     [InlineData("RallyAbility", TacticalGenericIntentCodec.KindNone)]         // self-derives its squad (spec "actor-or-self" → none)
     [InlineData("PsychicScreamAbility", TacticalGenericIntentCodec.KindNone)] // self AoE
@@ -212,6 +228,11 @@ public class TacticalAbilityRelayTests
     [InlineData("DeployShieldAbility", TacticalGenericIntentCodec.KindPos)]        // facing folds into pos (ChoosePosEncoding)
     [InlineData("RetrieveDeployedItemAbility", TacticalGenericIntentCodec.KindActor)] // target = the deployed turret actor
     [InlineData("RetrieveShieldAbility", TacticalGenericIntentCodec.KindNone)]     // ignores its param (Source = own status)
+    [InlineData("ExitVehicleAbility", TacticalGenericIntentCodec.KindPos)]      // wave-2: dismount cell (PositionToApply)
+    [InlineData("JetJumpAbility", TacticalGenericIntentCodec.KindPos)]          // wave-2: landing cell
+    [InlineData("CaterpillarMoveAbility", TacticalGenericIntentCodec.KindPos)]  // wave-2: move destination
+    [InlineData("RepositionAbility", TacticalGenericIntentCodec.KindPos)]       // wave-2: Dash destination
+    [InlineData("RamAbility", TacticalGenericIntentCodec.KindPos)]              // wave-2: charge direction anchor
     [InlineData("ReloadAbility", TacticalGenericIntentCodec.KindSlot)]
     [InlineData("DropItemAbility", TacticalGenericIntentCodec.KindSlot)]           // own equipped item — was WRONGLY grouped "object"
     [InlineData("InteractWithObjectAbility", TacticalGenericIntentCodec.KindObject)]
@@ -256,6 +277,10 @@ public class TacticalAbilityRelayTests
                 "DeployTurretAbility", "ThrowTurretAbility", "DeployShieldAbility",
                 "RetrieveDeployedItemAbility", "RetrieveShieldAbility",
                 "OpenCrateAbility", "DropItemAbility",
+                // gap-ability-allowlist-wave2 (audit D19 + D10 + D3):
+                "EnterVehicleAbility", "ExitVehicleAbility",
+                "MindControlAbility", "InstilFrenzyAbility",
+                "JetJumpAbility", "CaterpillarMoveAbility", "RepositionAbility", "RamAbility",
             },
             TacticalAbilityRelay.RelayableGenericAbilityTypeNames);
     }
@@ -270,6 +295,14 @@ public class TacticalAbilityRelayTests
     [InlineData("RetrieveShieldAbility")]
     [InlineData("OpenCrateAbility")]
     [InlineData("DropItemAbility")]              // item already dropped → SelectedEquipment deref hazard
+    [InlineData("EnterVehicleAbility")]          // wave-2: vehicle full / already mounted
+    [InlineData("ExitVehicleAbility")]           // wave-2: NotMounted gate
+    [InlineData("MindControlAbility")]           // wave-2: WP re-spend on stale re-send
+    [InlineData("InstilFrenzyAbility")]          // wave-2: WP cost
+    [InlineData("JetJumpAbility")]               // wave-2: AP prerequisites
+    [InlineData("CaterpillarMoveAbility")]       // wave-2: AP / immobilized
+    [InlineData("RepositionAbility")]            // wave-2: uses-per-turn / disabled statuses
+    [InlineData("RamAbility")]                   // wave-2: AP / immobilized
     public void HostEnabledCheck_RequiredFor_NewLootDeploySet(string typeName)
     {
         Assert.True(TacticalAbilityRelay.RequiresHostEnabledCheck(typeName));
@@ -313,5 +346,57 @@ public class TacticalAbilityRelayTests
     public void ChoosePosEncoding_DecisionTable(bool hasPos, bool hasDir, byte expected)
     {
         Assert.Equal(expected, TacticalAbilityRelay.ChoosePosEncoding(hasPos, hasDir));
+    }
+
+    // ── gap-ability-allowlist-wave2: direct-activation-only relay gate (Dash vs damage-triggered reactions) ──
+
+    [Theory]
+    [InlineData("RepositionAbility")]  // Dash (direct) relays; Umbra Vanish / PainChameleon (TriggerOnDamage) never
+    public void DirectActivationOnly_RequiredFor_HurtReactionShapedRelays(string typeName)
+    {
+        Assert.True(TacticalAbilityRelay.RelaysOnlyDirectActivation(typeName));
+    }
+
+    [Theory]
+    [InlineData("EnterVehicleAbility")]   // plain wave-2 relays carry no reaction shape → no extra gate
+    [InlineData("ExitVehicleAbility")]
+    [InlineData("MindControlAbility")]
+    [InlineData("InstilFrenzyAbility")]
+    [InlineData("JetJumpAbility")]
+    [InlineData("CaterpillarMoveAbility")]
+    [InlineData("RamAbility")]
+    [InlineData("HealAbility")]           // shipped set stays ungated
+    [InlineData("SpawnMistAbility")]      // off-list sibling is excluded by the allowlist gate, not this one
+    [InlineData("SomeFutureUnknownAbility")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void DirectActivationOnly_NotRequired_ForOthers(string typeName)
+    {
+        Assert.False(TacticalAbilityRelay.RelaysOnlyDirectActivation(typeName));
+    }
+
+    [Fact]
+    public void DirectActivationOnlySet_IsSubsetOf_GenericRelaySet()
+    {
+        // The gate refines abilities the relay actually carries — an entry that is NOT relayed would be dead
+        // policy (or a typo silently disabling the double-fire protection for the real ability).
+        foreach (var n in TacticalAbilityRelay.DirectActivationOnlyAbilityTypeNames)
+            Assert.True(TacticalAbilityRelay.IsGenericRelayable(n),
+                "Direct-activation-only ability " + n + " must be on the generic relay allowlist.");
+    }
+
+    [Fact]
+    public void CanonPin_FactionFlippers_StayHardExcluded_FromStatusMirror()
+    {
+        // gap-ability-allowlist-wave2 HARD CONSTRAINT (sync canon §5.4): relaying MindControlAbility moves the
+        // ACTION to the host, but faction AUTHORITY never rides the status mirror — the faction-flipper
+        // hard-exclude must survive this and every future allowlist widening (the client sees only the TS5
+        // display flip, 0x8F ActorFieldFaction). Duplicates the TacticalActorStateDiffTests pin ON PURPOSE:
+        // this file is where the allowlist grows, so the constraint fails loudly next to the change that broke it.
+        foreach (var vis in new[] { 0, 1, 5 })
+        {
+            Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(vis, "MindControlStatus"));
+            Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(vis, "ZombifiedStatus"));
+        }
     }
 }

@@ -298,6 +298,16 @@ namespace Multiplayer.Sync.Tactical
             // base Activate shared with an off-list sibling, that sibling runs native — never suppressed.)
             if (!TacticalAbilityRelay.IsGenericRelayable(typeName)) return true;
 
+            // gap-ability-allowlist-wave2: RepositionAbility is BOTH the player-clicked Dash (def TriggerOnDamage
+            // = false) AND a damage-TRIGGERED hurt reaction (Umbra Vanish etc). A reaction-triggered Activate on
+            // the mirror is the native reaction queue firing off the MIRRORED health StatChange — NOT a client
+            // intent; the host runs its OWN authoritative reaction, so relaying would DOUBLE-Activate it. Pass
+            // through instead (return true): HurtReactionActivateSuppressPatch (BUG3b, a second prefix on the
+            // same sealed base Activate — all prefixes run) still suppresses the local reaction on the mirror.
+            // Unreadable def → treated as reaction (never risk the double-fire; worst case = today's no-relay).
+            if (TacticalAbilityRelay.RelaysOnlyDirectActivation(typeName) && IsReactionTriggeredDef(ability))
+                return true;
+
             try
             {
                 object actor = GetProp(ability, "TacticalActorBase");
@@ -467,6 +477,15 @@ namespace Multiplayer.Sync.Tactical
                     return;
                 }
 
+                // gap-ability-allowlist-wave2 defense-in-depth (mirror of the client gate): a direct-activation-
+                // only ability whose HOST def says TriggerOnDamage is a hurt REACTION the host already runs
+                // authoritatively off its own damage — a relayed Activate would double-fire it. Drop the intent.
+                if (TacticalAbilityRelay.RelaysOnlyDirectActivation(typeName) && IsReactionTriggeredDef(ability))
+                {
+                    NotifyGenericDegrade(typeName, "reaction-triggered def relayed (client regression?) — intent dropped");
+                    return;
+                }
+
                 if (!TryBuildGenericTarget(typeName, intent, out object target))
                 {
                     NotifyGenericDegrade(typeName, "unsupported target kind=" + intent.TargetKind + " on host");
@@ -572,6 +591,28 @@ namespace Multiplayer.Sync.Tactical
                 }
                 default:
                     return false;   // KindUnknown → degrade
+            }
+        }
+
+        /// <summary>gap-ability-allowlist-wave2: is this ability instance a damage-TRIGGERED hurt reaction?
+        /// Reads <c>BaseDef.TriggerOnDamage</c> (public field on <c>TacticalHurtReactionAbilityDef</c>,
+        /// TacticalHurtReactionAbilityDef.cs:13; <c>AccessTools.Field</c> walks base types, so the concrete
+        /// <c>RepositionAbilityDef</c> resolves it). Fail-CLOSED toward "reaction" (unreadable → true = do NOT
+        /// relay): wrongly skipping a Dash relay degrades to today's no-relay behavior, while wrongly relaying a
+        /// reaction would double-Activate it on the host — the strictly worse failure.</summary>
+        private static bool IsReactionTriggeredDef(object ability)
+        {
+            try
+            {
+                object def = GetProp(ability, "BaseDef");
+                var f = def != null ? AccessTools.Field(def.GetType(), "TriggerOnDamage") : null;
+                if (f == null) return true;   // not a hurt-reaction def shape → never relay a direct-only type blind
+                return !(f.GetValue(def) is bool b) || b;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] IsReactionTriggeredDef read failed (treat as reaction): " + ex);
+                return true;
             }
         }
 

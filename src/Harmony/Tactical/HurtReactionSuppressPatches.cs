@@ -26,6 +26,13 @@ namespace Multiplayer.Harmony.Tactical
     /// <c>SuppressedAbilityViewClearPatch</c>). <c>Activate</c> is the <c>sealed override</c> declared on the abstract
     /// base <c>TacticalHurtReactionAbility</c>, so patching it covers EVERY subclass. Reflection target + Prepare()-
     /// gated on the type resolving so an engine rename can't PatchAll-bomb bootstrap. Diag-logged on bind + on fire.
+    ///
+    /// COEXISTENCE (gap-ability-allowlist-wave2): <c>GenericAbilityRelayPatch</c> now ALSO prefixes this same
+    /// sealed base Activate (via its <c>RepositionAbility</c> allowlist entry). Both prefixes run (any false skips
+    /// the original): a player-clicked DIRECT activation (Dash, def TriggerOnDamage=false) is relayed to the host
+    /// by the generic prefix while this one keeps the local run suppressed; damage-TRIGGERED reactions are gated
+    /// OFF the relay (<c>TacticalAbilityRelay.RelaysOnlyDirectActivation</c> + the TriggerOnDamage def read) and
+    /// keep exactly this patch's no-op behavior — never a double host Activate.
     /// </summary>
     [HarmonyPatch]
     public static class HurtReactionActivateSuppressPatch

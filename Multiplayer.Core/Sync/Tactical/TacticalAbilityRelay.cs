@@ -92,15 +92,40 @@ namespace Multiplayer.Sync.Tactical
         ///     action. Also self-derives its exit zone → KindNone; the host re-resolves the passengers natively
         ///     (Vehicle.Passengers), so the relay carries only the acting VEHICLE actor id. Same outcome surfaces
         ///     (per-passenger + vehicle EvacuatedStatus on 0x8F, TS4 conclusion).
+        ///   • wave-2 (gap-ability-allowlist-wave2, audit D19/D10/D3): mount/dismount, client-init psychic and
+        ///     the special moves — every outcome rides an ALREADY-SHIPPED surface:
+        ///     – <c>EnterVehicleAbility</c>  — actor target (the vehicle, EnterVehicleCrt casts target.Actor);
+        ///       MountedStatus rides the 0x8F inert status delta, positions via 0x8F Pos.
+        ///     – <c>ExitVehicleAbility</c>   — pos target (dismount cell, ExitVehicleCrt reads PositionToApply);
+        ///       status unapply + Pos via 0x8F.
+        ///     – <c>MindControlAbility</c>   — actor target. AUTHORITY stays host-side: the faction-flipper
+        ///       HARD-EXCLUDE in the status mirror stays (sync canon §5.4, TacticalActorStateDiff); the client
+        ///       sees ONLY the TS5 display flip (0x8F <c>ActorFieldFaction</c> bit 0x0800 — shipped).
+        ///     – <c>InstilFrenzyAbility</c>  — self (InstilFrenzyCrt IGNORES its param and self-derives
+        ///       GetTargets(), InstilFrenzyAbility.cs:35-46); FrenzyStatus rides the 0x8F status delta.
+        ///     – <c>JetJumpAbility</c>       — pos target (landing cell, JetJump crt reads PositionToApply);
+        ///       end position via 0x8F Pos (jump-arc pathing VFX = presentation, converges on end-position).
+        ///     – <c>CaterpillarMoveAbility</c> — pos target; a <c>MoveAbility</c> SUBCLASS that DECLARES its own
+        ///       Activate (CaterpillarMoveAbility.cs:35) → binds EXACTLY, and the generic prefix suppresses the
+        ///       DERIVED Activate before its base.Activate call, so the dedicated MoveAbility patch never
+        ///       double-relays it. Wall-destruction damage funnels via ApplyDamage → tac.damage on the host.
+        ///     – <c>RepositionAbility</c>    — pos target; Dash/Run/Vanish. Inherits the SEALED
+        ///       <c>TacticalHurtReactionAbility.Activate</c> (no own override) → the patch binds that BASE method
+        ///       once (deduped), ALSO firing for the off-list siblings SpawnMist/StartPreparing/YuggothShields —
+        ///       the runtime allowlist gate runs them native. DIRECT-ACTIVATION-ONLY
+        ///       (<see cref="RelaysOnlyDirectActivation"/>): a damage-TRIGGERED reaction (def TriggerOnDamage) is
+        ///       the native reaction queue firing off the MIRRORED health StatChange, NOT a client intent — the
+        ///       host runs its own authoritative reaction, so relaying it would double-Activate; those stay
+        ///       locally suppressed by <c>HurtReactionActivateSuppressPatch</c> (BUG3b) and are never relayed.
+        ///     – <c>RamAbility</c>           — pos target (Ram derives its charge direction from PositionToApply,
+        ///       RamAbility.cs:185). The relay carries only the INTENT — Ram's collision damage funnels via the
+        ///       host's ApplyDamage → tac.damage (never client-applied), so no double-count.
         /// Most of these DECLARE their own <c>Activate(object)</c> override (verified vs the decompile), so the
-        /// generic Harmony patch binds each type EXACTLY. The ONE deliberate exception (gap-turret-crate-loot):
-        /// <c>DeployTurretAbility</c>/<c>ThrowTurretAbility</c> INHERIT <c>SpawnActorAbility.Activate</c>
-        /// (SpawnActorAbility.cs:41 — neither subclass overrides it), so the patch binds the BASE method once
-        /// (deduped) — which ALSO fires for the off-list sibling <c>MorphIntoActorAbility</c>; the runtime-type
-        /// allowlist gate in <c>ClientInterceptGenericAbility</c> lets that sibling run native (host-only enemy
-        /// path anyway — client AI is suppressed). Abilities whose outcome still needs a not-yet-shipped surface
-        /// (mind-control→faction/TS5) stay OFF the relay: KNOWN to <see cref="GenericTargetKindFor"/> (wire +
-        /// host build support their kind) but deferred (degrade-to-notify meanwhile, spec R1).</summary>
+        /// generic Harmony patch binds each type EXACTLY. TWO deliberate exceptions bind an inherited BASE method
+        /// once (deduped): <c>DeployTurretAbility</c>/<c>ThrowTurretAbility</c> → <c>SpawnActorAbility.Activate</c>
+        /// (SpawnActorAbility.cs:41; off-list sibling <c>MorphIntoActorAbility</c> passes the runtime gate and runs
+        /// native — host-only enemy path anyway, client AI is suppressed), and <c>RepositionAbility</c> →
+        /// <c>TacticalHurtReactionAbility.Activate</c> (see above).</summary>
         public static readonly string[] RelayableGenericAbilityTypeNames =
         {
             "HealAbility",              // actor target → HP via 0x8F Health
@@ -125,6 +150,15 @@ namespace Multiplayer.Sync.Tactical
             "RetrieveShieldAbility",    // self (Source = own ShieldDeployedStatus) → status unapply via 0x8F
             "OpenCrateAbility",         // ground-object target (raw CrateComponent param) → host-authoritative open
             "DropItemAbility",          // own equipped item (slot) → dropped container via TS1 0x92 + refresh
+            // gap-ability-allowlist-wave2 (audit D19 vehicles/mutogs + D10 psychic + D3 special moves):
+            "EnterVehicleAbility",      // actor target (the vehicle) → MountedStatus via 0x8F status delta
+            "ExitVehicleAbility",       // pos target (dismount cell) → status unapply + Pos via 0x8F
+            "MindControlAbility",       // actor target → host-side faction AUTHORITY; client sees TS5 0x0800 display flip
+            "InstilFrenzyAbility",      // self (Crt ignores its param, self-derives) → FrenzyStatus via 0x8F
+            "JetJumpAbility",           // pos target (landing cell) → end position via 0x8F Pos
+            "CaterpillarMoveAbility",   // pos target; own Activate override → no double with the MoveAbility patch
+            "RepositionAbility",        // pos target (Dash); DIRECT-activation only — reactions never relay
+            "RamAbility",               // pos target (charge direction); damage via host ApplyDamage → tac.damage
         };
 
         private static readonly HashSet<string> _genericRelayable =
@@ -139,9 +173,10 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>PURE ability→target-KIND map for the 0x8E generic intent (the discriminator the client writes +
         /// the host reads to build the <c>TacticalAbilityTarget</c>). Covers the ACTIVE relay set AND the
         /// deferred-but-known abilities (so the wire is complete + the map is unit-testable ahead of activation):
-        ///   Heal / RetrieveDeployedItem → actor; RecoverWill / Rally / PsychicScream / ExitMission /
-        ///   EvacuateMounted / RetrieveShield → none(self); DeployTurret / ThrowTurret / DeployShield → pos;
-        ///   Reload / DropItem → slot; Interact / OpenCrate → object; MindControl / InstilFrenzy → actor.
+        ///   Heal / RetrieveDeployedItem / EnterVehicle / MindControl → actor; RecoverWill / Rally /
+        ///   PsychicScream / ExitMission / EvacuateMounted / RetrieveShield / InstilFrenzy → none(self);
+        ///   DeployTurret / ThrowTurret / DeployShield / ExitVehicle / JetJump / CaterpillarMove / Reposition /
+        ///   Ram → pos; Reload / DropItem → slot; Interact / OpenCrate → object.
         /// Returns <see cref="TacticalGenericIntentCodec.KindUnknown"/> for anything unmapped — the client then
         /// degrades-to-notify (never sends an unresolvable intent). Kept in sync with the audit's ability domains
         /// (D8 heal/support, D10 psychic, D12 deployables, D18 loot, D13 mind-control). NOTE: the spec groups
@@ -164,11 +199,18 @@ namespace Multiplayer.Sync.Tactical
                 // gap-turret-crate-loot: RetrieveShieldAbility ignores its Activate parameter entirely — it
                 // unapplies its own Source ShieldDeployedStatus (RetrieveShieldAbility.cs:23-30) → nothing to carry.
                 case "RetrieveShieldAbility":
+                // wave-2: InstilFrenzyCrt IGNORES action.Param and applies FrenzyStatus to every self-derived
+                // GetTargets() ally (InstilFrenzyAbility.cs:35-46) — the earlier "→ actor" grouping was wrong
+                // (an actor intent would DEGRADE on the instant self-cast the native UI fires). Safe to re-map
+                // while deferred: the kind was never sent (the ability just joined the allowlist).
+                case "InstilFrenzyAbility":
                     return TacticalGenericIntentCodec.KindNone;
                 // actor target
                 case "HealAbility":
-                case "InstilFrenzyAbility":
                 case "MindControlAbility":
+                // wave-2: the enter-vehicle target IS the vehicle ACTOR (EnterVehicleCrt casts target.Actor,
+                // EnterVehicleAbility.cs:96) — TS1/deploy-registered like any mirror actor.
+                case "EnterVehicleAbility":
                 // gap-turret-crate-loot: the retrieve target IS the deployed turret ACTOR
                 // (RetrieveTurretCrt reads target.Actor, RetrieveDeployedItemAbility.cs:30) — TS1-registered.
                 case "RetrieveDeployedItemAbility":
@@ -177,6 +219,15 @@ namespace Multiplayer.Sync.Tactical
                 case "DeployTurretAbility":
                 case "ThrowTurretAbility":
                 case "DeployShieldAbility":
+                // wave-2 special moves + dismount — all read TacticalAbilityTarget.PositionToApply:
+                // ExitVehicleCrt (ExitVehicleAbility.cs:88), JetJump landing (JetJumpAbility.cs:155),
+                // CaterpillarMove via inherited MoveAbility.Move (MoveAbility.cs:107/118), Dash/Reposition
+                // navigate (RepositionAbility.cs:125), Ram charge direction (RamAbility.cs:185).
+                case "ExitVehicleAbility":
+                case "JetJumpAbility":
+                case "CaterpillarMoveAbility":
+                case "RepositionAbility":
+                case "RamAbility":
                     return TacticalGenericIntentCodec.KindPos;
                 // equipment-slot target: reload (TS5 ammo surface) AND drop — grounded vs the decompile, a drop
                 // target carries the caster's OWN equipped TacticalItem (DropItemAbility.cs:18-36), NOT a ground
@@ -202,7 +253,11 @@ namespace Multiplayer.Sync.Tactical
         /// re-checks the disabled state (the local UI does), so a blind host Activate would NRE mid-coroutine
         /// (SelectedEquipment deref, DeployTurretAbility.cs:22) or duplicate the action. Scoped to the NEW
         /// deploy/retrieve/crate/drop set so every ALREADY-SHIPPED relay path stays byte-identical (the gate can
-        /// widen later after an in-game soak). Fail-open at the reflection layer (unreadable → run native).</summary>
+        /// widen later after an in-game soak). Fail-open at the reflection layer (unreadable → run native).
+        /// gap-ability-allowlist-wave2 joins the SAME gate: the client mirror's vehicle-capacity / mount state /
+        /// WP cost / immobilize state can be stale mid-mission, and a blind host Activate would double-mount,
+        /// double-mind-control (WP re-spend) or charge from an invalid state — <c>IsEnabled()</c> is the exact
+        /// pre-check the native UI runs before offering each of these.</summary>
         public static readonly string[] HostEnabledCheckAbilityTypeNames =
         {
             "DeployTurretAbility",
@@ -212,6 +267,15 @@ namespace Multiplayer.Sync.Tactical
             "RetrieveShieldAbility",
             "OpenCrateAbility",
             "DropItemAbility",
+            // gap-ability-allowlist-wave2:
+            "EnterVehicleAbility",      // vehicle full / already mounted → stale re-send must not double-mount
+            "ExitVehicleAbility",       // NotMounted gate (ExitVehicleAbility.cs:43) → drop a stale dismount
+            "MindControlAbility",       // WP cost + target-WP check → stale re-send must not re-spend WP
+            "InstilFrenzyAbility",      // WP cost → same
+            "JetJumpAbility",           // AP/fumble prerequisites
+            "CaterpillarMoveAbility",   // AP / immobilized
+            "RepositionAbility",        // Dash uses-per-turn / disabled statuses
+            "RamAbility",               // AP / immobilized
         };
 
         private static readonly HashSet<string> _hostEnabledCheck =
@@ -222,6 +286,31 @@ namespace Multiplayer.Sync.Tactical
         /// shipped-relay types return false (no behavior change for the already-soaked set).</summary>
         public static bool RequiresHostEnabledCheck(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _hostEnabledCheck.Contains(abilityTypeName);
+
+        // ─── gap-ability-allowlist-wave2: direct-activation-only relay gate ──────────────────────────
+        /// <summary>Type NAMES on the generic relay whose <c>Activate</c> can ALSO fire as a damage-TRIGGERED
+        /// hurt reaction (a <c>TacticalHurtReactionAbility</c> whose def sets <c>TriggerOnDamage</c> —
+        /// TacticalHurtReactionAbilityDef.cs:13, default TRUE). Only the DIRECT (player-clicked, TriggerOnDamage
+        /// = false, e.g. Assault Dash) activation is a client INTENT to relay; a reaction-triggered Activate on
+        /// the mirror is the native reaction queue firing off the MIRRORED health StatChange
+        /// (TacticalHurtReactionAbility.OnActorDamaged → RegisterHurtReaction →
+        /// TacticalLevelController.ExecuteHurtReactionAbilities → Execute → Activate) — the host runs its OWN
+        /// authoritative reaction from its own damage, so relaying it would DOUBLE-Activate. Reaction instances
+        /// stay locally suppressed by <c>HurtReactionActivateSuppressPatch</c> (BUG3b) and are never relayed.</summary>
+        public static readonly string[] DirectActivationOnlyAbilityTypeNames =
+        {
+            "RepositionAbility",   // Dash (direct) vs Umbra Vanish / PainChameleon (TriggerOnDamage reactions)
+        };
+
+        private static readonly HashSet<string> _directActivationOnly =
+            new HashSet<string>(DirectActivationOnlyAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>True when the relay must verify this generic-relayable ability was DIRECTLY activated
+        /// (def <c>TriggerOnDamage</c> == false) before sending the intent — reaction-triggered instances run
+        /// the native (suppressed-on-mirror) path instead (see <see cref="DirectActivationOnlyAbilityTypeNames"/>).
+        /// Unknown / null return false (no extra gate — the ability relays unconditionally).</summary>
+        public static bool RelaysOnlyDirectActivation(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _directActivationOnly.Contains(abilityTypeName);
 
         /// <summary>Pos-intent encoding modes for <see cref="ChoosePosEncoding"/> (the 0x8E KindPos wire carries
         /// ONE position; the native <c>TacticalAbilityTarget</c> may instead carry a facing DIRECTION —
