@@ -1554,29 +1554,10 @@ namespace Multiplayer.Network
         internal static bool TryChunkIndex(long offset, int chunkLen, int totalLen, int chunkSize, out int index)
             => SaveTransferMath.TryChunkIndex(offset, chunkLen, totalLen, chunkSize, out index);
 
-        // CRC-32 (IEEE 802.3, reflected) — small local impl, no external dependency.
-        private static readonly uint[] _crcTable = BuildCrcTable();
-
-        private static uint[] BuildCrcTable()
-        {
-            var table = new uint[256];
-            const uint poly = 0xEDB88320u;
-            for (uint i = 0; i < 256; i++)
-            {
-                var c = i;
-                for (var k = 0; k < 8; k++)
-                    c = (c & 1) != 0 ? poly ^ (c >> 1) : c >> 1;
-                table[i] = c;
-            }
-            return table;
-        }
-
-        private static uint Crc32(byte[] data)
-        {
-            var crc = 0xFFFFFFFFu;
-            for (var i = 0; i < data.Length; i++)
-                crc = _crcTable[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-            return crc ^ 0xFFFFFFFFu;
-        }
+        // CRC-32 (IEEE 802.3, reflected). The ONE shared implementation lives in Multiplayer.Core
+        // (Multiplayer.Util.Crc32 — moved verbatim from here, pinned by the standard check vector) so the
+        // Inc5 divergence probe reuses the exact same polynomial/table. Thin delegate keeps every existing
+        // call-site byte-identical.
+        private static uint Crc32(byte[] data) => Multiplayer.Util.Crc32.Compute(data);
     }
 }

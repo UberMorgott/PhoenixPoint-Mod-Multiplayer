@@ -73,6 +73,14 @@ namespace Multiplayer.Network.Sync
         // only moving vehicles ship bytes, so faster polling costs nothing at rest.
         private const int VehiclePollTickInterval = VehicleEmitScheduler.EmitTickInterval;
 
+        // ─── Inc5 part 1 — rolling CRC divergence probe (GeoCrcProbe 0xA9) ─────────
+        // HOST: hourly per-subset CRC broadcast pump (HourTicked cadence, subsets read via CrcProbeMirror).
+        // CLIENT: the pure window/compare brain — 2 consecutive mismatching rounds flag a subset DIVERGED
+        // (loud log + native toast; detection only, no auto-resync). The rca-3 reload boundary arms its
+        // grace window below (every peer just loaded the same blob → mirror correct by construction).
+        private readonly State.CrcProbeMirror _crcProbe = new State.CrcProbeMirror();
+        private readonly State.DivergenceMonitor _crcMonitor = new State.DivergenceMonitor();
+
         // ─── Client geoscape-event raise/dismiss correlation (occurrence-id keyed) ─────────
         // Pure, Unity-free ordering brain: keys raise/dismiss on the host-synthesized per-occurrence id so two
         // occurrences of the same reusable EventID def-name never collide, and a Dismiss that arrives before its
@@ -198,6 +206,11 @@ namespace Multiplayer.Network.Sync
             // host's next anchor unconditionally and HARD-SET the display across the reload's game-time jump
             // (no lerp from the dead save's clock); re-pushes the pause/speed widgets. Self-guarded no-op on host.
             _reloadReset.Register("time-sync-client", () => _engine?.TimeSync?.ResetClientState());
+            // Inc5 CRC probe: the boundary loads the SAME blob on every peer, so the client mirror is
+            // correct by construction — arm the compare grace window and drop any pre-reload miss/diverged
+            // marks (they describe the dead geoscape). Host side: the probe's HourTicked binding self-heals
+            // via the HostTick level-instance rebind guard (ResearchChannel idiom), nothing to sweep here.
+            _reloadReset.Register("crc-probe-grace", () => _crcMonitor.ArmGrace(Environment.TickCount));
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
@@ -611,6 +624,7 @@ namespace Multiplayer.Network.Sync
         public void DetachAllChannels()
         {
             foreach (var ch in _channels.All) ch.DetachHost();
+            _crcProbe.Detach();   // Inc5 CRC probe hourly-tick subscription (same session-end sweep)
             // Teardown belt: never carry a deferred report across a session boundary (its modalData is dead).
             lock (_deferredReports) _deferredReports.Clear();
         }
@@ -1780,6 +1794,14 @@ namespace Multiplayer.Network.Sync
                 // parents to it. Feeds the native exploration progress bar on the frozen client (Symptom: no bar).
                 State.GeoVehicleExploreMirror.HostPollAndBroadcast(_engine, _geoLiveSeq);
             }
+
+            // Inc5 part 1 — rolling CRC divergence probe: once per in-game hour (HourTicked — the
+            // mist-channel cadence precedent) broadcast the CRC32 of each hand-picked deterministic state
+            // subset on the GeoCrcProbe (0xA9) envelope surface. Detection only (no auto-resync — that is
+            // the reconnect/self-heal increment). Same ClientSimFreeze gate as the mirrors above: an
+            // UNfrozen client legitimately simulates (diverges by design), so flag-OFF rollback = zero new
+            // traffic and zero false alarms. Idle cost ~zero (pump early-returns until the hour edge).
+            if (ClientSimFreeze.Enabled) _crcProbe.HostTick(_engine, _geoLiveSeq);
         }
 
         // ─── Unified 0x67 envelope inbound ─────────────────
@@ -1862,6 +1884,16 @@ namespace Multiplayer.Network.Sync
                 // the host fraction (GeoVehicleExploreMirror gates on ClientSimFreeze.ShouldFreeze). Seq-guarded (dup/stale drop).
                 try { State.GeoVehicleExploreMirror.HandleExplore(payload, _geoLiveSeq); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo vehicleexplore envelope failed: " + ex.Message); }
+                return true;
+            }
+            if (surfaceId == SurfaceIds.GeoCrcProbe)
+            {
+                // Inc5 part 1 divergence probe: the client recomputes each subset CRC over its own mirrored
+                // state and compares (loud log + native toast on a CONFIRMED divergence — 2 consecutive
+                // mismatching rounds). Host never applies its own broadcast; SurfaceSeq round guard +
+                // mid-tactical/grace skips live inside HandleProbe.
+                try { if (!_engine.IsHost) _crcProbe.HandleProbe(payload, _geoLiveSeq, _crcMonitor); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][geo] geo crcprobe envelope failed: " + ex.Message); }
                 return true;
             }
             if (surfaceId == SurfaceIds.GeoHarvestFloat)

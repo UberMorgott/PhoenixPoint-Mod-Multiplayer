@@ -297,6 +297,60 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>
+        /// Inc5 CRC probe: every live site's hand-picked deterministic subset {SiteId, ownerFactionDefGuid,
+        /// State} — read IDENTICALLY on host and client (the client's Owner/State getters read the same
+        /// backing fields the channel-#5 mirror writes), so equal mirrored state hashes equal. Field reads
+        /// are best-effort per site (a failed owner/state read degrades to ""/0 on BOTH sides the same way,
+        /// mirroring <see cref="ReadSite"/>); returns false only when the map itself is unavailable.
+        /// </summary>
+        public static bool TryReadCrcIdentities(GeoRuntime rt, out List<(int siteId, string ownerGuid, byte state)> list)
+        {
+            list = null;
+            try
+            {
+                Ensure(rt);
+                if (!_ready) return false;
+                var map = GetMap(rt);
+                if (map == null) return false;
+                if (!(_allSitesProp.GetValue(map, null) is IEnumerable sites)) return false;
+                list = new List<(int, string, byte)>();
+                foreach (var s in sites)
+                {
+                    if (s == null) continue;
+                    int id;
+                    try { id = _siteIdField.GetValue(s) is int i ? i : -1; } catch { continue; }
+                    if (id < 0) continue;
+
+                    string ownerGuid = "";
+                    try
+                    {
+                        var owner = _ownerProp != null ? _ownerProp.GetValue(s, null) : _ownerBackingField.GetValue(s);
+                        if (owner != null && _factionDefProp != null)
+                            ownerGuid = DefReflection.GetGuid(_factionDefProp.GetValue(owner, null)) ?? "";
+                    }
+                    catch { ownerGuid = ""; }
+
+                    byte state = 0;
+                    try
+                    {
+                        var st = _stateProp != null ? _stateProp.GetValue(s, null) : _stateBackingField.GetValue(s);
+                        state = (byte)Convert.ToInt32(st);
+                    }
+                    catch { state = 0; }
+
+                    list.Add((id, ownerGuid, state));
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.TryReadCrcIdentities failed: " + ex.Message);
+                list = null;
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Host: build the IDENTITY snapshot (Owner/Type/State/SiteName-locKey/EncounterID) for a LIVE GeoSite,
         /// or null if it can't be read. Used by the event-raise broadcast to carry an absent-site fallback.
         /// </summary>

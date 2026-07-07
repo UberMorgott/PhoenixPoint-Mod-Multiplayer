@@ -76,9 +76,10 @@ namespace Multiplayer.Network
         /// <summary>
         /// Show a transient toast via the live native NotificationController if one exists in the
         /// current context (geoscape / main menu). No-op in tactical (none present) — chat-only there.
-        /// Never throws.
+        /// Never throws. INTERNAL: also the native "diverged" hint surface of the Inc5 CRC probe
+        /// (<c>CrcProbeMirror</c>) — one toast per divergence transition, native-UI-first.
         /// </summary>
-        private static void ShowToast(string message)
+        internal static void ShowToast(string message)
         {
             try
             {
