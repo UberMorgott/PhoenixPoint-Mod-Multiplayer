@@ -233,6 +233,22 @@ namespace Multiplayer.Network
                     stale.Add(peer.Key);
             return stale;
         }
+
+        /// <summary>
+        /// Self-identity collision guard (second-line defense). True iff a JOINing peer presents the
+        /// SAME persistent playerGUID as the HOST's own identity. That only happens as an operational
+        /// misconfiguration: two same-machine instances shared <c>persistentDataPath/identity.json</c>
+        /// and loaded the same guid (see <c>ClientIdentity</c>). Onboarding such a peer would silently
+        /// collapse it into the host's slot 0 — <c>SlotAllocator</c> seeds the host guid at slot 0, so
+        /// <c>Assign(hostGuid)</c> returns 0 — and would share the host's permission/ownership key (both
+        /// keyed by the guid). The host must REFUSE the JOIN loudly instead of degrading silently. Empty
+        /// guids are rejected upstream (missing-identity guard) and are never a collision here. Pure +
+        /// Unity-free so it is unit-testable.
+        /// </summary>
+        public static bool IsSelfIdentityCollision(Guid hostGuid, Guid joiningGuid)
+        {
+            return joiningGuid != Guid.Empty && joiningGuid == hostGuid;
+        }
     }
 
     /// <summary>

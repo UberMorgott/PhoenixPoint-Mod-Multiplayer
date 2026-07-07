@@ -255,6 +255,26 @@ namespace Multiplayer.Network
                 return;
             }
 
+            // HARDENING (second-line defense): a JOIN whose persistent playerGUID EQUALS the host's own
+            // is a guid collision — both instances loaded the SAME persistentDataPath/identity.json (see
+            // ClientIdentity). Onboarding it would silently collapse the client into host slot 0
+            // (SlotAllocator seeds the host guid at slot 0) AND share the host's permission/ownership key.
+            // REFUSE loudly — a colliding identity is an operational misconfig, not a game state; give the
+            // 2nd same-machine instance a distinct identity (auto identity-N.json, or set MULTIPLAYER_IDENTITY).
+            if (SessionLifecycle.IsSelfIdentityCollision(ClientIdentity.PlayerGuid, join.PlayerGuid))
+            {
+                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: client playerGUID {join.PlayerGuid} " +
+                               "EQUALS the host's own identity — both instances share identity.json (operational " +
+                               "misconfig). Launch the 2nd instance with a distinct identity (auto identity-N.json, " +
+                               "or set MULTIPLAYER_IDENTITY). Refusing to avoid collapsing the client into host slot 0.");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "Identity collision: this instance shares the host's player identity. " +
+                        "Relaunch the client with a distinct MULTIPLAYER_IDENTITY."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+
             // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
             // in the roster is a reconnect of a known player whose previous connection died (possibly a
             // death the transport never reported — crash inside the 20 s heartbeat window — and possibly

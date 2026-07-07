@@ -115,5 +115,34 @@ namespace Multiplayer.Tests
             Assert.False(latch.Handled);
             Assert.True(latch.TryHandle()); // fires once again for the fresh session
         }
+
+        // ─── Self-identity collision guard (host second-line defense) ───────
+        [Fact]
+        public void IsSelfIdentityCollision_JoinEqualsHost_True()
+        {
+            // Both instances loaded the SAME identity.json → the client presents the host's own guid.
+            var host = System.Guid.NewGuid();
+            Assert.True(SessionLifecycle.IsSelfIdentityCollision(host, host));
+        }
+
+        [Fact]
+        public void IsSelfIdentityCollision_DistinctGuids_False()
+        {
+            Assert.False(SessionLifecycle.IsSelfIdentityCollision(System.Guid.NewGuid(), System.Guid.NewGuid()));
+        }
+
+        [Fact]
+        public void IsSelfIdentityCollision_EmptyJoiningGuid_False()
+        {
+            // Empty is handled by the upstream missing-identity reject; never a self-collision here.
+            var host = System.Guid.NewGuid();
+            Assert.False(SessionLifecycle.IsSelfIdentityCollision(host, System.Guid.Empty));
+        }
+
+        [Fact]
+        public void IsSelfIdentityCollision_BothEmpty_False()
+        {
+            Assert.False(SessionLifecycle.IsSelfIdentityCollision(System.Guid.Empty, System.Guid.Empty));
+        }
     }
 }

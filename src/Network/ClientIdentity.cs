@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Multiplayer.Util;
 using UnityEngine;
 
 namespace Multiplayer.Network
@@ -13,6 +14,14 @@ namespace Multiplayer.Network
     /// NOTE (OPEN SDK Q): the PP per-user config dir that survives a mod update is unconfirmed
     /// (docs/specs/03-open-questions-sdk.md → "Persistent Config Location"). persistentDataPath is
     /// the grounded always-available Unity default; revisit before release.
+    ///
+    /// PER-INSTANCE FILE: two same-machine instances (the local 2-instance co-op test rig) share
+    /// persistentDataPath, so a single identity.json would give BOTH the same guid → the host assigns
+    /// the joining client its own slot 0 and per-player ownership collapses. To avoid that WITHOUT the
+    /// manual <c>MULTIPLAYER_IDENTITY</c> override, the file is keyed off the authoritative same-machine
+    /// index <see cref="MultiplayerLog.InstanceIndex"/>: identity.json for instance 1, identity-2.json
+    /// for instance 2, … (reusing the ONE canonical "-N before extension" suffixer the log file uses).
+    /// A real cross-machine peer is always instance 1 → identity.json on its own machine — unchanged.
     /// </summary>
     public static class ClientIdentity
     {
@@ -35,11 +44,31 @@ namespace Multiplayer.Network
         }
 
         private static string Directory => Path.Combine(Application.persistentDataPath, DirName);
-        private static string FilePath => Path.Combine(Directory, FileName);
+
+        // Per-instance identity file. instance 1 → identity.json (shared/primary); instance N>1 →
+        // identity-N.json, keyed off MultiplayerLog.InstanceIndex (the authoritative same-machine index,
+        // resolved in MultiplayerLog.Init). Reuses TftvLogRedirect — the ONE canonical "-N before
+        // extension" suffixer the per-instance log file uses — so identity and log share identical
+        // instance-suffix semantics. Load() calls MultiplayerLog.Init() first, so the index is resolved
+        // before this getter is read (order-safe even if a caller touches PlayerGuid before mod startup).
+        private static string FilePath
+        {
+            get
+            {
+                var basePath = Path.Combine(Directory, FileName);
+                var index = MultiplayerLog.InstanceIndex;
+                return TftvLogRedirect.ResolveRedirectedPath(basePath, index > 1, index);
+            }
+        }
 
         private static void Load()
         {
             _loaded = true;
+
+            // Order-safe: guarantees MultiplayerLog.InstanceIndex is resolved (via the log-lock fallback
+            // loop) BEFORE FilePath picks the per-instance identity file. Idempotent — a no-op in normal
+            // startup where MultiplayerMain.OnModEnabled already ran it as its first step.
+            MultiplayerLog.Init();
 
             // Local 2-instance test seam: a distinct GUID can be injected via the
             // MULTIPLAYER_IDENTITY env var so a 2nd instance on the same machine (which
@@ -52,6 +81,8 @@ namespace Multiplayer.Network
                     Guid.TryParse(envOverride, out var fromEnv) && fromEnv != Guid.Empty)
                 {
                     _playerGuid = fromEnv;
+                    Debug.Log($"[Multiplayer] ClientIdentity: using MULTIPLAYER_IDENTITY override {_playerGuid} " +
+                              $"(instance {MultiplayerLog.InstanceIndex}).");
                     return;
                 }
             }
@@ -68,6 +99,8 @@ namespace Multiplayer.Network
                     if (TryParseGuid(json, out var parsed) && parsed != Guid.Empty)
                     {
                         _playerGuid = parsed;
+                        Debug.Log($"[Multiplayer] ClientIdentity: loaded {_playerGuid} from " +
+                                  $"{Path.GetFileName(FilePath)} (instance {MultiplayerLog.InstanceIndex}).");
                         return;
                     }
                 }
@@ -80,6 +113,8 @@ namespace Multiplayer.Network
             // First run (or unreadable/empty file): generate once and persist.
             _playerGuid = Guid.NewGuid();
             Save();
+            Debug.Log($"[Multiplayer] ClientIdentity: generated new {_playerGuid} → " +
+                      $"{Path.GetFileName(FilePath)} (instance {MultiplayerLog.InstanceIndex}).");
         }
 
         private static void Save()
