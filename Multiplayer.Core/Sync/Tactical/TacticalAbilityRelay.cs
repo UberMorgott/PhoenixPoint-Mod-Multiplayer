@@ -92,13 +92,15 @@ namespace Multiplayer.Sync.Tactical
         ///     action. Also self-derives its exit zone → KindNone; the host re-resolves the passengers natively
         ///     (Vehicle.Passengers), so the relay carries only the acting VEHICLE actor id. Same outcome surfaces
         ///     (per-passenger + vehicle EvacuatedStatus on 0x8F, TS4 conclusion).
-        /// Each of these DECLARES its own <c>Activate(object)</c> override (verified vs the decompile), so the
-        /// generic Harmony patch binds each type EXACTLY (no base-method over-patch). Abilities whose outcome
-        /// needs a not-yet-shipped surface or has a UI/authority hazard (deploy-turret→pos/SpawnActorAbility base
-        /// binding, open-crate→host InventoryAbility.Activate would hijack the HOST into the inventory view +
-        /// auto-open already rides the relayed move, drop→object-registry, mind-control→faction/TS5) are
-        /// DELIBERATELY absent from this active set — they are KNOWN to <see cref="GenericTargetKindFor"/> (wire +
-        /// host build support their kind) but stay OFF the relay until safe (degrade-to-notify meanwhile, spec R1).</summary>
+        /// Most of these DECLARE their own <c>Activate(object)</c> override (verified vs the decompile), so the
+        /// generic Harmony patch binds each type EXACTLY. The ONE deliberate exception (gap-turret-crate-loot):
+        /// <c>DeployTurretAbility</c>/<c>ThrowTurretAbility</c> INHERIT <c>SpawnActorAbility.Activate</c>
+        /// (SpawnActorAbility.cs:41 — neither subclass overrides it), so the patch binds the BASE method once
+        /// (deduped) — which ALSO fires for the off-list sibling <c>MorphIntoActorAbility</c>; the runtime-type
+        /// allowlist gate in <c>ClientInterceptGenericAbility</c> lets that sibling run native (host-only enemy
+        /// path anyway — client AI is suppressed). Abilities whose outcome still needs a not-yet-shipped surface
+        /// (mind-control→faction/TS5) stay OFF the relay: KNOWN to <see cref="GenericTargetKindFor"/> (wire +
+        /// host build support their kind) but deferred (degrade-to-notify meanwhile, spec R1).</summary>
         public static readonly string[] RelayableGenericAbilityTypeNames =
         {
             "HealAbility",              // actor target → HP via 0x8F Health
@@ -112,6 +114,17 @@ namespace Multiplayer.Sync.Tactical
             // EvacuateMountedActorsAbility.cs:57 — so the generic patch binds each EXACTLY).
             "ExitMissionAbility",       // self (zone self-derived) → EvacuatedStatus via 0x8F + mission end via TS4
             "EvacuateMountedActorsAbility", // self (vehicle + passengers, host-derived) → same surfaces
+            // gap-turret-crate-loot (audit D12 deployables + D18 loot): every outcome rides an ALREADY-SHIPPED
+            // surface — the spawned turret ACTOR rides the TS1 0x92 spawn mirror (host ActorEnteredPlay funnel),
+            // retrieval rides the 0x93 despawn sweep, the shield status rides the 0x8F inert status delta, and a
+            // dropped item's ground container rides 0x92 (+ the host content-refresh re-broadcast).
+            "DeployTurretAbility",      // pos target (deploy cell) → turret actor via TS1 0x92; inherits base Activate
+            "ThrowTurretAbility",       // pos target (parabolic throw) → same TS1 spawn; inherits base Activate
+            "DeployShieldAbility",      // pos/direction target → ShieldDeployedStatus via 0x8F status delta
+            "RetrieveDeployedItemAbility", // actor target (the deployed turret) → RemoveActorEffect → 0x93 sweep
+            "RetrieveShieldAbility",    // self (Source = own ShieldDeployedStatus) → status unapply via 0x8F
+            "OpenCrateAbility",         // ground-object target (raw CrateComponent param) → host-authoritative open
+            "DropItemAbility",          // own equipped item (slot) → dropped container via TS1 0x92 + refresh
         };
 
         private static readonly HashSet<string> _genericRelayable =
@@ -126,9 +139,9 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>PURE ability→target-KIND map for the 0x8E generic intent (the discriminator the client writes +
         /// the host reads to build the <c>TacticalAbilityTarget</c>). Covers the ACTIVE relay set AND the
         /// deferred-but-known abilities (so the wire is complete + the map is unit-testable ahead of activation):
-        ///   Heal → actor; RecoverWill / Rally / PsychicScream / ExitMission / EvacuateMounted → none(self);
-        ///   DeployTurret / ThrowTurret → pos; Reload → slot; Interact / OpenCrate / DropItem → object;
-        ///   MindControl / InstilFrenzy → actor.
+        ///   Heal / RetrieveDeployedItem → actor; RecoverWill / Rally / PsychicScream / ExitMission /
+        ///   EvacuateMounted / RetrieveShield → none(self); DeployTurret / ThrowTurret / DeployShield → pos;
+        ///   Reload / DropItem → slot; Interact / OpenCrate → object; MindControl / InstilFrenzy → actor.
         /// Returns <see cref="TacticalGenericIntentCodec.KindUnknown"/> for anything unmapped — the client then
         /// degrades-to-notify (never sends an unresolvable intent). Kept in sync with the audit's ability domains
         /// (D8 heal/support, D10 psychic, D12 deployables, D18 loot, D13 mind-control). NOTE: the spec groups
@@ -148,29 +161,85 @@ namespace Multiplayer.Sync.Tactical
                 // passengers from Vehicle.Passengers on the host — nothing to carry beyond the caster.
                 case "ExitMissionAbility":
                 case "EvacuateMountedActorsAbility":
+                // gap-turret-crate-loot: RetrieveShieldAbility ignores its Activate parameter entirely — it
+                // unapplies its own Source ShieldDeployedStatus (RetrieveShieldAbility.cs:23-30) → nothing to carry.
+                case "RetrieveShieldAbility":
                     return TacticalGenericIntentCodec.KindNone;
                 // actor target
                 case "HealAbility":
                 case "InstilFrenzyAbility":
                 case "MindControlAbility":
+                // gap-turret-crate-loot: the retrieve target IS the deployed turret ACTOR
+                // (RetrieveTurretCrt reads target.Actor, RetrieveDeployedItemAbility.cs:30) — TS1-registered.
+                case "RetrieveDeployedItemAbility":
                     return TacticalGenericIntentCodec.KindActor;
-                // position target (deploy cell)
+                // position target (deploy cell / shield facing — see ChoosePosEncoding for the direction fold)
                 case "DeployTurretAbility":
                 case "ThrowTurretAbility":
                 case "DeployShieldAbility":
                     return TacticalGenericIntentCodec.KindPos;
-                // equipment-slot target (reload — TS5 ammo surface)
+                // equipment-slot target: reload (TS5 ammo surface) AND drop — grounded vs the decompile, a drop
+                // target carries the caster's OWN equipped TacticalItem (DropItemAbility.cs:18-36), NOT a ground
+                // object netId (the earlier "drop→object" grouping was wrong; the ground container only EXISTS
+                // after the host drop and rides TS1 0x92).
                 case "ReloadAbility":
+                case "DropItemAbility":
                     return TacticalGenericIntentCodec.KindSlot;
-                // ground-object target (loot / crate — TS5 object registry)
+                // ground-object target (interact console / crate — TS5 object registry)
                 case "InteractWithObjectAbility":
                 case "OpenCrateAbility":
-                case "DropItemAbility":
                     return TacticalGenericIntentCodec.KindObject;
                 default:
                     return TacticalGenericIntentCodec.KindUnknown;
             }
         }
+
+        // ─── gap-turret-crate-loot: host pre-Activate enabled gate + pos-intent encoding ─────────────
+        /// <summary>Type NAMES of the relayed generics the HOST must check <c>IsEnabled()</c> on BEFORE the
+        /// relayed <c>Activate</c>. WHY: mid-mission the client mirror's EQUIPMENT/INVENTORY is NOT mirrored —
+        /// after the host consumes the turret item (DeployTurretAbility.OnActorSpawned removes it) the client's
+        /// stale UI can still show the ability lit and re-send the intent; the native <c>Activate</c> never
+        /// re-checks the disabled state (the local UI does), so a blind host Activate would NRE mid-coroutine
+        /// (SelectedEquipment deref, DeployTurretAbility.cs:22) or duplicate the action. Scoped to the NEW
+        /// deploy/retrieve/crate/drop set so every ALREADY-SHIPPED relay path stays byte-identical (the gate can
+        /// widen later after an in-game soak). Fail-open at the reflection layer (unreadable → run native).</summary>
+        public static readonly string[] HostEnabledCheckAbilityTypeNames =
+        {
+            "DeployTurretAbility",
+            "ThrowTurretAbility",
+            "DeployShieldAbility",
+            "RetrieveDeployedItemAbility",
+            "RetrieveShieldAbility",
+            "OpenCrateAbility",
+            "DropItemAbility",
+        };
+
+        private static readonly HashSet<string> _hostEnabledCheck =
+            new HashSet<string>(HostEnabledCheckAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>True when the host must verify the resolved ability's <c>IsEnabled()</c> before invoking a
+        /// relayed generic <c>Activate</c> (see <see cref="HostEnabledCheckAbilityTypeNames"/>). Unknown / null /
+        /// shipped-relay types return false (no behavior change for the already-soaked set).</summary>
+        public static bool RequiresHostEnabledCheck(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _hostEnabledCheck.Contains(abilityTypeName);
+
+        /// <summary>Pos-intent encoding modes for <see cref="ChoosePosEncoding"/> (the 0x8E KindPos wire carries
+        /// ONE position; the native <c>TacticalAbilityTarget</c> may instead carry a facing DIRECTION —
+        /// DeployShieldAbility prefers <c>Direction</c>, else derives it from <c>PositionToApply - casterPos</c>,
+        /// DeployShieldAbility.cs:30-37).</summary>
+        public const byte PosEncodeUsePosition         = 0;  // send target.PositionToApply verbatim (deploy cell)
+        public const byte PosEncodeCasterPlusDirection = 1;  // send casterPos + Direction (host re-derives the facing)
+        public const byte PosEncodeCasterPos           = 2;  // nothing usable → send casterPos (host falls back to actor forward)
+
+        /// <summary>PURE decision how the client encodes a KindPos generic intent from the native target shape.
+        /// A readable <c>PositionToApply</c> wins (EXACT deploy cell for turret/throw — never displaced by a
+        /// stray direction; for a shield the host re-derives the same facing from pos−casterPos). Direction-only
+        /// (shield aimed by facing, pos unset/NaN) → anchor it as casterPos+direction. Neither → casterPos (the
+        /// native shield activate then falls back to the actor's forward — DeployShieldAbility.cs:27).</summary>
+        public static byte ChoosePosEncoding(bool hasPositionToApply, bool hasDirection)
+            => hasPositionToApply ? PosEncodeUsePosition
+             : hasDirection      ? PosEncodeCasterPlusDirection
+                                 : PosEncodeCasterPos;
 
         /// <summary>Ability type NAMES whose <c>Activate(object)</c> a mirroring client SUPPRESSES via a dedicated
         /// Harmony prefix that is NOT the generic relay: <c>MoveAbility</c> (<c>MoveAbilityActivatePatch</c>) and

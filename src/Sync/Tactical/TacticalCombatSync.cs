@@ -320,7 +320,7 @@ namespace Multiplayer.Sync.Tactical
                 }
 
                 byte kind = TacticalAbilityRelay.GenericTargetKindFor(typeName);
-                if (!TryBuildGenericIntent(actorNetId, abilityGuid, kind, parameter, out var intent))
+                if (!TryBuildGenericIntent(actorNetId, abilityGuid, typeName, kind, parameter, out var intent))
                 {
                     NotifyGenericDegrade(typeName, "unsupported/unreadable target kind=" + kind);
                     return false;   // suppress + notify (never run on the frozen sim), never send a junk intent
@@ -341,13 +341,17 @@ namespace Multiplayer.Sync.Tactical
         }
 
         /// <summary>Build the wire intent from the client's <c>TacticalAbilityTarget</c> parameter per target-kind
-        /// (TS5b completes Slot + Object). None → no target (self-derived). Actor → the target actor's netId (must
-        /// resolve). Pos → PositionToApply. Slot → RELOAD: reload-others (an ally actor) rides an ACTOR intent so the
-        /// host re-derives weapon+ammo, while reload-self carries the caster's own weapon equipment-slot index (or -1
-        /// = the selected weapon). Object → INTERACT/CRATE: the ground object's shared registry netId. Returns false
-        /// for a KNOWN kind whose target could not be read (caller degrades-to-notify).</summary>
-        private static bool TryBuildGenericIntent(int actorNetId, string guid, byte kind, object parameter,
-            out TacticalGenericIntentCodec.GenericIntent intent)
+        /// (TS5b completes Slot + Object; gap-turret-crate-loot adds the deploy/drop/crate shapes). None → no target
+        /// (self-derived). Actor → the target actor's netId (must resolve). Pos → PositionToApply, with the shield
+        /// FACING fold (a Direction-only target anchors as casterPos+direction — <c>ChoosePosEncoding</c>). Slot →
+        /// RELOAD: reload-others (an ally actor) rides an ACTOR intent so the host re-derives weapon+ammo, while
+        /// reload-self carries the caster's own weapon equipment-slot index (or -1 = the selected weapon); DROP:
+        /// the caster's own equipped item's slot index (-1 = SelectedEquipment, kept in sync by the 0x8B
+        /// equip-select mirror). Object → INTERACT/CRATE: the ground object's shared registry netId (a crate
+        /// auto-open passes the raw <c>CrateComponent</c> — resolved via its sibling <c>ItemContainer</c>).
+        /// Returns false for a KNOWN kind whose target could not be read (caller degrades-to-notify).</summary>
+        private static bool TryBuildGenericIntent(int actorNetId, string guid, string typeName, byte kind,
+            object parameter, out TacticalGenericIntentCodec.GenericIntent intent)
         {
             intent = default(TacticalGenericIntentCodec.GenericIntent);
             uint nonce = NextNonce();
@@ -365,8 +369,20 @@ namespace Multiplayer.Sync.Tactical
                 }
                 case TacticalGenericIntentCodec.KindPos:
                 {
-                    ReadTarget(parameter, out _, out Vector3 pos);
-                    intent = TacticalGenericIntentCodec.Pos(actorNetId, guid, pos.x, pos.y, pos.z, nonce);
+                    // gap-turret-crate-loot: encode per the pure decision — an exact PositionToApply (deploy cell)
+                    // verbatim; a Direction-only shield target as casterPos+direction (the host re-derives the same
+                    // facing from pos−casterPos, DeployShieldAbility.cs:36); neither → casterPos (native forward
+                    // fallback). Only the caster-anchored modes need a resolvable caster (else degrade).
+                    ReadPosAndDirection(parameter, out bool hasPos, out Vector3 pos, out bool hasDir, out Vector3 dir);
+                    byte mode = TacticalAbilityRelay.ChoosePosEncoding(hasPos, hasDir);
+                    Vector3 send = pos;
+                    if (mode != TacticalAbilityRelay.PosEncodeUsePosition)
+                    {
+                        object caster = TacticalDeploySync.ResolveLiveActor(actorNetId);
+                        if (!(GetProp(caster, "Pos") is Vector3 casterPos)) return false;   // no anchor → degrade
+                        send = mode == TacticalAbilityRelay.PosEncodeCasterPlusDirection ? casterPos + dir : casterPos;
+                    }
+                    intent = TacticalGenericIntentCodec.Pos(actorNetId, guid, send.x, send.y, send.z, nonce);
                     return true;
                 }
                 case TacticalGenericIntentCodec.KindSlot:
@@ -375,13 +391,20 @@ namespace Multiplayer.Sync.Tactical
                     // ALLY actor; the host re-derives that ally's weapon+ammo from GetReloadOthersWeaponTargets, so
                     // it needs ONLY the target actor → emit an ACTOR intent (reuses the KindActor host build).
                     // reload-SELF carries the caster's OWN weapon equipment-slot index (or -1 = the currently
-                    // selected weapon, which ReloadCrt.ChooseEquipmentAndAmmo self-derives).
-                    ReadTarget(parameter, out int reloadTargetNetId, out _);
-                    if (reloadTargetNetId >= 0 && reloadTargetNetId != actorNetId)
+                    // selected weapon, which ReloadCrt.ChooseEquipmentAndAmmo self-derives). The actor branch is
+                    // reload-ONLY: a DROP target never carries an Actor, and must never be re-shaped as one.
+                    if (string.Equals(typeName, "ReloadAbility", StringComparison.Ordinal))
                     {
-                        intent = TacticalGenericIntentCodec.Actor(actorNetId, guid, reloadTargetNetId, nonce);
-                        return true;
+                        ReadTarget(parameter, out int reloadTargetNetId, out _);
+                        if (reloadTargetNetId >= 0 && reloadTargetNetId != actorNetId)
+                        {
+                            intent = TacticalGenericIntentCodec.Actor(actorNetId, guid, reloadTargetNetId, nonce);
+                            return true;
+                        }
                     }
+                    // DROP (gap-turret-crate-loot) reads the same slot shape: its target carries the item in
+                    // TacticalAbilityTarget.TacticalItem (DropItemAbility.cs:18-36) — ReadEquipmentSlotIndex
+                    // resolves Equipment ?? TacticalItem to the caster's Equipments index; -1 = SelectedEquipment.
                     int slotIndex = ReadEquipmentSlotIndex(actorNetId, parameter);
                     intent = TacticalGenericIntentCodec.Slot(actorNetId, guid, slotIndex, nonce);
                     return true;
@@ -433,7 +456,18 @@ namespace Multiplayer.Sync.Tactical
                     return;
                 }
 
-                if (!TryBuildGenericTarget(intent, out object target))
+                // gap-turret-crate-loot: the client mirror's equipment/inventory is NOT mirrored mid-mission, so
+                // its stale UI can re-send an intent whose item the host already consumed (deploy/drop). Native
+                // Activate never re-checks the disabled state — a blind invoke would NRE mid-coroutine
+                // (DeployTurretAbility.cs:22 SelectedEquipment deref) or duplicate the action. Scoped to the new
+                // set (RequiresHostEnabledCheck) so shipped relays stay byte-identical; fail-open on reflection.
+                if (TacticalAbilityRelay.RequiresHostEnabledCheck(typeName) && !HostAbilityEnabled(ability))
+                {
+                    NotifyGenericDegrade(typeName, "ability disabled on host (stale client state?) — intent dropped");
+                    return;
+                }
+
+                if (!TryBuildGenericTarget(typeName, intent, out object target))
                 {
                     NotifyGenericDegrade(typeName, "unsupported target kind=" + intent.TargetKind + " on host");
                     return;
@@ -441,6 +475,14 @@ namespace Multiplayer.Sync.Tactical
 
                 var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
                 if (activate == null) { Debug.LogError("[Multiplayer][tac] generic intent: Activate(object) not found on " + typeName); return; }
+
+                // gap-turret-crate-loot: identify the item a relayed DROP is about to drop BEFORE Activate (the
+                // slot target carries it; the self-derive path drops SelectedEquipment) so the container it lands
+                // in can be content-refreshed afterwards (its 0x92 blob was serialized EMPTY at EnterPlay).
+                object dropItem = null;
+                if (string.Equals(typeName, "DropItemAbility", StringComparison.Ordinal))
+                    dropItem = (target != null ? GetField(target, "TacticalItem") : null)
+                               ?? GetProp(GetProp(actor, "Equipments"), "SelectedEquipment");
 
                 // Hold the host camera-follow guard across the relayed Activate (BUG2 pattern from the shoot relay):
                 // the synchronous Activate camera hint must not fly the host camera to the client's actor.
@@ -450,6 +492,8 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] HOST executed generic ability " + typeName +
                           " (guid=" + intent.AbilityDefGuid + ") for actor " + intent.ActorNetId + " kind=" + intent.TargetKind);
 
+                if (dropItem != null) HostRefreshDroppedItemContainer(dropItem);
+
                 // The host ran this relayed CLIENT action programmatically (never UI-selected the soldier), so re-grey
                 // its ability bar if the host UI currently has it selected — same as the shoot relay. No-op otherwise.
                 TacticalActorStateSync.RefreshHostSelectedBarForActor(intent.ActorNetId);
@@ -458,19 +502,25 @@ namespace Multiplayer.Sync.Tactical
         }
 
         /// <summary>Build the <c>TacticalAbilityTarget</c> the host passes to a relayed generic <c>Activate</c>,
-        /// per target-kind (TS5b completes Slot + Object). None → null (the ability self-derives). Actor → an actor
-        /// target (Actor + DamageReceiver + aim-point). Pos → a bare-position target. Slot → RELOAD-self: a target
-        /// carrying the caster's own weapon Equipment at the slot index (or a BARE target for slot &lt; 0 → ReloadCrt
-        /// self-derives the selected weapon). Object → INTERACT: an actor target for the ground object (the ability
-        /// reads target.Actor as the StructuralTarget). Returns false for a KNOWN kind whose target could not be
-        /// resolved (the actor/object already left play / is not on this side), so the caller degrades-to-notify.</summary>
-        private static bool TryBuildGenericTarget(TacticalGenericIntentCodec.GenericIntent intent, out object target)
+        /// per target-kind (TS5b completes Slot + Object; gap-turret-crate-loot adds the drop/crate shapes).
+        /// None → null (the ability self-derives). Actor → an actor target (Actor + DamageReceiver + aim-point).
+        /// Pos → a bare-position target. Slot → RELOAD-self: a target carrying the caster's own weapon Equipment
+        /// at the slot index (or a BARE target for slot &lt; 0 → ReloadCrt self-derives the selected weapon);
+        /// DROP: a target carrying the caster's equipped item in <c>TacticalItem</c> (slot &lt; 0 → null target,
+        /// the native Activate self-derives SelectedEquipment — DropItemAbility.cs:19-35 — which 0x8B keeps in
+        /// sync; an unresolvable slot ≥ 0 degrades — never drop a guessed item). Object → INTERACT: an actor
+        /// target (the ability reads target.Actor as the StructuralTarget); OPEN-CRATE: the raw
+        /// <c>CrateComponent</c> itself (the OpenCrate coroutine casts <c>action.Param</c> directly,
+        /// OpenCrateAbility.cs:57 — NOT a TacticalAbilityTarget). Returns false for a KNOWN kind whose target
+        /// could not be resolved (already left play / not on this side), so the caller degrades-to-notify.</summary>
+        private static bool TryBuildGenericTarget(string typeName, TacticalGenericIntentCodec.GenericIntent intent,
+            out object target)
         {
             target = null;
             switch (intent.TargetKind)
             {
                 case TacticalGenericIntentCodec.KindNone:
-                    target = null;   // Activate(null) — RecoverWill/Rally/PsychicScream self-derive
+                    target = null;   // Activate(null) — RecoverWill/Rally/PsychicScream/RetrieveShield self-derive
                     return true;
                 case TacticalGenericIntentCodec.KindActor:
                 {
@@ -484,25 +534,58 @@ namespace Multiplayer.Sync.Tactical
                     return target != null;
                 case TacticalGenericIntentCodec.KindSlot:
                 {
-                    // Reload-self: resolve the caster and target its OWN weapon Equipment at the slot index. slot < 0
-                    // ⇒ a bare (empty) target that ReloadCrt.ChooseEquipmentAndAmmo self-derives from the selected
-                    // weapon. NEVER null for a resolvable caster (ReloadCrt dereferences action.Param for a self-reload).
                     object caster = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
+                    if (caster == null) return false;
+                    if (string.Equals(typeName, "DropItemAbility", StringComparison.Ordinal))
+                    {
+                        if (intent.SlotIndex < 0) { target = null; return true; }   // self-derive SelectedEquipment
+                        object item = EquipmentAtSlot(caster, intent.SlotIndex);
+                        if (item == null) return false;   // never drop a guessed item → degrade
+                        target = BuildDropItemTarget(item);
+                        return target != null;
+                    }
+                    // Reload-self: target the caster's OWN weapon Equipment at the slot index. slot < 0 ⇒ a bare
+                    // (empty) target that ReloadCrt.ChooseEquipmentAndAmmo self-derives from the selected weapon.
+                    // NEVER null for a resolvable caster (ReloadCrt dereferences action.Param for a self-reload).
                     target = BuildReloadSlotTarget(caster, intent.SlotIndex);
                     return target != null;
                 }
                 case TacticalGenericIntentCodec.KindObject:
                 {
-                    // Interact: resolve the ground-object actor from the shared registry and hand the ability an
-                    // actor target (InteractWithObjectAbility reads target.Actor as the StructuralTarget). Not on
-                    // this side / already gone → false → degrade-to-notify.
                     object obj = TacticalDeploySync.ResolveLiveActor(intent.TargetNetId);
                     if (obj == null) return false;
+                    if (string.Equals(typeName, "OpenCrateAbility", StringComparison.Ordinal))
+                    {
+                        // OpenCrate's Activate param is the raw CrateComponent on the container's GameObject.
+                        target = ResolveCrateComponent(obj);
+                        return target != null;
+                    }
+                    // Interact: hand the ability an actor target (target.Actor = the StructuralTarget).
                     target = BuildActorAbilityTarget(obj);
                     return target != null;
                 }
                 default:
                     return false;   // KindUnknown → degrade
+            }
+        }
+
+        /// <summary>gap-turret-crate-loot: is the resolved ability actually usable on the host right now?
+        /// Reflection <c>IsEnabled(filter:null)</c> (TacticalAbility.cs:367 — the same check the native UI runs
+        /// before offering the ability). Fail-OPEN (unreadable → true) so a reflection surprise can never wedge
+        /// a legitimate relayed action; the native Activate is then no worse than before this gate existed.</summary>
+        private static bool HostAbilityEnabled(object ability)
+        {
+            try
+            {
+                var m = AccessTools.FirstMethod(ability.GetType(),
+                    x => x.Name == "IsEnabled" && x.GetParameters().Length == 1);
+                if (m == null) return true;   // fail-open
+                return !(m.Invoke(ability, new object[] { null }) is bool b) || b;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] HostAbilityEnabled read failed (fail-open): " + ex);
+                return true;
             }
         }
 
@@ -558,16 +641,17 @@ namespace Multiplayer.Sync.Tactical
         }
 
         // ─── TS5b: reload (equipment-slot) + interact (ground-object) target helpers ─────────────────
-        /// <summary>CLIENT: the equipment-slot index of a reload-self target's OWN weapon — the position of
-        /// <c>parameter.Equipment</c> in the caster's <c>Equipments.Equipments</c> list, so the host reloads the
-        /// EXACT weapon (a soldier may carry several). Returns <see cref="TacticalGenericIntentCodec.SlotIndexNone"/>
-        /// (-1) when the parameter carries no specific weapon (auto-reload of the selected weapon), or the caster /
-        /// slot can't be read — the host then self-derives the selected weapon (ReloadCrt.ChooseEquipmentAndAmmo).</summary>
+        /// <summary>CLIENT: the equipment-slot index of a slot-target's OWN item — the position of
+        /// <c>parameter.Equipment</c> (reload) ?? <c>parameter.TacticalItem</c> (drop, gap-turret-crate-loot) in
+        /// the caster's <c>Equipments.Equipments</c> list, so the host acts on the EXACT item (a soldier may carry
+        /// several). Returns <see cref="TacticalGenericIntentCodec.SlotIndexNone"/> (-1) when the parameter carries
+        /// no specific item (auto-reload / drop-selected), or the caster / slot can't be read — the host then
+        /// self-derives the selected weapon/equipment (ReloadCrt.ChooseEquipmentAndAmmo / DropItemAbility:19-35).</summary>
         private static int ReadEquipmentSlotIndex(int casterNetId, object parameter)
         {
             try
             {
-                object equipment = GetField(parameter, "Equipment");
+                object equipment = GetField(parameter, "Equipment") ?? GetField(parameter, "TacticalItem");
                 if (equipment == null) return TacticalGenericIntentCodec.SlotIndexNone;
                 object caster = TacticalDeploySync.ResolveLiveActor(casterNetId);
                 if (caster == null) return TacticalGenericIntentCodec.SlotIndexNone;
@@ -599,21 +683,82 @@ namespace Multiplayer.Sync.Tactical
             object target = Activator.CreateInstance(targetType);
             if (slotIndex >= 0)
             {
-                try
-                {
-                    if (GetProp(GetProp(caster, "Equipments"), "Equipments") is IEnumerable equipments)
-                    {
-                        int i = 0;
-                        foreach (var e in equipments)
-                        {
-                            if (i == slotIndex) { AccessTools.Field(targetType, "Equipment")?.SetValue(target, e); break; }
-                            i++;
-                        }
-                    }
-                }
-                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildReloadSlotTarget slot read failed: " + ex); }
+                object e = EquipmentAtSlot(caster, slotIndex);
+                if (e != null) AccessTools.Field(targetType, "Equipment")?.SetValue(target, e);
             }
             return target;   // bare target for slot < 0 (or unresolved slot) → ReloadCrt reloads the selected weapon
+        }
+
+        /// <summary>The caster's equipped item at <paramref name="slotIndex"/> (its position in
+        /// <c>Equipments.Equipments</c> — the same enumeration the client indexed against in
+        /// <see cref="ReadEquipmentSlotIndex"/>). Null when out of range / unreadable.</summary>
+        private static object EquipmentAtSlot(object caster, int slotIndex)
+        {
+            try
+            {
+                if (GetProp(GetProp(caster, "Equipments"), "Equipments") is IEnumerable equipments)
+                {
+                    int i = 0;
+                    foreach (var e in equipments)
+                    {
+                        if (i == slotIndex) return e;
+                        i++;
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] EquipmentAtSlot read failed: " + ex); }
+            return null;
+        }
+
+        /// <summary>gap-turret-crate-loot: the DROP target — a <c>TacticalAbilityTarget</c> whose
+        /// <c>TacticalItem</c> field carries the exact item to drop (DropItemAbility.Activate reads
+        /// <c>tacticalAbilityTarget.TacticalItem.Drop(...)</c>, DropItemAbility.cs:36).</summary>
+        private static object BuildDropItemTarget(object item)
+        {
+            var targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget");
+            if (targetType == null) return null;
+            object target = Activator.CreateInstance(targetType);
+            var f = AccessTools.Field(targetType, "TacticalItem");
+            if (f == null) return null;   // wrong item shape would NRE inside Activate — degrade instead
+            try { f.SetValue(target, item); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] BuildDropItemTarget set failed: " + ex); return null; }
+            return target;
+        }
+
+        /// <summary>gap-turret-crate-loot: the <c>CrateComponent</c> living on a registry-resolved ground
+        /// container's GameObject (crate visual/animator — CrateComponent.cs:8). Null when the object is not a
+        /// crate (the caller degrades — an OpenCrate intent for a non-crate is a stale/garbled target).</summary>
+        private static object ResolveCrateComponent(object containerActor)
+        {
+            try
+            {
+                var crateType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.CrateComponent");
+                var comp = containerActor as Component;
+                if (crateType == null || comp == null) return null;
+                return comp.GetComponent(crateType);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ResolveCrateComponent failed: " + ex); return null; }
+        }
+
+        /// <summary>gap-turret-crate-loot HOST: after a relayed DROP lands <paramref name="dropItem"/> in a ground
+        /// container, re-broadcast that container's blob (despawn+respawn at the SAME netId — both existing TS1
+        /// surfaces) so every client mirror shows the item: the container's 0x92 spawn blob was serialized EMPTY
+        /// (EnterPlay fires BEFORE AddItem, TacticalItem.Drop:523→532), and a REUSED container never re-emits at
+        /// all. Skips (log only) when the item's container can't be read or isn't refresh-safe — the drop itself
+        /// is already host-authoritative, only the mirror's container contents stay stale.</summary>
+        private static void HostRefreshDroppedItemContainer(object dropItem)
+        {
+            try
+            {
+                object container = GetProp(GetProp(dropItem, "InventoryComponent"), "Actor");
+                if (container == null)
+                {
+                    Debug.LogWarning("[Multiplayer][tac] drop refresh: item has no container actor — mirror contents stale");
+                    return;
+                }
+                TacticalActorLifecycleSync.HostRefreshActorMirror(container);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostRefreshDroppedItemContainer failed: " + ex); }
         }
 
         /// <summary>CLIENT: resolve the shared registry netId of the ground OBJECT a generic object-target ability
@@ -639,9 +784,43 @@ namespace Multiplayer.Sync.Tactical
                     int net = TacticalDeploySync.NetIdForLiveActor(container);
                     if (net >= 0) return net;
                 }
+                // gap-turret-crate-loot: the crate AUTO-OPEN activates with the raw CrateComponent (not a
+                // TacticalAbilityTarget — OpenCrateAbility.OnActorAbilityExecuted:99). Resolve the ItemContainer
+                // actor living on the same GameObject and use ITS registry netId.
+                if (parameter is Component comp)
+                {
+                    var containerType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.ItemContainer");
+                    object sibling = containerType != null ? comp.GetComponent(containerType) : null;
+                    if (sibling != null)
+                    {
+                        int net = TacticalDeploySync.NetIdForLiveActor(sibling);
+                        if (net >= 0) return net;
+                    }
+                }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadObjectNetId failed: " + ex); }
             return -1;
+        }
+
+        /// <summary>CLIENT (gap-turret-crate-loot): read a pos-kind target's BOTH native shapes off the
+        /// <c>TacticalAbilityTarget</c> — <c>PositionToApply</c> (NaN = unset, TacticalAbilityTarget.cs:20/52)
+        /// and the shield facing <c>Direction</c> (zero = unset, :26/54). Feeds
+        /// <see cref="TacticalAbilityRelay.ChoosePosEncoding"/>.</summary>
+        private static void ReadPosAndDirection(object parameter,
+            out bool hasPos, out Vector3 pos, out bool hasDir, out Vector3 dir)
+        {
+            hasPos = false; pos = Vector3.zero; hasDir = false; dir = Vector3.zero;
+            if (parameter == null) return;
+            try
+            {
+                if (GetField(parameter, "PositionToApply") is Vector3 p &&
+                    !(float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z)))
+                { hasPos = true; pos = p; }
+                if (GetField(parameter, "Direction") is Vector3 d &&
+                    !(float.IsNaN(d.x) || float.IsNaN(d.y) || float.IsNaN(d.z)) && d.sqrMagnitude > 1e-6f)
+                { hasDir = true; dir = d; }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadPosAndDirection failed: " + ex); }
         }
 
         /// <summary>Degrade-to-notify for the generic relay (spec §1 "degrade-to-notify, never silent desync,

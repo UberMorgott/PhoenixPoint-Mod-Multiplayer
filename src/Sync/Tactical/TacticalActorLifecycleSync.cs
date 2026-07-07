@@ -30,8 +30,9 @@ namespace Multiplayer.Sync.Tactical
     ///
     /// CLIENT apply (display-only, under <see cref="SyncApplyScope"/> + the tactical remote-apply guard):
     ///   • <see cref="HandleActorSpawn"/> — reconstruct the actor from the blobs and
-    ///     <c>ActorSpawner.SpawnActor&lt;TacticalActor&gt;(componentSetDef, instanceData, callEnterPlayOnActor:true)</c>
-    ///     (the exact native path, SpawnActorAbility.cs:131), then bind the host netId. Enter-play is frozen-safe:
+    ///     <c>ActorSpawner.SpawnActor&lt;TacticalActorBase&gt;(componentSetDef, instanceData, callEnterPlayOnActor:true)</c>
+    ///     (the exact native path, SpawnActorAbility.cs:131, closed over the common base so ground entities —
+    ///     ItemContainer/StructuralTarget — materialize too), then bind the host netId. Enter-play is frozen-safe:
     ///     enemy AI is globally suppressed and the null-faction vision throw is guarded (NullFactionEnterPlayPatch).
     ///   • <see cref="HandleActorDespawn"/> — remove the mirror (native <c>ActorSpawner.DestroyActor</c>) + registry
     ///     cleanup. Idempotent.
@@ -155,6 +156,39 @@ namespace Multiplayer.Sync.Tactical
                           " faction=" + faction + " createLen=" + createBlob.Length + " instLen=" + instBlob.Length);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastSpawn failed: " + ex); }
+        }
+
+        /// <summary>gap-turret-crate-loot HOST: CONTENT-REFRESH a REGISTERED actor's client mirrors — despawn
+        /// (<see cref="TacticalActorLifecycleCodec.ReasonRefreshed"/>) + immediate re-spawn at the SAME netId,
+        /// both existing surfaces, both idempotent client-side (the despawn frees the netId so the follow-up
+        /// spawn re-materializes instead of skip-marking). Used when a mirrored actor's SERIALIZED state changed
+        /// after its 0x92 spawn (a dropped item lands in a ground container AFTER EnterPlay serialized it empty).
+        /// VALIDATES the actor is re-spawnable (ActorSetDef non-null) BEFORE emitting the despawn — a scene-placed
+        /// actor is never destroyed client-side without a replacement. The host registry binding is untouched
+        /// (same netId, same live actor). No-op off-host / unregistered / not-refreshable (log + skip).</summary>
+        public static void HostRefreshActorMirror(object actor)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost || actor == null) return;
+            try
+            {
+                int netId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (netId < 0)
+                {
+                    Debug.LogWarning("[Multiplayer][tac] refresh: actor not in the registry — skip (mirror stays stale)");
+                    return;
+                }
+                if (ReadActorSetDef(GetProp(actor, "ActorCreateData")) == null)
+                {
+                    Debug.LogWarning("[Multiplayer][tac] refresh netId=" + netId +
+                                     ": not a spawned actor (scene-placed?) — skip, NO despawn emitted");
+                    return;
+                }
+                HostBroadcastDespawn(netId, TacticalActorLifecycleCodec.ReasonRefreshed);
+                HostBroadcastSpawn(actor, netId);
+                Debug.Log("[Multiplayer][tac] HOST content-refreshed mirror netId=" + netId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostRefreshActorMirror failed: " + ex); }
         }
 
         /// <summary>HOST: broadcast a despawn (host→all). Reason is diagnostic; the client always removes the mirror.</summary>
@@ -316,7 +350,7 @@ namespace Multiplayer.Sync.Tactical
         private static Type _actorCreateDataType;
         private static Type _actorInstanceDataType;
         private static Type _tacActorType;
-        private static MethodInfo _spawnActorMethod;   // ActorSpawner.SpawnActor<TacticalActor>(BaseDef, ActorInstanceData, bool)
+        private static MethodInfo _spawnActorMethod;   // ActorSpawner.SpawnActor<TacticalActorBase>(BaseDef, ActorInstanceData, bool)
         private static MethodInfo _destroyActorMethod; // ActorSpawner.DestroyActor(ActorComponent)
         private static FieldInfo _actorSetDefField;    // ActorCreateData.ActorSetDef
         private static FieldInfo _serializeDefContentsField; // BaseDef.SerializeDefContents (static)
@@ -354,19 +388,23 @@ namespace Multiplayer.Sync.Tactical
             _serializeDefContentsField?.SetValue(null, value);
         }
 
-        /// <summary>Invoke <c>ActorSpawner.SpawnActor&lt;TacticalActor&gt;(componentSetDef, instanceData,
-        /// callEnterPlayOnActor:true)</c> — the exact native spawn path (SpawnActorAbility.cs:131). Returns the
-        /// spawned actor object, or null.</summary>
+        /// <summary>Invoke <c>ActorSpawner.SpawnActor&lt;TacticalActorBase&gt;(componentSetDef, instanceData,
+        /// callEnterPlayOnActor:true)</c> — the exact native spawn path (SpawnActorAbility.cs:131), closed over
+        /// the COMMON BASE. gap-turret-crate-loot fix: the old <c>&lt;TacticalActor&gt;</c> closure THREW for a
+        /// GROUND-ENTITY blob — <c>DefRepository.Instantiate&lt;T&gt;</c> hard-throws when the built root is not a
+        /// T (DefRepository.cs:191-195), and ItemContainer / StructuralTarget are <c>TacticalActorBase</c>, NOT
+        /// TacticalActor — so a dropped-loot container mirror always failed to materialize. T is only the return
+        /// cast (ActorSpawner.cs:12-27), so the base close spawns every TS1 entity kind identically.</summary>
         private static object InvokeSpawnActor(object componentSetDef, object instanceData)
         {
             if (_spawnActorMethod == null)
             {
                 var spawnerType = AccessTools.TypeByName("Base.Entities.ActorSpawner");
-                _tacActorType = _tacActorType ?? AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActor");
+                _tacActorType = _tacActorType ?? AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
                 var open = spawnerType != null ? AccessTools.Method(spawnerType, "SpawnActor") : null;
                 if (open == null || _tacActorType == null || !open.IsGenericMethodDefinition)
                 {
-                    Debug.LogError("[Multiplayer][tac] ActorSpawner.SpawnActor<TacticalActor> not resolvable");
+                    Debug.LogError("[Multiplayer][tac] ActorSpawner.SpawnActor<TacticalActorBase> not resolvable");
                     return null;
                 }
                 _spawnActorMethod = open.MakeGenericMethod(_tacActorType);

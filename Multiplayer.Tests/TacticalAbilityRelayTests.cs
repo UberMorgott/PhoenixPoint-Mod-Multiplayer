@@ -71,7 +71,7 @@ public class TacticalAbilityRelayTests
     }
 
     [Theory]
-    [InlineData("OpenCrateAbility")]  // deferred: host InventoryAbility.Activate would hijack the host view; auto-open rides the move
+    [InlineData("InventoryAbility")]  // NOT relayed — its Activate is the host view switch; client entry is view-guarded instead
     [InlineData("ApplyStatusAbility")]
     [InlineData("EndTurnAbility")]
     [InlineData("SomeFutureUnknownAbility")]
@@ -148,16 +148,22 @@ public class TacticalAbilityRelayTests
     [InlineData("InteractWithObjectAbility")] // TS5b: ground-object target → console status via 0x8F + objective via TS4
     [InlineData("ExitMissionAbility")]           // gap-evac: self (zone self-derived) → EvacuatedStatus via 0x8F + TS4 end
     [InlineData("EvacuateMountedActorsAbility")] // gap-evac: self (vehicle + host-derived passengers) → same surfaces
+    [InlineData("DeployTurretAbility")]          // gap-turret-crate-loot: pos → turret actor via TS1 0x92
+    [InlineData("ThrowTurretAbility")]           // gap-turret-crate-loot: pos (parabolic) → same TS1 spawn
+    [InlineData("DeployShieldAbility")]          // gap-turret-crate-loot: pos/dir → ShieldDeployedStatus via 0x8F
+    [InlineData("RetrieveDeployedItemAbility")]  // gap-turret-crate-loot: actor (the turret) → 0x93 despawn sweep
+    [InlineData("RetrieveShieldAbility")]        // gap-turret-crate-loot: self (own status) → 0x8F status unapply
+    [InlineData("OpenCrateAbility")]             // gap-turret-crate-loot: object (CrateComponent) → host-authoritative open
+    [InlineData("DropItemAbility")]              // gap-turret-crate-loot: own equipped item (slot) → container via 0x92
     public void GenericRelayable_ActiveSet_IsRelayed(string typeName)
     {
         Assert.True(TacticalAbilityRelay.IsGenericRelayable(typeName));
     }
 
     [Theory]
-    [InlineData("DeployTurretAbility")]   // deferred: pos target + SpawnActorAbility base-Activate binding
-    [InlineData("OpenCrateAbility")]      // deferred: host InventoryAbility.Activate hijacks host view; auto-open rides the move
-    [InlineData("DropItemAbility")]       // deferred: item (not object-netId) target; dropped container rides TS1 spawn
     [InlineData("MindControlAbility")]    // deferred: faction display needs the TS5 faction bit
+    [InlineData("InventoryAbility")]      // never relayed: its Activate IS a local view switch (guard, not relay)
+    [InlineData("MorphIntoActorAbility")] // off-list SpawnActorAbility sibling: shares the patched base Activate but runs native
     [InlineData("ShootAbility")]          // 0x87 damage relay, not the 0x8E generic relay
     [InlineData("MoveAbility")]           // dedicated move-sync
     [InlineData("SomeFutureUnknownAbility")]
@@ -203,10 +209,13 @@ public class TacticalAbilityRelayTests
     [InlineData("EvacuateMountedActorsAbility", TacticalGenericIntentCodec.KindNone)] // gap-evac: zone + passengers host-derived
     [InlineData("DeployTurretAbility", TacticalGenericIntentCodec.KindPos)]
     [InlineData("ThrowTurretAbility", TacticalGenericIntentCodec.KindPos)]
+    [InlineData("DeployShieldAbility", TacticalGenericIntentCodec.KindPos)]        // facing folds into pos (ChoosePosEncoding)
+    [InlineData("RetrieveDeployedItemAbility", TacticalGenericIntentCodec.KindActor)] // target = the deployed turret actor
+    [InlineData("RetrieveShieldAbility", TacticalGenericIntentCodec.KindNone)]     // ignores its param (Source = own status)
     [InlineData("ReloadAbility", TacticalGenericIntentCodec.KindSlot)]
+    [InlineData("DropItemAbility", TacticalGenericIntentCodec.KindSlot)]           // own equipped item — was WRONGLY grouped "object"
     [InlineData("InteractWithObjectAbility", TacticalGenericIntentCodec.KindObject)]
     [InlineData("OpenCrateAbility", TacticalGenericIntentCodec.KindObject)]
-    [InlineData("DropItemAbility", TacticalGenericIntentCodec.KindObject)]
     public void GenericTargetKindFor_MapsAbilityToKind(string typeName, byte expectedKind)
     {
         Assert.Equal(expectedKind, TacticalAbilityRelay.GenericTargetKindFor(typeName));
@@ -244,7 +253,65 @@ public class TacticalAbilityRelayTests
                 "HealAbility", "RecoverWillAbility", "RallyAbility", "PsychicScreamAbility",
                 "ReloadAbility", "InteractWithObjectAbility",
                 "ExitMissionAbility", "EvacuateMountedActorsAbility",
+                "DeployTurretAbility", "ThrowTurretAbility", "DeployShieldAbility",
+                "RetrieveDeployedItemAbility", "RetrieveShieldAbility",
+                "OpenCrateAbility", "DropItemAbility",
             },
             TacticalAbilityRelay.RelayableGenericAbilityTypeNames);
+    }
+
+    // ── gap-turret-crate-loot: host pre-Activate ENABLED gate (stale-client duplicate/NRE protection) ──
+
+    [Theory]
+    [InlineData("DeployTurretAbility")]          // item consumed on deploy → stale client UI can re-send
+    [InlineData("ThrowTurretAbility")]
+    [InlineData("DeployShieldAbility")]
+    [InlineData("RetrieveDeployedItemAbility")]  // inventory-full / turret already gone
+    [InlineData("RetrieveShieldAbility")]
+    [InlineData("OpenCrateAbility")]
+    [InlineData("DropItemAbility")]              // item already dropped → SelectedEquipment deref hazard
+    public void HostEnabledCheck_RequiredFor_NewLootDeploySet(string typeName)
+    {
+        Assert.True(TacticalAbilityRelay.RequiresHostEnabledCheck(typeName));
+    }
+
+    [Theory]
+    [InlineData("HealAbility")]        // shipped relay set stays byte-identical (no new gate)
+    [InlineData("RecoverWillAbility")]
+    [InlineData("RallyAbility")]
+    [InlineData("PsychicScreamAbility")]
+    [InlineData("ReloadAbility")]
+    [InlineData("InteractWithObjectAbility")]
+    [InlineData("ExitMissionAbility")]
+    [InlineData("EvacuateMountedActorsAbility")]
+    [InlineData("ShootAbility")]
+    [InlineData("SomeFutureUnknownAbility")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void HostEnabledCheck_NotRequired_ForShippedOrUnknown(string typeName)
+    {
+        Assert.False(TacticalAbilityRelay.RequiresHostEnabledCheck(typeName));
+    }
+
+    [Fact]
+    public void HostEnabledCheckSet_IsSubsetOf_GenericRelaySet()
+    {
+        // The gate only ever applies to abilities the host actually relays — a name here that is NOT relayed
+        // would be dead policy (or worse, a typo silently disabling the gate for the real ability).
+        foreach (var n in TacticalAbilityRelay.HostEnabledCheckAbilityTypeNames)
+            Assert.True(TacticalAbilityRelay.IsGenericRelayable(n),
+                "Host-enabled-check ability " + n + " must be on the generic relay allowlist.");
+    }
+
+    // ── gap-turret-crate-loot: KindPos intent encoding decision (deploy cell vs shield facing) ──
+
+    [Theory]
+    [InlineData(true,  false, TacticalAbilityRelay.PosEncodeUsePosition)]          // deploy cell → verbatim
+    [InlineData(true,  true,  TacticalAbilityRelay.PosEncodeUsePosition)]          // pos wins — never displace the exact cell
+    [InlineData(false, true,  TacticalAbilityRelay.PosEncodeCasterPlusDirection)]  // shield facing-only target
+    [InlineData(false, false, TacticalAbilityRelay.PosEncodeCasterPos)]            // nothing usable → native forward fallback
+    public void ChoosePosEncoding_DecisionTable(bool hasPos, bool hasDir, byte expected)
+    {
+        Assert.Equal(expected, TacticalAbilityRelay.ChoosePosEncoding(hasPos, hasDir));
     }
 }

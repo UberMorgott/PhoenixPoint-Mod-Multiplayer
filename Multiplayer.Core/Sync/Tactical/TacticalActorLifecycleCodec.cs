@@ -27,7 +27,8 @@ namespace Multiplayer.Sync.Tactical
     /// (the authoritative faction + position ride the instance-data blob).
     ///
     /// DESPAWN wire: [seq:u32][netId:i32][reason:u8]. Reason is diagnostic only (0 removed / 1 evacuated /
-    /// 2 morphed / 3 retrieved); the client behaviour is always "remove the mirror actor + registry cleanup".
+    /// 2 morphed / 3 retrieved / 4 refreshed); the client behaviour is always "remove the mirror actor +
+    /// registry cleanup".
     /// Both codecs reject truncation with a clean <c>false</c> (no partial accept) — the reliable transport
     /// guarantees full delivery, so a short buffer is a drop.
     /// </summary>
@@ -38,6 +39,11 @@ namespace Multiplayer.Sync.Tactical
         public const byte ReasonEvacuated = 1;
         public const byte ReasonMorphed   = 2;
         public const byte ReasonRetrieved = 3;
+        /// <summary>gap-turret-crate-loot: NOT a real removal — the first half of a host CONTENT-REFRESH
+        /// (despawn + immediate re-spawn at the SAME netId) that re-sends a registered ground container's blob
+        /// after its inventory changed post-EnterPlay (a dropped item lands AFTER the 0x92 spawn serialized an
+        /// empty container — TacticalItem.Drop:523→532). Diagnostic; the client removal is identical.</summary>
+        public const byte ReasonRefreshed = 4;
 
         // ─── Spawn (0x92) ─────────────────────────────────────────────────
 

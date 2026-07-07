@@ -81,6 +81,7 @@ public class TacticalActorLifecycleCodecTests
     [InlineData(TacticalActorLifecycleCodec.ReasonEvacuated)]
     [InlineData(TacticalActorLifecycleCodec.ReasonMorphed)]
     [InlineData(TacticalActorLifecycleCodec.ReasonRetrieved)]
+    [InlineData(TacticalActorLifecycleCodec.ReasonRefreshed)]   // gap-turret-crate-loot content refresh
     public void Despawn_RoundTrips(byte reason)
     {
         var bytes = TacticalActorLifecycleCodec.EncodeDespawn(seq: 42u, netId: 1_000_003, reason: reason);
@@ -141,6 +142,52 @@ public class TacticalActorLifecycleCodecTests
         Assert.Empty(TacticalActorLifecycleGate.ComputeDespawnedNetIds(registered, new HashSet<object> { a, b }));
         // Defensive: a null live set treats everything as despawned.
         Assert.Equal(new List<int> { 1, 2 }, TacticalActorLifecycleGate.ComputeDespawnedNetIds(registered, null));
+    }
+
+    // ─── (c') gap-turret-crate-loot: retrieve→despawn pairing + container content refresh ──────────
+
+    [Fact]
+    public void RetrievedTurret_LeavesLiveSet_IsSweptExactlyOnce()
+    {
+        // A relayed RetrieveDeployedItemAbility ends in RemoveActorEffect → ActorSpawner.DestroyActor
+        // (RemoveActorEffect.cs:28): the turret leaves the live map set WITHOUT a death report, so the 0x93
+        // pairing is the SWEEP flagging its registered netId exactly once — soldiers stay untouched.
+        var soldier = new object(); var turret = new object();
+        var registered = new List<KeyValuePair<int, object>>
+        {
+            new KeyValuePair<int, object>(3, soldier),           // deploy-time soldier — live
+            new KeyValuePair<int, object>(1_000_010, turret),    // TS1-minted turret — retrieved (destroyed)
+        };
+        var live = new HashSet<object> { soldier };
+
+        var swept = TacticalActorLifecycleGate.ComputeDespawnedNetIds(registered, live);
+        Assert.Equal(new List<int> { 1_000_010 }, swept);
+
+        // Second sweep after the registry removed it → nothing re-fires (pairing is one-shot).
+        registered.RemoveAt(1);
+        Assert.Empty(TacticalActorLifecycleGate.ComputeDespawnedNetIds(registered, live));
+    }
+
+    [Fact]
+    public void ContainerContentRefresh_ReusesSpawnCodec_SameNetId_NewBlob()
+    {
+        // gap-turret-crate-loot: a relayed DROP re-broadcasts the ground container at the SAME netId —
+        // despawn(ReasonRefreshed) then a spawn whose inst blob now CARRIES the item. Pure codec reuse: both
+        // frames round-trip, the netId pairs up, and the refreshed blob is byte-identical.
+        const int netId = 1_000_021;
+        var despawn = TacticalActorLifecycleCodec.EncodeDespawn(seq: 10u, netId: netId,
+            reason: TacticalActorLifecycleCodec.ReasonRefreshed);
+        var refreshedInst = new byte[] { 0xB1, 0x0B, 0x42, 0x42 };   // container blob WITH the dropped item
+        var respawn = TacticalActorLifecycleCodec.EncodeSpawn(
+            new TacticalActorLifecycleCodec.SpawnPayload(seq: 11u, netId: netId, factionIndex: -1,
+                px: 4f, py: 0f, pz: 9f, createBlob: new byte[] { 1 }, instBlob: refreshedInst));
+
+        Assert.True(TacticalActorLifecycleCodec.TryDecodeDespawn(despawn, out var d));
+        Assert.True(TacticalActorLifecycleCodec.TryDecodeSpawn(respawn, out var s));
+        Assert.Equal(TacticalActorLifecycleCodec.ReasonRefreshed, d.Reason);
+        Assert.Equal(d.NetId, s.NetId);                  // the refresh pairs on ONE netId (no re-mint)
+        Assert.Equal(refreshedInst, s.InstBlob);         // the new contents survive verbatim
+        Assert.True(s.Seq > d.Seq);                      // despawn applies before the respawn (per-surface seqs)
     }
 
     // ─── (d) registry minting invariants TS1 relies on ─────────────────
