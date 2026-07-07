@@ -23,7 +23,10 @@ namespace Multiplayer.Network.Sync.State
     ///     (:662 — the exact recruit-screen call, UIStateRosterRecruits.cs:301; havens + naked pool both use it);
     ///   • transfer → native <c>RemoveCharacter</c>(current)+<c>AddCharacter</c>(dest) (no dedicated method);
     ///   • dismiss → <c>GeoFaction.KillCharacter(unit, Dismissed)</c> (:1593, UIStateEditSoldier.cs:425);
-    ///   • rename → <c>GeoCharacter.Rename(string)</c> (:826).
+    ///   • rename → <c>GeoCharacter.Rename(string)</c> (:826);
+    ///   • containment kill / harvest → <c>GeoPhoenixFaction.KillCapturedUnit</c> (:771, kill button
+    ///     UIStateRosterAliens.cs:256) / <c>HarvestCapturedUnit(unit, ResourceType)</c> (:881, dismantle
+    ///     buttons :275/:296 — funnels through KillCapturedUnit :893, yield via Wallet.Give → 0xA0).
     /// Every native call runs on the HOST inside <c>SyncApplyScope</c> (the OnActionRequest apply path), so the
     /// client-suppress interceptors pass through AND the existing PS1/PS2/PS3 dirty Postfix hooks fire
     /// (authoritative write → mirror back on #6/#9/#10). All reflection is null-safe best-effort: a miss logs
@@ -56,6 +59,9 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _rename;        // GeoCharacter.Rename(string)
         private static MethodInfo _killCharacter; // GeoPhoenixFaction.KillCharacter
         private static MethodInfo _hireNaked;     // GeoPhoenixFaction.HireNakedRecruit
+        private static MethodInfo _killCaptured;  // GeoPhoenixFaction.KillCapturedUnit
+        private static MethodInfo _harvestCaptured; // GeoPhoenixFaction.HarvestCapturedUnit
+        private static Type _resourceTypeType;    // PhoenixPoint.Common.Core.ResourceType
         private static PropertyInfo _havenAvailRecruit; // GeoHaven.AvailableRecruit
         private static PropertyInfo _sitesProp;   // GeoFaction.Sites
         private static PropertyInfo _vehiclesProp;// GeoFaction.Vehicles
@@ -147,6 +153,30 @@ namespace Multiplayer.Network.Sync.State
             return false;
         }
 
+        /// <summary>CLIENT: map a containment-screen captive (<c>GeoUnitDescriptor</c>) to a host-resolvable
+        /// key: its ORDINAL in <c>_capturedUnits</c> (the #10 full-set mirror preserves host order — the
+        /// naked-pool precedent) + the TemplateDef-guid FINGERPRINT <see cref="ContainmentTarget"/> validates
+        /// against drift. False = unresolved (the interceptor suppresses + logs without relaying).</summary>
+        public static bool ResolveCapturedSource(GeoRuntime rt, object descriptor, out int ordinal, out string templateGuid)
+        {
+            ordinal = -1; templateGuid = null;
+            if (descriptor == null) return false;
+            try
+            {
+                var list = CapturedList(rt);
+                if (list == null) return false;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (!ReferenceEquals(list[i], descriptor)) continue;
+                    ordinal = i;
+                    templateGuid = CapturedTemplateGuid(descriptor);
+                    return !string.IsNullOrEmpty(templateGuid);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.ResolveCapturedSource failed: " + ex.Message); }
+            return false;
+        }
+
         // ─── HOST-side apply ──────────────────────────────────────────────────
 
         /// <summary>Full-loadout replace (equip): rebuild each of the three GeoItem lists from its def guids and
@@ -219,6 +249,41 @@ namespace Multiplayer.Network.Sync.State
                 _killCharacter.Invoke(fac, new[] { soldier, dismissed });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Dismiss failed: " + ex.Message); }
+        }
+
+        /// <summary>Kill a captured Pandoran: native <c>GeoPhoenixFaction.KillCapturedUnit(unit)</c> (the exact
+        /// containment kill-button call, UIStateRosterAliens.cs:256). Unknown captive (host trimmed/killed it
+        /// since the client's last #10 mirror) → logged no-op (reject precedent).</summary>
+        public static void KillCaptured(GeoRuntime rt, int ordinal, string templateGuid)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                var unit = ResolveCapturedUnit(rt, ordinal, templateGuid);
+                if (fac == null || unit == null) { LogUnresolved("KillCaptured", ordinal); return; }
+                if (_killCaptured == null) _killCaptured = AccessTools.Method(fac.GetType(), "KillCapturedUnit");
+                _killCaptured?.Invoke(fac, new[] { unit });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.KillCaptured failed: " + ex.Message); }
+        }
+
+        /// <summary>Harvest (dismantle) a captured Pandoran for food/mutagens: native
+        /// <c>GeoPhoenixFaction.HarvestCapturedUnit(unit, ResourceType)</c> (the exact dismantle-button call,
+        /// UIStateRosterAliens.cs:275/296). It funnels through KillCapturedUnit + Wallet.Give, so the result
+        /// mirrors via the existing #10 dirty seam + the 0xA0 wallet snapshot. Unknown captive → logged no-op.</summary>
+        public static void HarvestCaptured(GeoRuntime rt, int ordinal, string templateGuid, int resourceType)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                var unit = ResolveCapturedUnit(rt, ordinal, templateGuid);
+                if (fac == null || unit == null) { LogUnresolved("HarvestCaptured", ordinal); return; }
+                if (_harvestCaptured == null) _harvestCaptured = AccessTools.Method(fac.GetType(), "HarvestCapturedUnit");
+                if (_resourceTypeType == null) _resourceTypeType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceType");
+                if (_harvestCaptured == null || _resourceTypeType == null) { LogUnresolved("HarvestCaptured", ordinal); return; }
+                _harvestCaptured.Invoke(fac, new[] { unit, Enum.ToObject(_resourceTypeType, resourceType) });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.HarvestCaptured failed: " + ex.Message); }
         }
 
         /// <summary>Rename a soldier: native GeoCharacter.Rename(newName).</summary>
@@ -363,6 +428,46 @@ namespace Multiplayer.Network.Sync.State
             }
             catch { }
             return null;
+        }
+
+        /// <summary>The live <c>GeoPhoenixFaction._capturedUnits</c> list (containment pool), or null.</summary>
+        private static IList CapturedList(GeoRuntime rt)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return null;
+                return CachedField(fac.GetType(), "_capturedUnits")?.GetValue(fac) as IList;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>A captive's stable fingerprint: <c>GeoUnitDescriptor.UnitType.TemplateDef</c> BaseDef guid
+        /// (both readonly fields, decompile GeoUnitDescriptor.cs:176/36), or null.</summary>
+        private static string CapturedTemplateGuid(object descriptor)
+        {
+            try
+            {
+                if (descriptor == null) return null;
+                var unitType = CachedField(descriptor.GetType(), "UnitType")?.GetValue(descriptor);
+                var def = unitType != null ? CachedField(unitType.GetType(), "TemplateDef")?.GetValue(unitType) : null;
+                return DefReflection.GetGuid(def);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>HOST: resolve a relayed (ordinal, fingerprint) captive key against the live containment
+        /// list via the pure <see cref="ContainmentTarget"/> (ordinal hit → drift fallback → null = reject).</summary>
+        private static object ResolveCapturedUnit(GeoRuntime rt, int ordinal, string templateGuid)
+        {
+            try
+            {
+                var list = CapturedList(rt);
+                if (list == null) return null;
+                int idx = ContainmentTarget.Resolve(list.Count, i => CapturedTemplateGuid(list[i]), ordinal, templateGuid);
+                return idx >= 0 ? list[idx] : null;
+            }
+            catch { return null; }
         }
 
         private static IEnumerable AllSites(GeoRuntime rt)

@@ -9,12 +9,24 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class SyncRegistration
     {
+        private static readonly object _lock = new object();
         private static bool _done;
 
         public static void RegisterAll()
         {
-            if (_done) return;
-            _done = true;
+            // Idempotent + thread-safe: _done flips only AFTER every reader is in, under the lock —
+            // a concurrent caller (xunit parallel test classes; in-game it's a single SyncEngine-ctor
+            // call) never observes a half-registered registry.
+            lock (_lock)
+            {
+                if (_done) return;
+                RegisterAllCore();
+                _done = true;
+            }
+        }
+
+        private static void RegisterAllCore()
+        {
 
             // Research
             SyncedActionRegistry.Register(SyncedActionIds.StartResearch, StartResearchAction.Read);
@@ -49,6 +61,8 @@ namespace Multiplayer.Network.Sync
             SyncedActionRegistry.Register(SyncedActionIds.TransferSoldier, TransferSoldierAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.DismissSoldier, DismissSoldierAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.RenameSoldier, RenameSoldierAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.KillCapturedUnit, KillCapturedUnitAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.HarvestCapturedUnit, HarvestCapturedUnitAction.Read);
 
             // Geoscape sim-mutating abilities (ONE generic GeoAbility.Activate relay)
             SyncedActionRegistry.Register(SyncedActionIds.GeoAbilityActivate, GeoAbilityActivateAction.Read);

@@ -40,6 +40,8 @@ namespace Multiplayer.Network.Sync
         public const byte TransferSoldier = 63;
         public const byte DismissSoldier = 64;
         public const byte RenameSoldier = 65;
+        public const byte KillCapturedUnit = 66;   // containment captive kill (mirrors SyncedActionIds.KillCapturedUnit)
+        public const byte HarvestCapturedUnit = 67; // containment captive harvest → food/mutagen (mirrors SyncedActionIds.HarvestCapturedUnit)
 
         // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
         public const byte InventoryChannel = 1;   // distinct id-space from actions (kind disambiguates)

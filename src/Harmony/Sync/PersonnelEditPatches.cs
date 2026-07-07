@@ -30,7 +30,12 @@ namespace Multiplayer.Harmony.Sync
     ///   • <c>GeoCharacter.Rename</c> → <see cref="RenameSoldierAction"/>;
     ///   • <c>GeoFaction.KillCharacter(_, Dismissed)</c> → <see cref="DismissSoldierAction"/>;
     ///   • <c>GeoVehicle/GeoSite.AddCharacter</c> → <see cref="TransferSoldierAction"/> (the paired
-    ///     <c>RemoveCharacter</c> is suppressed without a second intent — the Add carries the transfer).
+    ///     <c>RemoveCharacter</c> is suppressed without a second intent — the Add carries the transfer);
+    ///   • <c>GeoPhoenixFaction.KillCapturedUnit</c> → <see cref="KillCapturedUnitAction"/> (containment
+    ///     kill button; research live-alien costs never reach it on a client — research start is suppressed
+    ///     at AddResearchToQueue);
+    ///   • <c>GeoPhoenixFaction.HarvestCapturedUnit</c> → <see cref="HarvestCapturedUnitAction"/> (dismantle
+    ///     for food/mutagens; suppressing it here also keeps its inner KillCapturedUnit from double-relaying).
     ///
     /// Composes with the PS1/PS2 dirty Postfixes on the same methods: on a client our Prefix returns false
     /// (suppress) and those Postfixes are IsHost-gated no-ops; on the host our Prefix passes through (IsHost /
@@ -206,6 +211,73 @@ namespace Multiplayer.Harmony.Sync
                     () => new DismissSoldierAction(unitId));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] DismissEditRelayPatch failed: " + ex.Message); return true; }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class KillCapturedUnitRelayPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction");
+            _target = t != null ? AccessTools.Method(t, "KillCapturedUnit") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: GeoPhoenixFaction.KillCapturedUnit relay " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // __0 = GeoUnitDescriptor captive (containment kill button, UIStateRosterAliens.cs:256). On the host
+        // (incl. a relayed apply inside SyncApplyScope) this passes through and the existing
+        // PhoenixKillCapturedUnitPoolDirtyPatch Postfix mirrors the removal on #10.
+        public static bool Prefix(object __0)
+        {
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            try
+            {
+                if (!PersonnelEditReflection.ResolveCapturedSource(GeoRuntime.Instance, __0, out int ordinal, out string guid))
+                {
+                    Debug.Log("[Multiplayer] KillCapturedUnitRelayPatch: captive unresolved — kill suppressed (no relay)");
+                    return false;   // frozen client can't mutate containment locally; nothing to relay
+                }
+                return PersonnelEditRelay.Relay(ActionCategory.Recruitment, 0, false,
+                    () => new KillCapturedUnitAction(ordinal, guid));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] KillCapturedUnitRelayPatch failed: " + ex.Message); return true; }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class HarvestCapturedUnitRelayPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction");
+            _target = t != null ? AccessTools.Method(t, "HarvestCapturedUnit") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: GeoPhoenixFaction.HarvestCapturedUnit relay " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // __0 = GeoUnitDescriptor captive; __1 = ResourceType (Supplies = food / Mutagen — dismantle buttons,
+        // UIStateRosterAliens.cs:275/296). Suppressing here on a client also keeps the inner
+        // KillCapturedUnit (GeoPhoenixFaction.cs:893) from firing a second relay.
+        public static bool Prefix(object __0, object __1)
+        {
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            try
+            {
+                if (!PersonnelEditReflection.ResolveCapturedSource(GeoRuntime.Instance, __0, out int ordinal, out string guid))
+                {
+                    Debug.Log("[Multiplayer] HarvestCapturedUnitRelayPatch: captive unresolved — harvest suppressed (no relay)");
+                    return false;
+                }
+                int resourceType = Convert.ToInt32(__1);
+                return PersonnelEditRelay.Relay(ActionCategory.Recruitment, 0, false,
+                    () => new HarvestCapturedUnitAction(ordinal, guid, resourceType));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] HarvestCapturedUnitRelayPatch failed: " + ex.Message); return true; }
         }
     }
 

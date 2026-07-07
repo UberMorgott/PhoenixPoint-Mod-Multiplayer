@@ -37,6 +37,8 @@ namespace Multiplayer.Network.Sync
         public const ushort TransferSoldier = 63;  // native RemoveCharacter(src)+AddCharacter(dst) between Phoenix containers
         public const ushort DismissSoldier = 64;   // GeoFaction.KillCharacter(soldier, Dismissed)
         public const ushort RenameSoldier = 65;    // GeoCharacter.Rename(newName)
+        public const ushort KillCapturedUnit = 66; // GeoPhoenixFaction.KillCapturedUnit (containment "kill" button; keyed ordinal+TemplateDef-guid)
+        public const ushort HarvestCapturedUnit = 67; // GeoPhoenixFaction.HarvestCapturedUnit (dismantle for food/mutagens; funnels through KillCapturedUnit)
 
         // Geoscape sim-mutating abilities 80-89 (ONE generic GeoAbility.Activate relay — client suppress + relay
         // intent, host authoritative Activate; result mirrors on the existing geoscape state channels)
