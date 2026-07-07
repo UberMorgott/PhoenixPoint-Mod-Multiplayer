@@ -450,6 +450,10 @@ namespace Multiplayer.Sync.Tactical
                 // statuses → all peers). Self-terminates at mission exit (it watches LiveTlc). Additive — runs
                 // ALONGSIDE the existing per-action surfaces as a redundant convergence layer.
                 TacticalActorStateSync.HostStartFlush(tacticalLevelController);
+                // 0x99: seed the FULL objective state set with the actor seed (turn-0 AND the reload-into-
+                // tactical path, rca-6 — a reloaded save carries mid-mission objective states the client's
+                // freshly built list must be stamped with).
+                TacticalObjectiveSync.HostSeedAfterDeploy(tacticalLevelController);
                 Debug.Log("[Multiplayer][tac] HOST broadcast tac.deploy site=" + siteId +
                           " gpBytes=" + gpBytes.Length + " snapBytes=" + snapBytes.Length +
                           " actors=" + table.Count);
@@ -717,6 +721,12 @@ namespace Multiplayer.Sync.Tactical
                 try { TacticalTurnSync.ClientEnterInitialTurn(tacticalLevelController); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientEnterInitialTurn failed: " + ex); }
 
+                // 5) 0x99: drain any objective payloads that raced the scene load (the host's deploy-time
+                //    objective SEED always arrives while the client is still loading) — after the fresh
+                //    LiveSeq above, so the queued seqs re-apply cleanly in arrival order.
+                try { TacticalObjectiveSync.ClientApplyPending(); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientApplyPending failed: " + ex); }
+
                 Debug.Log("[Multiplayer][tac] CLIENT hydrated tac.deploy site=" + p.MissionSiteId +
                           " matched=" + matched + "/" + p.ActorTable.Count + " removedExtras=" + removed +
                           " mirror=ARMED");
@@ -762,6 +772,8 @@ namespace Multiplayer.Sync.Tactical
             try { TacticalSurfaceSync.Reset(); }                                   // TS3: drop the pending ground-surface coalesce buffer
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalStructDamageSync.Reset(); }                              // TS6: drop the pending struct-damage buffer
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalObjectiveSync.Reset(); }                                 // 0x99: drop the diff cache + pre-hydrate queue
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
@@ -977,6 +989,16 @@ namespace Multiplayer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacMissionEnd)
             {
                 try { TacticalMissionEndSync.HandleMissionEnd(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.missionend failed: " + ex); }
+                return true;
+            }
+
+            // ─── 0x99: LIVE mission-objective mirror (scripted mission events part 1) ───────────────
+            // Host→all reliable state/progress/add push; client-only apply (side-gated internally, so a stray
+            // envelope on the host is a clean no-op). The client value-stamps objective state + kicks the native
+            // objectives-HUD refresh; completion logic stays host-owned (mission END stays on TS4 0x95).
+            if (surfaceId == (byte)TacticalSurfaceIds.TacObjective)
+            {
+                try { TacticalObjectiveSync.HandleObjective(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.objective failed: " + ex); }
                 return true;
             }
 

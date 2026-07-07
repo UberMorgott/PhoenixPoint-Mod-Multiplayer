@@ -248,8 +248,8 @@ namespace Multiplayer.Sync.Tactical
         private static Type _tlcType;                 // PhoenixPoint.Tactical.Levels.TacticalLevelController
         private static MethodInfo _getMissionResult;   // TacticalLevelController.GetMissionResult()
         private static MethodInfo _isGameOverSetter;    // TacticalLevelController.IsGameOver (private set)
-        private static MethodInfo _objStateSetter;      // FactionObjective.State (private set)
-        private static Type _objStateEnumType;          // FactionObjectiveState
+        // FactionObjective.State (private set) + FactionObjectiveState live in the SHARED
+        // FactionObjectiveReflect boundary (also used by the live 0x99 objective mirror).
 
         private static Type TlcType()
             => _tlcType ?? (_tlcType = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.TacticalLevelController"));
@@ -280,17 +280,7 @@ namespace Multiplayer.Sync.Tactical
         }
 
         private static void SetObjectiveState(object objective, byte state)
-        {
-            if (objective == null) return;
-            if (_objStateSetter == null || _objStateSetter.DeclaringType == null ||
-                !_objStateSetter.DeclaringType.IsInstanceOfType(objective))
-                _objStateSetter = AccessTools.PropertySetter(objective.GetType(), "State");
-            if (_objStateEnumType == null || !(_objStateEnumType.IsEnum))
-                _objStateEnumType = AccessTools.Property(objective.GetType(), "State")?.PropertyType;
-            if (_objStateSetter == null || _objStateEnumType == null) return;
-            object enumVal = Enum.ToObject(_objStateEnumType, (int)state);
-            _objStateSetter.Invoke(objective, new[] { enumVal });
-        }
+            => FactionObjectiveReflect.SetState(objective, state);   // shared boundary (also drives the 0x99 mirror)
 
         /// <summary>Resolve the live client <c>TacticalLevelController</c> — the same
         /// <c>GeoRuntime.CurrentLevel() → GetComponent</c> path the TS3 surface mirror uses. Null if the current

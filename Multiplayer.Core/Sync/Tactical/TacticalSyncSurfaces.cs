@@ -193,5 +193,20 @@ namespace Multiplayer.Sync.Tactical
         //     voxel volumes ride TS3 (0x94). See TacticalVfxSync / VfxBroadcastPatch. Next free ids 0x97/0x98.
         public const ushort TacCameraHint = 0x97;          // 151: host→all     "enemy-turn camera-follow target (visible enemy netId)" (carries seq)
         public const ushort TacVfx = 0x98;                 // 152: host→all     "AoE/explosion presentation VFX@def at pos"            (carries seq)
+
+        // ─── LIVE mission-objective mirror (scripted mission events part 1) ─────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL (3+ player safe), RELIABLE,
+        // carries its own TacticalLiveSeq (last-writer-wins). Closes the tactical audit gap D21 "in-battle
+        // objectives do not sync": scripted/custom missions flip FactionObjective state MID-battle (kill target,
+        // reach zone, defend N turns, activate console) — TS4 (0x95) repaints only at mission END. The host
+        // diffs the player faction's objective list at the ObjectivesManager.Evaluate/Add chokepoints and
+        // broadcasts changed STATE (+ progress ints) records, index-keyed with a CLASS-NAME sanity check;
+        // mid-mission scripted adds ride an ADD record (GeoMissionRecord P1 pattern) the client resolves from
+        // the shared NextOnSuccess/NextOnFail def graph. The client value-stamps via the FactionObjective.State
+        // private setter (display-only mirror — client objective EVALUATION is suppressed, completion logic
+        // stays host-owned; mission END stays owned by TS4 0x95). Deploy re-broadcast (incl. reload-into-
+        // tactical, rca-6) re-seeds the full state set with the actor seed. See TacticalObjectiveSync /
+        // TacticalObjectiveCodec / TacticalObjectiveGate. Next free 0x99.
+        public const ushort TacObjective = 0x99;           // 153: host→all     "objective state/progress + scripted-add mirror"       (carries seq)
     }
 }
