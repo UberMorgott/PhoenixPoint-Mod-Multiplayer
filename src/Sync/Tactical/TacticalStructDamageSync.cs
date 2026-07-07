@@ -85,6 +85,34 @@ namespace Multiplayer.Sync.Tactical
             catch { /* fail-quiet: a missed capture only drops a geometry mirror, never desyncs */ }
         }
 
+        /// <summary>HOST postfix hook on <c>Breakable/Swappables.ApplyDamage(Vector3 origin, Vector3 direction,
+        /// float force)</c> — the DIRECT geometry-break chokepoint (window pane smashed by ACTOR BODY PASSAGE:
+        /// vault / move-through, via native <c>TacticalNavigationComponent.TriggerWindowBreak</c>). That path calls
+        /// the break (<c>Explode</c>) straight, NEVER touching <c>DestructableDamageReceiver.ApplyDamage</c> → the
+        /// combat funnel misses it and the client keeps intact glass (cover/LoS mismatch). Funnel it into the SAME
+        /// 0x96 pending buffer as a kind-1 hit:
+        /// guid + break origin + <see cref="TacticalStructDamageCodec.DirectBreakHealthDamage"/> (the pane's receiver
+        /// zeroes out on the client → the SAME native break cascade runs). Same gates as
+        /// <see cref="HostCaptureStructDamage"/> — off-host (incl. the client's own native window break during a
+        /// mirrored move) is a clean no-op. Never throws.</summary>
+        public static void HostCaptureDirectBreak(object destructable, Vector3 origin)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            if (!TacticalDeploySync.HostHasBroadcastDeploy) return;   // exclude pre-deploy map generation
+            if (TacticalActorStateSync.IsApplyingRemote) return;      // defense-in-depth (host self-apply → no re-capture)
+            if (destructable == null) return;
+            try
+            {
+                string guid = ReadGuid(destructable);
+                if (string.IsNullOrEmpty(guid)) return;               // dynamic/id-less destructible → degrade (skip)
+                _pending.Add(new TacticalStructDamageCodec.StructHit(guid, origin.x, origin.y, origin.z,
+                    TacticalStructDamageCodec.DirectBreakHealthDamage));
+            }
+            catch { /* fail-quiet: a missed capture only drops a geometry mirror, never desyncs */ }
+        }
+
         /// <summary>HOST (folded into the 0x8F flush heartbeat): drain the pending hits, pack them into 0x96 messages
         /// (capped so no single message exceeds the envelope cap), and broadcast. Idle window = 0 pending = no-op.</summary>
         public static void HostFlushStructDamage(NetworkEngine engine)

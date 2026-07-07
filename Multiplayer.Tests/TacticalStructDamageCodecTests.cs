@@ -198,6 +198,54 @@ public class TacticalStructDamageCodecTests
         }
     }
 
+    // ─── (e) direct geometry break (window vault/pass-through) rides the SAME 0x96 record ─────
+    [Fact]
+    public void DirectBreak_RidesSameCodec_Kind1_SentinelHp()
+    {
+        // A window pane broken by ACTOR BODY PASSAGE (no damage event) is funneled into the SAME kind-1
+        // destructible record — guid + break origin + the guaranteed-break sentinel hp. Pins: NO new
+        // targetKind / surface for direct breaks, and the sentinel survives the wire bit-exact.
+        var bytes = TacticalStructDamageCodec.EncodeStructDamage(new TacticalStructDamageCodec.StructBatch(11u,
+            new List<TacticalStructDamageCodec.StructHit>
+            {
+                Hit("dddddddd-dddd-dddd-dddd-dddddddddddd", 3.5f, 1f, -2f, TacticalStructDamageCodec.DirectBreakHealthDamage),
+            }));
+        Assert.True(TacticalStructDamageCodec.TryDecodeStructDamage(bytes, out var d));
+        Assert.Single(d.Hits);
+        Assert.Equal(TacticalStructDamageCodec.KindDestructible, d.Hits[0].TargetKind);
+        Assert.Equal("dddddddd-dddd-dddd-dddd-dddddddddddd", d.Hits[0].Guid);
+        Assert.Equal(TacticalStructDamageCodec.DirectBreakHealthDamage, d.Hits[0].HealthDamage);
+    }
+
+    [Fact]
+    public void DirectBreakSentinel_Pinned_GuaranteesBreak()
+    {
+        // The sentinel must always exceed any receiver toughness (receiver health = GetToughness(), small
+        // values; health clamps at min 0 so overkill is inert + idempotent). Pin the exact value — changing
+        // it changes what older peers replay.
+        Assert.Equal(999999f, TacticalStructDamageCodec.DirectBreakHealthDamage);
+    }
+
+    [Fact]
+    public void IdempotentRebreak_DuplicateGuidHits_BothDecode()
+    {
+        // Contract for repeated break events on the SAME pane: struct damage is ADDITIVE (no coalescing),
+        // duplicates ride the wire as-is; idempotency lives in the client's native replay guards
+        // (receiver health-already-zero / Breakable._broken) — a re-break is a clean no-op, so shipping a
+        // duplicate is harmless by construction. The codec must not dedup or reject them.
+        var g = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        var bytes = TacticalStructDamageCodec.EncodeStructDamage(new TacticalStructDamageCodec.StructBatch(12u,
+            new List<TacticalStructDamageCodec.StructHit>
+            {
+                Hit(g, 1f, 2f, 3f, TacticalStructDamageCodec.DirectBreakHealthDamage),
+                Hit(g, 1f, 2f, 3f, TacticalStructDamageCodec.DirectBreakHealthDamage),
+            }));
+        Assert.True(TacticalStructDamageCodec.TryDecodeStructDamage(bytes, out var d));
+        Assert.Equal(2, d.Hits.Count);
+        Assert.Equal(g, d.Hits[0].Guid);
+        Assert.Equal(g, d.Hits[1].Guid);
+    }
+
     // ─── (d) pure inert-suppress decision (no double actor damage) ───────
     [Fact]
     public void ShouldNeuterExplosionChain_OnlyOnClientMirror()

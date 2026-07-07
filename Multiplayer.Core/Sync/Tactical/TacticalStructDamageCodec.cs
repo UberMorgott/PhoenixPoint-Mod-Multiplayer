@@ -60,6 +60,14 @@ namespace Multiplayer.Sync.Tactical
         /// cap: 512 * ~60 B + framing ≈ 31 KB &lt; 65535). A larger flush window splits across messages (R3).</summary>
         public const int MaxHitsPerMessage = 512;
 
+        /// <summary>HealthDamage emitted for a DIRECT geometry break (window pane smashed by actor body passage —
+        /// vault / move-through). That native path (<c>Breakable.ApplyDamage(origin, direction, force)</c> →
+        /// <c>Explode</c>) destroys UNCONDITIONALLY and never touches the damage receiver's health, so there is no
+        /// native HealthDamage to mirror; the client replays the break through the ordinary kind-1 receiver path, and
+        /// this sentinel guarantees the receiver zeroes out regardless of toughness (receiver health clamps at 0 —
+        /// overkill is inert). Rides the SAME wire record as a combat hit: no new targetKind, no new surface.</summary>
+        public const float DirectBreakHealthDamage = 999999f;
+
         /// <summary>One mirrored structural-damage hit: which destructible (guid), where (aim-point world pos, tile
         /// key + replay impact point), and how much health damage.</summary>
         public sealed class StructHit
