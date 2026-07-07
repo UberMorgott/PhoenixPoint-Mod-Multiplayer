@@ -60,6 +60,8 @@
     <Compile Include="..\src\Network\Sync\Actions\RenameSoldierAction.cs"><Link>Network\Sync\Actions\RenameSoldierAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\KillCapturedUnitAction.cs"><Link>Network\Sync\Actions\KillCapturedUnitAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\Actions\HarvestCapturedUnitAction.cs"><Link>Network\Sync\Actions\HarvestCapturedUnitAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\LevelUpAbilityAction.cs"><Link>Network\Sync\Actions\LevelUpAbilityAction.cs</Link></Compile>
+    <Compile Include="..\src\Network\Sync\Actions\SpendStatPointsAction.cs"><Link>Network\Sync\Actions\SpendStatPointsAction.cs</Link></Compile>
     <Compile Include="..\src\Network\Sync\SyncRegistration.cs"><Link>Network\Sync\SyncRegistration.cs</Link></Compile>
     <Compile Include="..\src\Network\ClientIdentity.cs"><Link>Network\ClientIdentity.cs</Link></Compile>
   </ItemGroup>

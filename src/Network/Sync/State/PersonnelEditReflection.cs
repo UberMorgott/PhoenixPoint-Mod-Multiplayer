@@ -26,7 +26,12 @@ namespace Multiplayer.Network.Sync.State
     ///   • rename → <c>GeoCharacter.Rename(string)</c> (:826);
     ///   • containment kill / harvest → <c>GeoPhoenixFaction.KillCapturedUnit</c> (:771, kill button
     ///     UIStateRosterAliens.cs:256) / <c>HarvestCapturedUnit(unit, ResourceType)</c> (:881, dismantle
-    ///     buttons :275/:296 — funnels through KillCapturedUnit :893, yield via Wallet.Give → 0xA0).
+    ///     buttons :275/:296 — funnels through KillCapturedUnit :893, yield via Wallet.Give → 0xA0);
+    ///   • level-up ability / stat spend → <c>CharacterProgression.LearnAbility</c> /
+    ///     <c>ModifyBaseStat</c> with native cost re-derivation (<c>GetAbilitySlotCost</c> /
+    ///     <c>GetBaseStatCost</c> + <c>CanLearnAbility</c>/<c>CanModifyBaseStat</c> gates,
+    ///     CharacterProgression.cs:162/201/274/296) and the soldier-first/faction-spill SP split
+    ///     (<see cref="ProgressionSpend"/> — the UIModuleCharacterProgression.ConsumeAbilityCost mirror).
     /// Every native call runs on the HOST inside <c>SyncApplyScope</c> (the OnActionRequest apply path), so the
     /// client-suppress interceptors pass through AND the existing PS1/PS2/PS3 dirty Postfix hooks fire
     /// (authoritative write → mirror back on #6/#9/#10). All reflection is null-safe best-effort: a miss logs
@@ -63,6 +68,22 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _harvestCaptured; // GeoPhoenixFaction.HarvestCapturedUnit
         private static Type _resourceTypeType;    // PhoenixPoint.Common.Core.ResourceType
         private static PropertyInfo _havenAvailRecruit; // GeoHaven.AvailableRecruit
+        // Progression intents (level-up / stat spend) — CharacterProgression members are single-overload
+        private static Type _charBaseAttrType;          // PhoenixPoint.Common.Entities.Characters.CharacterBaseAttribute
+        private static Type _abilityTrackSourceType;    // PhoenixPoint.Common.Entities.Characters.AbilityTrackSource
+        private static PropertyInfo _progressionProp;   // GeoCharacter.Progression
+        private static MethodInfo _getAbilityTrack;     // CharacterProgression.GetAbilityTrack(AbilityTrackSource)
+        private static MethodInfo _canLearnAbility;     // CharacterProgression.CanLearnAbility(slot, str, will, speed)
+        private static MethodInfo _getAbilitySlotCost;  // CharacterProgression.GetAbilitySlotCost(slot)
+        private static MethodInfo _learnAbility;        // CharacterProgression.LearnAbility(slot)
+        private static MethodInfo _getBaseStat;         // CharacterProgression.GetBaseStat(stat)
+        private static MethodInfo _canModifyBaseStat;   // CharacterProgression.CanModifyBaseStat(stat, toValue)
+        private static MethodInfo _getBaseStatCost;     // CharacterProgression.GetBaseStatCost(stat, forValue)
+        private static MethodInfo _modifyBaseStat;      // CharacterProgression.ModifyBaseStat(stat, amount)
+        private static FieldInfo _skillPointsField;     // CharacterProgression.SkillPoints (public field)
+        private static FieldInfo _factionSkillpointsField; // GeoPhoenixFaction.Skillpoints (public field)
+        private static FieldInfo _trackSlotsField;      // AbilityTrack.AbilitiesByLevel (AbilityTrackSlot[])
+        private static FieldInfo _slotAbilityField;     // AbilityTrackSlot.Ability (public field)
         private static PropertyInfo _sitesProp;   // GeoFaction.Sites
         private static PropertyInfo _vehiclesProp;// GeoFaction.Vehicles
         private static FieldInfo _mapField;       // GeoLevelController.Map
@@ -297,6 +318,149 @@ namespace Multiplayer.Network.Sync.State
                 _rename?.Invoke(soldier, new object[] { newName ?? string.Empty });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.RenameSoldier failed: " + ex.Message); }
+        }
+
+        // ─── HOST-side apply: progression (level-up ability / stat spend) ─────
+
+        /// <summary>Buy an ability on a progression track with skill points: resolve the
+        /// (trackSource, slotIndex) slot, fingerprint-check the relayed ability-def guid (an EMPTY slot —
+        /// the personal/mutoid pick — takes the relayed def, mirroring BuyAbility's null-slot assign,
+        /// UIModuleCharacterProgression.cs:393-396), gate on the NATIVE <c>CanLearnAbility</c>
+        /// (level/prereq/duplicate) + the combined SP pool, deduct via <see cref="ProgressionSpend"/>
+        /// (soldier SkillPoints first, spill into GeoPhoenixFaction.Skillpoints — ConsumeAbilityCost
+        /// :428-442), then run the native <c>LearnAbility</c>. Any unresolved/failed step logs + no-ops;
+        /// the learned ability + spent SP mirror back on the #9 blob (AddAbility dirty seam).</summary>
+        public static void LevelUpAbility(GeoRuntime rt, long unitId, int trackSource, int slotIndex, string abilityGuid)
+        {
+            try
+            {
+                var soldier = ResolveSoldierById(rt, unitId);
+                if (soldier == null) { LogUnresolved("LevelUpAbility", unitId); return; }
+                object prog = ReadProgression(soldier);
+                if (prog == null) { LogUnresolved("LevelUpAbility(progression)", unitId); return; }
+                EnsureProgressionMembers(prog);
+                if (_abilityTrackSourceType == null)
+                    _abilityTrackSourceType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.AbilityTrackSource");
+                if (_getAbilityTrack == null || _canLearnAbility == null || _getAbilitySlotCost == null
+                    || _learnAbility == null || _abilityTrackSourceType == null || _charBaseAttrType == null) return;
+                object track = _getAbilityTrack.Invoke(prog, new[] { Enum.ToObject(_abilityTrackSourceType, trackSource) });
+                if (track == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: unit " + unitId + " has no track source=" + trackSource + " — intent skipped"); return; }
+                if (_trackSlotsField == null) _trackSlotsField = AccessTools.Field(track.GetType(), "AbilitiesByLevel");
+                var slots = _trackSlotsField?.GetValue(track) as Array;
+                if (slots == null || slotIndex < 0 || slotIndex >= slots.Length)
+                { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: slot " + slotIndex + " out of range for unit " + unitId + " — intent skipped"); return; }
+                object slot = slots.GetValue(slotIndex);
+                if (slot == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: null slot " + slotIndex + " — intent skipped"); return; }
+                if (_slotAbilityField == null) _slotAbilityField = AccessTools.Field(slot.GetType(), "Ability");
+                object slotAbility = _slotAbilityField?.GetValue(slot);
+                if (slotAbility == null)
+                {
+                    object def = DefReflection.GetDefByGuid(abilityGuid);
+                    if (def == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: ability def " + abilityGuid + " unresolved — intent skipped"); return; }
+                    _slotAbilityField.SetValue(slot, def);
+                }
+                else if (DefReflection.GetGuid(slotAbility) != abilityGuid)
+                { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: slot ability drifted (expected " + abilityGuid + ") — intent skipped"); return; }
+                // Native gate: level requirement + prerequisite slot + not-already-learned (the stat args
+                // are part of the native signature; current values keep the call honest).
+                object[] canArgs = { slot, GetBaseStatInt(prog, 0), GetBaseStatInt(prog, 1), GetBaseStatInt(prog, 2) };
+                if (!(bool)_canLearnAbility.Invoke(prog, canArgs))
+                { Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: CanLearnAbility=false for unit " + unitId + " slot " + slotIndex + " — intent skipped"); return; }
+                int cost = (int)_getAbilitySlotCost.Invoke(prog, new[] { slot });
+                if (!TrySpendSkillPoints(rt, prog, cost, "LevelUpAbility", unitId)) return;
+                _learnAbility.Invoke(prog, new[] { slot });
+                Debug.Log("[Multiplayer] PersonnelEditReflection.LevelUpAbility: unit " + unitId + " learned " + abilityGuid + " (cost " + cost + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.LevelUpAbility failed: " + ex.Message); }
+        }
+
+        /// <summary>Spend skill points on ONE base stat, <paramref name="delta"/> single points applied
+        /// stepwise the way the native +1 button does: per point, native <c>CanModifyBaseStat</c> (max-cap)
+        /// + <c>GetBaseStatCost(stat, cur+1)</c> re-derived on the HOST (the client's SP arithmetic is
+        /// never trusted), <see cref="ProgressionSpend"/> pool split, then native <c>ModifyBaseStat(+1)</c>.
+        /// A mid-loop failure keeps the points already applied (each was individually affordable/legal —
+        /// partial converge beats all-or-nothing rollback of native writes) and logs the shortfall.</summary>
+        public static void SpendStatPoints(GeoRuntime rt, long unitId, int statId, int delta)
+        {
+            try
+            {
+                if (statId < 0 || statId > 2 || delta <= 0) return;   // action Validate mirrors this
+                var soldier = ResolveSoldierById(rt, unitId);
+                if (soldier == null) { LogUnresolved("SpendStatPoints", unitId); return; }
+                object prog = ReadProgression(soldier);
+                if (prog == null) { LogUnresolved("SpendStatPoints(progression)", unitId); return; }
+                EnsureProgressionMembers(prog);
+                if (_charBaseAttrType == null || _getBaseStat == null || _canModifyBaseStat == null
+                    || _getBaseStatCost == null || _modifyBaseStat == null) return;
+                object stat = Enum.ToObject(_charBaseAttrType, statId);
+                int applied = 0;
+                for (int i = 0; i < delta; i++)
+                {
+                    int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
+                    if (!(bool)_canModifyBaseStat.Invoke(prog, new object[] { stat, cur + 1 })) break;   // native max cap
+                    int cost = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur + 1 });
+                    if (!TrySpendSkillPoints(rt, prog, cost, "SpendStatPoints", unitId)) break;
+                    _modifyBaseStat.Invoke(prog, new object[] { stat, 1 });
+                    applied++;
+                }
+                Debug.Log("[Multiplayer] PersonnelEditReflection.SpendStatPoints: unit " + unitId + " stat " + statId
+                          + " +" + applied + (applied == delta ? "" : " (requested +" + delta + " — cap/pool stop)"));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.SpendStatPoints failed: " + ex.Message); }
+        }
+
+        /// <summary>Deduct <paramref name="cost"/> SP: soldier <c>CharacterProgression.SkillPoints</c>
+        /// first, shortfall spills into <c>GeoPhoenixFaction.Skillpoints</c> (both public fields).
+        /// False (logged) when the combined pool cannot cover it — nothing is written.</summary>
+        private static bool TrySpendSkillPoints(GeoRuntime rt, object prog, int cost, string op, long unitId)
+        {
+            if (_skillPointsField == null) _skillPointsField = AccessTools.Field(prog.GetType(), "SkillPoints");
+            if (_skillPointsField == null) return false;
+            var fac = rt?.PhoenixFaction();
+            if (_factionSkillpointsField == null && fac != null) _factionSkillpointsField = AccessTools.Field(fac.GetType(), "Skillpoints");
+            int sp = (int)_skillPointsField.GetValue(prog);
+            int fsp = fac != null && _factionSkillpointsField != null ? (int)_factionSkillpointsField.GetValue(fac) : 0;
+            if (!ProgressionSpend.TrySplit(cost, sp, fsp, out int newSp, out int newFsp))
+            {
+                Debug.Log("[Multiplayer] PersonnelEditReflection." + op + ": unit " + unitId + " cannot afford cost "
+                          + cost + " (sp=" + sp + " faction=" + fsp + ") — intent skipped");
+                return false;
+            }
+            _skillPointsField.SetValue(prog, newSp);
+            if (newFsp != fsp && fac != null && _factionSkillpointsField != null) _factionSkillpointsField.SetValue(fac, newFsp);
+            return true;
+        }
+
+        /// <summary>The soldier's live <c>GeoCharacter.Progression</c> (CharacterProgression), or null.</summary>
+        private static object ReadProgression(object soldier)
+        {
+            try
+            {
+                if (_progressionProp == null) _progressionProp = AccessTools.Property(soldier.GetType(), "Progression");
+                return _progressionProp?.GetValue(soldier, null);
+            }
+            catch { return null; }
+        }
+
+        private static int GetBaseStatInt(object prog, int statId)
+            => (int)_getBaseStat.Invoke(prog, new[] { Enum.ToObject(_charBaseAttrType, statId) });
+
+        /// <summary>Bind the CharacterProgression members once (all single-overload, decompile-verified
+        /// 2026-07-07: GetAbilityTrack/CanLearnAbility/GetAbilitySlotCost/LearnAbility/GetBaseStat/
+        /// CanModifyBaseStat/GetBaseStatCost/ModifyBaseStat + the public SkillPoints field).</summary>
+        private static void EnsureProgressionMembers(object prog)
+        {
+            var t = prog.GetType();
+            if (_charBaseAttrType == null) _charBaseAttrType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterBaseAttribute");
+            if (_getAbilityTrack == null) _getAbilityTrack = AccessTools.Method(t, "GetAbilityTrack");
+            if (_canLearnAbility == null) _canLearnAbility = AccessTools.Method(t, "CanLearnAbility");
+            if (_getAbilitySlotCost == null) _getAbilitySlotCost = AccessTools.Method(t, "GetAbilitySlotCost");
+            if (_learnAbility == null) _learnAbility = AccessTools.Method(t, "LearnAbility");
+            if (_getBaseStat == null) _getBaseStat = AccessTools.Method(t, "GetBaseStat");
+            if (_canModifyBaseStat == null) _canModifyBaseStat = AccessTools.Method(t, "CanModifyBaseStat");
+            if (_getBaseStatCost == null) _getBaseStatCost = AccessTools.Method(t, "GetBaseStatCost");
+            if (_modifyBaseStat == null) _modifyBaseStat = AccessTools.Method(t, "ModifyBaseStat");
+            if (_skillPointsField == null) _skillPointsField = AccessTools.Field(t, "SkillPoints");
         }
 
         // ─── self-contained resolution ────────────────────────────────────────

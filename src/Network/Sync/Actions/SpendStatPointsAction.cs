@@ -1,0 +1,68 @@
+using System;
+using System.IO;
+using Multiplayer.Network.Sync.State;
+
+namespace Multiplayer.Network.Sync.Actions
+{
+    /// <summary>
+    /// Progression client intent: SPEND skill points on one base stat (Strength/Will/Speed — the
+    /// soldier-edit stat +/- buttons committed by <c>UIModuleCharacterProgression.CommitStatChanges</c> →
+    /// <c>CharacterProgression.ModifyBaseStat</c>, UIModuleCharacterProgression.cs:367-375). The wire
+    /// carries only the POSITIVE stat delta — never the client's SP arithmetic: the host re-derives each
+    /// point's native cost (<c>GetBaseStatCost(stat, cur+1)</c>) step by step, gates every step on
+    /// <c>CanModifyBaseStat</c> + the combined soldier/faction pool (<see cref="ProgressionSpend"/>), and
+    /// applies via native ModifyBaseStat. Result mirrors on the #9 live-state blob (progression
+    /// _baseStats + SkillPoints ride the GeoCharacter snapshot). <see cref="IHostOnlyApply"/>. Category
+    /// ControlSoldiers → per-soldier ownership gate (PS4 policy). Committed stat spends are never
+    /// refundable in the native UI (decrease is gated to the uncommitted session, :907), so delta ≤ 0 is
+    /// invalid. Wire: <c>i64 unitId, u8 statId (CharacterBaseAttribute), i32 delta</c>.
+    /// </summary>
+    public sealed class SpendStatPointsAction : ISyncedAction, IHostOnlyApply
+    {
+        /// <summary>Sanity cap on a single intent's delta (native stat maxima are ~35; a runaway value
+        /// would spin the host apply loop).</summary>
+        public const int MaxDelta = 100;
+
+        private readonly long _unitId;
+        private readonly byte _statId;
+        private readonly int _delta;
+
+        public SpendStatPointsAction(long unitId, byte statId, int delta)
+        {
+            _unitId = unitId;
+            _statId = statId;
+            _delta = delta;
+        }
+
+        public long UnitId => _unitId;
+        public byte StatId => _statId;
+        public int Delta => _delta;
+
+        public ushort ActionId => SyncedActionIds.SpendStatPoints;
+        public ActionCategory Category => ActionCategory.ControlSoldiers;
+
+        public void Write(BinaryWriter w)
+        {
+            w.Write(_unitId);
+            w.Write(_statId);
+            w.Write(_delta);
+        }
+
+        public static ISyncedAction Read(BinaryReader r)
+        {
+            long unitId = r.ReadInt64();
+            byte statId = r.ReadByte();
+            int delta = r.ReadInt32();
+            return new SpendStatPointsAction(unitId, statId, delta);
+        }
+
+        public bool Validate(GeoRuntime rt, Guid actor)
+            => rt != null && rt.IsGeoscapeActive
+               && _statId <= 2                         // CharacterBaseAttribute: Strength/Will/Speed
+               && _delta > 0 && _delta <= MaxDelta
+               && PersonnelEditReflection.OwnsSoldier(actor, _unitId);
+
+        public void Apply(GeoRuntime rt)
+            => PersonnelEditReflection.SpendStatPoints(rt, _unitId, _statId, _delta);
+    }
+}

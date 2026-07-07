@@ -42,6 +42,8 @@ namespace Multiplayer.Network.Sync
         public const byte RenameSoldier = 65;
         public const byte KillCapturedUnit = 66;   // containment captive kill (mirrors SyncedActionIds.KillCapturedUnit)
         public const byte HarvestCapturedUnit = 67; // containment captive harvest → food/mutagen (mirrors SyncedActionIds.HarvestCapturedUnit)
+        public const byte LevelUpAbility = 68;      // SP ability buy on a progression track (mirrors SyncedActionIds.LevelUpAbility)
+        public const byte SpendStatPoints = 69;     // SP base-stat increase (mirrors SyncedActionIds.SpendStatPoints)
 
         // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
         public const byte InventoryChannel = 1;   // distinct id-space from actions (kind disambiguates)

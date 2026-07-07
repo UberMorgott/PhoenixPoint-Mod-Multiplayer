@@ -140,6 +140,47 @@ namespace Multiplayer.Harmony.Sync
         public static void Postfix(object __instance) => PersonnelStateDirty.Mark(__instance);
     }
 
+    /// <summary>Progression dirty seams (progression-intents feature): <c>CharacterProgression</c> has no
+    /// back-reference to its owning GeoCharacter, so an ability learn (<c>AddAbility</c> — LearnAbility and
+    /// the mutoid path both funnel through it, CharacterProgression.cs:152/173) or a stat spend
+    /// (<c>ModifyBaseStat</c> :201) marks the WHOLE roster (the hourly-bulk pattern); the per-soldier
+    /// blob-hash skip culls the unchanged majority (R3). Covers BOTH origins symmetrically: a relayed
+    /// LevelUpAbility/SpendStatPoints host apply AND the host player's own soldier-edit screen (whose raw
+    /// <c>SkillPoints</c> field write has no seam of its own but always travels with one of these calls).
+    /// Client-side fires are no-ops (MarkAll is _live-gated + IsHost-gated); the mirror's blob apply
+    /// value-copies <c>_progression</c> without calling either method.</summary>
+    [HarmonyPatch]
+    public static class CharacterProgressionAddAbilityStateDirtyPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "AddAbility") : null;
+            Debug.Log("[Multiplayer] PersonnelStatePatches: CharacterProgression.AddAbility "
+                      + (_target != null ? "bound" : "NOT FOUND — progression dirty seam disabled"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+        public static void Postfix() => PersonnelStateDirty.MarkAll();
+    }
+
+    [HarmonyPatch]
+    public static class CharacterProgressionModifyBaseStatStateDirtyPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "ModifyBaseStat") : null;
+            Debug.Log("[Multiplayer] PersonnelStatePatches: CharacterProgression.ModifyBaseStat "
+                      + (_target != null ? "bound" : "NOT FOUND — progression dirty seam disabled"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+        public static void Postfix() => PersonnelStateDirty.MarkAll();
+    }
+
     [HarmonyPatch]
     public static class PhoenixBaseHourlyBulkStateDirtyPatch
     {

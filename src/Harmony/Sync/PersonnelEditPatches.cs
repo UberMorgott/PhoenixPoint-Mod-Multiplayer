@@ -35,7 +35,15 @@ namespace Multiplayer.Harmony.Sync
     ///     kill button; research live-alien costs never reach it on a client — research start is suppressed
     ///     at AddResearchToQueue);
     ///   • <c>GeoPhoenixFaction.HarvestCapturedUnit</c> → <see cref="HarvestCapturedUnitAction"/> (dismantle
-    ///     for food/mutagens; suppressing it here also keeps its inner KillCapturedUnit from double-relaying).
+    ///     for food/mutagens; suppressing it here also keeps its inner KillCapturedUnit from double-relaying);
+    ///   • <c>UIModuleCharacterProgression.BuyAbility</c> → <see cref="LevelUpAbilityAction"/> (SP ability
+    ///     buy — the UI method IS the commit chokepoint: the SP deduction is a raw field write with no
+    ///     patchable native beneath it, so the relay hooks the one method that couples cost + LearnAbility);
+    ///   • <c>UIModuleCharacterProgression.CommitStatChanges</c> → <see cref="SpendStatPointsAction"/> per
+    ///     changed stat (positive deltas only; the host re-derives every point's cost natively). The prefix
+    ///     also rolls the module's local current-values back to starting so a repeated commit call in the
+    ///     same screen session can never double-relay. Mutoid (mutagen-cost) progression is suppressed
+    ///     without relay on a client (wallet-funded path, out of the SP intent family).
     ///
     /// Composes with the PS1/PS2 dirty Postfixes on the same methods: on a client our Prefix returns false
     /// (suppress) and those Postfixes are IsHost-gated no-ops; on the host our Prefix passes through (IsHost /
@@ -278,6 +286,132 @@ namespace Multiplayer.Harmony.Sync
                     () => new HarvestCapturedUnitAction(ordinal, guid, resourceType));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] HarvestCapturedUnitRelayPatch failed: " + ex.Message); return true; }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class BuyAbilityProgressionRelayPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "BuyAbility") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.BuyAbility relay " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // BuyAbility is the ONE native commit chokepoint coupling the SP cost (ConsumeAbilityCost +
+        // CommitStatChanges — raw SkillPoints field writes, unpatchable below UI level) with
+        // CharacterProgression.LearnAbility (UIModuleCharacterProgression.cs:389-426). The relay keys the
+        // slot as (trackSource, index in AbilitiesByLevel) + ability-def guid fingerprint; the host
+        // re-validates and re-prices natively. A second confirm click before the #9 round-trip is safe:
+        // the host's CanLearnAbility rejects the duplicate (already learned).
+        public static bool Prefix(object __instance)
+        {
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            try
+            {
+                var t = __instance.GetType();
+                object slot = AccessTools.Field(t, "_boughtAbilitySlot")?.GetValue(__instance);
+                if (slot == null) return true;   // native no-ops on a null slot too
+                if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool pandoran && pandoran)
+                {
+                    Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: mutoid (mutagen-cost) progression not relayed — buy suppressed");
+                    return false;
+                }
+                object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                object track = AccessTools.Property(slot.GetType(), "AbilityTrack")?.GetValue(slot, null);
+                var slots = track != null ? AccessTools.Field(track.GetType(), "AbilitiesByLevel")?.GetValue(track) as Array : null;
+                int slotIndex = -1;
+                if (slots != null)
+                    for (int i = 0; i < slots.Length; i++)
+                        if (ReferenceEquals(slots.GetValue(i), slot)) { slotIndex = i; break; }
+                int trackSource = track != null ? Convert.ToInt32(AccessTools.Field(track.GetType(), "Source")?.GetValue(track) ?? -1) : -1;
+                // An empty (personal-pick) slot carries the chosen def in _boughtAbility (BuyAbility :393-396).
+                object ability = AccessTools.Field(slot.GetType(), "Ability")?.GetValue(slot)
+                                 ?? AccessTools.Field(t, "_boughtAbility")?.GetValue(__instance);
+                string guid = DefReflection.GetGuid(ability);
+                if (slotIndex < 0 || trackSource < 0 || string.IsNullOrEmpty(guid))
+                {
+                    Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: slot unresolved — buy suppressed (no relay)");
+                    return false;
+                }
+                return PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                    () => new LevelUpAbilityAction(unitId, (byte)trackSource, slotIndex, guid));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BuyAbilityProgressionRelayPatch failed: " + ex.Message); return true; }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class CommitStatChangesProgressionRelayPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "CommitStatChanges") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.CommitStatChanges relay " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // CommitStatChanges is the native stat-spend commit (screen exit / soldier switch / confirm —
+        // UIStateEditSoldier.cs:232/363/715, UIModuleCharacterProgression.cs:367-387). Relays ONE
+        // SpendStatPointsAction per raised stat carrying only the positive delta; the local current
+        // values are rolled back to starting so a repeat commit in the same session never double-relays
+        // (native decrease below starting is impossible, :907 — committed spends are non-refundable).
+        public static bool Prefix(object __instance)
+        {
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            try
+            {
+                var t = __instance.GetType();
+                int dStr = Delta(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
+                int dWill = Delta(t, __instance, "_currentWillStat", "_startingWillStat");
+                int dSpeed = Delta(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
+                bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool p && p;
+                if (!pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
+                {
+                    object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
+                    long unitId = PersonnelReflection.ReadUnitId(character);
+                    // CharacterBaseAttribute: Strength=0, Will=1, Speed=2 (decompile enum order).
+                    if (dStr > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                        () => new SpendStatPointsAction(unitId, 0, dStr));
+                    if (dWill > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                        () => new SpendStatPointsAction(unitId, 1, dWill));
+                    if (dSpeed > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                        () => new SpendStatPointsAction(unitId, 2, dSpeed));
+                }
+                else if (pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
+                    Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: mutoid (mutagen-cost) stat spend not relayed — commit suppressed");
+                // Roll local session state back to starting (idempotent repeat-commit guard).
+                Reset(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
+                Reset(t, __instance, "_currentWillStat", "_startingWillStat");
+                Reset(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
+                Reset(t, __instance, "_currentSkillPoints", "_startingSkillPoints");
+                Reset(t, __instance, "_currentFactionPoints", "_startingFactionPoints");
+                Reset(t, __instance, "_currentMutagens", "_startingMutagens");
+                return false;   // suppress the frozen local commit (stat + SP + faction-pool + mutagen writes)
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] CommitStatChangesProgressionRelayPatch failed: " + ex.Message); return true; }
+        }
+
+        private static int Delta(Type t, object inst, string currentField, string startingField)
+        {
+            object cur = AccessTools.Field(t, currentField)?.GetValue(inst);
+            object start = AccessTools.Field(t, startingField)?.GetValue(inst);
+            return cur is int c && start is int s ? c - s : 0;
+        }
+
+        private static void Reset(Type t, object inst, string currentField, string startingField)
+        {
+            var cf = AccessTools.Field(t, currentField);
+            var sf = AccessTools.Field(t, startingField);
+            if (cf != null && sf != null) cf.SetValue(inst, sf.GetValue(inst));
         }
     }
 

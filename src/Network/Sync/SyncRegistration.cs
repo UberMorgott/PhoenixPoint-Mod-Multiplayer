@@ -63,6 +63,8 @@ namespace Multiplayer.Network.Sync
             SyncedActionRegistry.Register(SyncedActionIds.RenameSoldier, RenameSoldierAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.KillCapturedUnit, KillCapturedUnitAction.Read);
             SyncedActionRegistry.Register(SyncedActionIds.HarvestCapturedUnit, HarvestCapturedUnitAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.LevelUpAbility, LevelUpAbilityAction.Read);
+            SyncedActionRegistry.Register(SyncedActionIds.SpendStatPoints, SpendStatPointsAction.Read);
 
             // Geoscape sim-mutating abilities (ONE generic GeoAbility.Activate relay)
             SyncedActionRegistry.Register(SyncedActionIds.GeoAbilityActivate, GeoAbilityActivateAction.Read);
