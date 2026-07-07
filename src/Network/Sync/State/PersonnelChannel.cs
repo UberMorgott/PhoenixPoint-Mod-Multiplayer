@@ -161,6 +161,10 @@ namespace Multiplayer.Network.Sync.State
             // RosterReconcile Contains-guards entries that a preceding record's move made stale, and the
             // host emits each soldier in at most one container per snapshot (single-writer truth).
             var index = PersonnelReflection.BuildCharacterIndex(rt);
+            // Hire gap: a brand-new soldier (never on this client) is materialized from its PS2 blob into the
+            // site the membership names BEFORE the reconcile — so the reconcile below finds + orders it instead
+            // of skipping it as "not live". Its state is now applied (the decoded instance), so skip it below.
+            var materialized = PersonnelReflection.MaterializeNewcomers(rt, snap.Sites, snap.States, index);
             foreach (var rec in snap.Sites)
                 PersonnelReflection.ApplySiteRoster(rt, rec, index);
             // PS2 live-state AFTER membership (a just-transferred soldier is already in its mirrored
@@ -168,6 +172,7 @@ namespace Multiplayer.Network.Sync.State
             // degrades to notify — log + keep the soldier's previous state, never throw into the engine.
             foreach (var st in snap.States)
             {
+                if (materialized.Contains(st.UnitId)) continue;   // just materialized FROM this blob — already current
                 if (!index.ById.TryGetValue(st.UnitId, out var existing))
                 {
                     Debug.Log("[Multiplayer] PersonnelChannel: live-state for GeoUnitId " + st.UnitId

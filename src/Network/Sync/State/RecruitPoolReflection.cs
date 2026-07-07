@@ -43,6 +43,7 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _rpValuesField;           // ResourcePack.Values
         private static FieldInfo _ruTypeField;             // ResourceUnit.Type
         private static FieldInfo _ruValueField;            // ResourceUnit.Value
+        private static MethodInfo _getIdentityMethod;      // GeoUnitDescriptor.GetIdentity() (lazy appearance gen)
 
         private static void Ensure()
         {
@@ -74,6 +75,28 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] RecruitPoolReflection.Ensure failed (pool sync degraded): " + ex.Message); }
+        }
+
+        /// <summary>HOST: force the recruit descriptor's appearance to MATERIALIZE before it is serialized for
+        /// the #10 blob. A recruit's visual identity (<c>GeoUnitDescriptor._identity</c> — face/hair/body/colours,
+        /// [SerializeMember], GeoUnitDescriptor.cs:200) is LAZILY generated on the first <c>GetIdentity()</c> call
+        /// (:383-407 → <c>GenerateIdentity()</c> :514, a RANDOM roll) and is normally NULL when the pool is
+        /// snapshotted (the host hasn't rendered the recruit yet). A null <c>_identity</c> serializes as null, so
+        /// the CLIENT re-rolls its OWN random appearance on render → host and client show DIFFERENT faces. Calling
+        /// <c>GetIdentity()</c> here (the exact call the host's recruit screen makes) stamps the concrete identity
+        /// into the descriptor so the blob carries it; the client's <c>GetIdentity()</c> then returns the mirrored
+        /// value (:385-387) instead of rolling. Host-side, idempotent, best-effort.</summary>
+        private static void MaterializeIdentity(object descriptor)
+        {
+            if (descriptor == null) return;
+            try
+            {
+                if (_getIdentityMethod == null || _getIdentityMethod.DeclaringType == null
+                    || !_getIdentityMethod.DeclaringType.IsInstanceOfType(descriptor))
+                    _getIdentityMethod = AccessTools.Method(descriptor.GetType(), "GetIdentity", Type.EmptyTypes);
+                _getIdentityMethod?.Invoke(descriptor, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RecruitPoolReflection.MaterializeIdentity failed: " + ex.Message); }
         }
 
         /// <summary>Dirty-seam helper: a haven instance → its owning SiteId (the #10 key), or -1.</summary>
@@ -109,6 +132,7 @@ namespace Multiplayer.Network.Sync.State
                 if (haven == null || _availableRecruitProp == null) return res;
                 var recruit = _availableRecruitProp.GetValue(haven, null);
                 if (recruit == null) { res.Resolved = true; return res; }   // honest cleared slot
+                MaterializeIdentity(recruit);   // stamp appearance so the blob carries it (BUG-B: else client re-rolls)
                 var blob = PersonnelBlob.Write(recruit);
                 if (blob == null) return res;                                // serializer miss → Failed
                 res.Resolved = true;
@@ -136,6 +160,7 @@ namespace Multiplayer.Network.Sync.State
                 var res = new List<RecruitNakedRecord>(dict.Count);
                 foreach (DictionaryEntry entry in dict)
                 {
+                    MaterializeIdentity(entry.Key);   // stamp appearance so the blob carries it (BUG-B: else client re-rolls)
                     var blob = PersonnelBlob.Write(entry.Key);
                     if (blob == null) return null;
                     res.Add(new RecruitNakedRecord(blob, ReadCostEntries(entry.Value)));

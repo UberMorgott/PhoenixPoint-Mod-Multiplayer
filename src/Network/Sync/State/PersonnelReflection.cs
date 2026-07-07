@@ -165,6 +165,50 @@ namespace Multiplayer.Network.Sync.State
             }
         }
 
+        /// <summary>CLIENT (#9 hire gap): materialize soldiers the client has never seen. A HIRED recruit is a
+        /// brand-new <c>GeoCharacter</c>, so its id resolves to nothing — the membership reconcile and the PS2
+        /// live-state apply BOTH skip it ("not live on this client"). Its whole-<c>GeoCharacter</c> blob rides
+        /// the SAME snapshot's state block, so decode it and add the live instance to the site the membership
+        /// names — value-only <c>_tacUnits</c> add, the same non-native path <see cref="RosterReconcile"/> uses
+        /// (the frozen mirror never runs the native <c>AddCharacter</c> sim cascade). The decoded instance keeps
+        /// its serialized <c>_factionDef</c>, so <c>GeoCharacter.Faction</c> resolves against the live level.
+        /// Returns the ids actually materialized so <see cref="PersonnelChannel"/> skips re-applying their state
+        /// (the decoded instance IS that state). Best-effort: any per-soldier miss logs + leaves the id
+        /// unresolved (the pre-fix skip) so the next flush re-arms.</summary>
+        public static HashSet<long> MaterializeNewcomers(GeoRuntime rt, List<PersonnelSiteRoster> sites,
+                                                         List<PersonnelSoldierState> states, CharacterIndex index)
+        {
+            var materialized = new HashSet<long>();
+            if (sites == null || states == null || index == null) return materialized;
+            var placements = PersonnelNewcomerPlan.ResolvePlacements(sites, index.ById.Keys);
+            if (placements.Count == 0) return materialized;   // no membership-listed id is a newcomer
+            foreach (var st in states)
+            {
+                if (st?.Blob == null || index.ById.ContainsKey(st.UnitId)) continue;   // already live
+                if (!placements.TryGetValue(st.UnitId, out int siteId)) continue;      // membership never placed it
+                try
+                {
+                    var soldier = PersonnelBlob.Read(st.Blob);
+                    if (soldier == null)
+                    { Debug.LogError("[Multiplayer] PersonnelReflection: newcomer GeoUnitId " + st.UnitId + " blob decode failed — not materialized"); continue; }
+                    long decodedId = ReadUnitId(soldier);
+                    if (decodedId != 0 && decodedId != st.UnitId)
+                    { Debug.LogError("[Multiplayer] PersonnelReflection: newcomer blob id mismatch (" + decodedId + " != " + st.UnitId + ") — not materialized"); continue; }
+                    var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                    var list = site != null ? GetTacUnits(site) : null;
+                    if (list == null)
+                    { Debug.Log("[Multiplayer] PersonnelReflection: newcomer GeoUnitId " + st.UnitId + " site " + siteId + " unresolved — deferred (re-arms next flush)"); continue; }
+                    if (!list.Contains(soldier)) list.Add(soldier);    // value-only add; ApplySiteRoster then orders it
+                    index.ById[st.UnitId] = soldier;
+                    index.ContainerOf[soldier] = list;
+                    materialized.Add(st.UnitId);
+                    Debug.Log("[Multiplayer] PersonnelReflection: materialized hired GeoUnitId " + st.UnitId + " into site " + siteId);
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelReflection.MaterializeNewcomers(" + st.UnitId + ") failed: " + ex.Message); }
+            }
+            return materialized;
+        }
+
         /// <summary>CLIENT (#9): reconcile one mirrored site roster onto the resolved site's <c>_tacUnits</c>
         /// (value-only). Unresolvable site / list / soldier ids log + skip (degrade-to-notify).</summary>
         public static void ApplySiteRoster(GeoRuntime rt, PersonnelSiteRoster rec, CharacterIndex index)
