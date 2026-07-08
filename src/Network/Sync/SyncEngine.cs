@@ -401,6 +401,13 @@ namespace Multiplayer.Network.Sync
             // manufacturing + base-layout facility grid) so e.g. a client facility construct/repair rebuilds
             // the host's open base grid too.
             GeoUiRefresh.RefreshNeedsKick(rt);
+            // The host applied a client equip/augment intent (SetItems) authoritatively, but RefreshNeedsKick →
+            // RefreshRosterEquip only repaints progression + header — NOT the equip doll + storage lists. Without
+            // this, the native per-frame UpdateSoldierEquipment() reads the stale UI lists and overwrites the
+            // model with OLD data, rolling back the client's change. Repaint equip + storage HERE so the host's
+            // UI lists match the freshly-stamped model BEFORE the next frame's native flush.
+            if (id == SyncedActionIds.EquipSoldier || id == SyncedActionIds.AugmentSoldier)
+                GeoUiRefresh.RepaintEquipAndStorage(rt);
             // A client-relayed recruit/containment pool edit (hire/kill/harvest = Recruitment) applied here
             // mirrors on #10, but the host never applies its OWN #10 echo — so the host's open pool screen would
             // stay stale. Re-drive it here (gated to fire only while that screen is current), matching the #10

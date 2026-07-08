@@ -578,9 +578,9 @@ namespace Multiplayer.Network.Sync.State
         }
 
         // Roster-equip fan-out (from RefreshNeedsKick, BOTH peers): progression + header ONLY. The equip + storage
-        // repaint is driven separately by the EditSession-gated EquipMirrorRepaint on the CLIENT's #9/#1 applies
-        // (RepaintEquipAndStorage) — never from this fan-out, which also runs on the HOST where the native flush
-        // owns the equip screen.
+        // repaint is driven separately: on the CLIENT by EquipMirrorRepaint on #9/#1 applies; on the HOST by
+        // the explicit RepaintEquipAndStorage call in OnActionRequest after a client equip/augment intent — so
+        // the host UI lists match the model before the native per-frame UpdateSoldierEquipment flush.
         private static void RefreshRosterEquip(GeoRuntime rt)
         {
             EnsureRosterFamily();
