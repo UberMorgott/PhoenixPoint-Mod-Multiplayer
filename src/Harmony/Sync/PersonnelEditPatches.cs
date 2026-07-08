@@ -76,6 +76,10 @@ namespace Multiplayer.Harmony.Sync
                 if (!PermissionGate.Check(cat)
                     || (checkOwnership && !PersonnelEditReflection.OwnsSoldier(ClientIdentity.PlayerGuid, unitId)))
                 {
+                    // Deny visibility (field RCA round 3): Notify is a bare event invoke — without this line a
+                    // denied intent left ZERO log signature (indistinguishable from a dead relay path).
+                    Debug.Log("[Multiplayer] PersonnelEditRelay: intent DENIED cat=" + cat + " unit=" + unitId
+                              + " (permission/ownership) — not sent");
                     PermissionGate.Notify(cat);
                     return false;
                 }

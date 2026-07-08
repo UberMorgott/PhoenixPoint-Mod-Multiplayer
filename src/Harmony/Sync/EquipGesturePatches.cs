@@ -41,7 +41,12 @@ namespace Multiplayer.Harmony.Sync
         private static PropertyInfo _currentViewStateProp; // GeoscapeView.CurrentViewState
         private static Type _editSoldierType;              // UIStateEditSoldier
         private static FieldInfo _currentCharacterField;   // UIStateEditSoldier._currentCharacter
-        private static FieldInfo _soldierEquipModuleField; // UIStateEditSoldier._soldierEquipModule
+        // UIStateEditSoldier._soldierEquipModule is an expression-bodied PROPERTY (=> base._geoscapeModules.
+        // SoldierEquipModule; decompile UIStateEditSoldier.cs:64), NOT a field — the original Field() resolve
+        // returned null and SILENTLY ate every client gesture (field RCA round 3, ee736d1 logs: 11 patches
+        // bound, zero intents sent). Property-first with a field fallback for game-version drift.
+        private static PropertyInfo _soldierEquipModuleProp;
+        private static FieldInfo _soldierEquipModuleField;
         private static FieldInfo _armorListField;          // UIModuleSoldierEquip.ArmorList (public UIInventoryList)
         private static FieldInfo _readyListField;          // UIModuleSoldierEquip.ReadyList
         private static FieldInfo _inventoryListField;      // UIModuleSoldierEquip.InventoryList
@@ -63,6 +68,7 @@ namespace Multiplayer.Harmony.Sync
                 if (_editSoldierType != null)
                 {
                     _currentCharacterField = AccessTools.Field(_editSoldierType, "_currentCharacter");
+                    _soldierEquipModuleProp = AccessTools.Property(_editSoldierType, "_soldierEquipModule");
                     _soldierEquipModuleField = AccessTools.Field(_editSoldierType, "_soldierEquipModule");
                 }
                 if (moduleT != null)
@@ -97,6 +103,18 @@ namespace Multiplayer.Harmony.Sync
             return state != null ? _currentCharacterField?.GetValue(state) : null;
         }
 
+        // Transition-only guard-exit latch (field RCA round 3): every early-exit between the gesture Postfix
+        // and SendActionRequest was UNLOGGED, so a dead client→host relay left zero log signature. Gestures
+        // are human-click rate, so one line per exit-REASON transition is cheap and makes the guard chain
+        // permanently visible in field logs. A successful relay resets the latch.
+        private static string _lastGestureExit;
+        private static void LogGestureExit(string guard)
+        {
+            if (guard == _lastGestureExit) return;
+            _lastGestureExit = guard;
+            Debug.Log("[Multiplayer] EquipGestureRelay: gesture NOT relayed — guard=" + guard);
+        }
+
         /// <summary>An equip gesture completed. CLIENT → relay ONE full-loadout intent from the post-gesture UI
         /// list truth (ownership/permission gated inside <see cref="PersonnelEditRelay.Relay"/>). Host/SP/apply →
         /// no-op (the native flush + SetItems dirty seam own the host result). Never throws into the native gesture.</summary>
@@ -104,17 +122,21 @@ namespace Multiplayer.Harmony.Sync
         {
             try
             {
-                if (!EquipSyncV2Gate.Enabled) return;
-                if (!PersonnelEditRelay.ShouldRelay()) return;   // client-only; host + single-player run native
+                if (!EquipSyncV2Gate.Enabled) { LogGestureExit("gate-off"); return; }
+                if (!PersonnelEditRelay.ShouldRelay()) { LogGestureExit("not-client (host/single-player/applying)"); return; }
                 var state = ActiveState();
-                if (state == null) return;
+                if (state == null) { LogGestureExit("equip-screen-not-current"); return; }
                 object character = _currentCharacterField?.GetValue(state);
-                object module = _soldierEquipModuleField?.GetValue(state);
-                if (character == null || module == null) return;
+                if (character == null) { LogGestureExit("no-current-character"); return; }
+                object module = _soldierEquipModuleProp != null ? _soldierEquipModuleProp.GetValue(state, null)
+                                                                : _soldierEquipModuleField?.GetValue(state);
+                if (module == null) { LogGestureExit("soldier-equip-module-unresolved"); return; }
                 long unitId = PersonnelReflection.ReadUnitId(character);
+                if (unitId == 0) { LogGestureExit("unit-id-unresolved"); return; }
                 string[] armour = ReadList(module, _armorListField);
                 string[] equip = ReadList(module, _readyListField);
                 string[] inv = ReadList(module, _inventoryListField);
+                _lastGestureExit = null;   // reached the relay → re-arm the latch for a future different exit
                 PersonnelEditRelay.Relay(ActionCategory.Equip, unitId, true,
                     () => new EquipSoldierAction(unitId, armour, equip, inv, returnRemovedToStorage));
             }
