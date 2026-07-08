@@ -65,6 +65,18 @@ namespace Multiplayer.Harmony.Sync
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
                 ushort occId = EventOccurrenceIds.GetOrAssign(geoEvent);   // SAME instance → SAME id as raise/dismiss
+                // REPLAY MODE consume-click guard: when a client's advance was already applied MODEL-ONLY
+                // (SyncEngine.TryHostModelAdvance marked + broadcast without touching this window), the host
+                // player's own later click on the prompt renders window-2 natively (SetClosingEncounter) as the
+                // unified-rule CONSUME — it must NOT broadcast a second EventAdvanceResult. Gate-OFF flows are
+                // byte-identical: every legacy path reaches this postfix with the mark still unset (the native
+                // drive's belt-mark lands only AFTER OnChoiceSelected returns, i.e. after this postfix ran).
+                if (EventOccurrenceIds.WasAdvanced(occId))
+                {
+                    Debug.Log("[Multiplayer] SingleChoiceAdvancePatch occId=" + occId +
+                              " → skip re-broadcast (already advanced — model-only or earlier click won)");
+                    return;
+                }
                 int choiceIndex = EventReflection.GetSelectedChoiceIndex(geoEvent);
                 int siteId = EventReflection.GetSiteId(geoEvent);
                 // Mark the prompt→result advance BEFORE broadcasting: the module keeps the SAME _geoEvent on its
@@ -128,6 +140,17 @@ namespace Multiplayer.Harmony.Sync
                 if (EventOccurrenceIds.WasAdvanced(occId))
                 {
                     Multiplayer.Network.Sync.State.PendingHostAdvance.Remove(occId);
+                    return;
+                }
+                // REPLAY MODE: a buffered advance that becomes model-resolvable at prompt-show is applied
+                // MODEL-ONLY (mark + broadcast, host window untouched — the host player reads + consumes at
+                // their own pace), exactly like the request-time path. Fallback: legacy native drive.
+                if (Multiplayer.Network.Sync.EventReplayModeGate.Enabled && engine.Sync != null
+                    && engine.Sync.TryHostModelAdvance(occId, eventId))
+                {
+                    Multiplayer.Network.Sync.State.PendingHostAdvance.Remove(occId);
+                    Debug.Log("[Multiplayer] EncounterHostAdvanceReplayPatch resolved buffered advance occId=" + occId +
+                              " eventId=" + eventId + " → MODEL-ONLY broadcast (host window left for the unified consume)");
                     return;
                 }
                 bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);

@@ -49,6 +49,8 @@ namespace Multiplayer.Network.Sync.State
         /// belongs to the AnswerEventAction relay — never complete anything here); exactly one choice
         /// (unreadable count fails safe to no-op); not paging description text (a click would only page); and
         /// the occurrence not already advanced (first wins — host click or an earlier request marked it).
+        /// LEGACY path only: under <c>EventReplayModeGate</c> the MODEL-ONLY advance
+        /// (<see cref="ShouldModelAdvance"/>) runs first and this native drive remains the degrade fallback.
         /// </summary>
         public static bool ShouldDriveHostAdvance(bool isHost, bool modalShowingThisOccurrence, bool isCompleted, int choiceCount, bool paging, bool alreadyAdvanced)
             => isHost
@@ -56,6 +58,26 @@ namespace Multiplayer.Network.Sync.State
                && isCompleted
                && choiceCount == 1
                && !paging
+               && !alreadyAdvanced;
+
+        /// <summary>
+        /// HOST, replay mode: should a received client advance-request be applied MODEL-ONLY — mark the
+        /// occurrence advanced + broadcast the authoritative <c>EventAdvanceResult</c> straight off the LIVE
+        /// (already-completed-at-trigger) event, WITHOUT driving the host's own window? The host's window is then
+        /// just another peer to the unified replay rule: it stays wherever the host player is reading (prompt /
+        /// paging / not yet shown) and the host's own later click natively consumes (SetClosingEncounter renders
+        /// the same window-2 in place; native IsCompleted guards make it apply-nothing). Requires: host, replay
+        /// gate ON, the live event resolvable by occurrence id (the model is the source — no UI needed, so this
+        /// works for an open, queued, or not-yet-shown host window alike), auto-completed at trigger (the outcome
+        /// already exists; NOTHING is ever completed here), exactly one choice, and not already advanced (first
+        /// wins). Any false → the caller degrades to the legacy native drive / buffer path.
+        /// </summary>
+        public static bool ShouldModelAdvance(bool isHost, bool replayEnabled, bool liveEventFound, bool isCompleted, int choiceCount, bool alreadyAdvanced)
+            => isHost
+               && replayEnabled
+               && liveEventFound
+               && isCompleted
+               && choiceCount == 1
                && !alreadyAdvanced;
     }
 }

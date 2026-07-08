@@ -311,6 +311,15 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.GetEventId failed: " + ex.Message); return null; }
         }
 
+        /// <summary>Read <c>GeoscapeEvent.IsCompleted</c> (false on any failure — callers fail safe to "not
+        /// completed", which routes to the legacy/no-op paths, never to a model-only advance).</summary>
+        public static bool IsEventCompleted(object geoscapeEvent)
+        {
+            if (geoscapeEvent == null) return false;
+            try { Ensure(); return _isCompletedProp != null && _isCompletedProp.GetValue(geoscapeEvent, null) is bool done && done; }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.IsEventCompleted failed: " + ex.Message); return false; }
+        }
+
         /// <summary>
         /// Pure predicate: is <paramref name="eventId"/> the EventID of the client's OWN synthetic result/info
         /// page? The synthetic page is the SOLE dialog built with an EMPTY EventID (<see cref="BuildResultEvent"/>

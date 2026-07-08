@@ -1391,6 +1391,20 @@ namespace Multiplayer.Network.Sync
                               " → no-op (already advanced)");
                     return;
                 }
+                // REPLAY MODE — MODEL-ONLY advance (unified rule: the host is just another peer; NO peer's window
+                // ever force-advances). The event auto-completed at trigger, so the authoritative outcome already
+                // exists in the model: mark the occurrence advanced + broadcast EventAdvanceResult straight off the
+                // LIVE event — the host's OWN window is NEVER driven. It stays wherever the host player is reading
+                // (prompt / paging / not yet shown); the host's later click natively consumes it in place
+                // (OnChoiceSelected → SelectChoice no-ops on IsCompleted → SetClosingEncounter renders window-2 —
+                // SingleChoiceAdvancePatch skips the re-broadcast via the advanced mark). Works for open, queued AND
+                // not-yet-shown host windows (no PendingHostAdvance wait — the answering client gets its result at
+                // once). Any guard miss → degrade to the legacy native-drive / buffer path below.
+                if (TryHostModelAdvance(occId, eventId))
+                {
+                    State.PendingHostAdvance.Remove(occId);
+                    return;
+                }
                 bool drove = EventReflection.TryHostNativeAdvanceSingleChoice(GeoRuntime.Instance, occId, eventId);
                 if (drove)
                 {
@@ -1410,6 +1424,51 @@ namespace Multiplayer.Network.Sync
                                          : "buffered (host not showing yet — replay on prompt show)"));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnEventAdvanceRequest failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// HOST, replay mode: apply a client's single-choice advance MODEL-ONLY — verify via the pure
+        /// <see cref="State.SingleChoiceAdvanceGate.ShouldModelAdvance"/> gate (host + gate ON + live event found +
+        /// auto-completed-at-trigger + exactly one choice + not already advanced), then mark the occurrence
+        /// advanced (BEFORE the broadcast — the same first-wins discipline as <c>SingleChoiceAdvancePatch</c>) and
+        /// broadcast the authoritative <c>EventAdvanceResult</c> read straight off the LIVE event. Never touches
+        /// the host UI and never completes anything. Returns false on any guard/exception → the caller degrades to
+        /// the legacy native-drive / buffer path. Also consulted by <c>EncounterHostAdvanceReplayPatch</c> for a
+        /// legacy-buffered advance that becomes model-resolvable at prompt-show time.
+        /// </summary>
+        public bool TryHostModelAdvance(ushort occId, string eventId)
+        {
+            try
+            {
+                bool found = Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occId, out var liveEvent) && liveEvent != null;
+                bool isCompleted = found && EventReflection.IsEventCompleted(liveEvent);
+                int choiceCount = found ? EventReflection.GetChoiceCount(liveEvent) : -1;
+                bool alreadyAdvanced = Multiplayer.Harmony.Sync.EventOccurrenceIds.WasAdvanced(occId);
+                if (!State.SingleChoiceAdvanceGate.ShouldModelAdvance(
+                        isHost: _engine.IsHost, replayEnabled: EventReplayModeGate.Enabled,
+                        liveEventFound: found, isCompleted: isCompleted,
+                        choiceCount: choiceCount, alreadyAdvanced: alreadyAdvanced))
+                {
+                    if (EventReplayModeGate.Enabled)
+                        Debug.Log("[Multiplayer] HOST TryHostModelAdvance occId=" + occId + " eventId=" + eventId +
+                                  " → FALLBACK (found=" + found + " isCompleted=" + isCompleted +
+                                  " choiceCount=" + choiceCount + " alreadyAdvanced=" + alreadyAdvanced + ")");
+                    return false;
+                }
+                int choiceIndex = EventReflection.GetSelectedChoiceIndex(liveEvent);
+                int siteId = EventReflection.GetSiteId(liveEvent);
+                Multiplayer.Harmony.Sync.EventOccurrenceIds.MarkAdvanced(occId);
+                Debug.Log("[Multiplayer] HOST TryHostModelAdvance occId=" + occId + " eventId=" + eventId +
+                          " choiceIndex=" + choiceIndex + " siteId=" + siteId +
+                          " → MODEL-ONLY advance broadcast (host window untouched — unified replay rule)");
+                BroadcastEventAdvanceResult(occId, eventId, choiceIndex, siteId);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] SyncEngine.TryHostModelAdvance failed: " + ex.Message + " — degrading to native drive");
+                return false;
+            }
         }
 
         /// <summary>

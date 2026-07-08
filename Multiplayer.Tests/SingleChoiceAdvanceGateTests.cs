@@ -202,4 +202,43 @@ public class EventOccurrenceIdsAdvancedTrackingTests
         EventOccurrenceIds.ResetForTests();
         Assert.False(EventOccurrenceIds.WasAdvanced(occ));
     }
+
+    // ─── ShouldModelAdvance (replay mode: host applies a client advance MODEL-ONLY, window untouched) ───
+
+    [Fact]
+    public void ShouldModelAdvance_AllConditionsMet_True()
+    {
+        // Host + replay gate ON + live event found + auto-completed at trigger + exactly 1 choice + not yet
+        // advanced → model-only advance (mark + broadcast off the live event; NO peer's window force-advances).
+        Assert.True(SingleChoiceAdvanceGate.ShouldModelAdvance(
+            isHost: true, replayEnabled: true, liveEventFound: true,
+            isCompleted: true, choiceCount: 1, alreadyAdvanced: false));
+    }
+
+    [Fact]
+    public void ShouldModelAdvance_HasNoWindowStateInputs_ByDesign()
+    {
+        // The model is the source: unlike ShouldDriveHostAdvance there is deliberately NO modal-showing/paging
+        // input — the advance applies for an open, queued, paging, or not-yet-shown host window alike (the host
+        // window is never driven, so its UI state cannot matter). Pin the arity via a direct call.
+        Assert.True(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, true, true, 1, false));
+    }
+
+    [Fact]
+    public void ShouldModelAdvance_AnyGuardMiss_False()
+    {
+        // Not host (a client never applies advances).
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(false, true, true, true, 1, false));
+        // Replay gate OFF → byte-identical legacy (native drive / buffer only).
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, false, true, true, 1, false));
+        // Live event not resolvable by occId → nothing authoritative to read → legacy fallback.
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, false, false, -1, false));
+        // NOT completed → belongs to the AnswerEventAction relay; NEVER complete/advance here.
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, true, false, 1, false));
+        // Multi-choice (or unreadable count) → the dismiss rail owns it, not the advance rail.
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, true, true, 2, false));
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, true, true, -1, false));
+        // Already advanced (host click or earlier request won) → first-wins no-op.
+        Assert.False(SingleChoiceAdvanceGate.ShouldModelAdvance(true, true, true, true, 1, true));
+    }
 }
