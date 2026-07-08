@@ -408,6 +408,11 @@ namespace Multiplayer.Network.Sync
             // UI lists match the freshly-stamped model BEFORE the next frame's native flush.
             if (id == SyncedActionIds.EquipSoldier || id == SyncedActionIds.AugmentSoldier)
                 GeoUiRefresh.RepaintEquipAndStorage(rt);
+            // The host applied a client augment intent — the augmentation screen's cached baseline
+            // (CharacterOriginalItems) is stale. Repaint it so the host's open mutation/bionics screen
+            // shows the freshly-applied augment (body-part sections + mutagen wallet + 3D mesh).
+            if (id == SyncedActionIds.AugmentSoldier)
+                GeoUiRefresh.RepaintAugmentation(rt);
             // A client-relayed recruit/containment pool edit (hire/kill/harvest = Recruitment) applied here
             // mirrors on #10, but the host never applies its OWN #10 echo — so the host's open pool screen would
             // stay stale. Re-drive it here (gated to fire only while that screen is current), matching the #10
@@ -675,6 +680,12 @@ namespace Multiplayer.Network.Sync
             // RefreshStorage); a no-op when the equip screen is closed.
             if (channelId == SurfaceIds.PersonnelChannel || channelId == SurfaceIds.InventoryChannel)
                 State.EquipMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance);
+            // Augmentation screens (mutation/bionics) cache CharacterOriginalItems on open and never
+            // re-read from the model — a #9 blob apply that stamps new armour (augment applied by the
+            // host or another client) leaves them stale. Repaint here, gated to #9 only (augment state
+            // lives in the soldier blob, not #1 inventory). No-op when the screen is closed.
+            if (channelId == SurfaceIds.PersonnelChannel)
+                GeoUiRefresh.RepaintAugmentation(GeoRuntime.Instance);
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;

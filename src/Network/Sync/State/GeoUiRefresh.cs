@@ -815,6 +815,123 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RefreshVehicleBars best-effort failed: " + ex.Message); }
         }
 
+        // ─── Augmentation screens (UIStateMutate / UIStateBionics) ────────────────────────────────────
+        // Both modules cache CharacterOriginalItems on open/character-change and never re-read from the
+        // model until a new character is selected or the screen is re-opened. A remote augment apply (#9
+        // blob) stamps the model but the cached baseline stays stale → the bodypart sections, augment
+        // count, mutagen wallet, and 3D mesh show pre-apply state. We update the cached baseline from the
+        // freshly-stamped model and re-drive the module's own RequestViewRefresh (public:
+        // InitCharacterInfo/InitCurrentMutagens + OnRefreshRequested → DisplaySoldier). Decompile-verified
+        // 2026-07-08: UIModuleMutate.cs:68/70/72/76/88/123/345/355; UIModuleBionics.cs:67/69/71/74/92/136/393.
+        private static bool _augmentEnsured;
+        private static Type _mutateStateType;                  // UIStateMutate
+        private static Type _bionicsStateType;                 // UIStateBionics
+        private static FieldInfo _mutateModuleField;           // GeoscapeModulesData.MutateModule
+        private static FieldInfo _bionicsModuleField;          // GeoscapeModulesData.BionicsModule
+        private static PropertyInfo _mutateCurrentCharProp;    // UIModuleMutate.CurrentCharacter (public)
+        private static PropertyInfo _bionicsCurrentCharProp;   // UIModuleBionics.CurrentCharacter (public)
+        private static PropertyInfo _mutateOrigItemsProp;      // UIModuleMutate.CharacterOriginalItems (public List<GeoItem>)
+        private static PropertyInfo _bionicsOrigItemsProp;     // UIModuleBionics.CharacterOriginalItems (public List<GeoItem>)
+        private static PropertyInfo _mutateCurrentItemsProp;   // UIModuleMutate.CharacterCurrentItems (public List<GeoItem>)
+        private static PropertyInfo _bionicsCurrentItemsProp;  // UIModuleBionics.CharacterCurrentItems (public List<GeoItem>)
+        private static MethodInfo _mutateRequestRefresh;       // UIModuleMutate.RequestViewRefresh()
+        private static MethodInfo _bionicsRequestRefresh;      // UIModuleBionics.RequestViewRefresh()
+
+        private static void EnsureAugmentation()
+        {
+            if (_augmentEnsured) return;
+            _augmentEnsured = true;
+            try
+            {
+                var modulesType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
+                _mutateStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateMutate");
+                _bionicsStateType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateBionics");
+                var mutateModType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutate");
+                var bionicsModType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleBionics");
+                if (modulesType == null || mutateModType == null || bionicsModType == null) return;
+                _mutateModuleField = AccessTools.Field(modulesType, "MutateModule");
+                _bionicsModuleField = AccessTools.Field(modulesType, "BionicsModule");
+                _mutateCurrentCharProp = AccessTools.Property(mutateModType, "CurrentCharacter");
+                _bionicsCurrentCharProp = AccessTools.Property(bionicsModType, "CurrentCharacter");
+                _mutateOrigItemsProp = AccessTools.Property(mutateModType, "CharacterOriginalItems");
+                _bionicsOrigItemsProp = AccessTools.Property(bionicsModType, "CharacterOriginalItems");
+                _mutateCurrentItemsProp = AccessTools.Property(mutateModType, "CharacterCurrentItems");
+                _bionicsCurrentItemsProp = AccessTools.Property(bionicsModType, "CharacterCurrentItems");
+                _mutateRequestRefresh = AccessTools.Method(mutateModType, "RequestViewRefresh");
+                _bionicsRequestRefresh = AccessTools.Method(bionicsModType, "RequestViewRefresh");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureAugmentation failed: " + ex.Message); }
+        }
+
+        /// <summary>Repaint the open augmentation screen (mutation / bionics) after a remote model apply.
+        /// The modules cache <c>CharacterOriginalItems</c> on open / character-change and never re-read
+        /// from the model, so a remote augment apply (channel #9 blob) leaves the UI stale. We update the
+        /// cached baseline from the freshly-stamped model, clear any pending preview selection, and re-drive
+        /// the module's own <c>RequestViewRefresh</c> (InitCharacterInfo + InitCurrentMutagens + DisplaySoldier).
+        /// Safe no-op when neither augmentation screen is open. Never throws.</summary>
+        public static void RepaintAugmentation(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure(rt);
+                EnsureAugmentation();
+                EnsureRosterFamily(); // _currentViewStateProp, _viewField, _modulesField, _charArmourItemsProp
+                if (_viewField == null || _currentViewStateProp == null || _modulesField == null) return;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return;
+                var state = _currentViewStateProp.GetValue(view, null);
+                if (state == null) return;
+                var modules = _modulesField.GetValue(view);
+                if (modules == null) return;
+
+                if (_mutateStateType != null && _mutateStateType.IsInstanceOfType(state))
+                {
+                    RepaintAugmentModule(modules, _mutateModuleField, _mutateCurrentCharProp,
+                        _mutateOrigItemsProp, _mutateCurrentItemsProp, _mutateRequestRefresh);
+                }
+                else if (_bionicsStateType != null && _bionicsStateType.IsInstanceOfType(state))
+                {
+                    RepaintAugmentModule(modules, _bionicsModuleField, _bionicsCurrentCharProp,
+                        _bionicsOrigItemsProp, _bionicsCurrentItemsProp, _bionicsRequestRefresh);
+                }
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RepaintAugmentation best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>Shared helper: update a single augmentation module's cached baseline + re-drive its
+        /// native refresh. Called for whichever module (Mutate or Bionics) is the active view state.</summary>
+        private static void RepaintAugmentModule(object modules, FieldInfo moduleField,
+            PropertyInfo currentCharProp, PropertyInfo origItemsProp, PropertyInfo currentItemsProp,
+            MethodInfo requestRefresh)
+        {
+            if (moduleField == null || currentCharProp == null || origItemsProp == null
+                || currentItemsProp == null || requestRefresh == null || _charArmourItemsProp == null) return;
+            var module = moduleField.GetValue(modules);
+            if (module == null || !IsOpen(module)) return;
+            var character = currentCharProp.GetValue(module, null);
+            if (character == null) return;
+
+            // Re-read the model's current ArmourItems (post-apply) into the cached CharacterOriginalItems
+            // baseline so InitCharacterInfo (inside RequestViewRefresh) sees the fresh state, and any
+            // RevertUnconfirmedChanges later reverts to this new truth — not the pre-apply snapshot.
+            var armourItems = _charArmourItemsProp.GetValue(character, null);
+            var origItems = origItemsProp.GetValue(module, null) as IList;
+            var currItems = currentItemsProp.GetValue(module, null) as IList;
+            if (origItems != null && armourItems is IEnumerable armourEnum)
+            {
+                origItems.Clear();
+                foreach (var item in armourEnum) origItems.Add(item);
+            }
+            // Clear any pending preview selection (a remote apply supersedes a local uncommitted pick).
+            currItems?.Clear();
+
+            // Re-drive the module's own refresh: InitCharacterInfo (body-part sections) + InitCurrentMutagens
+            // (mutagen wallet, Mutate only) + OnRefreshRequested → DisplaySoldier (3D mesh update).
+            requestRefresh.Invoke(module, null);
+        }
+
         private static bool IsOpen(object module)
         {
             // UIModuleBehavior : MonoBehaviour → ((Component)module).gameObject.activeInHierarchy.
