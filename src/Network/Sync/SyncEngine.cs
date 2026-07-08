@@ -140,8 +140,7 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleMirror.ResetForNewSession();
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
-            Harmony.Sync.SetItemsEditRelayPatch.ResetDedup();    // per-unit equip-loadout relay dedup (fresh session)
-            State.GeoUiRefresh.ClearPendingEquipRepaint();       // deferred equip repaint flag (static; never carry across sessions)
+            State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -653,6 +652,12 @@ namespace Multiplayer.Network.Sync
             _tracker.MarkChannel(channelId, ver);
             try { using (SyncApplyScope.Enter()) channel.Apply(GeoRuntime.Instance, payload); }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnStateSync apply failed: " + ex.Message); return; }
+            // Soldier-equip v2: a #9 (personnel/soldier blob) or #1 (storage) apply just stamped the client model
+            // → drive the EditSession-gated equip+storage repaint. It defers ONLY while a drag is in hand (drained
+            // on drop/Tick, capped) — NOT via _uiRefreshNeeded (the reverted guard). Cheapest paths (UpdateData +
+            // RefreshStorage); a no-op when the equip screen is closed.
+            if (channelId == SurfaceIds.PersonnelChannel || channelId == SurfaceIds.InventoryChannel)
+                State.EquipMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance);
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;
@@ -2018,11 +2023,10 @@ namespace Multiplayer.Network.Sync
         public void Tick()
         {
             if (_engine == null || !_engine.IsActive) return;
-            // Reactivity belt (both peers): drain any equip repaint that RefreshRosterEquip deferred past an
-            // ACTIVE equipment drag (personnel-screen fix wave). Fast no-op until one is pending; it fires the
-            // instant the drag ends so a peer's mirrored #9 apply never clobbers an in-progress drag yet is
-            // never lost either.
-            try { GeoUiRefresh.FlushPendingEquipRepaint(GeoRuntime.Instance); }
+            // Soldier-equip v2 reactivity belt (client): drain any mirror repaint the EditSession deferred past an
+            // ACTIVE drag. Fast no-op (a single pure bool) until one is pending; fires the instant the drag ends
+            // or the ~2s cap elapses, so a peer's #9/#1 apply never clobbers an in-flight drag yet is never lost.
+            try { State.EquipMirrorRepaint.Tick(GeoRuntime.Instance); }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.Tick equip-repaint drain failed: " + ex.Message); }
             if (!_engine.IsHost)
             {

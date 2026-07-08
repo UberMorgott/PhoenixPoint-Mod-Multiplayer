@@ -92,6 +92,11 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _vehiclesProp;// GeoFaction.Vehicles
         private static FieldInfo _mapField;       // GeoLevelController.Map
         private static PropertyInfo _allSitesProp;// GeoMap.AllSites
+        // v2 storage-delta reconcile (equip): faction global store + its bulk add/remove.
+        private static PropertyInfo _useGlobalStorageProp; // GeoPhoenixFaction.UseGlobalStorage
+        private static PropertyInfo _factionItemStorageProp; // GeoPhoenixFaction.ItemStorage
+        private static MethodInfo _storeAddItems;   // ItemStorage.AddItems(IEnumerable<GeoItem>)
+        private static MethodInfo _storeRemoveItems;// ItemStorage.RemoveItems(IEnumerable<GeoItem>)
 
         private static Type GeoItemT() => _geoItemType ?? (_geoItemType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoItem"));
         private static Type CharT() => _charType ?? (_charType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter"));
@@ -206,12 +211,80 @@ namespace Multiplayer.Network.Sync.State
 
         /// <summary>Full-loadout replace (equip): rebuild each of the three GeoItem lists from its def guids and
         /// run the native SetItems (freeReload:true — a fresh def-built item carries no ammo state to preserve;
-        /// exact charges converge via the authoritative #9 blob).</summary>
-        public static void Equip(GeoRuntime rt, long unitId, string[] armourGuids, string[] equipGuids, string[] invGuids)
+        /// exact charges converge via the authoritative #9 blob), then reconcile faction storage by the
+        /// authoritative loadout DELTA (v2 rebuild — <see cref="ReconcileStorageDelta"/>).</summary>
+        public static void Equip(GeoRuntime rt, long unitId, string[] armourGuids, string[] equipGuids,
+                                 string[] invGuids, bool returnRemovedToStorage = true)
         {
             var soldier = ResolveSoldierById(rt, unitId);
             if (soldier == null) { LogUnresolved("Equip", unitId); return; }
+            // Snapshot the OLD loadout BEFORE SetItems so the storage delta is computed against authoritative
+            // host state, never a client storage view (client never simulates; host is the one storage writer).
+            var oldLoadout = new List<string>();
+            oldLoadout.AddRange(ReadCurrentItemGuids(soldier, "_armourItems"));
+            oldLoadout.AddRange(ReadCurrentItemGuids(soldier, "_equipmentItems"));
+            oldLoadout.AddRange(ReadCurrentItemGuids(soldier, "_inventoryItems"));
             InvokeSetItems(soldier, BuildItems(armourGuids), BuildItems(equipGuids), BuildItems(invGuids));
+            var newLoadout = new List<string>();
+            if (armourGuids != null) newLoadout.AddRange(armourGuids);
+            if (equipGuids != null) newLoadout.AddRange(equipGuids);
+            if (invGuids != null) newLoadout.AddRange(invGuids);
+            ReconcileStorageDelta(rt, oldLoadout, newLoadout, returnRemovedToStorage);
+        }
+
+        /// <summary>Mirror native <c>UIStateEditSoldier.UpdateStorage</c>, but from the AUTHORITATIVE loadout
+        /// delta instead of a client storage snapshot: items the soldier GAINED (new \ old, multiset) are removed
+        /// from faction storage (they came from it); items it LOST (old \ new) are added back — gated by
+        /// <paramref name="returnRemoved"/> (false for scrap: destroyed, not returned). Relative delta ⇒ two peers
+        /// pulling from shared storage never clobber each other (the absolute-snapshot dupe). E1: reconciles the
+        /// FACTION global store (<c>UseGlobalStorage</c>); a site-local store is a noted follow-up. The #1 dirty
+        /// mark rides the SetItems seam (host mirror), so no explicit mark here.</summary>
+        private static void ReconcileStorageDelta(GeoRuntime rt, List<string> oldLoadout, List<string> newLoadout, bool returnRemoved)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return;
+                if (_useGlobalStorageProp == null) _useGlobalStorageProp = AccessTools.Property(fac.GetType(), "UseGlobalStorage");
+                bool global = _useGlobalStorageProp?.GetValue(fac, null) is bool g && g;
+                if (!global)
+                {
+                    Debug.Log("[Multiplayer] PersonnelEditReflection.ReconcileStorageDelta: faction uses site-local storage — storage delta deferred (E1 reconciles global store only)");
+                    return;
+                }
+                if (_factionItemStorageProp == null) _factionItemStorageProp = AccessTools.Property(fac.GetType(), "ItemStorage");
+                object store = _factionItemStorageProp?.GetValue(fac, null);
+                if (store == null) return;
+                MultisetDiff(oldLoadout, newLoadout, out var added, out var removed);
+                if (_storeAddItems == null) _storeAddItems = AccessTools.Method(store.GetType(), "AddItems");
+                if (_storeRemoveItems == null) _storeRemoveItems = AccessTools.Method(store.GetType(), "RemoveItems");
+                if (added.Count > 0) _storeRemoveItems?.Invoke(store, new object[] { BuildItems(added.ToArray()) });
+                if (returnRemoved && removed.Count > 0) _storeAddItems?.Invoke(store, new object[] { BuildItems(removed.ToArray()) });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.ReconcileStorageDelta failed: " + ex.Message); }
+        }
+
+        /// <summary>Multiset difference of two guid lists: <paramref name="added"/> = new minus old,
+        /// <paramref name="removed"/> = old minus new (honouring per-guid counts, so 2→1 of a def yields one
+        /// removed, not a full clear).</summary>
+        private static void MultisetDiff(List<string> oldList, List<string> newList, out List<string> added, out List<string> removed)
+        {
+            added = new List<string>();
+            removed = new List<string>();
+            var oldCounts = new Dictionary<string, int>();
+            var newCounts = new Dictionary<string, int>();
+            foreach (var g in oldList) { if (g == null) continue; oldCounts.TryGetValue(g, out int c); oldCounts[g] = c + 1; }
+            foreach (var g in newList) { if (g == null) continue; newCounts.TryGetValue(g, out int c); newCounts[g] = c + 1; }
+            foreach (var kv in newCounts)
+            {
+                oldCounts.TryGetValue(kv.Key, out int o);
+                for (int i = 0; i < kv.Value - o; i++) added.Add(kv.Key);
+            }
+            foreach (var kv in oldCounts)
+            {
+                newCounts.TryGetValue(kv.Key, out int n);
+                for (int i = 0; i < kv.Value - n; i++) removed.Add(kv.Key);
+            }
         }
 
         /// <summary>Augment = body-part swap through the SAME SetItems, armour(bodypart) list only; equipment/

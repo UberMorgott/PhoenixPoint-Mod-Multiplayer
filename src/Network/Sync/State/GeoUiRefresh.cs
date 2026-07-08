@@ -383,7 +383,6 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _currentViewStateProp;   // GeoscapeView.CurrentViewState (getter)
         private static Type _editSoldierType;                // UIStateEditSoldier
         private static FieldInfo _editSoldierCharField;      // UIStateEditSoldier._currentCharacter (private GeoCharacter)
-        private static FieldInfo _editSoldierRefreshNeededField; // UIStateEditSoldier._uiRefreshNeeded (unflushed local equip edit)
         private static FieldInfo _editSoldierRefreshStorageField; // UIStateEditSoldier._refreshStorage
         private static MethodInfo _editSoldierRefreshStorage;    // UIStateEditSoldier.RefreshStorage()
         private static FieldInfo _soldierEquipModuleField;   // GeoscapeModulesData.SoldierEquipModule
@@ -421,13 +420,6 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _geoItemDefProp2;        // GeoItem.ItemDef
         private static PropertyInfo _charStatsProp;          // GeoCharacter.CharacterStats
         private static MethodInfo _getInventorySlots;        // CharacterStats.GetInventorySlots()
-        // Active-drag guard (fix #2): the native item-drag icon exposes IsBeingDragged() — the precise
-        // "the player is holding an item right now" signal on EITHER peer, unlike _uiRefreshNeeded (also set
-        // by screen-open, so it over-suppressed the client mirror). A #9 apply that lands mid-drag DEFERS the
-        // equip re-read past the drag instead of clobbering it, re-arming a pending repaint drained in Tick.
-        private static FieldInfo _itemDragIconField;         // UIModuleSoldierEquip.ItemDragIcon (UIInventoryItemDragIcon)
-        private static MethodInfo _isBeingDraggedMethod;     // UIInventoryItemDragIcon.IsBeingDragged() → bool
-        private static bool _pendingEquipRepaint;            // deferred equip repaint (armed on a drag-skip, drained in Tick)
         private static bool _loggedProgressionSkip;          // transition-only log latch for the progression skip line
 
         private static void EnsureRosterFamily()
@@ -444,15 +436,10 @@ namespace Multiplayer.Network.Sync.State
                 if (viewType == null || modulesType == null || soldierEquipType == null || _editSoldierType == null || charType == null) return;
                 _currentViewStateProp = AccessTools.Property(viewType, "CurrentViewState");
                 _editSoldierCharField = AccessTools.Field(_editSoldierType, "_currentCharacter");
-                _editSoldierRefreshNeededField = AccessTools.Field(_editSoldierType, "_uiRefreshNeeded");
                 _editSoldierRefreshStorageField = AccessTools.Field(_editSoldierType, "_refreshStorage");
                 _editSoldierRefreshStorage = AccessTools.Method(_editSoldierType, "RefreshStorage");
                 _soldierEquipModuleField = AccessTools.Field(modulesType, "SoldierEquipModule");
                 _soldierEquipUpdateData = AccessTools.Method(soldierEquipType, "UpdateData");
-                // Active equipment-drag signal (best-effort; absence just disables the client drag guard).
-                _itemDragIconField = AccessTools.Field(soldierEquipType, "ItemDragIcon");
-                var dragIconType = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewControllers.Inventory.UIInventoryItemDragIcon");
-                if (dragIconType != null) _isBeingDraggedMethod = AccessTools.Method(dragIconType, "IsBeingDragged");
                 _charInventoryItemsProp = AccessTools.Property(charType, "InventoryItems");
                 _charEquipmentItemsProp = AccessTools.Property(charType, "EquipmentItems");
                 _charArmourItemsProp = AccessTools.Property(charType, "ArmourItems");
@@ -528,64 +515,86 @@ namespace Multiplayer.Network.Sync.State
             return view == null ? null : _currentViewStateProp.GetValue(view, null);
         }
 
+        /// <summary>The currently-edited soldier GeoCharacter when the soldier-equip screen is the active view
+        /// state, else null. Public for the v2 gesture/repaint driver (EquipMirrorRepaint).</summary>
+        public static object ActiveEditSoldierCharacter(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureRosterFamily();
+                if (_viewField == null || _currentViewStateProp == null || _editSoldierType == null
+                    || _editSoldierCharField == null) return null;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return null;
+                var state = _currentViewStateProp.GetValue(view, null);
+                if (state == null || !_editSoldierType.IsInstanceOfType(state)) return null;
+                return _editSoldierCharField.GetValue(state);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>v2 soldier-equip mirror repaint (the old (A) block, UNCONDITIONAL): re-drive the open equip
+        /// doll + shared-storage lists from the freshly-stamped model via the cheapest native read paths
+        /// (UIModuleSoldierEquip.UpdateData as DisplaySoldier, then RefreshStorage for #1). NO drag/_uiRefreshNeeded
+        /// guard here — the caller (EquipMirrorRepaint) already gated on EditSession.ShouldDeferRepaint (drag in
+        /// hand) and is CLIENT-only, so the client's equip screen is a pure mirror. Echo-safe: UpdateData/SetItems
+        /// (UI) never fire GeoCharacter.SetItems, so this cannot re-enter the gesture relay. No-op when the
+        /// equip screen is closed / not current. Never throws.</summary>
+        public static void RepaintEquipAndStorage(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureRosterFamily();
+                if (_editSoldierType == null || _editSoldierCharField == null || _soldierEquipModuleField == null
+                    || _soldierEquipUpdateData == null || _charInventoryItemsProp == null || _charEquipmentItemsProp == null
+                    || _charArmourItemsProp == null || _modulesField == null || _viewField == null || _currentViewStateProp == null) return;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return;
+                var state = _currentViewStateProp.GetValue(view, null);
+                if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;   // not the soldier-equip screen
+                var modules = _modulesField.GetValue(view);
+                if (modules == null) return;
+                var character = _editSoldierCharField.GetValue(state);
+                var module = _soldierEquipModuleField.GetValue(modules);
+                if (module == null || !IsOpen(module) || character == null) return;
+
+                object inv = _charInventoryItemsProp.GetValue(character, null);
+                object ready = _charEquipmentItemsProp.GetValue(character, null);
+                object armour = _charArmourItemsProp.GetValue(character, null);
+                _soldierEquipUpdateData.Invoke(module, new object[] { inv, ready, armour, null, 0 });
+                // shared-stores panel: force a model re-read of faction/site ItemStorage (#1). RefreshStorage
+                // reuses the UI's current items unless _refreshStorage is set, so set it first. Read-only.
+                if (_editSoldierRefreshStorage != null && _editSoldierRefreshStorageField != null)
+                {
+                    _editSoldierRefreshStorageField.SetValue(state, true);
+                    _editSoldierRefreshStorage.Invoke(state, null);
+                }
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RepaintEquipAndStorage best-effort failed: " + ex.Message); }
+        }
+
+        // Roster-equip fan-out (from RefreshNeedsKick, BOTH peers): progression + header ONLY. The equip + storage
+        // repaint is driven separately by the EditSession-gated EquipMirrorRepaint on the CLIENT's #9/#1 applies
+        // (RepaintEquipAndStorage) — never from this fan-out, which also runs on the HOST where the native flush
+        // owns the equip screen.
         private static void RefreshRosterEquip(GeoRuntime rt)
         {
             EnsureRosterFamily();
-            if (_editSoldierType == null || _editSoldierCharField == null || _soldierEquipModuleField == null
-                || _soldierEquipUpdateData == null || _charInventoryItemsProp == null || _charEquipmentItemsProp == null
-                || _charArmourItemsProp == null || _modulesField == null || _viewField == null) return;
+            if (_editSoldierType == null || _editSoldierCharField == null || _modulesField == null || _viewField == null) return;
             var geo = rt?.GeoLevel();
             if (geo == null) return;
             var view = _viewField.GetValue(geo);
             if (view == null) return;
-            // Gate: active view state MUST be the soldier-equip screen (SoldierEquipModule is shared with
-            // UIStateEditVehicle — repainting soldier lists onto an open vehicle screen would corrupt it).
+            // Gate: active view state MUST be the soldier-equip screen.
             var state = _currentViewStateProp?.GetValue(view, null);
-            if (state == null || !_editSoldierType.IsInstanceOfType(state)) { _pendingEquipRepaint = false; return; }
+            if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;
             var modules = _modulesField.GetValue(view);
             if (modules == null) return;
             var character = _editSoldierCharField.GetValue(state);
-
-            // (A) equip + shared-storage lists. SKIP if the viewer has an unflushed local equipment drag
-            // (_uiRefreshNeeded, UIStateEditSoldier.cs:50 — set on a local slot change until the next UpdateState
-            // flush); re-reading the model here would clobber it. Skip-if-editing (never-silent) beats clobber.
-            var module = _soldierEquipModuleField.GetValue(modules);
-            if (module != null && IsOpen(module) && character != null)
-            {
-                // DEFER (never clobber, never lose) a re-read that would fight an in-progress equipment edit:
-                //   • HOST: its own uncommitted drag, keyed by _uiRefreshNeeded (host is the authority — a mid-
-                //     drag re-read would clobber the host player's uncommitted equipment write).
-                //   • EITHER peer: a LIVE native drag (UIInventoryItemDragIcon.IsBeingDragged) — the precise
-                //     "holding an item right now" signal. On a client the equip screen is otherwise a pure
-                //     mirror (its SetItems is suppressed + relayed, no local write), so _uiRefreshNeeded is the
-                //     WRONG guard there (screen-open sets it too, which ate every mirrored repaint) — but an
-                //     active drag IS a real edit to protect. When we defer, re-arm _pendingEquipRepaint so the
-                //     Tick belt fires the repaint the instant the drag ends (reactivity mandate: defer, never drop).
-                bool hostEditing = IsHostEditingGuardActive() && (_editSoldierRefreshNeededField?.GetValue(state) is bool re && re);
-                bool dragging = IsEquipItemDragActive(module);
-                if (hostEditing || dragging)
-                {
-                    if (!_pendingEquipRepaint)   // transition-only log: per-Tick Debug.Log I/O was part of the fps collapse
-                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive DEFERRED — active equipment "
-                                  + (dragging ? "drag" : "edit") + " in progress (pending repaint armed)");
-                    _pendingEquipRepaint = true;
-                }
-                else
-                {
-                    object inv = _charInventoryItemsProp.GetValue(character, null);
-                    object ready = _charEquipmentItemsProp.GetValue(character, null);
-                    object armour = _charArmourItemsProp.GetValue(character, null);
-                    _soldierEquipUpdateData.Invoke(module, new object[] { inv, ready, armour, null, 0 });
-                    // shared-stores panel: force a model re-read (faction/site ItemStorage, #1). RefreshStorage
-                    // reuses the UI's current items unless _refreshStorage is set, so set it first. Read-only.
-                    if (_editSoldierRefreshStorage != null && _editSoldierRefreshStorageField != null)
-                    {
-                        _editSoldierRefreshStorageField.SetValue(state, true);
-                        _editSoldierRefreshStorage.Invoke(state, null);
-                    }
-                    _pendingEquipRepaint = false;   // repaint delivered — nothing left deferred
-                }
-            }
 
             // (B) progression panel (stats / SP / abilities) — same #9 blob. SKIP when the viewer has an
             // in-progress unconfirmed allocation (IsCharacterChanged = stat delta; _boughtAbilitySlot = pending
@@ -825,67 +834,8 @@ namespace Multiplayer.Network.Sync.State
             return eng != null && eng.IsActiveSession && eng.IsHost;
         }
 
-        /// <summary>True while the player is actively DRAGGING an item in the soldier-equip screen (native
-        /// <c>UIInventoryItemDragIcon.IsBeingDragged</c> on the module's <c>ItemDragIcon</c>). Best-effort:
-        /// any resolve miss returns false (guard disabled, mirror repaints normally).</summary>
-        private static bool IsEquipItemDragActive(object soldierEquipModule)
-        {
-            try
-            {
-                if (_itemDragIconField == null || _isBeingDraggedMethod == null || soldierEquipModule == null) return false;
-                var icon = _itemDragIconField.GetValue(soldierEquipModule);
-                if (icon == null) return false;
-                return _isBeingDraggedMethod.Invoke(icon, null) is bool b && b;
-            }
-            catch { return false; }
-        }
-
-        /// <summary>TRUE while the equip-edit window is open on the CURRENT EditSoldier screen under the
-        /// EXISTING guard semantics: the host's armed <c>_uiRefreshNeeded</c> (host-only, unchanged) or a live
-        /// item drag (either peer). The Tick drain probes this CHEAPLY — three reflection reads, no UpdateData,
-        /// no logging — so a still-open window never re-drives the refresh path (the c74a8e2 field RCA: the
-        /// old drain called RefreshRosterEquip every Tick, whose defer branch re-armed the flag + logged →
-        /// 60 Hz reflection+log loop = fps collapse). Any resolve miss → false (window closed → drain fires).</summary>
-        private static bool IsEquipEditWindowActive(GeoRuntime rt)
-        {
-            try
-            {
-                EnsureRosterFamily();
-                if (_viewField == null || _currentViewStateProp == null || _editSoldierType == null) return false;
-                var geo = rt?.GeoLevel();
-                if (geo == null) return false;
-                var view = _viewField.GetValue(geo);
-                if (view == null) return false;
-                var state = _currentViewStateProp.GetValue(view, null);
-                if (state == null || !_editSoldierType.IsInstanceOfType(state)) return false;   // screen closed → window closed
-                if (IsHostEditingGuardActive() && _editSoldierRefreshNeededField?.GetValue(state) is bool re && re) return true;
-                var modules = _modulesField?.GetValue(view);
-                var module = modules != null ? _soldierEquipModuleField?.GetValue(modules) : null;
-                return IsEquipItemDragActive(module);
-            }
-            catch { return false; }
-        }
-
-        /// <summary>Drain a deferred equip repaint armed when <see cref="RefreshRosterEquip"/> deferred its
-        /// equip/storage re-read past an in-progress local edit. Called every SyncEngine.Tick; a fast no-op
-        /// until one is pending. TERMINATION: while the edit window is still open this only PROBES (no
-        /// RefreshRosterEquip call, no log, no re-arm churn); on the first Tick the window reads CLOSED the
-        /// flag is cleared FIRST and the repaint fires ONCE. It cannot re-arm inside that same drain: the
-        /// probe and RefreshRosterEquip's own guard read the SAME values in the same synchronous frame, so
-        /// the defer branch is unreachable — a re-arm requires a genuinely NEW apply/edit. If the screen was
-        /// left while pending, the fired Refresh no-ops on its state gate and the flag stays consumed.</summary>
-        public static void FlushPendingEquipRepaint(GeoRuntime rt)
-        {
-            if (!_pendingEquipRepaint) return;
-            if (IsEquipEditWindowActive(rt)) return;   // window still open → keep pending, silently
-            _pendingEquipRepaint = false;              // consume BEFORE repainting — fires exactly once
-            Debug.Log("[Multiplayer] GeoUiRefresh: deferred equip repaint drained (edit window closed)");
-            Refresh(rt, Screen.RosterEquip);
-        }
-
-        /// <summary>Drop any deferred equip repaint (new session): the flag is static, so a drag-skip armed
-        /// in a dying session must not fire a spurious first repaint in the next one. Wired from the
-        /// SyncEngine ctor (the SetItemsEditRelayPatch.ResetDedup pattern).</summary>
-        public static void ClearPendingEquipRepaint() => _pendingEquipRepaint = false;
+        // (The v2 equip repaint defer/drain now lives in the pure EditSession + EquipMirrorRepaint driver — the
+        // old per-Tick reflection+log probe machinery (IsEquipItemDragActive / IsEquipEditWindowActive /
+        // FlushPendingEquipRepaint / ClearPendingEquipRepaint) that re-armed a flag every frame is DELETED.)
     }
 }

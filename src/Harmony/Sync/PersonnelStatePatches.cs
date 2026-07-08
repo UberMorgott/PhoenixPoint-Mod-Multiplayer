@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
@@ -60,6 +61,24 @@ namespace Multiplayer.Harmony.Sync
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelStatePatches.MarkAll failed: " + ex.Message); }
         }
+
+        /// <summary>Mark the inventory (#1) storage channel dirty (HOST-only). Folded here from the deleted
+        /// StorageDirtyPatches (v2 rebuild): the ONLY equip storage mutation that reaches clients is the native
+        /// UIStateEditSoldier.UpdateStorage diff — which runs in the SAME synchronous UpdateState pass as
+        /// UpdateSoldierEquipment→SetItems, TWO lines after it (:470/:474). So marking #1 from the SetItems
+        /// Postfix has CORRECT timing (the storage store is written before the next SyncEngine.Tick drains #1)
+        /// AND is once-per-edit, NOT per-frame (UpdateState gates the whole flush on _uiRefreshNeeded, reset each
+        /// flush) — satisfying the ZERO-per-frame-work mandate without a mark inside UpdateStorage itself.</summary>
+        internal static void MarkStorage()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                engine.Sync?.MarkChannelDirty(SurfaceIds.InventoryChannel);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelStatePatches.MarkStorage failed: " + ex.Message); }
+        }
     }
 
     [HarmonyPatch]
@@ -85,7 +104,16 @@ namespace Multiplayer.Harmony.Sync
             return _target != null;
         }
         public static MethodBase TargetMethod() => _target;
-        public static void Postfix(object __instance) => PersonnelStateDirty.Mark(__instance);
+        // SetItems is the once-per-edit equip/augment/host-apply model write (NOT per-frame — verified
+        // UIStateEditSoldier.UpdateState:459 gates the flush on _uiRefreshNeeded, reset each flush). Mark BOTH
+        // the soldier (#9) AND storage (#1): a host equip-from-storage's UpdateStorage runs in the same
+        // synchronous UpdateState pass, and the host-apply of a relayed EquipSoldierAction reconciles storage
+        // right after this SetItems — both settle before the next Tick drains, so #1 snapshots the fresh store.
+        public static void Postfix(object __instance)
+        {
+            PersonnelStateDirty.Mark(__instance);
+            PersonnelStateDirty.MarkStorage();
+        }
     }
 
     [HarmonyPatch]

@@ -101,53 +101,12 @@ namespace Multiplayer.Harmony.Sync
         }
     }
 
-    [HarmonyPatch]
-    public static class SetItemsEditRelayPatch
-    {
-        private static MethodBase _target;
-
-        // Per-unit last-relayed-loadout content dedup: native UIStateEditSoldier.UpdateState re-flushes the
-        // OPEN soldier's whole loadout via SetItems EVERY FRAME (armed _uiRefreshNeeded), so without this an
-        // identical EquipSoldier intent would relay ~60×/s (the FPS-collapse storm, RCA 2026-07-08). A genuine
-        // edit changes the signature and relays immediately; an unchanged re-flush is suppressed with no send.
-        private static readonly LoadoutRelayDedup _dedup = new LoadoutRelayDedup();
-
-        /// <summary>Drop the per-unit loadout-dedup cache (new session). Wired from the SyncEngine ctor.</summary>
-        public static void ResetDedup() => _dedup.Reset();
-
-        public static bool Prepare()
-        {
-            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter");
-            _target = t != null ? AccessTools.Method(t, "SetItems") : null;
-            Debug.Log("[Multiplayer] PersonnelEditPatches: GeoCharacter.SetItems relay " + (_target != null ? "bound" : "NOT FOUND"));
-            return _target != null;
-        }
-        public static MethodBase TargetMethod() => _target;
-
-        // __0/__1/__2 = armour/equipment/inventory IEnumerable<GeoItem> (null = leave that slot unchanged).
-        public static bool Prefix(object __instance, object __0, object __1, object __2)
-        {
-            if (!PersonnelEditRelay.ShouldRelay()) return true;
-            try
-            {
-                long unitId = PersonnelReflection.ReadUnitId(__instance);
-                var armour = __0 != null ? PersonnelEditReflection.ReadItemGuids(__0).ToArray()
-                                         : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_armourItems");
-                var equip = __1 != null ? PersonnelEditReflection.ReadItemGuids(__1).ToArray()
-                                        : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_equipmentItems");
-                var inv = __2 != null ? PersonnelEditReflection.ReadItemGuids(__2).ToArray()
-                                      : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_inventoryItems");
-                // Content-dedup at the SOURCE: an identical per-frame re-flush (same ordered loadout for this
-                // unit as the last relay) is suppressed WITHOUT SendActionRequest — the storm never leaves the
-                // client. A changed loadout falls through and relays this frame.
-                if (!_dedup.ShouldRelay(unitId, LoadoutRelayDedup.Signature(armour, equip, inv)))
-                    return false;
-                return PersonnelEditRelay.Relay(ActionCategory.Equip, unitId, true,
-                    () => new EquipSoldierAction(unitId, armour, equip, inv));
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] SetItemsEditRelayPatch failed: " + ex.Message); return true; }
-        }
-    }
+    // NOTE (v2 rebuild 2026-07-08): the equip intent no longer rides a GeoCharacter.SetItems flush-diff prefix.
+    // The old SetItemsEditRelayPatch + LoadoutRelayDedup are DELETED — they inferred edits by diffing the
+    // per-frame SetItems flush and stormed ~60 intents/s (the FPS-collapse layer). Equip now captures at the
+    // SOURCE gesture seams in EquipGesturePatches.cs (one intent per user action) with the client flush
+    // suppressed. Augment (AugmentSoldierAction) rode the same deleted SetItems relay and is a tracked later
+    // wave (COOP-SYNC-ROADMAP.md) — its own gesture chokepoint on the augmentation screen.
 
     [HarmonyPatch]
     public static class HireRecruitEditRelayPatch
