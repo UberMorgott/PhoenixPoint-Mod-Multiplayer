@@ -229,14 +229,14 @@ namespace Multiplayer.Harmony.Sync
                     return false;
                 }
                 // Confirmed SINGLE-choice real host event (Choices.Count == 1): the host auto-completed it at trigger
-                // and ALREADY broadcast its result-bearing dismiss. The client normally lands on the SYNTHETIC RESULT
-                // page (closed by the EventID=="" branch above — ShowResultInPlace if the raise arrived first,
-                // ShowResultPage if the dismiss did; the old "consumed-at-raise → ShowDialog flavor mirror" path no
-                // longer applies). This branch only fires in the brief race where the player OKs the REAL flavor modal
-                // BEFORE that result page replaces it. NO host dismiss will ever arrive to close THIS modal (the
-                // host's own closed LOCALLY on its OK; its second dismiss is suppressed by WasDismissed) → mirror the
-                // host: close LOCALLY on the player's OK. The outcome/reward already applied via the state channels;
-                // this is a pure UI hide, no host call.
+                // and ALREADY broadcast its result-bearing dismiss. When the client is MIRRORING the host's window-1
+                // prompt (gate ON, known occurrence), the player's OK relays an advance-request AND — FIX C — keeps
+                // this modal OPEN (greyed), so the host's EventAdvanceResult transitions it to the result page IN
+                // PLACE (matching the host's two-window flow) instead of the old local-close that let that advance
+                // re-pop a FRESH result window. When no advance is relayed (gate OFF / occId 0 / the brief race where
+                // the player OKs the REAL flavor modal before the synthetic result page replaces it) NO host signal
+                // will close this modal → close LOCALLY on the OK (the outcome/reward already applied via the state
+                // channels; a pure UI hide, no host call).
                 if (choiceCount == 1)
                 {
                     // Co-op UX fix (in-game confirmed bug): the local close alone left the HOST's prompt open
@@ -254,8 +254,22 @@ namespace Multiplayer.Harmony.Sync
                         Debug.Log("[Multiplayer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + advOccId +
                                   " eventId=" + eventId + " (advance the host's single-choice prompt)");
                         NetworkEngine.Instance?.Sync?.SendEventAdvanceRequest(advOccId, eventId);
+                        // FIX C: DO NOT local-close. The host WILL broadcast EventAdvanceResult for this occurrence,
+                        // so keep the modal OPEN and grey the lone button (matching the multi-choice path above) —
+                        // the host's advance then transitions THIS SAME window to the result page IN PLACE
+                        // (EventDisplay.ShowResult openIsEventState=True). Local-closing here made that later advance
+                        // re-pop a FRESH result window (the RCA re-pop). Belt: record the locally-answered occId so
+                        // an in-order raise/advance coalesces into this open modal instead of a fresh Show.
+                        NetworkEngine.Instance?.Sync?.MarkEventLocallyAnswered(advOccId);
+                        SetChoiceButtonsEnabled(__instance, false);
+                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch keepOpen=true (single-choice prompt mirror answered occId=" +
+                                  advOccId + " eventId=" + eventId + " — awaiting host EventAdvanceResult, in-place transition)");
+                        return false;
                     }
-                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, EventID=" + eventId + ")");
+                    // No advance relay (gate OFF / occId==0 / late race): NO host EventAdvanceResult will arrive to
+                    // transition this modal, so close it LOCALLY as before (legacy behavior — the outcome/reward
+                    // already applied via the state channels; this is a pure UI hide).
+                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch localClose=true (single-choice host modal mirror, no advance relay, EventID=" + eventId + ")");
                     _finishEncounter?.Invoke(__instance, null);
                     return false;
                 }

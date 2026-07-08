@@ -123,6 +123,15 @@ namespace Multiplayer.Network.Sync.State
         // occIds currently MIRRORING the host's single-choice window-1 PROMPT page (gated single-choice branch),
         // awaiting the host's explicit PROMPT→RESULT advance (Advanced). A subset of _open.
         private readonly HashSet<ushort> _promptMirror = new HashSet<ushort>();
+        // FIX C belt: occIds whose single-choice prompt the LOCAL player already answered while KEEPING the modal
+        // open (EncounterChoiceClientPatch greys the lone button instead of local-closing, so the host's later
+        // EventAdvanceResult transitions the SAME window in place). Recorded so an advance that arrives for an
+        // occId shown IN-ORDER (a plain ShowDialog, never entered _promptMirror) still resolves to the result page
+        // in place — never buffered into a DropNoop that would leave the greyed modal waiting. Bounded FIFO so a
+        // never-resolved mark can't leak; host-monotonic occId wraps only after 65535 so an evicted id can't alias.
+        private const int MaxLocallyAnswered = 32;
+        private readonly HashSet<ushort> _locallyAnswered = new HashSet<ushort>();
+        private readonly Queue<ushort> _locallyAnsweredOrder = new Queue<ushort>();
         // Host advances that arrived BEFORE their prompt mirror was shown (the same-frame SetClosingEncounter /
         // advance-before-raise case, e.g. an empty-outcome single-choice). FIFO-bounded so it can never leak.
         private readonly HashSet<ushort> _pendingAdvance = new HashSet<ushort>();
@@ -136,6 +145,8 @@ namespace Multiplayer.Network.Sync.State
         public int PendingCount => _pending.Count;
         /// <summary>Single-choice prompt mirrors awaiting a host advance (diagnostics/tests).</summary>
         public int PromptMirrorCount => _promptMirror.Count;
+        /// <summary>Locally-answered single-choice prompts kept open awaiting the host advance (diagnostics/tests).</summary>
+        public int LocallyAnsweredCount => _locallyAnswered.Count;
         /// <summary>True iff no dialog occupies the single client display slot. Batch-3 P4: the unified display
         /// queue treats an EVENT display as closed exactly when this slot frees (dismiss/advance) — the
         /// correlator is the queue's event-rail CONSUMER, keeping all its dedup/correlation logic.</summary>
@@ -150,6 +161,8 @@ namespace Multiplayer.Network.Sync.State
             _pending.Clear();
             _pendingOrder.Clear();
             _promptMirror.Clear();
+            _locallyAnswered.Clear();
+            _locallyAnsweredOrder.Clear();
             _pendingAdvance.Clear();
             _pendingAdvanceOrder.Clear();
             _shownSlot = 0;
@@ -294,8 +307,19 @@ namespace Multiplayer.Network.Sync.State
 
             if (_promptMirror.Remove(occurrenceId))
             {
+                _locallyAnswered.Remove(occurrenceId);   // tidy the belt mark; the prompt-mirror path owns it here
                 _open.Remove(occurrenceId);   // the result page replaces the mirrored prompt
                 if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
+                MarkCompleted(occurrenceId);
+                return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId, choiceIndex);
+            }
+            // BELT (FIX C): a locally-answered prompt whose modal was KEPT OPEN but never entered _promptMirror
+            // (the raise arrived in-order → a plain ShowDialog). The host's advance still transitions THAT open
+            // modal to the result page IN PLACE (openIsEventState=True) — resolve it here instead of buffering into
+            // a DropNoop that would leave the greyed modal waiting. Only when the occurrence is still open.
+            if (_locallyAnswered.Remove(occurrenceId) && _open.Remove(occurrenceId))
+            {
+                if (_shownSlot == occurrenceId) _shownSlot = 0;
                 MarkCompleted(occurrenceId);
                 return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId, choiceIndex);
             }
@@ -332,6 +356,7 @@ namespace Multiplayer.Network.Sync.State
             {
                 _open.Remove(occurrenceId);
                 _promptMirror.Remove(occurrenceId);   // a real dismiss closes a mirrored prompt too (keep the set clean)
+                _locallyAnswered.Remove(occurrenceId);   // and drops any belt mark (the dismiss resolves it in place)
                 if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
                 MarkCompleted(occurrenceId);
                 if (choiceIndex >= 0)
@@ -379,8 +404,27 @@ namespace Multiplayer.Network.Sync.State
         {
             _open.Remove(occurrenceId);
             _promptMirror.Remove(occurrenceId);
+            _locallyAnswered.Remove(occurrenceId);
             if (_shownSlot == occurrenceId) _shownSlot = 0;
             MarkCompleted(occurrenceId);
+        }
+
+        /// <summary>
+        /// FIX C belt: the LOCAL player answered a single-choice prompt for <paramref name="occurrenceId"/> and
+        /// the client kept its modal OPEN (greyed) awaiting the host's <see cref="Advanced"/> broadcast. Recording
+        /// it lets that later advance resolve the SAME open modal to the result page in place even when the prompt
+        /// was shown in-order (a plain ShowDialog that never entered <c>_promptMirror</c>). Idempotent, bounded
+        /// FIFO. No effect on the dedup (<c>_completed</c>) or ordering paths — purely additive.
+        /// </summary>
+        public void MarkLocallyAnswered(ushort occurrenceId)
+        {
+            if (occurrenceId == 0) return;
+            if (_locallyAnswered.Add(occurrenceId))
+            {
+                _locallyAnsweredOrder.Enqueue(occurrenceId);
+                while (_locallyAnsweredOrder.Count > MaxLocallyAnswered)
+                    _locallyAnswered.Remove(_locallyAnsweredOrder.Dequeue());
+            }
         }
 
         // Record an occurrence as terminally resolved for idempotent dedup of transport-duplicated raises/dismisses.

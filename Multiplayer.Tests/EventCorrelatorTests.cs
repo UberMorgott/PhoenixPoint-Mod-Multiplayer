@@ -131,6 +131,101 @@ public class EventCorrelatorTests
         Assert.Equal(0, c.OpenCount);
     }
 
+    // ─── FIX C: locally-answered single-choice prompt kept OPEN (belt) ─────────────────────────────
+
+    [Fact]
+    public void LocallyAnswered_InOrderPrompt_HostAdvance_ResolvesResultPageInPlace()
+    {
+        var c = new EventCorrelator();
+
+        // Raise-FIRST single-choice: the prompt shows in-order as a plain ShowDialog (NOT a prompt mirror — that
+        // path is only entered when a dismiss beat the raise). The local player OKs the prompt and the client
+        // KEEPS the modal open (FIX C) → MarkLocallyAnswered. The host's later EventAdvanceResult must transition
+        // THAT open modal to the result page IN PLACE (ShowResultPage), not buffer into a DropNoop.
+        var raised = c.Raised(10, "EXLC", singleChoice: true);
+        Assert.Equal(Kind.ShowDialog, raised.Kind);
+        Assert.Equal(-1, raised.ChoiceIndex);              // plain in-order (not a mirror)
+        Assert.Equal(0, c.PromptMirrorCount);              // never entered _promptMirror
+
+        c.MarkLocallyAnswered(10);
+        Assert.Equal(1, c.LocallyAnsweredCount);
+
+        var advanced = c.Advanced(10, "EXLC", choiceIndex: 0);
+        Assert.Equal(Kind.ShowResultPage, advanced.Kind);  // belt: resolve the OPEN modal in place
+        Assert.Equal(0, advanced.ChoiceIndex);
+        Assert.Equal(0, c.OpenCount);                      // result page replaced the prompt
+        Assert.Equal(0, c.LocallyAnsweredCount);           // belt mark consumed
+        Assert.True(c.ShownSlotFree);                      // single slot freed for the next display
+
+        // A duplicate/late advance is now an idempotent Ignore (terminal-occId dedup preserved).
+        Assert.Equal(Kind.Ignore, c.Advanced(10, "EXLC", choiceIndex: 0).Kind);
+    }
+
+    [Fact]
+    public void LocallyAnswered_InOrderPrompt_HostDismissInstead_ResolvesInPlace_LateAdvanceIgnored()
+    {
+        var c = new EventCorrelator();
+
+        // Same raise-first prompt kept open, but the host's authoritative signal arrives as a result-bearing
+        // DISMISS (the auto-complete-at-trigger dismiss) rather than an advance. It resolves the open modal in
+        // place (ShowResultInPlace) and clears the belt mark; a late advance for the now-completed occurrence is
+        // deduped — the belt never double-resolves.
+        Assert.Equal(Kind.ShowDialog, c.Raised(11, "EXLC2", singleChoice: true).Kind);
+        c.MarkLocallyAnswered(11);
+        Assert.Equal(1, c.LocallyAnsweredCount);
+
+        var dismissed = c.Dismissed(11, "EXLC2", choiceIndex: 0);
+        Assert.Equal(Kind.ShowResultInPlace, dismissed.Kind);
+        Assert.Equal(0, c.OpenCount);
+        Assert.Equal(0, c.LocallyAnsweredCount);           // belt mark dropped by the dismiss resolution
+
+        Assert.Equal(Kind.Ignore, c.Advanced(11, "EXLC2", choiceIndex: 0).Kind);   // late advance → dedup
+    }
+
+    [Fact]
+    public void LocallyAnswered_PromptMirror_AdvanceStillWins_BeltMarkCleared()
+    {
+        var c = new EventCorrelator();
+
+        // Dismiss-first prompt MIRROR (the classic path). Even when the player locally answers it, the existing
+        // _promptMirror resolution takes precedence in Advanced() and the belt mark is cleared (no stale state).
+        Assert.Equal(Kind.BufferDismiss, c.Dismissed(12, "EXPM", choiceIndex: 0).Kind);
+        Assert.Equal(Kind.ShowDialog, c.Raised(12, "EXPM", singleChoice: true).Kind);
+        Assert.Equal(1, c.PromptMirrorCount);
+        c.MarkLocallyAnswered(12);
+
+        var advanced = c.Advanced(12, "EXPM", choiceIndex: 0);
+        Assert.Equal(Kind.ShowResultPage, advanced.Kind);
+        Assert.Equal(0, c.PromptMirrorCount);
+        Assert.Equal(0, c.LocallyAnsweredCount);           // cleared by the prompt-mirror path
+        Assert.Equal(0, c.OpenCount);
+    }
+
+    [Fact]
+    public void NotLocallyAnswered_InOrderPrompt_AdvanceKeepsLegacyBufferBehavior()
+    {
+        var c = new EventCorrelator();
+
+        // Regression guard: the belt is purely ADDITIVE. Without a MarkLocallyAnswered, an advance for an
+        // in-order (non-mirror) open prompt keeps the legacy behavior — buffered as a pending advance (DropNoop),
+        // NOT coalesced. Confirms the belt only fires on an explicit local answer.
+        Assert.Equal(Kind.ShowDialog, c.Raised(13, "EXNL", singleChoice: true).Kind);
+        Assert.Equal(0, c.LocallyAnsweredCount);
+
+        var advanced = c.Advanced(13, "EXNL", choiceIndex: 0);
+        Assert.Equal(Kind.DropNoop, advanced.Kind);        // legacy: not coalesced
+        Assert.Equal(1, c.PendingAdvanceCount);
+        Assert.Equal(1, c.OpenCount);                      // modal still open (unresolved)
+    }
+
+    [Fact]
+    public void MarkLocallyAnswered_ZeroOccId_IsNoOp()
+    {
+        var c = new EventCorrelator();
+        c.MarkLocallyAnswered(0);
+        Assert.Equal(0, c.LocallyAnsweredCount);
+    }
+
     [Fact]
     public void OutOfOrder_SingleChoiceAdvanceBeforeRaise_ResolvesStraightToResultPage()
     {

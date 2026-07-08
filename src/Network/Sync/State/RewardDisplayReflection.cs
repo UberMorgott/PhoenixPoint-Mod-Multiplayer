@@ -61,6 +61,13 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _itemsItems;                                     // ItemStorage.Items (IReadOnlyDictionary)
         private static Type _havenLeaderType, _geoFactionType;
         private static FieldInfo _siteIdField;                                       // GeoSite.SiteId
+        // FIX A: host pre-formats the revealed-sites reward lines with the SAME native grouping the host UI uses
+        // (GenerateSitesRewardStrings) so the client renders the grouped/encounter-title strings verbatim instead
+        // of re-resolving SiteIds one-by-one. Needs the APPLY RESULT's RevealedSites (the list native passes,
+        // UIModuleSiteEncounters.cs:425) + a live host module to invoke the private instance method on.
+        private static FieldInfo _arRevealedSites;                                   // GeoFactionRewardApplyResult.RevealedSites (List<GeoSite>)
+        private static MethodInfo _genSitesRewardStrings;                            // UIModuleSiteEncounters.GenerateSitesRewardStrings(IEnumerable<GeoSite>)
+        private static FieldInfo _glViewField, _gvModulesField, _gmSiteEncModuleField;  // live host-module path
 
         // ─── client render ───
         // The module instance is handed in by the ShowEncounter Postfix (__instance); no live-fetch needed.
@@ -128,6 +135,18 @@ namespace Multiplayer.Network.Sync.State
             if (storageType != null) _itemsItems = AccessTools.Property(storageType, "Items");
             if (geoSiteType != null) _siteIdField = AccessTools.Field(geoSiteType, "SiteId");
 
+            // FIX A host-format binds (all OPTIONAL — a miss leaves RevealedSiteStrings empty so the client falls
+            // back to its SiteId rendering; never gate _hostReady on them).
+            _arRevealedSites = AccessTools.Field(arType, "RevealedSites");
+            var moduleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters");
+            if (moduleType != null) _genSitesRewardStrings = AccessTools.Method(moduleType, "GenerateSitesRewardStrings");
+            var glType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+            var gvType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+            var gmType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
+            if (glType != null) _glViewField = AccessTools.Field(glType, "View");
+            if (gvType != null) _gvModulesField = AccessTools.Field(gvType, "GeoscapeModules");
+            if (gmType != null) _gmSiteEncModuleField = AccessTools.Field(gmType, "SiteEncountersModule");
+
             // Stash the ApplyResult accessor as a "property-like" via a tiny wrapper field read.
             _frApplyResultField = arField;
 
@@ -175,8 +194,12 @@ namespace Multiplayer.Network.Sync.State
 
                 // Units — native renders geoEvent.ChoiceReward.Units (List<GeoCharacter>); carry NAMES only.
                 TryReadUnitNames(_frUnits?.GetValue(choiceReward) as IEnumerable, snap);
-                // RevealedSites — native renders geoEvent.ChoiceReward.RevealedSites (List<GeoSite>); carry ids.
+                // RevealedSites — native renders geoEvent.ChoiceReward.RevealedSites (List<GeoSite>); carry ids
+                // (client SiteId fallback). ALSO pre-format the host UI's grouped/encounter-title strings from the
+                // APPLY RESULT's RevealedSites — the exact list native GenerateSitesRewardStrings consumes
+                // (UIModuleSiteEncounters.cs:425) — so the client can render them verbatim (FIX A).
                 TryReadSiteIds(_frRevealedSites?.GetValue(choiceReward) as IEnumerable, snap);
+                if (ar != null) TryReadRevealedSiteStrings(ar, snap);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] RewardDisplayReflection.BuildFromReward failed: " + ex.Message); }
             return snap;
@@ -303,6 +326,51 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] reward.RevealedSites read failed: " + ex.Message); }
+        }
+
+        // FIX A: invoke the LIVE host module's native GenerateSitesRewardStrings on the apply-result RevealedSites
+        // so the wire carries the EXACT grouped/localized host UI lines (group-by-owner "N Type", encounter-bearing
+        // sites → their event Title). Best-effort: any missing bind / absent module / empty sites leaves the list
+        // empty → the client renders the RevealedSites ids instead. The native method is a pure read (no markers,
+        // no state mutation — decompile UIModuleSiteEncounters.cs:514-544), safe to call for string extraction.
+        private static void TryReadRevealedSiteStrings(object applyResult, RewardDisplaySnapshot snap)
+        {
+            try
+            {
+                if (applyResult == null || _arRevealedSites == null || _genSitesRewardStrings == null) return;
+                var sites = _arRevealedSites.GetValue(applyResult);   // List<GeoSite> (IEnumerable<GeoSite>)
+                if (!(sites is IEnumerable seq)) return;
+                bool any = false; foreach (var _ in seq) { any = true; break; }
+                if (!any) return;   // no revealed sites → nothing to format (and the native method handles empty too)
+                object module = GetLiveHostModule();
+                if (module == null)
+                {
+                    Debug.LogWarning("[Multiplayer] reward.RevealedSiteStrings SKIPPED: live host UIModuleSiteEncounters not found — client falls back to SiteId rendering");
+                    return;
+                }
+                var result = _genSitesRewardStrings.Invoke(module, new[] { sites }) as IEnumerable;
+                if (result == null) return;
+                foreach (var s in result)
+                    if (s is string str && !string.IsNullOrEmpty(str)) snap.RevealedSiteStrings.Add(str);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] reward.RevealedSiteStrings read failed: " + ex.Message); }
+        }
+
+        // The live host UIModuleSiteEncounters (GeoLevelController.View→GeoscapeView.GeoscapeModules→
+        // SiteEncountersModule). Any module instance carries the same prefab-serialized SiteRevealedTextKey /
+        // MultipleSiteRevealedTextKey binds GenerateSitesRewardStrings needs. Null on any miss.
+        private static object GetLiveHostModule()
+        {
+            try
+            {
+                if (_glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null) return null;
+                var geo = GeoRuntime.Instance?.GeoLevel();
+                if (geo == null) return null;
+                var view = _glViewField.GetValue(geo);
+                var modules = view != null ? _gvModulesField.GetValue(view) : null;
+                return modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
+            }
+            catch { return null; }
         }
 
         private static void TryReadHavenPop(IEnumerable changeHavenPop, RewardDisplaySnapshot snap)
@@ -589,12 +657,25 @@ namespace Multiplayer.Network.Sync.State
                     if (Add(module, text)) lines++;
                 }
 
-                // Revealed sites (UIModuleSiteEncounters.cs:421-431): SiteRevealedTextKey(siteTypeOrName).
-                foreach (var siteId in snap.RevealedSites)
+                // Revealed sites (UIModuleSiteEncounters.cs:419-429). FIX A: when the host pre-formatted the grouped
+                // lines (RevealedSiteStrings, via the SAME native GenerateSitesRewardStrings the host UI drew),
+                // render them VERBATIM — this reproduces the host's grouping ("N Exploration" via
+                // MultipleSiteRevealedTextKey) and encounter titles that per-SiteId re-resolution can't. Host-locale
+                // (accepted, same tradeoff as geoscape toasts). Only when ABSENT (legacy payload) fall back to the
+                // per-SiteId rendering below.
+                if (snap.RevealedSiteStrings != null && snap.RevealedSiteStrings.Count > 0)
                 {
-                    string siteName = RevealedSiteName(rt, siteId);
-                    if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multiplayer] reward revealed-site dropped (unresolved id " + siteId + ")"); continue; }
-                    if (Add(module, FormatKey(module, _kSiteRevealed, siteName))) lines++;
+                    foreach (var line in snap.RevealedSiteStrings)
+                        if (Add(module, line)) lines++;
+                }
+                else
+                {
+                    foreach (var siteId in snap.RevealedSites)
+                    {
+                        string siteName = RevealedSiteName(rt, siteId);
+                        if (string.IsNullOrEmpty(siteName)) { Debug.Log("[Multiplayer] reward revealed-site dropped (unresolved id " + siteId + ")"); continue; }
+                        if (Add(module, FormatKey(module, _kSiteRevealed, siteName))) lines++;
+                    }
                 }
 
                 // Soldier injured / tired sums (UIModuleSiteEncounters.cs:437-457).

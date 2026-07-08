@@ -748,7 +748,9 @@ namespace Multiplayer.Network.Sync
                         // result body IS the raise narrative).
                         var buffered = TakeBufferedDismiss(occId);
                         string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : wireNarrative;
-                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, buffered.Reward, siteId, buffered.WireOutcome, narrative, wireTitle);
+                        // FIX B: this raise carried the site identity — pass it so the result page spawns the inert
+                        // mirror site (no prior raise dialog here) and its backdrop matches the host's.
+                        ResolveToResultPage(rt, occId, eventId, decision.ChoiceIndex, buffered.Reward, siteId, buffered.WireOutcome, narrative, wireTitle, hasIdentity, identity);
                         break;
                     }
                     case State.EventCorrelator.ActionKind.DropNoop:
@@ -943,7 +945,9 @@ namespace Multiplayer.Network.Sync
                         // backfills a text-less dismiss). Terminal → slot stays free, drain continues.
                         var buffered = TakeBufferedDismiss(occId);
                         string narrative = !string.IsNullOrEmpty(buffered.WireNarrative) ? buffered.WireNarrative : q.WireNarrative;
-                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, buffered.Reward, q.SiteId, buffered.WireOutcome, narrative, q.WireTitle);
+                        // FIX B: released queued raise carried the site identity — spawn its mirror site so the
+                        // result-page backdrop matches the host (no prior raise dialog was shown for it).
+                        ResolveToResultPage(rt, occId, q.EventId, next.ChoiceIndex, buffered.Reward, q.SiteId, buffered.WireOutcome, narrative, q.WireTitle, q.HasIdentity, q.Identity);
                         break;
                     }
                     case State.EventCorrelator.ActionKind.DropNoop:
@@ -1186,6 +1190,18 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
+        /// Client (FIX C): the local player answered a single-choice prompt and the client kept its modal OPEN
+        /// (greyed) awaiting the host's <c>EventAdvanceResult</c>. Mark the occurrence locally-answered in the
+        /// correlator so that advance (or a raise) coalesces into the OPEN modal — an in-place result-page
+        /// transition — instead of re-materializing a fresh window. No-op on host.
+        /// </summary>
+        public void MarkEventLocallyAnswered(ushort occurrenceId)
+        {
+            if (_engine.IsHost) return;
+            _eventCorrelator.MarkLocallyAnswered(occurrenceId);
+        }
+
+        /// <summary>
         /// Host: a client OK'd its single-choice prompt mirror — drive OUR open native prompt to its result page
         /// exactly as a local host click would (<see cref="EventReflection.TryHostNativeAdvanceSingleChoice"/>:
         /// native OnChoiceSelected → SetClosingEncounter → SingleChoiceAdvancePatch broadcasts EventAdvanceResult
@@ -1238,8 +1254,17 @@ namespace Multiplayer.Network.Sync
         /// to a plain close when the page can't be rebuilt. Shared by the in-order (ShowResultInPlace) and the
         /// buffered-then-raised (ShowResultPage) paths.
         /// </summary>
-        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
+        private void ResolveToResultPage(GeoRuntime rt, ushort occId, string eventId, int choiceIndex, RewardDisplaySnapshot reward, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null, bool hasIdentity = false, GeoSiteState identity = default(GeoSiteState))
         {
+            // FIX B: when the result page is materialized WITHOUT a prior raise dialog (a buffered out-of-order
+            // dismiss whose raise carried a site IDENTITY), the in-play site never existed on this sim-frozen
+            // client, so BuildResultEvent's ResolveSiteById returns null → a SITELESS context → the synthetic
+            // result window shows the wrong (default) backdrop instead of the host's. Spawn the SAME inert mirror
+            // site ShowRaisedDialog does so ResolveSiteById finds it and Context.Site matches the host's art. No-op
+            // when no identity was carried (in-place / advance paths already showed the raise dialog → site exists).
+            if (hasIdentity && EventReflection.ShouldSpawnMirror(
+                    hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
+                State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
             var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative, wireTitle);
             Debug.Log("[Multiplayer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +

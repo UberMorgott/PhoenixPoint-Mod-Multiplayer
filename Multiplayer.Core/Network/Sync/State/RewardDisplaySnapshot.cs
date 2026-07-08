@@ -114,6 +114,8 @@ namespace Multiplayer.Network.Sync.State
     ///   [i32 spawnedHavenDefensesCount]
     ///   [i32 damagedSoldiersSum][i32 tiredSoldiersSum][i32 allSoldiersDamage][i32 allSoldiersTiredness]
     ///   [i32 factionSkillPoints][i32 newPhoenixBaseSiteId]
+    ///   ── OPTIONAL TAIL v1 (written only when RevealedSiteStrings non-empty; decoder reads only if bytes remain) ──
+    ///   [u16 nRevealedStrings]{[str hostFormattedLine]}
     /// </summary>
     public sealed class RewardDisplaySnapshot
     {
@@ -133,13 +135,26 @@ namespace Multiplayer.Network.Sync.State
         public int FactionSkillPoints;
         public int NewPhoenixBaseSiteId = -1;   // -1 = none
 
+        /// <summary>
+        /// OPTIONAL-TAIL v1 (host→client): the revealed-sites reward lines PRE-FORMATTED host-side by the native
+        /// <c>UIModuleSiteEncounters.GenerateSitesRewardStrings</c> — the SAME grouped/localized strings the host
+        /// UI draws (group-by-owner counts via <c>MultipleSiteRevealedTextKey</c> "4 Exploration", encounter-bearing
+        /// sites resolved to their event Title). When present the client renders them VERBATIM (host-locale, same
+        /// tradeoff as geoscape toasts) instead of re-resolving <see cref="RevealedSites"/> id-by-id (which yields
+        /// one ungrouped line per site + no encounter titles). Absent tail (legacy payload) → client falls back to
+        /// the <see cref="RevealedSites"/> id rendering. Written on the wire ONLY when non-empty (a no-tail payload
+        /// stays byte-identical to the pre-tail format — GeoSiteSnapshot WA-2 precedent).
+        /// </summary>
+        public readonly List<string> RevealedSiteStrings = new List<string>();
+
         /// <summary>True when there is nothing to render (the render path is a clean no-op).</summary>
         public bool IsEmpty =>
             Resources.Count == 0 && Diplomacy.Count == 0 && Items.Count == 0 && Units.Count == 0
             && RevealedSites.Count == 0 && HavenPopulation.Count == 0 && DamageZones.Count == 0
             && MaxDiplomacyFactionGuids.Count == 0 && SpawnedHavenDefensesCount == 0
             && DamagedSoldiersSum == 0 && TiredSoldiersSum == 0 && AllSoldiersDamage == 0
-            && AllSoldiersTiredness == 0 && FactionSkillPoints == 0 && NewPhoenixBaseSiteId < 0;
+            && AllSoldiersTiredness == 0 && FactionSkillPoints == 0 && NewPhoenixBaseSiteId < 0
+            && RevealedSiteStrings.Count == 0;
 
         public static byte[] Encode(RewardDisplaySnapshot snap)
         {
@@ -183,6 +198,15 @@ namespace Multiplayer.Network.Sync.State
                 w.Write(snap.AllSoldiersTiredness);
                 w.Write(snap.FactionSkillPoints);
                 w.Write(snap.NewPhoenixBaseSiteId);
+
+                // OPTIONAL TAIL v1 — host-formatted revealed-site strings. Written ONLY when non-empty so a
+                // reward without them stays byte-identical to the pre-tail wire format (older decoders stop at
+                // NewPhoenixBaseSiteId; newer ones read this only when bytes remain — GeoSiteSnapshot precedent).
+                if (snap.RevealedSiteStrings.Count > 0)
+                {
+                    w.Write((ushort)snap.RevealedSiteStrings.Count);
+                    foreach (var s in snap.RevealedSiteStrings) WriteStr(w, s);
+                }
                 return ms.ToArray();
             }
         }
@@ -241,6 +265,15 @@ namespace Multiplayer.Network.Sync.State
                     snap.AllSoldiersTiredness = r.ReadInt32();
                     snap.FactionSkillPoints = r.ReadInt32();
                     snap.NewPhoenixBaseSiteId = r.ReadInt32();
+
+                    // OPTIONAL TAIL v1 — read the host-formatted revealed-site strings ONLY if bytes remain (a
+                    // legacy no-tail payload decodes with an empty list; a truncated tail throws → whole payload
+                    // rejected, all-or-nothing). ms is in scope (the outer using) for the position check.
+                    if (ms.Position < ms.Length)
+                    {
+                        int nRevStr = r.ReadUInt16();
+                        for (int i = 0; i < nRevStr; i++) snap.RevealedSiteStrings.Add(ReadStr(r));
+                    }
                     return snap;
                 }
             }

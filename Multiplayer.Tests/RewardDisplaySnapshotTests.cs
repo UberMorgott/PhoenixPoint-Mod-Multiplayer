@@ -261,4 +261,55 @@ public class RewardDisplaySnapshotTests
         Assert.Equal("EV_2", id);
         Assert.Equal(4, choiceIndex);
     }
+
+    // ─── FIX A: optional-tail host-formatted revealed-site strings ─────────────────────────────
+
+    [Fact]
+    public void RevealedSiteStrings_RoundTrip_PreservesTailAndBaseFields()
+    {
+        var s = Sample();   // has RevealedSites ids 42, 7 for the SiteId fallback
+        s.RevealedSiteStrings.Add("4 Exploration");
+        s.RevealedSiteStrings.Add("Императрица");   // encounter-bearing site → its event Title
+        var rt = RoundTrip(s);
+        Assert.NotNull(rt);
+        Assert.Equal(new[] { "4 Exploration", "Императрица" }, rt.RevealedSiteStrings.ToArray());
+        Assert.Equal(new[] { 42, 7 }, rt.RevealedSites.ToArray());   // fallback ids still carried alongside
+        Assert.Equal(s.Resources, rt.Resources);                     // base payload unaffected
+        Assert.Equal(s.NewPhoenixBaseSiteId, rt.NewPhoenixBaseSiteId);
+    }
+
+    [Fact]
+    public void RevealedSiteStrings_OmittedWhenEmpty_StaysBackCompat()
+    {
+        // The tail is written ONLY when non-empty: an empty-strings snapshot encodes SHORTER than one carrying a
+        // string, and a no-tail blob decodes with an empty list (a legacy payload without the tail is tolerated).
+        var noTail = RewardDisplaySnapshot.Encode(Sample());        // Sample() carries no RevealedSiteStrings
+        var withTail = Sample();
+        withTail.RevealedSiteStrings.Add("Sentinel Site");
+        var withTailBytes = RewardDisplaySnapshot.Encode(withTail);
+        Assert.True(withTailBytes.Length > noTail.Length);          // tail bytes only present when non-empty
+
+        var decoded = RewardDisplaySnapshot.Decode(noTail);
+        Assert.NotNull(decoded);
+        Assert.Empty(decoded.RevealedSiteStrings);                  // no-tail → empty list, base fields intact
+        Assert.Equal(Sample().RevealedSites, decoded.RevealedSites);
+    }
+
+    [Fact]
+    public void RevealedSiteStrings_OnlyStrings_IsNotEmpty_AndRoundTrips()
+    {
+        // A reward that ONLY carries host-formatted revealed-site strings (pathological: apply-result reveals but
+        // no other delta lines) must count as non-empty so it still encodes/renders.
+        var s = new RewardDisplaySnapshot();
+        s.RevealedSiteStrings.Add("2 Haven");
+        Assert.False(s.IsEmpty);
+        var rt = RoundTrip(s);
+        Assert.NotNull(rt);
+        Assert.False(rt.IsEmpty);
+        Assert.Equal(new[] { "2 Haven" }, rt.RevealedSiteStrings.ToArray());
+    }
+
+    [Fact]
+    public void RevealedSiteStrings_EmptyList_KeepsSnapshotEmpty()
+        => Assert.True(new RewardDisplaySnapshot().IsEmpty);   // no strings added → still empty (IsEmpty guard)
 }
