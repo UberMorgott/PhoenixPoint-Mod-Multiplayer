@@ -137,36 +137,10 @@ namespace Multiplayer.Harmony.Sync
                                         : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_equipmentItems");
                 var inv = __2 != null ? PersonnelEditReflection.ReadItemGuids(__2).ToArray()
                                       : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_inventoryItems");
-                string intentSig = LoadoutRelayDedup.Signature(armour, equip, inv);
-                // MODEL-IDENTITY suppress (wave-2 R1): a flush whose lists EQUAL the soldier's current local
-                // model is a no-op SetItems (SetItems(current) = identity) — nothing to relay. On a client the
-                // model is written ONLY by mirrored #9 applies (inside SyncApplyScope; the user's OWN edit is
-                // suppressed right here and never lands locally), so UI ≠ model marks an unflushed user edit
-                // while UI == model marks a non-edit flush: screen-open/soldier-switch (DisplaySoldier arms
-                // _uiRefreshNeeded, UIStateEditSoldier.cs:583), stat/ability confirm (:718), and the
-                // post-repaint flush after our own mirror re-drive — that last one previously RE-RELAYED the
-                // stale model loadout right after a genuine edit (host applied new-then-stale = edit reverted).
-                // TIMING (review 2026-07-08): intent read + model read + this decision are ONE synchronous
-                // call on the Unity main thread — an inbound apply can land between FRAMES (the drop→flush
-                // window GeoUiRefresh defers repaints across), never inside the decision. The only user edit
-                // this branch can eat is one whose final loadout ALREADY equals the mirrored authoritative
-                // state (e.g. re-doing the exact move a mirror apply just landed) — the desired state is
-                // already true; any mirror-vs-host staleness re-converges on the next #9 flush.
-                string modelSig = LoadoutRelayDedup.Signature(
-                    PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_armourItems"),
-                    PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_equipmentItems"),
-                    PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_inventoryItems"));
-                if (intentSig == modelSig)
-                {
-                    Debug.Log("[Multiplayer] SetItemsEditRelayPatch: model-identical flush for unit " + unitId
-                              + " suppressed (no edit to relay)");
-                    return false;
-                }
                 // Content-dedup at the SOURCE: an identical per-frame re-flush (same ordered loadout for this
                 // unit as the last relay) is suppressed WITHOUT SendActionRequest — the storm never leaves the
-                // client (the UI differs from the model until the #9 echo lands, so per-frame re-flushes keep
-                // hitting this cache, not the model-identity branch above). A changed loadout relays this frame.
-                if (!_dedup.ShouldRelay(unitId, intentSig))
+                // client. A changed loadout falls through and relays this frame.
+                if (!_dedup.ShouldRelay(unitId, LoadoutRelayDedup.Signature(armour, equip, inv)))
                     return false;
                 return PersonnelEditRelay.Relay(ActionCategory.Equip, unitId, true,
                     () => new EquipSoldierAction(unitId, armour, equip, inv));

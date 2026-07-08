@@ -234,24 +234,8 @@ namespace Multiplayer.Network.Sync
                 _pending.Remove(old);
             }
             var payload = WriteAction(a);
-            // DIAG (wave-2): the intent rail had ZERO send-side logging — the 2026-07-08 RCA was blind on
-            // id=60/69 traffic. One line per send, rate-bounded by real user actions (the SetItems relay
-            // dedups per-frame re-flushes before ever reaching here).
-            Debug.Log("[Multiplayer] CLIENT intent send id=" + a.ActionId + " nonce=" + nonce + " " + DescribeAction(a));
             // Envelope GeoIntent(0xA2) on the 0x67 rail — the sole geoscape action-request wire.
             _engine.SendToHost(GeoActionRelay.BuildIntent(a.ActionId, nonce, payload));
-        }
-
-        /// <summary>Diag: action type + its UnitId when the concrete action exposes one (the personnel/
-        /// progression family does). Reflection cost is per real user action — negligible.</summary>
-        private static string DescribeAction(ISyncedAction a)
-        {
-            try
-            {
-                var p = a.GetType().GetProperty("UnitId");
-                return a.GetType().Name + (p != null ? " unitId=" + p.GetValue(a, null) : "");
-            }
-            catch { return a.GetType().Name; }
         }
 
         /// <summary>Host: the local interceptor will let the original run; sequence + broadcast the apply to all.</summary>
@@ -365,9 +349,6 @@ namespace Multiplayer.Network.Sync
             {
                 try
                 {
-                    // DIAG (wave-2): host-apply visibility for the intent rail (send-side twin in SendActionRequest).
-                    Debug.Log("[Multiplayer] HOST intent apply id=" + id + " nonce=" + nonce + " peer=" + senderPeerId
-                              + " " + DescribeAction(action));
                     // IResolvesOutsideScope actions run OUTSIDE SyncApplyScope; every other action runs INSIDE so its
                     // interceptors pass through (engine-driven replay).
                     if (action is IResolvesOutsideScope) action.Apply(rt);
