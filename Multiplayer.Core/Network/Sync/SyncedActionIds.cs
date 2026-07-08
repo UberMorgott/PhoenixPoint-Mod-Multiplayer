@@ -47,5 +47,13 @@ namespace Multiplayer.Network.Sync
         // Geoscape sim-mutating abilities 80-89 (ONE generic GeoAbility.Activate relay — client suppress + relay
         // intent, host authoritative Activate; result mirrors on the existing geoscape state channels)
         public const ushort GeoAbilityActivate = 80; // Harvest/Excavate/EmergencyRepair/Scan/AncientSiteProbe/ActivateBase/AncientGuardianGuard
+
+        /// <summary>True for the personnel client-edit intent family (ids 60-79). Every member is
+        /// <c>IHostOnlyApply</c> whose authoritative result mirrors back on the #6/#9/#10 state channels
+        /// (+ wallet), so the host NEVER needs to echo its GeoOutcome to clients — the client's OnActionApply
+        /// would only suppress it. The host uses this to skip that redundant per-edit echo (the EditSoldier
+        /// SetItems re-flush made it a per-frame storm). Other IHostOnlyApply families (research/manufacture/
+        /// vehicle/answer) KEEP their echo — their subsystems are untouched.</summary>
+        public static bool IsPersonnelEditIntent(ushort id) => id >= EquipSoldier && id <= 79;
     }
 }

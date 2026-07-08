@@ -140,6 +140,8 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleMirror.ResetForNewSession();
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
+            Harmony.Sync.SetItemsEditRelayPatch.ResetDedup();    // per-unit equip-loadout relay dedup (fresh session)
+            State.GeoUiRefresh.ClearPendingEquipRepaint();       // deferred equip repaint flag (static; never carry across sessions)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -386,8 +388,18 @@ namespace Multiplayer.Network.Sync
                 GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.Recruits);
             }
 
-            ulong seq = NextOutcomeSeq();
-            _engine.BroadcastToAll(GeoActionRelay.BuildOutcome(id, seq, payload));
+            // The personnel client-edit family (ids 60-79) is IHostOnlyApply AND fully channelled (#6/#9/#10 +
+            // wallet) — the client's OnActionApply only SUPPRESSES its outcome, so echoing it is pure waste, and
+            // under the EditSoldier SetItems re-flush it was a per-frame outcome storm (source-deduped above). Skip
+            // the echo for this family ONLY; every other action (incl. other IHostOnlyApply: research/manufacture/
+            // vehicle/answer) keeps its authoritative broadcast, so no other subsystem changes. Skipping the echo
+            // also skips authoring a seq for it — the GeoOutcome stream stays strict-greater-monotonic for the
+            // outcomes that DO ship (a gap is a valid last-writer-wins guard).
+            if (!SyncedActionIds.IsPersonnelEditIntent(id))
+            {
+                ulong seq = NextOutcomeSeq();
+                _engine.BroadcastToAll(GeoActionRelay.BuildOutcome(id, seq, payload));
+            }
             // Client-relayed vehicle order (travel/explore) just applied authoritatively → ship the mirror now
             // instead of waiting up to a full poll interval (tightens the click→visible-motion latency).
             if (VehicleEmitScheduler.TriggersImmediateEmit(action.Category)) RequestImmediateVehicleEmit();
@@ -1987,6 +1999,12 @@ namespace Multiplayer.Network.Sync
         public void Tick()
         {
             if (_engine == null || !_engine.IsActive) return;
+            // Reactivity belt (both peers): drain any equip repaint that RefreshRosterEquip deferred past an
+            // ACTIVE equipment drag (personnel-screen fix wave). Fast no-op until one is pending; it fires the
+            // instant the drag ends so a peer's mirrored #9 apply never clobbers an in-progress drag yet is
+            // never lost either.
+            try { GeoUiRefresh.FlushPendingEquipRepaint(GeoRuntime.Instance); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.Tick equip-repaint drain failed: " + ex.Message); }
             if (!_engine.IsHost)
             {
                 // CLIENT per-frame: drive the geoscape vehicle travel-mirror INTERPOLATION (Inc4 S2 smoothing).

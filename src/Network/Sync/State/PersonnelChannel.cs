@@ -58,6 +58,14 @@ namespace Multiplayer.Network.Sync.State
         // (and seeding would cost a full-roster serialize hitch on every rebind boundary).
         private readonly Dictionary<long, ulong> _lastSentBlobHash = new Dictionary<long, ulong>();
 
+        // PS2 faction-SP tail: the last shared GeoPhoenixFaction.Skillpoints value we shipped. The pool rides
+        // EVERY #9 flush (value-only, last-writer-wins) but only when it CHANGED since this — an SP spend
+        // (TrySpendSkillPoints, alongside ModifyBaseStat/AddAbility MarkAll) and a mission/hourly SP grant
+        // (ApllyTacticalResult / BaseHourlyUpdate bulk) both already mark this channel dirty, so the current
+        // value converges on the same flush the client already applies (no new rail, no new dirty hook). Null =
+        // nothing shipped yet (first flush after (re)bind ships the current value). Host-only; cleared on Detach.
+        private int? _lastSentFactionSp;
+
         // Per-flush byte budget for PS2 state records: EncodeStateSync's u16 len (65535) is the hard
         // wire cap; 24 KB mirrors the MistChannel-proven per-message bound (MistChannel.ChunkBytes).
         private const int StateBytesPerFlush = 24 * 1024;
@@ -148,15 +156,26 @@ namespace Multiplayer.Network.Sync.State
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelChannel state flush failed: " + ex.Message); }
 
-            if (snap.Sites.Count == 0 && snap.States.Count == 0) return null;   // mid-load / all skipped → next mark re-arms
+            // PS2 faction-SP tail: ship the shared pool value only when it CHANGED since the last emit
+            // (value-only mirror). This snapshot is only reached when the channel was already marked dirty
+            // (soldier/membership seam OR the hourly bulk), so a standalone faction-SP grant ships within one
+            // base-hour at worst and immediately alongside any progression/mission edit.
+            int? curFacSp = PersonnelReflection.ReadFactionSkillpoints(rt);
+            if (curFacSp.HasValue && (!_lastSentFactionSp.HasValue || _lastSentFactionSp.Value != curFacSp.Value))
+                snap.FactionSkillpoints = curFacSp;
+
+            if (snap.Sites.Count == 0 && snap.States.Count == 0 && !snap.FactionSkillpoints.HasValue)
+                return null;   // mid-load / all skipped, nothing to ship → next mark re-arms
+            if (snap.FactionSkillpoints.HasValue) _lastSentFactionSp = snap.FactionSkillpoints;
             return PersonnelSnapshot.Encode(snap);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = PersonnelSnapshot.Decode(data);
-            if (snap == null || (snap.Sites.Count == 0 && snap.States.Count == 0)) return;
-            Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count + " states=" + snap.States.Count);
+            if (snap == null || (snap.Sites.Count == 0 && snap.States.Count == 0 && !snap.FactionSkillpoints.HasValue)) return;
+            Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count + " states=" + snap.States.Count
+                      + (snap.FactionSkillpoints.HasValue ? " factionSP=" + snap.FactionSkillpoints.Value : ""));
             // ONE index for the whole payload: every Phoenix soldier resolved across vehicles + sites.
             // RosterReconcile Contains-guards entries that a preceding record's move made stale, and the
             // host emits each soldier in at most one container per snapshot (single-writer truth).
@@ -196,6 +215,15 @@ namespace Multiplayer.Network.Sync.State
                 if (PersonnelReflection.ApplySoldierState(existing, decoded))
                     Debug.Log("[Multiplayer] PersonnelChannel: applied live-state for GeoUnitId " + st.UnitId);
             }
+            // PS2 faction-SP tail: value-only mirror of the shared GeoPhoenixFaction.Skillpoints pool (present
+            // only when the host value changed). The open progression panel repaints on the same #9 apply via
+            // the OnStateSync → RefreshNeedsKick → RefreshRosterEquip re-drive (a client with no uncommitted
+            // local allocation), so the new pool total lands reactively.
+            if (snap.FactionSkillpoints.HasValue)
+            {
+                PersonnelReflection.ApplyFactionSkillpoints(rt, snap.FactionSkillpoints.Value);
+                Debug.Log("[Multiplayer] PersonnelChannel: applied shared faction SP pool = " + snap.FactionSkillpoints.Value);
+            }
         }
 
         public void AttachHost(SyncEngine eng)
@@ -229,6 +257,7 @@ namespace Multiplayer.Network.Sync.State
             if (_live == this) _live = null;
             lock (_dirtyLock) { _dirty.Clear(); _stateDirty.Clear(); _stateBulk = false; }
             _lastSentBlobHash.Clear();
+            _lastSentFactionSp = null;   // re-seed the faction-SP tail on the next (re)bind
         }
     }
 }

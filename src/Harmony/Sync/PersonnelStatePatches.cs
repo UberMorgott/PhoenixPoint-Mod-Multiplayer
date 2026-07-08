@@ -140,6 +140,28 @@ namespace Multiplayer.Harmony.Sync
         public static void Postfix(object __instance) => PersonnelStateDirty.Mark(__instance);
     }
 
+    /// <summary>Rename dirty seam (echo-skip review 2026-07-08): <c>GeoCharacter.Rename</c> writes
+    /// <c>Identity.Name</c> (GeoCharacter.cs:826) — mirrored by the #9 blob's <c>_identity</c> value-copy
+    /// (PersonnelReflection.ApplySoldierState) but covered by NEITHER the six PS2 mutators above NOR the
+    /// membership/pool seams: without this mark a rename (host-local OR a host-applied RenameSoldierAction)
+    /// reached clients only on the next hourly bulk. Same doctrine as the six above (IsHost-gated, no
+    /// IsApplying skip); typed resolve mirrors RenameEditRelayPatch (exact-param-match canon).</summary>
+    [HarmonyPatch]
+    public static class GeoCharacterRenameStateDirtyPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter");
+            _target = t != null ? AccessTools.Method(t, "Rename", new[] { typeof(string) }) : null;
+            Debug.Log("[Multiplayer] PersonnelStatePatches: GeoCharacter.Rename "
+                      + (_target != null ? "bound" : "NOT FOUND — rename dirty seam disabled"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+        public static void Postfix(object __instance) => PersonnelStateDirty.Mark(__instance);
+    }
+
     /// <summary>Progression dirty seams (progression-intents feature): <c>CharacterProgression</c> has no
     /// back-reference to its owning GeoCharacter, so an ability learn (<c>AddAbility</c> — LearnAbility and
     /// the mutoid path both funnel through it, CharacterProgression.cs:152/173) or a stat spend

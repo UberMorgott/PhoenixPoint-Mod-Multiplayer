@@ -235,6 +235,96 @@ public class PersonnelSnapshotTests
         Assert.Equal(6, outSnap.States[0].UnitId);
     }
 
+    // ─── PS2 faction-SP trailing block (shared GeoPhoenixFaction.Skillpoints pool, value-only mirror) ────────
+
+    [Fact]
+    public void RoundTrip_FactionSkillpoints_PreservesValue()
+    {
+        var snap = new PersonnelSnapshot();
+        snap.Sites.Add(new PersonnelSiteRoster(3, new long[] { 7 }));
+        snap.States.Add(new PersonnelSoldierState(7, new byte[] { 1, 2 }));
+        snap.FactionSkillpoints = 137;
+
+        var outSnap = PersonnelSnapshot.Decode(PersonnelSnapshot.Encode(snap));
+
+        Assert.NotNull(outSnap);
+        Assert.True(outSnap.FactionSkillpoints.HasValue);
+        Assert.Equal(137, outSnap.FactionSkillpoints.Value);
+        // The membership + state blocks still round-trip intact alongside the tail.
+        Assert.Single(outSnap.Sites);
+        Assert.Single(outSnap.States);
+    }
+
+    [Fact]
+    public void RoundTrip_FactionSpOnlyFlush_NoSitesNoStates()
+    {
+        // A standalone pool change (hourly-bulk ship trigger, all soldier blobs culled): only the tail.
+        var snap = new PersonnelSnapshot { FactionSkillpoints = 0 };
+
+        var outSnap = PersonnelSnapshot.Decode(PersonnelSnapshot.Encode(snap));
+
+        Assert.NotNull(outSnap);
+        Assert.Empty(outSnap.Sites);
+        Assert.Empty(outSnap.States);
+        Assert.True(outSnap.FactionSkillpoints.HasValue);
+        Assert.Equal(0, outSnap.FactionSkillpoints.Value);
+    }
+
+    [Fact]
+    public void Encode_NoFactionSp_WritesNoTrailingTail_BackCompat()
+    {
+        // Not carried → byte-identical to the pre-tail format: a membership-only flush still ends with the
+        // [u16 stateCount=0] pair (the legacy pin), NO trailing faction byte. Old decoders keep working.
+        var snap = new PersonnelSnapshot();
+        snap.Sites.Add(new PersonnelSiteRoster(1, new long[] { 5 }));
+        byte[] wire = PersonnelSnapshot.Encode(snap);
+        Assert.Null(snap.FactionSkillpoints);
+        Assert.Equal(0, wire[wire.Length - 2]);   // stateCount hi
+        Assert.Equal(0, wire[wire.Length - 1]);   // stateCount lo — nothing appended after
+        Assert.Null(PersonnelSnapshot.Decode(wire).FactionSkillpoints);
+    }
+
+    [Fact]
+    public void Decode_LegacyPayloadWithoutTail_FactionSpIsNull()
+    {
+        // A pre-tail wire (membership + empty state block, no trailing byte) decodes with null pool —
+        // a newer decoder tolerates the tail's absence (forward/backward compatible).
+        byte[] wire;
+        using (var ms = new MemoryStream())
+        using (var w = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            w.Write((ushort)1);   // siteCount
+            w.Write(5);           // siteId
+            w.Write((ushort)1);   // nUnits
+            w.Write(42L);         // GeoUnitId
+            w.Write((ushort)0);   // stateCount = 0 (no trailing faction block)
+            wire = ms.ToArray();
+        }
+        var outSnap = PersonnelSnapshot.Decode(wire);
+        Assert.NotNull(outSnap);
+        Assert.Equal(new long[] { 42 }, outSnap.Sites[0].UnitIds);
+        Assert.Null(outSnap.FactionSkillpoints);
+    }
+
+    [Fact]
+    public void Decode_FactionTailUnknownFlagBit_IgnoredNotThrown()
+    {
+        // Forward-compat: a trailing block whose flag has ONLY an unknown (future) bit carries no known
+        // payload — decoder reads the flag byte and leaves FactionSkillpoints null, never throws.
+        byte[] wire;
+        using (var ms = new MemoryStream())
+        using (var w = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            w.Write((ushort)0);      // siteCount
+            w.Write((ushort)0);      // stateCount
+            w.Write((byte)0x02);     // faction tail flags: unknown bit1 only (bit0 not set)
+            wire = ms.ToArray();
+        }
+        var outSnap = PersonnelSnapshot.Decode(wire);
+        Assert.NotNull(outSnap);
+        Assert.Null(outSnap.FactionSkillpoints);
+    }
+
     // ─── RosterReconcile (value-only membership reconcile core) ─────────────────────────────────────────────
 
     private sealed class Soldier

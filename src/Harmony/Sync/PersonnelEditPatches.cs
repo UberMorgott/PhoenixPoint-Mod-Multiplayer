@@ -105,6 +105,16 @@ namespace Multiplayer.Harmony.Sync
     public static class SetItemsEditRelayPatch
     {
         private static MethodBase _target;
+
+        // Per-unit last-relayed-loadout content dedup: native UIStateEditSoldier.UpdateState re-flushes the
+        // OPEN soldier's whole loadout via SetItems EVERY FRAME (armed _uiRefreshNeeded), so without this an
+        // identical EquipSoldier intent would relay ~60×/s (the FPS-collapse storm, RCA 2026-07-08). A genuine
+        // edit changes the signature and relays immediately; an unchanged re-flush is suppressed with no send.
+        private static readonly LoadoutRelayDedup _dedup = new LoadoutRelayDedup();
+
+        /// <summary>Drop the per-unit loadout-dedup cache (new session). Wired from the SyncEngine ctor.</summary>
+        public static void ResetDedup() => _dedup.Reset();
+
         public static bool Prepare()
         {
             var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter");
@@ -127,6 +137,11 @@ namespace Multiplayer.Harmony.Sync
                                         : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_equipmentItems");
                 var inv = __2 != null ? PersonnelEditReflection.ReadItemGuids(__2).ToArray()
                                       : PersonnelEditReflection.ReadCurrentItemGuids(__instance, "_inventoryItems");
+                // Content-dedup at the SOURCE: an identical per-frame re-flush (same ordered loadout for this
+                // unit as the last relay) is suppressed WITHOUT SendActionRequest — the storm never leaves the
+                // client. A changed loadout falls through and relays this frame.
+                if (!_dedup.ShouldRelay(unitId, LoadoutRelayDedup.Signature(armour, equip, inv)))
+                    return false;
                 return PersonnelEditRelay.Relay(ActionCategory.Equip, unitId, true,
                     () => new EquipSoldierAction(unitId, armour, equip, inv));
             }

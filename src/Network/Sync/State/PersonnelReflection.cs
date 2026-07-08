@@ -293,6 +293,36 @@ namespace Multiplayer.Network.Sync.State
             return f;
         }
 
+        // ─── PS2 faction-SP tail: the shared GeoPhoenixFaction.Skillpoints pool (a raw public int field) ───
+
+        /// <summary>HOST: read the faction's shared skill-point pool (<c>GeoPhoenixFaction.Skillpoints</c>),
+        /// or null when the faction isn't live (mid-load) or the field can't be resolved.</summary>
+        public static int? ReadFactionSkillpoints(GeoRuntime rt)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return null;
+                var f = CachedField(fac.GetType(), "Skillpoints");
+                return f != null ? (int?)(int)f.GetValue(fac) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>CLIENT: value-only mirror of the shared faction SP pool onto the live
+        /// <c>GeoPhoenixFaction</c> — a plain field write (the pool has no native mutator), so it can never
+        /// re-enter a sim path. No-op when the faction isn't live / the field is unresolved.</summary>
+        public static void ApplyFactionSkillpoints(GeoRuntime rt, int value)
+        {
+            try
+            {
+                var fac = rt?.PhoenixFaction();
+                if (fac == null) return;
+                CachedField(fac.GetType(), "Skillpoints")?.SetValue(fac, value);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelReflection.ApplyFactionSkillpoints failed: " + ex.Message); }
+        }
+
         /// <summary>Reference/value copy of one serialized field decoded → existing. False = field missing
         /// (caller decides whether that is fatal; most are load-bearing).</summary>
         private static bool CopyField(Type t, string name, object decoded, object existing)

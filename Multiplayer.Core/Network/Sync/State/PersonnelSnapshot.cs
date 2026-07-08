@@ -85,8 +85,18 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>tailFlags bit0: record carries a whole-GeoCharacter Serializer blob (PS2).</summary>
         public const byte TailHasCharacterBlob = 0x01;
 
+        /// <summary>Faction-SP trailing-block flags bit0: block carries the shared
+        /// <c>GeoPhoenixFaction.Skillpoints</c> pool value.</summary>
+        public const byte FactionTailHasSkillpoints = 0x01;
+
         public readonly List<PersonnelSiteRoster> Sites = new List<PersonnelSiteRoster>();
         public readonly List<PersonnelSoldierState> States = new List<PersonnelSoldierState>();
+
+        /// <summary>Optional PS2 faction-SP tail: the shared <c>GeoPhoenixFaction.Skillpoints</c> pool
+        /// (value-only mirror). <c>null</c> = not carried this flush (or an older payload with no tail) —
+        /// the client leaves the pool untouched. Rides the #9 flush whenever the host value changed
+        /// (one writer, no new rail); see <c>PersonnelChannel</c>.</summary>
+        public int? FactionSkillpoints;
 
         public static byte[] Encode(PersonnelSnapshot snap)
         {
@@ -118,6 +128,14 @@ namespace Multiplayer.Network.Sync.State
                     w.Write(TailHasCharacterBlob);
                     w.Write(st.Blob.Length);
                     w.Write(st.Blob);
+                }
+                // Faction-SP TRAILING block (optional, LAST): written only when carried, so a payload without
+                // it is byte-identical to the pre-tail format. An older decoder ignores trailing bytes; a newer
+                // decoder tolerates its absence (the position<length guard in Decode) — back-compat both ways.
+                if (snap.FactionSkillpoints.HasValue)
+                {
+                    w.Write(FactionTailHasSkillpoints);
+                    w.Write(snap.FactionSkillpoints.Value);
                 }
                 return ms.ToArray();
             }
@@ -176,6 +194,15 @@ namespace Multiplayer.Network.Sync.State
                             if (rest.Length != skip)
                                 throw new EndOfStreamException("PersonnelSnapshot: truncated state record (wanted " + skip + " more, got " + rest.Length + ")");
                         }
+                    }
+                    // Optional faction-SP trailing block: present only in a newer payload that carried it.
+                    // Absent (older payload / not carried) → FactionSkillpoints stays null. We read only the
+                    // known bit0; any future higher bit / trailing bytes are tolerated (never a throw here).
+                    if (ms.Position < ms.Length)
+                    {
+                        byte facFlags = r.ReadByte();
+                        if ((facFlags & FactionTailHasSkillpoints) != 0)
+                            snap.FactionSkillpoints = r.ReadInt32();
                     }
                     return snap;
                 }
