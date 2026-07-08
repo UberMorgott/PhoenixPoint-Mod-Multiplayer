@@ -395,6 +395,18 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _isCharacterChanged;       // UIModuleCharacterProgression.IsCharacterChanged()
         private static FieldInfo _boughtAbilitySlotField;    // UIModuleCharacterProgression._boughtAbilitySlot
         private static MethodInfo _setCharacterProgression;  // UIModuleCharacterProgression.SetCharacterProgression(GeoFaction,char)
+        // Wave-2 R3 stat-buffer replay: the module's session edit-buffer fields (current vs starting per stat)
+        // + its own private per-point increment handlers ChangeStrength/Will/SpeedStat(bool increase) —
+        // decompile :848-905: native cap gate, cost re-derivation, personal→faction pool split, panel repaint.
+        private static FieldInfo _curStrField, _startStrField;     // _currentStrengthStat / _startingStrengthStat
+        private static FieldInfo _curWillField, _startWillField;   // _currentWillStat / _startingWillStat
+        private static FieldInfo _curSpeedField, _startSpeedField; // _currentSpeedStat / _startingSpeedStat
+        private static MethodInfo _changeStrengthStat;       // UIModuleCharacterProgression.ChangeStrengthStat(bool)
+        private static MethodInfo _changeWillStat;           // UIModuleCharacterProgression.ChangeWillStat(bool)
+        private static MethodInfo _changeSpeedStat;          // UIModuleCharacterProgression.ChangeSpeedStat(bool)
+        // One-shot-per-frame guard for the stat-buffer replay (review 2026-07-08 option 1): a second
+        // invocation in the SAME frame (multi-channel apply + Tick drain) skips the redundant reset+replay.
+        private static int _lastStatReplayFrame = -1;
         private static PropertyInfo _viewerFactionProp;      // GeoLevelController.ViewerFaction
         private static FieldInfo _actorCycleModuleField;     // GeoscapeModulesData.ActorCycleModule
         private static MethodInfo _refreshSoldierInfo;       // UIModuleActorCycle.RefreshSoldierInfo()
@@ -464,6 +476,16 @@ namespace Multiplayer.Network.Sync.State
                     _isCharacterChanged = AccessTools.Method(progType, "IsCharacterChanged");
                     _boughtAbilitySlotField = AccessTools.Field(progType, "_boughtAbilitySlot");
                     _setCharacterProgression = AccessTools.Method(progType, "SetCharacterProgression");
+                    // R3 stat-buffer replay handles (best-effort; a miss falls back to the skip path).
+                    _curStrField = AccessTools.Field(progType, "_currentStrengthStat");
+                    _startStrField = AccessTools.Field(progType, "_startingStrengthStat");
+                    _curWillField = AccessTools.Field(progType, "_currentWillStat");
+                    _startWillField = AccessTools.Field(progType, "_startingWillStat");
+                    _curSpeedField = AccessTools.Field(progType, "_currentSpeedStat");
+                    _startSpeedField = AccessTools.Field(progType, "_startingSpeedStat");
+                    _changeStrengthStat = AccessTools.Method(progType, "ChangeStrengthStat");
+                    _changeWillStat = AccessTools.Method(progType, "ChangeWillStat");
+                    _changeSpeedStat = AccessTools.Method(progType, "ChangeSpeedStat");
                 }
                 var geoType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
                 if (geoType != null) _viewerFactionProp = AccessTools.Property(geoType, "ViewerFaction");
@@ -539,34 +561,40 @@ namespace Multiplayer.Network.Sync.State
             if (view == null) return;
             // Gate: active view state MUST be the soldier-equip screen (SoldierEquipModule is shared with
             // UIStateEditVehicle — repainting soldier lists onto an open vehicle screen would corrupt it).
+            // Do NOT clear _pendingEquipRepaint here: it is shared with the vehicle screen; the Tick drain
+            // clears it (a drain with neither screen current no-ops through these gates and terminates).
             var state = _currentViewStateProp?.GetValue(view, null);
-            if (state == null || !_editSoldierType.IsInstanceOfType(state)) { _pendingEquipRepaint = false; return; }
+            if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;
             var modules = _modulesField.GetValue(view);
             if (modules == null) return;
             var character = _editSoldierCharField.GetValue(state);
 
-            // (A) equip + shared-storage lists. SKIP if the viewer has an unflushed local equipment drag
-            // (_uiRefreshNeeded, UIStateEditSoldier.cs:50 — set on a local slot change until the next UpdateState
-            // flush); re-reading the model here would clobber it. Skip-if-editing (never-silent) beats clobber.
+            // (A) equip + shared-storage lists. DEFER past an in-progress local equipment edit; never drop.
             var module = _soldierEquipModuleField.GetValue(modules);
             if (module != null && IsOpen(module) && character != null)
             {
-                // DEFER (never clobber, never lose) a re-read that would fight an in-progress equipment edit:
-                //   • HOST: its own uncommitted drag, keyed by _uiRefreshNeeded (host is the authority — a mid-
-                //     drag re-read would clobber the host player's uncommitted equipment write).
-                //   • EITHER peer: a LIVE native drag (UIInventoryItemDragIcon.IsBeingDragged) — the precise
-                //     "holding an item right now" signal. On a client the equip screen is otherwise a pure
-                //     mirror (its SetItems is suppressed + relayed, no local write), so _uiRefreshNeeded is the
-                //     WRONG guard there (screen-open sets it too, which ate every mirrored repaint) — but an
-                //     active drag IS a real edit to protect. When we defer, re-arm _pendingEquipRepaint so the
-                //     Tick belt fires the repaint the instant the drag ends (reactivity mandate: defer, never drop).
-                bool hostEditing = IsHostEditingGuardActive() && (_editSoldierRefreshNeededField?.GetValue(state) is bool re && re);
+                // DEFER (never clobber, never lose) a re-read that would fight an in-progress equipment edit,
+                // on EITHER peer (wave-2 R1 — the client drop→flush gap):
+                //   • _uiRefreshNeeded = an armed-but-unflushed local change (set by the slot-drop handler,
+                //     UIStateEditSoldier.cs:538, swap/stat :486, confirm :718, screen-open :583). Repainting
+                //     inside this window rebuilds the doll from the model BEFORE UpdateState (:459-470) flushes
+                //     the UI lists → the edit is visually reverted AND the flush becomes model-equal, so the
+                //     relay never fires (the client "drags revert + never relay" RCA). NON-LATCHING by
+                //     construction: UpdateState CONSUMES the flag every frame while the screen is current
+                //     (:459-461), and neither our repaint (UIInventoryList.SetItems fires no slot events) nor
+                //     RefreshStorage (:587-597) re-arms it — only user actions and DisplaySoldier do. Worst
+                //     case = a one-frame deferral (screen-open arm), drained by the next Tick.
+                //   • a LIVE native drag (UIInventoryItemDragIcon.IsBeingDragged) — the "holding an item right
+                //     now" signal that spans frames before the drop even arms _uiRefreshNeeded.
+                // Deferring arms _pendingEquipRepaint; the Tick belt fires the repaint once the window closes.
+                bool editing = _editSoldierRefreshNeededField?.GetValue(state) is bool re && re;
                 bool dragging = IsEquipItemDragActive(module);
-                if (hostEditing || dragging)
+                if (editing || dragging)
                 {
+                    if (!_pendingEquipRepaint)   // transition-only log (the drain probes silently while armed)
+                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive DEFERRED — active equipment "
+                                  + (dragging ? "drag" : "edit") + " in progress (pending repaint armed)");
                     _pendingEquipRepaint = true;
-                    Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive DEFERRED — active equipment "
-                              + (dragging ? "drag" : "edit") + " in progress (pending repaint armed)");
                 }
                 else
                 {
@@ -585,9 +613,28 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
 
-            // (B) progression panel (stats / SP / abilities) — same #9 blob. SKIP when the viewer has an
-            // in-progress unconfirmed allocation (IsCharacterChanged = stat delta; _boughtAbilitySlot = pending
-            // ability buy): SetCharacterProgression re-reads the model and RESETS the edit buffer. Never-silent.
+            // (B) progression panel (stats / SP / abilities) — same #9 blob. Wave-2 R3 NARROWED skip: the old
+            // blanket skip-while-any-pending-allocation meant two peers editing the SAME soldier never saw each
+            // other's committed changes (a stat buffer persists until screen exit). Now:
+            //   • pending ABILITY pick (_boughtAbilitySlot != null) → still skip (a seconds-long confirm-popup
+            //     window; SetCharacterProgression closes the popup + drops the pick, unrecoverable).
+            //   • pending STAT delta → CAPTURE the uncommitted deltas, repaint authoritatively
+            //     (SetCharacterProgression resets the buffer from the model), then REPLAY each delta point via
+            //     the module's own native increment (ChangeStrength/Will/SpeedStat — the bool arg selects the
+            //     INCREASE branch :877-905: CanModifyBaseStat cap, GetBaseStatCost re-derivation,
+            //     personal→faction pool split :892-903, panel + track repaint; false = the refund branch :907).
+            //     A point the fresh authoritative state can no longer afford/allow is dropped by the native
+            //     gate itself — converged, never over-allocated.
+            // TERMINATION (review 2026-07-08): after a replay the buffer delta is non-zero again
+            // (IsCharacterChanged :358-365 true) — DELIBERATE: the pending local edit survives until commit/
+            // screen-exit. It cannot oscillate: each invocation is IDEMPOTENT (capture d → reset to
+            // authoritative → replay ≤d — the delta never grows), the replay emits NO wire traffic (buffer
+            // fields + labels only; CommitStatChanges is the sole relay chokepoint), and its event chain
+            // (StatChanged → RequestRefreshCharacterData :484-488) only ARMS _uiRefreshNeeded — consumed by
+            // next-frame UpdateState (:459-461) into a SetItems flush whose equip lists the replay never
+            // touched → model-identical suppress (client) / blob-hash skip (host). A re-replay therefore
+            // needs a NEW external invocation (inbound apply / Tick drain); the one-shot-per-frame guard
+            // below additionally bounds it to ≤1 rebaseline+replay per rendered frame.
             if (_progModuleField != null && _isCharacterChanged != null && _setCharacterProgression != null
                 && _viewerFactionProp != null && character != null)
             {
@@ -596,12 +643,37 @@ namespace Multiplayer.Network.Sync.State
                 {
                     bool pendingStat = _isCharacterChanged.Invoke(progModule, null) is bool pc && pc;
                     bool pendingAbility = _boughtAbilitySlotField != null && _boughtAbilitySlotField.GetValue(progModule) != null;
-                    if (pendingStat || pendingAbility)
-                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local stat/ability allocation");
+                    bool canReplay = _changeStrengthStat != null && _changeWillStat != null && _changeSpeedStat != null
+                                     && _curStrField != null && _startStrField != null && _curWillField != null
+                                     && _startWillField != null && _curSpeedField != null && _startSpeedField != null;
+                    if (pendingAbility || (pendingStat && !canReplay))
+                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local "
+                                  + (pendingAbility ? "ability pick" : "stat allocation (replay handles unresolved)"));
+                    else if (pendingStat && _lastStatReplayFrame == Time.frameCount)
+                    {
+                        // Already rebaselined+replayed THIS frame (second channel/action apply or the Tick
+                        // drain landing in the same frame) — the panel is current; skip the redundant pass.
+                    }
                     else
                     {
+                        int dStr = pendingStat ? BufferDelta(progModule, _curStrField, _startStrField) : 0;
+                        int dWill = pendingStat ? BufferDelta(progModule, _curWillField, _startWillField) : 0;
+                        int dSpeed = pendingStat ? BufferDelta(progModule, _curSpeedField, _startSpeedField) : 0;
                         object viewerFaction = _viewerFactionProp.GetValue(geo, null);
-                        if (viewerFaction != null) _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                        if (viewerFaction != null)
+                        {
+                            _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                            if (dStr + dWill + dSpeed > 0)
+                            {
+                                _lastStatReplayFrame = Time.frameCount;   // one-shot per frame (review option 1)
+                                int replayed = ReplayStatDelta(progModule, _changeStrengthStat, dStr)
+                                             + ReplayStatDelta(progModule, _changeWillStat, dWill)
+                                             + ReplayStatDelta(progModule, _changeSpeedStat, dSpeed);
+                                Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression repainted with local stat "
+                                          + "allocation replayed on top (+" + replayed + " of +" + (dStr + dWill + dSpeed)
+                                          + " points re-applied; shortfall = authoritative cap/pool)");
+                            }
+                        }
                     }
                 }
             }
@@ -690,15 +762,19 @@ namespace Multiplayer.Network.Sync.State
             var character = _editVehicleCharField.GetValue(state);
             if (character == null) return;
 
-            // SKIP only for the HOST's own unflushed local equipment drag (_uiRefreshNeeded, set until the next
-            // UpdateState flush) — re-reading the model would clobber the host's in-progress drag. A client is a
-            // pure mirror (its vehicle SetItems is suppressed + relayed), so it must ALWAYS repaint the
-            // authoritative #9/#1 apply — same host-only gate as the soldier-equip path above.
-            if (IsHostEditingGuardActive() && _editVehicleRefreshNeededField?.GetValue(state) is bool re && re)
+            // DEFER past an in-progress local equipment edit on EITHER peer (wave-2 R1 — identical mechanics to
+            // the soldier path: UIStateEditVehicle._uiRefreshNeeded is armed by its slot-drop handler (:200-202)
+            // / DisplayVehicle (:347) and CONSUMED by its UpdateState every frame (:360-362) — same non-latching
+            // proof). Arms the shared pending flag; the Tick belt repaints once the window closes.
+            bool vehEditing = _editVehicleRefreshNeededField?.GetValue(state) is bool re && re;
+            if (vehEditing || IsEquipItemDragActive(module))
             {
-                Debug.Log("[Multiplayer] GeoUiRefresh: EditVehicle equip re-drive SKIPPED — host has an unflushed local equipment edit");
+                if (!_pendingEquipRepaint)
+                    Debug.Log("[Multiplayer] GeoUiRefresh: EditVehicle equip re-drive DEFERRED — active equipment edit in progress (pending repaint armed)");
+                _pendingEquipRepaint = true;
                 return;
             }
+            _pendingEquipRepaint = false;   // repaint delivered below — nothing left deferred
 
             object inv = _charInventoryItemsProp.GetValue(character, null);
             object weapon = FilterVehicleEquip(character, _gveWeapon);
@@ -806,18 +882,6 @@ namespace Multiplayer.Network.Sync.State
             return comp != null && comp.gameObject != null && comp.gameObject.activeInHierarchy;
         }
 
-        /// <summary>The equip/vehicle "skip-if-locally-editing" guards apply ONLY to the HOST: the host is the
-        /// authority and a mid-drag re-read would clobber the host player's own uncommitted equipment drag. A
-        /// CLIENT's geoscape equip edit is suppressed + relayed as an intent (never a local model write), so its
-        /// open equip screen is a pure display mirror that must ALWAYS repaint from the authoritative #9/#1 apply —
-        /// never gated by _uiRefreshNeeded (also set by screen-open/refresh, not just a real drag). No active MP
-        /// session (single-player) → the mirror re-drive path never reaches these guards, so the value is moot.</summary>
-        private static bool IsHostEditingGuardActive()
-        {
-            var eng = NetworkEngine.Instance;
-            return eng != null && eng.IsActiveSession && eng.IsHost;
-        }
-
         /// <summary>True while the player is actively DRAGGING an item in the soldier-equip screen (native
         /// <c>UIInventoryItemDragIcon.IsBeingDragged</c> on the module's <c>ItemDragIcon</c>). Best-effort:
         /// any resolve miss returns false (guard disabled, mirror repaints normally).</summary>
@@ -833,15 +897,79 @@ namespace Multiplayer.Network.Sync.State
             catch { return false; }
         }
 
-        /// <summary>Drain a deferred equip repaint armed when <see cref="RefreshRosterEquip"/> skipped its
-        /// equip/storage re-read to protect an active equipment drag (fix #2). Called every SyncEngine.Tick;
-        /// a fast no-op until one is pending. Re-drives RefreshRosterEquip, which repaints the instant the drag
-        /// ends (clearing the flag) or keeps deferring while it continues — never lose the repaint, only defer
-        /// past the drag. Leaving the EditSoldier screen also clears the flag (RefreshRosterEquip state gate).</summary>
+        /// <summary>The uncommitted-stat delta held in the progression module's session buffer (current −
+        /// starting for one stat), clamped non-negative (a decrease below starting is impossible natively).</summary>
+        private static int BufferDelta(object progModule, FieldInfo cur, FieldInfo start)
+        {
+            try
+            {
+                return cur.GetValue(progModule) is int c && start.GetValue(progModule) is int s && c > s ? c - s : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>Re-apply <paramref name="delta"/> uncommitted stat points on top of a freshly repainted
+        /// authoritative baseline by invoking the module's OWN per-point increment handler
+        /// (ChangeStrength/Will/SpeedStat(true)) — native cap + cost + pool bookkeeping decide each point;
+        /// an unaffordable point no-ops (returns early), so the loop just stops adding. Returns points
+        /// actually re-applied. Best-effort: an invoke failure stops the replay, never throws out.</summary>
+        private static int ReplayStatDelta(object progModule, MethodInfo changeStat, int delta)
+        {
+            int applied = 0;
+            try
+            {
+                for (int i = 0; i < delta && i < 100; i++)   // 100 = sanity cap (native maxima ~35)
+                {
+                    changeStat.Invoke(progModule, new object[] { true });
+                    applied++;
+                }
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.ReplayStatDelta stopped: " + ex.Message); }
+            return applied;
+        }
+
+        /// <summary>TRUE while an equip-edit window is open on the CURRENT equip-family screen (soldier or
+        /// vehicle): an armed-but-unflushed <c>_uiRefreshNeeded</c> or a live item drag. The Tick drain probes
+        /// this CHEAPLY (no UpdateData, no logging) so a still-open window never re-drives the refresh path —
+        /// the wave-2 bonus fix for the self-sustaining drain loop. Any resolve miss → false (window closed).</summary>
+        private static bool IsEquipEditWindowActive(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureRosterFamily();
+                if (_viewField == null || _currentViewStateProp == null || _soldierEquipModuleField == null) return false;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return false;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return false;
+                var state = _currentViewStateProp.GetValue(view, null);
+                FieldInfo refreshField = null;
+                if (state != null && _editSoldierType != null && _editSoldierType.IsInstanceOfType(state))
+                    refreshField = _editSoldierRefreshNeededField;
+                else if (state != null && _editVehicleType != null && _editVehicleType.IsInstanceOfType(state))
+                    refreshField = _editVehicleRefreshNeededField;
+                else return false;   // neither equip screen is current → window closed
+                if (refreshField?.GetValue(state) is bool re && re) return true;
+                var modules = _modulesField?.GetValue(view);
+                var module = modules != null ? _soldierEquipModuleField.GetValue(modules) : null;
+                return IsEquipItemDragActive(module);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Drain a deferred equip repaint armed when the soldier/vehicle equip re-drive deferred past
+        /// an in-progress local edit. Called every SyncEngine.Tick; a fast no-op until one is pending.
+        /// TERMINATION (wave-2 bonus): while the edit window is still open this only PROBES (no refresh call,
+        /// no log, no re-arm churn); once it closes the flag is cleared FIRST and the repaint fires ONCE —
+        /// it can only re-arm if a genuinely NEW edit window opened. Both refreshes are state-gated, so with
+        /// neither screen current they no-op and the pending flag stays consumed (never lost, never spinning).</summary>
         public static void FlushPendingEquipRepaint(GeoRuntime rt)
         {
             if (!_pendingEquipRepaint) return;
+            if (IsEquipEditWindowActive(rt)) return;   // window still open → keep pending, silently
+            _pendingEquipRepaint = false;              // consume BEFORE repainting (fire once)
             Refresh(rt, Screen.RosterEquip);
+            Refresh(rt, Screen.VehicleEquip);
         }
 
         /// <summary>Drop any deferred equip repaint (new session): the flag is static, so a drag-skip armed
