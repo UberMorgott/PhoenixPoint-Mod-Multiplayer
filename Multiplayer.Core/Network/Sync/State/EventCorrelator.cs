@@ -44,6 +44,8 @@ namespace Multiplayer.Network.Sync.State
             Ignore,
             /// <summary>Raise that arrived while another dialog is already shown on the single-slot client → DEFER it (occId-ordered); it is shown when the current dialog is dismissed.</summary>
             Enqueue,
+            /// <summary>Replay mode (<c>EventReplayModeGate</c> ON): the decided signal arrived for an OPEN choice window this peer did NOT win → keep the window open, grey non-winning buttons + highlight the winner (<c>ChoiceIndex</c>), and wait for the local click. NOT a forced transition; the window is still live.</summary>
+            ArmReplay,
         }
 
         /// <summary>The decided action plus the fields the caller needs to execute it.</summary>
@@ -137,6 +139,23 @@ namespace Multiplayer.Network.Sync.State
         private readonly HashSet<ushort> _pendingAdvance = new HashSet<ushort>();
         private readonly Queue<ushort> _pendingAdvanceOrder = new Queue<ushort>();
 
+        // ── Replay mode (EventReplayModeGate ON) — only the OPEN-window branch of Dismissed uses these ──
+        /// <summary>Max DECIDED occurrences tracked (occId → winning choice index) for replay-mode dedup + local
+        /// click resolution; oldest evicted past this so the map can't leak. Cap ≥128 (was the 32/64 belts).</summary>
+        public const int MaxDecidedTracked = 128;
+        // occId → the authoritative WINNING choice index, recorded when the decided signal arrives for an OPEN
+        // window this peer did NOT win (ArmReplay). Consumed by ReplayLocalClick when the player clicks the
+        // highlighted winner; dropped on any terminal resolution of the occurrence and on Reset. Bounded FIFO.
+        private readonly Dictionary<ushort, int> _decided = new Dictionary<ushort, int>();
+        private readonly Queue<ushort> _decidedOrder = new Queue<ushort>();
+        /// <summary>Max locally-picked multi-choice indices tracked (occId → this peer's clicked index), for the
+        /// winner-vs-race-loser split at Dismissed time; oldest evicted past this so it can't leak.</summary>
+        public const int MaxPickedTracked = 32;
+        // occId → the multi-choice index THIS peer clicked (winner detection: picked == decided winning index →
+        // auto in-place transition; else replay-arm). Bounded FIFO; dropped on the occurrence's terminal resolve.
+        private readonly Dictionary<ushort, int> _pickedChoice = new Dictionary<ushort, int>();
+        private readonly Queue<ushort> _pickedOrder = new Queue<ushort>();
+
         /// <summary>Currently-open dialog count (diagnostics/tests).</summary>
         public int OpenCount => _open.Count;
         /// <summary>Plain raises deferred behind the currently-shown dialog, awaiting its dismiss (diagnostics/tests).</summary>
@@ -153,6 +172,8 @@ namespace Multiplayer.Network.Sync.State
         public bool ShownSlotFree => _shownSlot == 0;
         /// <summary>Buffered advances that beat their raise (diagnostics/tests).</summary>
         public int PendingAdvanceCount => _pendingAdvance.Count;
+        /// <summary>Decided-and-replay-armed occurrences awaiting a local winner click (diagnostics/tests).</summary>
+        public int DecidedCount => _decided.Count;
 
         /// <summary>Forget all open/pending state (call on session teardown so it never carries across sessions).</summary>
         public void Reset()
@@ -165,6 +186,10 @@ namespace Multiplayer.Network.Sync.State
             _locallyAnsweredOrder.Clear();
             _pendingAdvance.Clear();
             _pendingAdvanceOrder.Clear();
+            _decided.Clear();
+            _decidedOrder.Clear();
+            _pickedChoice.Clear();
+            _pickedOrder.Clear();
             _shownSlot = 0;
             _queue.Clear();
             _completed.Clear();
@@ -333,20 +358,31 @@ namespace Multiplayer.Network.Sync.State
         /// place (result page or close-only). If the raise hasn't arrived yet, BUFFER the dismiss (FIFO-bounded)
         /// so the upcoming raise resolves straight to the result page.
         /// </summary>
-        public Decision Dismissed(ushort occurrenceId, string eventId, int choiceIndex)
+        public Decision Dismissed(ushort occurrenceId, string eventId, int choiceIndex, bool replayMode = false)
         {
             // DEDUP (transport double-send): a dismiss for an occurrence already terminally resolved is an idempotent
             // no-op — it must NOT re-buffer as a phantom out-of-order dismiss that a later duplicate raise resolves.
             if (_completed.Contains(occurrenceId))
                 return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
 
+            // REPLAY DEDUP: a duplicate decided signal for an occurrence already replay-armed (its window is still
+            // OPEN awaiting the local winner click) is an idempotent no-op — never re-arm / re-record. This class is
+            // BCL-only (no Unity logging); the Unity caller (SyncEngine.OnEventDismiss, Ignore case) logs the drop
+            // with occId + the replay-armed reason (via TryGetDecided) so late/duplicate decided signals stay
+            // diagnosable in field logs.
+            if (replayMode && _decided.ContainsKey(occurrenceId))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
+
             // Dismiss of an occurrence still DEFERRED in the queue (its raise arrived but the single slot was busy, so
             // its prompt was never shown). The host already applied the answer → drop it from the queue and resolve it
             // terminally: a picked choice still surfaces its result page (so the player sees the outcome); a close-only
             // one has nothing to show. Never leave it in the queue (it would later pop as an orphan dialog).
+            // (Legacy under replayMode too: the window was never SHOWN on this peer, so there is nothing to re-arm —
+            // replay applies only to an actually-open window, the _open branch below.)
             if (_queue.Remove(occurrenceId))
             {
                 MarkCompleted(occurrenceId);
+                _pickedChoice.Remove(occurrenceId);
                 if (choiceIndex >= 0)
                     return new Decision(ActionKind.ShowResultInPlace, occurrenceId, eventId, choiceIndex);
                 return new Decision(ActionKind.CloseDialog, occurrenceId, eventId, choiceIndex);
@@ -354,9 +390,26 @@ namespace Multiplayer.Network.Sync.State
 
             if (_open.ContainsKey(occurrenceId))
             {
+                // REPLAY MODE (gate ON): the window is OPEN on this peer and this is a result-bearing decided signal
+                // (choiceIndex >= 0). If THIS peer did not win the occurrence (its locally-picked choice != the decided
+                // winning index, or it never clicked), do NOT force the result page — keep the window OPEN, record the
+                // winning index, and let the caller grey the non-winning buttons + highlight the winner. The local
+                // click then resolves to the result page (ReplayLocalClick). The winner (picked == winning) falls
+                // through to the legacy auto in-place transition below.
+                if (replayMode && choiceIndex >= 0
+                    && !(_pickedChoice.TryGetValue(occurrenceId, out var picked) && picked == choiceIndex))
+                {
+                    RecordDecided(occurrenceId, choiceIndex);
+                    // Window stays live: _open / _shownSlot / _pickedChoice are intentionally left intact and the
+                    // occurrence is NOT marked completed (it resolves terminally only on the local winner click).
+                    return new Decision(ActionKind.ArmReplay, occurrenceId, eventId, choiceIndex);
+                }
+
                 _open.Remove(occurrenceId);
                 _promptMirror.Remove(occurrenceId);   // a real dismiss closes a mirrored prompt too (keep the set clean)
                 _locallyAnswered.Remove(occurrenceId);   // and drops any belt mark (the dismiss resolves it in place)
+                _pickedChoice.Remove(occurrenceId);
+                _decided.Remove(occurrenceId);   // belt: a real dismiss supersedes any prior replay arm for it
                 if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
                 MarkCompleted(occurrenceId);
                 if (choiceIndex >= 0)
@@ -405,6 +458,8 @@ namespace Multiplayer.Network.Sync.State
             _open.Remove(occurrenceId);
             _promptMirror.Remove(occurrenceId);
             _locallyAnswered.Remove(occurrenceId);
+            RemoveDecided(occurrenceId);
+            _pickedChoice.Remove(occurrenceId);
             if (_shownSlot == occurrenceId) _shownSlot = 0;
             MarkCompleted(occurrenceId);
         }
@@ -424,6 +479,78 @@ namespace Multiplayer.Network.Sync.State
                 _locallyAnsweredOrder.Enqueue(occurrenceId);
                 while (_locallyAnsweredOrder.Count > MaxLocallyAnswered)
                     _locallyAnswered.Remove(_locallyAnsweredOrder.Dequeue());
+            }
+        }
+
+        /// <summary>
+        /// REPLAY MODE: record THIS peer's locally-clicked MULTI-choice index for <paramref name="occurrenceId"/>
+        /// (its answer relay is in flight). At <see cref="Dismissed"/> time this distinguishes the WINNER (picked ==
+        /// the decided winning index → auto in-place transition) from a race-loser / non-winner (→ replay-arm).
+        /// Idempotent, bounded FIFO; only meaningful when <c>EventReplayModeGate</c> is ON. No effect on any legacy
+        /// (dedup / ordering / single-choice) path — purely additive.
+        /// </summary>
+        public void MarkPickedChoice(ushort occurrenceId, int choiceIndex)
+        {
+            if (occurrenceId == 0) return;
+            if (!_pickedChoice.ContainsKey(occurrenceId))
+            {
+                _pickedOrder.Enqueue(occurrenceId);
+                while (_pickedOrder.Count > MaxPickedTracked)
+                    _pickedChoice.Remove(_pickedOrder.Dequeue());
+            }
+            _pickedChoice[occurrenceId] = choiceIndex;
+        }
+
+        /// <summary>REPLAY MODE: true iff <paramref name="occurrenceId"/> is decided-and-replay-armed (its window is
+        /// still open awaiting the local winner click); <paramref name="winningChoiceIndex"/> = the winning index.</summary>
+        public bool TryGetDecided(ushort occurrenceId, out int winningChoiceIndex)
+            => _decided.TryGetValue(occurrenceId, out winningChoiceIndex);
+
+        /// <summary>
+        /// REPLAY MODE: the local player clicked the highlighted WINNER button on a replay-armed window for
+        /// <paramref name="occurrenceId"/> → resolve it terminally to the authoritative result page. Drops the
+        /// occurrence from all live/replay tracking, frees the single slot, and marks it completed (dedup). Returns
+        /// <see cref="ActionKind.ShowResultPage"/> with the winning index; a no-op <see cref="ActionKind.Ignore"/>
+        /// when the occurrence was not (or no longer) replay-armed (already resolved / superseded).
+        /// </summary>
+        public Decision ReplayLocalClick(ushort occurrenceId, string eventId)
+        {
+            if (!_decided.TryGetValue(occurrenceId, out var winningChoiceIndex))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, -1);
+            RemoveDecided(occurrenceId);
+            _open.Remove(occurrenceId);
+            _promptMirror.Remove(occurrenceId);
+            _locallyAnswered.Remove(occurrenceId);
+            _pickedChoice.Remove(occurrenceId);
+            if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → the next deferred raise can release
+            MarkCompleted(occurrenceId);
+            return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId, winningChoiceIndex);
+        }
+
+        // Record occId → winning choice index for a replay-armed occurrence. Hard-bounded FIFO so it can never leak.
+        private void RecordDecided(ushort occurrenceId, int winningChoiceIndex)
+        {
+            if (!_decided.ContainsKey(occurrenceId))
+            {
+                _decidedOrder.Enqueue(occurrenceId);
+                while (_decidedOrder.Count > MaxDecidedTracked)
+                    _decided.Remove(_decidedOrder.Dequeue());
+            }
+            _decided[occurrenceId] = winningChoiceIndex;
+        }
+
+        // Drop a decided/replay-armed occurrence and prune its FIFO token (mirrors RemovePending).
+        private void RemoveDecided(ushort occurrenceId)
+        {
+            if (!_decided.Remove(occurrenceId)) return;
+            if (_decidedOrder.Count > 0)
+            {
+                int n = _decidedOrder.Count;
+                for (int i = 0; i < n; i++)
+                {
+                    var id = _decidedOrder.Dequeue();
+                    if (id != occurrenceId) _decidedOrder.Enqueue(id);
+                }
             }
         }
 

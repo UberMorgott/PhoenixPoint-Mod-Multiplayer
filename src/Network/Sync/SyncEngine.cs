@@ -328,7 +328,17 @@ namespace Multiplayer.Network.Sync
             {
                 try
                 {
-                    if (!EventReflection.TryHostNativeResolve(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
+                    // Replay mode (symmetric to the client): if the host is showing THIS occurrence's own CHOICE page,
+                    // arm replay on it — apply the outcome model-only (broadcasts the dismiss) + grey non-winners +
+                    // highlight the winner — instead of force-transitioning the host to the result page. The host
+                    // player clicks the highlighted winner → native SetClosingEncounter(winner) → consistent page.
+                    // Falls back to the native drive (or model-only Apply) when the host isn't on that choice page.
+                    if (EventReplayModeGate.Enabled
+                        && EventReflection.TryHostArmReplay(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
+                    {
+                        // applied model-only + armed the host's live window (no forced transition).
+                    }
+                    else if (!EventReflection.TryHostNativeResolve(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
                         action.Apply(rt);   // fallback: model-only reflected resolve (IResolvesOutsideScope → no scope)
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnActionRequest answer resolve failed: " + ex.Message); }
@@ -822,6 +832,52 @@ namespace Multiplayer.Network.Sync
         }
         private readonly Dictionary<ushort, QueuedRaise> _queuedRaises = new Dictionary<ushort, QueuedRaise>();
 
+        // ─── Replay-mode decided-occurrence stash (EventReplayModeGate, keyed by occurrence id) ──────────────
+        // When the decided signal arrives for an OPEN choice window this peer did NOT win, the correlator returns
+        // ArmReplay (window kept open). The result payload (winning index + reward + wire texts + site) is RETAINED
+        // here until the local player clicks the highlighted winner button (TryReplayDecidedClick → ResolveToResult
+        // Page). Bounded by the correlator's own decided cap; cleared on replay click / reload boundary.
+        private readonly struct DecidedReplay
+        {
+            public readonly string EventId;
+            public readonly int WinningIndex;
+            public readonly RewardDisplaySnapshot Reward;
+            public readonly string WireOutcome;
+            public readonly string WireNarrative;
+            public readonly int SiteId;
+            public DecidedReplay(string eventId, int winningIndex, RewardDisplaySnapshot reward, string wireOutcome, string wireNarrative, int siteId)
+            { EventId = eventId; WinningIndex = winningIndex; Reward = reward; WireOutcome = wireOutcome; WireNarrative = wireNarrative; SiteId = siteId; }
+        }
+        private readonly Dictionary<ushort, DecidedReplay> _decidedReplay = new Dictionary<ushort, DecidedReplay>();
+        // FIFO tokens for the bounded eviction below — the stash mirrors the correlator's decided cap so the two can
+        // never drift apart unboundedly (an orphaned payload / dead armed window). Stale tokens pruned on removal.
+        private readonly Queue<ushort> _decidedReplayOrder = new Queue<ushort>();
+
+        // Insert (or refresh) a decided-replay payload, hard-bounded to the SAME cap as the correlator's decided
+        // registry (EventCorrelator.MaxDecidedTracked): past the cap the OLDEST stash entry is evicted, matching the
+        // correlator's own FIFO eviction (both insert at ArmReplay and remove at replay-click / terminal dismiss /
+        // reset, so they stay in lockstep). If they ever DO drift (evicted correlator entry, retained payload), the
+        // click path degrades to the legacy jump-to-result — never a dead button (see TryReplayDecidedClick).
+        private void StashDecidedReplay(ushort occId, DecidedReplay payload)
+        {
+            if (!_decidedReplay.ContainsKey(occId)) _decidedReplayOrder.Enqueue(occId);
+            _decidedReplay[occId] = payload;
+            while (_decidedReplay.Count > State.EventCorrelator.MaxDecidedTracked && _decidedReplayOrder.Count > 0)
+                _decidedReplay.Remove(_decidedReplayOrder.Dequeue());   // a stale token no-ops; the loop re-checks the cap
+        }
+
+        // Drop a decided-replay payload + prune its FIFO token (mirrors the correlator's RemoveDecided rotation).
+        private void RemoveDecidedReplay(ushort occId)
+        {
+            if (!_decidedReplay.Remove(occId)) return;
+            int n = _decidedReplayOrder.Count;
+            for (int i = 0; i < n; i++)
+            {
+                var id = _decidedReplayOrder.Dequeue();
+                if (id != occId) _decidedReplayOrder.Enqueue(id);
+            }
+        }
+
         /// <summary>
         /// Save-load / co-op save-transfer boundary reset for the CLIENT event-mirror — the sibling of the host-side
         /// <see cref="Arbiter"/>.Reset() (both are driven from <c>SaveTransferCoordinator.PrepareEntryFromBlobCrt</c>).
@@ -841,6 +897,8 @@ namespace Multiplayer.Network.Sync
             _eventCorrelator.Reset();
             _queuedRaises.Clear();
             _bufferedRewards.Clear();
+            _decidedReplay.Clear();   // replay-mode: a stale decided arm must never survive a save-transfer/reload
+            _decidedReplayOrder.Clear();
             State.EventDisplay.ResetOpenOccurrence();
             // Boundary belt: a save-transfer/reload must never inherit a stale blocking-prompt arm (the modal it
             // guarded is gone with the old geoscape). Re-arms naturally if the restored host reopens the prompt.
@@ -1090,19 +1148,31 @@ namespace Multiplayer.Network.Sync
                 if (reward == null && rewardBlob != null && rewardBlob.Length > 0)
                     Debug.LogError("[Multiplayer] reward decode failed (malformed blob, " + rewardBlob.Length + " bytes) — result card shown without reward lines");
 
-                var decision = _eventCorrelator.Dismissed(occId, eventId, choiceIndex);
+                var decision = _eventCorrelator.Dismissed(occId, eventId, choiceIndex, EventReplayModeGate.Enabled);
                 Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId +
                           " choiceIndex=" + choiceIndex + " rewardBytes=" + (rewardBlob?.Length ?? 0) +
                           " rewardEmpty=" + (reward == null || reward.IsEmpty) + " decision=" + decision.Kind +
-                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount);
+                          " open=" + _eventCorrelator.OpenCount + " pending=" + _eventCorrelator.PendingCount +
+                          " decided=" + _eventCorrelator.DecidedCount);
                 switch (decision.Kind)
                 {
+                    case State.EventCorrelator.ActionKind.ArmReplay:
+                        // Replay mode: the decided signal arrived for an OPEN window this peer did NOT win. The
+                        // window stays LIVE on the choice page — retain the result payload (bounded, correlator-cap
+                        // mirror) and REACTIVELY re-arm the live module (grey non-winners + highlight the winner)
+                        // this instant (reactivity mandate). The local winner click then resolves it to the result
+                        // page (TryReplayDecidedClick).
+                        StashDecidedReplay(occId, new DecidedReplay(eventId, choiceIndex, reward, wireOutcome, wireNarrative, siteId));
+                        Multiplayer.Harmony.Sync.EncounterChoiceClientPatch.ArmReplayOnLiveModule(rt, occId, choiceIndex);
+                        break;
                     case State.EventCorrelator.ActionKind.ShowResultInPlace:
                         _queuedRaises.Remove(occId);   // if this dismiss resolved a still-deferred raise, drop its stash
+                        RemoveDecidedReplay(occId);    // terminal: a retained replay payload must never outlive its arm
                         ResolveToResultPage(rt, occId, eventId, choiceIndex, reward, siteId, wireOutcome, wireNarrative);
                         break;
                     case State.EventCorrelator.ActionKind.CloseDialog:
                         _queuedRaises.Remove(occId);   // ditto for a close-only resolution of a deferred raise
+                        RemoveDecidedReplay(occId);    // ditto for a stale replay payload (terminal close supersedes it)
                         State.EventDisplay.Dismiss(rt, occId, eventId);   // close-only
                         break;
                     case State.EventCorrelator.ActionKind.BufferDismiss:
@@ -1111,8 +1181,14 @@ namespace Multiplayer.Network.Sync
                         StashBufferedReward(occId, reward, wireOutcome, wireNarrative);
                         break;
                     case State.EventCorrelator.ActionKind.Ignore:
-                        // Transport double-send of an already-resolved dismiss → idempotent no-op.
-                        Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId + " → IGNORED (duplicate dismiss)");
+                        // Transport double-send of an already-resolved dismiss → idempotent no-op. Distinguish the
+                        // replay-armed dedup (a duplicate/late decided signal for a window still OPEN awaiting the
+                        // local winner click) from the terminal-completed dedup so dropped decided signals are
+                        // diagnosable in field logs. (The correlator itself is BCL-only and cannot log.)
+                        Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId
+                                  + " → IGNORED (" + (_eventCorrelator.TryGetDecided(occId, out var armedWinner)
+                                      ? "duplicate decided signal for a replay-armed open window, winningIndex=" + armedWinner
+                                      : "duplicate dismiss for an already-resolved occurrence") + ")");
                         break;
                 }
                 // The shown dialog (if any) just closed → release the next deferred raise in occId order.
@@ -1199,6 +1275,68 @@ namespace Multiplayer.Network.Sync
         {
             if (_engine.IsHost) return;
             _eventCorrelator.MarkLocallyAnswered(occurrenceId);
+        }
+
+        /// <summary>
+        /// Client (replay mode): record THIS peer's locally-clicked MULTI-choice index — its answer relay is in
+        /// flight. When the decided signal lands the correlator uses it to split the WINNER (picked == decided
+        /// winning index → auto in-place transition) from a race-loser / non-winner (→ replay-arm). No-op on host.
+        /// </summary>
+        public void MarkEventPickedChoice(ushort occurrenceId, int choiceIndex)
+        {
+            if (_engine.IsHost) return;
+            _eventCorrelator.MarkPickedChoice(occurrenceId, choiceIndex);
+        }
+
+        /// <summary>Client (replay mode): true iff <paramref name="occurrenceId"/> is decided-and-replay-armed (its
+        /// window is open awaiting the local winner click); <paramref name="winningIndex"/> = the winning choice
+        /// index. Consulted by the choice-button re-arm on every render (paging→choice / pooled re-render).</summary>
+        public bool TryGetDecidedWinning(ushort occurrenceId, out int winningIndex)
+        {
+            winningIndex = -1;
+            if (_engine.IsHost) return false;
+            if (_decidedReplay.TryGetValue(occurrenceId, out var d)) { winningIndex = d.WinningIndex; return true; }
+            return false;
+        }
+
+        /// <summary>
+        /// Client (replay mode): the local player clicked a choice on a replay-armed window for
+        /// <paramref name="occurrenceId"/>. If it is the highlighted WINNER, resolve the SAME window to the
+        /// authoritative result page (reusing the retained payload) — NO network claim (the occurrence is already
+        /// decided). A stray non-winner click (defensive; non-winners are greyed) is swallowed and the window
+        /// re-armed. Returns TRUE iff the click was consumed here (the caller then swallows the native handler); FALSE
+        /// when the occurrence is not replay-armed (the caller runs its normal claim path). No-op / false on host.
+        /// </summary>
+        public bool TryReplayDecidedClick(ushort occurrenceId, int clickedIndex)
+        {
+            if (_engine.IsHost) return false;
+            if (!_decidedReplay.TryGetValue(occurrenceId, out var d)) return false;
+            var rt = GeoRuntime.Instance;
+            if (clickedIndex >= 0 && clickedIndex != d.WinningIndex)
+            {
+                Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId + " clicked=" + clickedIndex +
+                          " != winning=" + d.WinningIndex + " → suppressed + re-armed");
+                Multiplayer.Harmony.Sync.EncounterChoiceClientPatch.ArmReplayOnLiveModule(rt, occurrenceId, d.WinningIndex);
+                return true;
+            }
+            RemoveDecidedReplay(occurrenceId);
+            var decision = _eventCorrelator.ReplayLocalClick(occurrenceId, d.EventId);
+            Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId + " winning=" + d.WinningIndex +
+                      " decision=" + decision.Kind + " → ShowResultInPlace");
+            // DEGRADE (defensive): the correlator's decided entry was evicted/superseded while the payload survived
+            // (Ignore). The window is still open on this peer — jump to the legacy result page anyway (never a dead
+            // button) and AbortShow so the correlator drops its open/slot state (else every later raise defers forever).
+            if (decision.Kind != State.EventCorrelator.ActionKind.ShowResultPage)
+            {
+                Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId +
+                          " → correlator entry missing (evicted/superseded) — DEGRADED to legacy jump-to-result");
+                _eventCorrelator.AbortShow(occurrenceId);
+            }
+            ResolveToResultPage(rt, occurrenceId, d.EventId, d.WinningIndex, d.Reward, d.SiteId, d.WireOutcome, d.WireNarrative);
+            // The window just resolved → the freed correlator slot may release the next deferred raise / stamped display.
+            DrainQueuedRaises(rt);
+            NotifyEventDisplayMaybeClosed();
+            return true;
         }
 
         /// <summary>

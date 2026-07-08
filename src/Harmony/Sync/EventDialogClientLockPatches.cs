@@ -164,6 +164,35 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterChoiceClientPatch SetChoiceButtonsEnabled failed: " + ex.Message); }
         }
 
+        /// <summary>
+        /// Client replay mode (<c>EventReplayModeGate</c>): reactively re-arm the LIVE open choice window for
+        /// <paramref name="occId"/> — restore the choice-button container (a race-loser greyed the whole CanvasGroup
+        /// on its own click, which blocks raycasts) then grey non-winning buttons + highlight the winner via the
+        /// native selected state (<see cref="Multiplayer.Network.Sync.State.EventReplayReflection.ApplyReplayButtons"/>).
+        /// No-op unless this client's currently-open dialog IS this occurrence's choice page (not paging). Called the
+        /// instant the decided signal arrives (reactivity mandate) and again from the SetEncounter re-arm postfix.
+        /// Best-effort; never throws into game code.
+        /// </summary>
+        internal static void ArmReplayOnLiveModule(GeoRuntime rt, ushort occId, int winningIndex)
+        {
+            try
+            {
+                if (rt == null || occId == 0) return;
+                // Only when THIS client's currently-open dialog is this occurrence (EventDisplay records it on Show).
+                if (Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId != occId) return;
+                var module = EventReflection.GetLiveSiteEncountersModule(rt);
+                if (module == null) return;
+                // Still paging the description text → the real choice buttons aren't shown yet; the re-arm lands via
+                // the SetEncounter postfix when the choice page renders.
+                if (EventReflection.IsSiteEncountersPaging(module)) return;
+                SetChoiceButtonsEnabled(module, true);   // restore the container (winner must be clickable)
+                Multiplayer.Network.Sync.State.EventReplayReflection.ApplyReplayButtons(module, winningIndex);
+                Debug.Log("[Multiplayer] EncounterChoiceClientPatch ArmReplayOnLiveModule occId=" + occId +
+                          " winningIndex=" + winningIndex + " → armed (grey losers, highlight winner)");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterChoiceClientPatch ArmReplayOnLiveModule failed: " + ex.Message); }
+        }
+
         public static MethodBase TargetMethod() => _target;
 
         // __instance = UIModuleSiteEncounters; __0 = the clicked GeoEventChoice (OnChoiceSelected's arg).
@@ -217,10 +246,24 @@ namespace Multiplayer.Harmony.Sync
                     // still resolves the occurrence (close-only) and the modal is never left stuck.
                     if (claimIndex == EventReflection.ChoiceLookupFailed) claimIndex = -1;
                     ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    // REPLAY MODE: if this occurrence is already DECIDED (a remote peer won it and this window is
+                    // replay-armed, non-winning buttons greyed + winner highlighted), a click on the highlighted
+                    // WINNER resolves THIS window to the authoritative result page locally — NO new claim (the
+                    // occurrence is already resolved host-side). Handled entirely by the SyncEngine; swallow the click.
+                    if (EventReplayModeGate.Enabled && NetworkEngine.Instance?.Sync != null
+                        && NetworkEngine.Instance.Sync.TryReplayDecidedClick(occId, claimIndex))
+                    {
+                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch REPLAY-CLICK occId=" + occId +
+                                  " choiceIndex=" + claimIndex + " → resolved to result in place (no claim)");
+                        return false;
+                    }
                     Debug.Log("[Multiplayer] EncounterChoiceClientPatch CLAIM eventId=" + eventId +
                               " occId=" + occId + " choiceIndex=" + claimIndex + " → SendActionRequest(AnswerEventAction) (modal stays open)");
                     NetworkEngine.Instance?.Sync?.SendActionRequest(
                         new Multiplayer.Network.Sync.Actions.AnswerEventAction(occId, eventId, claimIndex));
+                    // REPLAY MODE: remember THIS peer's picked index so the decided signal can split the WINNER
+                    // (picked == winning → auto in-place transition) from a race-loser (→ replay-arm). Additive.
+                    if (EventReplayModeGate.Enabled) NetworkEngine.Instance?.Sync?.MarkEventPickedChoice(occId, claimIndex);
                     // Immediate local feedback that the click registered: grey + block the choice buttons so the
                     // player sees it took and can't double-fire. NOT an outcome/close — the authoritative result
                     // still arrives via the host's EventDismiss (8f9452f path) which rebuilds the result page.
@@ -322,8 +365,28 @@ namespace Multiplayer.Harmony.Sync
         {
             try
             {
-                if (!EventDialogClientGuard.IsClient) return;   // host: buttons are never greyed → nothing to reset
-                EncounterChoiceClientPatch.SetChoiceButtonsEnabled(__instance, true);
+                bool isClient = EventDialogClientGuard.IsClient;
+                if (isClient) EncounterChoiceClientPatch.SetChoiceButtonsEnabled(__instance, true);   // client: un-grey the pooled container
+
+                // REPLAY MODE: the module is POOLED across events → a prior replay arm must never leak its highlight
+                // onto this freshly rendered event. When THIS render is a still-decided occurrence (client:
+                // paging→choice / pooled re-render), RE-APPLY the arm here so the highlight lands the moment the
+                // choice page shows; otherwise (host, or a non-armed render) CLEAR any stale selected state to the
+                // native default. Byte-for-byte legacy when the gate is OFF (only the client CanvasGroup reset above).
+                if (!EventReplayModeGate.Enabled) return;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return;
+                if (isClient)
+                {
+                    ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    if (occId != 0 && engine.Sync != null
+                        && engine.Sync.TryGetDecidedWinning(occId, out int winningIndex))
+                    {
+                        Multiplayer.Network.Sync.State.EventReplayReflection.ApplyReplayButtons(__instance, winningIndex);
+                        return;
+                    }
+                }
+                Multiplayer.Network.Sync.State.EventReplayReflection.ClearReplayButtons(__instance);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] EncounterResetButtonsClientPatch failed: " + ex.Message); }
         }

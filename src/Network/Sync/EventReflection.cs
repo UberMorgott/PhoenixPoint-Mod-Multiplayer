@@ -682,6 +682,110 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.CompleteEventByOccurrence failed: " + ex.Message); }
         }
 
+        /// <summary>The live host <c>UIModuleSiteEncounters</c> instance (GeoLevelController.View →
+        /// GeoscapeView.GeoscapeModules → SiteEncountersModule), or null. Shared module locator (same chain as
+        /// <see cref="TryHostNativeResolve"/>) reused by the replay-mode button repaint.</summary>
+        internal static object GetLiveSiteEncountersModule(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure();
+                if (_glViewField == null || _gvModulesField == null || _gmSiteEncModuleField == null) return null;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                var view = _glViewField.GetValue(geo);
+                var modules = view != null ? _gvModulesField.GetValue(view) : null;
+                return modules != null ? _gmSiteEncModuleField.GetValue(modules) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>True iff the module is currently PAGING multi-page description text (choice buttons show the
+        /// "Continue" pager, not the real choices) — the replay arm must wait for the real choice page.</summary>
+        internal static bool IsSiteEncountersPaging(object module)
+        {
+            try { return module != null && _encPagingField != null && _encPagingField.GetValue(module) is bool p && p; }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// HOST replay mode (<c>EventReplayModeGate</c>): a REMOTE client won an occurrence the host is currently
+        /// showing on its CHOICE page. Apply the authoritative outcome MODEL-ONLY (native CompleteEvent →
+        /// first-wins Claim + CompleteEventDismissPatch broadcast) WITHOUT driving the host UI to the result page
+        /// (unlike <see cref="TryHostNativeResolve"/>, which calls SetClosingEncounter), then ARM replay on the
+        /// host's own live window: grey the non-winning buttons + highlight the winner. The host player then clicks
+        /// the highlighted winner → native OnChoiceSelected → SelectChoice sees IsCompleted (no re-complete) →
+        /// SetClosingEncounter(winner) → a consistent text+reward result page (kills the nonsense page: text from the
+        /// host's stray click, reward from the winner's). Returns TRUE if it applied + armed; FALSE (logged) when the
+        /// host is not showing this occurrence's live choice page (paging / already completed / different-or-closed
+        /// event / not multi-choice) → the caller falls back to <see cref="TryHostNativeResolve"/>.
+        /// </summary>
+        public static bool TryHostArmReplay(GeoRuntime rt, ushort occurrenceId, string eventId, int choiceIndex)
+        {
+            try
+            {
+                Ensure();
+                string missingMember = NativeDriveMissingMemberTag();
+                if (missingMember != null)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=" + missingMember);
+                    return false;
+                }
+                var module = GetLiveSiteEncountersModule(rt);
+                if (module == null)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=module-null");
+                    return false;
+                }
+                var liveEvent = _encGeoEventField.GetValue(module);
+                if (liveEvent == null)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=liveEvent-null (host modal not showing an event)");
+                    return false;
+                }
+                // Must be THIS occurrence's live instance (prefer exact identity via the occId reverse-lookup).
+                bool isThisOccurrence;
+                if (Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var byId) && byId != null)
+                    isThisOccurrence = ReferenceEquals(byId, liveEvent);
+                else
+                    isThisOccurrence = !string.IsNullOrEmpty(eventId) && GetEventId(liveEvent) == eventId;
+                if (!isThisOccurrence)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " eventId=" + eventId +
+                              " → FALLBACK guard=not-this-occurrence liveEventId=" + GetEventId(liveEvent));
+                    return false;
+                }
+                // Already completed (host clicked / a prior resolve won) → the host is (or is about to be) on its own
+                // result page; nothing to arm. Let the caller's normal path handle it (idempotent no-op downstream).
+                if (_isCompletedProp != null && _isCompletedProp.GetValue(liveEvent, null) is bool done && done)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=already-completed");
+                    return false;
+                }
+                // Still paging the description text → the real choice buttons aren't shown yet; can't arm. Fall back.
+                if (IsSiteEncountersPaging(module))
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=paging");
+                    return false;
+                }
+                int choiceCount = GetChoiceCount(liveEvent);
+                if (choiceCount < 2 || choiceIndex < 0 || choiceIndex >= choiceCount)
+                {
+                    Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " → FALLBACK guard=not-multi-choice-or-bad-index"
+                              + " choiceCount=" + choiceCount + " choiceIndex=" + choiceIndex);
+                    return false;
+                }
+                // Apply the authoritative outcome model-only (broadcasts the dismiss to clients), then arm the host's
+                // own live choice page for replay (no forced transition).
+                CompleteEventByOccurrence(rt, occurrenceId, choiceIndex);
+                State.EventReplayReflection.ApplyReplayButtons(module, choiceIndex);
+                Debug.Log("[Multiplayer] TryHostArmReplay occId=" + occurrenceId + " eventId=" + eventId +
+                          " choiceIndex=" + choiceIndex + " → applied model-only + armed host replay (grey losers, highlight winner)");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.TryHostArmReplay failed: " + ex.Message); return false; }
+        }
+
         private static object ResolveEventData(GeoRuntime rt, string eventId)
         {
             try
