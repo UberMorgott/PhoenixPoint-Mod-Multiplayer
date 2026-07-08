@@ -288,12 +288,61 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>Augment = body-part swap through the SAME SetItems, armour(bodypart) list only; equipment/
-        /// inventory pass null → left unchanged (GeoCharacter.cs:848/860 null-skip).</summary>
+        /// inventory pass null → left unchanged (GeoCharacter.cs:848/860 null-skip). Also deducts the
+        /// augment's <c>ManufacturePrice</c> from the faction wallet (the native UI calls
+        /// <c>Wallet.Take(augment.ManufacturePrice)</c> inside <c>OnAugmentApplied</c>, which the relay
+        /// bypasses — without this the client-relayed augment is free). The added item is derived from the
+        /// (old → new) bodypart delta.</summary>
         public static void Augment(GeoRuntime rt, long unitId, string[] bodypartGuids)
         {
             var soldier = ResolveSoldierById(rt, unitId);
             if (soldier == null) { LogUnresolved("Augment", unitId); return; }
+            // Snapshot old bodyparts BEFORE SetItems (same pattern as Equip's storage-delta snapshot).
+            var oldBodyparts = new List<string>(ReadCurrentItemGuids(soldier, "_armourItems"));
             InvokeSetItems(soldier, BuildItems(bodypartGuids), null, null);
+            // Wallet deduction: the ADDED item (new \ old delta) is the augment whose ManufacturePrice
+            // the native flow would have deducted via Wallet.Take. Typically exactly one item added.
+            DeductAugmentCost(rt, oldBodyparts, bodypartGuids != null ? new List<string>(bodypartGuids) : new List<string>());
+        }
+
+        /// <summary>Deduct the <c>ManufacturePrice</c> of each ADDED bodypart (the augment) from the
+        /// faction wallet. Reads the individual manufacture cost fields from the ItemDef (public floats:
+        /// ManufactureTech, ManufactureMaterials, ManufactureMutagen, etc., decompile ItemDef.cs:60-70)
+        /// and applies negative diffs via <see cref="WalletReflection.ApplyDiff"/>. Best-effort: a miss
+        /// logs and no-ops (the bodypart swap itself already succeeded).</summary>
+        private static void DeductAugmentCost(GeoRuntime rt, List<string> oldBodyparts, List<string> newBodyparts)
+        {
+            try
+            {
+                MultisetDiff(oldBodyparts, newBodyparts, out var added, out _);
+                if (added.Count == 0) return;
+                var wallet = rt?.Wallet();
+                if (wallet == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.DeductAugmentCost: wallet unresolved — cost not deducted"); return; }
+                // ResourceType enum values (decompile ResourceType.cs): Materials=2, Tech=4, Mutagen=0x100,
+                // LivingCrystals=0x200, Orichalcum=0x400, ProteanMutane=0x800.
+                var costFields = new (string field, int resType)[]
+                {
+                    ("ManufactureMaterials", 2),
+                    ("ManufactureTech",      4),
+                    ("ManufactureMutagen",   0x100),
+                    ("ManufactureLivingCrystals", 0x200),
+                    ("ManufactureOricalcum", 0x400),
+                    ("ManufactureProteanMutane", 0x800),
+                };
+                foreach (var guid in added)
+                {
+                    object def = DefReflection.GetDefByGuid(guid);
+                    if (def == null) continue;
+                    foreach (var (field, resType) in costFields)
+                    {
+                        var fi = AccessTools.Field(def.GetType(), field);
+                        if (fi == null) continue;
+                        float cost = fi.GetValue(def) is float f ? f : 0f;
+                        if (cost > 0f) WalletReflection.ApplyDiff(wallet, resType, -cost);
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.DeductAugmentCost failed: " + ex.Message); }
         }
 
         /// <summary>Hire a recruit (haven or naked pool) into a base: resolve the source GeoUnitDescriptor + the

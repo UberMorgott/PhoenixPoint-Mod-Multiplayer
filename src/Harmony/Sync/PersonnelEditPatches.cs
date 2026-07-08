@@ -109,8 +109,8 @@ namespace Multiplayer.Harmony.Sync
     // The old SetItemsEditRelayPatch + LoadoutRelayDedup are DELETED — they inferred edits by diffing the
     // per-frame SetItems flush and stormed ~60 intents/s (the FPS-collapse layer). Equip now captures at the
     // SOURCE gesture seams in EquipGesturePatches.cs (one intent per user action) with the client flush
-    // suppressed. Augment (AugmentSoldierAction) rode the same deleted SetItems relay and is a tracked later
-    // wave (COOP-SYNC-ROADMAP.md) — its own gesture chokepoint on the augmentation screen.
+    // suppressed. Augment (AugmentSoldierAction) now has its own gesture chokepoint on the augmentation screen
+    // in AugmentGesturePatches.cs (PREFIX on UIModuleMutationSection.ApplyMutation).
 
     [HarmonyPatch]
     public static class HireRecruitEditRelayPatch
