@@ -19,7 +19,7 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class EventReplayModeGate
     {
-        /// <summary>Master switch for co-op event-window replay mode. Default OFF (ship ON after in-game validation).</summary>
-        public static bool Enabled = false;
+        /// <summary>Master switch for co-op event-window replay mode. ON for 2-instance in-game validation 2026-07-08.</summary>
+        public static bool Enabled = true;
     }
 }
