@@ -428,6 +428,7 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _itemDragIconField;         // UIModuleSoldierEquip.ItemDragIcon (UIInventoryItemDragIcon)
         private static MethodInfo _isBeingDraggedMethod;     // UIInventoryItemDragIcon.IsBeingDragged() → bool
         private static bool _pendingEquipRepaint;            // deferred equip repaint (armed on a drag-skip, drained in Tick)
+        private static bool _loggedProgressionSkip;          // transition-only log latch for the progression skip line
 
         private static void EnsureRosterFamily()
         {
@@ -564,9 +565,10 @@ namespace Multiplayer.Network.Sync.State
                 bool dragging = IsEquipItemDragActive(module);
                 if (hostEditing || dragging)
                 {
+                    if (!_pendingEquipRepaint)   // transition-only log: per-Tick Debug.Log I/O was part of the fps collapse
+                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive DEFERRED — active equipment "
+                                  + (dragging ? "drag" : "edit") + " in progress (pending repaint armed)");
                     _pendingEquipRepaint = true;
-                    Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier equip/storage re-drive DEFERRED — active equipment "
-                              + (dragging ? "drag" : "edit") + " in progress (pending repaint armed)");
                 }
                 else
                 {
@@ -597,11 +599,16 @@ namespace Multiplayer.Network.Sync.State
                     bool pendingStat = _isCharacterChanged.Invoke(progModule, null) is bool pc && pc;
                     bool pendingAbility = _boughtAbilitySlotField != null && _boughtAbilitySlotField.GetValue(progModule) != null;
                     if (pendingStat || pendingAbility)
-                        Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local stat/ability allocation");
+                    {
+                        if (!_loggedProgressionSkip)   // transition-only (was one line per invocation while pending)
+                            Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local stat/ability allocation");
+                        _loggedProgressionSkip = true;
+                    }
                     else
                     {
                         object viewerFaction = _viewerFactionProp.GetValue(geo, null);
                         if (viewerFaction != null) _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                        _loggedProgressionSkip = false;   // repainted → next skip is a new transition
                     }
                 }
             }
@@ -833,14 +840,46 @@ namespace Multiplayer.Network.Sync.State
             catch { return false; }
         }
 
-        /// <summary>Drain a deferred equip repaint armed when <see cref="RefreshRosterEquip"/> skipped its
-        /// equip/storage re-read to protect an active equipment drag (fix #2). Called every SyncEngine.Tick;
-        /// a fast no-op until one is pending. Re-drives RefreshRosterEquip, which repaints the instant the drag
-        /// ends (clearing the flag) or keeps deferring while it continues — never lose the repaint, only defer
-        /// past the drag. Leaving the EditSoldier screen also clears the flag (RefreshRosterEquip state gate).</summary>
+        /// <summary>TRUE while the equip-edit window is open on the CURRENT EditSoldier screen under the
+        /// EXISTING guard semantics: the host's armed <c>_uiRefreshNeeded</c> (host-only, unchanged) or a live
+        /// item drag (either peer). The Tick drain probes this CHEAPLY — three reflection reads, no UpdateData,
+        /// no logging — so a still-open window never re-drives the refresh path (the c74a8e2 field RCA: the
+        /// old drain called RefreshRosterEquip every Tick, whose defer branch re-armed the flag + logged →
+        /// 60 Hz reflection+log loop = fps collapse). Any resolve miss → false (window closed → drain fires).</summary>
+        private static bool IsEquipEditWindowActive(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureRosterFamily();
+                if (_viewField == null || _currentViewStateProp == null || _editSoldierType == null) return false;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return false;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return false;
+                var state = _currentViewStateProp.GetValue(view, null);
+                if (state == null || !_editSoldierType.IsInstanceOfType(state)) return false;   // screen closed → window closed
+                if (IsHostEditingGuardActive() && _editSoldierRefreshNeededField?.GetValue(state) is bool re && re) return true;
+                var modules = _modulesField?.GetValue(view);
+                var module = modules != null ? _soldierEquipModuleField?.GetValue(modules) : null;
+                return IsEquipItemDragActive(module);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Drain a deferred equip repaint armed when <see cref="RefreshRosterEquip"/> deferred its
+        /// equip/storage re-read past an in-progress local edit. Called every SyncEngine.Tick; a fast no-op
+        /// until one is pending. TERMINATION: while the edit window is still open this only PROBES (no
+        /// RefreshRosterEquip call, no log, no re-arm churn); on the first Tick the window reads CLOSED the
+        /// flag is cleared FIRST and the repaint fires ONCE. It cannot re-arm inside that same drain: the
+        /// probe and RefreshRosterEquip's own guard read the SAME values in the same synchronous frame, so
+        /// the defer branch is unreachable — a re-arm requires a genuinely NEW apply/edit. If the screen was
+        /// left while pending, the fired Refresh no-ops on its state gate and the flag stays consumed.</summary>
         public static void FlushPendingEquipRepaint(GeoRuntime rt)
         {
             if (!_pendingEquipRepaint) return;
+            if (IsEquipEditWindowActive(rt)) return;   // window still open → keep pending, silently
+            _pendingEquipRepaint = false;              // consume BEFORE repainting — fires exactly once
+            Debug.Log("[Multiplayer] GeoUiRefresh: deferred equip repaint drained (edit window closed)");
             Refresh(rt, Screen.RosterEquip);
         }
 
