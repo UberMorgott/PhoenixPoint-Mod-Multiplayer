@@ -231,32 +231,36 @@ namespace Multiplayer.Harmony.Sync
                     _finishEncounter?.Invoke(__instance, null);
                     return false;
                 }
-                // Real host event (non-empty EventID). A genuine MULTI-choice (Choices >= 2) client click is now
-                // an ANSWER REQUEST over the research-style action relay (first-click-wins): capture the chosen
-                // index off the live event, send an AnswerEventAction(occId, eventId, choiceIndex) to the host,
-                // and keep the modal OPEN (return false → native body never runs → no local CompleteEvent /
-                // null-ChoiceReward NRE). The host arbitrates the first claim and broadcasts the OUTCOME, which
-                // closes/replaces this modal via OnEventDismiss → ShowResultInPlace / CloseDialog.
+                // Real host event (non-empty EventID). Resolve the clicked choice index + open occurrence ONCE for
+                // every window kind. GetChoiceIndex returns ChoiceDecline (-1) for a null/decline choice and
+                // ChoiceLookupFailed (int.MinValue) when it can't introspect — normalize the failure to -1 (decline)
+                // so the host still resolves the occurrence (close-only) and the modal is never left stuck.
                 int choiceCount = EventReflection.GetChoiceCount(geoEvent);
+                int claimIndex = EventReflection.GetChoiceIndex(geoEvent, __0);
+                if (claimIndex == EventReflection.ChoiceLookupFailed) claimIndex = -1;
+                ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+
+                // UNIFIED REPLAY CONSUME — one rule for EVERY window kind (multi-choice, single-OK info, close-only):
+                // if this occurrence is already DECIDED and this window is replay-armed, the local click consumes the
+                // buffered terminal IN PLACE (winner click → authoritative result page; close-only → local close;
+                // stray loser click → suppressed + re-armed). NO new claim/relay — the occurrence is already resolved
+                // host-side. Handled entirely by the SyncEngine; swallow the native handler either way.
+                if (EventReplayModeGate.Enabled && NetworkEngine.Instance?.Sync != null
+                    && NetworkEngine.Instance.Sync.TryReplayDecidedClick(occId, claimIndex))
+                {
+                    Debug.Log("[Multiplayer] EncounterChoiceClientPatch REPLAY-CLICK occId=" + occId +
+                              " choiceIndex=" + claimIndex + " choiceCount=" + choiceCount +
+                              " → consumed decided terminal in place (no claim/relay)");
+                    return false;
+                }
+
+                // A genuine MULTI-choice (Choices >= 2) client click is an ANSWER REQUEST over the research-style
+                // action relay (first-click-wins): send an AnswerEventAction(occId, eventId, choiceIndex) to the
+                // host and keep the modal OPEN (return false → native body never runs → no local CompleteEvent /
+                // null-ChoiceReward NRE). The host arbitrates the first claim and broadcasts the OUTCOME, which
+                // closes/replaces this modal via OnEventDismiss → ShowResultInPlace / CloseDialog / ArmReplay.
                 if (choiceCount >= 2)
                 {
-                    int claimIndex = EventReflection.GetChoiceIndex(geoEvent, __0);
-                    // GetChoiceIndex returns ChoiceDecline (-1) for a null/decline choice and ChoiceLookupFailed
-                    // (int.MinValue) when it can't introspect — normalize the failure to -1 (decline) so the host
-                    // still resolves the occurrence (close-only) and the modal is never left stuck.
-                    if (claimIndex == EventReflection.ChoiceLookupFailed) claimIndex = -1;
-                    ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
-                    // REPLAY MODE: if this occurrence is already DECIDED (a remote peer won it and this window is
-                    // replay-armed, non-winning buttons greyed + winner highlighted), a click on the highlighted
-                    // WINNER resolves THIS window to the authoritative result page locally — NO new claim (the
-                    // occurrence is already resolved host-side). Handled entirely by the SyncEngine; swallow the click.
-                    if (EventReplayModeGate.Enabled && NetworkEngine.Instance?.Sync != null
-                        && NetworkEngine.Instance.Sync.TryReplayDecidedClick(occId, claimIndex))
-                    {
-                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch REPLAY-CLICK occId=" + occId +
-                                  " choiceIndex=" + claimIndex + " → resolved to result in place (no claim)");
-                        return false;
-                    }
                     Debug.Log("[Multiplayer] EncounterChoiceClientPatch CLAIM eventId=" + eventId +
                               " occId=" + occId + " choiceIndex=" + claimIndex + " → SendActionRequest(AnswerEventAction) (modal stays open)");
                     NetworkEngine.Instance?.Sync?.SendActionRequest(
@@ -289,24 +293,23 @@ namespace Multiplayer.Harmony.Sync
                     // The event auto-completed on the host at trigger, so AnswerEventAction can't do this
                     // (TryHostNativeResolve no-ops on IsCompleted). First-wins/idempotent host-side; occId 0
                     // (no recorded open occurrence) or gate OFF → no relay, localClose only (legacy behavior).
-                    ushort advOccId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
                     if (Multiplayer.Network.Sync.State.SingleChoiceAdvanceGate.ShouldRelayClientAdvance(
                             isClient: true, gateEnabled: EventMirrorFixGate.Enabled,
-                            eventId: eventId, choiceCount: choiceCount, occurrenceId: advOccId))
+                            eventId: eventId, choiceCount: choiceCount, occurrenceId: occId))
                     {
-                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + advOccId +
+                        Debug.Log("[Multiplayer] EncounterChoiceClientPatch → SendEventAdvanceRequest occId=" + occId +
                                   " eventId=" + eventId + " (advance the host's single-choice prompt)");
-                        NetworkEngine.Instance?.Sync?.SendEventAdvanceRequest(advOccId, eventId);
+                        NetworkEngine.Instance?.Sync?.SendEventAdvanceRequest(occId, eventId);
                         // FIX C: DO NOT local-close. The host WILL broadcast EventAdvanceResult for this occurrence,
                         // so keep the modal OPEN and grey the lone button (matching the multi-choice path above) —
                         // the host's advance then transitions THIS SAME window to the result page IN PLACE
                         // (EventDisplay.ShowResult openIsEventState=True). Local-closing here made that later advance
                         // re-pop a FRESH result window (the RCA re-pop). Belt: record the locally-answered occId so
                         // an in-order raise/advance coalesces into this open modal instead of a fresh Show.
-                        NetworkEngine.Instance?.Sync?.MarkEventLocallyAnswered(advOccId);
+                        NetworkEngine.Instance?.Sync?.MarkEventLocallyAnswered(occId);
                         SetChoiceButtonsEnabled(__instance, false);
                         Debug.Log("[Multiplayer] EncounterChoiceClientPatch keepOpen=true (single-choice prompt mirror answered occId=" +
-                                  advOccId + " eventId=" + eventId + " — awaiting host EventAdvanceResult, in-place transition)");
+                                  occId + " eventId=" + eventId + " — awaiting host EventAdvanceResult, in-place transition)");
                         return false;
                     }
                     // No advance relay (gate OFF / occId==0 / late race): NO host EventAdvanceResult will arrive to
@@ -379,8 +382,12 @@ namespace Multiplayer.Harmony.Sync
                 if (isClient)
                 {
                     ushort occId = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    // A result-bearing arm re-applies its visuals (winner highlight + grey losers; a lone OK button
+                    // is its own winner). A CLOSE-ONLY arm (winning < 0) falls through to the Clear below instead:
+                    // buttons stay native-live and any click consumes the buffered terminal.
                     if (occId != 0 && engine.Sync != null
-                        && engine.Sync.TryGetDecidedWinning(occId, out int winningIndex))
+                        && engine.Sync.TryGetDecidedWinning(occId, out int winningIndex)
+                        && winningIndex >= 0)
                     {
                         Multiplayer.Network.Sync.State.EventReplayReflection.ApplyReplayButtons(__instance, winningIndex);
                         return;
@@ -454,6 +461,22 @@ namespace Multiplayer.Harmony.Sync
             try
             {
                 if (!EventDialogClientGuard.IsClient) return true; // host: native
+                // REPLAY MODE: Esc/back on a replay-armed window consumes the buffered decided terminal exactly
+                // like the OK/winner click (result page in place, or local close for a close-only terminal) — a
+                // plain native local-hide would close the window WITHOUT resolving the correlator's open/slot
+                // state (no future host signal will ever free it → every later dialog would defer forever).
+                // clickedIndex -1 = unconditional consume. Not armed → fall through to the normal lock logic.
+                if (EventReplayModeGate.Enabled)
+                {
+                    ushort occ = Multiplayer.Network.Sync.State.EventDisplay.OpenOccurrenceId;
+                    var sync = NetworkEngine.Instance?.Sync;
+                    if (occ != 0 && sync != null && sync.TryReplayDecidedClick(occ, -1))
+                    {
+                        Debug.Log("[Multiplayer] EventCancelClientLockPatch REPLAY-CANCEL occId=" + occ +
+                                  " → consumed decided terminal (Esc acts as the consume click)");
+                        return false;
+                    }
+                }
                 object geoEvent = _eventProp?.GetValue(__instance, null);
                 // CHOICE (or ambiguous) → block the local close; INFO → allow native local hide.
                 return !EventReflection.IsClientChoiceLocked(geoEvent);

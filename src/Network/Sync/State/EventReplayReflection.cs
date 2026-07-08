@@ -76,8 +76,12 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>
-        /// Arm replay mode on <paramref name="module"/>: highlight the button at <paramref name="winningIndex"/>
-        /// (native selected state, kept clickable) and grey + disable every other shown choice button. Best-effort.
+        /// Arm-visuals helper — the ONLY place the window kind matters (the arm/consume RULE upstream is
+        /// choice-count-agnostic): highlight the button at <paramref name="winningIndex"/> (native selected state,
+        /// kept clickable) and grey + disable every other shown choice button. N≥2 → losers greyed + winner
+        /// highlighted; N==1 → the lone OK/prompt button IS the winner (highlighted, stays live); a CLOSE-ONLY
+        /// terminal (<paramref name="winningIndex"/> &lt; 0) has nothing to grey or point at → no visual change,
+        /// every button stays live (any click consumes the buffered terminal). Best-effort.
         /// </summary>
         public static void ApplyReplayButtons(object module, int winningIndex)
         {
@@ -85,6 +89,7 @@ namespace Multiplayer.Network.Sync.State
             {
                 Ensure();
                 if (!_ready || module == null) return;
+                if (winningIndex < 0) return;   // close-only terminal → buttons stay native-enabled
                 var list = GetChoiceButtons(module);
                 if (list == null) return;
                 for (int i = 0; i < list.Count; i++)

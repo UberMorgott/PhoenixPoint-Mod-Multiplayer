@@ -705,7 +705,7 @@ namespace Multiplayer.Network.Sync
                 // reward-less prompt) so the client matches the host's single window. Gate-coupled (off-gate stays
                 // legacy). A 2-window single-choice-WITH-outcome (oneWindow=false) keeps the prompt-mirror+advance.
                 bool oneWindowMirror = EventMirrorFixGate.Enabled && oneWindow;
-                var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice, oneWindowMirror);
+                var decision = _eventCorrelator.Raised(occId, eventId, mirrorSingleChoice, oneWindowMirror, EventReplayModeGate.Enabled);
                 Debug.Log("[Multiplayer] CLIENT OnEventRaised occId=" + occId + " eventId=" + eventId +
                           " siteId=" + siteId + " vehicleId=" + vehicleId + " singleChoice=" + singleChoice +
                           " oneWindow=" + oneWindow + " mirror=" + mirrorSingleChoice + " oneWindowMirror=" + oneWindowMirror +
@@ -952,6 +952,17 @@ namespace Multiplayer.Network.Sync
         // so BuildEvent renders the correct backdrop/subtitle (not StartingBase).
         private void ShowRaisedDialog(GeoRuntime rt, ushort occId, string eventId, int siteId, int vehicleId, bool hasIdentity, GeoSiteState identity, string wireTitle = null, string wireNarrative = null)
         {
+            // REPLAY MODE: this window opens ALREADY-DECIDED (an armed prompt-mirror whose advance beat the raise,
+            // or a queued raise dismissed-while-queued). Move its retained result payload (reward + wire texts, held
+            // in the out-of-order dismiss stash) into the decided-replay stash so the local consume click can render
+            // the authoritative result — the SetEncounter postfix re-applies the arm visuals at render. No-op when
+            // the payload already rode a live ArmReplay dismiss (stash hit) or the occurrence isn't decided.
+            if (EventReplayModeGate.Enabled && !_decidedReplay.ContainsKey(occId)
+                && _eventCorrelator.TryGetDecided(occId, out var decidedWinner))
+            {
+                var buffered = TakeBufferedDismiss(occId);
+                StashDecidedReplay(occId, new DecidedReplay(eventId, decidedWinner, buffered.Reward, buffered.WireOutcome, buffered.WireNarrative, siteId));
+            }
             if (hasIdentity && EventReflection.ShouldSpawnMirror(
                     hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
                 State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
@@ -968,7 +979,7 @@ namespace Multiplayer.Network.Sync
             // buffered-dismiss single-choice → ShowResultPage / DropNoop) does NOT re-occupy the slot, so the next
             // deferred raise can surface in the SAME drain; a plain / single-choice-prompt ShowDialog DOES occupy it,
             // so TryDequeueNext returns false the next iteration and the loop stops. Released in occId (host) order.
-            while (_eventCorrelator.TryDequeueNext(out var next))
+            while (_eventCorrelator.TryDequeueNext(out var next, EventReplayModeGate.Enabled))
             {
                 ushort occId = next.OccurrenceId;
                 if (!_queuedRaises.TryGetValue(occId, out var q))
@@ -1217,11 +1228,12 @@ namespace Multiplayer.Network.Sync
             try
             {
                 var rt = GeoRuntime.Instance;
-                var decision = _eventCorrelator.Advanced(occId, eventId, choiceIndex);
+                var decision = _eventCorrelator.Advanced(occId, eventId, choiceIndex, EventReplayModeGate.Enabled);
                 Debug.Log("[Multiplayer] CLIENT OnEventAdvanceResult occId=" + occId + " eventId=" + eventId +
                           " choiceIndex=" + choiceIndex + " siteId=" + siteId + " decision=" + decision.Kind +
                           " promptMirror=" + _eventCorrelator.PromptMirrorCount +
-                          " pendingAdvance=" + _eventCorrelator.PendingAdvanceCount);
+                          " pendingAdvance=" + _eventCorrelator.PendingAdvanceCount +
+                          " decided=" + _eventCorrelator.DecidedCount);
                 // Mirroring the prompt → advance to the result page (reward + wire texts = the ones stashed at
                 // the earlier out-of-order dismiss). Otherwise the advance was BUFFERED (it beat the raise) →
                 // no-op now; the upcoming raise resolves it straight to the result page.
@@ -1229,6 +1241,15 @@ namespace Multiplayer.Network.Sync
                 {
                     var buffered = TakeBufferedDismiss(occId);
                     ResolveToResultPage(rt, occId, eventId, choiceIndex, buffered.Reward, siteId, buffered.WireOutcome, buffered.WireNarrative);
+                }
+                else if (decision.Kind == State.EventCorrelator.ActionKind.ArmReplay)
+                {
+                    // UNIFIED replay rule: the host advanced its prompt but THIS peer is still reading the mirror it
+                    // never answered — no forced transition. Retain the result payload (reward stashed at the earlier
+                    // out-of-order dismiss) and reactively arm the live window; the local OK consumes it in place.
+                    var buffered = TakeBufferedDismiss(occId);
+                    StashDecidedReplay(occId, new DecidedReplay(eventId, choiceIndex, buffered.Reward, buffered.WireOutcome, buffered.WireNarrative, siteId));
+                    Multiplayer.Harmony.Sync.EncounterChoiceClientPatch.ArmReplayOnLiveModule(rt, occId, choiceIndex);
                 }
                 else if (decision.Kind == State.EventCorrelator.ActionKind.Ignore)
                 {
@@ -1300,19 +1321,22 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
-        /// Client (replay mode): the local player clicked a choice on a replay-armed window for
-        /// <paramref name="occurrenceId"/>. If it is the highlighted WINNER, resolve the SAME window to the
-        /// authoritative result page (reusing the retained payload) — NO network claim (the occurrence is already
-        /// decided). A stray non-winner click (defensive; non-winners are greyed) is swallowed and the window
-        /// re-armed. Returns TRUE iff the click was consumed here (the caller then swallows the native handler); FALSE
-        /// when the occurrence is not replay-armed (the caller runs its normal claim path). No-op / false on host.
+        /// Client (replay mode): the local player clicked a replay-armed window for <paramref name="occurrenceId"/>
+        /// — the UNIFIED consume for EVERY window kind. A result-bearing terminal (WinningIndex ≥ 0) resolves the
+        /// SAME window to the authoritative result page (retained payload; the multi-choice winner button or the
+        /// single-OK lone button — same path); a close-only terminal (WinningIndex &lt; 0) closes the window locally.
+        /// NO network claim either way (the occurrence is already decided). <paramref name="clickedIndex"/>:
+        /// the clicked choice index, or -1 for an unconditional consume (single-OK / Esc). A stray non-winner click
+        /// on a result-bearing arm (defensive; non-winners are greyed) is swallowed and the window re-armed.
+        /// Returns TRUE iff the click was consumed here (the caller then swallows the native handler); FALSE when
+        /// the occurrence is not replay-armed (the caller runs its normal claim/relay path). No-op / false on host.
         /// </summary>
         public bool TryReplayDecidedClick(ushort occurrenceId, int clickedIndex)
         {
             if (_engine.IsHost) return false;
             if (!_decidedReplay.TryGetValue(occurrenceId, out var d)) return false;
             var rt = GeoRuntime.Instance;
-            if (clickedIndex >= 0 && clickedIndex != d.WinningIndex)
+            if (d.WinningIndex >= 0 && clickedIndex >= 0 && clickedIndex != d.WinningIndex)
             {
                 Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId + " clicked=" + clickedIndex +
                           " != winning=" + d.WinningIndex + " → suppressed + re-armed");
@@ -1322,17 +1346,20 @@ namespace Multiplayer.Network.Sync
             RemoveDecidedReplay(occurrenceId);
             var decision = _eventCorrelator.ReplayLocalClick(occurrenceId, d.EventId);
             Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId + " winning=" + d.WinningIndex +
-                      " decision=" + decision.Kind + " → ShowResultInPlace");
+                      " decision=" + decision.Kind + " → " + (d.WinningIndex >= 0 ? "ShowResultInPlace" : "local close"));
             // DEGRADE (defensive): the correlator's decided entry was evicted/superseded while the payload survived
-            // (Ignore). The window is still open on this peer — jump to the legacy result page anyway (never a dead
+            // (Ignore). The window is still open on this peer — resolve it the legacy way anyway (never a dead
             // button) and AbortShow so the correlator drops its open/slot state (else every later raise defers forever).
             if (decision.Kind != State.EventCorrelator.ActionKind.ShowResultPage)
             {
                 Debug.Log("[Multiplayer] CLIENT replay click occId=" + occurrenceId +
-                          " → correlator entry missing (evicted/superseded) — DEGRADED to legacy jump-to-result");
+                          " → correlator entry missing (evicted/superseded) — DEGRADED to legacy resolution");
                 _eventCorrelator.AbortShow(occurrenceId);
             }
-            ResolveToResultPage(rt, occurrenceId, d.EventId, d.WinningIndex, d.Reward, d.SiteId, d.WireOutcome, d.WireNarrative);
+            if (d.WinningIndex >= 0)
+                ResolveToResultPage(rt, occurrenceId, d.EventId, d.WinningIndex, d.Reward, d.SiteId, d.WireOutcome, d.WireNarrative);
+            else
+                State.EventDisplay.Dismiss(rt, occurrenceId, d.EventId);   // close-only terminal → local close, reader's pace
             // The window just resolved → the freed correlator slot may release the next deferred raise / stamped display.
             DrainQueuedRaises(rt);
             NotifyEventDisplayMaybeClosed();

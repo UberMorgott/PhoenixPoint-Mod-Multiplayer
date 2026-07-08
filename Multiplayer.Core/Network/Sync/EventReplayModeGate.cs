@@ -1,21 +1,25 @@
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Default-OFF rollout gate for the co-op geoscape event-window "replay mode" (mirrors
-    /// <see cref="EventMirrorFixGate"/> / <see cref="ReportMirrorGate"/>). Supersedes the legacy
-    /// "forced in-place transition for everyone" model with a per-peer decoupled UI:
-    ///   • A peer whose OPEN choice window did NOT win the occurrence is NOT force-transitioned to the
-    ///     result page when the decided signal arrives. Instead its non-winning buttons grey INSTANTLY and
-    ///     the winning button is highlighted (native selected state) — the only clickable one. Clicking it
-    ///     shows the authoritative result page in place, at the reader's own pace.
-    ///   • The winner (its locally-picked choice == the decided winning choice) keeps the current auto
-    ///     in-place transition.
-    ///   • The host's OWN live window is armed the same way when a client wins (kills the nonsense result
-    ///     page: text from the host's click, reward from the winner's).
+    /// Rollout gate for the co-op geoscape event-window "replay mode" (mirrors <see cref="EventMirrorFixGate"/>
+    /// / <see cref="ReportMirrorGate"/>). Supersedes the legacy "forced in-place transition for everyone" model
+    /// with ONE per-peer decoupled rule for EVERY window kind (multi-choice, single-OK info, close-only —
+    /// written once in <c>EventCorrelator</c>):
+    ///   • decided &amp;&amp; NOT locally answered/won &amp;&amp; window OPEN (or queued → opens later, armed) → ARM,
+    ///     never force: the window stays live and the LOCAL click consumes the buffered terminal (authoritative
+    ///     result page in place, or local close for a close-only terminal) at the reader's own pace.
+    ///   • Locally answered (single-choice modal-hold) / locally won (picked == decided index) → the existing
+    ///     auto in-place transition (winner/answering-peer path, unchanged).
+    ///   • Window never opened on this peer (buffered dismiss before raise / 1-window) → legacy jump/close.
+    /// Choice count affects ONLY the arm visuals (<c>EventReplayReflection.ApplyReplayButtons</c>): N≥2 →
+    /// losers greyed + winner highlighted (native selected state); N≤1 → the lone OK stays live; close-only →
+    /// no visual change. Stacked host fast-clicks never skip or force-pop windows: queued raises stay queued
+    /// and open ARMED in occId (host emission) order. The host's OWN live window is armed the same way when a
+    /// client wins (kills the nonsense result page: text from the host's click, reward from the winner's).
     ///
     /// While <see cref="Enabled"/> is false the correlator's <c>replayMode</c> paths are never taken and the
-    /// legacy behavior (ShowResultInPlace for every open dialog; host force-transition via
-    /// TryHostNativeResolve) is byte-for-byte unchanged. Flip ON after the 2-instance in-game gate.
+    /// legacy behavior (forced ShowResultInPlace/CloseDialog/ShowResultPage; host force-transition via
+    /// TryHostNativeResolve) is byte-for-byte unchanged.
     /// </summary>
     public static class EventReplayModeGate
     {

@@ -220,7 +220,7 @@ namespace Multiplayer.Network.Sync.State
         /// reward-less "phantom prompt". The prompt-mirror+advance lockstep is kept ONLY for the genuine 2-window
         /// (non-empty outcome-text) single-choice case (<paramref name="oneWindow"/>=false).
         /// </summary>
-        public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false, bool oneWindow = false)
+        public Decision Raised(ushort occurrenceId, string eventId, bool singleChoice = false, bool oneWindow = false, bool replayMode = false)
         {
             // DEDUP (transport double-send): a raise for an occurrence already shown, already queued, or already
             // terminally resolved is an idempotent no-op — never a second dialog. (_pending is intentionally NOT in
@@ -240,7 +240,7 @@ namespace Multiplayer.Network.Sync.State
                 return new Decision(ActionKind.Enqueue, occurrenceId, eventId, -1);
             }
 
-            return DecideForRaise(occurrenceId, eventId, singleChoice, oneWindow);
+            return DecideForRaise(occurrenceId, eventId, singleChoice, oneWindow, replayMode);
         }
 
         /// <summary>
@@ -250,7 +250,7 @@ namespace Multiplayer.Network.Sync.State
         /// prompt mirror) marks the slot busy so the next raise defers behind it; a TERMINAL outcome (ShowResultPage /
         /// DropNoop) leaves the slot free (the native view-switch query serializes its actual on-screen display).
         /// </summary>
-        private Decision DecideForRaise(ushort occurrenceId, string eventId, bool singleChoice, bool oneWindow)
+        private Decision DecideForRaise(ushort occurrenceId, string eventId, bool singleChoice, bool oneWindow, bool replayMode = false)
         {
             if (_pending.TryGetValue(occurrenceId, out var buffered))
             {
@@ -263,7 +263,8 @@ namespace Multiplayer.Network.Sync.State
                         // 1-WINDOW single-choice (host IsSingleChoiceEncounter()==true → one combined window WITH
                         // reward): skip the phantom reward-less prompt and resolve STRAIGHT to the result page,
                         // matching the host. The host's empty-outcome SetClosingEncounter may also emit an advance —
-                        // consume any buffered one so it can't linger.
+                        // consume any buffered one so it can't linger. (Replay mode too: no window was ever open on
+                        // this peer and the host itself showed ONE window → the jump is the faithful mirror.)
                         if (oneWindow)
                         {
                             RemovePendingAdvance(occurrenceId);
@@ -275,6 +276,18 @@ namespace Multiplayer.Network.Sync.State
                         // single-choice), jump straight to the result page; the host is already on window 2.
                         if (RemovePendingAdvance(occurrenceId))
                         {
+                            // REPLAY MODE: the host already advanced, but THIS peer never saw the window-1 prompt.
+                            // Do not skip it — show the prompt ARMED (decided terminal recorded; the caller re-applies
+                            // the arm at render and the local OK consumes it), so the reader still gets window-1 at
+                            // their own pace. Slot-occupying like any prompt mirror.
+                            if (replayMode)
+                            {
+                                RecordDecided(occurrenceId, buffered.ChoiceIndex);
+                                _open[occurrenceId] = eventId ?? buffered.EventId;
+                                _promptMirror.Add(occurrenceId);
+                                _shownSlot = occurrenceId;
+                                return new Decision(ActionKind.ShowDialog, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
+                            }
                             MarkCompleted(occurrenceId);
                             return new Decision(ActionKind.ShowResultPage, occurrenceId, eventId ?? buffered.EventId, buffered.ChoiceIndex);
                         }
@@ -318,7 +331,7 @@ namespace Multiplayer.Network.Sync.State
         /// same-frame empty-outcome case) → BUFFER it (FIFO-bounded) so the upcoming raise resolves straight to
         /// the result page. Only reached when <c>EventMirrorFixGate</c> is ON (the host emits no advance off-gate).
         /// </summary>
-        public Decision Advanced(ushort occurrenceId, string eventId, int choiceIndex)
+        public Decision Advanced(ushort occurrenceId, string eventId, int choiceIndex, bool replayMode = false)
         {
             // DEDUP (duplicate/late advance): an advance for an occurrence ALREADY terminally resolved — the
             // client showed (and closed) its result page via a prior advance, or resolved it via an in-place /
@@ -330,8 +343,25 @@ namespace Multiplayer.Network.Sync.State
             if (_completed.Contains(occurrenceId))
                 return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
 
-            if (_promptMirror.Remove(occurrenceId))
+            // REPLAY DEDUP: a duplicate advance for an occurrence already replay-armed is an idempotent no-op
+            // (mirrors the same guard in Dismissed; the Unity caller logs the drop).
+            if (replayMode && _decided.ContainsKey(occurrenceId))
+                return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
+
+            if (_promptMirror.Contains(occurrenceId))
             {
+                // UNIFIED REPLAY RULE (decided && !locallyAnswered && windowOpen → ArmReplay): the host advanced
+                // its window-1 prompt but THIS peer is still reading its mirror and did NOT answer it — do NOT
+                // force-transition to the result page. Keep the prompt OPEN (slot busy, _promptMirror intact),
+                // record the decided terminal, and let the local OK click consume it (ReplayLocalClick). The
+                // ANSWERING peer (_locallyAnswered) keeps the auto in-place transition below (winner path).
+                if (replayMode && !_locallyAnswered.Contains(occurrenceId))
+                {
+                    RecordDecided(occurrenceId, choiceIndex);
+                    return new Decision(ActionKind.ArmReplay, occurrenceId, eventId, choiceIndex);
+                }
+
+                _promptMirror.Remove(occurrenceId);
                 _locallyAnswered.Remove(occurrenceId);   // tidy the belt mark; the prompt-mirror path owns it here
                 _open.Remove(occurrenceId);   // the result page replaces the mirrored prompt
                 if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
@@ -373,14 +403,21 @@ namespace Multiplayer.Network.Sync.State
             if (replayMode && _decided.ContainsKey(occurrenceId))
                 return new Decision(ActionKind.Ignore, occurrenceId, eventId, choiceIndex);
 
-            // Dismiss of an occurrence still DEFERRED in the queue (its raise arrived but the single slot was busy, so
-            // its prompt was never shown). The host already applied the answer → drop it from the queue and resolve it
-            // terminally: a picked choice still surfaces its result page (so the player sees the outcome); a close-only
-            // one has nothing to show. Never leave it in the queue (it would later pop as an orphan dialog).
-            // (Legacy under replayMode too: the window was never SHOWN on this peer, so there is nothing to re-arm —
-            // replay applies only to an actually-open window, the _open branch below.)
-            if (_queue.Remove(occurrenceId))
+            // Dismiss of an occurrence still DEFERRED in the queue (its raise arrived but the single slot was busy,
+            // so its window was never shown).
+            //   • REPLAY MODE: record the decided terminal and LEAVE the raise queued — it is still presented in
+            //     occId (host emission) order when the slot frees, opening already ARMED (the caller re-applies the
+            //     arm at render; the local click consumes the terminal). Host fast-clicking N stacked windows must
+            //     never skip or force-pop windows on this peer.
+            //   • LEGACY: drop it from the queue and resolve terminally (result page or nothing).
+            if (_queue.ContainsKey(occurrenceId))
             {
+                if (replayMode)
+                {
+                    RecordDecided(occurrenceId, choiceIndex);
+                    return new Decision(ActionKind.ArmReplay, occurrenceId, eventId, choiceIndex);
+                }
+                _queue.Remove(occurrenceId);
                 MarkCompleted(occurrenceId);
                 _pickedChoice.Remove(occurrenceId);
                 if (choiceIndex >= 0)
@@ -390,18 +427,19 @@ namespace Multiplayer.Network.Sync.State
 
             if (_open.ContainsKey(occurrenceId))
             {
-                // REPLAY MODE (gate ON): the window is OPEN on this peer and this is a result-bearing decided signal
-                // (choiceIndex >= 0). If THIS peer did not win the occurrence (its locally-picked choice != the decided
-                // winning index, or it never clicked), do NOT force the result page — keep the window OPEN, record the
-                // winning index, and let the caller grey the non-winning buttons + highlight the winner. The local
-                // click then resolves to the result page (ReplayLocalClick). The winner (picked == winning) falls
-                // through to the legacy auto in-place transition below.
-                if (replayMode && choiceIndex >= 0
-                    && !(_pickedChoice.TryGetValue(occurrenceId, out var picked) && picked == choiceIndex))
+                // UNIFIED REPLAY RULE — written once, for EVERY event-window terminal (multi-choice, single-OK
+                // info, close-only alike; choice count affects only the arm VISUALS downstream):
+                //   decided && !locallyAnswered/!locallyWon && windowOpen → ArmReplay (window stays live; the
+                //   local click consumes the terminal at the reader's own pace);
+                //   locallyWon (picked == decided index, incl. decline -1) or locallyAnswered (single-choice
+                //   modal-hold) → legacy auto in-place transition (winner/answering-peer path, unchanged);
+                //   window not open → legacy paths elsewhere.
+                bool locallyWon = _pickedChoice.TryGetValue(occurrenceId, out var picked) && picked == choiceIndex;
+                if (replayMode && !locallyWon && !_locallyAnswered.Contains(occurrenceId))
                 {
                     RecordDecided(occurrenceId, choiceIndex);
                     // Window stays live: _open / _shownSlot / _pickedChoice are intentionally left intact and the
-                    // occurrence is NOT marked completed (it resolves terminally only on the local winner click).
+                    // occurrence is NOT marked completed (it resolves terminally only on the local consume click).
                     return new Decision(ActionKind.ArmReplay, occurrenceId, eventId, choiceIndex);
                 }
 
@@ -409,7 +447,7 @@ namespace Multiplayer.Network.Sync.State
                 _promptMirror.Remove(occurrenceId);   // a real dismiss closes a mirrored prompt too (keep the set clean)
                 _locallyAnswered.Remove(occurrenceId);   // and drops any belt mark (the dismiss resolves it in place)
                 _pickedChoice.Remove(occurrenceId);
-                _decided.Remove(occurrenceId);   // belt: a real dismiss supersedes any prior replay arm for it
+                RemoveDecided(occurrenceId);   // belt: a real dismiss supersedes any prior replay arm for it
                 if (_shownSlot == occurrenceId) _shownSlot = 0;   // single slot freed → TryDequeueNext can release the next
                 MarkCompleted(occurrenceId);
                 if (choiceIndex >= 0)
@@ -431,7 +469,7 @@ namespace Multiplayer.Network.Sync.State
         /// caller keeps draining the next deferred raise). The (Unity-bound) caller looks up the stashed raise payload
         /// for the returned occId to build/show it — deferred events surface in occId (host emission) order.
         /// </summary>
-        public bool TryDequeueNext(out Decision next)
+        public bool TryDequeueNext(out Decision next, bool replayMode = false)
         {
             next = default(Decision);
             if (_shownSlot != 0) return false;   // single slot still occupied → keep waiting
@@ -442,7 +480,9 @@ namespace Multiplayer.Network.Sync.State
             _queue.Remove(occId);
             // Re-run the SAME branch this raise would have taken had the slot been free when it arrived. DecideForRaise
             // sets _shownSlot for a slot-occupying show (plain/prompt-mirror) and leaves it clear for a terminal result.
-            next = DecideForRaise(occId, info.EventId, info.SingleChoice, info.OneWindow);
+            // A queued raise DISMISSED-while-queued under replay mode kept its decided terminal in _decided (the queue
+            // entry was left in place) → the plain ShowDialog below opens it already-armed (caller re-applies the arm).
+            next = DecideForRaise(occId, info.EventId, info.SingleChoice, info.OneWindow, replayMode);
             return true;
         }
 
