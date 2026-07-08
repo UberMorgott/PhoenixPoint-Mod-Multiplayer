@@ -92,11 +92,10 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _vehiclesProp;// GeoFaction.Vehicles
         private static FieldInfo _mapField;       // GeoLevelController.Map
         private static PropertyInfo _allSitesProp;// GeoMap.AllSites
-        // v2 storage-delta reconcile (equip): faction global store + its bulk add/remove.
+        // v2 storage-delta reconcile (equip): faction global store + its single-item add/remove.
         private static PropertyInfo _useGlobalStorageProp; // GeoPhoenixFaction.UseGlobalStorage
-        private static PropertyInfo _factionItemStorageProp; // GeoPhoenixFaction.ItemStorage
-        private static MethodInfo _storeAddItems;   // ItemStorage.AddItems(IEnumerable<GeoItem>)
-        private static MethodInfo _storeRemoveItems;// ItemStorage.RemoveItems(IEnumerable<GeoItem>)
+        private static MethodInfo _storeAddItem;    // ItemStorage.AddItem(GeoItem)
+        private static MethodInfo _storeRemoveItem; // ItemStorage.RemoveItem(GeoItem)
 
         private static Type GeoItemT() => _geoItemType ?? (_geoItemType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoItem"));
         private static Type CharT() => _charType ?? (_charType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter"));
@@ -252,14 +251,15 @@ namespace Multiplayer.Network.Sync.State
                     Debug.Log("[Multiplayer] PersonnelEditReflection.ReconcileStorageDelta: faction uses site-local storage — storage delta deferred (E1 reconciles global store only)");
                     return;
                 }
-                if (_factionItemStorageProp == null) _factionItemStorageProp = AccessTools.Property(fac.GetType(), "ItemStorage");
-                object store = _factionItemStorageProp?.GetValue(fac, null);
+                object store = ItemStorageReflection.GetStorage(rt);
                 if (store == null) return;
                 MultisetDiff(oldLoadout, newLoadout, out var added, out var removed);
-                if (_storeAddItems == null) _storeAddItems = AccessTools.Method(store.GetType(), "AddItems");
-                if (_storeRemoveItems == null) _storeRemoveItems = AccessTools.Method(store.GetType(), "RemoveItems");
-                if (added.Count > 0) _storeRemoveItems?.Invoke(store, new object[] { BuildItems(added.ToArray()) });
-                if (returnRemoved && removed.Count > 0) _storeAddItems?.Invoke(store, new object[] { BuildItems(removed.ToArray()) });
+                if (_storeAddItem == null) _storeAddItem = AccessTools.Method(store.GetType(), "AddItem");
+                if (_storeRemoveItem == null) _storeRemoveItem = AccessTools.Method(store.GetType(), "RemoveItem");
+                var gainedItems = added.Count > 0 ? BuildItems(added.ToArray()) : null;
+                var lostItems = returnRemoved && removed.Count > 0 ? BuildItems(removed.ToArray()) : null;
+                if (gainedItems != null) foreach (var it in gainedItems) _storeRemoveItem?.Invoke(store, new[] { it });
+                if (lostItems != null) foreach (var it in lostItems) _storeAddItem?.Invoke(store, new[] { it });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.ReconcileStorageDelta failed: " + ex.Message); }
         }
