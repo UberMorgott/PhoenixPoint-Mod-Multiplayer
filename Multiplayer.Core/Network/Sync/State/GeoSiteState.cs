@@ -48,13 +48,14 @@ namespace Multiplayer.Network.Sync.State
         public readonly GeoAttackTail Attack;           // pre-attack schedule tail (gap 6b); null = not carried
         public readonly GeoWeatherTail Weather;         // weather tail (gap 6f, bit6); null = host weather is Clear (client resets)
         public readonly GeoExpiringTimerTail ExpiringTimer; // expiring-timer tail (bit7); null = host timer is Zero (client clears)
+        public readonly GeoFacilityTail Facility;       // W1 facility working-state tail (separate facility section); null = not carried (non-base / older payload)
 
         public GeoSiteState(int siteId, string ownerFactionDefGuid, byte siteType, byte state, string siteName, string encounterID,
                             bool inspected = false, bool visible = false, bool visited = false,
                             GeoMissionRecord mission = null, GeoHavenTail haven = null,
                             GeoAlienBaseTail alienBase = null, GeoExcavationTail excavation = null,
                             GeoAttackTail attack = null, GeoWeatherTail weather = null,
-                            GeoExpiringTimerTail expiringTimer = null)
+                            GeoExpiringTimerTail expiringTimer = null, GeoFacilityTail facility = null)
         {
             SiteId = siteId;
             // Normalize null → "" so equality + the wire are stable (the codec also coalesces, this keeps
@@ -74,6 +75,7 @@ namespace Multiplayer.Network.Sync.State
             Attack = attack;
             Weather = weather;
             ExpiringTimer = expiringTimer;
+            Facility = facility;
         }
 
         public bool Equals(GeoSiteState other)
@@ -92,7 +94,8 @@ namespace Multiplayer.Network.Sync.State
                && (Excavation == null ? other.Excavation == null : Excavation.Equals(other.Excavation))
                && (Attack == null ? other.Attack == null : Attack.Equals(other.Attack))
                && (Weather == null ? other.Weather == null : Weather.Equals(other.Weather))
-               && (ExpiringTimer == null ? other.ExpiringTimer == null : ExpiringTimer.Equals(other.ExpiringTimer));
+               && (ExpiringTimer == null ? other.ExpiringTimer == null : ExpiringTimer.Equals(other.ExpiringTimer))
+               && (Facility == null ? other.Facility == null : Facility.Equals(other.Facility));
 
         public override bool Equals(object obj) => obj is GeoSiteState o && Equals(o);
 
@@ -116,11 +119,12 @@ namespace Multiplayer.Network.Sync.State
                 h = (h * 397) ^ (Attack?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (Weather?.GetHashCode() ?? 0);
                 h = (h * 397) ^ (ExpiringTimer?.GetHashCode() ?? 0);
+                h = (h * 397) ^ (Facility?.GetHashCode() ?? 0);
                 return h;
             }
         }
 
         public override string ToString()
-            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())} attack={(Attack == null ? "none" : Attack.ToString())} weather={(Weather == null ? "none" : Weather.ToString())} expTimer={(ExpiringTimer == null ? "none" : ExpiringTimer.ToString())})";
+            => $"Site({SiteId} owner={OwnerFactionDefGuid} type={SiteType} state={State} name={SiteName} enc={EncounterID} insp={Inspected} vis={Visible} visited={Visited} mission={(Mission == null ? "none" : Mission.ToString())} haven={(Haven == null ? "none" : Haven.ToString())} alienBase={(AlienBase == null ? "none" : AlienBase.ToString())} excav={(Excavation == null ? "none" : Excavation.ToString())} attack={(Attack == null ? "none" : Attack.ToString())} weather={(Weather == null ? "none" : Weather.ToString())} expTimer={(ExpiringTimer == null ? "none" : ExpiringTimer.ToString())} facility={(Facility == null ? "none" : Facility.ToString())})";
     }
 }

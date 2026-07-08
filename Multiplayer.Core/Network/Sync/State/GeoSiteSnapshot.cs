@@ -38,6 +38,13 @@ namespace Multiplayer.Network.Sync.State
     ///                     snapshotted site WITHOUT this bit means host timer is Zero → client clears).
     ///   An extras record for a siteId absent from the record array is skipped (join-by-id, never a throw).
     ///
+    /// W1 FACILITY SECTION (a SECOND optional block after the extras block; the tailFlags byte is full — all 8
+    /// bits assigned — so this per-base-site facility working-state tail rides its own siteId-keyed section):
+    ///   [u16 facCount] { [i32 siteId] [u16 recLen] [u8 nFac] {[u32 facId][i32 gx][i32 gy][u8 state][u8 powered]}* }*
+    ///   Written ONLY when ≥1 base carries facilities; the extras block above is then ALWAYS emitted first
+    ///   (extrasCount possibly 0) so the two blocks read strictly in order. A no-facility payload adds nothing
+    ///   (empty/extras wire stays byte-identical), and an older decoder stops after the extras block, ignoring it.
+    ///
     /// Case A only: this mirrors EXISTING client sites (resolved by SiteId). Vanilla never creates sites
     /// in-play, so a snapshot id absent on the client is logged + skipped (Case B / site creation deferred).
     /// </summary>
@@ -97,11 +104,13 @@ namespace Multiplayer.Network.Sync.State
                         for (int i = 0; i < n2; i++) w.Write(m.AttackingSiteIds[i]);
                     }
                 }
-                // WA-2 extras block — written ONLY when ≥1 site carries a tail, so a no-tail payload stays
-                // byte-identical to the pre-WA-2 wire (existing pins hold; older decoders ignore the block).
-                int extras = 0;
-                foreach (var s in snap.Sites) if (HasTail(s)) extras++;
-                if (extras > 0)
+                // WA-2 extras block — written when ≥1 site carries a per-record tail OR any site carries the W1
+                // facility section (so the — possibly zero — extrasCount ALWAYS precedes the facility section:
+                // the decoder reads the two blocks strictly in order, never ambiguously). A payload with neither
+                // stays byte-identical to the pre-WA-2 wire (existing pins hold; older decoders ignore the block).
+                int extras = 0, facExtras = 0;
+                foreach (var s in snap.Sites) { if (HasTail(s)) extras++; if (s.Facility != null) facExtras++; }
+                if (extras > 0 || facExtras > 0)
                 {
                     w.Write((ushort)extras);
                     foreach (var s in snap.Sites)
@@ -109,6 +118,25 @@ namespace Multiplayer.Network.Sync.State
                         if (!HasTail(s)) continue;
                         w.Write(s.SiteId);
                         var rec = EncodeTailRecord(s);
+                        w.Write((ushort)rec.Length);
+                        w.Write(rec);
+                    }
+                }
+                // W1 FACILITY SECTION — a SEPARATE siteId-keyed optional block AFTER the extras block: the
+                // per-record tailFlags byte is fully assigned (all 8 bits), so the facility working-state tail
+                // rides its own section instead of a flag bit. Written ONLY when ≥1 base carries facilities, so a
+                // no-facility payload adds nothing (the extras/empty wire stays byte-identical); an older decoder
+                // stops after the extras block and ignores these trailing bytes.
+                //   [u16 facCount] { [i32 siteId] [u16 recLen] [u8 nFac] {[u32 facId][i32 gx][i32 gy][u8 state][u8 powered]}* }*
+                //   recLen lets a decoder skip a record whose future fields trail the known entries (parse-known-then-skip).
+                if (facExtras > 0)
+                {
+                    w.Write((ushort)facExtras);
+                    foreach (var s in snap.Sites)
+                    {
+                        if (s.Facility == null) continue;
+                        w.Write(s.SiteId);
+                        var rec = EncodeFacilityRecord(s.Facility);
                         w.Write((ushort)rec.Length);
                         w.Write(rec);
                     }
@@ -167,6 +195,27 @@ namespace Multiplayer.Network.Sync.State
                 // bits 6/7 payloads trail the lower-bit ones (ascending bit order = parse-known-then-skip).
                 if (s.Weather != null) w.Write(s.Weather.Weather);
                 if (s.ExpiringTimer != null) w.Write(s.ExpiringTimer.ExpiringTicks);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>[u8 nFac]{[u32 facId][i32 gx][i32 gy][u8 state][u8 powered]}* for one base site's facilities.</summary>
+        private static byte[] EncodeFacilityRecord(GeoFacilityTail tail)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                int n = tail.Entries.Length > byte.MaxValue ? byte.MaxValue : tail.Entries.Length;
+                w.Write((byte)n);
+                for (int i = 0; i < n; i++)
+                {
+                    var e = tail.Entries[i];
+                    w.Write(e.FacilityId);                       // u32
+                    w.Write(e.GridX);                           // i32
+                    w.Write(e.GridY);                           // i32
+                    w.Write(e.State);                           // u8 (raw FacilityState enum value)
+                    w.Write((byte)(e.IsPowered ? 1 : 0));       // u8
+                }
                 return ms.ToArray();
             }
         }
@@ -240,6 +289,35 @@ namespace Multiplayer.Network.Sync.State
                                     set.Weather, set.ExpiringTimer);
                             }
                     }
+                    // W1 FACILITY SECTION — read ONLY if bytes remain after the extras block (an older payload
+                    // without it decodes with all facility tails null). Join-by-SiteId like the extras block;
+                    // a truncated record throws → whole payload rejected (null), preserving all-or-nothing.
+                    if (ms.Position < ms.Length)
+                    {
+                        int nf = r.ReadUInt16();
+                        Dictionary<int, GeoFacilityTail> facs = null;
+                        for (int i = 0; i < nf; i++)
+                        {
+                            int siteId = r.ReadInt32();
+                            int recLen = r.ReadUInt16();
+                            var rec = r.ReadBytes(recLen);
+                            if (rec.Length != recLen)
+                                throw new EndOfStreamException("GeoSiteSnapshot: truncated facility record");
+                            var tail = DecodeFacilityRecord(rec);
+                            if (tail != null)
+                                (facs ?? (facs = new Dictionary<int, GeoFacilityTail>()))[siteId] = tail;
+                        }
+                        if (facs != null)
+                            for (int i = 0; i < snap.Sites.Count; i++)
+                            {
+                                var s = snap.Sites[i];
+                                if (!facs.TryGetValue(s.SiteId, out var tail)) continue;
+                                snap.Sites[i] = new GeoSiteState(s.SiteId, s.OwnerFactionDefGuid, s.SiteType,
+                                    s.State, s.SiteName, s.EncounterID, s.Inspected, s.Visible, s.Visited,
+                                    s.Mission, s.Haven, s.AlienBase, s.Excavation, s.Attack, s.Weather,
+                                    s.ExpiringTimer, tail);
+                            }
+                    }
                     return snap;
                 }
             }
@@ -303,6 +381,29 @@ namespace Multiplayer.Network.Sync.State
                 if ((flags & TailHasExpiringTimer) != 0)
                     set.ExpiringTimer = new GeoExpiringTimerTail(r.ReadInt64());
                 return set.Any ? set : null;
+            }
+        }
+
+        /// <summary>Parse one facility record ([u8 nFac]{[u32 facId][i32 gx][i32 gy][u8 state][u8 powered]}*).
+        /// Future per-record fields trailing the known entries are left unread (the record slice is
+        /// length-prefixed) — parse-known-then-skip, exactly like the extras records.</summary>
+        private static GeoFacilityTail DecodeFacilityRecord(byte[] rec)
+        {
+            using (var ms = new MemoryStream(rec))
+            using (var r = new BinaryReader(ms, Encoding.UTF8))
+            {
+                int n = r.ReadByte();
+                var entries = new GeoFacilityEntry[n];
+                for (int i = 0; i < n; i++)
+                {
+                    uint facId = r.ReadUInt32();
+                    int gx = r.ReadInt32();
+                    int gy = r.ReadInt32();
+                    byte state = r.ReadByte();
+                    bool powered = r.ReadByte() != 0;
+                    entries[i] = new GeoFacilityEntry(facId, gx, gy, state, powered);
+                }
+                return new GeoFacilityTail(entries);
             }
         }
 

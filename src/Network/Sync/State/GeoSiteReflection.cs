@@ -461,9 +461,13 @@ namespace Multiplayer.Network.Sync.State
             GeoExpiringTimerTail expiringTimer = null;
             try { expiringTimer = ReadExpiringTimerTail(site); }
             catch { expiringTimer = null; }
+            // W1 facility working-state tail: best-effort — a miss / non-base site carries null (not carried).
+            GeoFacilityTail facility = null;
+            try { facility = ReadFacilityTail(site); }
+            catch { facility = null; }
 
             return new GeoSiteState(siteId, ownerGuid, siteType, state, siteName, encounterId, inspected, visible, visited,
-                mission, haven, alienBase, excavation, attack, weather, expiringTimer);
+                mission, haven, alienBase, excavation, attack, weather, expiringTimer, facility);
         }
 
         /// <summary>
@@ -2045,6 +2049,166 @@ namespace Multiplayer.Network.Sync.State
                 RefreshSiteVisuals(site);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyExpiringTimerTail failed: " + ex.Message); }
+        }
+
+        // ─── W1 facility working-state tail (per-base facility {id, grid, State, IsPowered} mirror) ───
+        // Own lazy gate: a miss degrades ONLY the facility tail (identity/other tails keep flowing).
+        //
+        // Decompile-verified 2026-07-08 (GeoPhoenixFacility.cs / GeoPhoenixBase.cs / GeoPhoenixBaseLayout.cs):
+        //   • A PhoenixBase is a GeoPhoenixBase COMPONENT on the GeoSite actor — resolved via
+        //     site.GetComponent<GeoPhoenixBase>() exactly as UIModuleInfoBar.UpdateResourceInfo does (:403).
+        //   • GeoPhoenixBase.Layout (:95) → GeoPhoenixBaseLayout.Facilities (:62, IEnumerable<GeoPhoenixFacility>).
+        //   • GeoPhoenixFacility: FacilityId (uint public FIELD, :57), GridPosition (Vector2Int prop, :79),
+        //     State (FacilityState prop, private set → _state FIELD :75), IsPowered (prop :131 → _isPowered
+        //     FIELD :51). IsWorking (:109-127) is DERIVED from IsPowered/Def.PowerCost + State, which the client's
+        //     UIModuleInfoBar lab/workshop tally counts (:410). The sim-frozen client never re-derives power, so
+        //     the client stamps _state + _isPowered VALUE-ONLY (the property setters fire OnFacilityStateUpdated /
+        //     OnPowerStateChanged display cascades — avoided on the mirror). Facilities are resolved by FacilityId
+        //     (fallback grid position). Never Construct/Complete/Remove here — those ride the action relay.
+
+        private static bool _facilityTailEnsured;
+        private static Type _pxBaseTypeFac;                 // GeoPhoenixBase (site.GetComponent)
+        private static PropertyInfo _pxLayoutProp;          // GeoPhoenixBase.Layout
+        private static PropertyInfo _pxFacilitiesProp;      // GeoPhoenixBaseLayout.Facilities
+        private static Type _facilityTypeFac;               // GeoPhoenixFacility
+        private static FieldInfo _facIdField;               // GeoPhoenixFacility.FacilityId (uint)
+        private static PropertyInfo _facGridPosProp;        // GeoPhoenixFacility.GridPosition (Vector2Int)
+        private static PropertyInfo _facStateProp;          // GeoPhoenixFacility.State (host read)
+        private static FieldInfo _facStateField;            // GeoPhoenixFacility._state (client value-only stamp)
+        private static Type _facStateEnum;                  // GeoPhoenixFacility.FacilityState
+        private static PropertyInfo _facIsPoweredProp;      // GeoPhoenixFacility.IsPowered (host read)
+        private static FieldInfo _facIsPoweredField;        // GeoPhoenixFacility._isPowered (client value-only stamp)
+
+        private static void EnsureFacilityTail()
+        {
+            if (_facilityTailEnsured) return;
+            _facilityTailEnsured = true;   // one attempt; every user null-guards
+            try
+            {
+                _pxBaseTypeFac = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase");
+                _facilityTypeFac = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility");
+                var layoutT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixBaseLayout");
+                if (_pxBaseTypeFac == null || _facilityTypeFac == null || layoutT == null) return;
+                _pxLayoutProp = AccessTools.Property(_pxBaseTypeFac, "Layout");
+                _pxFacilitiesProp = AccessTools.Property(layoutT, "Facilities");
+                _facIdField = AccessTools.Field(_facilityTypeFac, "FacilityId");
+                _facGridPosProp = AccessTools.Property(_facilityTypeFac, "GridPosition");
+                _facStateProp = AccessTools.Property(_facilityTypeFac, "State");
+                _facStateField = AccessTools.Field(_facilityTypeFac, "_state");
+                _facStateEnum = AccessTools.Inner(_facilityTypeFac, "FacilityState");
+                _facIsPoweredProp = AccessTools.Property(_facilityTypeFac, "IsPowered");
+                _facIsPoweredField = AccessTools.Field(_facilityTypeFac, "_isPowered");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureFacilityTail failed (facility tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>The site's live <c>GeoPhoenixBase</c> component, or null (not a PhoenixBase / unbound).</summary>
+        private static object GetPhoenixBaseComponent(object site)
+        {
+            if (_pxBaseTypeFac == null || !(site is Component c)) return null;
+            try { return c.GetComponent(_pxBaseTypeFac); }
+            catch { return null; }
+        }
+
+        /// <summary>HOST: read the facility tail off a live site, or null (not a PhoenixBase / no layout → not
+        /// carried). Carries EVERY facility's {id, grid, State, IsPowered} so the client's working-count matches.</summary>
+        public static GeoFacilityTail ReadFacilityTail(object site)
+        {
+            try
+            {
+                EnsureFacilityTail();
+                var pxBase = GetPhoenixBaseComponent(site);
+                if (pxBase == null || _pxLayoutProp == null || _pxFacilitiesProp == null) return null;
+                var layout = _pxLayoutProp.GetValue(pxBase, null);
+                if (layout == null) return null;
+                if (!(_pxFacilitiesProp.GetValue(layout, null) is IEnumerable facs)) return null;
+                var entries = new List<GeoFacilityEntry>();
+                foreach (var f in facs)
+                {
+                    if (f == null) continue;
+                    uint id = 0;
+                    try { id = Convert.ToUInt32(_facIdField?.GetValue(f) ?? 0u); } catch { id = 0; }
+                    int gx = 0, gy = 0;
+                    try
+                    {
+                        var v = _facGridPosProp?.GetValue(f, null);
+                        if (v is Vector2Int vi) { gx = vi.x; gy = vi.y; }
+                    }
+                    catch { gx = 0; gy = 0; }
+                    byte st = 0;
+                    try { st = (byte)Convert.ToInt32(_facStateProp?.GetValue(f, null) ?? 0); } catch { st = 0; }
+                    bool powered = false;
+                    try { powered = (bool)(_facIsPoweredProp?.GetValue(f, null) ?? false); } catch { powered = false; }
+                    entries.Add(new GeoFacilityEntry(id, gx, gy, st, powered));
+                }
+                return new GeoFacilityTail(entries.ToArray());
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadFacilityTail failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: stamp the mirrored facility working-state onto the resolved base's facilities — VALUE-ONLY,
+        /// idempotent, last-wins. Resolves each facility by <c>FacilityId</c> (fallback grid position) and writes
+        /// the private <c>_state</c> + <c>_isPowered</c> backing fields (never the property setters — they fire
+        /// OnFacilityStateUpdated / OnPowerStateChanged display cascades). Null tail = not carried (non-base /
+        /// older payload) → no-op, NEVER a clear. Returns true iff ≥1 facility was stamped (so the caller drives
+        /// the info-bar / base-layout repaint once). No RefreshSiteVisuals — facility state feeds the resource
+        /// bar + base grid, not the map marker.
+        /// </summary>
+        public static bool ApplyFacilityTail(GeoRuntime rt, object site, GeoFacilityTail tail)
+        {
+            if (site == null || tail == null) return false;
+            try
+            {
+                EnsureFacilityTail();
+                var pxBase = GetPhoenixBaseComponent(site);
+                if (pxBase == null || _pxLayoutProp == null || _pxFacilitiesProp == null) return false;
+                var layout = _pxLayoutProp.GetValue(pxBase, null);
+                if (layout == null) return false;
+                if (!(_pxFacilitiesProp.GetValue(layout, null) is IEnumerable facsEnum)) return false;
+                // Snapshot the facilities once (id/grid lookup), then stamp each carried entry onto its match.
+                var facs = new List<object>();
+                foreach (var f in facsEnum) if (f != null) facs.Add(f);
+                bool any = false;
+                foreach (var e in tail.Entries)
+                {
+                    object match = null;
+                    foreach (var f in facs)
+                    {
+                        uint id;
+                        try { id = Convert.ToUInt32(_facIdField?.GetValue(f) ?? 0u); } catch { continue; }
+                        if (id == e.FacilityId) { match = f; break; }
+                    }
+                    if (match == null)   // fall back to grid position (id may be 0 on a not-yet-serialized facility)
+                        foreach (var f in facs)
+                        {
+                            try
+                            {
+                                if (_facGridPosProp?.GetValue(f, null) is Vector2Int vi && vi.x == e.GridX && vi.y == e.GridY)
+                                { match = f; break; }
+                            }
+                            catch { }
+                        }
+                    if (match == null) continue;
+                    if (_facStateField != null && _facStateEnum != null)
+                    {
+                        try { _facStateField.SetValue(match, Enum.ToObject(_facStateEnum, e.State)); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyFacilityTail state failed (skipped): " + ex.Message); }
+                    }
+                    if (_facIsPoweredField != null)
+                    {
+                        try { _facIsPoweredField.SetValue(match, e.IsPowered); }
+                        catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyFacilityTail power failed (skipped): " + ex.Message); }
+                    }
+                    any = true;
+                }
+                return any;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyFacilityTail failed: " + ex.Message); return false; }
         }
 
         /// <summary>The owning <c>GeoSite</c> of a live <c>GeoMission</c> (<c>GeoMission.Site</c>,

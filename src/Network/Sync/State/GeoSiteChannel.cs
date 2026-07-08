@@ -82,6 +82,7 @@ namespace Multiplayer.Network.Sync.State
             // Case-B spawn path. GetMapPublic runs Ensure and is idempotent.
             GeoSiteReflection.GetMapPublic(rt);
             Debug.Log("[Multiplayer] GeoSiteChannel apply sites=" + snap.Sites.Count);
+            bool facilityApplied = false;
             foreach (var dto in snap.Sites)
             {
                 var site = GeoSiteReflection.ResolveSiteById(rt, dto.SiteId);
@@ -116,6 +117,19 @@ namespace Multiplayer.Network.Sync.State
                 // Clear / timer Zero), so the client RESETS to it (converges a drifted value), never "no change".
                 GeoSiteReflection.ApplyWeatherTail(rt, site, dto.Weather);
                 GeoSiteReflection.ApplyExpiringTimerTail(rt, site, dto.ExpiringTimer);
+                // W1 facility working-state tail: value-only stamp of each facility's {State, IsPowered} (a host
+                // power recompute unpowers/repowers labs). Null tail = not carried (non-base site) → no-op.
+                if (GeoSiteReflection.ApplyFacilityTail(rt, site, dto.Facility)) facilityApplied = true;
+            }
+            // A mirrored facility power/state change flips facility.IsWorking, which the persistent top resource
+            // bar's lab/workshop tally (UIModuleInfoBar.UpdateResourceInfo counts facility.IsWorking) and the
+            // base-layout facility power icons read — neither repaints from a reflective backing-field write. Ride
+            // the EXISTING repaint rail once per apply: force the wallet bar (past its modal IsOpen gate, so it
+            // lands even under an event modal) + re-Init the base-layout grid if open. No new rail.
+            if (facilityApplied)
+            {
+                GeoUiRefresh.RefreshWalletBar(rt, force: true);
+                GeoUiRefresh.Refresh(rt, GeoUiRefresh.Screen.BaseLayout);
             }
         }
 

@@ -244,4 +244,96 @@ namespace Multiplayer.Network.Sync.State
         public override int GetHashCode() => ExpiringTicks.GetHashCode();
         public override string ToString() => $"ExpiringTimer({ExpiringTicks})";
     }
+
+    /// <summary>
+    /// PURE optional-tail record of ONE facility's mirrored working state on a PhoenixBase site (W1 unified-HUD
+    /// rail, 2026-07-08 §W1.1). The sim-frozen client never re-derives a facility's power/working state — the
+    /// host's hourly power recompute unpowers/repowers labs & workshops (<c>GeoPhoenixFacility.SetPowered</c>),
+    /// and <c>UIModuleInfoBar.UpdateResourceInfo</c> counts <c>facility.IsWorking</c> per faction site
+    /// (UIModuleInfoBar.cs:399-433) → the client's lab/workshop tallies drift (host 2 vs client 4).
+    ///   • <c>FacilityId</c> — <c>GeoPhoenixFacility.FacilityId</c> (uint, serialized/stable; GeoPhoenixFacility.cs:57);
+    ///     the client resolves the SAME facility by this id (falls back to grid position).
+    ///   • <c>GridX/GridY</c> — <c>GridPosition</c> (Vector2Int; :79) split to two ints so this record stays
+    ///     BCL-only (Multiplayer.Core carries no UnityEngine ref); the resolve fallback + a divergence pin.
+    ///   • <c>State</c> — raw <c>GeoPhoenixFacility.FacilityState</c> enum value {UnderConstruction=0, Damaged=1,
+    ///     Repairing=2, Functioning=3, Destroyed=4} (:29-36/:214); the client stamps the private <c>_state</c>
+    ///     backing field value-only (the property setter fires OnFacilityStateUpdated — display cascade avoided).
+    ///   • <c>IsPowered</c> — <c>GeoPhoenixFacility._isPowered</c> (:51, prop :131); the client stamps the
+    ///     backing field value-only (SetPowered fires OnPowerStateChanged — avoided). <c>IsWorking</c> is DERIVED
+    ///     from these two + <c>Def.PowerCost</c> (:109-127) so mirroring both makes the client's working-count match.
+    /// </summary>
+    public sealed class GeoFacilityEntry : IEquatable<GeoFacilityEntry>
+    {
+        public readonly uint FacilityId;
+        public readonly int GridX;
+        public readonly int GridY;
+        public readonly byte State;       // raw GeoPhoenixFacility.FacilityState enum value
+        public readonly bool IsPowered;
+
+        public GeoFacilityEntry(uint facilityId, int gridX, int gridY, byte state, bool isPowered)
+        {
+            FacilityId = facilityId;
+            GridX = gridX;
+            GridY = gridY;
+            State = state;
+            IsPowered = isPowered;
+        }
+
+        public bool Equals(GeoFacilityEntry other)
+            => other != null && FacilityId == other.FacilityId && GridX == other.GridX && GridY == other.GridY
+               && State == other.State && IsPowered == other.IsPowered;
+
+        public override bool Equals(object obj) => obj is GeoFacilityEntry o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = (int)FacilityId;
+                h = (h * 397) ^ GridX;
+                h = (h * 397) ^ GridY;
+                h = (h * 397) ^ State;
+                h = (h * 397) ^ (IsPowered ? 1 : 0);
+                return h;
+            }
+        }
+
+        public override string ToString()
+            => $"Fac({FacilityId} @{GridX},{GridY} state={State} pow={IsPowered})";
+    }
+
+    /// <summary>See <see cref="GeoFacilityEntry"/> — the per-base-site tail wrapper (Entries never null; empty =
+    /// a base with no facilities, honest last-wins). Null tail = not carried (the site is not a PhoenixBase on
+    /// the host / older payload) → the client leaves its facilities untouched, NEVER a clear.</summary>
+    public sealed class GeoFacilityTail : IEquatable<GeoFacilityTail>
+    {
+        public readonly GeoFacilityEntry[] Entries;   // never null (empty = base with no facilities, last-wins)
+
+        public GeoFacilityTail(GeoFacilityEntry[] entries = null)
+        {
+            Entries = entries ?? new GeoFacilityEntry[0];
+        }
+
+        public bool Equals(GeoFacilityTail other)
+        {
+            if (other == null || Entries.Length != other.Entries.Length) return false;
+            for (int i = 0; i < Entries.Length; i++)
+                if (!Entries[i].Equals(other.Entries[i])) return false;
+            return true;
+        }
+
+        public override bool Equals(object obj) => obj is GeoFacilityTail o && Equals(o);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = Entries.Length;
+                for (int i = 0; i < Entries.Length; i++) h = (h * 397) ^ Entries[i].GetHashCode();
+                return h;
+            }
+        }
+
+        public override string ToString() => $"Facilities(n={Entries.Length})";
+    }
 }

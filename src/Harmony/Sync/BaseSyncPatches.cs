@@ -4,6 +4,7 @@ using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 using Multiplayer.Network.Sync.Actions;
+using Multiplayer.Network.Sync.State;
 using UnityEngine;
 
 namespace Multiplayer.Harmony.Sync
@@ -296,6 +297,9 @@ namespace Multiplayer.Harmony.Sync
     /// client / single-player = no-op. Vanilla research has NO per-lab worker assignment (passive lab income),
     /// so power is the operative mid-hour rate trigger; facility DAMAGE stays hourly-converged, exactly as
     /// <see cref="CompleteFacilityPatch"/> already documents. Reflective target (Prepare false → PatchAll skips).
+    /// W1 unified-HUD rail (2026-07-08): the SAME SetPowered chokepoint ALSO marks channel #5 dirty for the
+    /// facility's owning base site, so the ch5 facility working-state tail re-snapshots and the client's
+    /// UIModuleInfoBar lab/workshop tally + base-layout power icons converge on the same coalesced flush.
     /// </summary>
     [HarmonyPatch]
     public static class FacilityPowerResearchDirtyPatch
@@ -312,15 +316,21 @@ namespace Multiplayer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        // Pure observe: after the host toggles a facility's power, mark ch2 dirty so the client's research
-        // ETA rate refreshes on the next coalesced flush instead of waiting for the hourly heartbeat.
-        public static void Postfix()
+        // Pure observe: after the host toggles a facility's power, refresh two client HUD surfaces on the next
+        // coalesced flush instead of waiting for the hourly heartbeat — (ch2) the research ETA rate, and (ch5)
+        // the facility working-state tail (a power flip changes facility.IsWorking, which the client's
+        // UIModuleInfoBar lab/workshop tally + base-layout power icons count off the mirrored facility state).
+        public static void Postfix(object __instance)
         {
             try
             {
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
                 engine.Sync?.MarkChannelDirty(2);
+                // ch5 base facility tail: mark the OWNING base site dirty so its facility section re-snapshots.
+                // Host-only (MarkSiteDirtyExternal no-ops unless the ch5 channel is host-attached).
+                int siteId = BaseReflection.GetFacilityOwningSiteId(__instance);
+                if (siteId >= 0) GeoSiteChannel.MarkSiteDirtyExternal(siteId);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] FacilityPowerResearchDirtyPatch failed: " + ex.Message); }
         }

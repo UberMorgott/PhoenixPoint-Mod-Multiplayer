@@ -206,33 +206,51 @@ namespace Multiplayer.Network.Sync.State
             try
             {
                 Ensure(rt);
-                RefreshWalletBar(rt);
+                // FORCE the wallet bar: a mirrored wallet delta (event-choice reward, income tick) must repaint the
+                // resource bar the instant it lands, even while a geoscape EVENT MODAL is open. The event state
+                // does MainUILayer.SetActiveState("GeoscapeEvent") (UIStateGeoscapeEvent.cs:50), so the info bar
+                // is behind the event layer and its IsOpen (activeInHierarchy) gate would otherwise SKIP the
+                // repaint until the modal closes — the "reward looks ungranted while the modal is up" lag (W1.2,
+                // reactivity mandate: repaint on message arrival, never deferred).
+                RefreshWalletBar(rt, force: true);
                 RefreshResearchProgressBar(rt);
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RefreshPersistentBars best-effort failed: " + ex.Message); }
         }
 
-        private static void RefreshWalletBar(GeoRuntime rt)
+        /// <summary>Repaint the persistent top resource bar (UIModuleInfoBar.UpdateResourceInfo) from the current
+        /// model. <paramref name="force"/> = repaint even when the module is not <c>activeInHierarchy</c> (behind
+        /// an open event modal): setting the label text while hidden persists it so the bar is already correct the
+        /// instant the modal closes — never deferred. Self-Ensured + self-guarded → safe to call directly from a
+        /// channel apply; a no-op when no geoscape view / info bar is live.</summary>
+        public static void RefreshWalletBar(GeoRuntime rt, bool force = false)
         {
-            if (_infoBarModuleField == null || _infoBarContextField == null
-                || _infoBarUpdateResource == null || _ctxViewerFactionProp == null) return;
-            var geo = rt?.GeoLevel();
-            if (geo == null) return;
-            var view = _viewField.GetValue(geo);
-            if (view == null) return;
-            var modules = _modulesField.GetValue(view);
-            if (modules == null) return;
-            var module = _infoBarModuleField.GetValue(modules);
-            if (module == null) return;
-            if (!IsOpen(module)) return;
+            try
+            {
+                Ensure(rt);
+                if (_infoBarModuleField == null || _infoBarContextField == null
+                    || _infoBarUpdateResource == null || _ctxViewerFactionProp == null
+                    || _viewField == null || _modulesField == null) return;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return;
+                var modules = _modulesField.GetValue(view);
+                if (modules == null) return;
+                var module = _infoBarModuleField.GetValue(modules);
+                if (module == null) return;
+                if (!force && !IsOpen(module)) return;   // gated by default; forced past an open-modal layer swap
 
-            var context = _infoBarContextField.GetValue(module);
-            if (context == null) return; // never opened yet → nothing cached
-            var faction = _ctxViewerFactionProp.GetValue(context, null);
-            if (faction == null) return;
+                var context = _infoBarContextField.GetValue(module);
+                if (context == null) return; // never opened yet → nothing cached (guard holds even when forced)
+                var faction = _ctxViewerFactionProp.GetValue(context, null);
+                if (faction == null) return;
 
-            // UIModuleInfoBar.UpdateResourceInfo(viewerFaction, useAnimation:false) — repaint resource text now.
-            _infoBarUpdateResource.Invoke(module, new object[] { faction, false });
+                // UIModuleInfoBar.UpdateResourceInfo(viewerFaction, useAnimation:false) — pure display re-read
+                // (wallet + ResourceIncome + working-facility tally); no model mutation, no events raised.
+                _infoBarUpdateResource.Invoke(module, new object[] { faction, false });
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RefreshWalletBar best-effort failed: " + ex.Message); }
         }
 
         private static void RefreshResearchProgressBar(GeoRuntime rt)

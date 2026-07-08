@@ -511,6 +511,237 @@ public class GeoSiteTailTests
         Assert.Null(GeoSiteSnapshot.Decode(truncated));
     }
 
+    // ─── W1 facility working-state tail (separate facility section, 2026-07-08 §W1.1) ───────────
+
+    private static GeoFacilityEntry Fac(uint id, int gx, int gy, byte state, bool powered)
+        => new GeoFacilityEntry(id, gx, gy, state, powered);
+
+    [Theory]
+    [InlineData(3, true)]    // Functioning + powered → working
+    [InlineData(3, false)]   // Functioning but unpowered → NOT working (the power-deficit case)
+    [InlineData(0, false)]   // UnderConstruction
+    [InlineData(4, false)]   // Destroyed
+    public void FacilityTail_RoundTrips(byte state, bool powered)
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(5, "o", 10, 1, "n", "e",
+            facility: new GeoFacilityTail(new[] { Fac(42u, 1, 2, state, powered) })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Facility);
+        Assert.Single(rt.Sites[0].Facility.Entries);
+        var e = rt.Sites[0].Facility.Entries[0];
+        Assert.Equal(42u, e.FacilityId);
+        Assert.Equal(1, e.GridX);
+        Assert.Equal(2, e.GridY);
+        Assert.Equal(state, e.State);
+        Assert.Equal(powered, e.IsPowered);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void FacilityTail_MultipleFacilities_RoundTrip()
+    {
+        // A base carries many facilities; each {id, grid, state, powered} must survive independently.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(5, "o", 10, 1, "n", "e", facility: new GeoFacilityTail(new[]
+        {
+            Fac(1u, 0, 0, 3, true),   // access lift, working
+            Fac(2u, 1, 0, 3, false),  // lab, unpowered (power deficit)
+            Fac(3u, 2, 0, 2, false),  // repairing
+            Fac(uint.MaxValue, -1, -5, 4, false),
+        })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(4, rt.Sites[0].Facility.Entries.Length);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.Equal(uint.MaxValue, rt.Sites[0].Facility.Entries[3].FacilityId);
+        Assert.Equal(-5, rt.Sites[0].Facility.Entries[3].GridY);
+    }
+
+    [Fact]
+    public void FacilityTail_EmptyEntries_IsHonestClear_DistinctFromAbsent()
+    {
+        // A base with an EMPTY facility list must survive as empty (last-wins), never collapse into "absent".
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e", facility: new GeoFacilityTail()));
+        snap.Sites.Add(new GeoSiteState(2, "o", 60, 1, "n", "e"));   // POI — no facility tail at all
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Facility);
+        Assert.Empty(rt.Sites[0].Facility.Entries);
+        Assert.Null(rt.Sites[1].Facility);
+    }
+
+    [Fact]
+    public void FacilityTail_NullStaysNull_AndMixesWithCarriedFacilities()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 60, 1, "n", "e"));                                 // POI
+        snap.Sites.Add(new GeoSiteState(2, "o", 10, 1, "n", "e", facility: new GeoFacilityTail(new[] { Fac(9u, 0, 0, 3, true) }))); // base
+        snap.Sites.Add(new GeoSiteState(3, "o", 60, 1, "n", "e"));                                 // POI
+
+        var rt = RoundTrip(snap);
+
+        Assert.Null(rt.Sites[0].Facility);
+        Assert.NotNull(rt.Sites[1].Facility);
+        Assert.Null(rt.Sites[2].Facility);
+    }
+
+    [Fact]
+    public void FacilityTail_CoexistsWithAllOtherTails()
+    {
+        // The facility section must ride alongside a full per-record extras record on the SAME site.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
+            haven: new GeoHavenTail(1200, true),
+            alienBase: new GeoAlienBaseTail("TYPE", new[] { "ADDON" }),
+            excavation: new GeoExcavationTail(true, 42L),
+            attack: new GeoAttackTail(new[] { new GeoAttackEntry("ALN", 1L, 2L) }),
+            weather: new GeoWeatherTail(4),
+            expiringTimer: new GeoExpiringTimerTail(9999L),
+            facility: new GeoFacilityTail(new[] { Fac(7u, 3, 4, 3, false) })));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.NotNull(rt.Sites[0].Haven);
+        Assert.NotNull(rt.Sites[0].Facility);
+        Assert.Single(rt.Sites[0].Facility.Entries);
+    }
+
+    [Fact]
+    public void FacilityTail_ParticipatesInEquality()
+    {
+        var baseline = new GeoSiteState(3, "o", 10, 1, "n", "e");
+        Assert.NotEqual(baseline, new GeoSiteState(3, "o", 10, 1, "n", "e", facility: new GeoFacilityTail()));
+        Assert.NotEqual(new GeoFacilityTail(), new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }));
+        Assert.NotEqual(new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }),
+                        new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, false) }));   // powered differs
+        Assert.NotEqual(new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }),
+                        new GeoFacilityTail(new[] { Fac(1u, 0, 0, 2, true) }));    // state differs
+        Assert.NotEqual(new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }),
+                        new GeoFacilityTail(new[] { Fac(2u, 0, 0, 3, true) }));    // id differs
+        Assert.NotEqual(new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }),
+                        new GeoFacilityTail(new[] { Fac(1u, 9, 0, 3, true) }));    // grid differs
+        Assert.Equal(new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }),
+                     new GeoFacilityTail(new[] { Fac(1u, 0, 0, 3, true) }));
+    }
+
+    [Fact]
+    public void FacilityTail_WireBytes_Pinned()
+    {
+        // Pin the EXACT wire: a facility-only site emits the extras block with extrasCount=0 (so the facility
+        // section is unambiguously ordered after it), then the facility section.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C",
+            facility: new GeoFacilityTail(new[] { Fac(7u, 2, 3, 3, true) })));
+
+        var bytes = GeoSiteSnapshot.Encode(snap);
+
+        var tail = new byte[]
+        {
+            0x00, 0x00,                 // extrasCount = 0 (no per-record tail — but a facility section follows)
+            0x01, 0x00,                 // facCount = 1
+            0x01, 0x00, 0x00, 0x00,     // siteId = 1
+            0x0F, 0x00,                 // recLen = 15 (nFac + one 14-byte entry)
+            0x01,                       // nFac = 1
+            0x07, 0x00, 0x00, 0x00,     // facilityId = 7 (u32 LE)
+            0x02, 0x00, 0x00, 0x00,     // gridX = 2 (i32 LE)
+            0x03, 0x00, 0x00, 0x00,     // gridY = 3 (i32 LE)
+            0x03,                       // state = 3 (Functioning)
+            0x01,                       // powered = 1
+        };
+        Assert.Equal(19 + tail.Length, bytes.Length);
+        Assert.Equal(tail, bytes.Skip(19).ToArray());
+    }
+
+    [Fact]
+    public void PreW1Payload_ExtrasOnly_DecodesWithNullFacility()
+    {
+        // A haven-only extras payload (no facility section) must decode with a null Facility — an older host's
+        // wire is never rejected and never grows a phantom facility tail.
+        var v = new GeoSiteSnapshot();
+        v.Sites.Add(new GeoSiteState(1, "A", 20, 1, "B", "C", haven: new GeoHavenTail(2450, true)));
+        var bytes = GeoSiteSnapshot.Encode(v);   // extras block only, no facility section
+
+        var rt = GeoSiteSnapshot.Decode(bytes);
+
+        Assert.NotNull(rt);
+        Assert.NotNull(rt.Sites[0].Haven);
+        Assert.Null(rt.Sites[0].Facility);
+    }
+
+    [Fact]
+    public void FacilitySection_UnknownTrailingBytes_SkippedNotRejected()
+    {
+        // Forward-compat: a FUTURE format may append per-record fields after the known entries and grow recLen;
+        // a current decoder reads the known entries and skips the trailing bytes via the length-prefixed slice.
+        var known = new GeoSiteSnapshot();
+        known.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C",
+            facility: new GeoFacilityTail(new[] { Fac(7u, 2, 3, 3, true) })));
+        var bytes = GeoSiteSnapshot.Encode(known);
+
+        // Grow the facility record by 3 trailing bytes (recLen 15 → 18) without touching nFac / the entry.
+        var patched = new byte[bytes.Length + 3];
+        System.Array.Copy(bytes, patched, bytes.Length);
+        int recLenAt = 19 + 2 /*extrasCount*/ + 2 /*facCount*/ + 4 /*siteId*/;   // position of the facility recLen u16
+        patched[recLenAt] = 0x12;   // recLen = 18 (15 + 3 future bytes)
+        patched[bytes.Length] = 0xDE; patched[bytes.Length + 1] = 0xAD; patched[bytes.Length + 2] = 0xBF;
+
+        var snap = GeoSiteSnapshot.Decode(patched);
+
+        Assert.NotNull(snap);
+        Assert.NotNull(snap.Sites[0].Facility);
+        Assert.Single(snap.Sites[0].Facility.Entries);
+        Assert.Equal(7u, snap.Sites[0].Facility.Entries[0].FacilityId);
+    }
+
+    [Fact]
+    public void FacilitySection_Truncated_RejectsWholePayload()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
+            facility: new GeoFacilityTail(new[] { Fac(7u, 2, 3, 3, true) })));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+
+        var truncated = new byte[bytes.Length - 3];   // cut inside the facility entry
+        System.Array.Copy(bytes, truncated, truncated.Length);
+
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
+    }
+
+    [Fact]
+    public void FacilitySection_ForUnknownSiteId_Ignored()
+    {
+        // Join-by-id: a facility record whose siteId is absent from the record array is skipped (never a throw).
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 10, 1, "n", "e",
+            facility: new GeoFacilityTail(new[] { Fac(7u, 2, 3, 3, true) })));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        // facility-section siteId sits at: 19 record + 2 extrasCount + 2 facCount = 23.
+        bytes[23] = 0x63;   // siteId 1 → 99 (no such record)
+
+        var rt = GeoSiteSnapshot.Decode(bytes);
+
+        Assert.NotNull(rt);
+        Assert.Null(rt.Sites[0].Facility);   // record dropped with its unknown id — identity intact
+    }
+
+    [Fact]
+    public void FacilitySection_DoesNotDisturbNoTailByteIdentity()
+    {
+        // A site with NEITHER a per-record tail NOR a facility tail must still emit the bare 19-byte record
+        // (no extras block, no facility section) — the byte-identical-when-empty invariant.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "A", 10, 1, "B", "C"));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        Assert.Equal(19, bytes.Length);
+    }
+
     // ─── dirty-subscription decision pins (WA-2 families join the bind lists) ───────────────────
 
     [Fact]

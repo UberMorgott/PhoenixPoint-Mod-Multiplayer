@@ -44,6 +44,7 @@ namespace Multiplayer.Network.Sync
         private static FieldInfo _facilityIdField;   // GeoPhoenixFacility.FacilityId
         private static PropertyInfo _gridPosProp;    // GeoPhoenixFacility.GridPosition
         private static PropertyInfo _facDefProp;     // GeoPhoenixFacility.Def
+        private static PropertyInfo _pxBaseProp;     // GeoPhoenixFacility.PxBase (GeoPhoenixBase back-ref, :212)
         private static PropertyInfo _basesProp;      // GeoPhoenixFaction.Bases
 
         private static void Ensure()
@@ -72,6 +73,7 @@ namespace Multiplayer.Network.Sync
             _facilityIdField = AccessTools.Field(_facilityType, "FacilityId");
             _gridPosProp = AccessTools.Property(_facilityType, "GridPosition");
             _facDefProp = AccessTools.Property(_facilityType, "Def");
+            _pxBaseProp = AccessTools.Property(_facilityType, "PxBase");
 
             _ready = _construct != null && _repair != null && _complete != null && _remove != null
                      && _layoutProp != null && _facilitiesProp != null && _siteProp != null
@@ -132,6 +134,24 @@ namespace Multiplayer.Network.Sync
                 return DefReflection.GetGuid(def);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetFacilityDefId failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>The stable <c>SiteId</c> of the base owning a facility, via the direct
+        /// <c>GeoPhoenixFacility.PxBase</c> back-reference (GeoPhoenixFacility.cs:212) → <c>Site.SiteId</c>.
+        /// O(1) — avoids the base×facility scan of <see cref="FindBaseOfFacility"/> (which matters when a
+        /// base-wide power recompute fires SetPowered per facility). Returns -1 on any miss.</summary>
+        public static int GetFacilityOwningSiteId(object facility)
+        {
+            if (facility == null) return -1;
+            try
+            {
+                Ensure();
+                var pxBase = _pxBaseProp?.GetValue(facility, null);
+                if (pxBase == null) return -1;
+                var idStr = GetBaseId(pxBase);   // reads pxBase.Site.SiteId as string
+                return int.TryParse(idStr, out int id) ? id : -1;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BaseReflection.GetFacilityOwningSiteId failed: " + ex.Message); return -1; }
         }
 
         /// <summary>The <c>GeoPhoenixBase</c> that owns a facility, found by scanning faction bases.</summary>
