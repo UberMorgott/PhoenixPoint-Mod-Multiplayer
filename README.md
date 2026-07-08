@@ -144,7 +144,9 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 **Personnel and recruits**
 - [x] 🧪 Roster composition mirror (who is stationed where)
 - [x] 🧪 Full soldier live-state
-- [x] 🧪 Equip, augment, hire, transfer, dismiss, rename (permission and ownership gated)
+- [x] ✅ Equip from either side: drag items between doll and inventory, unequip-all button, items returned to storage correctly (permission and ownership gated)
+- [x] ✅ Augmentations (bionics and mutations) from either side: reactive UI repaint, wallet cost deducted, body-part sections updated live
+- [x] 🧪 Hire, transfer, dismiss, rename (permission and ownership gated)
 - [x] 🧪 Recruit pool mirror (available, unarmed, and captured units)
 - [x] 🧪 Level-up spending from a client (buy abilities, spend stat points)
 - [x] 🧪 Containment actions from a client (kill or harvest captured units)
@@ -153,11 +155,11 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Events with answer choices, shown to everyone at once
 - [x] ✅ Choice arbitration when two people answer together (first click wins)
 - [x] ✅ Single-choice prompt advance
+- [x] ✅ Event windows as a notification queue: popups stack in order, unavailable response options are greyed out (already chosen by another player), host-authoritative outcome text and art
 - [x] 🧪 Ambush events, including the blocking brief that locks the screen
 - [x] 🧪 Point-of-interest exploration (scan, probe, excavate)
 - [x] 🧪 Resource harvesting
 - [x] 🧪 Quest missions with cutscenes
-- [x] 🧪 A display queue for when several popups stack up at once
 - [x] 🧪 Objectives and quest-line state (including DLC and critical path)
 
 **Report modals**
