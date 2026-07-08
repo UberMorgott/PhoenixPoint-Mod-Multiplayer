@@ -124,6 +124,11 @@ namespace Multiplayer.Network.Sync
         private readonly State.ReportOccurrenceDedup _reportDedup = new State.ReportOccurrenceDedup();
         // Tick belt: last-seen geoscape-view liveness, to free a queue slot orphaned by a view teardown.
         private bool _geoViewWasLive;
+        // RCA 2026-07-08 round 2 safeguard: one-line warning when ANY state channel flushes >5/s sustained 3s
+        // (a per-frame dirty-mark storm — the silent class of bug that froze co-op clients). Counted at
+        // FlushChannel ENTRY so a null-snapshot storm (serialize cost with no broadcast) is visible too.
+        private readonly FlushRateTripwire _flushTripwire = new FlushRateTripwire(maxPerSec: 5, sustainSec: 3);
+        private static readonly System.Diagnostics.Stopwatch _flushClock = System.Diagnostics.Stopwatch.StartNew();
 
         // ─── rca-3 reload-boundary sweep ───────────────────────────────────
         // ONE aggregated, idempotent reset for every in-flight engine-state holder that can wedge sync across
@@ -620,6 +625,11 @@ namespace Multiplayer.Network.Sync
         /// <summary>Host: snapshot + version-bump + broadcast a single channel. No-op if snapshot unavailable.</summary>
         private void FlushChannel(IStateChannel channel)
         {
+            // Storm tripwire (transition-only): a healthy channel flushes on real edits — a sustained >5/s
+            // means some dirty seam is marked per frame; one warning line makes it visible in field logs.
+            if (_flushTripwire.OnFlush(channel.ChannelId, _flushClock.ElapsedMilliseconds))
+                Debug.LogWarning("[Multiplayer] TRIPWIRE: state channel #" + channel.ChannelId
+                                 + " flushing >5/s sustained 3s — per-frame dirty-mark storm suspected (fix the seam, not this log)");
             var payload = channel.Snapshot(GeoRuntime.Instance);
             if (payload == null) return;
             byte id = channel.ChannelId;

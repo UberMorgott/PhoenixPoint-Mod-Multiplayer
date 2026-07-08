@@ -94,25 +94,94 @@ namespace Multiplayer.Harmony.Sync
         public static void Postfix(object __instance) => PersonnelStateDirty.Mark(__instance);
     }
 
+    /// <summary>Equip/augment dirty seam with CHANGE-DETECTION (RCA 2026-07-08 round 2). GeoCharacter.SetItems
+    /// IS per-frame on a TFTV host with the equip screen open: the native flush gate (_uiRefreshNeeded,
+    /// UIStateEditSoldier.UpdateState:459-461) is DEFEATED by TFTV — its weight patches (GetPrimaryWeight/
+    /// RefreshWeightSlider, TFTVUI\Personnel\Stats.cs:588) run INSIDE the flush (:467) and invoke
+    /// UIModuleCharacterProgression.StatChanged, which the state maps to RequestRefreshCharacterData (:108)
+    /// → re-arms _uiRefreshNeeded EVERY flush ("constant stat updates", TFTV's own comment :609) → flush →
+    /// SetItems every frame. An unconditional Postfix mark therefore stormed #9 (silent full-graph
+    /// PersonnelBlob serialize per Tick — the hash-skip culls only the WIRE) + #1 (full storage broadcast per
+    /// Tick, NO content skip) → the client applied + re-Init'd its open UI per Tick → the field freeze (logs
+    /// 18:09:36: both peers go silent at the first #9 flush after the host opened soldier 5's equip screen).
+    ///
+    /// Fix: mark ONLY when the item lists actually CHANGE — never by call-site (host real edits flow through
+    /// this same flush; suppressing the call-site would blind them). The Prefix compares each non-null arg
+    /// against the soldier's CURRENT list BEFORE the clear+refill, by per-element REFERENCE equality: an
+    /// unchanged TFTV re-flush re-pushes the SAME GeoItem instances in the SAME order (the UI lists hold the
+    /// model's instances) ⇒ equal ⇒ no mark, zero serialization; a genuine edit reorders/adds/removes
+    /// instances — and a mirror/relayed apply builds FRESH instances — ⇒ marks. Args are re-enumerable
+    /// (List / LINQ OfType/Select over lists at every caller, decompile-swept), so the extra enumeration is
+    /// safe. The unchanged path allocates nothing but the boxed enumerators (native's own flush LINQ dwarfs
+    /// it). Fail-open: any resolve/compare miss ⇒ treat as changed (a missed mark = stale client forever, a
+    /// false mark = one redundant flush). Known gap: an IN-PLACE item mutation with no list change (host
+    /// reload's ammo write) doesn't mark — it converges on the hourly bulk sweep (blob-hash diff ships it).</summary>
     [HarmonyPatch]
     public static class GeoCharacterSetItemsStateDirtyPatch
     {
         private static MethodBase _target;
+        private static FieldInfo _armourField;   // GeoCharacter._armourItems (List<GeoItem>)
+        private static FieldInfo _equipField;    // GeoCharacter._equipmentItems
+        private static FieldInfo _invField;      // GeoCharacter._inventoryItems
+
         public static bool Prepare()
         {
             _target = PersonnelStateDirty.ResolveOnGeoCharacter("SetItems");
+            if (_target != null)
+            {
+                var t = _target.DeclaringType;
+                _armourField = AccessTools.Field(t, "_armourItems");
+                _equipField = AccessTools.Field(t, "_equipmentItems");
+                _invField = AccessTools.Field(t, "_inventoryItems");
+            }
             return _target != null;
         }
         public static MethodBase TargetMethod() => _target;
-        // SetItems is the once-per-edit equip/augment/host-apply model write (NOT per-frame — verified
-        // UIStateEditSoldier.UpdateState:459 gates the flush on _uiRefreshNeeded, reset each flush). Mark BOTH
-        // the soldier (#9) AND storage (#1): a host equip-from-storage's UpdateStorage runs in the same
-        // synchronous UpdateState pass, and the host-apply of a relayed EquipSoldierAction reconciles storage
-        // right after this SetItems — both settle before the next Tick drains, so #1 snapshots the fresh store.
-        public static void Postfix(object __instance)
+
+        // __0/__1/__2 = armour/equipment/inventory IEnumerable<GeoItem> args (null = leave that list unchanged).
+        // __state = "the lists actually change" — computed BEFORE the native clear+refill.
+        public static void Prefix(object __instance, object __0, object __1, object __2, out bool __state)
         {
+            __state = false;
+            try
+            {
+                // Cheap host gate first: off-host / no session the marks are no-ops anyway — skip the compare
+                // so single-player TFTV (same per-frame loop) pays zero work here.
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                __state = ListChanged(__0, _armourField, __instance)
+                          || ListChanged(__1, _equipField, __instance)
+                          || ListChanged(__2, _invField, __instance);
+            }
+            catch { __state = true; }   // fail-open: never let a compare error silently kill sync
+        }
+
+        public static void Postfix(object __instance, bool __state)
+        {
+            if (!__state) return;
+            // Mark BOTH #9 (soldier blob) AND #1 (storage): a host equip-from-storage's UpdateStorage runs in
+            // the same synchronous UpdateState pass (:474), and the host-apply of a relayed EquipSoldierAction
+            // reconciles storage right after SetItems — both settle before the next Tick drains the channels.
             PersonnelStateDirty.Mark(__instance);
             PersonnelStateDirty.MarkStorage();
+        }
+
+        /// <summary>True when applying <paramref name="arg"/> would change the soldier's current list:
+        /// different length or any position holding a DIFFERENT GeoItem instance. Null arg = native
+        /// leave-unchanged ⇒ false. Unresolvable current list ⇒ true (fail-open).</summary>
+        private static bool ListChanged(object arg, FieldInfo currentField, object soldier)
+        {
+            if (arg == null) return false;
+            if (currentField == null) return true;
+            if (!(currentField.GetValue(soldier) is System.Collections.IList current)) return true;
+            if (!(arg is System.Collections.IEnumerable items)) return true;
+            int n = 0;
+            foreach (var item in items)
+            {
+                if (n >= current.Count || !ReferenceEquals(item, current[n])) return true;
+                n++;
+            }
+            return n != current.Count;
         }
     }
 
