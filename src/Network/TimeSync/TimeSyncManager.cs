@@ -153,6 +153,16 @@ namespace Multiplayer.Network.TimeSync
         internal static bool GlyphHostPaused;
         internal static int GlyphHostSpeedIndex = 1;
 
+        // Inc4 V2 (ClientSimFreezeV2Gate) — DISPLAY-clock split. Under the V2 sim-pin WriteClock no longer
+        // advances the geoscape Timing (Now stays constant = sim frozen), so the native HUD clock widget can no
+        // longer read a live Timing.Now. These publish the host-mirrored game-time each client frame;
+        // ClientTimeDateDisplayFreezePatch paints the widget's HH:mm / dd.MM.yyyy / minute-hand from them.
+        // DisplayActive gates that postfix — true ONLY while the V2 pin is actually driving (active client,
+        // in geoscape, anchor+offset seeded). V2-OFF / pre-sync / host ⇒ false ⇒ the postfix is inert and the
+        // widget paints itself from Now exactly as at HEAD.
+        internal static double DisplayHostGameSeconds;
+        internal static bool DisplayActive;
+
         public TimeSyncManager(NetworkEngine engine)
         {
             _engine = engine;
@@ -344,6 +354,7 @@ namespace Multiplayer.Network.TimeSync
             if (_engine == null || !_engine.IsActive)
             {
                 _haveCache = false;
+                DisplayActive = false; // no session → the V2 display postfix must not paint
                 return;
             }
 
@@ -355,6 +366,7 @@ namespace Multiplayer.Network.TimeSync
 
         private void HostTick()
         {
+            DisplayActive = false; // host drives the widget natively — never the V2 display postfix
             var timing = GetTiming();
             if (timing == null) { _haveCache = false; return; }
 
@@ -559,6 +571,9 @@ namespace Multiplayer.Network.TimeSync
         {
             // Reset host-side cache when not host.
             _haveCache = false;
+            // Default the V2 display gate OFF; WriteClock re-arms it (= pin) only when it actually runs this
+            // frame. So the pre-sync / not-in-geoscape early-returns below leave the display postfix inert.
+            DisplayActive = false;
 
             SchedulePings();
 
@@ -588,11 +603,29 @@ namespace Multiplayer.Network.TimeSync
         }
 
         /// <summary>
-        /// Overwrite the client clock to the displayed game-time via the game's own save/load seam
-        /// (Timing.ProcessInstanceData) — R5: NOT GeoscapeView.SetGamePauseState (TimeLimit guard).
-        /// StartTime = display, OwnNow = 0 ⇒ Now == StartTime == display. ProcessInstanceData fires no
-        /// events / reschedules nothing ⇒ no re-intercept. Scale/Paused are cosmetic (overwritten next
-        /// frame) so the native widget animator/pause graphic reflect host speed.
+        /// Drive the client geoscape clock. TWO modes, gated by <see cref="ClientSimFreezeV2Gate"/>:
+        ///
+        ///  • V2 PIN (default; active client + V1 freeze on) — the client is a PURE MIRROR, so the sim clock
+        ///    must NOT advance: we do NOT rewrite StartTime. With <c>Timing.Paused</c> pinned true (asserted at
+        ///    each geoscape load by <see cref="FreezeClientGeoSim"/>, plus the cheap per-frame drift guard
+        ///    below) <c>OwnNow</c> is constant, so <c>Now = StartTime + OwnNow</c> stays CONSTANT — the geoscape
+        ///    sim clock is genuinely frozen and every producer stays Max'd (matches the "Now frozen" assumption
+        ///    the other mirrors already rely on, e.g. GeoVehicleExploreMirror). The HUD date/time widget can no
+        ///    longer read a live <c>Now</c>, so it is repainted DISPLAY-ONLY from the host mirror by
+        ///    <c>ClientTimeDateDisplayFreezePatch</c> (fed via <see cref="DisplayHostGameSeconds"/>). This
+        ///    replaces V1's per-frame <c>ProcessInstanceData</c> (the client-only per-frame burner) with one
+        ///    bool read in steady state.
+        ///
+        ///  • V1 / flag-OFF (byte-identical rollback) — overwrite the clock to the displayed game-time via the
+        ///    game's own save/load seam <c>Timing.ProcessInstanceData</c> (R5: NOT GeoscapeView.SetGamePauseState
+        ///    — the TimeLimit guard). StartTime = display, OwnNow = 0 ⇒ Now == StartTime == display, ADVANCING
+        ///    each frame; the native widget reads that <c>Now</c> itself. ProcessInstanceData sets fields +
+        ///    re-anchors but does NOT call RescheduleUpdateables; Scale/Paused are cosmetic (overwritten next
+        ///    frame). Note: because that advancing <c>Now</c> is what V2 removes, do NOT re-describe the sim as
+        ///    "frozen" under this branch — under V1 the sim clock moves.
+        ///
+        /// Both modes publish the host cosmetic glyph (paused/speed) for the glyph-decouple patch and mirror the
+        /// speed/pause widget on-change under the echo-guard.
         /// </summary>
         private void WriteClock(object timing, double displayGameSeconds, bool paused, float scale)
         {
@@ -610,36 +643,55 @@ namespace Multiplayer.Network.TimeSync
                 _engine != null && _engine.IsActiveSession,
                 _engine != null && _engine.IsHost);
             bool simPaused = ClientSimFreeze.SimPaused(freeze, paused);
+            // Inc4 V2: when the gate says pin, keep the sim clock constant and route the clock display through
+            // the host mirror instead of advancing Now.
+            bool pin = ClientSimFreezeV2Gate.ShouldPinSim(ClientSimFreezeV2Gate.Enabled, freeze);
             GlyphHostPaused = paused;
             GlyphHostSpeedIndex = _clientAnchor.SpeedIndex;
+            DisplayHostGameSeconds = displayGameSeconds; // fed to ClientTimeDateDisplayFreezePatch
+            DisplayActive = pin;                         // gate the display postfix (V2 pin only)
 
             IsApplyingRemote = true;
             try
             {
-                // PERF: reuse ONE TimingInstanceData (the fixed-clock fields below are constant Zero, so a
-                // single persistent instance is sufficient — only StartTime/Paused/Scale vary per frame).
-                if (_tidScratch == null) _tidScratch = Activator.CreateInstance(_timingInstanceDataType);
-                var tid = _tidScratch;
-                object zero = _timeUnitZero;
+                if (pin)
+                {
+                    // V2 TRUE SIM PIN: do NOT advance StartTime — Timing.Now stays constant (sim frozen). Cheap
+                    // per-frame DRIFT GUARD (one bool read, no clock write in steady state): if a native path
+                    // unpaused the geoscape Timing (V1 leaned on the per-frame ProcessInstanceData to re-pin
+                    // _paused each frame — we removed it), re-assert the freeze via the setter + reschedule so
+                    // every producer re-Max's. FreezeClientGeoSim is self-gated + best-effort; it fires only on
+                    // an actual drift, which is rare (client time-control input is relayed, not applied locally).
+                    if (!GetPaused(timing)) FreezeClientGeoSim();
+                }
+                else
+                {
+                    // V1 / flag-OFF: advance the sim clock every frame via ProcessInstanceData (StartTime=display).
+                    // PERF: reuse ONE TimingInstanceData (the fixed-clock fields below are constant Zero, so a
+                    // single persistent instance is sufficient — only StartTime/Paused/Scale vary per frame).
+                    if (_tidScratch == null) _tidScratch = Activator.CreateInstance(_timingInstanceDataType);
+                    var tid = _tidScratch;
+                    object zero = _timeUnitZero;
 
-                _arg1[0] = TimeSpan.FromSeconds(displayGameSeconds);
-                object startTime = _fromTimeSpanMethod.Invoke(null, _arg1);
+                    _arg1[0] = TimeSpan.FromSeconds(displayGameSeconds);
+                    object startTime = _fromTimeSpanMethod.Invoke(null, _arg1);
 
-                _tidPausedField.SetValue(tid, simPaused);
-                _tidScaleField.SetValue(tid, scale);
-                _tidStartTimeField.SetValue(tid, startTime);
-                // INTENTIONAL / verified-inert: the fixed clock (StartFixedTime/OwnFixedNow → FixedNow) is
-                // pinned to Zero. The only FixedNow consumers — TimingScheduler.Update (Fixed phase) and
-                // PhoenixGame fast-physics — read the ROOT game TimeSource.Timing, NOT this geoscape child
-                // Timing we overwrite. So pinning the child's FixedNow=0 each frame is observably inert for
-                // the client (verified vs decompile Timing.cs/TimingScheduler.cs:679). The geoscape clock
-                // display reads Now (= StartTime, OwnNow pinned 0), which we set above.
-                _tidStartFixedTimeField.SetValue(tid, zero);
-                _tidOwnNowField.SetValue(tid, zero);
-                _tidOwnFixedNowField.SetValue(tid, zero);
+                    _tidPausedField.SetValue(tid, simPaused);
+                    _tidScaleField.SetValue(tid, scale);
+                    _tidStartTimeField.SetValue(tid, startTime);
+                    // INTENTIONAL / verified-inert: the fixed clock (StartFixedTime/OwnFixedNow → FixedNow) is
+                    // pinned to Zero. The only FixedNow consumers — TimingScheduler.Update (Fixed phase) and
+                    // PhoenixGame fast-physics — read the ROOT game TimeSource.Timing, NOT this geoscape child
+                    // Timing we overwrite. So pinning the child's FixedNow=0 each frame is observably inert for
+                    // the client (verified vs decompile Timing.cs/TimingScheduler.cs:679). The geoscape clock
+                    // display reads Now (= StartTime, OwnNow pinned 0), which we set above.
+                    _tidStartFixedTimeField.SetValue(tid, zero);
+                    _tidOwnNowField.SetValue(tid, zero);
+                    _tidOwnFixedNowField.SetValue(tid, zero);
 
-                _arg1[0] = tid;
-                _processInstanceDataMethod.Invoke(timing, _arg1);
+                    _arg1[0] = tid;
+                    _processInstanceDataMethod.Invoke(timing, _arg1);
+                }
 
                 // Keep the speed widget index in sync (cosmetic), under the echo-guard. ON-CHANGE only:
                 // SelectTimePreset already early-outs internally, but gating here removes the per-frame

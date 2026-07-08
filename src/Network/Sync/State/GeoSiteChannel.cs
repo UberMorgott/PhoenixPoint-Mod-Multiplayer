@@ -6,9 +6,11 @@ namespace Multiplayer.Network.Sync.State
     /// <summary>
     /// State channel #5 — GeoSite IDENTITY + ACTIVE-MISSION mirror (fixes stale client sites → wrong
     /// geoscape-event header/backdrop; unlocks LIVE→site-id mission briefs, P1 of the 2026-07-05 popup-mirror
-    /// spec). The client geoscape sim is frozen, so existing client GeoSites never update their
-    /// Owner/Type/State/EncounterID/name; an event modal then resolves a STALE <c>Context.Site</c> and the
-    /// native art collection (derived from <c>Context.Site.Owner</c>/<c>Type</c>) renders wrong. Host
+    /// spec). The client is a PURE MIRROR — under the sim-freeze its geoscape <c>Timing</c> is pinned (Now
+    /// constant, producers Max'd; Inc4 V2 <c>ClientSimFreezeV2Gate</c>) and it never runs the host site sim, so
+    /// existing client GeoSites never update their Owner/Type/State/EncounterID/name on their own; an event modal
+    /// then resolves a STALE <c>Context.Site</c> and the native art collection (derived from
+    /// <c>Context.Site.Owner</c>/<c>Type</c>) renders wrong unless THIS channel refreshes them. Host
     /// subscribes the aggregate site events on <c>GeoMap</c> (identity + the per-faction explored-state family:
     /// Inspected/Visible/Visited — plus the mission family SiteMissionStarted/Ended/Cancelled for the
     /// ActiveMission mirror, plus the WA-2 haven family HavenPopulationChanged/HavenPopulationZoneAttrition/

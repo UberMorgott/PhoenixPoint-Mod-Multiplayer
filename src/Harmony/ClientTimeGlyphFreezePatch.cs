@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Globalization;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -50,6 +51,10 @@ namespace Multiplayer.Harmony
         internal static FieldInfo PresetTimes;         // float[]
         internal static FieldInfo AnimatorField;       // Animator (private _animator)
         internal static MethodInfo LocalizeMethod;     // LocalizedTextBind.Localize(string=null)
+        // Inc4 V2 — the date/time render targets (UIModuleTimeControl.Update paints these from Now).
+        internal static FieldInfo TimerHrsMins;        // Text  (HH:mm)
+        internal static FieldInfo TimerDMY;            // Text  (dd.MM.yyyy)
+        internal static FieldInfo MinutesHand;         // Image (clock minute hand)
         private static bool _resolved;
 
         // Resolve the widget's fields once. Verified vs decompile (2026-07-02, UIModuleTimeControl.cs):
@@ -70,6 +75,11 @@ namespace Multiplayer.Harmony
             AnimatorField = AccessTools.Field(WidgetType, "_animator");
             var bindType = AccessTools.TypeByName("Base.UI.LocalizedTextBind");
             if (bindType != null) LocalizeMethod = AccessTools.Method(bindType, "Localize", new[] { typeof(string) });
+            // Inc4 V2 date/time render targets. Verified vs decompile (UIModuleTimeControl.cs): TimerHrsMins :30,
+            // TimerDMY :33, MinutesHand :36 — the exact fields Update() paints (:143-149).
+            TimerHrsMins = AccessTools.Field(WidgetType, "TimerHrsMins");
+            TimerDMY = AccessTools.Field(WidgetType, "TimerDMY");
+            MinutesHand = AccessTools.Field(WidgetType, "MinutesHand");
             return true;
         }
 
@@ -107,6 +117,28 @@ namespace Multiplayer.Harmony
                 if (s != null) textObj.text = s;
             }
             catch { /* text label is cosmetic-secondary — never let it break the graphic/animator correction */ }
+        }
+
+        /// <summary>
+        /// Inc4 V2 — paint the widget's date/time DISPLAY from a host-mirrored <paramref name="dt"/> while the
+        /// sim <c>Timing.Now</c> is pinned. Byte-for-byte reproduces <c>UIModuleTimeControl.Update</c>'s render
+        /// block (UIModuleTimeControl.cs:143-149 + <c>UpdateHourHands</c> :262-266): HH:mm (invariant), dd.MM.yyyy,
+        /// and the minute hand at <c>-6°·Minute</c>. Display-only — never touches the frozen sim clock. The
+        /// <c>Text.text</c> setter is the codebase's accepted write (mirrors <see cref="CorrectSpeedText"/>).
+        /// </summary>
+        internal static void PaintDate(object widget, DateTime dt)
+        {
+            try
+            {
+                var hm = TimerHrsMins?.GetValue(widget) as Text;
+                if (hm != null) hm.text = dt.ToString("HH:mm", CultureInfo.InvariantCulture);
+                var dmy = TimerDMY?.GetValue(widget) as Text;
+                if (dmy != null) dmy.text = dt.ToString("dd.MM.yyyy");
+                var hand = MinutesHand?.GetValue(widget) as Image;
+                if (hand != null)
+                    hand.rectTransform.rotation = Quaternion.Euler(new Vector3(0f, 0f, -6 * dt.Minute));
+            }
+            catch { /* display-only — never throw into the widget's Update */ }
         }
     }
 
@@ -182,6 +214,56 @@ namespace Multiplayer.Harmony
                 TimeGlyphWidgetReflection.CorrectSpeedText(__instance, hostPaused, hostSpeed);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ClientTimeSpeedGlyphFreezePatch failed: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// Inc4 V2 — the CLIENT date/time DISPLAY driver for the geoscape sim-pin. Design: under the V2 pin
+    /// (<see cref="ClientSimFreezeV2Gate"/>) TimeSyncManager.WriteClock no longer advances the geoscape
+    /// <c>Timing.Now</c> (sim frozen = canon), so <c>UIModuleTimeControl.Update</c> (which paints the HUD clock
+    /// from <c>_timing.Now.DateTime</c>, UIModuleTimeControl.cs:143-149) would show a STUCK clock. This POSTFIX
+    /// runs after the widget's own Update and repaints HH:mm / dd.MM.yyyy / minute-hand from the host-mirrored
+    /// time (<see cref="TimeSyncManager.DisplayHostGameSeconds"/>) — display-only, never touching the frozen sim.
+    ///
+    /// Gated on <see cref="TimeSyncManager.DisplayActive"/> (true ONLY while the V2 pin is driving: active
+    /// client, in geoscape, anchor+offset seeded). V2-OFF / pre-sync / host ⇒ DisplayActive false ⇒ this returns
+    /// before touching anything and the widget paints itself from Now exactly as at HEAD (byte-identical
+    /// rollback). Repaints ONLY when the host game-MINUTE changes (the rendered fields' granularity), so steady
+    /// state is a long compare, not a per-frame string format — cheaper than V1's per-frame widget repaint.
+    /// Reflection target so an engine rename never PatchAll-bombs; best-effort try/catch.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ClientTimeDateDisplayFreezePatch
+    {
+        private static MethodBase _target;
+        private static object _lastWidget;  // reset the minute cache when the widget instance changes (scene reload)
+        private static long _lastMinute = long.MinValue;
+
+        public static bool Prepare()
+        {
+            if (!TimeGlyphWidgetReflection.Ensure()) return false;
+            _target = AccessTools.Method(TimeGlyphWidgetReflection.WidgetType, "Update", Type.EmptyTypes);
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (__instance == null || !TimeSyncManager.DisplayActive) return; // V2 pin inactive → widget owns the paint
+                if (!TimeGlyphWidgetReflection.FreezeActive()) return;             // defensive belt (host/single-player)
+
+                double seconds = TimeSyncManager.DisplayHostGameSeconds;
+                long minute = (long)Math.Floor(seconds / 60.0);
+                if (!ReferenceEquals(__instance, _lastWidget)) { _lastWidget = __instance; _lastMinute = long.MinValue; }
+                if (minute == _lastMinute) return; // on-change (per game-minute) only — the rendered fields don't change intra-minute
+                _lastMinute = minute;
+
+                TimeGlyphWidgetReflection.PaintDate(__instance, ClientSimFreezeV2Gate.DisplayDateTime(seconds));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ClientTimeDateDisplayFreezePatch failed: " + ex.Message); }
         }
     }
 }
