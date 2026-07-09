@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
@@ -277,6 +278,87 @@ namespace Multiplayer.Harmony.Sync
                 PersonnelStateDirty.MarkStorage();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] AugmentCommitDirtyPatch failed: " + ex.Message); }
+        }
+    }
+
+    // ─── same-group preview switching (co-op sessions only) ───────────────────────────────────────────
+    // VANILLA blocks a direct A→B preview switch inside one body-part group: SelectMutation's slot loop
+    // disables every sibling (slot2.SetEnable(false), UIModuleMutationSection.cs:219) while a slot is
+    // selected, and PhoenixGeneralButton.OnPointerClick (:327) drops clicks on !IsEnabled — so the second
+    // click never reaches SelectMutation. The only native unblocks are the toggle-off paths (re-click the
+    // selected slot, Escape → HandleCancelInput, a click in another group → ClearMutationSelection) or a
+    // full RefreshContainerSlots (commit/repair/character-change). RCA 2026-07-09 round-2: the "dead
+    // second click" reported after c65cb4d IS this vanilla deselect-first design — the pre-v2 mod merely
+    // masked it by repainting the whole module on every #9 apply (RequestViewRefresh → ResetContainer →
+    // RefreshContainerSlots re-enabled all slots), which read as free switching. In a co-op session we
+    // restore that free-switching feel PROPERLY: after every SelectMutation that leaves a slot selected,
+    // re-enable the section's slots with the native enable rule (CanApplyAugumentation — the exact state
+    // RefreshContainerSlots/toggle-off produce, :210/:384), so the next click on B runs SelectMutation(B)
+    // natively (switch branch :203 → preview swap from the CharacterOriginalItems baseline). Preview
+    // stays local-only (OnAugmentClicked is still latched by AugmentPreviewScope); commit/sync untouched.
+    // Toggle-off calls end with _selectedMutationSlot == null → no-op (native re-enable already ran).
+    // Gate OFF / single-player / no session → pure native vanilla, matching the rest of the file.
+
+    [HarmonyPatch]
+    public static class AugmentSlotSwitchUnlockPatch
+    {
+        private static MethodBase _target;
+        private static FieldInfo _selectedSlotField;     // UIModuleMutationSection._selectedMutationSlot
+        private static PropertyInfo _currentContainerProp; // UIModuleMutationSection.CurrentContainer
+        private static MethodInfo _canApply;             // UIModuleMutationSection.CanApplyAugumentation(ItemDef)
+        private static PropertyInfo _containerSlotsProp; // UIModuleMutationsContainer.Slots
+        private static PropertyInfo _slotMutationProp;   // UIModuleMutationsSlot.Mutation
+        private static MethodInfo _slotSetEnable;        // UIModuleMutationsSlot.SetEnable(bool)
+
+        public static bool Prepare()
+        {
+            var sectionT = AccessTools.TypeByName(
+                "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationSection");
+            var containerT = AccessTools.TypeByName(
+                "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationsContainer");
+            var slotT = AccessTools.TypeByName(
+                "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationsSlot");
+            if (sectionT != null && containerT != null && slotT != null)
+            {
+                _target = AccessTools.Method(sectionT, "SelectMutation");
+                _selectedSlotField = AccessTools.Field(sectionT, "_selectedMutationSlot");
+                _currentContainerProp = AccessTools.Property(sectionT, "CurrentContainer");
+                _canApply = AccessTools.Method(sectionT, "CanApplyAugumentation");
+                _containerSlotsProp = AccessTools.Property(containerT, "Slots");
+                _slotMutationProp = AccessTools.Property(slotT, "Mutation");
+                _slotSetEnable = AccessTools.Method(slotT, "SetEnable");
+            }
+            bool ok = _target != null && _selectedSlotField != null && _currentContainerProp != null
+                      && _canApply != null && _containerSlotsProp != null && _slotMutationProp != null
+                      && _slotSetEnable != null;
+            Debug.Log("[Multiplayer] AugmentGesturePatches: same-group switch unlock "
+                      + (ok ? "bound" : "NOT FOUND — vanilla deselect-first stays"));
+            return ok;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!EquipSyncV2Gate.Enabled) return;
+                var eng = NetworkEngine.Instance;
+                if (eng == null || !eng.IsActiveSession) return;
+                if (_selectedSlotField.GetValue(__instance) == null) return;   // toggle-off → native re-enabled all
+                var container = _currentContainerProp.GetValue(__instance, null);
+                if (container == null) return;
+                if (!(_containerSlotsProp.GetValue(container, null) is IEnumerable slots)) return;
+                foreach (var slot in slots)
+                {
+                    if (slot == null) continue;
+                    object mutation = _slotMutationProp.GetValue(slot, null);
+                    bool canApply = mutation != null
+                                    && _canApply.Invoke(__instance, new[] { mutation }) is bool b && b;
+                    _slotSetEnable.Invoke(slot, new object[] { canApply });
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] AugmentSlotSwitchUnlockPatch failed: " + ex.Message); }
         }
     }
 }
