@@ -311,6 +311,10 @@ namespace Multiplayer.Network.Sync.State
             public int Removed;                  // previous members absent from the mirrored set
             public bool Reordered;               // same membership, different order
             public readonly List<long> Unresolved = new List<long>();   // mirrored ids with no live instance
+            // The instances behind Removed: after this apply they sit in NO container (remove-from-old
+            // moved same-apply transfers already) — the caller parks them in PersonnelOrphanPool so a
+            // cross-CHANNEL transfer (#9 site remove now, #6 crew add ticks later) can still resolve them.
+            public readonly List<object> RemovedInstances = new List<object>();
         }
 
         /// <param name="target">The container's live roster list (mutated in place, value-only).</param>
@@ -350,7 +354,7 @@ namespace Multiplayer.Network.Sync.State
             var before = new List<object>(target.Count);
             foreach (var o in target) before.Add(o);
             foreach (var o in desired) if (!before.Contains(o)) outcome.Added++;
-            foreach (var o in before) if (!desired.Contains(o)) outcome.Removed++;
+            foreach (var o in before) if (!desired.Contains(o)) { outcome.Removed++; outcome.RemovedInstances.Add(o); }
             outcome.Reordered = outcome.Added == 0 && outcome.Removed == 0;
 
             target.Clear();

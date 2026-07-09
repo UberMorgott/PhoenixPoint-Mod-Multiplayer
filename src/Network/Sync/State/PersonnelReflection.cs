@@ -141,11 +141,66 @@ namespace Multiplayer.Network.Sync.State
                 var fac = rt?.PhoenixFaction();
                 if (fac == null) return index;
                 EnsureFaction(fac);
+                EnsureOrphanPoolBinding(fac);
                 IndexContainers(_vehiclesProp?.GetValue(fac, null) as IEnumerable, index);
                 IndexContainers(_sitesProp?.GetValue(fac, null) as IEnumerable, index);
+                MergeOrphanPool(index);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelReflection.BuildCharacterIndex failed: " + ex.Message); }
             return index;
+        }
+
+        // ─── Client orphan pool (cross-channel transfer race, RCA 2026-07-09) ───
+        // Site rosters ride #9 and vehicle crews ride #6 as SEPARATE applies, each with a fresh
+        // container-scan index: a site→vehicle transfer's #9 apply removes the soldier from his site
+        // first, and the #6 crew apply ticks later can no longer resolve his id — the instance ends in
+        // NO container. Removed-and-unclaimed instances park in PersonnelOrphanPool; the merge below
+        // makes every subsequent index (and therefore every #6/#9 reconcile + PS2 live-state resolve)
+        // see them, and the reconcile that places one back into a container adopts it (pool entry
+        // dropped). The #6 crew map re-emits in FULL every flush, so an already-orphaned unit heals on
+        // the next flush that references it. Pool is populated ONLY by the client apply paths
+        // (ReconcileInto); on the host it is always empty, so the merge is a no-op there.
+
+        // Rebind-by-instance (the PersonnelChannel.AttachHost / WalletWatcher idiom): a fresh
+        // GeoPhoenixFaction (geoscape reload, tactical round-trip, new session) means every parked
+        // instance belongs to a DEAD level — never adopt one across the boundary.
+        private static object _orphanPoolFaction;
+
+        private static void EnsureOrphanPoolBinding(object faction)
+        {
+            if (ReferenceEquals(faction, _orphanPoolFaction)) return;
+            ResetOrphanPool("faction rebind");
+            _orphanPoolFaction = faction;
+        }
+
+        /// <summary>Session/reload seam: drop every parked orphan + the faction binding. Ids never
+        /// re-claimed (dismissed/dead soldiers — the host's rosters never reference them again, so a
+        /// parked instance can never resurrect one) are logged ONCE here and dropped.</summary>
+        public static void ResetOrphanPool(string reason)
+        {
+            _orphanPoolFaction = null;
+            var dropped = PersonnelOrphanPool.Reset();
+            if (dropped.Count > 0)
+                Debug.Log("[Multiplayer] PersonnelReflection: orphan pool reset (" + reason + ") — dropped "
+                          + dropped.Count + " never-reclaimed GeoUnitId(s) [" + string.Join(",", dropped) + "]");
+        }
+
+        // An id NO live container claims resolves to its parked instance (deliberately no ContainerOf
+        // entry — it sits in no container, so remove-from-old is a no-op); an id a container claims
+        // again is superseded — the live instance won, drop the pool entry.
+        private static void MergeOrphanPool(CharacterIndex index)
+        {
+            if (PersonnelOrphanPool.Count == 0) return;
+            foreach (var kv in PersonnelOrphanPool.SnapshotEntries())
+            {
+                if (index.ById.ContainsKey(kv.Key))
+                {
+                    PersonnelOrphanPool.Evict(kv.Key);
+                    Debug.Log("[Multiplayer] PersonnelReflection: GeoUnitId " + kv.Key
+                              + " live in a container again — orphan pool entry dropped (superseded)");
+                }
+                else index.ById[kv.Key] = kv.Value;
+            }
         }
 
         private static void IndexContainers(IEnumerable containers, CharacterIndex index)
@@ -256,6 +311,31 @@ namespace Multiplayer.Network.Sync.State
             var outcome = RosterReconcile.Apply(target, ids,
                 id => index.ById.TryGetValue(id, out var ch) ? ch : null,
                 ch => index.ContainerOf.TryGetValue(ch, out var l) ? l : null);
+            // Cross-channel transfer gap: an instance this reconcile REMOVED now sits in no container
+            // (a same-apply transfer went through remove-from-old instead and never lands here) — park
+            // it so the #6/#9 apply that references its id ticks later can still resolve it. If it is
+            // in fact still claimed somewhere (corrupt double-membership), the next index's container
+            // scan supersedes the entry.
+            foreach (var inst in outcome.RemovedInstances)
+            {
+                long id = ReadUnitId(inst);
+                if (id == 0) continue;   // unresolvable id can never be referenced again — not poolable
+                PersonnelOrphanPool.Park(id, inst);
+                index.ContainerOf.Remove(inst);
+                Debug.Log("[Multiplayer] PersonnelReflection: " + label + " — GeoUnitId " + id
+                          + " removed with no live container, parked in orphan pool (awaiting adoption)");
+            }
+            // Adoption: every mirrored id that resolved is IN this container now — drop its pool entry
+            // (a pooled instance resolves via the BuildCharacterIndex merge, so this is where an
+            // orphaned soldier re-enters a live roster).
+            if (PersonnelOrphanPool.Count > 0)
+                foreach (var id in ids)
+                    if (PersonnelOrphanPool.Evict(id) && index.ById.TryGetValue(id, out var adopted))
+                    {
+                        index.ContainerOf[adopted] = target;
+                        Debug.Log("[Multiplayer] PersonnelReflection: " + label + " — GeoUnitId " + id
+                                  + " adopted from orphan pool");
+                    }
             if (outcome.Unresolved.Count > 0)
                 Debug.Log("[Multiplayer] PersonnelReflection: " + label + " — " + outcome.Unresolved.Count
                           + " GeoUnitId(s) not live on this client, skipped [" + string.Join(",", outcome.Unresolved) + "]");

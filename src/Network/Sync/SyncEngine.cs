@@ -154,6 +154,7 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
+            State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -227,6 +228,10 @@ namespace Multiplayer.Network.Sync
             // marks (they describe the dead geoscape). Host side: the probe's HourTicked binding self-heals
             // via the HostTick level-instance rebind guard (ResearchChannel idiom), nothing to sweep here.
             _reloadReset.Register("crc-probe-grace", () => _crcMonitor.ArmGrace(Environment.TickCount));
+            // Client-side roster orphan pool: parked GeoCharacter instances belong to the DEAD geoscape
+            // (the reloaded blob is consistent — no orphans by construction). The faction rebind-by-instance
+            // guard inside BuildCharacterIndex would catch this too; sweeping here drops the dead refs promptly.
+            _reloadReset.Register("personnel-orphan-pool", () => State.PersonnelReflection.ResetOrphanPool("reload boundary"));
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────

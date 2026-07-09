@@ -316,6 +316,10 @@ namespace Multiplayer.Harmony.Sync
                 object ability = AccessTools.Field(slot.GetType(), "Ability")?.GetValue(slot)
                                  ?? AccessTools.Field(t, "_boughtAbility")?.GetValue(__instance);
                 string guid = DefReflection.GetGuid(ability);
+                // DIAG (orphan RCA 2026-07-09 evidence gap): one entry line per real buy click with the
+                // resolved slot signature, so a dropped/misrouted SP spend on a live soldier is traceable.
+                Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: entry unitId=" + unitId
+                          + " trackSource=" + trackSource + " slotIndex=" + slotIndex + " guid=" + guid);
                 if (slotIndex < 0 || trackSource < 0 || string.IsNullOrEmpty(guid))
                 {
                     Debug.Log("[Multiplayer] BuyAbilityProgressionRelayPatch: slot unresolved — buy suppressed (no relay)");
@@ -373,10 +377,14 @@ namespace Multiplayer.Harmony.Sync
                 int dWill = Delta(t, __instance, "_currentWillStat", "_startingWillStat");
                 int dSpeed = Delta(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
                 bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool p && p;
+                object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                // DIAG (orphan RCA 2026-07-09 evidence gap): one entry line per native commit (screen exit /
+                // soldier switch / confirm) with the deltas, so a dropped/misrouted stat spend is traceable.
+                Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: entry unitId=" + unitId
+                          + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + " pandoran=" + pandoran);
                 if (!pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
                 {
-                    object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
-                    long unitId = PersonnelReflection.ReadUnitId(character);
                     // CharacterBaseAttribute: Strength=0, Will=1, Speed=2 (decompile enum order).
                     if (dStr > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
                         () => new SpendStatPointsAction(unitId, 0, dStr));
