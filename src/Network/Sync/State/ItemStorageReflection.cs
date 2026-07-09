@@ -18,13 +18,15 @@ namespace Multiplayer.Network.Sync.State
     ///     is a field, not a property — bound via AccessTools.Field.)
     ///   • model: <c>ItemStorage.Items : IReadOnlyDictionary&lt;ItemDef,GeoItem&gt;</c> (ItemStorage.cs:22).
     ///   • count: <c>GeoItem.CommonItemData.Count</c> (CommonItemData.cs:39).
+    ///   • charges: <c>CommonItemData.CurrentCharges</c> (CommonItemData.cs:33) — the stack's TOP-unit
+    ///     charges (all other units are full: <c>TotalAvailableCharges</c>, CommonItemData.cs:96-99).
     ///   • def: <c>GeoItem.ItemDef</c> (GeoItem.cs:21); guid via <see cref="DefReflection.GetGuid"/>.
     ///   • change event: <c>ItemStorage.StorageChanged</c> — a plain <c>System.Action</c> FIELD
     ///     (ItemStorage.cs:17), so a direct delegate subscription works (no DynamicMethod needed).
     ///   • reconcile (client apply): mirror the game's own load path
     ///     <c>GeoFaction.LevelStartLoadedGame</c> (GeoFaction.cs:600-601): <c>Clear()</c> then add a
-    ///     fresh <c>new GeoItem(def, count)</c> per def. <c>AddItem</c> clones the GeoItem and preserves
-    ///     its preset <c>CommonItemData.Count</c> when the def is absent (ItemStorage.cs:58-65). The
+    ///     fresh <c>new GeoItem(def, count, charges)</c> per def. <c>AddItem</c> clones the GeoItem and
+    ///     preserves its preset <c>CommonItemData</c> when the def is absent (ItemStorage.cs:58-65). The
     ///     faction-storage ammo auto-unload (ItemStorage.cs:48-57) is harmless: a fresh GeoItem made
     ///     via the count ctor has an empty AmmoManager (no loaded magazines) → nothing to unload.
     /// </summary>
@@ -42,6 +44,7 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _geoItemDefProp;   // GeoItem.ItemDef
         private static PropertyInfo _geoItemCommonProp;// GeoItem.CommonItemData
         private static PropertyInfo _commonCountProp;  // CommonItemData.Count
+        private static PropertyInfo _commonChargesProp;// CommonItemData.CurrentCharges
         private static ConstructorInfo _geoItemCtor;   // GeoItem(ItemDef, int count, int charges, AmmoManager, int)
 
         private static void Ensure()
@@ -59,7 +62,10 @@ namespace Multiplayer.Network.Sync.State
             _geoItemDefProp = AccessTools.Property(_geoItemType, "ItemDef");
             _geoItemCommonProp = AccessTools.Property(_geoItemType, "CommonItemData");
             if (_geoItemCommonProp != null)
+            {
                 _commonCountProp = AccessTools.Property(_geoItemCommonProp.PropertyType, "Count");
+                _commonChargesProp = AccessTools.Property(_geoItemCommonProp.PropertyType, "CurrentCharges");
+            }
             // GeoItem(ItemDef def, int count = 1, int charges = -1, AmmoManager ammo = null, int malfunctionPercent = -100)
             _geoItemCtor = AccessTools.GetDeclaredConstructors(_geoItemType)?.Find(c =>
             {
@@ -68,7 +74,8 @@ namespace Multiplayer.Network.Sync.State
             });
 
             _ready = _itemsProp != null && _clearMethod != null && _addItemMethod != null
-                     && _geoItemDefProp != null && _commonCountProp != null && _geoItemCtor != null;
+                     && _geoItemDefProp != null && _commonCountProp != null && _commonChargesProp != null
+                     && _geoItemCtor != null;
         }
 
         /// <summary>The Phoenix faction's global <c>ItemStorage</c> (field on <c>GeoFaction</c>), or null.</summary>
@@ -86,8 +93,9 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex) { Debug.LogError("[Multiplayer] ItemStorageReflection.GetStorage failed: " + ex.Message); return null; }
         }
 
-        /// <summary>Host: enumerate the storage as (def guid, count) pairs, aggregated per def. Null if unavailable.</summary>
-        public static List<(string guid, int count)> Snapshot(GeoRuntime rt)
+        /// <summary>Host: enumerate the storage as (def guid, count, charges) entries, one per def stack.
+        /// Charges = the stack's <c>CurrentCharges</c> (top unit; see class doc). Null if unavailable.</summary>
+        public static List<(string guid, int count, int charges)> Snapshot(GeoRuntime rt)
         {
             try
             {
@@ -98,7 +106,7 @@ namespace Multiplayer.Network.Sync.State
                 var dict = _itemsProp.GetValue(storage, null) as IEnumerable;
                 if (dict == null) return null;
 
-                var list = new List<(string, int)>();
+                var list = new List<(string, int, int)>();
                 foreach (var entry in dict) // KeyValuePair<ItemDef, GeoItem>
                 {
                     var geoItem = GetKvpValue(entry);
@@ -107,7 +115,7 @@ namespace Multiplayer.Network.Sync.State
                     string guid = DefReflection.GetGuid(def);
                     if (string.IsNullOrEmpty(guid)) continue;
                     int count = GetCount(geoItem);
-                    if (count > 0) list.Add((guid, count));
+                    if (count > 0) list.Add((guid, count, GetCharges(geoItem)));
                 }
                 return list;
             }
@@ -116,10 +124,10 @@ namespace Multiplayer.Network.Sync.State
 
         /// <summary>
         /// Client: reconcile the live storage to EXACTLY match <paramref name="target"/>. Mirrors the
-        /// game's own load reconcile (<c>Clear()</c> + fresh <c>AddItem(new GeoItem(def, count))</c> per
-        /// def). Defs present on the client but absent from the snapshot are dropped by the Clear.
+        /// game's own load reconcile (<c>Clear()</c> + fresh <c>AddItem(new GeoItem(def, count, charges))</c>
+        /// per def). Defs present on the client but absent from the snapshot are dropped by the Clear.
         /// </summary>
-        public static void Apply(GeoRuntime rt, List<(string guid, int count)> target)
+        public static void Apply(GeoRuntime rt, List<(string guid, int count, int charges)> target)
         {
             if (target == null) return;
             try
@@ -129,24 +137,28 @@ namespace Multiplayer.Network.Sync.State
                 var storage = GetStorage(rt);
                 if (storage == null) return;
 
-                // NOTE — INVARIANT: faction global ItemStorage holds only STATELESS, count-only items.
-                // The wire snapshot carries (guid, count) per def ONLY — it cannot represent per-GeoItem
-                // state (AmmoManager / loaded magazines, charges, malfunction%). So Clear()+rebuild with a
-                // fresh `new GeoItem(def, count)` is correct here: it exactly mirrors the game's own load
-                // path (GeoFaction.LevelStartLoadedGame, GeoFaction.cs:600-601), and a count-ctor GeoItem
-                // has an empty AmmoManager so the faction-storage auto-unload (ItemStorage.cs:48-57) is a
-                // no-op. Stateful per-instance items (a loaded weapon, a partially-used medkit) live on
-                // soldiers / in equipment, NOT in faction storage, and are reconciled by their own
-                // channels — they never round-trip through here, so no per-instance state is destroyed.
-                // Do NOT switch to a diff-against-existing reconcile: there is no per-instance state to
-                // preserve, and the snapshot couldn't carry it anyway.
+                // NOTE — reconcile: Clear()+rebuild with a fresh `new GeoItem(def, count, charges)` per
+                // def, exactly mirroring the game's own load path (GeoFaction.LevelStartLoadedGame,
+                // GeoFaction.cs:600-601). The snapshot carries per-stack CHARGES because the native
+                // post-mission replenish leaves PARTIAL stacks in faction storage
+                // (GeoMission.TryReloadItem → ModifyCharges(-n), GeoMission.cs:1095-1104) — a count-only
+                // rebuild silently refilled them to ChargesMax (ctor charges=-1 → full) and drifted from
+                // the host. The ctor stores the exact value: charges>=0 → _charges = charges
+                // (CommonItemData.cs:51-63), so the mirrored stack is bit-identical (GeoItem.Equals
+                // compares def+count+CurrentCharges). Remaining per-GeoItem state (AmmoManager / loaded
+                // magazines, malfunction%) still never lives in faction storage: AddItem auto-unloads
+                // magazines into their own def stacks (ItemStorage.cs:52-63), and a count-ctor GeoItem
+                // has an empty AmmoManager so that unload is a no-op here. Stateful per-instance items
+                // (a loaded weapon, a partially-used medkit) live on soldiers / in equipment and are
+                // reconciled by their own channels — they never round-trip through here. Do NOT switch
+                // to a diff-against-existing reconcile: there is no per-instance state to preserve.
                 _clearMethod.Invoke(storage, null);
-                foreach (var (guid, count) in target)
+                foreach (var (guid, count, charges) in target)
                 {
                     if (count <= 0) continue;
                     var def = DefReflection.GetDefByGuid(guid);
                     if (def == null) continue;
-                    var geoItem = NewGeoItem(def, count);
+                    var geoItem = NewGeoItem(def, count, charges);
                     if (geoItem == null) continue;
                     _addItemMethod.Invoke(storage, new[] { geoItem });
                 }
@@ -185,7 +197,7 @@ namespace Multiplayer.Network.Sync.State
 
         // ─── helpers ──────────────────────────────────────────────────────
 
-        private static object NewGeoItem(object def, int count)
+        private static object NewGeoItem(object def, int count, int charges)
         {
             // GeoItem(ItemDef def, int count, int charges = -1, AmmoManager ammo = null, int malf = -100)
             var ps = _geoItemCtor.GetParameters();
@@ -193,6 +205,9 @@ namespace Multiplayer.Network.Sync.State
             args[0] = def;
             args[1] = count;
             for (int i = 2; i < ps.Length; i++) args[i] = ps[i].DefaultValue;
+            // Per-stack charges ride param #2; a negative value keeps the ctor's "full charges"
+            // default (charges<0 → _charges = ChargesMax, CommonItemData.cs:56-63).
+            if (ps.Length >= 3 && ps[2].ParameterType == typeof(int)) args[2] = charges;
             return _geoItemCtor.Invoke(args);
         }
 
@@ -201,6 +216,15 @@ namespace Multiplayer.Network.Sync.State
             var common = _geoItemCommonProp.GetValue(geoItem, null);
             if (common == null) return 0;
             return (int)_commonCountProp.GetValue(common, null);
+        }
+
+        // Stack top-unit charges; -1 (= ctor "full" default) when unreadable so a broken read can
+        // never zero a client's stack.
+        private static int GetCharges(object geoItem)
+        {
+            var common = _geoItemCommonProp.GetValue(geoItem, null);
+            if (common == null) return -1;
+            return (int)_commonChargesProp.GetValue(common, null);
         }
 
         // KeyValuePair<ItemDef,GeoItem>.Value via reflection (struct, boxed during foreach).

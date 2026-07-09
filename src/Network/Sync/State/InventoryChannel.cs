@@ -1,17 +1,21 @@
 using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Text;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
     /// State channel #1 — Phoenix faction global <c>ItemStorage</c> (fixes 8v7 manufacture desync).
-    /// Host snapshots (def guid, count) pairs on <c>ItemStorage.StorageChanged</c>; client reconciles
-    /// its storage to match exactly (Clear + rebuild). Mirrors the wallet echo shape.
+    /// Host snapshots (def guid, count, charges) entries on <c>ItemStorage.StorageChanged</c>; client
+    /// reconciles its storage to match exactly (Clear + rebuild). Mirrors the wallet echo shape.
+    /// Wire codec + drift signature live in the pure <see cref="InventorySnapshot"/> (unit-tested).
     ///
-    /// Wire payload (inside StateSync): [u16 count]{[u16 guidLen][guid utf8][i32 count]}*.
+    /// The change EVENT alone is not enough: native code consumes storage WITHOUT raising
+    /// <c>StorageChanged</c> — partial <c>PopItem</c> (ItemStorage.cs:102-106) and partial
+    /// <c>RemoveItem</c> (:86-91) fire it only when a def stack is fully removed,
+    /// <c>CommonItemData.ModifyCharges</c> raises only <c>OnItemModified</c> (CommonItemData.cs:101-141),
+    /// and <c>Clear()</c> raises nothing. The post-mission replenish (GeoMission.cs:1095-1104) and
+    /// <c>UIModuleReplenish</c> (:250) write through exactly those silent paths, so the host-side
+    /// <see cref="PollHostDrift"/> backstop re-derives dirtiness from absolute truth.
     /// </summary>
     public sealed class InventoryChannel : IStateChannel
     {
@@ -20,31 +24,50 @@ namespace Multiplayer.Network.Sync.State
         // ─── host subscription state (mirrors WalletWatcher) ───────────────
         private Delegate _handler;
         private object _storage;
+        // Host: content signature of the last snapshot actually BROADCAST (poll baseline). Snapshot()
+        // is the sole payload builder and runs only at broadcast time (SyncEngine.FlushChannel /
+        // BroadcastAllChannels), so what it returns is exactly what clients received — the drift poll
+        // never re-fires what was just sent (same baseline discipline as _lastWalletBroadcast).
+        private string _lastBroadcastSig;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
             var items = ItemStorageReflection.Snapshot(rt);
             if (items == null) return null;
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write((ushort)items.Count);
-                foreach (var (guid, count) in items)
-                {
-                    var g = Encoding.UTF8.GetBytes(guid ?? "");
-                    w.Write((ushort)g.Length);
-                    w.Write(g);
-                    w.Write(count);
-                }
-                return ms.ToArray();
-            }
+            _lastBroadcastSig = InventorySnapshot.Signature(items);
+            return InventorySnapshot.Encode(items);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
-            var target = Decode(data);
-            if (target == null) return;
+            var target = InventorySnapshot.Decode(data);
+            if (target == null)
+            {
+                if (data != null)
+                    Debug.LogError("[Multiplayer] InventoryChannel: undecodable payload (" + data.Length + " bytes) — apply skipped");
+                return;
+            }
             ItemStorageReflection.Apply(rt, target);
+        }
+
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): signature-compare the live
+        /// storage against the last broadcast and mark the channel dirty on drift — catching ALL silent
+        /// writers (see class doc), current and future. Marks only; the one existing per-channel flush
+        /// path stays the sole sender. No-op off-geoscape (null snapshot).
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null) return;
+            var items = ItemStorageReflection.Snapshot(rt);
+            if (items == null) return;                        // not in geoscape yet / mid-load
+            var sig = InventorySnapshot.Signature(items);
+            if (sig == _lastBroadcastSig) return;             // clients already hold exactly this
+            // DIAG: fires only on real drift the StorageChanged event path missed (or the pre-first-
+            // flush seed). The flush itself logs nothing here — tripwire in FlushChannel covers storms.
+            if (_lastBroadcastSig != null)
+                Debug.Log("[Multiplayer] Inventory poll drift detected (silent storage write; event path missed it) — arming channel #1 flush");
+            eng.MarkChannelDirty(ChannelId);
         }
 
         public void AttachHost(SyncEngine eng)
@@ -72,34 +95,6 @@ namespace Multiplayer.Network.Sync.State
                 ItemStorageReflection.Unsubscribe(_storage, _handler);
             _storage = null;
             _handler = null;
-        }
-
-        private static List<(string guid, int count)> Decode(byte[] data)
-        {
-            if (data == null) return null;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    int n = r.ReadUInt16();
-                    var list = new List<(string, int)>(n);
-                    for (int i = 0; i < n; i++)
-                    {
-                        int gl = r.ReadUInt16();
-                        // BinaryReader.ReadBytes silently returns fewer bytes on truncation (no throw);
-                        // verify the full guid length was read, else bail (caught below → null = no-op).
-                        var gbytes = r.ReadBytes(gl);
-                        if (gbytes.Length != gl)
-                            throw new EndOfStreamException("InventoryChannel: truncated guid (wanted " + gl + ", got " + gbytes.Length + ")");
-                        string guid = Encoding.UTF8.GetString(gbytes);
-                        int count = r.ReadInt32();
-                        list.Add((guid, count));
-                    }
-                    return list;
-                }
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] InventoryChannel.Decode failed: " + ex.Message); return null; }
         }
     }
 }

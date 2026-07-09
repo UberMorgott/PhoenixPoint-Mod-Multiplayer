@@ -36,6 +36,13 @@ namespace Multiplayer.Network.Sync
         // GetAmount reads don't run every frame — the event path + bind/ready belts catch the common case
         // instantly; the poll is just the convergence backstop for a missed/stale-bound ResourcesChanged.
         private const int WalletPollTickInterval = 15;
+        private int _inventoryPollTick;   // host: frame counter throttling the storage signature-drift poll
+        // Inventory (channel #1) drift-poll cadence. Native code consumes faction storage WITHOUT raising
+        // StorageChanged (partial PopItem / partial RemoveItem / ModifyCharges / Clear — see
+        // InventoryChannel.PollHostDrift), so the event path alone leaves clients stale forever after e.g.
+        // the post-mission replenish. 30 ticks (~0.5 s @60fps) keeps the full-storage reflection walk off
+        // the per-frame path while still converging faster than a player can act on the drift.
+        private const int InventoryPollTickInterval = 30;
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
         private readonly Queue<uint> _pendingOrder = new Queue<uint>();   // FIFO eviction order for _pending (bounds growth)
 
@@ -2130,6 +2137,17 @@ namespace Multiplayer.Network.Sync
 
             // Host: bind every state channel's change-event the same way (idempotent per channel).
             foreach (var ch in _channels.All) ch.AttachHost(this);
+
+            // Host: inventory (channel #1) signature-drift POLL — the storage convergence backstop for
+            // native writers that never raise StorageChanged (post-mission replenish, UIModuleReplenish;
+            // see InventoryChannel.PollHostDrift). Mirrors the wallet poll above: throttled, marks dirty
+            // only — the per-channel flush below stays the sole sender.
+            if (++_inventoryPollTick >= InventoryPollTickInterval)
+            {
+                _inventoryPollTick = 0;
+                (_channels.Get(SurfaceIds.InventoryChannel) as State.InventoryChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
 
             if (_walletDirty)
             {
