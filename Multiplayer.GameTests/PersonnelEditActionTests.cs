@@ -47,12 +47,12 @@ public class PersonnelEditActionTests
     }
 
     [Fact]
-    public void Augment_RoundTrip_PreservesBodyparts()
+    public void Augment_RoundTrip_PreservesAugmentGuid()
     {
-        var rt = RoundTrip(new AugmentSoldierAction(7, new[] { "bionic-arm", "bionic-leg" }));
+        var rt = RoundTrip(new AugmentSoldierAction(7, "bionic-arm"));
         Assert.Equal(ActionCategory.Equip, rt.Category);
         Assert.Equal(7, rt.UnitId);
-        Assert.Equal(new[] { "bionic-arm", "bionic-leg" }, rt.Bodyparts);
+        Assert.Equal("bionic-arm", rt.AugmentGuid);
     }
 
     [Fact]

@@ -435,39 +435,54 @@ namespace Multiplayer.Network.Sync.State
                         }
                 }
 
-                // Commit — the native SetItems (freeReload:false, matching OnAugmentClicked/OnAugmentApplied).
-                InvokeSetItems(soldier, newArmour, keepEquipment, null, false);
-
-                // Displaced bodyparts → faction storage unless permanent augment (OnAugmentApplied step 1);
-                // bionics additionally free-repair a damaged displaced part (UIModuleBionics.cs:222-227).
-                object store = ItemStorageReflection.GetStorage(rt);
-                if (_storeAddItem == null && store != null) _storeAddItem = AccessTools.Method(store.GetType(), "AddItem");
-                foreach (var it in displaced)
-                {
-                    if (store != null && !IsPermanentAugment(_itemDefProp?.GetValue(it, null)))
-                        _storeAddItem?.Invoke(store, new[] { it });
-                    if (isBionic && _getEquippedItemHealth != null && _repairItem != null
-                        && (float)_getEquippedItemHealth.Invoke(soldier, new[] { it }) < 1f)
-                        _repairItem.Invoke(soldier, new object[] { it, false });
-                }
-                // Dropped 2-handed equipment → storage unless family-tagged (the native tag exclusion).
-                foreach (var it in dropped2H)
-                {
-                    if (store != null && !HasTag(_itemDefProp?.GetValue(it, null), familyTag))
-                        _storeAddItem?.Invoke(store, new[] { it });
-                }
-
-                // Wallet — native Wallet.Take(ManufacturePrice, OperationReason.Purchase).
+                // Wallet — native Wallet.Take(ManufacturePrice, OperationReason.Purchase). Native order is
+                // SetItems-then-Take, but affordability is already gated above (HasResources) and every
+                // Deny/return is behind us, so charging BEFORE the commit is value-identical on the happy
+                // path — and a throw in any post-commit step can no longer leave the augment applied unpaid.
                 if (_walletTake != null && _operationReasonType != null)
                     _walletTake.Invoke(wallet, new[] { price, Enum.Parse(_operationReasonType, "Purchase") });
 
-                // Preferred loadout + statistics + loadout save (OnAugmentApplied step 5 + UIState handler).
-                _updatePreferredLoadout?.Invoke(fac, new[] { soldier });
-                object statsMgr = _statsComponent?.Invoke(null, null);
-                if (statsMgr != null) (isBionic ? _onApplyBionic : _onApplyMutation)?.Invoke(statsMgr, new[] { augment });
-                _saveLoadout?.Invoke(soldier, null);
+                // Commit — the native SetItems (freeReload:false, matching OnAugmentClicked/OnAugmentApplied).
+                InvokeSetItems(soldier, newArmour, keepEquipment, null, false);
 
-                // TFTV parity — its augment side-effects ride UI postfixes this headless path never trips.
+                // Post-commit steps: each group isolated so one failure logs loudly and never silently
+                // skips the rest (augment + charge are already committed; the #9 blob mirrors the
+                // authoritative result regardless).
+                try
+                {
+                    // Displaced bodyparts → faction storage unless permanent augment (OnAugmentApplied step 1);
+                    // bionics additionally free-repair a damaged displaced part (UIModuleBionics.cs:222-227).
+                    object store = ItemStorageReflection.GetStorage(rt);
+                    if (_storeAddItem == null && store != null) _storeAddItem = AccessTools.Method(store.GetType(), "AddItem");
+                    foreach (var it in displaced)
+                    {
+                        if (store != null && !IsPermanentAugment(_itemDefProp?.GetValue(it, null)))
+                            _storeAddItem?.Invoke(store, new[] { it });
+                        if (isBionic && _getEquippedItemHealth != null && _repairItem != null
+                            && (float)_getEquippedItemHealth.Invoke(soldier, new[] { it }) < 1f)
+                            _repairItem.Invoke(soldier, new object[] { it, false });
+                    }
+                    // Dropped 2-handed equipment → storage unless family-tagged (the native tag exclusion).
+                    foreach (var it in dropped2H)
+                    {
+                        if (store != null && !HasTag(_itemDefProp?.GetValue(it, null), familyTag))
+                            _storeAddItem?.Invoke(store, new[] { it });
+                    }
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Augment: displaced-to-storage failed — " + ex.Message); }
+
+                try
+                {
+                    // Preferred loadout + statistics + loadout save (OnAugmentApplied step 5 + UIState handler).
+                    _updatePreferredLoadout?.Invoke(fac, new[] { soldier });
+                    object statsMgr = _statsComponent?.Invoke(null, null);
+                    if (statsMgr != null) (isBionic ? _onApplyBionic : _onApplyMutation)?.Invoke(statsMgr, new[] { augment });
+                    _saveLoadout?.Invoke(soldier, null);
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Augment: loadout/statistics failed — " + ex.Message); }
+
+                // TFTV parity — its augment side-effects ride UI postfixes this headless path never trips
+                // (already failure-isolated per effect inside).
                 TftvAugmentCompat.OnHostAugmentApplied(rt, soldier, augment, isBionic);
 
                 Debug.Log("[Multiplayer] PersonnelEditReflection.Augment: unit " + unitId + " applied "
