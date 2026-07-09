@@ -420,7 +420,14 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _geoItemDefProp2;        // GeoItem.ItemDef
         private static PropertyInfo _charStatsProp;          // GeoCharacter.CharacterStats
         private static MethodInfo _getInventorySlots;        // CharacterStats.GetInventorySlots()
-        private static bool _loggedProgressionSkip;          // transition-only log latch for the progression skip line
+        private static bool _loggedProgressionSkip;          // transition-only log latch for the progression defer line
+        // One-shot per-apply stamp for the progression panel (mirrors PersonnelChannel.LastStateApplyUnitIds):
+        // armed by the caller that knows WHAT the apply changed (client #9 / host stat-SP intent), consumed by
+        // the next RefreshRosterEquip. Unarmed calls keep the legacy conservative repaint-when-idle behavior.
+        private static bool _progressionStampArmed;
+        private static IReadOnlyList<long> _progressionStampIds;
+        private static bool _progressionStampFactionSp;
+        private static bool _progressionRepaintOwed;         // a relevant apply was deferred behind a pending local edit
 
         private static void EnsureRosterFamily()
         {
@@ -584,43 +591,71 @@ namespace Multiplayer.Network.Sync.State
         private static void RefreshRosterEquip(GeoRuntime rt)
         {
             EnsureRosterFamily();
-            if (_editSoldierType == null || _editSoldierCharField == null || _modulesField == null || _viewField == null) return;
+            // Consume the one-shot progression stamp FIRST (even on early exit) so a stale stamp can never
+            // mis-gate a later unrelated fan-out call. Armed only by a stat/SP-relevant apply (client #9 /
+            // host stat intent); every exit below that drops an armed stamp logs why (stat-sync RCA 2026-07-10:
+            // the silent-success/silent-exit ambiguity made the staleness verdict impossible from logs).
+            bool stampArmed = _progressionStampArmed;
+            var stampIds = _progressionStampIds;
+            bool stampSp = _progressionStampFactionSp;
+            _progressionStampArmed = false; _progressionStampIds = null; _progressionStampFactionSp = false;
+
+            if (_editSoldierType == null || _editSoldierCharField == null || _modulesField == null || _viewField == null)
+                { ProgressionStampDiag(stampArmed, "roster-family reflection unresolved"); return; }
             var geo = rt?.GeoLevel();
-            if (geo == null) return;
+            if (geo == null) { ProgressionStampDiag(stampArmed, "no geoscape level"); return; }
             var view = _viewField.GetValue(geo);
-            if (view == null) return;
+            if (view == null) { ProgressionStampDiag(stampArmed, "no geoscape view"); return; }
             // Gate: active view state MUST be the soldier-equip screen.
             var state = _currentViewStateProp?.GetValue(view, null);
-            if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;
+            if (state == null || !_editSoldierType.IsInstanceOfType(state))
+                { ProgressionStampDiag(stampArmed, "view state is " + (state == null ? "null" : state.GetType().Name) + ", not EditSoldier"); return; }
             var modules = _modulesField.GetValue(view);
-            if (modules == null) return;
+            if (modules == null) { ProgressionStampDiag(stampArmed, "no modules data"); return; }
             var character = _editSoldierCharField.GetValue(state);
 
-            // (B) progression panel (stats / SP / abilities) — same #9 blob. SKIP when the viewer has an
-            // in-progress unconfirmed allocation (IsCharacterChanged = stat delta; _boughtAbilitySlot = pending
-            // ability buy): SetCharacterProgression re-reads the model and RESETS the edit buffer. Never-silent.
+            // (B) progression panel (stats / SP / abilities) — same #9 blob. SetCharacterProgression re-reads
+            // the model and RESETS the edit buffer, so ProgressionRepaintDecision gates it: DEFER when the
+            // viewer has an in-progress unconfirmed allocation (drained on the commit/clear seam), SKIP when a
+            // stamped apply touched neither the viewed soldier nor the shared SP pool. Never-silent for stamps.
             if (_progModuleField != null && _isCharacterChanged != null && _setCharacterProgression != null
                 && _viewerFactionProp != null && character != null)
             {
                 var progModule = _progModuleField.GetValue(modules);
-                if (progModule != null && IsOpen(progModule))
+                if (progModule == null || !IsOpen(progModule))
+                    ProgressionStampDiag(stampArmed, progModule == null ? "progression module null" : "progression module not activeInHierarchy");
+                else
                 {
                     bool pendingStat = _isCharacterChanged.Invoke(progModule, null) is bool pc && pc;
                     bool pendingAbility = _boughtAbilitySlotField != null && _boughtAbilitySlotField.GetValue(progModule) != null;
-                    if (pendingStat || pendingAbility)
+                    long viewedUnitId = PersonnelReflection.ReadUnitId(character);
+                    var outcome = ProgressionRepaintDecision.Decide(pendingStat || pendingAbility, _progressionRepaintOwed,
+                        viewedUnitId, stampArmed ? stampIds : null, stampArmed && stampSp);
+                    if (outcome == ProgressionRepaintDecision.Outcome.Defer)
                     {
+                        _progressionRepaintOwed = true;
                         if (!_loggedProgressionSkip)   // transition-only (was one line per invocation while pending)
-                            Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive SKIPPED — viewer has a pending local stat/ability allocation");
+                            Debug.Log("[Multiplayer] GeoUiRefresh: EditSoldier progression re-drive DEFERRED — pending local stat/ability allocation (drains on commit/clear)");
                         _loggedProgressionSkip = true;
                     }
-                    else
+                    else if (outcome == ProgressionRepaintDecision.Outcome.Repaint)
                     {
                         object viewerFaction = _viewerFactionProp.GetValue(geo, null);
-                        if (viewerFaction != null) _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
-                        _loggedProgressionSkip = false;   // repainted → next skip is a new transition
+                        if (viewerFaction == null) ProgressionStampDiag(stampArmed, "ViewerFaction null");
+                        else
+                        {
+                            _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                            _progressionRepaintOwed = false;
+                            _loggedProgressionSkip = false;   // repainted → next defer is a new transition
+                            if (stampArmed)
+                                Debug.Log("[Multiplayer] GeoUiRefresh: progression re-drive unit=" + viewedUnitId
+                                          + " stamped=[" + JoinIds(stampIds) + "] factionSp=" + stampSp);
+                        }
                     }
+                    // Skip: apply touched neither the viewed soldier nor the SP pool — keep the buffer, no log.
                 }
             }
+            else ProgressionStampDiag(stampArmed, "progression reflection unresolved or no current character");
 
             // (C) soldier header (name/class/level/corruption + button costs) — cheap, no animation reset, no
             // editable buffer to clobber. The 3D armour mesh is a documented skip (DisplaySoldier resets pose).
@@ -631,6 +666,42 @@ namespace Multiplayer.Network.Sync.State
                     try { _refreshSoldierInfo.Invoke(actorCycle, null); }
                     catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh RefreshSoldierInfo skipped: " + ex.Message); }
             }
+        }
+
+        /// <summary>Arm the one-shot progression-repaint stamp for the NEXT RefreshRosterEquip call: the unit
+        /// ids the apply actually stamped (null = unknown → conservative) + whether the shared faction-SP pool
+        /// changed (its total is displayed on the panel for every soldier). Callers: SyncEngine.OnStateSync on
+        /// a #9 apply (client) and SyncEngine.OnActionRequest after a stat/SP intent apply (host).</summary>
+        public static void SetProgressionStamp(IReadOnlyList<long> stampedUnitIds, bool factionSpChanged)
+        {
+            _progressionStampArmed = true;
+            _progressionStampIds = stampedUnitIds;
+            _progressionStampFactionSp = factionSpChanged;
+        }
+
+        /// <summary>Drain a progression repaint deferred behind a pending local allocation (the Defer outcome).
+        /// Called from the CommitStatChanges/BuyAbility POSTFIX seams on BOTH peers — the moment the pending
+        /// edit commits/clears, the owed repaint fires instead of waiting for the next unrelated apply
+        /// (reactivity mandate). No-op when nothing is owed. Never throws (Refresh is self-guarded).</summary>
+        public static void DrainDeferredProgressionRepaint(GeoRuntime rt)
+        {
+            if (!_progressionRepaintOwed) return;
+            Refresh(rt, Screen.RosterEquip);
+        }
+
+        /// <summary>Never-silent stamp accounting: a stat/SP-relevant apply armed the stamp but the repaint was
+        /// not reached — say why (one line per armed stamp; stat applies are rare, user-triggered).</summary>
+        private static void ProgressionStampDiag(bool stampArmed, string why)
+        {
+            if (stampArmed) Debug.Log("[Multiplayer] GeoUiRefresh: progression stamp dropped — " + why);
+        }
+
+        private static string JoinIds(IReadOnlyList<long> ids)
+        {
+            if (ids == null) return "?";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < ids.Count; i++) { if (i > 0) sb.Append(','); sb.Append(ids[i]); }
+            return sb.ToString();
         }
 
         private static void RefreshRosterOverview(GeoRuntime rt)

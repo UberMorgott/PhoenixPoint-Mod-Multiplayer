@@ -77,6 +77,11 @@ namespace Multiplayer.Network.Sync.State
         private readonly List<long> _lastStateApplyIds = new List<long>();
         public IReadOnlyList<long> LastStateApplyUnitIds => _lastStateApplyIds;
 
+        // CLIENT: the most recent Apply carried (and applied) the shared faction-SP pool tail. Read together
+        // with LastStateApplyUnitIds to scope the progression-panel repaint: the pool total is displayed on
+        // the panel for EVERY soldier, so a pool-only apply must still repaint the open panel.
+        public bool LastApplyFactionSpChanged { get; private set; }
+
         private object _faction;   // bound GeoPhoenixFaction instance (rebind-by-instance guard)
 
         /// <summary>Out-of-band host dirty-mark (PS1 membership Harmony seams): mark
@@ -180,6 +185,7 @@ namespace Multiplayer.Network.Sync.State
         public void Apply(GeoRuntime rt, byte[] data)
         {
             _lastStateApplyIds.Clear();   // cleared even on decode/no-op exits — never carries a stale stamp set
+            LastApplyFactionSpChanged = false;
             var snap = PersonnelSnapshot.Decode(data);
             if (snap == null || (snap.Sites.Count == 0 && snap.States.Count == 0 && !snap.FactionSkillpoints.HasValue)) return;
             Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count + " states=" + snap.States.Count
@@ -234,6 +240,7 @@ namespace Multiplayer.Network.Sync.State
             if (snap.FactionSkillpoints.HasValue)
             {
                 PersonnelReflection.ApplyFactionSkillpoints(rt, snap.FactionSkillpoints.Value);
+                LastApplyFactionSpChanged = true;
                 Debug.Log("[Multiplayer] PersonnelChannel: applied shared faction SP pool = " + snap.FactionSkillpoints.Value);
             }
         }

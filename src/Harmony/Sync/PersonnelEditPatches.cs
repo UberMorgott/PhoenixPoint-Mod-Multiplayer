@@ -347,6 +347,11 @@ namespace Multiplayer.Harmony.Sync
             try { AccessTools.Method(t, "ClearBoughtAbility")?.Invoke(module, null); }
             catch (Exception ex) { Debug.LogError("[Multiplayer] BuyAbilityProgressionRelayPatch.ClearBoughtSlot failed: " + ex.Message); }
         }
+
+        /// <summary>Pending-clear drain (BOTH peers; postfixes run even when the prefix suppressed the original):
+        /// the buy seam just cleared the pending ability pick (client: suppress+relay+clear; host: native learn),
+        /// so a remote apply deferred behind it repaints NOW instead of waiting for the next unrelated apply.</summary>
+        public static void Postfix() => GeoUiRefresh.DrainDeferredProgressionRepaint(GeoRuntime.Instance);
     }
 
     [HarmonyPatch]
@@ -420,6 +425,11 @@ namespace Multiplayer.Harmony.Sync
             var sf = AccessTools.Field(t, startingField);
             if (cf != null && sf != null) cf.SetValue(inst, sf.GetValue(inst));
         }
+
+        /// <summary>Pending-clear drain (BOTH peers; postfixes run even when the prefix suppressed the original):
+        /// the commit seam just cleared the pending stat allocation (client: relay+rollback; host: native commit),
+        /// so a remote apply deferred behind it repaints NOW instead of waiting for the next unrelated apply.</summary>
+        public static void Postfix() => GeoUiRefresh.DrainDeferredProgressionRepaint(GeoRuntime.Instance);
     }
 
     [HarmonyPatch]

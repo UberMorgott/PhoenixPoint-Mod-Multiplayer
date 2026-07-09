@@ -413,6 +413,14 @@ namespace Multiplayer.Network.Sync
             // that module isn't open. RefreshNeedsKick fans out over every needs-kick module (research +
             // manufacturing + base-layout facility grid) so e.g. a client facility construct/repair rebuilds
             // the host's open base grid too.
+            // A client stat/SP intent just mutated the intent's soldier + the shared SP pool on the host —
+            // arm the progression stamp so the RefreshNeedsKick below repaints the host's open progression
+            // panel for exactly that soldier (factionSp=true also covers the shared-pool display), mirroring
+            // the client's #9 stamp path in OnStateSync.
+            if (id == SyncedActionIds.SpendStatPoints && action is SpendStatPointsAction spendStatIntent)
+                GeoUiRefresh.SetProgressionStamp(new[] { spendStatIntent.UnitId }, factionSpChanged: true);
+            else if (id == SyncedActionIds.LevelUpAbility && action is LevelUpAbilityAction levelUpIntent)
+                GeoUiRefresh.SetProgressionStamp(new[] { levelUpIntent.UnitId }, factionSpChanged: true);
             GeoUiRefresh.RefreshNeedsKick(rt);
             // The host applied a client equip/augment intent (SetItems) authoritatively, but RefreshNeedsKick →
             // RefreshRosterEquip only repaints progression + header — NOT the equip doll + storage lists. Without
@@ -706,6 +714,13 @@ namespace Multiplayer.Network.Sync
             if (channelId == SurfaceIds.PersonnelChannel)
                 State.AugmentMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance,
                     (channel as State.PersonnelChannel)?.LastStateApplyUnitIds);
+            // Progression-panel repaint scoping: hand the same per-apply stamp (stamped unit ids + the
+            // faction-SP pool tail) to the RefreshNeedsKick fan-out below (one-shot; consumed by
+            // RefreshRosterEquip) so the open stat/ability panel repaints exactly when the VIEWED soldier or
+            // the shared SP pool changed, and defers-then-drains across a pending local allocation instead of
+            // skipping forever (stat-sync reactivity RCA 2026-07-10).
+            if (channelId == SurfaceIds.PersonnelChannel && channel is State.PersonnelChannel personnelCh)
+                GeoUiRefresh.SetProgressionStamp(personnelCh.LastStateApplyUnitIds, personnelCh.LastApplyFactionSpChanged);
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;
