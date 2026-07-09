@@ -836,6 +836,10 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _bionicsCurrentItemsProp;  // UIModuleBionics.CharacterCurrentItems (public List<GeoItem>)
         private static MethodInfo _mutateRequestRefresh;       // UIModuleMutate.RequestViewRefresh()
         private static MethodInfo _bionicsRequestRefresh;      // UIModuleBionics.RequestViewRefresh()
+        private static FieldInfo _mutateSectionsField;         // UIModuleMutate._augmentSections (Dictionary<AddonSlotDef, UIModuleMutationSection>)
+        private static FieldInfo _bionicsSectionsField;        // UIModuleBionics._augmentSections (same shape)
+        private static MethodInfo _sectionClearSelection;      // UIModuleMutationSection.ClearMutationSelection() (public)
+        private static MethodInfo _sectionUnselectAll;         // UIModuleMutationSection.UnselectAllMutations() (public)
 
         private static void EnsureAugmentation()
         {
@@ -859,6 +863,14 @@ namespace Multiplayer.Network.Sync.State
                 _bionicsCurrentItemsProp = AccessTools.Property(bionicsModType, "CharacterCurrentItems");
                 _mutateRequestRefresh = AccessTools.Method(mutateModType, "RequestViewRefresh");
                 _bionicsRequestRefresh = AccessTools.Method(bionicsModType, "RequestViewRefresh");
+                _mutateSectionsField = AccessTools.Field(mutateModType, "_augmentSections");
+                _bionicsSectionsField = AccessTools.Field(bionicsModType, "_augmentSections");
+                var sectionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationSection");
+                if (sectionType != null)
+                {
+                    _sectionClearSelection = AccessTools.Method(sectionType, "ClearMutationSelection");
+                    _sectionUnselectAll = AccessTools.Method(sectionType, "UnselectAllMutations");
+                }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.EnsureAugmentation failed: " + ex.Message); }
         }
@@ -868,8 +880,13 @@ namespace Multiplayer.Network.Sync.State
         /// from the model, so a remote augment apply (channel #9 blob) leaves the UI stale. We update the
         /// cached baseline from the freshly-stamped model, clear any pending preview selection, and re-drive
         /// the module's own <c>RequestViewRefresh</c> (InitCharacterInfo + InitCurrentMutagens + DisplaySoldier).
-        /// Safe no-op when neither augmentation screen is open. Never throws.</summary>
-        public static void RepaintAugmentation(GeoRuntime rt)
+        /// <paramref name="stampedUnitIds"/> = the unit ids the apply actually stamped (null = unknown →
+        /// unconditional): the repaint fires ONLY when the screen's character is among them — on unrelated
+        /// applies it would eat the user's uncommitted LOCAL preview and, because the live ArmourItems still
+        /// hold the transient preview item, bake that preview into the baseline (phantom never-purchased
+        /// augment — preview regression RCA 2026-07-09). Safe no-op when neither augmentation screen is open.
+        /// Never throws.</summary>
+        public static void RepaintAugmentation(GeoRuntime rt, IReadOnlyList<long> stampedUnitIds = null)
         {
             try
             {
@@ -889,12 +906,14 @@ namespace Multiplayer.Network.Sync.State
                 if (_mutateStateType != null && _mutateStateType.IsInstanceOfType(state))
                 {
                     RepaintAugmentModule(modules, _mutateModuleField, _mutateCurrentCharProp,
-                        _mutateOrigItemsProp, _mutateCurrentItemsProp, _mutateRequestRefresh);
+                        _mutateOrigItemsProp, _mutateCurrentItemsProp, _mutateRequestRefresh,
+                        _mutateSectionsField, stampedUnitIds);
                 }
                 else if (_bionicsStateType != null && _bionicsStateType.IsInstanceOfType(state))
                 {
                     RepaintAugmentModule(modules, _bionicsModuleField, _bionicsCurrentCharProp,
-                        _bionicsOrigItemsProp, _bionicsCurrentItemsProp, _bionicsRequestRefresh);
+                        _bionicsOrigItemsProp, _bionicsCurrentItemsProp, _bionicsRequestRefresh,
+                        _bionicsSectionsField, stampedUnitIds);
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RepaintAugmentation best-effort failed: " + ex.Message); }
@@ -904,7 +923,7 @@ namespace Multiplayer.Network.Sync.State
         /// native refresh. Called for whichever module (Mutate or Bionics) is the active view state.</summary>
         private static void RepaintAugmentModule(object modules, FieldInfo moduleField,
             PropertyInfo currentCharProp, PropertyInfo origItemsProp, PropertyInfo currentItemsProp,
-            MethodInfo requestRefresh)
+            MethodInfo requestRefresh, FieldInfo sectionsField, IReadOnlyList<long> stampedUnitIds)
         {
             if (moduleField == null || currentCharProp == null || origItemsProp == null
                 || currentItemsProp == null || requestRefresh == null || _charArmourItemsProp == null) return;
@@ -912,6 +931,10 @@ namespace Multiplayer.Network.Sync.State
             if (module == null || !IsOpen(module)) return;
             var character = currentCharProp.GetValue(module, null);
             if (character == null) return;
+            // Genuine-remote-apply gate: only an apply that stamped THIS character can make the screen
+            // stale; anything else must leave the user's local preview transaction untouched.
+            if (!AugmentRepaintDecision.ShouldRepaint(PersonnelReflection.ReadUnitId(character), stampedUnitIds))
+                return;
 
             // Re-read the model's current ArmourItems (post-apply) into the cached CharacterOriginalItems
             // baseline so InitCharacterInfo (inside RequestViewRefresh) sees the fresh state, and any
@@ -923,6 +946,24 @@ namespace Multiplayer.Network.Sync.State
             {
                 origItems.Clear();
                 foreach (var item in armourEnum) origItems.Add(item);
+            }
+            // Unselect every body-part section through the NATIVE toggle-off (ClearMutationSelection →
+            // SelectMutation(same slot) → _selectedMutationSlot = null + SelectedButton cleared + ClearAugment,
+            // which re-stamps the just-reset baseline — a no-op write). Leaving _selectedMutationSlot armed
+            // while the visible selection was wiped inverted the click parity: the user's next click on the
+            // same option TOGGLED OFF ("first click does nothing until Escape"). UnselectAllMutations after
+            // is the hard-null backstop for the locked-section edge SelectMutation refuses to clear.
+            if (sectionsField?.GetValue(module) is IDictionary sections)
+            {
+                foreach (var section in sections.Values)
+                {
+                    try
+                    {
+                        _sectionClearSelection?.Invoke(section, null);
+                        _sectionUnselectAll?.Invoke(section, null);
+                    }
+                    catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh augment section unselect failed: " + ex.Message); }
+                }
             }
             // Clear any pending preview selection (a remote apply supersedes a local uncommitted pick).
             currItems?.Clear();

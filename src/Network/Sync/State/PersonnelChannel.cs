@@ -70,6 +70,13 @@ namespace Multiplayer.Network.Sync.State
         // wire cap; 24 KB mirrors the MistChannel-proven per-message bound (MistChannel.ChunkBytes).
         private const int StateBytesPerFlush = 24 * 1024;
 
+        // CLIENT: unit ids whose soldier STATE the most recent Apply actually stamped (ApplySoldierState
+        // successes + newcomers materialized from their blob). Read by SyncEngine.OnStateSync right after
+        // the apply to scope the augment-screen mirror repaint to genuine same-character stamps (preview
+        // regression RCA 2026-07-09) — membership-only / SP-only applies leave it empty.
+        private readonly List<long> _lastStateApplyIds = new List<long>();
+        public IReadOnlyList<long> LastStateApplyUnitIds => _lastStateApplyIds;
+
         private object _faction;   // bound GeoPhoenixFaction instance (rebind-by-instance guard)
 
         /// <summary>Out-of-band host dirty-mark (PS1 membership Harmony seams): mark
@@ -172,6 +179,7 @@ namespace Multiplayer.Network.Sync.State
 
         public void Apply(GeoRuntime rt, byte[] data)
         {
+            _lastStateApplyIds.Clear();   // cleared even on decode/no-op exits — never carries a stale stamp set
             var snap = PersonnelSnapshot.Decode(data);
             if (snap == null || (snap.Sites.Count == 0 && snap.States.Count == 0 && !snap.FactionSkillpoints.HasValue)) return;
             Debug.Log("[Multiplayer] PersonnelChannel apply sites=" + snap.Sites.Count + " states=" + snap.States.Count
@@ -184,6 +192,7 @@ namespace Multiplayer.Network.Sync.State
             // site the membership names BEFORE the reconcile — so the reconcile below finds + orders it instead
             // of skipping it as "not live". Its state is now applied (the decoded instance), so skip it below.
             var materialized = PersonnelReflection.MaterializeNewcomers(rt, snap.Sites, snap.States, index);
+            _lastStateApplyIds.AddRange(materialized);   // a newcomer's state came from its blob → stamped
             foreach (var rec in snap.Sites)
                 PersonnelReflection.ApplySiteRoster(rt, rec, index);
             // PS2 live-state AFTER membership (a just-transferred soldier is already in its mirrored
@@ -213,7 +222,10 @@ namespace Multiplayer.Network.Sync.State
                     continue;
                 }
                 if (PersonnelReflection.ApplySoldierState(existing, decoded))
+                {
+                    _lastStateApplyIds.Add(st.UnitId);
                     Debug.Log("[Multiplayer] PersonnelChannel: applied live-state for GeoUnitId " + st.UnitId);
+                }
             }
             // PS2 faction-SP tail: value-only mirror of the shared GeoPhoenixFaction.Skillpoints pool (present
             // only when the host value changed). The open progression panel repaints on the same #9 apply via

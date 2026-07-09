@@ -149,6 +149,13 @@ namespace Multiplayer.Harmony.Sync
                 // so single-player TFTV (same per-frame loop) pays zero work here.
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                // Augment-screen PREVIEW click (OnAugmentClicked bracket via AugmentPreviewScopePatch): a
+                // transient UI-local write, reverted on Escape/exit — never authoritative state. Marking it
+                // broadcast the uncommitted preview on #9/#1 and repainted the other peer's open augment
+                // screen mid-preview (preview regression RCA 2026-07-09). Reverts keep their marks
+                // (hash-culled baseline re-stamp = self-heal) and the COMMIT re-marks via
+                // AugmentCommitDirtyPatch (OnAugmentApplied), so real augments still mirror.
+                if (AugmentPreviewScope.Active) return;
                 __state = ListChanged(__0, _armourField, __instance)
                           || ListChanged(__1, _equipField, __instance)
                           || ListChanged(__2, _invField, __instance);

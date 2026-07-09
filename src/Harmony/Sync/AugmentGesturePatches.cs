@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -189,5 +190,93 @@ namespace Multiplayer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         public static bool Prefix() => !PersonnelEditRelay.ShouldRelay();
+    }
+
+    // ─── preview-write scope (previews are 100% LOCAL — a preview click never dirties #9/#1) ──────────────
+    // The 3D preview is a REAL GeoCharacter.SetItems write (OnAugmentClicked) — a transient UI transaction,
+    // not an edit. Bracket ONLY OnAugmentClicked (both modules) with the AugmentPreviewScope latch;
+    // GeoCharacterSetItemsStateDirtyPatch skips marking while it is active (preview regression RCA
+    // 2026-07-09: a host preview click broadcast the uncommitted pick on #9/#1, stamping the client model
+    // and repainting the client's open augment screen mid-preview). The REVERT writes (ClearAugment /
+    // RevertUnconfirmedChanges) deliberately KEEP their marks: a revert re-stamps the authoritative
+    // baseline, so its blob equals the last-emitted state and the per-soldier hash-skip culls it to zero
+    // wire in the common case — and when an unrelated same-soldier mark (hourly bulk sweep) DID ship a
+    // preview-contaminated blob mid-transaction, the revert mark ships the corrective baseline (self-heal).
+    // The Finalizer runs on every exit path (including native throws), so the latch can never leak armed.
+
+    [HarmonyPatch]
+    public static class AugmentPreviewScopePatch
+    {
+        private static readonly List<MethodBase> _targets = new List<MethodBase>();
+
+        public static bool Prepare()
+        {
+            _targets.Clear();
+            foreach (var typeName in new[]
+                     {
+                         "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutate",
+                         "PhoenixPoint.Geoscape.View.ViewModules.UIModuleBionics",
+                     })
+            {
+                var t = AccessTools.TypeByName(typeName);
+                var m = t != null ? AccessTools.Method(t, "OnAugmentClicked") : null;
+                if (m != null) _targets.Add(m);
+            }
+            Debug.Log("[Multiplayer] AugmentGesturePatches: preview scope bound " + _targets.Count
+                      + "/2 preview-click methods" + (_targets.Count == 2 ? "" : " — INCOMPLETE, preview writes may leak to #9"));
+            return _targets.Count > 0;
+        }
+
+        public static IEnumerable<MethodBase> TargetMethods() => _targets;
+
+        public static void Prefix() => AugmentPreviewScope.Enter();
+        public static void Finalizer() => AugmentPreviewScope.Exit();
+    }
+
+    /// <summary>The COMMIT dirty seam that replaces the preview click's accidental one: the native commit
+    /// (<c>OnAugmentApplied</c>) does NOT re-run SetItems for the main path — the last preview write already
+    /// stamped the final bodyparts — so with previews scope-suppressed the host must mark #9 (soldier blob)
+    /// + #1 (displaced parts returned to storage) here. Host-gated inside <see cref="PersonnelStateDirty"/>;
+    /// never fires on a co-op client (its ApplyMutation prefix suppresses the native commit entirely), and
+    /// the relayed-intent host chain (<see cref="PersonnelEditReflection.Augment"/>) is headless — its own
+    /// SetItems marks as before.</summary>
+    [HarmonyPatch]
+    public static class AugmentCommitDirtyPatch
+    {
+        private static readonly List<MethodBase> _targets = new List<MethodBase>();
+        private static PropertyInfo _currentCharProp;   // UIModuleMutate/UIModuleBionics.CurrentCharacter
+
+        public static bool Prepare()
+        {
+            _targets.Clear();
+            foreach (var typeName in new[]
+                     {
+                         "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutate",
+                         "PhoenixPoint.Geoscape.View.ViewModules.UIModuleBionics",
+                     })
+            {
+                var t = AccessTools.TypeByName(typeName);
+                var m = t != null ? AccessTools.Method(t, "OnAugmentApplied") : null;
+                if (m != null) _targets.Add(m);
+            }
+            Debug.Log("[Multiplayer] AugmentGesturePatches: commit dirty seam bound " + _targets.Count + "/2 modules");
+            return _targets.Count > 0;
+        }
+
+        public static IEnumerable<MethodBase> TargetMethods() => _targets;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (_currentCharProp == null || !_currentCharProp.DeclaringType.IsInstanceOfType(__instance))
+                    _currentCharProp = AccessTools.Property(__instance.GetType(), "CurrentCharacter");
+                object character = _currentCharProp?.GetValue(__instance, null);
+                if (character == null) return;
+                PersonnelStateDirty.Mark(character);
+                PersonnelStateDirty.MarkStorage();
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] AugmentCommitDirtyPatch failed: " + ex.Message); }
+        }
     }
 }

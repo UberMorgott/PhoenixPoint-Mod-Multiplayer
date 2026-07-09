@@ -146,6 +146,7 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
+            State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -410,9 +411,12 @@ namespace Multiplayer.Network.Sync
                 GeoUiRefresh.RepaintEquipAndStorage(rt);
             // The host applied a client augment intent — the augmentation screen's cached baseline
             // (CharacterOriginalItems) is stale. Repaint it so the host's open mutation/bionics screen
-            // shows the freshly-applied augment (body-part sections + mutagen wallet + 3D mesh).
+            // shows the freshly-applied augment (body-part sections + mutagen wallet + 3D mesh). Scoped
+            // to the intent's soldier: an intent for a DIFFERENT soldier must never eat the host player's
+            // own uncommitted preview / reset its baseline mid-preview (preview regression RCA 2026-07-09).
             if (id == SyncedActionIds.AugmentSoldier)
-                GeoUiRefresh.RepaintAugmentation(rt);
+                GeoUiRefresh.RepaintAugmentation(rt,
+                    action is AugmentSoldierAction augIntent ? new[] { augIntent.UnitId } : null);
             // A client-relayed recruit/containment pool edit (hire/kill/harvest = Recruitment) applied here
             // mirrors on #10, but the host never applies its OWN #10 echo — so the host's open pool screen would
             // stay stale. Re-drive it here (gated to fire only while that screen is current), matching the #10
@@ -684,9 +688,12 @@ namespace Multiplayer.Network.Sync
             // re-read from the model — a #9 blob apply that stamps new armour (augment applied by the
             // host or another client) leaves them stale. EditSession-gated adapter (no drag on these
             // screens → always repaints immediately), gated to #9 only (augment state lives in the
-            // soldier blob, not #1 inventory). No-op when the screen is closed.
+            // soldier blob, not #1 inventory) AND to applies that actually stamped the screen's character
+            // (LastStateApplyUnitIds) — unrelated #9 traffic must never eat a local uncommitted preview
+            // (preview regression RCA 2026-07-09). No-op when the screen is closed.
             if (channelId == SurfaceIds.PersonnelChannel)
-                State.AugmentMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance);
+                State.AugmentMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance,
+                    (channel as State.PersonnelChannel)?.LastStateApplyUnitIds);
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;
