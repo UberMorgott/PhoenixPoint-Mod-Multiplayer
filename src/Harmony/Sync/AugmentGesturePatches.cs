@@ -25,10 +25,13 @@ namespace Multiplayer.Harmony.Sync
     ///      snapshots originals, fires <c>AugmentApplied</c> event.
     ///
     /// CLIENT (gate on, active session, not applying):
-    ///   • PREFIX on <c>UIModuleMutationSection.ApplyMutation</c> — reads the preview-written bodyparts
-    ///     from the character model (<c>_armourItems</c>), builds ONE <see cref="AugmentSoldierAction"/>,
-    ///     relays via <see cref="PersonnelEditRelay.Relay"/>, returns false (suppresses the native commit:
-    ///     no wallet deduction, no storage mutation, no events on the frozen client).
+    ///   • PREFIX on <c>UIModuleMutationSection.ApplyMutation</c> — captures the CHOSEN augment
+    ///     (<c>_selectedMutationSlot.Mutation</c>, the exact def the native commit would apply) as its
+    ///     stable def guid, relays ONE INTENT <see cref="AugmentSoldierAction"/> via
+    ///     <see cref="PersonnelEditRelay.Relay"/>, returns false (suppresses the native commit: no wallet
+    ///     deduction, no storage mutation, no events on the frozen client). The payload is NEVER read from
+    ///     the character model — the preview (<c>OnAugmentClicked</c>) contaminates <c>_armourItems</c>
+    ///     with uncommitted picks, the bug the old bodypart-list payload shipped to the host.
     ///
     /// HOST / single-player: every patch is a pass-through (<see cref="PersonnelEditRelay.ShouldRelay"/>
     /// false). The host is fully native; the #9 personnel dirty seam mirrors the authoritative result.
@@ -39,6 +42,8 @@ namespace Multiplayer.Harmony.Sync
     {
         private static bool _ensured;
         private static FieldInfo _parentModuleField;     // UIModuleMutationSection._parentModule (IAugmentationUIModule)
+        private static FieldInfo _selectedSlotField;     // UIModuleMutationSection._selectedMutationSlot
+        private static PropertyInfo _slotMutationProp;   // UIModuleMutationsSlot.Mutation (ItemDef, public get)
         private static PropertyInfo _currentCharProp;    // UIModuleBionics/UIModuleMutate.CurrentCharacter
 
         private static void Ensure()
@@ -50,7 +55,10 @@ namespace Multiplayer.Harmony.Sync
                 var sectionT = AccessTools.TypeByName(
                     "PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationSection");
                 if (sectionT != null)
+                {
                     _parentModuleField = AccessTools.Field(sectionT, "_parentModule");
+                    _selectedSlotField = AccessTools.Field(sectionT, "_selectedMutationSlot");
+                }
             }
             catch (Exception ex)
             {
@@ -78,7 +86,7 @@ namespace Multiplayer.Harmony.Sync
                 if (!PersonnelEditRelay.ShouldRelay()) { LogExit("not-client"); return true; }
 
                 Ensure();
-                if (_parentModuleField == null) { LogExit("section-unresolved"); return true; }
+                if (_parentModuleField == null || _selectedSlotField == null) { LogExit("section-unresolved"); return true; }
 
                 object parentModule = _parentModuleField.GetValue(section);
                 if (parentModule == null) { LogExit("parent-module-null"); return true; }
@@ -93,13 +101,17 @@ namespace Multiplayer.Harmony.Sync
                 long unitId = PersonnelReflection.ReadUnitId(character);
                 if (unitId == 0) { LogExit("unit-id-unresolved"); return true; }
 
-                // The preview (OnAugmentClicked) already wrote the new bodyparts to the character via
-                // SetItems — read them from the model (_armourItems) as the intended final bodypart set.
-                string[] bodyparts = PersonnelEditReflection.ReadCurrentItemGuids(character, "_armourItems");
+                // The INTENT: the augment the native commit would apply — _selectedMutationSlot.Mutation,
+                // the same field ApplyMutation itself reads. Its stable def guid is the whole payload.
+                object slot = _selectedSlotField.GetValue(section);
+                if (slot == null) { LogExit("no-selected-mutation"); return true; }
+                if (_slotMutationProp == null) _slotMutationProp = AccessTools.Property(slot.GetType(), "Mutation");
+                string augmentGuid = DefReflection.GetGuid(_slotMutationProp?.GetValue(slot, null));
+                if (string.IsNullOrEmpty(augmentGuid)) { LogExit("augment-guid-unresolved"); return true; }
 
                 _lastExit = null;   // reached the relay — re-arm the latch
                 PersonnelEditRelay.Relay(ActionCategory.Equip, unitId, true,
-                    () => new AugmentSoldierAction(unitId, bodyparts));
+                    () => new AugmentSoldierAction(unitId, augmentGuid));
             }
             catch (Exception ex)
             {
@@ -130,5 +142,52 @@ namespace Multiplayer.Harmony.Sync
         // Prefix: true = run native (host/SP), false = suppress (client relay).
         public static bool Prefix(object __instance)
             => AugmentGestureRelay.OnApplyMutation(__instance);
+    }
+
+    // ─── TFTV client-side postfix guards ───────────────────────────────────────────────────────────────
+    // TFTV postfixes UIModuleMutationSection.ApplyMutation (TFTV-src: TFTVStamina.cs:218 stamina SetToMin;
+    // TFTVAugmentations.cs:623 NJ broke-promise diplomacy var). A Harmony POSTFIX still runs when our client
+    // prefix suppresses the native body — so a relayed (never-applied-locally) augment would write stamina /
+    // diplomacy vars into the client mirror model, and the __instance.MutationUsed it reads is stale
+    // pre-commit state. Skip TFTV's postfix bodies exactly when the gesture is relayed
+    // (PersonnelEditRelay.ShouldRelay: co-op client outside an engine apply); the host applies the real TFTV
+    // effects once (native postfixes for host-local augments, TftvAugmentCompat for relayed ones). TFTV's
+    // UIModuleBionics.OnAugmentApplied postfix needs no guard: the suppressed client never invokes
+    // OnAugmentApplied at all. Without TFTV, Prepare() returns false and the guard never registers.
+
+    [HarmonyPatch]
+    public static class TftvApplyMutationStaminaPostfixGuard
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName(
+                "TFTV.TFTVStamina+UIModuleMutationSection_ApplyMutation_SetStaminaTo0_patch");
+            _target = t != null ? AccessTools.Method(t, "Postfix") : null;
+            if (_target != null)
+                Debug.Log("[Multiplayer] AugmentGesturePatches: TFTV ApplyMutation stamina postfix guard bound");
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        public static bool Prefix() => !PersonnelEditRelay.ShouldRelay();
+    }
+
+    [HarmonyPatch]
+    public static class TftvApplyMutationDiplomacyPostfixGuard
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName(
+                "TFTV.TFTVAugmentations+UIModuleMutationSection_ApplyMutation_PissedEvents_patch");
+            _target = t != null ? AccessTools.Method(t, "Postfix") : null;
+            if (_target != null)
+                Debug.Log("[Multiplayer] AugmentGesturePatches: TFTV ApplyMutation diplomacy postfix guard bound");
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        public static bool Prefix() => !PersonnelEditRelay.ShouldRelay();
     }
 }

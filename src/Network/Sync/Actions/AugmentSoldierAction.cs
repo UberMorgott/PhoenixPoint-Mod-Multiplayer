@@ -5,27 +5,31 @@ using Multiplayer.Network.Sync.State;
 namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
-    /// PS4 client-edit intent: AUGMENT a soldier (body-part item swap). An augmentation rides the SAME
-    /// <c>GeoCharacter.SetItems</c> as equip but touches only the armour/bodypart list (taxonomy §4), so the
-    /// host applies <c>SetItems(armour: bodyparts, equipment: null, inventory: null)</c> — the null lists are
-    /// left unchanged (GeoCharacter.cs:848/860). Frozen-client relay + authoritative host apply + #9 mirror,
-    /// exactly like <see cref="EquipSoldierAction"/>; <see cref="IHostOnlyApply"/>. Same ManageEquipment gate
-    /// (augment has no distinct permission bit); the separate id keeps augment intents distinguishable from
-    /// weapon equips on the wire. Wire: <c>i64 unitId</c>, then one guid list (bodyparts).
+    /// PS4 client-edit intent: AUGMENT a soldier (mutation/bionic install). The payload is the pure INTENT —
+    /// the CHOSEN augment's stable def guid + the target soldier — never a model-derived bodypart list (the
+    /// 3D-preview <c>OnAugmentClicked</c> writes SetItems into the client model BEFORE the commit, so a
+    /// model-read payload carried stale/preview contamination). The host re-derives everything natively:
+    /// <see cref="PersonnelEditReflection.Augment"/> runs the full <c>OnAugmentApplied</c>-equivalent chain
+    /// (gates + CanSwapItem + SetItems + displaced-to-storage + Wallet.Take + statistics + SaveLoadout +
+    /// TFTV parity), then the #9 blob + 0xA0 wallet snapshot mirror the authoritative result back.
+    /// <see cref="IHostOnlyApply"/>; same ManageEquipment gate as equip (augment has no distinct permission
+    /// bit); the separate id keeps augment intents distinguishable on the wire.
+    /// Wire: <c>i64 unitId</c>, then one def guid (string). Both peers run the same DLL → the payload
+    /// change from the old guid-list format needs no versioning.
     /// </summary>
     public sealed class AugmentSoldierAction : ISyncedAction, IHostOnlyApply
     {
         private readonly long _unitId;
-        private readonly string[] _bodyparts;
+        private readonly string _augmentGuid;
 
-        public AugmentSoldierAction(long unitId, string[] bodyparts)
+        public AugmentSoldierAction(long unitId, string augmentGuid)
         {
             _unitId = unitId;
-            _bodyparts = bodyparts ?? Array.Empty<string>();
+            _augmentGuid = augmentGuid ?? string.Empty;
         }
 
         public long UnitId => _unitId;
-        public string[] Bodyparts => _bodyparts;
+        public string AugmentGuid => _augmentGuid;
 
         public ushort ActionId => SyncedActionIds.AugmentSoldier;
         public ActionCategory Category => ActionCategory.Equip;
@@ -33,20 +37,20 @@ namespace Multiplayer.Network.Sync.Actions
         public void Write(BinaryWriter w)
         {
             w.Write(_unitId);
-            PersonnelActionWire.WriteGuids(w, _bodyparts);
+            w.Write(_augmentGuid);
         }
 
         public static ISyncedAction Read(BinaryReader r)
         {
             long unitId = r.ReadInt64();
-            var bodyparts = PersonnelActionWire.ReadGuids(r);
-            return new AugmentSoldierAction(unitId, bodyparts);
+            string augmentGuid = r.ReadString();
+            return new AugmentSoldierAction(unitId, augmentGuid);
         }
 
         public bool Validate(GeoRuntime rt, Guid actor)
             => rt != null && rt.IsGeoscapeActive && PersonnelEditReflection.OwnsSoldier(actor, _unitId);
 
         public void Apply(GeoRuntime rt)
-            => PersonnelEditReflection.Augment(rt, _unitId, _bodyparts);
+            => PersonnelEditReflection.Augment(rt, _unitId, _augmentGuid);
     }
 }

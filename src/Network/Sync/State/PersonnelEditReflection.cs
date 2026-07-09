@@ -17,8 +17,11 @@ namespace Multiplayer.Network.Sync.State
     /// call the heavier PersonnelReflection/GeoSiteReflection bridges (it re-derives the small pieces it needs:
     /// GeoUnitId, container scan, site-by-id). Each entry point runs the SAME native the game itself uses
     /// (decompile-verified 2026-07-06):
-    ///   • equip / augment → <c>GeoCharacter.SetItems(armour, equipment, inventory, freeReload)</c>
-    ///     (GeoCharacter.cs:831 — a null list is left unchanged; augment sets only the armour/bodypart list);
+    ///   • equip → <c>GeoCharacter.SetItems(armour, equipment, inventory, freeReload)</c>
+    ///     (GeoCharacter.cs:831 — a null list is left unchanged) + authoritative storage-delta reconcile;
+    ///   • augment → the FULL native <c>OnAugmentApplied</c> commit chain, headless (gates + CanSwapItem +
+    ///     SetItems + displaced-to-storage + Wallet.Take + statistics + SaveLoadout + TFTV parity — see
+    ///     <see cref="Augment"/>);
     ///   • hire → <c>GeoPhoenixFaction.HireNakedRecruit(GeoUnitDescriptor, IGeoCharacterContainer)</c>
     ///     (:662 — the exact recruit-screen call, UIStateRosterRecruits.cs:301; havens + naked pool both use it);
     ///   • transfer → native <c>RemoveCharacter</c>(current)+<c>AddCharacter</c>(dest) (no dedicated method);
@@ -96,6 +99,33 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _useGlobalStorageProp; // GeoPhoenixFaction.UseGlobalStorage
         private static MethodInfo _storeAddItem;    // ItemStorage.AddItem(GeoItem)
         private static MethodInfo _storeRemoveItem; // ItemStorage.RemoveItem(GeoItem)
+        // Augment intent (native OnAugmentApplied chain, headless) — decompile-verified 2026-07-09:
+        // CommonCharacterUtils.cs:98/120, GeoCharacter.cs:302/831/1388/1476, ItemDef.cs:40/89,
+        // TacticalItemDef.cs:41, GeoFaction.cs:75/155, GeoPhoenixFaction.cs:1233, Wallet.cs:40/63,
+        // PhoenixStatisticsManager.cs:407/417, SharedGameTagsDataDef.cs:53/59, AddonDef.cs:24/69.
+        private static Type _itemDefType;             // PhoenixPoint.Common.Entities.Items.ItemDef
+        private static Type _tacItemDefType;          // PhoenixPoint.Tactical.Entities.Equipments.TacticalItemDef
+        private static Type _operationReasonType;     // PhoenixPoint.Common.Core.OperationReason
+        private static Type _statsManagerType;        // PhoenixPoint.Common.Core.PhoenixStatisticsManager
+        private static FieldInfo _isPermanentAugmentField; // TacticalItemDef.IsPermanentAugment (public bool, hides base)
+        private static FieldInfo _anuMutationTagField;     // SharedGameTagsDataDef.AnuMutationTag (GameTagDef)
+        private static FieldInfo _bionicalTagField;        // SharedGameTagsDataDef.BionicalTag (GameTagDef)
+        private static FieldInfo _handsToUseField;          // ItemDef.HandsToUse (public int)
+        private static PropertyInfo _templateDefProp;       // GeoCharacter.TemplateDef (TacCharacterDef)
+        private static PropertyInfo _manufacturePriceProp;  // ItemDef.ManufacturePrice (ResourcePack, lazy)
+        private static PropertyInfo _unlockedAugsProp;      // GeoFaction.UnlockedAugmentations (HashSet<ItemDef>)
+        private static MethodInfo _getAddonsMangerDef;      // TacCharacterDef.GetAddonsMangerDef() (game's typo)
+        private static MethodInfo _canSwapItem;             // CommonCharacterUtils.CanSwapItem (static)
+        private static MethodInfo _loseHandOnEquip;         // CommonCharacterUtils.LoseHandOnEquip (static)
+        private static MethodInfo _walletHasResources;      // Wallet.HasResources(ResourcePack)
+        private static MethodInfo _walletTake;              // Wallet.Take(ResourcePack, OperationReason)
+        private static MethodInfo _updatePreferredLoadout;  // GeoPhoenixFaction.UpdatePreferredLoadout(GeoCharacter)
+        private static MethodInfo _saveLoadout;             // GeoCharacter.SaveLoadout()
+        private static MethodInfo _getEquippedItemHealth;   // GeoCharacter.GetEquippedItemHealth(GeoItem)
+        private static MethodInfo _repairItem;              // GeoCharacter.RepairItem(GeoItem, bool)
+        private static MethodInfo _onApplyMutation;         // PhoenixStatisticsManager.OnApplyMutation(ItemDef)
+        private static MethodInfo _onApplyBionic;           // PhoenixStatisticsManager.OnApplyBionic(ItemDef)
+        private static MethodInfo _statsComponent;          // GameUtl.GameComponent<PhoenixStatisticsManager>() (closed)
 
         private static Type GeoItemT() => _geoItemType ?? (_geoItemType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoItem"));
         private static Type CharT() => _charType ?? (_charType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoCharacter"));
@@ -287,62 +317,309 @@ namespace Multiplayer.Network.Sync.State
             }
         }
 
-        /// <summary>Augment = body-part swap through the SAME SetItems, armour(bodypart) list only; equipment/
-        /// inventory pass null → left unchanged (GeoCharacter.cs:848/860 null-skip). Also deducts the
-        /// augment's <c>ManufacturePrice</c> from the faction wallet (the native UI calls
-        /// <c>Wallet.Take(augment.ManufacturePrice)</c> inside <c>OnAugmentApplied</c>, which the relay
-        /// bypasses — without this the client-relayed augment is free). The added item is derived from the
-        /// (old → new) bodypart delta.</summary>
-        public static void Augment(GeoRuntime rt, long unitId, string[] bodypartGuids)
-        {
-            var soldier = ResolveSoldierById(rt, unitId);
-            if (soldier == null) { LogUnresolved("Augment", unitId); return; }
-            // Snapshot old bodyparts BEFORE SetItems (same pattern as Equip's storage-delta snapshot).
-            var oldBodyparts = new List<string>(ReadCurrentItemGuids(soldier, "_armourItems"));
-            InvokeSetItems(soldier, BuildItems(bodypartGuids), null, null);
-            // Wallet deduction: the ADDED item (new \ old delta) is the augment whose ManufacturePrice
-            // the native flow would have deducted via Wallet.Take. Typically exactly one item added.
-            DeductAugmentCost(rt, oldBodyparts, bodypartGuids != null ? new List<string>(bodypartGuids) : new List<string>());
-        }
+        // ─── HOST-side apply: augment (native OnAugmentApplied chain, headless) ─
 
-        /// <summary>Deduct the <c>ManufacturePrice</c> of each ADDED bodypart (the augment) from the
-        /// faction wallet. Reads the individual manufacture cost fields from the ItemDef (public floats:
-        /// ManufactureTech, ManufactureMaterials, ManufactureMutagen, etc., decompile ItemDef.cs:60-70)
-        /// and applies negative diffs via <see cref="WalletReflection.ApplyDiff"/>. Best-effort: a miss
-        /// logs and no-ops (the bodypart swap itself already succeeded).</summary>
-        private static void DeductAugmentCost(GeoRuntime rt, List<string> oldBodyparts, List<string> newBodyparts)
+        private const int MaxAugmentations = 2;   // UIModuleMutate/UIModuleBionics MAX_AUGMENTATIONS
+
+        /// <summary>Augment = the FULL native commit chain, headless — the faithful replica of
+        /// <c>UIModuleMutate/UIModuleBionics.OnAugmentApplied</c> + the <c>UIStateMutate/UIStateBionics</c>
+        /// AugmentApplied handlers, which the relayed intent bypasses (decompile-verified 2026-07-09:
+        /// UIModuleMutate.cs:160/199, UIModuleBionics.cs:174/213, UIStateMutate.cs:144, UIStateBionics.cs:144):
+        ///   1. native gates — family tag (AnuMutationTag/BionicalTag), faction UnlockedAugmentations,
+        ///      other-family slot lock + the 2-augment limit (InitCharacterInfo slot states + the
+        ///      ApplyMutation guard), affordability via <c>Wallet.HasResources(ManufacturePrice)</c> (the
+        ///      pack aggregates all six cost fields INCLUDING Mutagen, ItemDef.cs:89 — one native check
+        ///      covers CanAffordMutation's mutagen gate and UIModuleBionics.CanAugment's wallet gate);
+        ///   2. new bodypart list from the game's OWN swap resolver (<c>CommonCharacterUtils.CanSwapItem</c>
+        ///      — the exact OnAugmentClicked call) keeping the LIVE displaced-complement GeoItems + a fresh
+        ///      <c>new GeoItem(augment)</c>;
+        ///   3. <c>GeoCharacter.SetItems</c> (freeReload:false like the native calls; on
+        ///      <c>LoseHandOnEquip</c> also replaces equipment with the 1-handed-only survivors);
+        ///   4. displaced non-permanent-augment bodyparts → faction ItemStorage (bionics also free-repair a
+        ///      damaged displaced part, UIModuleBionics.cs:222-227); dropped 2-handed equipment → storage
+        ///      unless family-tagged;
+        ///   5. <c>Wallet.Take(ManufacturePrice, Purchase)</c>, <c>UpdatePreferredLoadout</c>,
+        ///      <c>PhoenixStatisticsManager.OnApplyMutation/OnApplyBionic</c>, <c>SaveLoadout</c>;
+        ///   6. TFTV parity via <see cref="TftvAugmentCompat"/> (its augment side-effects ride UI postfixes
+        ///      this headless path never trips; no-op without TFTV).
+        /// A failed gate logs an intent-DENIED + no-ops (host stays authoritative; the client mirror simply
+        /// never changes). The result mirrors back on the #9 blob (_armourItems/_equipmentItems are
+        /// [SerializeMember]) + the 0xA0 wallet snapshot.</summary>
+        public static void Augment(GeoRuntime rt, long unitId, string augmentGuid)
         {
             try
             {
-                MultisetDiff(oldBodyparts, newBodyparts, out var added, out _);
-                if (added.Count == 0) return;
-                var wallet = rt?.Wallet();
-                if (wallet == null) { Debug.Log("[Multiplayer] PersonnelEditReflection.DeductAugmentCost: wallet unresolved — cost not deducted"); return; }
-                // ResourceType enum values (decompile ResourceType.cs): Materials=2, Tech=4, Mutagen=0x100,
-                // LivingCrystals=0x200, Orichalcum=0x400, ProteanMutane=0x800.
-                var costFields = new (string field, int resType)[]
+                var soldier = ResolveSoldierById(rt, unitId);
+                if (soldier == null) { LogUnresolved("Augment", unitId); return; }
+                object augment = DefReflection.GetDefByGuid(augmentGuid);
+                var fac = rt?.PhoenixFaction();
+                if (augment == null || fac == null)
+                { Deny(unitId, augment == null ? "augment def " + augmentGuid + " unresolved" : "faction unresolved"); return; }
+                EnsureAugmentMembers(soldier, fac);
+
+                // Family tag (mutation vs bionic) — drives the slot-lock/limit gates, the storage tag
+                // exclusion, the statistics hook and the TFTV side-effects.
+                object sharedTags = SharedGameTags(rt);
+                if (_anuMutationTagField == null && sharedTags != null) _anuMutationTagField = AccessTools.Field(sharedTags.GetType(), "AnuMutationTag");
+                if (_bionicalTagField == null && sharedTags != null) _bionicalTagField = AccessTools.Field(sharedTags.GetType(), "BionicalTag");
+                object mutationTag = sharedTags != null ? _anuMutationTagField?.GetValue(sharedTags) : null;
+                object bionicTag = sharedTags != null ? _bionicalTagField?.GetValue(sharedTags) : null;
+                bool isMutation = HasTag(augment, mutationTag);
+                bool isBionic = !isMutation && HasTag(augment, bionicTag);
+                if (!isMutation && !isBionic) { Deny(unitId, "def carries no mutation/bionic family tag"); return; }
+                object familyTag = isMutation ? mutationTag : bionicTag;
+                object otherTag = isMutation ? bionicTag : mutationTag;
+
+                // Native gate — CanApplyAugumentation: the augment must be unlocked for the faction.
+                if (!UnlockedAugmentationsContains(fac, augment)) { Deny(unitId, "augment not unlocked"); return; }
+
+                // Native gate — slot lock + 2-augment limit (InitCharacterInfo slot states + the
+                // ApplyMutation "SlotState == Available || MutationUsed != null" guard): the other family
+                // at the slot blocks it; same family at the slot allows replacement past the limit.
+                object slot = FirstRequiredSlot(augment);
+                object atSlot = AugmentDefAtSlot(soldier, slot);
+                if (atSlot != null && HasTag(atSlot, otherTag)) { Deny(unitId, "slot blocked by other-family augment"); return; }
+                if (ReferenceEquals(atSlot, augment)) { Deny(unitId, "augment already applied at slot"); return; }
+                bool sameFamilyAtSlot = atSlot != null && HasTag(atSlot, familyTag);
+                if (!sameFamilyAtSlot && CountAugments(soldier, mutationTag, bionicTag) >= MaxAugmentations)
+                { Deny(unitId, "augmentation limit reached"); return; }
+
+                // Native gate — affordability (see the summary: one HasResources covers both screens).
+                object wallet = rt?.Wallet();
+                object price = _manufacturePriceProp?.GetValue(augment, null);
+                if (wallet == null || price == null) { LogUnresolved("Augment(wallet)", unitId); return; }
+                if (_walletHasResources == null) _walletHasResources = AccessTools.Method(wallet.GetType(), "HasResources", new[] { _manufacturePriceProp.PropertyType });
+                if (_walletTake == null && _operationReasonType != null) _walletTake = AccessTools.Method(wallet.GetType(), "Take", new[] { _manufacturePriceProp.PropertyType, _operationReasonType });
+                if (_walletHasResources == null || !(bool)_walletHasResources.Invoke(wallet, new[] { price }))
+                { Deny(unitId, "cannot afford ManufacturePrice"); return; }
+
+                // Native swap resolve — the exact OnAugmentClicked call: which current bodyparts must leave
+                // for the augment to attach. Null = incompatible with the character's addon slots.
+                var armourItems = CachedField(soldier.GetType(), "_armourItems")?.GetValue(soldier) as IList;
+                object addonsMgr = _getAddonsMangerDef?.Invoke(_templateDefProp?.GetValue(soldier, null), null);
+                var oldDefs = NewTypedList(_itemDefType);
+                if (armourItems == null || addonsMgr == null || oldDefs == null || _canSwapItem == null)
+                { LogUnresolved("Augment(swap-members)", unitId); return; }
+                foreach (var it in armourItems)
+                { object d = _itemDefProp?.GetValue(it, null); if (d != null) oldDefs.Add(d); }
+                var toRemove = _canSwapItem.Invoke(null, new object[] { addonsMgr, augment, oldDefs, null, soldier, false }) as IList;
+                if (toRemove == null) { Deny(unitId, "augment incompatible with current bodyparts (CanSwapItem)"); return; }
+
+                // New bodypart list: keep the LIVE GeoItem instances that stay (they carry item state,
+                // exactly like the native CharacterCurrentItems rebuild) + a fresh GeoItem for the augment.
+                var newArmour = NewGeoItemList();
+                var displaced = new List<object>();
+                foreach (var it in armourItems)
                 {
-                    ("ManufactureMaterials", 2),
-                    ("ManufactureTech",      4),
-                    ("ManufactureMutagen",   0x100),
-                    ("ManufactureLivingCrystals", 0x200),
-                    ("ManufactureOricalcum", 0x400),
-                    ("ManufactureProteanMutane", 0x800),
-                };
-                foreach (var guid in added)
+                    object d = _itemDefProp?.GetValue(it, null);
+                    if (d != null && toRemove.Contains(d)) displaced.Add(it); else newArmour.Add(it);
+                }
+                object augmentItem = NewGeoItem(GeoItemT(), augment);
+                if (newArmour == null || augmentItem == null) { LogUnresolved("Augment(item)", unitId); return; }
+                newArmour.Add(augmentItem);
+
+                // Hand-loss (native OnAugmentApplied step 2): an augment carrying an UnusableHand status
+                // unequips every >1-handed equipment item; the 1-handed survivors are re-set.
+                bool loseHand = _loseHandOnEquip != null && (bool)_loseHandOnEquip.Invoke(null, new[] { augment });
+                IList keepEquipment = null;
+                var dropped2H = new List<object>();
+                if (loseHand)
                 {
-                    object def = DefReflection.GetDefByGuid(guid);
-                    if (def == null) continue;
-                    foreach (var (field, resType) in costFields)
-                    {
-                        var fi = AccessTools.Field(def.GetType(), field);
-                        if (fi == null) continue;
-                        float cost = fi.GetValue(def) is float f ? f : 0f;
-                        if (cost > 0f) WalletReflection.ApplyDiff(wallet, resType, -cost);
-                    }
+                    keepEquipment = NewGeoItemList();
+                    if (CachedField(soldier.GetType(), "_equipmentItems")?.GetValue(soldier) is IList equipmentItems && keepEquipment != null)
+                        foreach (var it in equipmentItems)
+                        {
+                            object d = _itemDefProp?.GetValue(it, null);
+                            int hands = d != null && _handsToUseField != null ? (int)_handsToUseField.GetValue(d) : 1;
+                            if (hands > 1) dropped2H.Add(it); else keepEquipment.Add(it);
+                        }
+                }
+
+                // Commit — the native SetItems (freeReload:false, matching OnAugmentClicked/OnAugmentApplied).
+                InvokeSetItems(soldier, newArmour, keepEquipment, null, false);
+
+                // Displaced bodyparts → faction storage unless permanent augment (OnAugmentApplied step 1);
+                // bionics additionally free-repair a damaged displaced part (UIModuleBionics.cs:222-227).
+                object store = ItemStorageReflection.GetStorage(rt);
+                if (_storeAddItem == null && store != null) _storeAddItem = AccessTools.Method(store.GetType(), "AddItem");
+                foreach (var it in displaced)
+                {
+                    if (store != null && !IsPermanentAugment(_itemDefProp?.GetValue(it, null)))
+                        _storeAddItem?.Invoke(store, new[] { it });
+                    if (isBionic && _getEquippedItemHealth != null && _repairItem != null
+                        && (float)_getEquippedItemHealth.Invoke(soldier, new[] { it }) < 1f)
+                        _repairItem.Invoke(soldier, new object[] { it, false });
+                }
+                // Dropped 2-handed equipment → storage unless family-tagged (the native tag exclusion).
+                foreach (var it in dropped2H)
+                {
+                    if (store != null && !HasTag(_itemDefProp?.GetValue(it, null), familyTag))
+                        _storeAddItem?.Invoke(store, new[] { it });
+                }
+
+                // Wallet — native Wallet.Take(ManufacturePrice, OperationReason.Purchase).
+                if (_walletTake != null && _operationReasonType != null)
+                    _walletTake.Invoke(wallet, new[] { price, Enum.Parse(_operationReasonType, "Purchase") });
+
+                // Preferred loadout + statistics + loadout save (OnAugmentApplied step 5 + UIState handler).
+                _updatePreferredLoadout?.Invoke(fac, new[] { soldier });
+                object statsMgr = _statsComponent?.Invoke(null, null);
+                if (statsMgr != null) (isBionic ? _onApplyBionic : _onApplyMutation)?.Invoke(statsMgr, new[] { augment });
+                _saveLoadout?.Invoke(soldier, null);
+
+                // TFTV parity — its augment side-effects ride UI postfixes this headless path never trips.
+                TftvAugmentCompat.OnHostAugmentApplied(rt, soldier, augment, isBionic);
+
+                Debug.Log("[Multiplayer] PersonnelEditReflection.Augment: unit " + unitId + " applied "
+                          + (isBionic ? "bionic " : "mutation ") + augmentGuid
+                          + (displaced.Count > 0 ? " (displaced " + displaced.Count + ")" : "")
+                          + (loseHand ? " (hand-loss: dropped " + dropped2H.Count + " two-handed)" : ""));
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Augment failed: " + ex.Message); }
+        }
+
+        private static void Deny(long unitId, string reason)
+            => Debug.Log("[Multiplayer] PersonnelEditReflection.Augment: unit " + unitId + " intent DENIED — " + reason);
+
+        /// <summary>Bind the augment-chain members once (types by full name, members single-overload except
+        /// where the exact param list is passed — the AccessTools exact-match trap).</summary>
+        private static void EnsureAugmentMembers(object soldier, object fac)
+        {
+            if (_itemDefType == null) _itemDefType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Items.ItemDef");
+            if (_tacItemDefType == null) _tacItemDefType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.TacticalItemDef");
+            if (_operationReasonType == null) _operationReasonType = AccessTools.TypeByName("PhoenixPoint.Common.Core.OperationReason");
+            if (_statsManagerType == null) _statsManagerType = AccessTools.TypeByName("PhoenixPoint.Common.Core.PhoenixStatisticsManager");
+            if (_itemDefProp == null && GeoItemT() != null) _itemDefProp = AccessTools.Property(GeoItemT(), "ItemDef");
+            if (_isPermanentAugmentField == null && _tacItemDefType != null) _isPermanentAugmentField = AccessTools.Field(_tacItemDefType, "IsPermanentAugment");
+            if (_handsToUseField == null && _itemDefType != null) _handsToUseField = AccessTools.Field(_itemDefType, "HandsToUse");
+            if (_manufacturePriceProp == null && _itemDefType != null) _manufacturePriceProp = AccessTools.Property(_itemDefType, "ManufacturePrice");
+            if (_templateDefProp == null) _templateDefProp = AccessTools.Property(soldier.GetType(), "TemplateDef");
+            if (_getAddonsMangerDef == null && _templateDefProp != null) _getAddonsMangerDef = AccessTools.Method(_templateDefProp.PropertyType, "GetAddonsMangerDef");
+            var utilsT = AccessTools.TypeByName("PhoenixPoint.Common.Utils.CommonCharacterUtils");
+            if (_canSwapItem == null && utilsT != null) _canSwapItem = AccessTools.Method(utilsT, "CanSwapItem");
+            if (_loseHandOnEquip == null && utilsT != null) _loseHandOnEquip = AccessTools.Method(utilsT, "LoseHandOnEquip");
+            if (_updatePreferredLoadout == null) _updatePreferredLoadout = AccessTools.Method(fac.GetType(), "UpdatePreferredLoadout");
+            var charT = CharT();
+            if (_saveLoadout == null && charT != null) _saveLoadout = AccessTools.Method(charT, "SaveLoadout");
+            if (_getEquippedItemHealth == null && charT != null && GeoItemT() != null) _getEquippedItemHealth = AccessTools.Method(charT, "GetEquippedItemHealth", new[] { GeoItemT() });
+            if (_repairItem == null && charT != null && GeoItemT() != null) _repairItem = AccessTools.Method(charT, "RepairItem", new[] { GeoItemT(), typeof(bool) });
+            if (_onApplyMutation == null && _statsManagerType != null) _onApplyMutation = AccessTools.Method(_statsManagerType, "OnApplyMutation");
+            if (_onApplyBionic == null && _statsManagerType != null) _onApplyBionic = AccessTools.Method(_statsManagerType, "OnApplyBionic");
+            if (_statsComponent == null && _statsManagerType != null)
+            {
+                var gameUtl = AccessTools.TypeByName("Base.Core.GameUtl") ?? AccessTools.TypeByName("GameUtl");
+                var generic = gameUtl != null ? AccessTools.Method(gameUtl, "GameComponent", new Type[0]) : null;
+                if (generic != null && generic.IsGenericMethodDefinition) _statsComponent = generic.MakeGenericMethod(_statsManagerType);
+            }
+        }
+
+        /// <summary>GeoLevelController.SharedData.SharedGameTags (SharedGameTagsDataDef), or null. Shares the
+        /// cached property/field handles with <see cref="HasPandoranProgression"/>.</summary>
+        private static object SharedGameTags(GeoRuntime rt)
+        {
+            try
+            {
+                var geo = rt?.GeoLevel();
+                if (geo == null) return null;
+                if (_sharedDataProp == null) _sharedDataProp = AccessTools.Property(geo.GetType(), "SharedData");
+                object shared = _sharedDataProp?.GetValue(geo, null);
+                if (shared == null) return null;
+                if (_sharedGameTagsField == null) _sharedGameTagsField = AccessTools.Field(shared.GetType(), "SharedGameTags");
+                return _sharedGameTagsField?.GetValue(shared);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The def's <c>Tags</c> list (public GameTagsList field, AddonDef.cs:83) contains this tag
+        /// def (defs are singletons → reference compare). Null-safe false.</summary>
+        private static bool HasTag(object def, object tag)
+        {
+            try
+            {
+                if (def == null || tag == null) return false;
+                if (!(CachedField(def.GetType(), "Tags")?.GetValue(def) is IEnumerable tags)) return false;
+                foreach (var t in tags) if (ReferenceEquals(t, tag)) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Native <c>AugmentScreenUtilities.IsPermanentAugment</c>: TacticalItemDef.IsPermanentAugment
+        /// (the derived `new` field, TacticalItemDef.cs:41); a non-tactical def is never permanent.</summary>
+        private static bool IsPermanentAugment(object def)
+        {
+            try
+            {
+                if (def == null || _tacItemDefType == null || !_tacItemDefType.IsInstanceOfType(def)) return false;
+                return _isPermanentAugmentField != null && (bool)_isPermanentAugmentField.GetValue(def);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>ItemDef.RequiredSlotBinds[0].RequiredSlot (AddonSlotDef) — the augment's target body slot
+        /// (the same [0] the native section mapping and TFTV use; augments bind exactly one slot), or null.</summary>
+        private static object FirstRequiredSlot(object def)
+        {
+            try
+            {
+                if (!(CachedField(def.GetType(), "RequiredSlotBinds")?.GetValue(def) is Array binds) || binds.Length == 0) return null;
+                object bind = binds.GetValue(0);
+                return bind == null ? null : CachedField(bind.GetType(), "RequiredSlot")?.GetValue(bind);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Native <c>AugmentScreenUtilities.GetAugmentAtSlot</c>: the ItemDef of the armour item
+        /// whose RequiredSlotBinds bind this AddonSlotDef, or null.</summary>
+        private static object AugmentDefAtSlot(object soldier, object slot)
+        {
+            try
+            {
+                if (slot == null) return null;
+                if (!(CachedField(soldier.GetType(), "_armourItems")?.GetValue(soldier) is IList items)) return null;
+                foreach (var it in items)
+                {
+                    object d = _itemDefProp?.GetValue(it, null);
+                    if (d == null || !(CachedField(d.GetType(), "RequiredSlotBinds")?.GetValue(d) is Array binds)) continue;
+                    foreach (var bind in binds)
+                        if (bind != null && ReferenceEquals(CachedField(bind.GetType(), "RequiredSlot")?.GetValue(bind), slot))
+                            return d;
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.DeductAugmentCost failed: " + ex.Message); }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Native <c>AugmentScreenUtilities.GetNumberOfAugments</c>: armour items tagged with either
+        /// augment family tag.</summary>
+        private static int CountAugments(object soldier, object mutationTag, object bionicTag)
+        {
+            int n = 0;
+            try
+            {
+                if (!(CachedField(soldier.GetType(), "_armourItems")?.GetValue(soldier) is IList items)) return 0;
+                foreach (var it in items)
+                {
+                    object d = _itemDefProp?.GetValue(it, null);
+                    if (HasTag(d, mutationTag) || HasTag(d, bionicTag)) n++;
+                }
+            }
+            catch { }
+            return n;
+        }
+
+        /// <summary>Native CanApplyAugumentation's unlock gate: <c>GeoFaction.UnlockedAugmentations</c>
+        /// (HashSet&lt;ItemDef&gt;) contains this def (reference compare — defs are singletons).</summary>
+        private static bool UnlockedAugmentationsContains(object fac, object def)
+        {
+            try
+            {
+                if (_unlockedAugsProp == null) _unlockedAugsProp = AccessTools.Property(fac.GetType(), "UnlockedAugmentations");
+                if (!(_unlockedAugsProp?.GetValue(fac, null) is IEnumerable set)) return false;
+                foreach (var d in set) if (ReferenceEquals(d, def)) return true;
+                return false;
+            }
+            catch { return false; }
         }
 
         /// <summary>Hire a recruit (haven or naked pool) into a base: resolve the source GeoUnitDescriptor + the
@@ -861,19 +1138,24 @@ namespace Multiplayer.Network.Sync.State
             return f;
         }
 
+        /// <summary>A fresh native <c>List&lt;T&gt;</c> for a game element type, or null.</summary>
+        private static IList NewTypedList(Type elementType)
+            => elementType == null ? null : (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+
+        private static IList NewGeoItemList() => NewTypedList(GeoItemT());
+
         /// <summary>Build a native <c>List&lt;GeoItem&gt;</c> from def guids (resolve def → new GeoItem(def)).
         /// Null in → null out (SetItems leaves that slot unchanged); non-null → a (possibly empty) list SetItems
         /// clears+refills. Mirrors the game's own reconstruction (GeoCharacter.cs:1620).</summary>
         private static IList BuildItems(string[] guids)
         {
             if (guids == null) return null;
-            var geoItemT = GeoItemT();
-            if (geoItemT == null) return null;
-            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(geoItemT));
+            var list = NewGeoItemList();
+            if (list == null) return null;
             foreach (var g in guids)
             {
                 object def = DefReflection.GetDefByGuid(g);
-                object item = def != null ? NewGeoItem(geoItemT, def) : null;
+                object item = def != null ? NewGeoItem(GeoItemT(), def) : null;
                 if (item != null) list.Add(item);
             }
             return list;
@@ -900,12 +1182,14 @@ namespace Multiplayer.Network.Sync.State
             return null;
         }
 
-        private static void InvokeSetItems(object soldier, IList armour, IList equipment, IList inventory)
+        // freeReload:true for equip (a def-rebuilt item carries no ammo state to preserve); the augment
+        // chain passes false, matching the native OnAugmentClicked/OnAugmentApplied SetItems calls.
+        private static void InvokeSetItems(object soldier, IList armour, IList equipment, IList inventory, bool freeReload = true)
         {
             try
             {
                 if (_setItems == null && CharT() != null) _setItems = AccessTools.Method(CharT(), "SetItems");
-                _setItems?.Invoke(soldier, new object[] { armour, equipment, inventory, true });
+                _setItems?.Invoke(soldier, new object[] { armour, equipment, inventory, freeReload });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.InvokeSetItems failed: " + ex.Message); }
         }

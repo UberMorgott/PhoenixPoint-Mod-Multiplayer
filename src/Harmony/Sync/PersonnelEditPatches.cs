@@ -23,9 +23,9 @@ namespace Multiplayer.Harmony.Sync
     ///
     /// Chokepoints (each single native method, decompile-verified 2026-07-06):
     ///   • <c>GeoCharacter.SetItems</c> → <see cref="EquipSoldierAction"/> (full final loadout — a null arg is
-    ///     filled from the soldier's current list; this SUBSUMES augment, whose new body-parts ride the armour
-    ///     list, so <see cref="AugmentSoldierAction"/> is the registered dedicated-augment variant for a future
-    ///     distinct augment chokepoint);
+    ///     filled from the soldier's current list); augment has its OWN chokepoint (AugmentGesturePatches.cs
+    ///     PREFIX on <c>UIModuleMutationSection.ApplyMutation</c>) → <see cref="AugmentSoldierAction"/>
+    ///     carrying the chosen augment's def guid, host-applied via the full native-equivalent chain;
     ///   • <c>GeoPhoenixFaction.HireNakedRecruit</c> → <see cref="HireRecruitAction"/>;
     ///   • <c>GeoCharacter.Rename</c> → <see cref="RenameSoldierAction"/>;
     ///   • <c>GeoFaction.KillCharacter(_, Dismissed)</c> → <see cref="DismissSoldierAction"/>;

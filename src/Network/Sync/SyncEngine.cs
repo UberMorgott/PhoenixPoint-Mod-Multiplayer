@@ -682,10 +682,11 @@ namespace Multiplayer.Network.Sync
                 State.EquipMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance);
             // Augmentation screens (mutation/bionics) cache CharacterOriginalItems on open and never
             // re-read from the model — a #9 blob apply that stamps new armour (augment applied by the
-            // host or another client) leaves them stale. Repaint here, gated to #9 only (augment state
-            // lives in the soldier blob, not #1 inventory). No-op when the screen is closed.
+            // host or another client) leaves them stale. EditSession-gated adapter (no drag on these
+            // screens → always repaints immediately), gated to #9 only (augment state lives in the
+            // soldier blob, not #1 inventory). No-op when the screen is closed.
             if (channelId == SurfaceIds.PersonnelChannel)
-                GeoUiRefresh.RepaintAugmentation(GeoRuntime.Instance);
+                State.AugmentMirrorRepaint.OnRemoteApplied(GeoRuntime.Instance);
             // MIST (#8) is a world-texture redraw with NO UI module to kick — and it is CHUNKED (one Apply per
             // chunk), so the generic fan-out below would rebuild open modules once per chunk for nothing.
             if (channelId == SurfaceIds.MistChannel) return;
