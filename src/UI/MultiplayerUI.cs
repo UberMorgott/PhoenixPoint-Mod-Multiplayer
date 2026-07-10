@@ -68,6 +68,26 @@ namespace Multiplayer.UI
 
             // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
+
+            WireSteamInvite();
+        }
+
+        // One-time wiring of the Steam invite/join subsystem. Registered here (persistent ModGO) so an
+        // invite accepted from the MAIN MENU — before the co-op lobby is even opened — still routes into
+        // the join flow. The join callback reuses OnLobbyJoin (full client join + OnConnectionFailed
+        // diagnostics); the report callback surfaces every stage (errors → native message box, never a
+        // silent no-op). Idempotent: SteamInvite.RegisterJoinHandlers self-guards against re-subscribe.
+        private void WireSteamInvite()
+        {
+            SteamInvite.OnJoinResolved = joinString => OnLobbyJoin(joinString);
+            SteamInvite.Report = (msg, isError) =>
+            {
+                if (!isError) return; // successes already reach Player.log inside SteamInvite
+                var mb = GameUtl.GetMessageBox();
+                mb?.ShowSimplePrompt("Steam invite: " + msg, MessageBoxIcon.Error,
+                    MessageBoxButtons.OK, null, this);
+            };
+            SteamInvite.RegisterJoinHandlers();
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -82,6 +102,10 @@ namespace Multiplayer.UI
             if (_panelsBuilt || menuCanvas == null) return;
             _lobby.Build(menuCanvas);
             _panelsBuilt = true;
+
+            // Cold start: if the game was launched by accepting a Steam invite ("+connect_lobby <id>"),
+            // kick the join now that the menu + lobby panel are ready (OnLobbyJoin needs them).
+            SteamInvite.HandleColdStart();
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -228,6 +252,10 @@ namespace Multiplayer.UI
             NetworkEngine.Instance.Initialize(composite);
             NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
+            // Publish a friends-only Steam lobby advertising our SteamID64 so "Invite via Steam" (and the
+            // friends-list Join Game) work. Fire-and-forget: the lobby is ready a beat later (reported via
+            // SteamInvite.Report); the invite button below no-ops loudly until then. Harmless off Steam.
+            SteamInvite.HostPublish();
             // Fresh host: drop any chosen-save carried over from a PRIOR session. Without this the
             // stale _pendingChosenSave (the rich transfer payload) survives a host→PLAY→leave→re-host
             // and PLAY could ship a save the new lobby's clients never chose. (The gate itself now keys
@@ -1051,6 +1079,7 @@ namespace Multiplayer.UI
             finally
             {
                 NetworkEngine.Instance?.Shutdown();
+                SteamInvite.LeaveHostLobby(); // drop any published invite lobby + rich presence (no-op on a client)
                 TeardownLobbyState();
                 _inGameBar.SetActive(false);
                 _lobby?.Hide();
@@ -1200,24 +1229,10 @@ namespace Multiplayer.UI
                     }
                 }
 
-                var friendsType = asm.GetType("Steamworks.SteamFriends");
-                if (friendsType == null)
-                {
-                    ShowSteamNotAvailable();
-                    return;
-                }
-
-                var method = friendsType.GetMethod("OpenOverlay",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
-                    null, new[] { typeof(string) }, null);
-
-                if (method != null)
-                {
-                    method.Invoke(null, new object[] { "friends" });
-                    return;
-                }
-
-                ShowSteamNotAvailable();
+                // Open Steam's invite dialog for the host lobby (published at host start). SteamInvite
+                // reports its own stage (overlay opened, or "lobby not ready — try again") so the button
+                // is never a silent no-op; when the friend accepts, the Steam-P2P join path auto-connects.
+                SteamInvite.OpenInviteOverlay();
             }
             catch { ShowSteamNotAvailable(); }
         }

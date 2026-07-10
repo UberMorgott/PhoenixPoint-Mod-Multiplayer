@@ -37,6 +37,13 @@
       <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- The game's OWN shipped Steamworks binding (already loaded + initialised by PlatformSteam).
+         Private=false, exactly like the Unity/Assembly-CSharp references — NOT a new dependency, just
+         a compile-time handle onto a DLL the running game always has loaded. -->
+    <Reference Include="Facepunch.Steamworks.Win64">
+      <HintPath>$(GameManaged)\Facepunch.Steamworks.Win64.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
       <Private>false</Private>

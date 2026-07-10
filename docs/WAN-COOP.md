@@ -14,7 +14,7 @@ The Join box auto-detects which kind of target you paste (`SmartJoinParser`).
 | **Direct IP** (recommended) | ✅ Works whenever the port is reachable | `"<host-public-ip>:14242"` | **HOST forwards TCP 14242** (client: none) |
 | **Direct IP over VPN** (easiest) | ✅ Works, no router setup | the host's VPN IP `:14242` | none — VPN/ZeroTier/Radmin/Hamachi makes it a LAN IP |
 | **Invite code** (STUN) | ⚠️ Best-effort — fails on symmetric NAT / CGNAT (common on home/mobile) | the SHARE code from the host's lobby | none, but not guaranteed to traverse |
-| **Steam invite** | ❌ Not implemented (see below) | — | — |
+| **Steam invite** | ✅ Works between Steam friends (P2P relay, no NAT setup) | nothing — click **INVITE VIA STEAM** | none — Steam relays P2P |
 
 ## Direct IP — exact port-forward answer
 
@@ -39,20 +39,57 @@ The Join box auto-detects which kind of target you paste (`SmartJoinParser`).
 - Hole-punching beyond the plain transport is **explicitly out of scope** (see
   `COOP-SYNC-ROADMAP.md` → OUT of scope). If the code fails, use **Direct IP** above.
 
-## Steam invite — NOT implemented yet
+## Steam invite — IMPLEMENTED (increment 1)
 
-- The lobby **"INVITE VIA STEAM"** button only opens the Steam friends overlay
-  (`SteamFriends.OpenOverlay("friends")`). There is **no** Steam lobby creation, no game
-  invite, and no client-side join-accept callback — so a Steam invite cannot auto-join.
-  (The client already in the lobby correctly has no invite button; SHARE is host-only.)
-- `SteamTransport` implements only raw P2P packet send/recv keyed by a `SteamID64`. A
-  **manual** Steam join is theoretically possible — host shares their SteamID64, friend
-  pastes it into Join — but this is **unverified** and there is no UI to surface the host's
-  SteamID64 today.
-- Smallest viable plan to make Steam invites real (a discrete subsystem, not yet built):
-  1. Host: `SteamMatchmaking.CreateLobby` + set the host SteamID64 in lobby data / rich
-     presence `connect`.
-  2. Host invite button: `SteamMatchmaking.InviteUserToLobby` (or rely on the overlay's
-     built-in invite once a lobby exists).
-  3. Client: subscribe `SteamMatchmaking.OnLobbyEntered` / `SteamFriends.OnGameLobbyJoinRequested`
-     (and the `+connect_lobby` launch arg) → read host SteamID64 → `SteamTransport.Connect`.
+Uses the game's OWN shipped `Facepunch.Steamworks.Win64.dll` bindings and its OWN callback pump
+(`SteamClient.RunCallbacks`, pumped every frame by `Base.Platforms.Steam.PlatformSteam.UpdateSteamworksApi`).
+No new dependency. All Facepunch code is confined to `src/Transport/SteamInvite.cs`
+(`internal`, so it stays out of the mod's `ExportedTypes`); the pure decisions live in
+`Multiplayer.Core/Network/SteamConnect.cs` (unit-tested, `Multiplayer.Tests/SteamConnectTests.cs`).
+
+### Implemented behavior
+
+- **Host** (`StartHostAndOpenLobby` → `SteamInvite.HostPublish()`): on lobby open, creates a
+  **friends-only** Steam lobby (`SteamMatchmaking.CreateLobbyAsync(4)` → `SetFriendsOnly()` +
+  `SetJoinable(true)`), advertises the host `SteamID64` in lobby data key `mp_host`, and sets rich
+  presence `connect = "+connect_lobby <lobbyId>"` (enables the friends-list **Join Game** + cold start).
+- **Invite button**: the existing host-only SHARE-rail **"INVITE VIA STEAM"** button
+  (`MultiplayerUI.InvitePlayers`) now opens Steam's invite dialog for that lobby
+  (`SteamFriends.OpenGameInviteOverlay(lobbyId)`). No new UI widget. If the lobby is not ready yet
+  it says so (retry) instead of a silent no-op.
+- **Client** (`SteamInvite.RegisterJoinHandlers`, wired once in `MultiplayerUI.Awake`): subscribes
+  `SteamFriends.OnGameLobbyJoinRequested` (overlay invite) + `OnGameRichPresenceJoinRequested`
+  (friends-list Join) + cold-start `+connect_lobby <id>` (`OnMenuReady` → `HandleColdStart`). On
+  accept → `SteamMatchmaking.JoinLobbyAsync(id)` → resolve host from `Lobby.Owner` (or `mp_host` data)
+  → `SteamConnect.ResolveJoinString` → **`MultiplayerUI.OnLobbyJoin("<hostSteamID64>")`**, i.e. the
+  EXISTING client join flow (`SmartJoinParser` → Steam-P2P transport → `SteamTransport.Connect`).
+  DirectIP fallback is read-supported (`mp_ip` lobby key) but the host advertises none today
+  (P2P is the Steam path).
+- **Never-silent diagnostics**: every stage (lobby create, invite open, invite accepted, lobby join,
+  host resolve) logs to `Player.log` with the `[Multiplayer][steam-invite]` tag; failures also raise a
+  native message box naming the stage (`SteamInvite.Report` → `MultiplayerUI`). A downstream Steam-P2P
+  connect failure still surfaces via `NetworkEngine.BuildTransportFailureReason` (SteamP2P hint updated).
+- **Cleanup**: leaving the session (`OnDisconnectClicked`) calls `SteamInvite.LeaveHostLobby()` (leave
+  lobby + clear rich presence); re-hosting drops the prior lobby first.
+
+### 2-PC live test checklist (real Steam, BOTH machines have the mod enabled + are Steam friends)
+
+1. **Host PC**: launch PP → main menu → **MULTIPLAYER** (auto-hosts Direct+STUN+Steam, opens lobby).
+2. Host: confirm `Player.log` shows `[steam-invite] invite lobby ready (<id>) — Invite via Steam is now live`.
+3. Host: click **INVITE VIA STEAM** → Steam overlay invite dialog opens → invite the friend.
+4. **Client PC**: accept the invite from the Steam overlay/notification (game already running).
+5. Client: expect `[steam-invite] Steam invite accepted … resolved host <id> — starting join`, then the
+   native **Connecting to host…** box, then the co-op lobby with both players in the roster.
+6. Also test the **friends-list "Join Game"** button (rich presence) and **cold start** (accept the
+   invite while the client's PP is CLOSED → Steam relaunches it with `+connect_lobby`; join fires at menu ready).
+7. Host picks a save / NEW CAMPAIGN → PLAY → verify the client loads into the same campaign.
+8. Negative: click **INVITE VIA STEAM** immediately at host start before the lobby is ready → expect the
+   "lobby not ready — try again" box (never a silent no-op).
+
+### Behavior when the game is NOT modded on accept
+
+- **Client not running the mod (or mod disabled)**: accepting the invite still launches/focuses PP via
+  Steam, but no mod callback is registered, so nothing auto-joins — the client just lands on the normal
+  main menu. There is no crash and no error; the join simply does not happen. Both players must have the
+  Multiplayer mod enabled. (Vanilla PP has no co-op, so Steam's own "Join Game" has nothing to route to.)
+- **Host not running the mod**: no lobby is ever published, so the friend has nothing to accept.

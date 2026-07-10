@@ -384,8 +384,9 @@ namespace Multiplayer.Network
                          + "not hosting; TimedOut = firewall or port not forwarded.";
                     break;
                 case TransportType.SteamP2P:
-                    hint = "Steam invite/join is not implemented yet. Paste the host's Steam ID, or use "
-                         + "Direct IP (host forwards TCP 14242).";
+                    hint = "The Steam P2P link to the host could not be established. Make sure both players "
+                         + "are Steam friends and the host is still in the lobby, then accept the invite "
+                         + "again — or use Direct IP (host forwards TCP 14242).";
                     break;
                 default:
                     hint = null;
