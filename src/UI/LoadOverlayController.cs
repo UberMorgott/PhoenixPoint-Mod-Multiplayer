@@ -323,7 +323,7 @@ namespace Multiplayer.UI
             }
 
             bool shouldShow = LoadOverlayVisibility.ShouldShow(
-                coord.LoadPhaseStarted, coord.InPhase2, expectedPeers, donePeers);
+                coord.LoadPhaseStarted, coord.InPhase2, coord.IsDownloading, expectedPeers, donePeers);
 
             if (shouldShow) Show(); else Hide();
 

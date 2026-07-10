@@ -38,13 +38,19 @@ namespace Multiplayer.UI
         /// <param name="expectedPeers">Count of participating roster slots (RosterProgressTracker done is
         ///   tracked per slot). 0 means no participants → treated as "all done" (nothing to wait on).</param>
         /// <param name="donePeers">How many of those slots have reported LoadComplete (tracker.IsDone).</param>
-        public static bool ShouldShow(bool loadStarted, bool inPhase2, int expectedPeers, int donePeers)
+        /// <param name="downloading">SaveTransferCoordinator.IsDownloading — this CLIENT is actively
+        ///   receiving the save blob (mid-download, before the curtain/world-load). FIX-3: over WAN the
+        ///   ~1 MB save download takes seconds→minutes and precedes BOTH loadStarted and inPhase2, so
+        ///   without this signal the download was a blank screen. The host is never downloading and a
+        ///   client is only downloading once chunks arrive, so this never re-introduces the lobby popup.</param>
+        public static bool ShouldShow(bool loadStarted, bool inPhase2, bool downloading, int expectedPeers, int donePeers)
         {
-            // No genuine load window open → never show. Gate on the ACTUAL load-start (curtain Loading)
-            // or phase-2 world-load, NOT on the command-time TransferActive: that prevents the overlay
-            // from appearing in the lobby the instant the host presses PLAY (the bug). The overlay now
-            // appears exactly when the native loading curtain drops for the mission.
-            if (!loadStarted && !inPhase2) return false;
+            // No genuine load window open → never show. Gate on the ACTUAL load-start (curtain Loading),
+            // phase-2 world-load, OR this client's active download (FIX-3), NOT on the command-time
+            // TransferActive: that prevents the overlay from appearing in the lobby the instant the host
+            // presses PLAY (the bug). The overlay appears when the download starts (client) or the native
+            // loading curtain drops for the mission.
+            if (!loadStarted && !inPhase2 && !downloading) return false;
 
             // A load window is open: show until every participating peer has reported done.
             bool allPeersDone = expectedPeers <= 0 || donePeers >= expectedPeers;

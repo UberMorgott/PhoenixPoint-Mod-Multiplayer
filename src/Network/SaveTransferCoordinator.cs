@@ -285,6 +285,14 @@ namespace Multiplayer.Network
         public bool TransferActive =>
             (_engine.IsHost && _barrierOpen) || _rxTotalBytes > 0 || IsBarrierPending;
 
+        /// <summary>
+        /// FIX-3: true only on a CLIENT that is actively receiving a save blob (mid-download, before the
+        /// curtain "Loading" and phase-2 world-load). Drives the load overlay's DOWNLOAD-phase visibility
+        /// so a slow WAN save download isn't a blank screen. False on the host (it holds the blob locally)
+        /// and false once the blob is fully received (ResetRx clears _rxTotalBytes at SaveDone).
+        /// </summary>
+        public bool IsDownloading => !_engine.IsHost && _rxTotalBytes > 0;
+
         /// <summary>This peer's own download percent (0..100), or -1 when not downloading.</summary>
         public int LocalDownloadPercent
         {
