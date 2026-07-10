@@ -132,6 +132,44 @@ namespace Multiplayer.Harmony.Sync
             return cur is int c && start is int s ? c - s : 0;
         }
 
+        /// <summary>DISPLAY-ONLY preview broadcast (co-op reactivity mandate): after a native ChangeCharacterStat
+        /// click ran its SP/faction-pool math, ship the current UNCOMMITTED buffer so a watcher on the SAME
+        /// soldier sees the edit live (stat values + the two SP labels moving) before it commits. READ-ONLY — never
+        /// mutates the buffer or the model; carries no authoritative state (the real spend rides SpendStatPoints +
+        /// the #9 blob, which wins). Fires for BOTH host and client spenders (the +/- buttons run native locally on
+        /// either; only the COMMIT is suppressed on a client). The changed stat's <c>_current*Stat</c> is applied by
+        /// the CALLER one line AFTER ChangeCharacterStat returns, so fold the postfix result into that stat's delta.
+        /// Mutoid (mutagen-cost) progression has no SP pool → not previewed. Best-effort.</summary>
+        internal static void BroadcastStatEditPreview(object progModule, int changedStatIdx, int result)
+        {
+            if (progModule == null) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return;                       // single-player: no watchers
+            var t = progModule.GetType();
+            if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(progModule) is bool p && p) return; // mutoid
+            int dStr = Delta(t, progModule, "_currentStrengthStat", "_startingStrengthStat") + (changedStatIdx == 0 ? result : 0);
+            int dWill = Delta(t, progModule, "_currentWillStat", "_startingWillStat") + (changedStatIdx == 1 ? result : 0);
+            int dSpeed = Delta(t, progModule, "_currentSpeedStat", "_startingSpeedStat") + (changedStatIdx == 2 ? result : 0);
+            int soldierSP = AccessTools.Field(t, "_currentSkillPoints")?.GetValue(progModule) is int sp ? sp : 0;
+            int factionSP = AccessTools.Field(t, "_currentFactionPoints")?.GetValue(progModule) is int fp ? fp : 0;
+            object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
+            long unitId = PersonnelReflection.ReadUnitId(character);
+            engine.Sync?.BroadcastStatEditPreview(unitId, dStr, dWill, dSpeed, soldierSP, factionSP);
+        }
+
+        /// <summary>Preview-CLEAR on the commit seam (commit / soldier-switch / screen-exit all route through
+        /// CommitStatChanges): the spender stopped editing this soldier, so watchers drop the preview. The real
+        /// committed state re-drives on the following #9 (or the 10 s watcher-side expiry) — never a forced re-drive
+        /// here that could bounce a watcher's pool UP to the not-yet-mirrored pre-commit value. Best-effort.</summary>
+        internal static void BroadcastStatEditPreviewClear(object progModule)
+        {
+            if (progModule == null) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return;
+            object character = AccessTools.Field(progModule.GetType(), "_character")?.GetValue(progModule);
+            engine.Sync?.BroadcastStatEditPreviewClear(PersonnelReflection.ReadUnitId(character));
+        }
+
         /// <summary>HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint in
         /// <see cref="GeoUiRefresh.FullRedriveProgression"/> is about to <c>SetCharacterProgression</c> the OPEN
         /// soldier's panel — resetting <c>_current*Stat</c> to <c>_starting*Stat</c> and DISCARDING the local
@@ -459,6 +497,30 @@ namespace Multiplayer.Harmony.Sync
     }
 
     [HarmonyPatch]
+    public static class ChangeCharacterStatPreviewPatch
+    {
+        private static MethodBase _target;
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+            _target = t != null ? AccessTools.Method(t, "ChangeCharacterStat") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.ChangeCharacterStat preview " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // DISPLAY-ONLY preview (never suppresses — POSTFIX only, the native +/- math always runs). __0 =
+        // CharacterBaseAttribute (Strength=0/Will=1/Speed=2); __result = the ±1/0 stat delta the caller applies
+        // one line later. A no-op click (__result==0 → buffer unchanged) is not broadcast.
+        public static void Postfix(object __instance, object __0, int __result)
+        {
+            if (__result == 0) return;
+            try { PersonnelEditRelay.BroadcastStatEditPreview(__instance, Convert.ToInt32(__0), __result); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ChangeCharacterStatPreviewPatch failed: " + ex.Message); }
+        }
+    }
+
+    [HarmonyPatch]
     public static class CommitStatChangesProgressionRelayPatch
     {
         private static MethodBase _target;
@@ -508,8 +570,14 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] CommitStatChangesProgressionRelayPatch failed: " + ex.Message); return true; }
         }
 
-        // FIX 3 commit-seam backstop — runs on host (native) and client (Prefix suppressed, Postfix still fires).
-        public static void Postfix() => PersonnelEditRelay.CommitSeamBackstop();
+        // FIX 3 commit-seam backstop + preview-CLEAR — both run on host (native) and client (Prefix suppressed,
+        // Postfix still fires). The commit/soldier-switch/screen-exit all route through CommitStatChanges, so this
+        // is the single seam where the spender stops previewing this soldier.
+        public static void Postfix(object __instance)
+        {
+            PersonnelEditRelay.CommitSeamBackstop();
+            PersonnelEditRelay.BroadcastStatEditPreviewClear(__instance);
+        }
 
         private static void Reset(Type t, object inst, string currentField, string startingField)
         {

@@ -434,6 +434,25 @@ namespace Multiplayer.Network.Sync.State
         private static IReadOnlyList<long> _progressionStampIds;
         private static bool _progressionStampFactionSp;
 
+        // ─── Stat-edit preview (display-only, co-op reactivity) — extra progression-panel label/slider handles +
+        // max-stat reflection + the single active-preview state. WATCHER-side only: writes UI labels, never
+        // _current*/_starting*/model. See ApplyStatEditPreview / StatEditPreviewPayload.
+        private static FieldInfo _progCharacterField;         // UIModuleCharacterProgression._character (GeoCharacter)
+        private static FieldInfo _progStartingStrField, _progStartingWillField, _progStartingSpeedField; // int baselines
+        private static FieldInfo _progStrengthStatText, _progWillStatText, _progSpeedStatText;   // UnityEngine.UI.Text
+        private static FieldInfo _progSoldierSPText, _progFactionSPText;                          // UnityEngine.UI.Text
+        private static FieldInfo _progStrengthSlider, _progSpeedSlider, _progWillSlider;          // UnityEngine.UI.Slider
+        private static PropertyInfo _uiTextTextProp;          // UnityEngine.UI.Text.text
+        private static PropertyInfo _uiSliderValueProp;       // UnityEngine.UI.Slider.value
+        private static PropertyInfo _charProgressionProp;     // GeoCharacter.Progression
+        private static MethodInfo _getMaxBaseStat;            // CharacterProgression.GetMaxBaseStat(CharacterBaseAttribute)
+        private static object _cbaStrength, _cbaWill, _cbaSpeed; // boxed CharacterBaseAttribute (0/1/2)
+        private const float PreviewTtlSec = 10f;              // safety expiry for an orphaned preview
+        private static bool _previewActive;
+        private static long _previewUnitId;
+        private static StatEditPreviewPayload _preview;
+        private static float _previewExpiry;
+
         private static void EnsureRosterFamily()
         {
             if (_rosterFamilyEnsured) return;
@@ -480,6 +499,33 @@ namespace Multiplayer.Network.Sync.State
                     _progCurrentFactionPointsField = AccessTools.Field(progType, "_currentFactionPoints");
                     var phoenixFactionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction");
                     if (phoenixFactionType != null) _phoenixFactionSkillpointsField = AccessTools.Field(phoenixFactionType, "Skillpoints");
+
+                    // Stat-edit preview (display-only): label/slider handles + max-stat reflection. All best-effort.
+                    _progCharacterField = AccessTools.Field(progType, "_character");
+                    _progStartingStrField = AccessTools.Field(progType, "_startingStrengthStat");
+                    _progStartingWillField = AccessTools.Field(progType, "_startingWillStat");
+                    _progStartingSpeedField = AccessTools.Field(progType, "_startingSpeedStat");
+                    _progStrengthStatText = AccessTools.Field(progType, "StrengthStatText");
+                    _progWillStatText = AccessTools.Field(progType, "WillpowerStatText");
+                    _progSpeedStatText = AccessTools.Field(progType, "SpeedStatText");
+                    _progSoldierSPText = AccessTools.Field(progType, "AvailableSoldierSkillPointsText");
+                    _progFactionSPText = AccessTools.Field(progType, "AvailableFactionSkillPointsText");
+                    _progStrengthSlider = AccessTools.Field(progType, "StrengthSlider");
+                    _progSpeedSlider = AccessTools.Field(progType, "SpeedSlider");
+                    _progWillSlider = AccessTools.Field(progType, "WillSlider");
+                    var uiTextType = AccessTools.TypeByName("UnityEngine.UI.Text");
+                    if (uiTextType != null) _uiTextTextProp = AccessTools.Property(uiTextType, "text");
+                    var uiSliderType = AccessTools.TypeByName("UnityEngine.UI.Slider");
+                    if (uiSliderType != null) _uiSliderValueProp = AccessTools.Property(uiSliderType, "value");
+                    _charProgressionProp = AccessTools.Property(charType, "Progression");
+                    var charProgType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterProgression");
+                    var cbaType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterBaseAttribute");
+                    if (charProgType != null && cbaType != null)
+                    {
+                        _getMaxBaseStat = AccessTools.Method(charProgType, "GetMaxBaseStat", new[] { cbaType });
+                        try { _cbaStrength = Enum.ToObject(cbaType, 0); _cbaWill = Enum.ToObject(cbaType, 1); _cbaSpeed = Enum.ToObject(cbaType, 2); }
+                        catch { _cbaStrength = _cbaWill = _cbaSpeed = null; }
+                    }
                 }
                 var geoType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
                 if (geoType != null) _viewerFactionProp = AccessTools.Property(geoType, "ViewerFaction");
@@ -684,12 +730,15 @@ namespace Multiplayer.Network.Sync.State
                                           + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); pending stat allocation HARVESTED (committed) before re-drive, unconfirmed ability selection discarded");
                             else if (stampArmed)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression re-drive unit=" + viewedUnitId
-                                          + " stamped=[" + JoinIds(stampIds) + "] factionSp=" + stampSp);
+                                          + " stamped=[" + JoinIds(stampIds) + "] factionSp=" + stampSp
+                                          + " pool=" + ReadLiveFactionPool(progModule));   // PART-1 DIAG: pool value behind any bounce
                         }
                     }
                     else if (stampArmed)   // Skip: apply touched neither the open unit nor the shared pool
                         Debug.Log("[Multiplayer] GeoUiRefresh: progression repaint SKIPPED — apply touched neither open unit="
                                   + viewedUnitId + " nor the shared SP pool (stamped=[" + JoinIds(stampIds) + "])");
+                    // Stat-edit preview (display-only): keep it sticky against this repaint, or let real state win.
+                    ReassertOrClearPreview(progModule, character, viewedUnitId, stampArmed, stampIds, stampSp);
                 }
             }
             else ProgressionStampDiag(stampArmed, "progression reflection unresolved or no current character");
@@ -743,9 +792,24 @@ namespace Multiplayer.Network.Sync.State
                     // covered by the live pool? If not, shifting the baseline would set _currentFactionPoints
                     // negative (over-spend) — bail to a ConflictRepaint. shiftedCur is always ≥ 0 when affordable.
                     if (!ProgressionRepaintDecision.CanPartialShiftFactionSp(live, start, cur, out int shiftedCur))
+                    {
+                        Debug.Log("[Multiplayer] GeoUiRefresh: faction-SP reconcile OVER-COMMITTED — live=" + live
+                                  + " start=" + start + " cur=" + cur + " pendingDraw=" + (start - cur)
+                                  + " > live pool → escalate to ConflictRepaint");
                         return false;
+                    }
                     if (live != start)
                     {
+                        // PART-1 DIAG (pool-bounce RCA 2026-07-11): the ONLY path that moves the DISPLAYED shared
+                        // pool while an edit is pending. It was SILENT on an unstamped apply (the caller's PARTIAL
+                        // log is stampArmed-gated), so an on-screen pool change had no log line. Now unconditional +
+                        // with values. shiftedCur = live − pendingDraw is convergence-correct (draw preserved); it
+                        // moves UP only when the authoritative pool genuinely grew (live > start). NB the model pool
+                        // changes ONLY on a STAMPED #9 (ApplyFactionSkillpoints → LastApplyFactionSpChanged), so an
+                        // UNSTAMPED apply always has live==start → no shift → no bounce (verified RCA 2026-07-11).
+                        Debug.Log("[Multiplayer] GeoUiRefresh: faction-SP reconcile — live=" + live + " start(old)=" + start
+                                  + " cur(old)=" + cur + " → start=" + live + " cur=" + shiftedCur
+                                  + " (pendingDraw=" + (start - cur) + " preserved)");
                         _progStartingFactionPointsField.SetValue(progModule, live);
                         _progCurrentFactionPointsField.SetValue(progModule, shiftedCur);
                     }
@@ -818,6 +882,156 @@ namespace Multiplayer.Network.Sync.State
                           + PersonnelReflection.ReadUnitId(character));
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RedriveOpenProgressionPanel best-effort failed: " + ex.Message); }
+        }
+
+        // ─── Stat-edit preview (display-only, WATCHER side) ──────────────────────────────────────────────
+
+        /// <summary>Locate the OPEN soldier-equip progression module + its viewed character, or return false.
+        /// Shared by the preview apply and the reassert path. Never throws (caller-wrapped where needed).</summary>
+        private static bool TryGetOpenProgression(GeoRuntime rt, out object progModule, out object character)
+        {
+            progModule = null; character = null;
+            EnsureRosterFamily();
+            if (_editSoldierType == null || _editSoldierCharField == null || _progModuleField == null
+                || _modulesField == null || _viewField == null || _currentViewStateProp == null) return false;
+            var geo = rt?.GeoLevel();
+            if (geo == null) return false;
+            var view = _viewField.GetValue(geo);
+            if (view == null) return false;
+            var state = _currentViewStateProp.GetValue(view, null);
+            if (state == null || !_editSoldierType.IsInstanceOfType(state)) return false;   // not the soldier-equip screen
+            var modules = _modulesField.GetValue(view);
+            if (modules == null) return false;
+            character = _editSoldierCharField.GetValue(state);
+            if (character == null) return false;
+            progModule = _progModuleField.GetValue(modules);
+            return progModule != null && IsOpen(progModule);
+        }
+
+        /// <summary>WATCHER: write a spender's in-progress stat-edit preview into the progression-panel LABELS ONLY
+        /// (stat value texts + sliders + the two SP labels) when the panel is open on the SAME soldier and the
+        /// watcher has no uncommitted local edit of its own. NEVER touches _current*/_starting*/model — a preview
+        /// can only ever change pixels. Multi-watcher idempotent. Arms a safety expiry + is kept sticky against
+        /// unrelated repaints (ReassertOrClearPreview) until a real apply / clear / expiry. Never throws.</summary>
+        public static void ApplyStatEditPreview(GeoRuntime rt, StatEditPreviewPayload p)
+        {
+            if (!TryGetOpenProgression(rt, out var progModule, out var character))
+            {
+                Debug.Log("[Multiplayer] GeoUiRefresh: stat preview NOT shown — progression panel closed (unit=" + p.UnitId + ")");
+                return;
+            }
+            long openUnitId = PersonnelReflection.ReadUnitId(character);
+            bool localEdit = (_isCharacterChanged?.Invoke(progModule, null) is bool pc && pc)
+                             || (_boughtAbilitySlotField?.GetValue(progModule) != null);
+            if (!StatEditPreviewDecision.ShouldShowOnWatcher(true, openUnitId, p.UnitId, localEdit))
+            {
+                Debug.Log("[Multiplayer] GeoUiRefresh: stat preview NOT shown — open unit=" + openUnitId
+                          + " preview unit=" + p.UnitId + " localEdit=" + localEdit);
+                return;
+            }
+            if (WritePreviewLabels(progModule, character, p))
+            {
+                _previewActive = true; _previewUnitId = p.UnitId; _preview = p;
+                _previewExpiry = Time.realtimeSinceStartup + PreviewTtlSec;
+                Debug.Log("[Multiplayer] GeoUiRefresh: stat preview SHOWN unit=" + p.UnitId + " dStr=" + p.DStr
+                          + " dWill=" + p.DWill + " dSpeed=" + p.DSpeed + " soldierSP=" + p.SoldierSP + " factionSP=" + p.FactionSP);
+            }
+        }
+
+        /// <summary>WATCHER: drop an active preview for <paramref name="unitId"/> (spender committed / switched /
+        /// exited). Does NOT force a model re-drive: the labels are corrected by the following real #9 apply (which
+        /// always wins) or the expiry — a forced re-drive here would bounce a watcher's pool UP to the not-yet-
+        /// mirrored pre-commit model value between the commit and its #9. Never throws.</summary>
+        public static void ClearStatEditPreview(GeoRuntime rt, long unitId)
+        {
+            if (!_previewActive || _previewUnitId != unitId) return;
+            _previewActive = false;
+            Debug.Log("[Multiplayer] GeoUiRefresh: stat preview CLEARED (spender commit/switch/exit) unit=" + unitId);
+        }
+
+        /// <summary>Write the preview numbers into the panel's label text + slider values (display-only). Returns
+        /// false (no state armed) when the core label reflection is missing. Never throws.</summary>
+        private static bool WritePreviewLabels(object progModule, object character, StatEditPreviewPayload p)
+        {
+            try
+            {
+                if (_uiTextTextProp == null || _progStartingStrField == null) return false;
+                int baseStr = ToInt(_progStartingStrField.GetValue(progModule));
+                int baseWill = ToInt(_progStartingWillField?.GetValue(progModule));
+                int baseSpeed = ToInt(_progStartingSpeedField?.GetValue(progModule));
+                SetStatText(progModule, character, _progStrengthStatText, _progStrengthSlider, baseStr + p.DStr, _cbaStrength);
+                SetStatText(progModule, character, _progWillStatText, _progWillSlider, baseWill + p.DWill, _cbaWill);
+                SetStatText(progModule, character, _progSpeedStatText, _progSpeedSlider, baseSpeed + p.DSpeed, _cbaSpeed);
+                SetText(_progSoldierSPText?.GetValue(progModule), p.SoldierSP.ToString());
+                SetText(_progFactionSPText?.GetValue(progModule), p.FactionSP.ToString());
+                return true;
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.WritePreviewLabels best-effort failed: " + ex.Message); return false; }
+        }
+
+        // Star-bar text is native "{value} / {max}" (GetStarBarValuesDisplayString); max is constant per soldier.
+        private static void SetStatText(object progModule, object character, FieldInfo textField, FieldInfo sliderField, int value, object cbaValue)
+        {
+            int max = value;
+            if (_getMaxBaseStat != null && _charProgressionProp != null && cbaValue != null)
+            {
+                object prog = _charProgressionProp.GetValue(character, null);
+                if (prog != null && _getMaxBaseStat.Invoke(prog, new[] { cbaValue }) is int m) max = m;
+            }
+            SetText(textField?.GetValue(progModule), value + " / " + max);
+            var slider = sliderField?.GetValue(progModule);
+            if (slider != null) _uiSliderValueProp?.SetValue(slider, (float)value, null);
+        }
+
+        private static void SetText(object textObj, string s) { if (textObj != null) _uiTextTextProp?.SetValue(textObj, s, null); }
+        private static int ToInt(object o) => o is int i ? i : 0;
+
+        /// <summary>Keep an active stat-edit preview STICKY against unrelated repaints (the progression block
+        /// re-drives from the model on many applies), and let REAL state WIN: a stamped change to the previewed
+        /// soldier or the shared pool, a soldier switch, or the safety expiry drops it (the model re-draw stands);
+        /// otherwise re-write the labels the model re-draw just clobbered. Prevents the watcher's pool bouncing UP
+        /// to the pre-commit model value between the spender's last click and the commit. Never throws.</summary>
+        private static void ReassertOrClearPreview(object progModule, object character, long openUnitId,
+            bool stampArmed, IReadOnlyList<long> stampIds, bool stampSp)
+        {
+            if (!_previewActive) return;
+            try
+            {
+                bool expired = Time.realtimeSinceStartup >= _previewExpiry;
+                bool realUnitChange = stampArmed && Contains(stampIds, _previewUnitId);   // model changed THIS soldier
+                bool realPoolChange = stampArmed && stampSp;                              // shared pool really moved
+                if (openUnitId != _previewUnitId || expired || realUnitChange || realPoolChange)
+                {
+                    string why = openUnitId != _previewUnitId ? "soldier switched" : expired ? "expired (safety)"
+                               : realUnitChange ? "real apply for unit" : "shared pool changed";
+                    _previewActive = false;
+                    Debug.Log("[Multiplayer] GeoUiRefresh: stat preview cleared on repaint (" + why + ") unit=" + _previewUnitId);
+                    if (expired) RedriveOpenProgressionPanel(GeoRuntime.Instance);   // safety: force real state after a stale orphan
+                    return;
+                }
+                WritePreviewLabels(progModule, character, _preview);   // idle/unrelated repaint clobbered labels → re-assert
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.ReassertOrClearPreview best-effort failed: " + ex.Message); }
+        }
+
+        private static bool Contains(IReadOnlyList<long> ids, long id)
+        {
+            if (ids == null) return false;
+            for (int i = 0; i < ids.Count; i++) if (ids[i] == id) return true;
+            return false;
+        }
+
+        /// <summary>Live shared faction-SP pool off the module's cached GeoPhoenixFaction (PART-1 DIAG), or -1.</summary>
+        private static int ReadLiveFactionPool(object progModule)
+        {
+            try
+            {
+                object pf = _progPhoenixFactionField?.GetValue(progModule);
+                if (pf != null && _phoenixFactionSkillpointsField != null)
+                    return Convert.ToInt32(_phoenixFactionSkillpointsField.GetValue(pf));
+            }
+            catch { }
+            return -1;
         }
 
         /// <summary>Never-silent stamp accounting: a stat/SP-relevant apply armed the stamp but the repaint was

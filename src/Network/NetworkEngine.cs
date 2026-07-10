@@ -690,6 +690,12 @@ namespace Multiplayer.Network
                     Sync?.OnGeoLogNotice(msg.Payload);
                     break;
 
+                case PacketType.StatEditPreview:
+                    // Any direction: display-only preview of a peer's in-progress soldier stat edit. Host relays
+                    // a client's preview to the other clients + shows it locally; a client just shows it.
+                    Sync?.OnStatEditPreview(msg.SenderSteamId, msg.Payload);
+                    break;
+
                 case PacketType.SyncEnvelope:
                     // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
                     // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).

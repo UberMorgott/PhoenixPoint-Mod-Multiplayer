@@ -76,6 +76,10 @@ namespace Multiplayer.Network.MessageLayer
         GeoLogNotice = 0x6D,    // host -> all: mirror a small geoscape LOG toast (GeoscapeLog.AddEntry) — the client sim
                                 // is frozen + domain state arrives via silent channel writes, so the native GeoscapeLog
                                 // handlers never fire client-side; host ships the pre-resolved line [highPriority:u8][text:str]
+        StatEditPreview = 0x6E, // any direction: DISPLAY-ONLY preview of a peer's in-progress soldier stat edit (spender's
+                                // live +/- buffer). Client spender -> host -> other clients; host spender -> all. Cosmetic,
+                                // NOT an authoritative action — the real spend rides SpendStatPoints + the #9 blob, which
+                                // wins. Payload [u8 clear][i64 unitId][i32 dStr][i32 dWill][i32 dSpeed][i32 soldierSP][i32 factionSP]
 
         // Chat
         ChatMessage = 0x50,
