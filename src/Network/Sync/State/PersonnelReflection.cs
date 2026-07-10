@@ -413,6 +413,52 @@ namespace Multiplayer.Network.Sync.State
             return true;
         }
 
+        // Cached handles for the mirror stat-callback rewire (resolved once per process).
+        private static PropertyInfo _statModifiedCallbackProp;   // CharacterProgression.StatModifiedCallback (settable auto-prop)
+        private static MethodInfo _onStatsModifiedMethod;        // GeoCharacter.OnStatsModified (private instance)
+        private static bool _rewireResolveFailed;
+
+        /// <summary>Native-fidelity heal for the #9 blob apply: <see cref="ApplySoldierState"/> mirrors a whole
+        /// soldier by swapping in the transient decoded character's <c>_progression</c> BY REFERENCE (a captured-
+        /// reference hazard the sibling <see cref="CopyListContents"/> deliberately avoids). But
+        /// <c>GeoCharacter.Init()</c> (decompile GeoCharacter.cs:553) wires
+        /// <c>progression.StatModifiedCallback → THIS character's OnStatsModified</c> (which runs
+        /// <c>UpdateStats()</c> to fold a base-stat change back into the displayed <c>CharacterStats</c>). After the
+        /// swap that callback still points at the DEAD decoded character, so any later native stat recompute on the
+        /// mirror (TFTV passive/status re-eval, fatigue tick) rebuilds the throw-away instance and leaves the LIVE
+        /// soldier's CharacterStats un-refolded — the base advances on the shared progression while the displayed
+        /// modifier drifts, i.e. the mirror-only "base + growing modifier" split. Re-point the callback at the LIVE
+        /// character so its stat pipeline behaves exactly like a natively-loaded soldier (the spender's window
+        /// already uses the live native path, callback intact — hence it stays correct). Best-effort: a resolve miss
+        /// logs ONCE and no-ops (never breaks the mirror apply). ponytail: StatModifiedCallback only — the sibling
+        /// OnAbilityAdded/OnNewSpecializationAdded events are ability-sync (out of the stat-split scope); rewire them
+        /// too only if an ability-mirror recompute bug ever surfaces.</summary>
+        private static void RewireProgressionStatCallback(object existing)
+        {
+            try
+            {
+                object prog = CachedField(existing.GetType(), "_progression")?.GetValue(existing);
+                if (prog == null) return;
+                if (_statModifiedCallbackProp == null && !_rewireResolveFailed)
+                {
+                    _statModifiedCallbackProp = AccessTools.Property(prog.GetType(), "StatModifiedCallback");
+                    _onStatsModifiedMethod = AccessTools.Method(existing.GetType(), "OnStatsModified");
+                    if (_statModifiedCallbackProp == null || _onStatsModifiedMethod == null || !_statModifiedCallbackProp.CanWrite)
+                    {
+                        _rewireResolveFailed = true;
+                        Debug.LogError("[Multiplayer] PersonnelReflection.RewireProgressionStatCallback: StatModifiedCallback/OnStatsModified unresolved — mirror stat pipeline not re-wired (progression swap keeps native-fidelity gap)");
+                        return;
+                    }
+                }
+                if (_rewireResolveFailed) return;
+                // Replace (not combine): the swapped-in callback targets the transient decoded character; the live
+                // character is the sole valid target. PropertyType IS the CharacterProgression.StatModified delegate.
+                var del = Delegate.CreateDelegate(_statModifiedCallbackProp.PropertyType, existing, _onStatsModifiedMethod);
+                _statModifiedCallbackProp.SetValue(prog, del, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelReflection.RewireProgressionStatCallback failed: " + ex.Message); }
+        }
+
         /// <summary>Clear + refill the existing PUBLIC list field from the decoded one (keeps the existing
         /// list INSTANCE — safer for any captured reference than a wholesale swap).</summary>
         private static void CopyListContents(Type t, string name, object decoded, object existing)
@@ -491,6 +537,8 @@ namespace Multiplayer.Network.Sync.State
                 CopyField(t, "_bonusCharacterStats", decoded, existing);
                 if (!CopyField(t, "_progression", decoded, existing))
                     Debug.LogError("[Multiplayer] PersonnelReflection: GeoCharacter._progression not found — progression not mirrored");
+                else
+                    RewireProgressionStatCallback(existing);   // native-fidelity: re-point the swapped progression's stat callback at the LIVE character
                 CopyField(t, "_armourLoadoutItems", decoded, existing);
                 CopyField(t, "_equipmentLoadoutItems", decoded, existing);
                 CopyField(t, "_inventoryLoadoutItems", decoded, existing);
