@@ -33,5 +33,17 @@ namespace Multiplayer.Network
             index = (int)(offset / chunkSize);
             return true;
         }
+
+        /// <summary>
+        /// Curtain-lift hold predicate (CS-style all-loaded barrier): during a live, started co-op
+        /// session, EVERY native curtain lift is parked until the synchronized reveal (RevealAll →
+        /// Revealed). HOLD ⇔ engine active AND session started AND not yet revealed. Any teardown
+        /// (engine inactive) or the reveal itself opens the gate, so a parked lift can never hang
+        /// forever: RevealAll fires on roster all-done, the roster SHRINKS when a peer drops
+        /// (peer-left → live AllDone re-check), and the host deadline / per-peer self-reveal are the
+        /// bounded belts. Evaluated LIVE each frame by the gate coroutine.
+        /// </summary>
+        public static bool HoldCurtain(bool engineActive, bool sessionStarted, bool revealed)
+            => engineActive && sessionStarted && !revealed;
     }
 }

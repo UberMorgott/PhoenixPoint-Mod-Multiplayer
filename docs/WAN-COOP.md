@@ -165,6 +165,32 @@ Fixes from the 2-PC Steam WAN test. Constants: `HeartbeatIntervalMs=5000`, `Hear
   (<stage>)…") instead of stranding the player on a stuck bar. A lost link / leave routes through
   `MultiplayerUI.TeardownLobbyState`, which also lifts the curtain.
 
+### All-loaded reveal barrier (CS-style: nobody's loading screen closes until EVERY peer is in)
+
+- **The gate**: `CurtainLiftGatePatch` (Postfix on `LevelSwitchCurtainController.LiftCurtainCrt`) wraps
+  EVERY native curtain lift in a coroutine that parks on `SaveTransferMath.HoldCurtain(engineActive,
+  sessionStarted, revealed)`, evaluated live each frame. Single chokepoint: the game lifts the curtain
+  through MULTIPLE paths — the Loaded→Playing auto-lift, but ALSO direct `LiftCurtainCrt` calls that
+  BYPASS `OnLevelStateChanged` (`UIStateSimulation.ExitState`, `UIStateInitView` tactical init,
+  `GeoLevelController` error paths). The bypass lifts were why the loading screen closed for whoever
+  finished loading (live RCA 2026-07-11). All routes converge on `LiftCurtainCrt`; one gate covers all.
+  Host included — the host waits too.
+- **Done = Playing, not data-read**: a peer reports `LoadComplete` ONLY at `OnReachedPlaying`
+  (Loaded→Playing, curtain-liftable). The phase-2 pump's `LoadingProgress → null` no longer fires done —
+  that is the DATA read finishing, seconds before the scene is actually playable; an early done there
+  could open the reveal while a peer was still mid-init.
+- **Hold UX**: the held peer sits at the native loading screen (bar full, label "Waiting for players…"
+  via `NativeWidgetFactory.SetCurtainLabel`, restored at reveal); the top-right plaque keeps showing each
+  peer's live progress.
+- **Release together**: host tracks per-slot done; `RosterProgressTracker.AllDone(GetRosterSlots())` →
+  broadcast `RevealAll` → every peer's `Revealed` flips → all parked lifts resume the same native fade
+  simultaneously.
+- **Failure semantics (no infinite wait)**: the wait set is the LIVE roster — a peer dropping mid-load is
+  removed from the roster before the disconnect event fires, so all-done re-evaluates over the SHRUNK set
+  and releases the rest (unit-pinned in `SaveTransferBarrierTests`). Belts: 180 s host forced-reveal +
+  per-peer self-reveal deadlines, and any session teardown (engine inactive) opens the gate instantly — a
+  parked lift can never hang a peer on a dead session.
+
 ### Parity SOFT-gate (host/client DLC + mods + settings)
 
 At the join handshake the client sends a **parity manifest** inside its JOIN (`ParityManifestCollector.

@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using Base.Core;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.UI;
@@ -118,6 +120,72 @@ namespace Multiplayer.Harmony
             {
                 Debug.LogError("[Multiplayer] CurtainShowPatch failed: " + e.Message);
             }
+        }
+    }
+
+    /// <summary>
+    /// THE all-loaded curtain barrier (CS-style): gate EVERY native curtain lift on the synchronized
+    /// reveal. The game lifts the loading curtain through MULTIPLE paths — the auto-lift on
+    /// Loaded→Playing (OnLevelStateChanged, suppressed above), but ALSO direct calls that BYPASS that
+    /// seam entirely: UIStateSimulation.ExitState (geoscape sim state, decompile UIStateSimulation.cs:36),
+    /// UIStateInitView (tactical init, cs:57) and GeoLevelController error paths (cs:1430/1461) all start
+    /// LiftCurtainCrt themselves. That is why the loading screen used to close for whoever finished
+    /// loading: the bypass lift ran regardless of peers (live RCA 2026-07-11).
+    ///
+    /// ALL of those routes converge on LevelSwitchCurtainController.LiftCurtainCrt (LiftCurtain() just
+    /// Timing.Start()s it; the inner SceneFadeController.LiftCurtain is called ONLY from it — verified
+    /// single chokepoint), so ONE Postfix here wraps the returned coroutine in a gate: while a live,
+    /// started co-op session has not revealed yet (SaveTransferMath.HoldCurtain, evaluated LIVE each
+    /// frame), the lift parks on NextFrame; then the original lift runs unchanged (fade, LoadingText off,
+    /// PauseObjectRendering release, OnCurtainLifted). Release paths: RevealAll → Revealed (roster
+    /// all-done, which SHRINKS on peer-left → no dumb infinite wait), the 180 s host/self-reveal belts,
+    /// and any session teardown (engine inactive) — a parked lift can never hang forever. Non-co-op
+    /// lifts pass through untouched.
+    /// </summary>
+    [HarmonyPatch]
+    public static class CurtainLiftGatePatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+            if (t == null) return false;
+            _target = AccessTools.Method(t, "LiftCurtainCrt");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix(ref IEnumerator<NextUpdate> __result)
+        {
+            __result = Gated(__result);
+        }
+
+        private static IEnumerator<NextUpdate> Gated(IEnumerator<NextUpdate> original)
+        {
+            if (Hold())
+            {
+                Debug.Log("[Multiplayer] curtain lift PARKED — holding for all-players reveal");
+                while (Hold()) yield return NextUpdate.NextFrame;
+                Debug.Log("[Multiplayer] curtain lift RELEASED — reveal/teardown opened the gate");
+            }
+            while (original.MoveNext()) yield return original.Current;
+        }
+
+        // Live per-frame hold decision; never throws (a gate exception must never strand the curtain).
+        private static bool Hold()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                var coord = engine?.SaveTransfer;
+                return SaveTransferMath.HoldCurtain(
+                    engineActive: engine != null && engine.IsActive,
+                    sessionStarted: coord != null && coord.SessionStarted,
+                    revealed: coord == null || coord.Revealed);
+            }
+            catch { return false; }
         }
     }
 }

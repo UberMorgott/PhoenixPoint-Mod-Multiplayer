@@ -1172,7 +1172,10 @@ namespace Multiplayer.Network
 
             Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
                       $"→ hold + SendLoadComplete");
-            // Idempotent: guarantees done is reported even if LoadingProgress never went null.
+            // This peer is done but HELD (curtain gate parks every native lift until Revealed).
+            // Label the held native loading screen so the wait reads as intentional.
+            Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
+            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable).
             SendLoadComplete();
         }
 
@@ -1190,6 +1193,10 @@ namespace Multiplayer.Network
             if (_revealed) return;
             _revealed = true;
             Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
+            // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
+            // Setting _revealed above already opened the curtain gate, so any PARKED lift resumes now.
+            try { Multiplayer.UI.NativeWidgetFactory.RestoreCurtainLabel(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] RestoreCurtainLabel failed: " + e.Message); }
             // Lift the native curtain we suppressed (animated alpha→0, unpauses rendering, fires
             // OnCurtainLifted → GeoscapeView unlocks input + enables sound). Reflection: mod can't ref the type.
             try
@@ -1363,7 +1370,7 @@ namespace Multiplayer.Network
                 }
                 else
                 {
-                    Multiplayer.UI.NativeWidgetFactory.SetDownloadLabel("Waiting for players…");
+                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
                     Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
                 }
             }
@@ -1404,10 +1411,13 @@ namespace Multiplayer.Network
                 }
                 else if (_lastReportedLoadPct >= 0)
                 {
-                    // Native load finished (LoadingProgress went null) → event-driven done.
+                    // Native DATA load finished (LoadingProgress went null) — but the peer is NOT yet
+                    // playable: scene instantiate/init still runs until Loaded→Playing. Done is reported
+                    // ONLY at OnReachedPlaying (curtain-liftable), so the all-loaded reveal can never fire
+                    // while a peer is still initializing (that early RevealAll opened the curtain gate
+                    // before the slow peer was actually in — the barrier bug, live RCA 2026-07-11).
                     _lastReportedLoadPct = -1;
-                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → SendLoadComplete");
-                    SendLoadComplete();
+                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → data loaded, awaiting Playing");
                 }
             }
 

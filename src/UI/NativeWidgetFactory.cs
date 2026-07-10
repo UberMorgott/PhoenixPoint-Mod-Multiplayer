@@ -407,8 +407,12 @@ namespace Multiplayer.UI
         // Base.Core.LoadingProgress.cs (public UpdateProgress). ProgressBarController is Base.Utils
         // (reflection-only for the private field); Base.Core.LoadingProgress is referenceable directly.
         private static Base.Core.LoadingProgress _downloadProgress;
-        private static Text _sceneLoadingText;
-        private static string _sceneLoadingTextOriginal;
+        // ONE curtain-label mechanism for every co-op phase ("Downloading save…" during transfer,
+        // "Waiting for players…" at the held all-loaded barrier): the cached live
+        // SceneFadeController.LoadingText + its pre-mod text. Unity-null-aware cache (a destroyed Text
+        // re-resolves on next access). Restored via RestoreCurtainLabel at hand-off/reveal/abort.
+        private static Text _curtainLabel;
+        private static string _curtainLabelOriginal;
 
         /// <summary>
         /// Begin driving the native bottom bar for the download phase. Requires the curtain already
@@ -430,13 +434,7 @@ namespace Multiplayer.UI
                     ?.SetValue(pbc, _downloadProgress);
                 _downloadProgress.UpdateProgress(0f);
 
-                // Phase label on the native loading text (restored at hand-off / abort).
-                _sceneLoadingText = GetSceneLoadingText();
-                if (_sceneLoadingText != null)
-                {
-                    _sceneLoadingTextOriginal = _sceneLoadingText.text;
-                    _sceneLoadingText.text = label ?? _sceneLoadingTextOriginal;
-                }
+                SetCurtainLabel(label); // phase label (restored at hand-off / reveal / abort)
                 return true;
             }
             catch (Exception e)
@@ -452,10 +450,26 @@ namespace Multiplayer.UI
             _downloadProgress?.UpdateProgress(Mathf.Clamp01(fraction01));
         }
 
-        /// <summary>Set the native loading-screen label (idempotent — a same-string set is a no-op).</summary>
-        public static void SetDownloadLabel(string label)
+        /// <summary>
+        /// Set the native loading-screen label (SceneFadeController.LoadingText). Captures the pre-mod
+        /// text ONCE (until RestoreCurtainLabel) so the native string always comes back. Safe per-frame:
+        /// uGUI's Text.text setter early-outs on an identical string. No-op if the label isn't found.
+        /// </summary>
+        public static void SetCurtainLabel(string label)
         {
-            if (_sceneLoadingText != null && label != null) _sceneLoadingText.text = label;
+            if (label == null) return;
+            if (_curtainLabel == null) _curtainLabel = GetSceneLoadingText(); // Unity-null: re-resolve
+            if (_curtainLabel == null) return;
+            if (_curtainLabelOriginal == null) _curtainLabelOriginal = _curtainLabel.text;
+            _curtainLabel.text = label;
+        }
+
+        /// <summary>Restore the native loading label captured by the first SetCurtainLabel. Idempotent.</summary>
+        public static void RestoreCurtainLabel()
+        {
+            if (_curtainLabelOriginal != null && _curtainLabel != null)
+                _curtainLabel.text = _curtainLabelOriginal;
+            _curtainLabelOriginal = null;
         }
 
         /// <summary>
@@ -465,11 +479,8 @@ namespace Multiplayer.UI
         /// </summary>
         public static void EndDownloadBar()
         {
-            if (_sceneLoadingText != null && _sceneLoadingTextOriginal != null)
-                _sceneLoadingText.text = _sceneLoadingTextOriginal;
+            RestoreCurtainLabel();
             _downloadProgress = null;
-            _sceneLoadingText = null;
-            _sceneLoadingTextOriginal = null;
         }
 
         // The live SceneFadeController.LoadingText (native loading-screen label), or null. Resolved by

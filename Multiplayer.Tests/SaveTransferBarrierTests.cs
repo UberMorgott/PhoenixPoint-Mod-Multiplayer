@@ -156,5 +156,48 @@ namespace Multiplayer.Tests
             Assert.True(gate.TryConsume());
             Assert.False(gate.TryConsume());
         }
+
+        // ─── Curtain-lift gate (CS-style all-loaded reveal barrier) ─────────────────────────────────
+        // CurtainLiftGatePatch parks EVERY native curtain lift (incl. the bypass paths that never route
+        // through OnLevelStateChanged — UIStateSimulation.ExitState / UIStateInitView / GeoLevelController)
+        // on this ONE live-evaluated predicate. THE BUG THIS PINS: the loading screen used to close for
+        // whoever finished loading because those bypass lifts ran regardless of peers (live RCA 2026-07-11).
+
+        [Fact]
+        public void Curtain_Held_While_Started_Session_Not_Revealed()
+        {
+            // Mid co-op load, reveal not broadcast yet → EVERY lift parks (host included — host waits too).
+            Assert.True(SaveTransferMath.HoldCurtain(engineActive: true, sessionStarted: true, revealed: false));
+        }
+
+        [Fact]
+        public void Curtain_Releases_On_Reveal()
+        {
+            // RevealAll (or the 180 s host/self-reveal belts) set Revealed → gate opens, everyone lifts together.
+            Assert.False(SaveTransferMath.HoldCurtain(engineActive: true, sessionStarted: true, revealed: true));
+        }
+
+        [Fact]
+        public void Curtain_Never_Held_Outside_A_Started_Session()
+        {
+            // Single-player / lobby / download phase (session not begun) → native lifts pass untouched.
+            Assert.False(SaveTransferMath.HoldCurtain(engineActive: true, sessionStarted: false, revealed: false));
+            // Session teardown mid-hold (leave / host-left / connection lost) → a parked lift must resume,
+            // never hang the player on a dead session's curtain.
+            Assert.False(SaveTransferMath.HoldCurtain(engineActive: false, sessionStarted: true, revealed: false));
+        }
+
+        [Fact]
+        public void Reveal_Barrier_Releases_When_PeerLeft_Shrinks_The_Wait_Set()
+        {
+            // Never-silent failure semantics: the reveal waits on the LIVE roster (AllDone over
+            // GetRosterSlots). A peer dropping mid-load is removed from the roster BEFORE the disconnect
+            // event, so the remaining peers' all-done re-evaluates over the SHRUNK set and releases —
+            // no dumb infinite wait on a ghost.
+            var t = new RosterProgressTracker();
+            t.MarkDone(0);                                     // host done
+            Assert.False(t.AllDone(new byte[] { 0, 1 }));      // client 1 still loading → hold
+            Assert.True(t.AllDone(new byte[] { 0 }));          // client 1 dropped → live set shrinks → release
+        }
     }
 }
