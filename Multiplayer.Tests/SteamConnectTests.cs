@@ -77,6 +77,69 @@ namespace Multiplayer.Tests
             Assert.Null(SteamConnect.ResolveJoinString(0, "   "));
         }
 
+        // ─── TryParseLaunch: both canonical Steam launch forms ───────────────
+
+        [Fact]
+        public void TryParseLaunch_ConnectLobby_ReturnsLobbyId()
+        {
+            Assert.True(SteamConnect.TryParseLaunch(new[] { "-nofx", "+connect_lobby", "123" }, out var id, out var js));
+            Assert.Equal(123UL, id);
+            Assert.Null(js);
+        }
+
+        [Fact]
+        public void TryParseLaunch_Connect_ReturnsJoinString()
+        {
+            Assert.True(SteamConnect.TryParseLaunch(new[] { "+connect", "1.2.3.4:14242" }, out var id, out var js));
+            Assert.Equal(0UL, id);
+            Assert.Equal("1.2.3.4:14242", js);
+        }
+
+        [Fact]
+        public void TryParseLaunch_Connect_CaseInsensitive_AndTrimmed()
+        {
+            Assert.True(SteamConnect.TryParseLaunch(new[] { "+CONNECT", " 1.2.3.4:14242 " }, out _, out var js));
+            Assert.Equal("1.2.3.4:14242", js);
+        }
+
+        [Fact]
+        public void TryParseLaunch_LobbyWinsWhenBothPresent()
+        {
+            Assert.True(SteamConnect.TryParseLaunch(
+                new[] { "+connect", "1.2.3.4:14242", "+connect_lobby", "77" }, out var id, out var js));
+            Assert.Equal(77UL, id);
+            Assert.Null(js);
+        }
+
+        [Fact]
+        public void TryParseLaunch_NoTarget_ReturnsFalse()
+        {
+            Assert.False(SteamConnect.TryParseLaunch(new[] { "-windowed", "-nofx" }, out _, out _));
+            Assert.False(SteamConnect.TryParseLaunch(new[] { "+connect" }, out _, out _));       // no value
+            Assert.False(SteamConnect.TryParseLaunch(new[] { "+connect", "  " }, out _, out _)); // blank value
+            Assert.False(SteamConnect.TryParseLaunch((string[])null, out _, out _));
+        }
+
+        [Fact]
+        public void TryParseLaunch_RawCommandLine_BothForms()
+        {
+            Assert.True(SteamConnect.TryParseLaunch("game.exe +connect_lobby 42", out var id, out _));
+            Assert.Equal(42UL, id);
+            Assert.True(SteamConnect.TryParseLaunch("game.exe +connect " + SampleHost, out var id2, out var js2));
+            Assert.Equal(0UL, id2);
+            Assert.Equal(SampleHost.ToString(), js2);
+            Assert.False(SteamConnect.TryParseLaunch("", out _, out _));
+            Assert.False(SteamConnect.TryParseLaunch((string)null, out _, out _));
+        }
+
+        [Fact]
+        public void TryParseLaunch_RichPresenceValue_RoundTrip()
+        {
+            // The exact string HostPublish sets as rich presence "connect" must resolve back to the lobby.
+            Assert.True(SteamConnect.TryParseLaunch(SteamConnect.ConnectString(SampleLobby), out var id, out _));
+            Assert.Equal(SampleLobby, id);
+        }
+
         [Fact]
         public void ResolvedSteamId_IsClassifiedAsSteamByJoinParser()
         {

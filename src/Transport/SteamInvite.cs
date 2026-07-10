@@ -56,18 +56,46 @@ namespace Multiplayer.Transport
                 if (!SteamClient.IsValid) { Stage("Steam not running — cannot create invite lobby", true); return; }
                 LeaveHostLobby();
                 Stage("creating Steam lobby…");
-                var made = await SteamMatchmaking.CreateLobbyAsync(4);
+                var made = await SteamMatchmaking.CreateLobbyAsync(2); // 2-player co-op: host + 1 client
                 if (!made.HasValue) { Stage("Steam lobby creation failed (no lobby returned)", true); return; }
 
                 var lobby = made.Value;
+                // Race guard: the user may have left / joined elsewhere while CreateLobbyAsync was in
+                // flight — publishing now would light a "Join Game" pointing at a dead session.
+                if (NetworkEngine.Instance?.IsHost != true)
+                {
+                    try { lobby.Leave(); } catch { }
+                    Stage("host session gone before Steam lobby was ready — lobby dropped");
+                    return;
+                }
                 lobby.SetFriendsOnly();
                 lobby.SetJoinable(true);
                 lobby.SetData(SteamConnect.HostKey, SteamClient.SteamId.Value.ToString());
+                // Canonical rich presence: non-empty "connect" lights the friends-list "Join Game"
+                // button (cleared explicitly in LeaveHostLobby — Steam does NOT auto-clear it while
+                // the game keeps running); "status" is the human-readable View Game Info line.
                 SteamFriends.SetRichPresence("connect", SteamConnect.ConnectString(lobby.Id.Value));
+                SteamFriends.SetRichPresence("status", "Hosting co-op campaign");
                 _hostLobby = lobby;
                 Stage($"invite lobby ready ({lobby.Id.Value}) — Invite via Steam is now live");
             }
             catch (Exception ex) { Stage("lobby create exception: " + ex.Message, true); }
+        }
+
+        /// <summary>
+        /// Canonical capacity gate: SetJoinable(false) once the co-op session is full, back to true
+        /// when the slot frees while still hosting. Driven by NetworkEngine's existing peer
+        /// connect/disconnect hooks (via NetworkEngine.SteamLobbySetJoinable) — no state of its own.
+        /// </summary>
+        public static void SetLobbyJoinable(bool joinable)
+        {
+            if (!_hostLobby.HasValue) return;
+            try
+            {
+                _hostLobby.Value.SetJoinable(joinable);
+                Stage("invite lobby joinable → " + joinable);
+            }
+            catch (Exception ex) { Stage("SetJoinable failed: " + ex.Message, true); }
         }
 
         /// <summary>HOST invite button: open Steam's invite dialog for our lobby. Returns false (with a stage message) when no lobby exists yet.</summary>
@@ -101,14 +129,66 @@ namespace Multiplayer.Transport
             _handlersRegistered = true;
             SteamFriends.OnGameLobbyJoinRequested += OnLobbyJoinRequested;
             SteamFriends.OnGameRichPresenceJoinRequested += OnRichPresenceJoin;
+            // Relaunch-while-running: accepting an invite from Steam's UI while PP is already open
+            // fires OnNewLaunchParameters instead of a fresh process — re-read SteamApps.CommandLine
+            // and route through the same launch handler.
+            SteamApps.OnNewLaunchParameters += OnNewLaunchParams;
             Stage("Steam join handlers registered");
         }
 
-        /// <summary>Cold start: this process was launched by accepting a Steam invite → "+connect_lobby &lt;id&gt;" on the command line.</summary>
+        /// <summary>Cold start: launched by accepting a Steam invite. Handles BOTH canonical forms —
+        /// "+connect_lobby &lt;id&gt;" (lobby invite) and "+connect &lt;value&gt;" (rich-presence join).</summary>
         public static void HandleColdStart()
         {
-            var id = SteamConnect.ParseConnectLobby(Environment.GetCommandLineArgs());
-            if (id.HasValue) { Stage("cold-start invite: joining lobby " + id.Value); JoinLobby(id.Value); }
+            RouteLaunch(Environment.GetCommandLineArgs(), null, "cold-start");
+        }
+
+        private static void OnNewLaunchParams()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                // Guard: never yank a live session. An EMPTY auto-hosted lobby doesn't count — the
+                // join flow tears that down anyway (same as pasting a join target by hand).
+                if (engine != null && engine.IsActiveSession
+                    && (!engine.IsHost || engine.Session?.ClientCount > 0))
+                {
+                    Stage("relaunch params ignored — already in a co-op session");
+                    return;
+                }
+                RouteLaunch(null, SteamApps.CommandLine, "relaunch");
+            }
+            catch (Exception ex) { Stage("relaunch params exception: " + ex.Message, true); }
+        }
+
+        // One connect-target chokepoint for cold start / relaunch / rich-presence join: args OR a raw
+        // string. Returns false when no connect target was present (a normal launch — callers that
+        // EXPECTED a target, like a Join click, surface their own error).
+        private static bool RouteLaunch(string[] args, string commandLine, string source)
+        {
+            ulong lobbyId;
+            string joinString;
+            bool parsed = args != null
+                ? SteamConnect.TryParseLaunch(args, out lobbyId, out joinString)
+                : SteamConnect.TryParseLaunch(commandLine, out lobbyId, out joinString);
+            if (!parsed) return false; // no connect params — a normal launch, stay quiet
+
+            if (lobbyId != 0)
+            {
+                Stage(source + " invite: joining lobby " + lobbyId);
+                JoinLobby(lobbyId);
+            }
+            else
+            {
+                // "+connect <value>": hand the value to the existing join flow; SmartJoinParser
+                // classifies it (SteamID64 / ip:port), and an unreadable value surfaces through
+                // OnLobbyJoin's own native error box — never a silent drop.
+                Stage(source + " +connect: joining " + joinString);
+                var handler = OnJoinResolved;
+                if (handler != null) handler(joinString);
+                else Stage("no join handler wired (mod menu not ready)", true);
+            }
+            return true;
         }
 
         private static void OnLobbyJoinRequested(Lobby lobby, SteamId invitedBy)
@@ -119,9 +199,10 @@ namespace Multiplayer.Transport
 
         private static void OnRichPresenceJoin(Friend friend, string connect)
         {
-            var id = SteamConnect.ParseConnectString(connect);
-            if (id.HasValue) { Stage("friends-list Join (lobby " + id.Value + ")"); JoinLobby(id.Value); }
-            else Stage("rich-presence join carried no lobby id: " + connect, true);
+            // The connect string is our own rich-presence value ("+connect_lobby <id>" — or a
+            // "+connect <value>" form from a future host); same grammar as a launch line.
+            if (!RouteLaunch(null, connect, "friends-list Join"))
+                Stage("rich-presence join carried no connect target: " + connect, true);
         }
 
         private static async void JoinLobby(ulong lobbyId)

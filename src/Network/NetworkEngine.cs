@@ -46,6 +46,21 @@ namespace Multiplayer.Network
         /// </summary>
         public bool IsIntentionalDisconnect => _intentionalDisconnect;
 
+        // ─── Steam invite-lobby lifecycle hooks ────────────────────────────
+        // Wired by MultiplayerUI at startup to SteamInvite.LeaveHostLobby / SetLobbyJoinable; null in
+        // unit tests. Delegate fields (not direct calls) so THIS class never references Steamworks
+        // types — Shutdown/TearDown must stay JIT-safe without the Facepunch assembly (test runners,
+        // non-Steam installs). Invoking HERE makes EVERY teardown path (leave button, smart-join
+        // handoff, return-to-menu TearDown patch) drop the published lobby + rich presence — Steam
+        // does NOT auto-clear rich presence while the game keeps running.
+        public static Action SteamLobbyCleanup;
+        public static Action<bool> SteamLobbySetJoinable;
+
+        private static void RunSteamLobbyCleanup()
+        {
+            try { SteamLobbyCleanup?.Invoke(); } catch { /* never let Steam cleanup break a teardown */ }
+        }
+
         // ─── Events ───────────────────────────────────────────────────────
 
         public event Action OnHostStarted;
@@ -137,6 +152,8 @@ namespace Multiplayer.Network
             // F1/F3: drop the lifecycle subscriptions before the engine objects go away.
             SessionNotifier.Detach();
             HostLeaveHandler.Detach();
+            // Drop any published Steam invite lobby + rich presence (no-op on a client / off Steam).
+            RunSteamLobbyCleanup();
             Transport?.Shutdown();
             Transport = null;
             Session = null;
@@ -179,6 +196,8 @@ namespace Multiplayer.Network
             Sync?.DetachAllChannels();
             SessionNotifier.Detach();  // F1: drop connect/disconnect notifier subscription on full teardown.
             HostLeaveHandler.Detach(); // F3: drop host-leave subscriptions on full teardown.
+            // Drop any published Steam invite lobby + rich presence (no-op on a client / off Steam).
+            RunSteamLobbyCleanup();
 
             // Tear down transport + all per-session objects (idempotent: each null-guards).
             Transport?.Shutdown();
@@ -403,6 +422,9 @@ namespace Multiplayer.Network
                 OnClientConnected?.Invoke(peerId);
                 // Seed the late joiner with the current authoritative time anchor (reliable, targeted).
                 TimeSync?.OnPeerConnectedHost(peerId);
+                // Canonical Steam-lobby capacity gate: 2-player co-op (host + 1 client) → the invite
+                // lobby stops being joinable the moment the slot fills. No-op when no lobby exists.
+                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount == 0); } catch { }
             }
             else
             {
@@ -432,6 +454,10 @@ namespace Multiplayer.Network
             Session.RemoveClient(peerId);
             OnClientDisconnected?.Invoke(peerId);
             OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown);
+
+            // Host still hosting and the slot freed → the Steam invite lobby is joinable again.
+            if (IsHost)
+                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount == 0); } catch { }
 
             // Client lost its host peer on an IN-PLACE transport drop (no Shutdown→Initialize, the manager
             // persists). Clear stale time-sync derive state so the next OnPeerConnected re-seeds the offset

@@ -38,6 +38,44 @@ namespace Multiplayer.Network
         }
 
         /// <summary>
+        /// Launch-parameter resolve covering BOTH canonical Steam launch forms: "+connect_lobby &lt;id64&gt;"
+        /// (lobby invite) and "+connect &lt;value&gt;" (rich-presence Join Game; the value goes to the
+        /// normal join classifier — ip:port or SteamID64). Lobby wins when both are present. Used for
+        /// the cold-start command line AND for SteamApps.CommandLine on a relaunch-while-running.
+        /// </summary>
+        public static bool TryParseLaunch(string[] args, out ulong lobbyId, out string joinString)
+        {
+            lobbyId = 0;
+            joinString = null;
+            var id = ParseConnectLobby(args);
+            if (id.HasValue) { lobbyId = id.Value; return true; }
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length - 1; i++)
+                {
+                    if (string.Equals(args[i], "+connect", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(args[i + 1]))
+                    {
+                        joinString = args[i + 1].Trim();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>Raw command-line overload (SteamApps.CommandLine is ONE string). Whitespace split is
+        /// enough — our connect values never contain spaces (lobby id / ip:port / SteamID64).</summary>
+        public static bool TryParseLaunch(string commandLine, out ulong lobbyId, out string joinString)
+        {
+            return TryParseLaunch(
+                string.IsNullOrWhiteSpace(commandLine)
+                    ? null
+                    : commandLine.Split((char[])null, StringSplitOptions.RemoveEmptyEntries),
+                out lobbyId, out joinString);
+        }
+
+        /// <summary>
         /// Fallback selection: prefer Steam-P2P (the host's SteamID64) when present, else the DirectIP
         /// "ip:port" carried in lobby data. Returns the string to hand to the EXISTING join flow
         /// (SmartJoinParser classifies a 15+ digit number as Steam and an ip:port as DirectIP), or null

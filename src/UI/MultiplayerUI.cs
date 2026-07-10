@@ -87,6 +87,12 @@ namespace Multiplayer.UI
                 mb?.ShowSimplePrompt("Steam invite: " + msg, MessageBoxIcon.Error,
                     MessageBoxButtons.OK, null, this);
             };
+            // Lifecycle hooks: EVERY teardown path routes through NetworkEngine.Shutdown/TearDown,
+            // which invoke these to leave the invite lobby + clear rich presence (canonical Valve
+            // lifecycle — rich presence never auto-clears while the game keeps running). The joinable
+            // gate is driven from the engine's peer connect/disconnect hooks (session full ↔ freed).
+            NetworkEngine.SteamLobbyCleanup = SteamInvite.LeaveHostLobby;
+            NetworkEngine.SteamLobbySetJoinable = SteamInvite.SetLobbyJoinable;
             SteamInvite.RegisterJoinHandlers();
         }
 
@@ -1078,8 +1084,7 @@ namespace Multiplayer.UI
             }
             finally
             {
-                NetworkEngine.Instance?.Shutdown();
-                SteamInvite.LeaveHostLobby(); // drop any published invite lobby + rich presence (no-op on a client)
+                NetworkEngine.Instance?.Shutdown();  // also drops the Steam invite lobby + rich presence (SteamLobbyCleanup hook)
                 TeardownLobbyState();
                 _inGameBar.SetActive(false);
                 _lobby?.Hide();
