@@ -101,8 +101,22 @@ namespace Multiplayer.Network
                 }
             }
 
+            // FIX-1: while a co-op save transfer / world-load is in flight, SUSPEND every heartbeat
+            // timeout. Over WAN a big bulk transfer can starve heartbeats, and a slow-HDD native
+            // world-load can block the busy peer's main thread for >20 s — in both cases the peer is
+            // perfectly alive but no heartbeat gets through the window. The transfer/barrier machinery
+            // proves liveness chunk-by-chunk (and owns its OWN straggler timeout: Phase1LoadTimeoutMs /
+            // RevealDeadlineMs), and RefreshLiveness keeps _lastHeartbeat fresh as chunks arrive, so
+            // nothing false-fires the instant the load ends.
+            var st = _engine.SaveTransfer;
+            bool loadInFlight = st != null && (st.TransferActive || st.InPhase2 || st.LoadPhaseStarted);
+
+            if (loadInFlight)
+            {
+                // suspended this tick (see note above).
+            }
             // Heartbeat timeout check (host only)
-            if (_engine.IsHost)
+            else if (_engine.IsHost)
             {
                 var toRemove = new List<ulong>();
                 foreach (var kvp in _lastHeartbeat)
@@ -126,12 +140,14 @@ namespace Multiplayer.Network
             // If we have not heard from the host within the timeout, route into the SAME host-leave
             // handler (its one-shot latch dedups against a graceful HostDisconnected packet / real drop,
             // and is also a no-op after the handler already ran). Reuses the existing heartbeat constants.
-            else if (HostPeerId.HasValue && !HostLeaveHandler.AlreadyHandled
-                     && _lastHeartbeat.TryGetValue(HostPeerId.Value, out var hostLast)
-                     && now - hostLast > HeartbeatTimeoutMs)
+            else if (HostPeerId.HasValue && !HostLeaveHandler.AlreadyHandled)
             {
-                Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
-                HostLeaveHandler.TriggerHostLeft();
+                if (_lastHeartbeat.TryGetValue(HostPeerId.Value, out var hostLast)
+                    && now - hostLast > HeartbeatTimeoutMs)
+                {
+                    Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
+                    HostLeaveHandler.TriggerHostLeft();
+                }
             }
         }
 
@@ -376,6 +392,21 @@ namespace Multiplayer.Network
         }
 
         // ─── Heartbeat ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// FIX-1: refresh a peer's liveness on ANY inbound packet (not just Heartbeat), called from the
+        /// single receive chokepoint (NetworkEngine.OnPacketReceived). Closes the gap where a healthy
+        /// peer streaming non-heartbeat traffic (RosterProgress during a save-pick, SaveChunks during a
+        /// download) was still timed out because only Heartbeat packets refreshed the clock. Refreshes
+        /// ONLY peers we already track (host: clients seeded in AddClient; client: the host seeded in
+        /// SetHostPeer) — it never CREATES an entry for an untracked/pre-registration sender, so a
+        /// rejected JOIN can't leave a phantom entry that later "times out" into a spurious leave notice.
+        /// </summary>
+        public void RefreshLiveness(ulong peerId)
+        {
+            if (_lastHeartbeat.ContainsKey(peerId))
+                _lastHeartbeat[peerId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+        }
 
         public void HandleHeartbeat(NetworkMessage msg)
         {

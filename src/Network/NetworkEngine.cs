@@ -473,6 +473,11 @@ namespace Multiplayer.Network
             {
                 var msg = NetworkMessage.Deserialize(data);
                 msg.SenderSteamId = senderSteamId;
+                // FIX-1: ANY inbound packet proves the sender is alive. Refresh liveness here at the
+                // single receive chokepoint (BEFORE routing) so high-rate non-heartbeat traffic —
+                // RosterProgress (routed straight to SaveTransfer, bypassing the Heartbeat handler),
+                // SaveChunks, chat, etc. — all count toward the peer's liveness, not just Heartbeat.
+                Session?.RefreshLiveness(senderSteamId);
                 RouteMessage(msg);
             }
             catch (Exception ex)
