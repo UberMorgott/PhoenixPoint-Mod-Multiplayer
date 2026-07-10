@@ -49,7 +49,7 @@ public class StatSpendHarvestTests
         Assert.Equal(Mode.None, StatSpendHarvest.Decide(true, isHost: false, pandoran: true, 4, 2, 0));
     }
 
-    // ── Host: commit natively (the native CommitStatChanges handles the SP split AND mutoid mutagen) ──
+    // ── Host: still decides HostCommit; the caller now applies via re-priced SpendStatPoints (not native) ──
 
     [Fact]
     public void Host_PositiveDelta_Commits()
@@ -60,7 +60,7 @@ public class StatSpendHarvestTests
     [Fact]
     public void Host_Pandoran_StillCommits()
     {
-        // On the host the mutoid path still commits natively (CommitStatChanges does the mutagen Take).
+        // On the host the mutoid path still decides HostCommit; the caller's SpendStatPoints apply skips it (no-op).
         Assert.Equal(Mode.HostCommit, StatSpendHarvest.Decide(true, isHost: true, pandoran: true, 3, 0, 0));
     }
 

@@ -670,7 +670,7 @@ namespace Multiplayer.Network.Sync.State
                         // the stale bought slot) so nothing later written to Skillpoints can go negative.
                         else if (FullRedriveProgression(progModule, geo, character, conflict: true, stampArmed))
                             Debug.Log("[Multiplayer] GeoUiRefresh: progression OVER-COMMITTED SP pool — partial shift unaffordable, "
-                                      + "full ConflictRepaint (pending allocation HARVESTED before re-drive; host clamps the spend to the live pool) unit=" + viewedUnitId
+                                      + "full ConflictRepaint (pending allocation HARVESTED before re-drive — re-priced per point against the live pool on authoritative apply, short pool drops the excess) unit=" + viewedUnitId
                                       + " stamped=[" + JoinIds(stampIds) + "]");
                     }
                     else if (outcome == ProgressionRepaintDecision.Outcome.Repaint

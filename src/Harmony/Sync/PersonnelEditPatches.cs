@@ -141,8 +141,11 @@ namespace Multiplayer.Harmony.Sync
         /// module fields the same way the commit-seam prefix does:
         ///   • co-op CLIENT → relay one SpendStatPoints intent per positive delta (host applies + re-broadcasts
         ///     → the panel converges to the committed values);
-        ///   • HOST → invoke the native <c>CommitStatChanges()</c> inline (authoritative local commit; the
-        ///     ModifyBaseStat dirty seam mirrors it on #9).
+        ///   • HOST → apply each positive delta through the authoritative re-priced <c>SpendStatPoints</c> (the
+        ///     SAME landing as the client relay) — NEVER the raw native <c>CommitStatChanges</c>, which writes the
+        ///     stale panel buffer straight into the shared SP pool and would re-inflate it over a concurrent
+        ///     remote spend; the ModifyBaseStat dirty seam mirrors the result on #9. Mutoid stat spend is out of
+        ///     the SP intent family → host no-op (like a client).
         /// The unconfirmed <c>_boughtAbilitySlot</c> is a pre-confirm SELECTION (OnTrackSlotPointerClicked arms
         /// it + opens a confirmation popup — decompile UIModuleCharacterProgression.cs:1031/1035), never a commit,
         /// so it is NOT harvested — the caller's ClearBoughtAbility correctly discards it. Idempotent: the caller
@@ -161,21 +164,33 @@ namespace Multiplayer.Harmony.Sync
                 int dWill = Delta(t, progModule, "_currentWillStat", "_startingWillStat");
                 int dSpeed = Delta(t, progModule, "_currentSpeedStat", "_startingSpeedStat");
                 bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(progModule) is bool p && p;
-                switch (StatSpendHarvest.Decide(active, isHost, pandoran, dStr, dWill, dSpeed))
+                var mode = StatSpendHarvest.Decide(active, isHost, pandoran, dStr, dWill, dSpeed);
+                if (mode == StatSpendHarvest.Mode.None) return;
+                object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                if (mode == StatSpendHarvest.Mode.HostCommit)
                 {
-                    case StatSpendHarvest.Mode.HostCommit:
-                        AccessTools.Method(t, "CommitStatChanges")?.Invoke(progModule, null);
-                        Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: HOST committed pending stat spend"
-                                  + " before conflict repaint (dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + ")");
-                        break;
-                    case StatSpendHarvest.Mode.ClientRelay:
-                        object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
-                        long unitId = PersonnelReflection.ReadUnitId(character);
-                        Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: CLIENT harvest before conflict repaint"
-                                  + " unit=" + unitId + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed
-                                  + " — relaying so the allocation commits instead of being discarded");
-                        RelayStatDeltas(unitId, dStr, dWill, dSpeed);
-                        break;
+                    // Do NOT raw-commit via native CommitStatChanges: it writes the panel buffer straight into
+                    // SkillPoints/faction Skillpoints with no re-price or clamp, and harvest fires exactly when
+                    // that buffer is STALE (a remote spend just moved the shared pool) — a native commit would
+                    // re-inflate the pool to the pre-conflict snapshot and erase the concurrent remote spend.
+                    // Route each positive delta through the SAME authoritative apply the client relay lands on
+                    // (SpendStatPoints): re-prices each point vs the LIVE pool + clamps (short pool writes
+                    // nothing); mutoid → no-op. Following SetCharacterProgression re-reads the live state.
+                    var rt = GeoRuntime.Instance;
+                    if (dStr > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 0, dStr);    // Strength
+                    if (dWill > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 1, dWill);   // Will
+                    if (dSpeed > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 2, dSpeed); // Speed
+                    Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: HOST applied pending stat spend"
+                              + " via authoritative re-priced SpendStatPoints — unit=" + unitId
+                              + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
+                }
+                else   // ClientRelay
+                {
+                    Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: CLIENT harvest before conflict repaint"
+                              + " unit=" + unitId + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed
+                              + " — relaying so the allocation commits instead of being discarded");
+                    RelayStatDeltas(unitId, dStr, dWill, dSpeed);
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend failed: " + ex.Message); }
