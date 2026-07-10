@@ -117,50 +117,24 @@ public class ProgressionRepaintDecisionTests
             ProgressionRepaintDecision.Decide(true, 0, new long[] { 7 }, false));
     }
 
-    // ── FIX 1: over-committed shared faction-SP pool guard (CanPartialShiftFactionSp) ──
-    // A PartialRepaint shifts the panel's SP baseline to the live pool while preserving the local pending draw
-    // (starting − current). If the live pool can no longer cover that draw the shift would push
-    // _currentFactionPoints negative — the guard returns false so the caller escalates to a ConflictRepaint.
+    // ── Reconcile the shared faction-SP buffer to the live pool (per-click applied-draw accounting 2026-07-10) ──
+    // Under per-click stat relay every applied +/- click is ALREADY committed to the live pool at the click, so a
+    // PartialRepaint reconciles the buffer to the live pool OUTRIGHT — it must NOT subtract the buffer draw
+    // (start − cur) a second time (the old `live − (start−cur)` double-debited the host's own applied SP, and the
+    // commit seam then wrote the under-counted value back to the authoritative pool). The reconcile takes start/cur
+    // only to pin that it IGNORES them. Result is order-independent (same value for reconcile→click→commit,
+    // click→reconcile→commit, click→commit). live ≥ 0 always → no over-commit escalation exists any more.
 
-    [Fact]
-    public void PartialShift_LivePoolCoversPendingDraw_Affordable()
+    [Theory]
+    [InlineData(90, 100, 90)]   // HOST post-click: start 100, click drew 10 (native cur 90) AND live already debited to 90 → 90 (old bug: 80).
+    [InlineData(78, 90, 68)]    // HOST second click on a reconciled baseline: live 78, buffer cur 68 → 78 (old bug: 56).
+    [InlineData(100, 100, 90)]  // CLIENT in-flight: click drew buffer to 90 but the #9 echo has NOT moved the mirror pool (live 100) → 100 (transient label bounce; heals on echo).
+    [InlineData(85, 100, 90)]   // CLIENT: a concurrent peer spent 15 (live 85) while an own click is in flight → 85 (buffer draw ignored).
+    [InlineData(0, 6, 0)]       // pool fully drained → 0 (never negative; replaces the old over-committed escalation).
+    [InlineData(10, 10, 10)]    // no draw, pool unchanged → 10 (no-op).
+    public void ReconcileFactionSpToLive_AlwaysTracksLivePool_IgnoresBufferDraw(int live, int start, int cur)
     {
-        // starting 10, current 4 → local pending draw 6; remote spent 2 → live 8 ≥ 6 → shift OK, current → 2.
-        Assert.True(ProgressionRepaintDecision.CanPartialShiftFactionSp(8, 10, 4, out int cur));
-        Assert.Equal(2, cur);
-        Assert.True(cur >= 0);
-    }
-
-    [Fact]
-    public void PartialShift_LivePoolBelowPendingDraw_OverCommitted()
-    {
-        // Live pool 5 < pending draw 6 → shifting would set current = -1 → not affordable.
-        Assert.False(ProgressionRepaintDecision.CanPartialShiftFactionSp(5, 10, 4, out int cur));
-        Assert.True(cur < 0);
-    }
-
-    [Fact]
-    public void PartialShift_LiveExactlyCoversDraw_AffordableAtZero()
-    {
-        // Boundary: live 6 == pending draw 6 → current shifts to exactly 0 (never below).
-        Assert.True(ProgressionRepaintDecision.CanPartialShiftFactionSp(6, 10, 4, out int cur));
-        Assert.Equal(0, cur);
-    }
-
-    [Fact]
-    public void PartialShift_NoPendingDraw_TracksLivePool()
-    {
-        // No local spend (starting == current) → any non-negative live pool is affordable; current = live.
-        Assert.True(ProgressionRepaintDecision.CanPartialShiftFactionSp(3, 10, 10, out int cur));
-        Assert.Equal(3, cur);
-    }
-
-    [Fact]
-    public void PartialShift_PoolUnchanged_PreservesCurrent()
-    {
-        // live == starting (no remote move) → current is preserved exactly (shift is a no-op).
-        Assert.True(ProgressionRepaintDecision.CanPartialShiftFactionSp(10, 10, 4, out int cur));
-        Assert.Equal(4, cur);
+        Assert.Equal(live, ProgressionRepaintDecision.ReconcileFactionSpToLive(live, start, cur));
     }
 
     [Fact]

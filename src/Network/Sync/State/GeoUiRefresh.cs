@@ -670,20 +670,10 @@ namespace Multiplayer.Network.Sync.State
                     }
                     if (outcome == ProgressionRepaintDecision.Outcome.PartialRepaint)
                     {
-                        if (PartialRepaintProgression(progModule))   // shared faction-SP pool label, buffer preserved
-                        {
-                            if (stampArmed)
-                                Debug.Log("[Multiplayer] GeoUiRefresh: progression PARTIAL repaint (shared faction-SP pool) — open unit="
-                                          + viewedUnitId + " not in stamped=[" + JoinIds(stampIds) + "], local edit buffer preserved");
-                        }
-                        // FIX 1: the local pending faction-SP draw now exceeds the live shared pool (a remote peer
-                        // over-committed it) — the partial baseline shift would push _currentFactionPoints below 0.
-                        // Escalate to a full ConflictRepaint (remote wins, discard the unaffordable buffer + clear
-                        // the stale bought slot) so nothing later written to Skillpoints can go negative.
-                        else if (FullRedriveProgression(progModule, geo, character, conflict: true, stampArmed))
-                            Debug.Log("[Multiplayer] GeoUiRefresh: progression OVER-COMMITTED SP pool — partial shift unaffordable, "
-                                      + "full ConflictRepaint (per-click already committed every point; buffer discarded, remote wins) unit=" + viewedUnitId
-                                      + " stamped=[" + JoinIds(stampIds) + "]");
+                        PartialRepaintProgression(progModule);   // reconcile the shared faction-SP buffer to live; per-soldier buffer preserved
+                        if (stampArmed)
+                            Debug.Log("[Multiplayer] GeoUiRefresh: progression PARTIAL repaint (shared faction-SP pool) — open unit="
+                                      + viewedUnitId + " not in stamped=[" + JoinIds(stampIds) + "], local edit buffer preserved");
                     }
                     else if (outcome == ProgressionRepaintDecision.Outcome.Repaint
                              || outcome == ProgressionRepaintDecision.Outcome.ConflictRepaint)
@@ -729,17 +719,21 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>PartialRepaint: a remote apply moved the SHARED faction-SP pool but not the open soldier, so
-        /// refresh the pool label WITHOUT resetting the stat/ability edit buffer. RefreshStatPanel writes the
-        /// label from <c>_currentFactionPoints</c> (buffer), so first reconcile that baseline to the live pool —
-        /// shift BOTH <c>_starting/_currentFactionPoints</c> to the model so the user's pending draw
-        /// (starting − current) survives — then re-drive the module's own RefreshStatPanel. The per-soldier
-        /// stat/SP buffer is never touched. Skipped for mutoid (mutagen-cost) progression and a non-Phoenix
-        /// faction (no pooled SP). Returns <c>true</c> = partial shift done (or nothing to shift); <c>false</c> =
-        /// FIX 1 over-committed — the live pool can no longer cover the local pending draw, so the shift would
-        /// push <c>_currentFactionPoints</c> below 0; the caller must escalate to a full ConflictRepaint instead.
-        /// ponytail: buffer reconcile, not a live label-element write — upgrade only if sub-frame pool accuracy
-        /// mid-allocation ever matters. Best-effort; never throws.</summary>
-        private static bool PartialRepaintProgression(object progModule)
+        /// refresh the pool label WITHOUT resetting the stat/ability edit buffer. RefreshStatPanel writes the label
+        /// from <c>_currentFactionPoints</c> (buffer), so first reconcile that buffer to the live pool. Under per-click
+        /// stat relay every applied +/- click is ALREADY committed to the live pool at the click (host: SpendStatPoints
+        /// hits GeoPhoenixFaction.Skillpoints synchronously; client: the #9 echo moves the mirror pool), so the buffer
+        /// draw (starting − current) is spent, NOT pending — the panel's remaining faction SP == the live pool outright:
+        /// shift BOTH <c>_starting/_currentFactionPoints</c> to live (an applied draw reserves nothing). The old
+        /// <c>live − (start−cur)</c> subtracted the draw a SECOND time and double-debited the pool it was already spent
+        /// from — the host saw its own SP vanish and the commit seam wrote the under-counted value back to the
+        /// authoritative pool (per-click applied-draw accounting 2026-07-10). The per-soldier stat/SP buffer and the
+        /// minus gate (keyed on <c>_starting*Stat</c>, not the pool) are untouched. Skipped for mutoid (mutagen-cost)
+        /// progression and a non-Phoenix faction (no pooled SP). Never-silent: logs old→new on a shift.
+        /// ponytail: the client sees a transient label bounce in the click→echo window (its own in-flight draw is not
+        /// yet in the mirror pool) — self-heals when the echo lands, and the client never writes the pool so there is
+        /// no corruption. Upgrade to un-echoed-cost tracking only if that bounce ever bites. Best-effort; never throws.</summary>
+        private static void PartialRepaintProgression(object progModule)
         {
             try
             {
@@ -749,26 +743,25 @@ namespace Multiplayer.Network.Sync.State
                     && _progStartingFactionPointsField != null && _progCurrentFactionPointsField != null)
                 {
                     int live = Convert.ToInt32(_phoenixFactionSkillpointsField.GetValue(pf));
-                    int start = Convert.ToInt32(_progStartingFactionPointsField.GetValue(progModule));
                     int cur = Convert.ToInt32(_progCurrentFactionPointsField.GetValue(progModule));
-                    // FIX 1: is the local pending draw (start − cur, ≥ 0 — native clamps current ≤ starting) still
-                    // covered by the live pool? If not, shifting the baseline would set _currentFactionPoints
-                    // negative (over-spend) — bail to a ConflictRepaint. shiftedCur is always ≥ 0 when affordable.
-                    if (!ProgressionRepaintDecision.CanPartialShiftFactionSp(live, start, cur, out int shiftedCur))
-                        return false;
-                    if (live != start)
+                    int start = Convert.ToInt32(_progStartingFactionPointsField.GetValue(progModule));
+                    // Per-click: the applied draw is already in the live pool → reconcile the buffer to live outright
+                    // (subtracting the draw again double-debits — see summary). live ≥ 0 always (authoritative pool).
+                    int reconciled = ProgressionRepaintDecision.ReconcileFactionSpToLive(live, start, cur);
+                    if (cur != reconciled || start != reconciled)
                     {
-                        _progStartingFactionPointsField.SetValue(progModule, live);
-                        _progCurrentFactionPointsField.SetValue(progModule, shiftedCur);
+                        _progStartingFactionPointsField.SetValue(progModule, reconciled);
+                        _progCurrentFactionPointsField.SetValue(progModule, reconciled);
+                        Debug.Log("[Multiplayer] GeoUiRefresh.PartialRepaintProgression: faction-SP buffer reconciled to live pool — cur "
+                                  + cur + "→" + reconciled + " start " + start + "→" + reconciled
+                                  + " (per-click applied draws already in pool; no re-debit)");
                     }
                 }
                 _refreshStatPanel?.Invoke(progModule, null);
-                return true;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning("[Multiplayer] GeoUiRefresh.PartialRepaintProgression best-effort failed: " + ex.Message);
-                return true;   // a reflection miss must not escalate to a buffer-discarding ConflictRepaint
             }
         }
 
