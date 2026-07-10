@@ -51,22 +51,23 @@ namespace Multiplayer.Network.Sync.State
             return Outcome.Skip;
         }
 
-        /// <summary>Reconcile the panel's faction-SP buffer to the authoritative shared pool for a PartialRepaint
-        /// (pure; the reflective caller is <c>GeoUiRefresh.PartialRepaintProgression</c>). Under per-click stat relay
-        /// every applied +/- click is ALREADY committed to the live pool AT THE CLICK (HOST: SpendStatPoints hits
-        /// <c>GeoPhoenixFaction.Skillpoints</c> synchronously; CLIENT: the #9 echo moves the mirror pool), so the
-        /// buffer draw (<paramref name="startingFactionPoints"/> − <paramref name="currentFactionPoints"/>) is SPENT,
-        /// not pending — the panel's remaining faction SP == <paramref name="liveSkillpoints"/> outright, and BOTH
-        /// <c>_starting/_currentFactionPoints</c> shift to it (an applied draw reserves nothing). The pre-per-click
-        /// formula subtracted that draw a SECOND time (<c>live − draw</c>), double-debiting the pool it was already
-        /// spent from → the host saw its own SP vanish and the commit seam wrote the under-counted value back to the
-        /// authoritative pool (per-click applied-draw accounting 2026-07-10). Returns the live pool (always ≥ 0: an
-        /// authoritative pool never goes negative — so no over-commit escalation exists any more).
-        /// <paramref name="startingFactionPoints"/>/<paramref name="currentFactionPoints"/> are taken only so a test
-        /// can pin that the reconcile IGNORES the buffer draw. The per-stat minus gate is untouched (it keys on
-        /// <c>_starting*Stat</c>, not the pool).</summary>
-        public static int ReconcileFactionSpToLive(int liveSkillpoints, int startingFactionPoints,
-            int currentFactionPoints) => liveSkillpoints;
+        /// <summary>FIX 1 over-committed-pool guard (pure arithmetic; the reflective caller is
+        /// <c>GeoUiRefresh.PartialRepaintProgression</c>). A PartialRepaint shifts the panel's faction-SP
+        /// baseline (<paramref name="startingFactionPoints"/>) to the live shared pool
+        /// (<paramref name="liveSkillpoints"/>) while preserving the local pending draw (starting − current,
+        /// always ≥ 0: native clamps current ≤ starting). If the live pool can no longer cover that pending draw
+        /// the shift would set <c>_currentFactionPoints</c> negative (an over-spend the host will reject) — the
+        /// caller must instead do a full ConflictRepaint (remote wins, discard the buffer). Returns
+        /// <c>true</c> = the partial shift is safe and <paramref name="shiftedCurrentFactionPoints"/> holds the
+        /// new current (guaranteed ≥ 0); <c>false</c> = over-committed.</summary>
+        public static bool CanPartialShiftFactionSp(int liveSkillpoints, int startingFactionPoints,
+            int currentFactionPoints, out int shiftedCurrentFactionPoints)
+        {
+            int pendingDraw = startingFactionPoints - currentFactionPoints;
+            if (pendingDraw < 0) pendingDraw = 0;   // defensive: never amplify a (nonexistent) negative draw
+            shiftedCurrentFactionPoints = liveSkillpoints - pendingDraw;
+            return shiftedCurrentFactionPoints >= 0;
+        }
 
         /// <summary>True only when the apply POSITIVELY stamped the open soldier — false for a null/unknown
         /// stamp or an unresolved open id (0), both of which must not discard a pending edit buffer.</summary>

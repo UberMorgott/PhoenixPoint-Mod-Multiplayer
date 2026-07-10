@@ -108,41 +108,92 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.CommitSeamBackstop failed: " + ex.Message); }
         }
 
-        /// <summary>HOST self-click (per-click stat relay 2026-07-10): the host is authoritative and NOT frozen,
-        /// so its own +/- click must hit the MODEL at once for the #9 blob to carry it to clients (the host→client
-        /// half of per-click reactivity). Apply the signed delta through the SAME re-priced, ledger-bounded
-        /// <c>SpendStatPoints</c> a client intent lands on (the ModifyBaseStat dirty seam mirrors it on #9).
-        /// Register the click as an OWN echo so the stamp-driven re-drive below is downgraded to a buffer-preserving
-        /// PartialRepaint (<see cref="GeoUiRefresh"/>): <c>_starting*Stat</c> stays at the panel-open baseline, so
-        /// the native minus gate stays open the whole editing session (undo a mis-click) — NOT closed per-click as
-        /// the old per-click rebase did. The stat double-apply of the deferred native <c>CommitStatChanges</c> is
-        /// instead neutralised once, at the commit seam (<see cref="CommitStatChangesProgressionRelayPatch"/>),
-        /// exactly as vanilla CommitStatChanges commits then rebases — native fidelity.</summary>
-        internal static void ApplyHostSelfStatClick(long unitId, int statId, int signedDelta)
+        /// <summary>Relay one <see cref="SpendStatPointsAction"/> per positive base-stat delta
+        /// (CharacterBaseAttribute: Strength=0, Will=1, Speed=2 — decompile enum order). Shared by the
+        /// commit-seam prefix (<see cref="CommitStatChangesProgressionRelayPatch"/>) and the conflict-repaint
+        /// harvest (<see cref="HarvestPendingStatSpend"/>) — both send the SAME wire the host re-prices natively.</summary>
+        internal static void RelayStatDeltas(long unitId, int dStr, int dWill, int dSpeed)
         {
-            try
-            {
-                var rt = GeoRuntime.Instance;
-                PersonnelEditReflection.SpendStatPoints(rt, unitId, statId, signedDelta);
-                OwnStatEchoTracker.RegisterOwnClick(unitId);   // self-echo skip: this apply's stamp must NOT reset the open baseline
-                // Repaint the host's other open progression surfaces (roster list) + shared-pool label, mirroring
-                // the client-intent apply path in SyncEngine.OnActionRequest.
-                GeoUiRefresh.SetProgressionStamp(new[] { unitId }, factionSpChanged: true);
-                GeoUiRefresh.RefreshNeedsKick(rt);
-                Debug.Log("[Multiplayer] ChangeCharacterStatPerClick: HOST self stat click applied unit=" + unitId
-                          + " stat=" + statId + " delta=" + signedDelta);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.ApplyHostSelfStatClick failed: " + ex.Message); }
+            if (dStr > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 0, dStr));
+            if (dWill > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 1, dWill));
+            if (dSpeed > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 2, dSpeed));
         }
 
         /// <summary>Positive-only int delta between two named int fields of <paramref name="inst"/>
-        /// (<c>_current* − _starting*</c>); 0 when either is unreadable/non-int. Used by the commit-seam prefix
-        /// diag (with per-click relay it is ~0 after the #9 echo re-drive).</summary>
+        /// (<c>_current* − _starting*</c>); 0 when either is unreadable/non-int. Shared by the commit-seam
+        /// prefix and the harvest below.</summary>
         internal static int Delta(Type t, object inst, string currentField, string startingField)
         {
             object cur = AccessTools.Field(t, currentField)?.GetValue(inst);
             object start = AccessTools.Field(t, startingField)?.GetValue(inst);
             return cur is int c && start is int s ? c - s : 0;
+        }
+
+        /// <summary>HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint in
+        /// <see cref="GeoUiRefresh.FullRedriveProgression"/> is about to <c>SetCharacterProgression</c> the OPEN
+        /// soldier's panel — resetting <c>_current*Stat</c> to <c>_starting*Stat</c> and DISCARDING the local
+        /// pending stat allocation before the deferred <c>CommitStatChanges</c> seam ever relays it (log-proven:
+        /// zero SpendStatPoints intents a whole session, because the host's periodic same-unit #9 re-broadcast
+        /// wiped the buffer every few seconds). COMMIT it first, reading the pending deltas straight off the
+        /// module fields the same way the commit-seam prefix does:
+        ///   • co-op CLIENT → relay one SpendStatPoints intent per positive delta (host applies + re-broadcasts
+        ///     → the panel converges to the committed values);
+        ///   • HOST → apply each positive delta through the authoritative re-priced <c>SpendStatPoints</c> (the
+        ///     SAME landing as the client relay) — NEVER the raw native <c>CommitStatChanges</c>, which writes the
+        ///     stale panel buffer straight into the shared SP pool and would re-inflate it over a concurrent
+        ///     remote spend; the ModifyBaseStat dirty seam mirrors the result on #9. Mutoid stat spend is out of
+        ///     the SP intent family → host no-op (like a client).
+        /// The unconfirmed <c>_boughtAbilitySlot</c> is a pre-confirm SELECTION (OnTrackSlotPointerClicked arms
+        /// it + opens a confirmation popup — decompile UIModuleCharacterProgression.cs:1031/1035), never a commit,
+        /// so it is NOT harvested — the caller's ClearBoughtAbility correctly discards it. Idempotent: the caller
+        /// runs SetCharacterProgression right after (resets the buffer), so a later repaint sees no pending edit
+        /// and cannot re-harvest. Best-effort; a miss must never break the repaint.</summary>
+        internal static void HarvestPendingStatSpend(object progModule)
+        {
+            try
+            {
+                if (progModule == null) return;
+                var engine = NetworkEngine.Instance;
+                bool active = engine != null && engine.IsActiveSession;
+                bool isHost = active && engine.IsHost;
+                var t = progModule.GetType();
+                int dStr = Delta(t, progModule, "_currentStrengthStat", "_startingStrengthStat");
+                int dWill = Delta(t, progModule, "_currentWillStat", "_startingWillStat");
+                int dSpeed = Delta(t, progModule, "_currentSpeedStat", "_startingSpeedStat");
+                bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(progModule) is bool p && p;
+                var mode = StatSpendHarvest.Decide(active, isHost, pandoran, dStr, dWill, dSpeed);
+                if (mode == StatSpendHarvest.Mode.None) return;
+                object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                if (mode == StatSpendHarvest.Mode.HostCommit)
+                {
+                    // Do NOT raw-commit via native CommitStatChanges: it writes the panel buffer straight into
+                    // SkillPoints/faction Skillpoints with no re-price or clamp, and harvest fires exactly when
+                    // that buffer is STALE (a remote spend just moved the shared pool) — a native commit would
+                    // re-inflate the pool to the pre-conflict snapshot and erase the concurrent remote spend.
+                    // Route each positive delta through the SAME authoritative apply the client relay lands on
+                    // (SpendStatPoints): re-prices each point vs the LIVE pool + clamps (short pool writes
+                    // nothing); mutoid → no-op. Following SetCharacterProgression re-reads the live state.
+                    var rt = GeoRuntime.Instance;
+                    if (dStr > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 0, dStr);    // Strength
+                    if (dWill > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 1, dWill);   // Will
+                    if (dSpeed > 0) PersonnelEditReflection.SpendStatPoints(rt, unitId, 2, dSpeed); // Speed
+                    Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: HOST applied pending stat spend"
+                              + " via authoritative re-priced SpendStatPoints — unit=" + unitId
+                              + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
+                }
+                else   // ClientRelay
+                {
+                    Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: CLIENT harvest before conflict repaint"
+                              + " unit=" + unitId + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed
+                              + " — relaying so the allocation commits instead of being discarded");
+                    RelayStatDeltas(unitId, dStr, dWill, dSpeed);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend failed: " + ex.Message); }
         }
 
         /// <summary>Destination container key for a transfer: (kind 1, VehicleID) for a GeoVehicle, else
@@ -420,30 +471,14 @@ namespace Multiplayer.Harmony.Sync
         }
         public static MethodBase TargetMethod() => _target;
 
-        // CommitStatChanges is the native stat-spend commit (screen exit / soldier switch / confirm / nested in
-        // BuyAbility — UIStateEditSoldier.cs:232/363/715, UIModuleCharacterProgression.cs:367-387/405). Per-click
-        // relay (ChangeCharacterStatPerClickPatch) already applied every SP-family stat point AT THE CLICK — the
-        // client relayed each, the host self-applied each via SpendStatPoints — so this deferred seam must NOT
-        // re-apply the stats (double-spend):
-        //   • CLIENT (frozen): suppress the whole native commit (return false) + roll the buffer back to starting
-        //     (idempotent repeat-commit guard). The model is the host's alone.
-        //   • HOST (SP-family): ZERO the stat deltas (starting = current) then let native RUN — ModifyBaseStat(0)
-        //     is a no-op while the pool/faction writes still commit any SP cost a NESTED BuyAbility accrued in the
-        //     buffer (ConsumeAbilityCost is buffer-only, decompile :435 — only CommitStatChanges' SkillPoints=_current
-        //     write reaches the model, so a blanket host suppress would grant FREE abilities). This is exactly what
-        //     vanilla CommitStatChanges does (ModifyBaseStat, then starting=current); moving the rebase HERE (commit
-        //     seam) instead of per-click is what keeps the native minus gate open the whole editing session so a
-        //     mis-click can be undone. The SkillPoints/faction writes are idempotent (buffer == the per-click-debited
-        //     model), so no double-debit of the pool.
-        //   • HOST (mutoid/pandoran): per-click SKIPS mutoid (out of the SP intent family), so native CommitStatChanges
-        //     is the SOLE authoritative commit — leave the buffer intact and let it apply the mutagen-cost stat spend.
-        // Single-player and engine-driven applies always run native. Also drains this unit's own-echo skip count
-        // (commit seam = panel teardown) so a coalesced-echo residue can't outlive the soldier's edit session.
+        // CommitStatChanges is the native stat-spend commit (screen exit / soldier switch / confirm —
+        // UIStateEditSoldier.cs:232/363/715, UIModuleCharacterProgression.cs:367-387). Relays ONE
+        // SpendStatPointsAction per raised stat carrying only the positive delta; the local current
+        // values are rolled back to starting so a repeat commit in the same session never double-relays
+        // (native decrease below starting is impossible, :907 — committed spends are non-refundable).
         public static bool Prefix(object __instance)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return true;   // single-player: native commit
-            if (SyncApplyScope.IsApplying) return true;                    // engine-driven apply/replay: native
+            if (!PersonnelEditRelay.ShouldRelay()) return true;
             try
             {
                 var t = __instance.GetType();
@@ -453,30 +488,15 @@ namespace Multiplayer.Harmony.Sync
                 bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool p && p;
                 object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
                 long unitId = PersonnelReflection.ReadUnitId(character);
-                OwnStatEchoTracker.ResetUnit(unitId);   // commit seam = panel teardown: drop any residual own-echo count
-
-                if (engine.IsHost)
-                {
-                    if (pandoran)
-                    {
-                        // Mutoid stat spend is NOT applied per-click → native commit is authoritative here.
-                        Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: HOST mutoid commit (native — per-click skips mutoid) unitId=" + unitId
-                                  + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
-                        return true;
-                    }
-                    // SP-family: neutralise the stat double-apply (starting=current) then let native commit the
-                    // pool/faction (and any nested BuyAbility SP cost). Vanilla-equivalent; minus gate stayed open.
-                    RebaseStartToCurrent(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
-                    RebaseStartToCurrent(t, __instance, "_currentWillStat", "_startingWillStat");
-                    RebaseStartToCurrent(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
-                    Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: HOST commit-seam stat rebase (per-click already applied; native no-ops stats, commits pool/ability) unitId=" + unitId
-                              + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
-                    return true;
-                }
-
-                // CLIENT (frozen): suppress the raw local commit; per-click relays already sent every delta.
-                Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: CLIENT suppress (no relay — per-click owns it) unitId=" + unitId
+                // DIAG (orphan RCA 2026-07-09 evidence gap): one entry line per native commit (screen exit /
+                // soldier switch / confirm) with the deltas, so a dropped/misrouted stat spend is traceable.
+                Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: entry unitId=" + unitId
                           + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + " pandoran=" + pandoran);
+                if (!pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
+                    PersonnelEditRelay.RelayStatDeltas(unitId, dStr, dWill, dSpeed);   // shared with the conflict-repaint harvest
+                else if (pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
+                    Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: mutoid (mutagen-cost) stat spend not relayed — commit suppressed");
+                // Roll local session state back to starting (idempotent repeat-commit guard).
                 Reset(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
                 Reset(t, __instance, "_currentWillStat", "_startingWillStat");
                 Reset(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
@@ -496,73 +516,6 @@ namespace Multiplayer.Harmony.Sync
             var cf = AccessTools.Field(t, currentField);
             var sf = AccessTools.Field(t, startingField);
             if (cf != null && sf != null) cf.SetValue(inst, sf.GetValue(inst));
-        }
-
-        // Host commit-seam stat neutralise: starting = current so native ModifyBaseStat(current−starting) is a no-op
-        // (the per-click SpendStatPoints already applied the delta to the model).
-        private static void RebaseStartToCurrent(Type t, object inst, string currentField, string startingField)
-        {
-            var cf = AccessTools.Field(t, currentField);
-            var sf = AccessTools.Field(t, startingField);
-            if (cf != null && sf != null) sf.SetValue(inst, cf.GetValue(inst));
-        }
-    }
-
-    [HarmonyPatch]
-    public static class ChangeCharacterStatPerClickPatch
-    {
-        private static MethodBase _target;
-        public static bool Prepare()
-        {
-            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
-            _target = t != null ? AccessTools.Method(t, "ChangeCharacterStat") : null;
-            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.ChangeCharacterStat per-click relay " + (_target != null ? "bound" : "NOT FOUND"));
-            return _target != null;
-        }
-        public static MethodBase TargetMethod() => _target;
-
-        // int ChangeCharacterStat(CharacterBaseAttribute baseStat, int cur, int start, bool increase) — the ONE
-        // native chokepoint every +/- button routes through (ChangeStrengthStat/ChangeWillStat/ChangeSpeedStat →
-        // UIModuleCharacterProgression.cs:848/857/866 → :875), mirroring the inline BuyAbility relay pattern.
-        // __0 = baseStat (CharacterBaseAttribute: Strength=0/Will=1/Speed=2); __result = the SIGNED delta the
-        // native applied to the buffer (+1 plus, −1 minus/refund, 0 = no-op click at cap/floor/insufficient SP).
-        // POSTFIX so the native buffer (optimistic display + the ≥_starting minus gate that bounds refunds) is
-        // untouched — we ONLY add the immediate relay (client) / authoritative apply (host).
-        public static void Postfix(object __instance, object __0, int __result)
-        {
-            try
-            {
-                if (__result == 0) return;                                // click had no effect
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession) return;    // single-player: native buffer + native commit is authoritative
-                if (SyncApplyScope.IsApplying) return;                    // engine-driven, not a user click
-                var t = __instance.GetType();
-                if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool pandoran && pandoran)
-                    return;   // mutoid (mutagen-cost) progression — out of the SP intent family
-                object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
-                long unitId = PersonnelReflection.ReadUnitId(character);
-                int statId = Convert.ToInt32(__0);   // CharacterBaseAttribute underlying int
-                if (engine.IsHost)
-                {
-                    PersonnelEditRelay.ApplyHostSelfStatClick(unitId, statId, __result);
-                }
-                else
-                {
-                    // CLIENT: relay the signed per-click delta at once (never-silent entry line); the host
-                    // re-prices + ledger-bounds and #9 echoes the authoritative result. The native buffer stays
-                    // as optimistic display, NOT rolled to starting; register the click as an OWN echo so the
-                    // incoming #9 apply for this soldier is downgraded to a buffer-preserving PartialRepaint
-                    // (GeoUiRefresh) instead of a ConflictRepaint that would bump _starting to live and slam the
-                    // native minus gate shut — the minus window stays open down to session-start (the host
-                    // StatRefundTracker bounds the real refund).
-                    OwnStatEchoTracker.RegisterOwnClick(unitId);
-                    Debug.Log("[Multiplayer] ChangeCharacterStatPerClickPatch: CLIENT per-click stat unit=" + unitId
-                              + " stat=" + statId + " delta=" + __result + " → relay");
-                    PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
-                        () => new SpendStatPointsAction(unitId, (byte)statId, __result));
-                }
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] ChangeCharacterStatPerClickPatch failed: " + ex.Message); }
         }
     }
 

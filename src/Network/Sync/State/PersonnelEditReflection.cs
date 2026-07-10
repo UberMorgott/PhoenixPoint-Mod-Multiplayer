@@ -685,8 +685,6 @@ namespace Multiplayer.Network.Sync.State
                 if (_killCharacter == null) _killCharacter = AccessTools.Method(fac.GetType(), "KillCharacter");
                 object dismissed = DismissedReason();
                 if (_killCharacter == null || dismissed == null) return;
-                StatRefundTracker.ResetUnit(unitId);   // a reused GeoUnitId must not inherit this soldier's stat-refund net
-                OwnStatEchoTracker.ResetUnit(unitId);  // …nor a stale own-echo skip count
                 _killCharacter.Invoke(fac, new[] { soldier, dismissed });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Dismiss failed: " + ex.Message); }
@@ -830,7 +828,7 @@ namespace Multiplayer.Network.Sync.State
         {
             try
             {
-                if (statId < 0 || statId > 2 || delta == 0) return;   // action Validate mirrors this (signed, non-zero)
+                if (statId < 0 || statId > 2 || delta <= 0) return;   // action Validate mirrors this
                 var soldier = ResolveSoldierById(rt, unitId);
                 if (soldier == null) { LogUnresolved("SpendStatPoints", unitId); return; }
                 if (HasPandoranProgression(rt, soldier))
@@ -841,63 +839,20 @@ namespace Multiplayer.Network.Sync.State
                 if (_charBaseAttrType == null || _getBaseStat == null || _canModifyBaseStat == null
                     || _getBaseStatCost == null || _modifyBaseStat == null) return;
                 object stat = Enum.ToObject(_charBaseAttrType, statId);
-                if (delta > 0)
+                int applied = 0;
+                for (int i = 0; i < delta; i++)
                 {
-                    // SPEND (plus button): each point re-priced + pool-gated on the LIVE state, stepwise as the
-                    // native +1 does. A mid-loop shortfall keeps the points already applied (each was individually
-                    // affordable/legal) and logs. Record the applied count so a later refund is ledger-bounded.
-                    int applied = 0;
-                    for (int i = 0; i < delta; i++)
-                    {
-                        int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
-                        if (!(bool)_canModifyBaseStat.Invoke(prog, new object[] { stat, cur + 1 })) break;   // native max cap
-                        int cost = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur + 1 });
-                        if (!TrySpendSkillPoints(rt, prog, cost, "SpendStatPoints", unitId)) break;
-                        _modifyBaseStat.Invoke(prog, new object[] { stat, 1 });
-                        applied++;
-                    }
-                    StatRefundTracker.RecordSpend(unitId, statId, applied);
-                    Debug.Log("[Multiplayer] PersonnelEditReflection.SpendStatPoints: unit " + unitId + " stat " + statId
-                              + " +" + applied + (applied == delta ? "" : " (requested +" + delta + " — cap/pool stop)"));
+                    int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
+                    if (!(bool)_canModifyBaseStat.Invoke(prog, new object[] { stat, cur + 1 })) break;   // native max cap
+                    int cost = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur + 1 });
+                    if (!TrySpendSkillPoints(rt, prog, cost, "SpendStatPoints", unitId)) break;
+                    _modifyBaseStat.Invoke(prog, new object[] { stat, 1 });
+                    applied++;
                 }
-                else
-                {
-                    // REFUND (minus button): bounded by the per-session net-applied ledger so a refund never banks
-                    // free SP nor drops the stat below its session-start value (anti-farm). Symmetric price — credit
-                    // the SAME per-point cost the spend charged (native decrement refunds GetBaseStatCost(stat, cur),
-                    // UIModuleCharacterProgression.cs:909). Credit lands on the soldier SkillPoints pool.
-                    int cap = StatRefundTracker.RefundableCap(unitId, statId);
-                    int want = StatRefundTracker.ClampRefund(cap, -delta);
-                    int refunded = 0;
-                    for (int i = 0; i < want; i++)
-                    {
-                        int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
-                        if (cur <= 0) break;                                                          // never below the floor
-                        int price = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur });   // the +1→cur price
-                        _modifyBaseStat.Invoke(prog, new object[] { stat, -1 });
-                        RefundSkillPoints(prog, price);                                                // credit soldier SP (never negative)
-                        refunded++;
-                    }
-                    StatRefundTracker.RecordRefund(unitId, statId, refunded);
-                    Debug.Log("[Multiplayer] PersonnelEditReflection.SpendStatPoints: unit " + unitId + " stat " + statId
-                              + " -" + refunded + " [refund]" + (refunded == -delta ? "" : " (requested -" + (-delta) + ", session-cap " + cap + ")"));
-                }
+                Debug.Log("[Multiplayer] PersonnelEditReflection.SpendStatPoints: unit " + unitId + " stat " + statId
+                          + " +" + applied + (applied == delta ? "" : " (requested +" + delta + " — cap/pool stop)"));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.SpendStatPoints failed: " + ex.Message); }
-        }
-
-        /// <summary>Credit <paramref name="price"/> SP back to the soldier <c>CharacterProgression.SkillPoints</c>
-        /// pool (a refund never goes negative). Slight asymmetry vs a spilled spend (which drew soldier-first then
-        /// faction) — the total is conserved and the anti-farm ledger caps the count, so this only reshuffles the
-        /// player's own soldier↔faction SP, never mints any. ponytail: credit soldier pool; reverse the exact
-        /// spill split only if per-soldier SP accounting ever matters competitively.</summary>
-        private static void RefundSkillPoints(object prog, int price)
-        {
-            if (price <= 0) return;
-            if (_skillPointsField == null) _skillPointsField = AccessTools.Field(prog.GetType(), "SkillPoints");
-            if (_skillPointsField == null) return;
-            int sp = (int)_skillPointsField.GetValue(prog);
-            _skillPointsField.SetValue(prog, sp + price);
         }
 
         /// <summary>Deduct <paramref name="cost"/> SP: soldier <c>CharacterProgression.SkillPoints</c>
