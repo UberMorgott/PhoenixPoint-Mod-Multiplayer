@@ -84,6 +84,16 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _getBaseStatCost;     // CharacterProgression.GetBaseStatCost(stat, forValue)
         private static MethodInfo _modifyBaseStat;      // CharacterProgression.ModifyBaseStat(stat, amount)
         private static FieldInfo _skillPointsField;     // CharacterProgression.SkillPoints (public field)
+        // Native stat-edit FRAME (the value ChangeCharacterStat/SetStatButtonInteractabilty price+cap against —
+        // effective displayed stat, NOT the raw GetBaseStat allocation): (int)(GetProgressionBaseStats().<attr>
+        // + Bonus<attr>), RefreshStats:516-518 + GeoCharacter.cs:1167.
+        private static MethodInfo _getProgressionBaseStats; // GeoCharacter.GetProgressionBaseStats() → BaseCharacterStats
+        private static FieldInfo _bcsEndurance;         // BaseCharacterStats.Endurance (Strength frame)
+        private static FieldInfo _bcsWillpower;         // BaseCharacterStats.Willpower
+        private static FieldInfo _bcsSpeed;             // BaseCharacterStats.Speed
+        private static PropertyInfo _bonusStrength;     // GeoCharacter.BonusStrength (float)
+        private static PropertyInfo _bonusWillpower;    // GeoCharacter.BonusWillpower (float)
+        private static PropertyInfo _bonusSpeed;        // GeoCharacter.BonusSpeed (float)
         private static FieldInfo _factionSkillpointsField; // GeoPhoenixFaction.Skillpoints (public field)
         private static FieldInfo _trackSlotsField;      // AbilityTrack.AbilitiesByLevel (AbilityTrackSlot[])
         private static FieldInfo _slotAbilityField;     // AbilityTrackSlot.Ability (public field)
@@ -856,7 +866,7 @@ namespace Multiplayer.Network.Sync.State
                     int applied = 0;
                     for (int i = 0; i < delta; i++)
                     {
-                        int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
+                        int cur = EffectiveStat(soldier, statId);   // native frame: effective displayed stat, NOT raw _baseStats
                         if (!(bool)_canModifyBaseStat.Invoke(prog, new object[] { stat, cur + 1 })) break;   // native max cap
                         int cost = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur + 1 });
                         if (!TrySpendSkillPoints(rt, prog, cost, "SpendStatPoints", unitId)) break;
@@ -880,9 +890,9 @@ namespace Multiplayer.Network.Sync.State
                     int refunded = 0;
                     for (int i = 0; i < want; i++)
                     {
-                        int cur = (int)_getBaseStat.Invoke(prog, new[] { stat });
+                        int cur = EffectiveStat(soldier, statId);   // native frame: effective displayed stat, NOT raw _baseStats
                         if (cur <= 0) break;                                                          // never below the floor
-                        int price = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur });   // the +1→cur price
+                        int price = (int)_getBaseStatCost.Invoke(prog, new object[] { stat, cur });   // symmetric per-point refund price
                         _modifyBaseStat.Invoke(prog, new object[] { stat, -1 });
                         RefundSkillPoints(prog, price);                                                // credit soldier SP (never negative)
                         refunded++;
@@ -974,6 +984,48 @@ namespace Multiplayer.Network.Sync.State
 
         private static int GetBaseStatInt(object prog, int statId)
             => (int)_getBaseStat.Invoke(prog, new[] { Enum.ToObject(_charBaseAttrType, statId) });
+
+        /// <summary>The soldier's EFFECTIVE base stat for a CharacterBaseAttribute (0=Str,1=Will,2=Speed) — the
+        /// value the NATIVE stat editor gates + prices against (UIModuleCharacterProgression.RefreshStats:516-518:
+        /// <c>(int)(GetProgressionBaseStats().&lt;attr&gt; + Bonus&lt;attr&gt;)</c> = bodypart contributions +
+        /// allocated points + item/mutation bonus, GeoCharacter.cs:1167). This is NOT
+        /// <c>CharacterProgression.GetBaseStat</c> (the raw <c>_baseStats</c> allocation, which omits bodyparts +
+        /// bonus and is far smaller) — pricing/capping on that undercharged (near-zero SP cost) and never reached
+        /// the cap (infinite upgrade). Unresolvable → 0 (inert in a test process, like every reflection here).</summary>
+        internal static int EffectiveStat(object soldier, int statId)
+        {
+            try
+            {
+                if (soldier == null || statId < 0 || statId > 2) return 0;
+                EnsureEffectiveStatMembers(soldier);
+                if (_getProgressionBaseStats == null) return 0;
+                object bcs = _getProgressionBaseStats.Invoke(soldier, null);
+                FieldInfo bf = statId == 0 ? _bcsEndurance : (statId == 1 ? _bcsWillpower : _bcsSpeed);
+                PropertyInfo bp = statId == 0 ? _bonusStrength : (statId == 1 ? _bonusWillpower : _bonusSpeed);
+                float baseAttr = bcs != null && bf != null ? Convert.ToSingle(bf.GetValue(bcs)) : 0f;
+                float bonus = bp != null ? Convert.ToSingle(bp.GetValue(soldier, null)) : 0f;
+                return StatEditGate.EffectiveStat(baseAttr, bonus);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.EffectiveStat failed: " + ex.Message); return 0; }
+        }
+
+        /// <summary>Bind the effective-stat frame members once: GeoCharacter.GetProgressionBaseStats() + the
+        /// returned BaseCharacterStats value fields + the GeoCharacter.Bonus* float properties.</summary>
+        private static void EnsureEffectiveStatMembers(object soldier)
+        {
+            var st = soldier.GetType();
+            if (_getProgressionBaseStats == null) _getProgressionBaseStats = AccessTools.Method(st, "GetProgressionBaseStats");
+            if (_bonusStrength == null) _bonusStrength = AccessTools.Property(st, "BonusStrength");
+            if (_bonusWillpower == null) _bonusWillpower = AccessTools.Property(st, "BonusWillpower");
+            if (_bonusSpeed == null) _bonusSpeed = AccessTools.Property(st, "BonusSpeed");
+            if (_bcsEndurance == null && _getProgressionBaseStats != null)
+            {
+                var bcsT = _getProgressionBaseStats.ReturnType;
+                _bcsEndurance = AccessTools.Field(bcsT, "Endurance");
+                _bcsWillpower = AccessTools.Field(bcsT, "Willpower");
+                _bcsSpeed = AccessTools.Field(bcsT, "Speed");
+            }
+        }
 
         /// <summary>Bind the CharacterProgression members once (all single-overload, decompile-verified
         /// 2026-07-07: GetAbilityTrack/CanLearnAbility/GetAbilitySlotCost/LearnAbility/GetBaseStat/

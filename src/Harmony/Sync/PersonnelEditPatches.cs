@@ -166,21 +166,22 @@ namespace Multiplayer.Harmony.Sync
             {
                 object character = AccessTools.Field(t, "_character")?.GetValue(module);
                 object prog = character != null ? AccessTools.Property(character.GetType(), "Progression")?.GetValue(character, null) : null;
+                if (character != null)
+                {
+                    // (a) clicked stat: pin both baselines to the EFFECTIVE live value the native editor shows +
+                    // prices (GetProgressionBaseStats + Bonus, RefreshStats:516-518) — NOT the raw _baseStats
+                    // allocation (GetBaseStat), which is far smaller and would display a wrong number + mis-gate
+                    // the native +/- affordability. Same frame the host apply prices/caps against.
+                    int liveStat = PersonnelEditReflection.EffectiveStat(character, statId);
+                    switch (statId)
+                    {
+                        case 0: SetIntField(t, module, "_currentStrengthStat", liveStat); SetIntField(t, module, "_startingStrengthStat", liveStat); break;
+                        case 1: SetIntField(t, module, "_currentWillStat", liveStat);     SetIntField(t, module, "_startingWillStat", liveStat);     break;
+                        case 2: SetIntField(t, module, "_currentSpeedStat", liveStat);    SetIntField(t, module, "_startingSpeedStat", liveStat);    break;
+                    }
+                }
                 if (prog != null)
                 {
-                    // (a) clicked stat: pin both baselines to the live model value (post authoritative apply).
-                    var getBaseStat = AccessTools.Method(prog.GetType(), "GetBaseStat");
-                    var cbaType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterBaseAttribute");
-                    if (getBaseStat != null && cbaType != null)
-                    {
-                        int liveStat = Convert.ToInt32(getBaseStat.Invoke(prog, new[] { Enum.ToObject(cbaType, statId) }));
-                        switch (statId)
-                        {
-                            case 0: SetIntField(t, module, "_currentStrengthStat", liveStat); SetIntField(t, module, "_startingStrengthStat", liveStat); break;
-                            case 1: SetIntField(t, module, "_currentWillStat", liveStat);     SetIntField(t, module, "_startingWillStat", liveStat);     break;
-                            case 2: SetIntField(t, module, "_currentSpeedStat", liveStat);    SetIntField(t, module, "_startingSpeedStat", liveStat);    break;
-                        }
-                    }
                     // (b) soldier SP pool.
                     var spField = AccessTools.Field(prog.GetType(), "SkillPoints");
                     if (spField != null)
