@@ -51,6 +51,7 @@ namespace Multiplayer.Transport
         // Pending connect outcome, surfaced on the main thread in Update(). Guarded by _lock.
         private bool _pendingConnectResult;          // a result is waiting to be surfaced
         private bool _pendingConnectSucceeded;       // true = connected, false = failed/timed out
+        private string _lastConnectError;             // precise connect-fail reason, surfaced via LocalEndpoint
         private TcpClient _pendingClient;             // the connected client (success only)
         private ulong _pendingPeerId;                 // minted peer id (success only)
         private string _pendingEndpoint;              // endpoint label (success only)
@@ -153,7 +154,12 @@ namespace Multiplayer.Transport
                 if (!done || _connectAborted)
                 {
                     try { client.Close(); } catch { }
-                    if (!_connectAborted) QueueConnectResult(false, 0, null, null);
+                    if (!_connectAborted)
+                    {
+                        _lastConnectError = $"connect timed out after {ConnectTimeoutMs / 1000}s "
+                            + $"(host {address}:{port} unreachable — TCP {port} not forwarded / firewall)";
+                        QueueConnectResult(false, 0, null, null);
+                    }
                     return;
                 }
                 // Completes the connect; throws SocketException if it actually failed
@@ -169,10 +175,10 @@ namespace Multiplayer.Transport
                 // Diagnostic: surface the real reason the DirectIP connect failed instead of
                 // swallowing it silently. For SocketException include the SocketErrorCode.
                 var sockEx = ex as SocketException;
-                var msg = sockEx != null
-                    ? $"[Multiplayer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message} (SocketErrorCode={sockEx.SocketErrorCode})"
-                    : $"[Multiplayer] DirectTransport connect failed: {ex.GetType().Name}: {ex.Message}";
-                LogError(msg);
+                _lastConnectError = sockEx != null
+                    ? $"{sockEx.SocketErrorCode} connecting to {address}:{port}"
+                    : $"{ex.GetType().Name}: {ex.Message}";
+                LogError($"[Multiplayer] DirectTransport connect failed: {_lastConnectError}");
                 try { client?.Close(); } catch { }
                 if (!_connectAborted) QueueConnectResult(false, 0, null, null);
             }
@@ -248,6 +254,10 @@ namespace Multiplayer.Transport
             }
             else
             {
+                // Surface the precise reason (SocketErrorCode / timeout) via LocalEndpoint so the UI
+                // failure dialog can show WHY, not a generic "connection failed". Mirrors the existing
+                // "DirectIP(bind failed: …)" label the Host path already uses.
+                LocalEndpoint = $"DirectIP(failed: {_lastConnectError ?? "unknown"})";
                 State = ConnectionState.Failed;
                 OnStateChanged?.Invoke(State);
             }

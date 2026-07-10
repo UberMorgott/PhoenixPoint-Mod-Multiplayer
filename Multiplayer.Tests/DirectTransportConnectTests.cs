@@ -89,6 +89,9 @@ namespace Multiplayer.Tests
                 var failed = PumpUntil(t, () => t.State == ConnectionState.Failed, 8000);
                 Assert.True(failed, "connect to a closed port should surface Failed via Update");
                 Assert.Equal(ConnectionState.Failed, lastState);
+                // Never-silent diag: the precise reason must reach LocalEndpoint (not be swallowed),
+                // so the UI failure dialog can show WHY (a closed port → ConnectionRefused/timeout).
+                Assert.Contains("failed:", t.LocalEndpoint);
             }
             finally
             {

@@ -38,6 +38,7 @@ The current source of truth for how the mod works today.
 | [engine/01-networking-core.md](engine/01-networking-core.md) | `NetworkEngine` singleton + lifecycle, message routing, `PacketType`, binary message formats, `SessionManager` (heartbeat, ready-state), reliable message flow |
 | [engine/02-transport-layer.md](engine/02-transport-layer.md) | `ITransport` + three transports (Steam P2P / Direct TCP / STUN UDP), comparison table, message envelope + message-type catalog by phase, reliability |
 | [engine/03-harmony-patches.md](engine/03-harmony-patches.md) | Patch table (P0–P3 tactical, C1–C5 campaign), runtime type resolution, per-patch detail, connection-menu UI injection, native Load-screen intercept for the co-op "Choose save" |
+| [WAN-COOP.md](WAN-COOP.md) | **Real-internet (WAN) join runbook:** which path to use, the exact Direct-IP port-forward answer (**TCP 14242, host-side only**), why the STUN invite code fails on symmetric NAT/CGNAT, and the Steam-invite gap (not implemented) + smallest viable plan |
 
 > **Command-sync / state-sync layer (as-built code, no dedicated engine doc yet):** the
 > host-authoritative sync backbone lives under `src/Network/` (`SyncEngine`, `SurfaceRouter`,

@@ -353,8 +353,45 @@ namespace Multiplayer.Network
                 // bogus error box pops on leave. Genuine join/connect failures arrive with the flag
                 // cleared (reset in Initialize) and still surface.
                 if (_intentionalDisconnect) return;
-                OnConnectionFailed?.Invoke("Transport connection failed");
+                OnConnectionFailed?.Invoke(BuildTransportFailureReason());
             }
+        }
+
+        // Never-silent diagnostics: name the failing transport (the "stage") + the precise reason the
+        // transport already computed (stashed in its LocalEndpoint on failure — e.g. DirectIP's
+        // SocketErrorCode or STUN's "no HOLE_PUNCH_ACK…") + an actionable next step, instead of the old
+        // opaque "Transport connection failed". The client's Transport is always the single concrete
+        // transport it joined with, so TransportType is accurate.
+        private string BuildTransportFailureReason()
+        {
+            var t = Transport;
+            if (t == null) return "Transport connection failed";
+
+            var detail = t.LocalEndpoint;
+            var stage = string.IsNullOrEmpty(detail) ? t.TransportType.ToString() : detail;
+
+            string hint;
+            switch (t.TransportType)
+            {
+                case TransportType.StunUDP:
+                    hint = "The invite code uses NAT hole-punching, which many home routers / CGNAT block. "
+                         + "Use Direct IP instead: the HOST forwards TCP 14242 to their PC, then you join with "
+                         + "their public IP typed as \"<host-public-ip>:14242\".";
+                    break;
+                case TransportType.DirectIP:
+                    hint = "Check the address and that the HOST forwarded TCP 14242 to their PC "
+                         + "(you, the client, need no port-forwarding). ConnectionRefused = wrong port / host "
+                         + "not hosting; TimedOut = firewall or port not forwarded.";
+                    break;
+                case TransportType.SteamP2P:
+                    hint = "Steam invite/join is not implemented yet. Paste the host's Steam ID, or use "
+                         + "Direct IP (host forwards TCP 14242).";
+                    break;
+                default:
+                    hint = null;
+                    break;
+            }
+            return hint == null ? stage : stage + "\n\n" + hint;
         }
 
         private void OnPeerConnected(ulong peerId, string endpoint)

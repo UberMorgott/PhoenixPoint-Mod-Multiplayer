@@ -331,6 +331,9 @@ namespace Multiplayer.Transport
             else
             {
                 Debug.LogWarning($"[Multiplayer] STUN connect failed: {failReason ?? "unknown"}");
+                // Surface the precise reason via LocalEndpoint so the UI failure dialog shows WHY the
+                // hole-punch/discovery failed, not a generic "connection failed".
+                LocalEndpoint = $"STUN(failed: {failReason ?? "unknown"})";
                 State = ConnectionState.Failed;
                 OnStateChanged?.Invoke(State);
             }
