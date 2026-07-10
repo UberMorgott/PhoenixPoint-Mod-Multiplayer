@@ -118,3 +118,52 @@ No new dependency. All Facepunch code is confined to `src/Transport/SteamInvite.
   main menu. There is no crash and no error; the join simply does not happen. Both players must have the
   Multiplayer mod enabled. (Vanilla PP has no co-op, so Steam's own "Join Game" has nothing to route to.)
 - **Host not running the mod**: no lobby is ever published, so the friend has nothing to accept.
+
+## Connection resilience & parity (WAN test hardening)
+
+Fixes from the 2-PC Steam WAN test. Constants: `HeartbeatIntervalMs=5000`, `HeartbeatTimeoutMs=20000`
+(`SessionManager`).
+
+- **Liveness = ANY inbound packet, not just Heartbeat** (`SessionManager.RefreshLiveness`, called from
+  the single receive chokepoint `NetworkEngine.OnPacketReceived`). Fixes the false "Host heartbeat timed
+  out — treating as host-leave" seen while `RosterProgress` (which bypasses the Heartbeat handler) was
+  still arriving during the host's save-pick. Only refreshes ALREADY-tracked peers (no phantom entry from
+  a pre-registration / rejected JOIN).
+- **Timeouts SUSPENDED during a co-op transfer/world-load** (`SaveTransfer.TransferActive || InPhase2 ||
+  LoadPhaseStarted`). A big WAN transfer can starve heartbeats and a slow-HDD native world-load can block
+  the busy peer's main thread >20 s — the peer is alive; the barrier owns its own straggler timeout
+  (`Phase1LoadTimeoutMs`/`RevealDeadlineMs` = 180 s).
+- **Half-open send channel detection (client)**: the client tracks the last `HeartbeatAck` separately. If
+  host traffic keeps ARRIVING but the host stops ACKing our heartbeats for `HeartbeatTimeoutMs`, our
+  client→host P2P session is half-open (dead outbound) → leave via the existing `HostLeaveHandler`
+  teardown chokepoint with a specific reason ("send channel dead — stage: heartbeat-ack timeout"). Ack
+  clock is pinned during a load so a long transfer can't false-fire on completion.
+- **`SteamTransport.SendPacket` no longer swallows errors**: counts consecutive send failures per peer,
+  logs the first, and after 5 in a row surfaces it — client-side as a transport failure
+  (`OnConnectionFailed`), host-side as that one client dropping (`OnPeerDisconnected`), never host-wide.
+  (Note: a HALF-open session reports send SUCCESS locally, so the ack-timeout above is what catches it.)
+- **Load overlay shows during the save DOWNLOAD phase** (`LoadOverlayVisibility.ShouldShow` gains
+  `downloading` = `SaveTransferCoordinator.IsDownloading`). Over WAN the ~1 MB download takes
+  seconds→minutes and precedes both the curtain "Loading" and phase-2 world-load, so it used to be a
+  blank screen. The host is never downloading, so no lobby-after-PLAY popup returns.
+
+### Parity gate (host/client DLC + mods + settings)
+
+At the join handshake — BEFORE any save transfer — the client sends a **parity manifest** inside its
+JOIN (`ParityManifestCollector.Collect` → pure `ParityManifest`/`ParityComparer` in `Multiplayer.Core`,
+riding the existing JOIN packet as a backward-compatible trailing block). The host compares it
+host-authoritatively and **blocks the join on any mismatch** with a never-silent dialog on BOTH sides
+(host message box + system-chat; client via `ConnectionRejected` → `OnConnectionFailed`) listing the
+EXACT diffs. `HandleConnectionRejected` is now never-silent for ALL reject reasons (was log-only).
+
+- **DLC** (platform entitlements, `GetPlatformEntitlement().IsUserEntitledFor`): blocks only when the
+  host has a DLC the client lacks (extra DLC on the client is fine).
+- **Mods** (`ModManager.Mods` where `Enabled`, id + `MetaData.Version`): missing / extra / version-differ
+  all block.
+- **Settings** (`ModConfig.GetConfigFields`, sorted `key=value` + crc32 per mod): any per-key value diff
+  blocks and is shown (`host=… client=…`).
+- **NOT auto-synced** — mods read config at load time, so settings distribution is a later increment.
+- **Settings-coverage LIMITATION**: values are stringified without a JSON dependency, so scalar settings
+  (bool/int/float/enum/string) diff exactly, but complex/array config values are compared by their stable
+  type-string only (equal values still hash equal; contents aren't shown in a diff). A client on an OLD
+  (pre-parity) Multiplayer build sends no manifest → treated as an unverifiable-parity mismatch → blocked.
