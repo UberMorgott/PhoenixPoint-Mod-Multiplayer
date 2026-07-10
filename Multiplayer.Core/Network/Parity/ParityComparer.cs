@@ -7,13 +7,15 @@ namespace Multiplayer.Network.Parity
     /// <summary>
     /// FIX-4 — pure host-authoritative parity comparison. <see cref="Compare"/> returns the list of
     /// human-readable diffs between the host manifest (reference) and a client manifest; an empty list
-    /// means the join passes. Blocking rules:
-    ///   • DLC: only "missing on client" blocks — the host save uses it and the client lacks it, so the
+    /// means full parity. SOFT GATE: a mismatched client still JOINS the lobby, but gets a roster
+    /// warning badge and cannot READY (<see cref="ReadyAllowed"/>, enforced host-side too) until the
+    /// diffs clear. Diff rules:
+    ///   • DLC: only "missing on client" diffs — the host save uses it and the client lacks it, so the
     ///     transferred save fails to deserialize. Extra DLC on the client is harmless (it just owns more).
-    ///   • Mods: missing / extra / version-differs all block — a def-patching mod divergence desyncs.
-    ///   • Settings: for a mod present on BOTH sides, any per-key value difference blocks (mods read
-    ///     config at load time, so different settings = different behaviour/defs).
-    /// Settings are reported but NOT auto-synced in this increment.
+    ///   • Mods: missing / extra / version-differs all diff — a def-patching mod divergence desyncs.
+    ///   • Settings: for a mod present on BOTH sides, any per-key value difference diffs (mods read
+    ///     config at load time, so different settings = different behaviour/defs). Host settings are
+    ///     AUTO-APPLIED on the client at join (ParityConfigSync); only unappliable keys keep diffing.
     /// </summary>
     public static class ParityComparer
     {
@@ -64,6 +66,12 @@ namespace Multiplayer.Network.Parity
         /// <summary>Join the diffs into a single message-box-ready block ("" when there are none).</summary>
         public static string Format(List<string> diffs)
             => diffs == null || diffs.Count == 0 ? "" : string.Join("\n", diffs);
+
+        /// <summary>
+        /// Parity soft-gate READY decision (shared by the host's authoritative gate and the client's
+        /// button lock): a peer may ready up only when its stored diff text is empty.
+        /// </summary>
+        public static bool ReadyAllowed(string parityDiffs) => string.IsNullOrEmpty(parityDiffs);
 
         private static Dictionary<string, string> ToModMap(List<ModRef> mods)
         {

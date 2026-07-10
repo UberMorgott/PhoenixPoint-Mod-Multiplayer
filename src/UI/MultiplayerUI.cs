@@ -299,6 +299,19 @@ namespace Multiplayer.UI
             engine.Session.SetClientReady(engine.LocalSteamId, ready);
         }
 
+        // Parity soft-gate: the roster "!" badge's click-through detail — the exact host-computed diff
+        // list. The lobby has no hover-tooltip mechanism; the native message box IS this mod's canonical
+        // never-silent detail surface.
+        public void OnLobbyShowParityDiffs(string diffs)
+        {
+            if (string.IsNullOrEmpty(diffs)) return;
+            var mb = GameUtl.GetMessageBox();
+            mb?.ShowSimplePrompt(
+                "Mods / DLC / mod settings differ from the host:\n\n" + diffs +
+                "\n\nREADY unlocks once these match the host.",
+                MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+        }
+
         // Nickname edit committed in the lobby panel.
         public void OnLobbyRename(string newName)
         {

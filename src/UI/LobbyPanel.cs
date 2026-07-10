@@ -54,6 +54,14 @@ namespace Multiplayer.UI
         // the second player's Ready arrives), never every frame. -1 = not yet applied.
         private int _playActiveCache = -1;
         private int _playInteractableCache = -1;
+        // Parity soft-gate: the READY button's native controller + last-applied interactable state
+        // (mirror of the Play button's repaint machinery — cloned native buttons repaint only via
+        // SetInteractable, see RefreshPlayButtonVisual). -1 = not yet applied.
+        private object _readyButtonCtrl;
+        private System.Reflection.MethodInfo _readyButtonSetInteractable;
+        private int _readyInteractableCache = -1;
+        // True while the LOCAL player's own roster row carries parity diffs → READY locked.
+        private bool _parityLocked;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
         private Text _railStunValue;
@@ -100,7 +108,10 @@ namespace Multiplayer.UI
             public GameObject Go;
             public Text ReadyLabel;    // col 1: far-left fixed-width ready check ("✓" when ready, else blank)
             public Text NameLabel;     // col 2: bare nickname, left-aligned, fills remaining width
-            public Button RenameBtn;   // col 3: far-right pencil; shown/interactable only on the local row
+            public Button WarnBtn;     // col 3: parity warning badge ("!"); shown only on a mismatched row,
+                                       //        click → exact diff list via the native message box
+            public Button RenameBtn;   // col 4: far-right pencil; shown/interactable only on the local row
+            public string ParityDiffs; // current row's diff text ("" = OK) — read by WarnBtn's onClick
         }
 
         // SINGLE visibility lever = the lobby's own overlay Canvas GameObject. While that GO is
@@ -657,7 +668,22 @@ namespace Multiplayer.UI
                     UpdateReadyButtonLabel();
                 });
             if (_readyButton != null)
+            {
                 AddCloneLayoutElement(_readyButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
+                // Parity soft-gate: resolve the clone's native PhoenixGeneralButton controller ONCE so
+                // the READY lock can repaint the greyed visual immediately (same machinery + reasons as
+                // the Play button below — interactable alone doesn't repaint a cloned native button).
+                var readyPgbType = HarmonyLib.AccessTools.TypeByName(
+                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
+                if (readyPgbType != null)
+                {
+                    _readyButtonCtrl = _readyButton.GetComponentInParent(readyPgbType)
+                        ?? _readyButton.GetComponentInChildren(readyPgbType);
+                    if (_readyButtonCtrl != null)
+                        _readyButtonSetInteractable =
+                            HarmonyLib.AccessTools.Method(readyPgbType, "SetInteractable", new[] { typeof(bool) });
+                }
+            }
             else
             {
                 _readyButton = UiToolkit.CreateButton(footer, "ReadyBtn", "READY",
@@ -1052,6 +1078,32 @@ namespace Multiplayer.UI
                 // relabel the button. This overrides any optimistic click flip with the truth (e.g. after
                 // a reconnect or if the host's view differs), without re-invoking OnLobbyToggleReady.
                 _localReady = me != null && me.Ready;
+
+                // Parity soft-gate READY LOCK: my own roster row carries host-computed diffs → grey the
+                // button (label names the reason; the row's "!" badge click shows the exact diffs). The
+                // host ALSO ignores a READY from a mismatched client (SetClientReady), so this lock is
+                // UX only — authority stays host-side. Repaint via the native SetInteractable path on a
+                // real transition only (cache guard), mirroring the Play button.
+                _parityLocked = me != null
+                    && !Multiplayer.Network.Parity.ParityComparer.ReadyAllowed(me.ParityDiffs);
+                if (_readyButton != null)
+                {
+                    var interactable = !_parityLocked;
+                    _readyButton.interactable = interactable;
+                    var interactableNow = interactable ? 1 : 0;
+                    if (interactableNow != _readyInteractableCache)
+                    {
+                        _readyInteractableCache = interactableNow;
+                        if (_readyButtonCtrl != null && _readyButtonSetInteractable != null)
+                        {
+                            try { _readyButtonSetInteractable.Invoke(_readyButtonCtrl, new object[] { interactable }); }
+                            catch (System.Exception e)
+                            {
+                                UnityEngine.Debug.LogError("[Multiplayer] Ready button repaint failed: " + e.Message);
+                            }
+                        }
+                    }
+                }
                 UpdateReadyButtonLabel();
             }
 
@@ -1122,7 +1174,10 @@ namespace Multiplayer.UI
         private void UpdateReadyButtonLabel()
         {
             if (_readyButtonLabel == null) return;
-            _readyButtonLabel.text = _localReady ? "✓ READY" : "READY";
+            // Parity soft-gate: the locked button itself names the reason (the row's "!" badge click
+            // shows the exact diff list).
+            _readyButtonLabel.text = _parityLocked ? "MODS MISMATCH"
+                : _localReady ? "✓ READY" : "READY";
         }
 
         // Rebuild/refresh the player rows from the unified lobby roster (host self-entry + clients).
@@ -1187,6 +1242,16 @@ namespace Multiplayer.UI
                         row.ReadyLabel.text = "✓";
                         row.ReadyLabel.color = new Color(0.7f, 0.8f, 1f);
                     }
+                }
+
+                // PARITY badge: shown only when this peer's row carries diffs (host sees it on the
+                // mismatched client's row; the client sees it on its OWN row). Click → exact diff list.
+                row.ParityDiffs = p.ParityDiffs ?? "";
+                if (row.WarnBtn != null)
+                {
+                    var warn = row.ParityDiffs.Length > 0;
+                    if (row.WarnBtn.gameObject.activeSelf != warn)
+                        row.WarnBtn.gameObject.SetActive(warn);
                 }
 
                 // RENAME pencil: shown + interactable ONLY on the local player's own row (the onClick
@@ -1306,7 +1371,33 @@ namespace Multiplayer.UI
             nle.preferredWidth = LobbyTheme.ScaledRosterNameWidth;
             nle.flexibleWidth = 1;
 
-            // (3) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
+            // (3) PARITY warning badge — a small native-cloned button ("!", warning tint), hidden unless
+            // the row's peer has parity diffs (toggled per-frame in RefreshRoster, same pattern as the
+            // pencil). Click → the EXACT host-computed diff list via the native message box (the lobby
+            // has no hover-tooltip mechanism; the message box is this mod's canonical detail surface).
+            // Reads the CURRENT pool row's diffs by index so a reused row never shows stale text.
+            System.Action showDiffs = () =>
+            {
+                if (index < _rows.Count) _owner.OnLobbyShowParityDiffs(_rows[index].ParityDiffs);
+            };
+            var warnBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "ParityWarnBtn", "!",
+                () => showDiffs());
+            if (warnBtn != null)
+                AddCloneLayoutElement(warnBtn, go.transform, icon, icon);
+            else
+            {
+                warnBtn = UiToolkit.CreateButton(go, "ParityWarnBtn", "!",
+                    Vector2.zero, new Vector2(icon, icon), new Vector2(1f, 0.5f),
+                    () => showDiffs());
+                var wle = LE(warnBtn.gameObject);
+                wle.preferredWidth = icon; wle.preferredHeight = icon; wle.flexibleWidth = 0;
+            }
+            // Warning tint on the badge glyph so it reads as "attention", not a normal action button.
+            var warnTxt = warnBtn.GetComponentInChildren<Text>();
+            if (warnTxt != null) warnTxt.color = new Color(1f, 0.75f, 0.2f);
+            warnBtn.gameObject.SetActive(false); // hidden until RefreshRoster sees diffs
+
+            // (4) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
             // live ownership (this pool slot must currently render the local player, tracked in
             // _myRowIndex) so a pooled row reused for another peer can never rename the wrong one; the
             // button is also hidden/disabled for non-local rows each frame in RefreshRoster. Reuse the
@@ -1324,7 +1415,11 @@ namespace Multiplayer.UI
                 rle.preferredWidth = icon; rle.preferredHeight = icon; rle.flexibleWidth = 0;
             }
 
-            return new RosterRow { Go = go, ReadyLabel = readyLabel, NameLabel = nameLabel, RenameBtn = renameBtn };
+            return new RosterRow
+            {
+                Go = go, ReadyLabel = readyLabel, NameLabel = nameLabel,
+                WarnBtn = warnBtn, RenameBtn = renameBtn, ParityDiffs = ""
+            };
         }
     }
 }

@@ -125,6 +125,12 @@ namespace Multiplayer.Network.MessageLayer
                     bw.Write((byte)(peer.IsHost ? 1 : 0));
                     bw.Write(peer.SlotIndex);
                 }
+                // Parity soft-gate: per-peer diff text as a TRAILING block (append-only, backward-
+                // compatible — a legacy reader stops after the entries and never touches it). Aligned
+                // by entry index; "" = parity OK.
+                bw.Write(true);
+                foreach (var peer in peers)
+                    bw.Write(peer.ParityDiffs ?? "");
                 return ms.ToArray();
             }
         }
@@ -149,6 +155,10 @@ namespace Multiplayer.Network.MessageLayer
                         SlotIndex = br.ReadByte()
                     });
                 }
+                // Trailing parity block (see SerializePeerList) — absent on a legacy sender.
+                if (ms.Position < ms.Length && br.ReadBoolean())
+                    for (var i = 0; i < n; i++)
+                        peers[i].ParityDiffs = br.ReadString();
                 return peers;
             }
         }
@@ -492,6 +502,9 @@ namespace Multiplayer.Network.MessageLayer
         public bool Ready { get; set; }
         public bool IsHost { get; set; }   // true for the host's own self-entry in the roster
         public byte SlotIndex { get; set; }   // host-assigned stable slot; 0 = host
+        /// <summary>Parity soft-gate: exact host-computed diff text ("" = parity OK). Drives the roster
+        /// warning badge + the client-side Ready lock; the host also gates Ready authoritatively.</summary>
+        public string ParityDiffs { get; set; } = "";
     }
 
     /// <summary>One row of the host-aggregated RosterProgress snapshot (~3 bytes on the wire).</summary>

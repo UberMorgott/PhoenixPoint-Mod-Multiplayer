@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using Base.Core;
-using Base.UI.MessageBox;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Parity;
 using Multiplayer.Validation;
@@ -357,34 +355,17 @@ namespace Multiplayer.Network
                 return;
             }
 
-            // FIX-4: host/client PARITY GATE — runs BEFORE onboarding + any save transfer. Compare the
-            // host's live manifest (enabled/owned DLC + enabled mods + per-mod settings) against the
-            // joiner's manifest (carried in JOIN). On ANY mismatch, block the join with a never-silent
-            // dialog listing the EXACT diffs on BOTH sides and do NOT register the client. Host-
-            // authoritative: the host computes the diff and ships it in the rejection reason so the
-            // client shows the identical list. Settings are checked but NOT auto-synced in this
-            // increment (mods read config at load time; distribution is later work).
+            // FIX-4 (SOFT GATE): host/client parity check — the mismatched client still JOINS the lobby
+            // normally, but the host stores the exact diff text on its roster row. The diff rides the
+            // PEER_LIST broadcast, so BOTH sides render the warning badge (host on that player's row,
+            // the client on its own row) and the client locks its READY button; the host ALSO gates
+            // Ready authoritatively in SetClientReady (never trust client UI). Host-authoritative: the
+            // host computes the one diff text every UI shows.
             var parityDiffs = ParityComparer.Compare(ParityManifestCollector.Collect(), join.Manifest);
+            var parityDiffText = ParityComparer.Format(parityDiffs);
             if (parityDiffs.Count > 0)
-            {
-                var diffText = ParityComparer.Format(parityDiffs);
-                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: parity mismatch:\n{diffText}");
-                var who = string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname;
-                SystemChat($"— join blocked ({who}): mod / DLC / settings mismatch —");
-                try
-                {
-                    GameUtl.GetMessageBox()?.ShowSimplePrompt(
-                        "Co-op join blocked — the joining player's mods, DLC or mod settings differ from yours:\n\n" + diffText,
-                        MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
-                }
-                catch (Exception e) { Debug.LogError("[Multiplayer] parity host prompt failed: " + e.Message); }
-
-                var parityReject = new NetworkMessage(PacketType.ConnectionRejected,
-                    NetworkMessage.BuildStringPayload(
-                        "Co-op requires identical mods, DLC and mod settings on both players.\n\n" + diffText));
-                _engine.SendToClient(clientId, parityReject);
-                return;
-            }
+                Debug.LogWarning($"[Multiplayer] JOIN from {clientId} has parity mismatch (soft-gate, " +
+                                 $"ready locked):\n{parityDiffText}");
 
             AddClient(clientId, $"Steam({clientId})");
 
@@ -394,6 +375,7 @@ namespace Multiplayer.Network
                 client.PlayerGuid = join.PlayerGuid;
                 if (!string.IsNullOrEmpty(join.Nickname))
                     client.PlayerName = join.Nickname;
+                client.ParityDiffs = parityDiffText; // "" = parity OK
 
                 // Co-op "allow everything" policy (no per-player permission menu yet): grant the
                 // joining client FullCommander, keyed by its persistent playerGUID (the permission
@@ -505,6 +487,16 @@ namespace Multiplayer.Network
         {
             if (_engine.IsHost)
             {
+                // Parity soft-gate (host-authoritative — never trust the client's locked button): a
+                // client whose roster row carries parity diffs may NOT ready up. Single chokepoint:
+                // HandleReadyState (the ClientReady packet) routes through here too.
+                if (ready && _clients.TryGetValue(steamId, out var pc)
+                          && !ParityComparer.ReadyAllowed(pc.ParityDiffs))
+                {
+                    Debug.LogWarning($"[Multiplayer] Ignoring READY from {steamId}: parity mismatch " +
+                                     $"(soft-gate):\n{pc.ParityDiffs}");
+                    return;
+                }
                 if (ready) _readyClients.Add(steamId);
                 else _readyClients.Remove(steamId);
                 if (_clients.TryGetValue(steamId, out var readyClient))
@@ -596,7 +588,8 @@ namespace Multiplayer.Network
                 Permissions = PermissionManager.GetPermissions(ClientIdentity.PlayerGuid),
                 Ready = HostReady,
                 IsHost = true,
-                SlotIndex = 0
+                SlotIndex = 0,
+                ParityDiffs = "" // the host is the parity reference — always OK
             });
 
             foreach (var c in _clients.Values)
@@ -610,7 +603,8 @@ namespace Multiplayer.Network
                     Permissions = c.Permissions,
                     Ready = c.IsReady,
                     IsHost = false,
-                    SlotIndex = c.SlotIndex
+                    SlotIndex = c.SlotIndex,
+                    ParityDiffs = c.ParityDiffs ?? ""
                 });
             }
             return peers;
@@ -866,6 +860,7 @@ namespace Multiplayer.Network
         public string PlayerName { get; set; } = "Unknown";
         public int Permissions { get; set; }
         public bool IsReady { get; set; }             // mirror of _readyClients for PEER_LIST broadcast
+        public string ParityDiffs { get; set; } = ""; // FIX-4 soft-gate: exact diff text ("" = parity OK)
         public int LatencyMs { get; set; }
         public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)
         public DateTime ConnectedAt { get; set; }

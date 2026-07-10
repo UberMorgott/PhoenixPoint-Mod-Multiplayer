@@ -125,4 +125,70 @@ public class ParityTests
         var legacyBack = MessageSerializer.DeserializeJoin(MessageSerializer.SerializeJoin(legacy));
         Assert.Null(legacyBack.Manifest);
     }
+
+    // ─── Soft gate: ready decision + roster wire + status transitions ───
+
+    [Fact]
+    public void ReadyAllowed_OnlyWhenDiffsEmpty()
+    {
+        Assert.True(ParityComparer.ReadyAllowed(""));
+        Assert.True(ParityComparer.ReadyAllowed(null));
+        Assert.False(ParityComparer.ReadyAllowed("Mod missing on client: x v1.0"));
+    }
+
+    [Fact]
+    public void PeerList_CarriesParityDiffs_RoundTrip()
+    {
+        var peers = new List<PeerListEntry>
+        {
+            new PeerListEntry { SteamId = 1, PlayerGuid = System.Guid.NewGuid(), Nickname = "host",
+                                IsHost = true, SlotIndex = 0, ParityDiffs = "" },
+            new PeerListEntry { SteamId = 2, PlayerGuid = System.Guid.NewGuid(), Nickname = "cl",
+                                Ready = true, SlotIndex = 1, ParityDiffs = "Mod missing on client: x v1.0" },
+        };
+        var back = MessageSerializer.DeserializePeerList(MessageSerializer.SerializePeerList(peers));
+        Assert.Equal("", back[0].ParityDiffs);
+        Assert.Equal("Mod missing on client: x v1.0", back[1].ParityDiffs);
+        Assert.True(back[1].Ready); // pre-existing fields untouched by the trailing block
+    }
+
+    [Fact]
+    public void PeerList_LegacyPayloadWithoutTrailingBlock_Parses()
+    {
+        // Simulate a legacy sender: serialize, then TRUNCATE the trailing parity block (marker byte
+        // onward). A new reader must parse the entries and default ParityDiffs to "".
+        var peers = new List<PeerListEntry>
+        {
+            new PeerListEntry { SteamId = 7, PlayerGuid = System.Guid.NewGuid(), Nickname = "p",
+                                SlotIndex = 0, ParityDiffs = "" },
+        };
+        var full = MessageSerializer.SerializePeerList(peers);
+        // Trailing block for 1 peer with "" diffs = bool(1) + 7-bit-len(1) = 2 bytes.
+        var legacy = new byte[full.Length - 2];
+        System.Array.Copy(full, legacy, legacy.Length);
+        var back = MessageSerializer.DeserializePeerList(legacy);
+        Assert.Single(back);
+        Assert.Equal("", back[0].ParityDiffs);
+        Assert.Equal(7UL, back[0].SteamId);
+    }
+
+    [Fact]
+    public void StatusTransition_MismatchThenFixed_ClearsAndUnlocksReady()
+    {
+        var host = Build(new string[0], new[] { ("m", "1.0") },
+            new[] { ("m", (IEnumerable<(string, string)>)new[] { ("speed", "2") }) });
+        var clientBefore = Build(new string[0], new[] { ("m", "1.0") },
+            new[] { ("m", (IEnumerable<(string, string)>)new[] { ("speed", "5") }) });
+
+        // Mismatch → diff text non-empty → ready locked.
+        var diffText = ParityComparer.Format(ParityComparer.Compare(host, clientBefore));
+        Assert.False(ParityComparer.ReadyAllowed(diffText));
+        Assert.Contains("Setting m.speed: host=2 client=5", diffText);
+
+        // Client converges (auto-apply host settings) → re-compare → clear → ready allowed.
+        var clientAfter = Build(new string[0], new[] { ("m", "1.0") },
+            new[] { ("m", (IEnumerable<(string, string)>)new[] { ("speed", "2") }) });
+        var after = ParityComparer.Format(ParityComparer.Compare(host, clientAfter));
+        Assert.True(ParityComparer.ReadyAllowed(after));
+    }
 }
