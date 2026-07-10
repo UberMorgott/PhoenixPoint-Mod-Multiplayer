@@ -394,6 +394,7 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _isCharacterChanged;       // UIModuleCharacterProgression.IsCharacterChanged()
         private static FieldInfo _boughtAbilitySlotField;    // UIModuleCharacterProgression._boughtAbilitySlot
         private static MethodInfo _setCharacterProgression;  // UIModuleCharacterProgression.SetCharacterProgression(GeoFaction,char)
+        private static MethodInfo _clearBoughtAbility;        // UIModuleCharacterProgression.ClearBoughtAbility() (nulls _boughtAbilitySlot + RefreshAbilityTracks; :452)
         private static MethodInfo _refreshStatPanel;         // UIModuleCharacterProgression.RefreshStatPanel() (repaints panel from buffer; NO buffer reset)
         private static FieldInfo _progHasPandoranField;      // UIModuleCharacterProgression._hasPandoranProgression (mutagen path → no SP pool)
         private static FieldInfo _progPhoenixFactionField;   // UIModuleCharacterProgression._phoenixFaction (GeoPhoenixFaction, cached on open)
@@ -463,6 +464,10 @@ namespace Multiplayer.Network.Sync.State
                     _isCharacterChanged = AccessTools.Method(progType, "IsCharacterChanged");
                     _boughtAbilitySlotField = AccessTools.Field(progType, "_boughtAbilitySlot");
                     _setCharacterProgression = AccessTools.Method(progType, "SetCharacterProgression");
+                    // FIX 2: SetCharacterProgression resets the stat buffer but NOT _boughtAbilitySlot/_boughtAbility
+                    // (:463 → RefreshStats never touches them), so a ConflictRepaint that discards a pending edit
+                    // must ALSO clear the armed ability slot natively — else the next confirm buys a spurious ability.
+                    _clearBoughtAbility = AccessTools.Method(progType, "ClearBoughtAbility");
                     // PartialRepaint plumbing: refresh the shared faction-SP pool label from the model without
                     // resetting the stat/ability edit buffer. RefreshStatPanel repaints from _current* (buffer),
                     // so the label reads from _currentFactionPoints — we reconcile that baseline to the live
@@ -652,20 +657,28 @@ namespace Multiplayer.Network.Sync.State
                         viewedUnitId, stampArmed ? stampIds : null, stampArmed && stampSp);
                     if (outcome == ProgressionRepaintDecision.Outcome.PartialRepaint)
                     {
-                        PartialRepaintProgression(progModule);   // shared faction-SP pool label, buffer preserved
-                        if (stampArmed)
-                            Debug.Log("[Multiplayer] GeoUiRefresh: progression PARTIAL repaint (shared faction-SP pool) — open unit="
-                                      + viewedUnitId + " not in stamped=[" + JoinIds(stampIds) + "], local edit buffer preserved");
+                        if (PartialRepaintProgression(progModule))   // shared faction-SP pool label, buffer preserved
+                        {
+                            if (stampArmed)
+                                Debug.Log("[Multiplayer] GeoUiRefresh: progression PARTIAL repaint (shared faction-SP pool) — open unit="
+                                          + viewedUnitId + " not in stamped=[" + JoinIds(stampIds) + "], local edit buffer preserved");
+                        }
+                        // FIX 1: the local pending faction-SP draw now exceeds the live shared pool (a remote peer
+                        // over-committed it) — the partial baseline shift would push _currentFactionPoints below 0.
+                        // Escalate to a full ConflictRepaint (remote wins, discard the unaffordable buffer + clear
+                        // the stale bought slot) so nothing later written to Skillpoints can go negative.
+                        else if (FullRedriveProgression(progModule, geo, character, conflict: true, stampArmed))
+                            Debug.Log("[Multiplayer] GeoUiRefresh: progression OVER-COMMITTED SP pool — partial shift unaffordable, "
+                                      + "full ConflictRepaint (remote wins, local buffer discarded) unit=" + viewedUnitId
+                                      + " stamped=[" + JoinIds(stampIds) + "]");
                     }
                     else if (outcome == ProgressionRepaintDecision.Outcome.Repaint
                              || outcome == ProgressionRepaintDecision.Outcome.ConflictRepaint)
                     {
-                        object viewerFaction = _viewerFactionProp.GetValue(geo, null);
-                        if (viewerFaction == null) ProgressionStampDiag(stampArmed, "ViewerFaction null");
-                        else
+                        bool conflict = outcome == ProgressionRepaintDecision.Outcome.ConflictRepaint;
+                        if (FullRedriveProgression(progModule, geo, character, conflict, stampArmed))
                         {
-                            _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
-                            if (outcome == ProgressionRepaintDecision.Outcome.ConflictRepaint)
+                            if (conflict)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression CONFLICT repaint — remote changed OPEN unit="
                                           + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); local uncommitted allocation discarded, remote wins");
                             else if (stampArmed)
@@ -705,12 +718,15 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>PartialRepaint: a remote apply moved the SHARED faction-SP pool but not the open soldier, so
         /// refresh the pool label WITHOUT resetting the stat/ability edit buffer. RefreshStatPanel writes the
         /// label from <c>_currentFactionPoints</c> (buffer), so first reconcile that baseline to the live pool —
-        /// shift BOTH <c>_starting/_currentFactionPoints</c> by the model delta so the user's pending spend count
-        /// (current − starting) survives — then re-drive the module's own RefreshStatPanel. The per-soldier
+        /// shift BOTH <c>_starting/_currentFactionPoints</c> to the model so the user's pending draw
+        /// (starting − current) survives — then re-drive the module's own RefreshStatPanel. The per-soldier
         /// stat/SP buffer is never touched. Skipped for mutoid (mutagen-cost) progression and a non-Phoenix
-        /// faction (no pooled SP). ponytail: buffer-delta reconcile, not a live label-element write — upgrade only
-        /// if sub-frame pool accuracy mid-allocation ever matters. Best-effort; never throws.</summary>
-        private static void PartialRepaintProgression(object progModule)
+        /// faction (no pooled SP). Returns <c>true</c> = partial shift done (or nothing to shift); <c>false</c> =
+        /// FIX 1 over-committed — the live pool can no longer cover the local pending draw, so the shift would
+        /// push <c>_currentFactionPoints</c> below 0; the caller must escalate to a full ConflictRepaint instead.
+        /// ponytail: buffer reconcile, not a live label-element write — upgrade only if sub-frame pool accuracy
+        /// mid-allocation ever matters. Best-effort; never throws.</summary>
+        private static bool PartialRepaintProgression(object progModule)
         {
             try
             {
@@ -721,17 +737,78 @@ namespace Multiplayer.Network.Sync.State
                 {
                     int live = Convert.ToInt32(_phoenixFactionSkillpointsField.GetValue(pf));
                     int start = Convert.ToInt32(_progStartingFactionPointsField.GetValue(progModule));
-                    int delta = live - start;
-                    if (delta != 0)
+                    int cur = Convert.ToInt32(_progCurrentFactionPointsField.GetValue(progModule));
+                    // FIX 1: is the local pending draw (start − cur, ≥ 0 — native clamps current ≤ starting) still
+                    // covered by the live pool? If not, shifting the baseline would set _currentFactionPoints
+                    // negative (over-spend) — bail to a ConflictRepaint. shiftedCur is always ≥ 0 when affordable.
+                    if (!ProgressionRepaintDecision.CanPartialShiftFactionSp(live, start, cur, out int shiftedCur))
+                        return false;
+                    if (live != start)
                     {
                         _progStartingFactionPointsField.SetValue(progModule, live);
-                        int cur = Convert.ToInt32(_progCurrentFactionPointsField.GetValue(progModule));
-                        _progCurrentFactionPointsField.SetValue(progModule, cur + delta);
+                        _progCurrentFactionPointsField.SetValue(progModule, shiftedCur);
                     }
                 }
                 _refreshStatPanel?.Invoke(progModule, null);
+                return true;
             }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.PartialRepaintProgression best-effort failed: " + ex.Message); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer] GeoUiRefresh.PartialRepaintProgression best-effort failed: " + ex.Message);
+                return true;   // a reflection miss must not escalate to a buffer-discarding ConflictRepaint
+            }
+        }
+
+        /// <summary>Full progression re-drive from the model: <c>SetCharacterProgression</c> re-snapshots the
+        /// stat/SP edit buffer. When <paramref name="conflict"/>, ALSO clear the stale armed ability slot (FIX 2:
+        /// SetCharacterProgression resets the stat buffer but not <c>_boughtAbilitySlot</c>/<c>_boughtAbility</c>,
+        /// so a discarded pending edit would leave an armed slot → the next confirm buys a spurious ability).
+        /// Returns <c>false</c> + DIAG when the viewer faction is unresolved (nothing re-driven). Never throws
+        /// (caller-wrapped).</summary>
+        private static bool FullRedriveProgression(object progModule, object geo, object character, bool conflict, bool stampArmed)
+        {
+            object viewerFaction = _viewerFactionProp.GetValue(geo, null);
+            if (viewerFaction == null) { ProgressionStampDiag(stampArmed, "ViewerFaction null"); return false; }
+            _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+            if (conflict) _clearBoughtAbility?.Invoke(progModule, null);   // FIX 2
+            return true;
+        }
+
+        /// <summary>FIX 3 commit-seam backstop: unconditionally re-drive the OPEN soldier's progression panel
+        /// from the model once, called from the native CommitStatChanges / BuyAbility postfix after THIS peer's
+        /// local commit completes (Harmony runs postfixes even when a prefix suppresses the client edit). Covers
+        /// the gap the deleted owed-drain left: a SAME-unit apply that arrived UNSTAMPED (stampedUnitIds
+        /// null/incomplete) lands at <c>PartialRepaint</c>, which keeps the buffer but never re-drives the open
+        /// soldier — hiding a real remote change until the next stamped apply. No owed state / counters — the
+        /// commit already finalized/reset the local buffer, so this re-read clobbers nothing. Never-silent (logs
+        /// when it fires). No-op when the equip screen / progression module is closed. Never throws.</summary>
+        public static void RedriveOpenProgressionPanel(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureRosterFamily();
+                if (_editSoldierType == null || _editSoldierCharField == null || _progModuleField == null
+                    || _setCharacterProgression == null || _viewerFactionProp == null
+                    || _modulesField == null || _viewField == null || _currentViewStateProp == null) return;
+                var geo = rt?.GeoLevel();
+                if (geo == null) return;
+                var view = _viewField.GetValue(geo);
+                if (view == null) return;
+                var state = _currentViewStateProp.GetValue(view, null);
+                if (state == null || !_editSoldierType.IsInstanceOfType(state)) return;   // not the soldier-equip screen
+                var modules = _modulesField.GetValue(view);
+                if (modules == null) return;
+                var character = _editSoldierCharField.GetValue(state);
+                if (character == null) return;
+                var progModule = _progModuleField.GetValue(modules);
+                if (progModule == null || !IsOpen(progModule)) return;
+                object viewerFaction = _viewerFactionProp.GetValue(geo, null);
+                if (viewerFaction == null) return;
+                _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
+                Debug.Log("[Multiplayer] GeoUiRefresh: progression commit-seam backstop re-drive — open unit="
+                          + PersonnelReflection.ReadUnitId(character));
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.RedriveOpenProgressionPanel best-effort failed: " + ex.Message); }
         }
 
         /// <summary>Never-silent stamp accounting: a stat/SP-relevant apply armed the stamp but the repaint was

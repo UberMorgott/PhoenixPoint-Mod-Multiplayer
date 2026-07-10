@@ -51,6 +51,24 @@ namespace Multiplayer.Network.Sync.State
             return Outcome.Skip;
         }
 
+        /// <summary>FIX 1 over-committed-pool guard (pure arithmetic; the reflective caller is
+        /// <c>GeoUiRefresh.PartialRepaintProgression</c>). A PartialRepaint shifts the panel's faction-SP
+        /// baseline (<paramref name="startingFactionPoints"/>) to the live shared pool
+        /// (<paramref name="liveSkillpoints"/>) while preserving the local pending draw (starting − current,
+        /// always ≥ 0: native clamps current ≤ starting). If the live pool can no longer cover that pending draw
+        /// the shift would set <c>_currentFactionPoints</c> negative (an over-spend the host will reject) — the
+        /// caller must instead do a full ConflictRepaint (remote wins, discard the buffer). Returns
+        /// <c>true</c> = the partial shift is safe and <paramref name="shiftedCurrentFactionPoints"/> holds the
+        /// new current (guaranteed ≥ 0); <c>false</c> = over-committed.</summary>
+        public static bool CanPartialShiftFactionSp(int liveSkillpoints, int startingFactionPoints,
+            int currentFactionPoints, out int shiftedCurrentFactionPoints)
+        {
+            int pendingDraw = startingFactionPoints - currentFactionPoints;
+            if (pendingDraw < 0) pendingDraw = 0;   // defensive: never amplify a (nonexistent) negative draw
+            shiftedCurrentFactionPoints = liveSkillpoints - pendingDraw;
+            return shiftedCurrentFactionPoints >= 0;
+        }
+
         /// <summary>True only when the apply POSITIVELY stamped the open soldier — false for a null/unknown
         /// stamp or an unresolved open id (0), both of which must not discard a pending edit buffer.</summary>
         private static bool OpenUnitStamped(long openUnitId, IReadOnlyList<long> stampedUnitIds)

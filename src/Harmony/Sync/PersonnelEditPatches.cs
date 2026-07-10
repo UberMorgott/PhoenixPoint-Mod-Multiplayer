@@ -90,6 +90,24 @@ namespace Multiplayer.Harmony.Sync
             return false;
         }
 
+        /// <summary>FIX 3 commit-seam backstop: after a native progression commit seam (CommitStatChanges /
+        /// BuyAbility) completes on THIS peer — the host runs it natively, the client suppresses it in the Prefix
+        /// yet Harmony still runs the Postfix (postfixes are unaffected by a false-returning prefix) — re-drive
+        /// the OPEN soldier's progression panel once, unconditionally. Covers the gap the deleted owed-drain
+        /// postfixes left: a SAME-unit apply that arrived UNSTAMPED lands at PartialRepaint, which keeps the edit
+        /// buffer but never re-drives the open soldier (stale until the next stamped apply). Idempotent (the
+        /// commit already reset the local buffer); single-player untouched (gated on an active session).</summary>
+        internal static void CommitSeamBackstop()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return;   // single-player: no remote applies to backstop
+                GeoUiRefresh.RedriveOpenProgressionPanel(GeoRuntime.Instance);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.CommitSeamBackstop failed: " + ex.Message); }
+        }
+
         /// <summary>Destination container key for a transfer: (kind 1, VehicleID) for a GeoVehicle, else
         /// (kind 0, SiteId) for a GeoSite/base.</summary>
         internal static void ContainerKey(object container, out int kind, out int id)
@@ -339,6 +357,9 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] BuyAbilityProgressionRelayPatch failed: " + ex.Message); return true; }
         }
 
+        // FIX 3 commit-seam backstop — runs on host (native) and client (Prefix suppressed, Postfix still fires).
+        public static void Postfix() => PersonnelEditRelay.CommitSeamBackstop();
+
         /// <summary>Reset the module's pending-ability pick after a client-suppressed buy — the native cancel idiom
         /// (UIModuleCharacterProgression.ClearBoughtAbility :452 nulls _boughtAbilitySlot + refreshes the tracks).
         /// Best-effort: a miss must never break the suppress path.</summary>
@@ -406,6 +427,9 @@ namespace Multiplayer.Harmony.Sync
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] CommitStatChangesProgressionRelayPatch failed: " + ex.Message); return true; }
         }
+
+        // FIX 3 commit-seam backstop — runs on host (native) and client (Prefix suppressed, Postfix still fires).
+        public static void Postfix() => PersonnelEditRelay.CommitSeamBackstop();
 
         private static int Delta(Type t, object inst, string currentField, string startingField)
         {
