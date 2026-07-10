@@ -142,10 +142,28 @@ Fixes from the 2-PC Steam WAN test. Constants: `HeartbeatIntervalMs=5000`, `Hear
   logs the first, and after 5 in a row surfaces it — client-side as a transport failure
   (`OnConnectionFailed`), host-side as that one client dropping (`OnPeerDisconnected`), never host-wide.
   (Note: a HALF-open session reports send SUCCESS locally, so the ack-timeout above is what catches it.)
-- **Load overlay shows during the save DOWNLOAD phase** (`LoadOverlayVisibility.ShouldShow` gains
-  `downloading` = `SaveTransferCoordinator.IsDownloading`). Over WAN the ~1 MB download takes
-  seconds→minutes and precedes both the curtain "Loading" and phase-2 world-load, so it used to be a
-  blank screen. The host is never downloading, so no lobby-after-PLAY popup returns.
+- **Client enters the game's NATIVE loading screen for the save DOWNLOAD** (not the lobby + a corner
+  plaque). On the first received chunk (`SaveTransferCoordinator.OnSaveChunk` first-chunk branch →
+  `MultiplayerUI.EnterDownloadLoadingScreen`) the client drops the native curtain
+  (`LevelSwitchCurtainController.DropCurtainInstant`) and hides the lobby, so the full-screen loading
+  page appears immediately. The native BOTTOM bar shows TWO sequential phases on the SAME
+  `Base.Utils.ProgressBarController`:
+  1. **Download** 0→100% — `NativeWidgetFactory.BeginDownloadBar` assigns the live bar a
+     `Base.Core.LoadingProgress` via its private `_currentLoadingProgress` field and the per-frame
+     `Update` driver calls `SetDownloadBar(rxReceived/rxTotalBytes)`; label `LoadingText` = "Downloading
+     save…" (→ "Waiting for players…" while it holds full through the prepare + LOADED-barrier gap).
+  2. **Level load** — at phase-2 the native path (`OnLevelStateChanged` Loading →
+     `SceneFadeController.DropCurtainInstant(level)` → `ProgressBar.SetLoadingLevel`) OVERWRITES the bar's
+     source with the level's own `LoadingProgress`; `SaveTransferCoordinator.SetLoadingLevel` clears the
+     download driver + restores the native label. Seamless hand-off, no flicker back to the lobby.
+- **Top-right plaque stays on top as secondary detail** during BOTH phases (`LoadOverlayVisibility.
+  ShouldShow` still gates on `downloading` = `IsDownloading`; the plaque canvas sorts at 7000, above the
+  native curtain). The host is never downloading, so no lobby-after-PLAY popup returns.
+- **Never-silent failure under the curtain**: a bad blob / checksum mismatch / prepare failure calls
+  `SaveTransferCoordinator.AbortDownloadCurtain(stage)` → `MultiplayerUI.OnClientTransferFailed` which
+  lifts the curtain, hides the plaque, and shows the staged native message box ("Save transfer failed
+  (<stage>)…") instead of stranding the player on a stuck bar. A lost link / leave routes through
+  `MultiplayerUI.TeardownLobbyState`, which also lifts the curtain.
 
 ### Parity SOFT-gate (host/client DLC + mods + settings)
 

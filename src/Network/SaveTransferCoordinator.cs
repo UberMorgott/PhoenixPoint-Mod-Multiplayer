@@ -174,6 +174,14 @@ namespace Multiplayer.Network
         // transfer, reset per-transfer in OnSaveChunk's first-chunk branch. Host is never a joiner.
         private bool _onDemandJoiner;
 
+        // ─── Client save-download native loading-screen driver ─────────────
+        // True from the first received save chunk until the download hands off to the real level-load
+        // (phase-2, SetLoadingLevel captures a loading Level) or aborts. While set, the per-frame Update
+        // drives the NATIVE bottom bar with the download fraction (via NativeWidgetFactory), so the
+        // client sees the game's own loading screen during the WAN transfer instead of the lobby. Never
+        // set on the host (OnSaveChunk is client-only).
+        private bool _downloadCurtain;
+
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
 
@@ -276,6 +284,28 @@ namespace Multiplayer.Network
             _liveProgressBar = _loadingLevel != null
                 ? Multiplayer.UI.NativeWidgetFactory.CaptureLiveProgressBar()
                 : null;
+
+            // Download → level-load hand-off: the real load just started, so the native path already
+            // reassigned the bottom bar's source (SceneFadeController.DropCurtainInstant(level) →
+            // ProgressBar.SetLoadingLevel). Stop our download driver + restore the native loading label
+            // so phase-2 shows the level-load progress with the native text. Client-only (host never
+            // set _downloadCurtain).
+            if (_loadingLevel != null && _downloadCurtain)
+            {
+                _downloadCurtain = false;
+                Multiplayer.UI.NativeWidgetFactory.EndDownloadBar();
+            }
+        }
+
+        // Never-silent: the download failed while the native loading screen was up (bad blob / checksum /
+        // prepare fail). Clear the download driver and hand off to the UI, which lifts the curtain + shows
+        // the staged failure dialog so the client is not stranded on a stuck bar. No-op if no curtain was up.
+        private void AbortDownloadCurtain(string stage)
+        {
+            if (!_downloadCurtain) return;
+            _downloadCurtain = false;
+            Multiplayer.UI.NativeWidgetFactory.EndDownloadBar();
+            Multiplayer.UI.MultiplayerUI.Instance?.OnClientTransferFailed(stage);
         }
 
         /// <summary>
@@ -832,6 +862,13 @@ namespace Multiplayer.Network
                 _loadingLevel = null;
                 _liveProgressBar = null;
                 _tracker.Reset(); // drop prior run's per-slot progress + done so the new load shows from 0
+                // Enter the game's NATIVE loading screen for this download RIGHT NOW: drop the curtain +
+                // start driving the bottom bar with the download %, hide the lobby. The client no longer
+                // sits in the lobby with only a top-right plaque during the WAN transfer; the bar hands
+                // off to the real level-load progress at phase-2 (SetLoadingLevel). Client-only (OnSaveChunk
+                // returns early on the host). Once per transfer (this first-chunk branch runs once per id).
+                _downloadCurtain = true;
+                Multiplayer.UI.MultiplayerUI.Instance?.EnterDownloadLoadingScreen();
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
@@ -891,6 +928,7 @@ namespace Multiplayer.Network
                                $"{_rxChunksRemaining} chunk(s) still missing.");
                 SendLoaded(transferId, false);
                 ResetRx();
+                AbortDownloadCurtain("download incomplete");
                 return;
             }
 
@@ -900,13 +938,14 @@ namespace Multiplayer.Network
                 Debug.LogError($"[Multiplayer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
                 SendLoaded(transferId, false);
                 ResetRx();
+                AbortDownloadCurtain("checksum mismatch");
                 return;
             }
 
             // Verified blob — load it in memory, but DEFER entering the level until BEGIN.
             PhoenixGame game;
             PhoenixSaveManager saveManager;
-            if (!TryGetGame(out game, out saveManager)) { SendLoaded(transferId, false); return; }
+            if (!TryGetGame(out game, out saveManager)) { SendLoaded(transferId, false); AbortDownloadCurtain("load init"); return; }
 
             var blob = _rxBuffer;
             var loadExt = string.IsNullOrEmpty(ext) ? SerializationComponent.DefaultExtension : ext;
@@ -938,13 +977,19 @@ namespace Multiplayer.Network
                 _onDemandJoiner = true;
                 Debug.Log($"[Multiplayer] ClientLoadCrt: on-demand join prepared ok={ok} → EnterLevel (no barrier)");
                 if (ok) EnterLevel();
-                else Debug.LogError("[Multiplayer] on-demand join: entry prepare FAILED; joiner cannot enter the level.");
+                else
+                {
+                    Debug.LogError("[Multiplayer] on-demand join: entry prepare FAILED; joiner cannot enter the level.");
+                    AbortDownloadCurtain("prepare");
+                }
                 yield break;
             }
 
             Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendLoaded(transferId, ok);
+            // Prepare failed: the barrier will never get our LOADED(true). Don't strand us on the curtain.
+            if (!ok) AbortDownloadCurtain("prepare");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1304,6 +1349,25 @@ namespace Multiplayer.Network
 
         public void Update()
         {
+            // Phase-1 (download) native bottom-bar driver — client only. While the save blob is arriving,
+            // feed the game's own loading-screen bar the exact download fraction so it fills 0..100% under
+            // the dropped curtain. When the download finishes we hold the bar full + relabel "Waiting for
+            // players…" through the prepare + LOADED-barrier gap; phase-2 (SetLoadingLevel) then hands the
+            // bar to the real level-load progress and clears this driver.
+            if (_downloadCurtain)
+            {
+                if (IsDownloading)
+                {
+                    Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(
+                        _rxTotalBytes > 0 ? (float)_rxReceived / _rxTotalBytes : 0f);
+                }
+                else
+                {
+                    Multiplayer.UI.NativeWidgetFactory.SetDownloadLabel("Waiting for players…");
+                    Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
+                }
+            }
+
             // Phase-2 progress pump — runs on EVERY peer (host + clients) regardless of overlay visibility.
             // Decoupled from the UI: the overlay being hidden must NOT stall progress/done reporting.
             if (InPhase2)

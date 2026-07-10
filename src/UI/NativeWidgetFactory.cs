@@ -390,6 +390,107 @@ namespace Multiplayer.UI
             if (pbc is Behaviour b) b.enabled = false;
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        //  Native bottom bar — DOWNLOAD-phase driver (client save transfer)
+        // ═══════════════════════════════════════════════════════════════════
+        //
+        // The client's WAN save DOWNLOAD precedes any real level load, so the game's own bottom bar
+        // would sit inert. We drive the SAME native bar the level-load uses: after the curtain is
+        // dropped (DropCurtainEarly → SceneFadeController.DropCurtainInstant(null), which activates the
+        // bar but leaves its ProgressBarController._currentLoadingProgress null → bar frozen at ~1%),
+        // we assign it a fresh Base.Core.LoadingProgress and UpdateProgress(0..1) with the download
+        // fraction. The controller's own Update() then eases ProgressFill toward it (native easing +
+        // "NN%" text). At phase-2 the native path (OnLevelStateChanged Loading →
+        // SceneFadeController.DropCurtainInstant(level) → ProgressBar.SetLoadingLevel(level)) OVERWRITES
+        // _currentLoadingProgress with the level's own progress — the bar hands off with no flicker.
+        // Grounded: decompile Base.Utils.SceneFadeController.cs:70-80 / ProgressBarController.cs:46,62 /
+        // Base.Core.LoadingProgress.cs (public UpdateProgress). ProgressBarController is Base.Utils
+        // (reflection-only for the private field); Base.Core.LoadingProgress is referenceable directly.
+        private static Base.Core.LoadingProgress _downloadProgress;
+        private static Text _sceneLoadingText;
+        private static string _sceneLoadingTextOriginal;
+
+        /// <summary>
+        /// Begin driving the native bottom bar for the download phase. Requires the curtain already
+        /// dropped (so ProgressBar.gameObject is active). Assigns a fresh LoadingProgress to the live
+        /// ProgressBarController's private _currentLoadingProgress and relabels the loading text.
+        /// Returns false (no-op) if the native bar was not found — the top-right plaque then remains the
+        /// only download indicator.
+        /// </summary>
+        public static bool BeginDownloadBar(string label)
+        {
+            try
+            {
+                var pbc = CaptureLiveProgressBar(); // SceneFadeController.ProgressBar component
+                if (pbc == null) return false;
+                _downloadProgress = new Base.Core.LoadingProgress();
+                // Private ILoadingProgress field — set via reflection (same field-access style as
+                // GetProgressFill). The live controller's Update() eases fillAmount toward .Progress.
+                HarmonyLib.AccessTools.Field(pbc.GetType(), "_currentLoadingProgress")
+                    ?.SetValue(pbc, _downloadProgress);
+                _downloadProgress.UpdateProgress(0f);
+
+                // Phase label on the native loading text (restored at hand-off / abort).
+                _sceneLoadingText = GetSceneLoadingText();
+                if (_sceneLoadingText != null)
+                {
+                    _sceneLoadingTextOriginal = _sceneLoadingText.text;
+                    _sceneLoadingText.text = label ?? _sceneLoadingTextOriginal;
+                }
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] BeginDownloadBar failed: " + e.Message);
+                return false;
+            }
+        }
+
+        /// <summary>Drive the native bottom bar to the download fraction 0..1 (Update eases toward it).</summary>
+        public static void SetDownloadBar(float fraction01)
+        {
+            _downloadProgress?.UpdateProgress(Mathf.Clamp01(fraction01));
+        }
+
+        /// <summary>Set the native loading-screen label (idempotent — a same-string set is a no-op).</summary>
+        public static void SetDownloadLabel(string label)
+        {
+            if (_sceneLoadingText != null && label != null) _sceneLoadingText.text = label;
+        }
+
+        /// <summary>
+        /// Stop driving the download bar and restore the native loading label. Does NOT lift the curtain
+        /// (the level load continues under it) and does NOT null the bar's source — the native level-load
+        /// path reassigns it via SetLoadingLevel. Only clears OUR references + restores the label text.
+        /// </summary>
+        public static void EndDownloadBar()
+        {
+            if (_sceneLoadingText != null && _sceneLoadingTextOriginal != null)
+                _sceneLoadingText.text = _sceneLoadingTextOriginal;
+            _downloadProgress = null;
+            _sceneLoadingText = null;
+            _sceneLoadingTextOriginal = null;
+        }
+
+        // The live SceneFadeController.LoadingText (native loading-screen label), or null. Resolved by
+        // name — the mod assembly cannot strong-reference Base.Utils.SceneFadeController.
+        private static Text GetSceneLoadingText()
+        {
+            try
+            {
+                var sfcType = HarmonyLib.AccessTools.TypeByName("Base.Utils.SceneFadeController");
+                if (sfcType == null) return null;
+                var sfc = UnityEngine.Object.FindObjectOfType(sfcType);
+                if (sfc == null) return null;
+                return HarmonyLib.AccessTools.Field(sfcType, "LoadingText").GetValue(sfc) as Text;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] GetSceneLoadingText failed: " + e.Message);
+                return null;
+            }
+        }
+
         public static Sprite TryGetPanelBackgroundSprite()
         {
             try

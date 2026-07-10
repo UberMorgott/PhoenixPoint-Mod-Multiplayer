@@ -156,6 +156,45 @@ namespace Multiplayer.UI
         public void ShowLoadOverlay() => EnsureLoadOverlay().Show();
         public void HideLoadOverlay() => _loadOverlay?.Hide();
 
+        /// <summary>
+        /// CLIENT: on the first received save chunk, enter the game's NATIVE loading screen for the
+        /// download IMMEDIATELY (instead of sitting in the lobby with only the top-right plaque). Drops
+        /// the native curtain (full-screen loading page), begins driving its bottom bar with the download
+        /// %, and hides the lobby behind it. The bar hands off to the real level-load progress at phase-2
+        /// (SaveTransferCoordinator.SetLoadingLevel). The top-right plaque still shows on top (sort 7000)
+        /// as secondary per-peer detail. Idempotent per transfer (the coordinator guards the first-chunk call).
+        /// </summary>
+        public void EnterDownloadLoadingScreen()
+        {
+            DropCurtainEarly();                                        // full-screen native loading page
+            NativeWidgetFactory.BeginDownloadBar("Downloading save…"); // drive the bottom bar with download %
+            _lobby?.HideForNativeScreen();                            // lobby out of the way, session intact
+        }
+
+        /// <summary>
+        /// CLIENT never-silent: the save transfer failed WHILE the native loading screen is up (bad blob /
+        /// checksum / prepare fail). Lift the curtain + hide the plaque so the player is not stranded on a
+        /// stuck bar, then surface the staged failure via the native message box and return to the lobby
+        /// (the session is still connected; the host owns the straggler timeout).
+        /// </summary>
+        public void OnClientTransferFailed(string stage)
+        {
+            LiftCurtainEarly();
+            HideLoadOverlay();
+            var mb = GameUtl.GetMessageBox();
+            if (mb != null)
+            {
+                _lobby?.HideForNativeScreen();
+                mb.ShowSimplePrompt($"Save transfer failed ({stage}). Returning to the lobby.",
+                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
+            else
+            {
+                _lobby?.Show();
+            }
+        }
+
         // Force the native curtain down early so phase-1 (download) shows under a vanilla-style
         // loading screen. Resolved dynamically; on any failure we fall back to the overlay's own
         // opaque backdrop (the overlay panel already paints a dark background).
@@ -1072,6 +1111,11 @@ namespace Multiplayer.UI
         {
             _lobbyController.Reset();
             _pendingChosenSave = null;
+            // If a session ends (LEAVE / connect-cancel / connection-fail / host-left) while the client is
+            // on the native download loading screen, lift the curtain + hide the plaque so we return to a
+            // usable menu, never a stuck bar. Idempotent no-op when no curtain was dropped.
+            LiftCurtainEarly();
+            HideLoadOverlay();
         }
 
         // Public teardown entry for the F3 host-leave path. When the HOST ends/leaves the session, the
