@@ -156,6 +156,7 @@ namespace Multiplayer.Network.Sync
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
             State.StatRefundTracker.ResetSession();              // per-click stat-refund anti-farm ledger (static; a reused GeoUnitId must not inherit a prior session's net)
+            State.OwnStatEchoTracker.ResetSession();             // per-click own-echo skip counters (static; never carry a prior session's outstanding echoes)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).

@@ -656,6 +656,18 @@ namespace Multiplayer.Network.Sync.State
                     long viewedUnitId = PersonnelReflection.ReadUnitId(character);
                     var outcome = ProgressionRepaintDecision.Decide(pendingStat || pendingAbility,
                         viewedUnitId, stampArmed ? stampIds : null, stampArmed && stampSp);
+                    // Self-echo skip (per-click stat relay 2026-07-10): a ConflictRepaint resets _starting to live and
+                    // slams the native minus gate shut. When this apply is THIS peer's OWN relayed (client) / self-applied
+                    // (host) stat click echoing back (OwnStatEchoTracker), downgrade to a buffer-preserving PartialRepaint:
+                    // the panel keeps its optimistic buffer, _starting stays at session-start, the minus window stays open.
+                    // A FOREIGN change to the open soldier (no own echo pending) still ConflictRepaints (remote wins).
+                    if (outcome == ProgressionRepaintDecision.Outcome.ConflictRepaint
+                        && OwnStatEchoTracker.TryConsumeEcho(viewedUnitId))
+                    {
+                        outcome = ProgressionRepaintDecision.Outcome.PartialRepaint;
+                        Debug.Log("[Multiplayer] GeoUiRefresh: progression SELF-ECHO of own stat click — open unit="
+                                  + viewedUnitId + " → PartialRepaint (buffer + minus window preserved, _starting not bumped)");
+                    }
                     if (outcome == ProgressionRepaintDecision.Outcome.PartialRepaint)
                     {
                         if (PartialRepaintProgression(progModule))   // shared faction-SP pool label, buffer preserved
@@ -670,7 +682,7 @@ namespace Multiplayer.Network.Sync.State
                         // the stale bought slot) so nothing later written to Skillpoints can go negative.
                         else if (FullRedriveProgression(progModule, geo, character, conflict: true, stampArmed))
                             Debug.Log("[Multiplayer] GeoUiRefresh: progression OVER-COMMITTED SP pool — partial shift unaffordable, "
-                                      + "full ConflictRepaint (pending allocation HARVESTED before re-drive — re-priced per point against the live pool on authoritative apply, short pool drops the excess) unit=" + viewedUnitId
+                                      + "full ConflictRepaint (per-click already committed every point; buffer discarded, remote wins) unit=" + viewedUnitId
                                       + " stamped=[" + JoinIds(stampIds) + "]");
                     }
                     else if (outcome == ProgressionRepaintDecision.Outcome.Repaint
@@ -681,7 +693,7 @@ namespace Multiplayer.Network.Sync.State
                         {
                             if (conflict)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression CONFLICT repaint — remote changed OPEN unit="
-                                          + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); pending stat allocation HARVESTED (committed) before re-drive, unconfirmed ability selection discarded");
+                                          + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); per-click already committed every point, buffer discarded (remote wins), unconfirmed ability selection discarded");
                             else if (stampArmed)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression re-drive unit=" + viewedUnitId
                                           + " stamped=[" + JoinIds(stampIds) + "] factionSp=" + stampSp);
@@ -770,14 +782,11 @@ namespace Multiplayer.Network.Sync.State
         {
             object viewerFaction = _viewerFactionProp.GetValue(geo, null);
             if (viewerFaction == null) { ProgressionStampDiag(stampArmed, "ViewerFaction null"); return false; }
-            // FIX 4 HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint is about to reset the
-            // stat buffer (SetCharacterProgression → RefreshStats) and DISCARD the local pending allocation before
-            // the deferred CommitStatChanges seam relays it (log-proven: zero SpendStatPoints intents all session —
-            // the host's periodic same-unit #9 re-broadcast wiped the buffer every few seconds). Commit it FIRST:
-            // the client relays a SpendStatPoints intent, the host commits natively — so the panel converges to the
-            // committed values instead of silently losing the spend. The unconfirmed _boughtAbilitySlot is a
-            // pre-confirm selection (not a commit) → discarded by _clearBoughtAbility below, not harvested.
-            if (conflict) Multiplayer.Harmony.Sync.PersonnelEditRelay.HarvestPendingStatSpend(progModule);
+            // ConflictRepaint (remote changed the OPEN soldier while a local edit was pending): re-drive from the
+            // model, remote wins. Under per-click stat relay every stat point was already committed at the click, so
+            // there is nothing to harvest here — a self-echo of the peer's OWN clicks is downgraded to PartialRepaint
+            // upstream (OwnStatEchoTracker); reaching here means a genuine FOREIGN change, so discarding the buffer is
+            // correct. The unconfirmed _boughtAbilitySlot is a pre-confirm selection (not a commit) → cleared below.
             _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
             if (conflict) _clearBoughtAbility?.Invoke(progModule, null);   // FIX 2
             return true;
