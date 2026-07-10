@@ -30,6 +30,26 @@ running the Multiplayer mod — to watch host UI and client UI at the same time.
   shared-identity misconfig is never silent.
 - Startup logs which identity file/source was used (`ClientIdentity: loaded … from identity-2.json (instance 2)`).
 
+## Unified N-instance launcher (`launch-instance.bat`)
+One self-contained bat runs any number of local test instances. Master lives at
+`Multiplayer\tools\launch-instance.bat`; deployed copies sit in each instance root.
+- **Add an instance:** copy the whole game folder to `D:\PP-InstanceN` (plain folder copy),
+  then drop/copy `launch-instance.bat` into its root and run it. Works under any folder name.
+- **Instance 1 = the real Steam install** — launch it normally via Steam; the bat REFUSES to
+  run inside `D:\Steam\steamapps\common\Phoenix Point` (copies only).
+- **Goldberg auto-activation (idempotent):** on each run the bat swaps the plugin
+  `steam_api64.dll` to the Goldberg emulator (11423144 bytes) if not already active, backing
+  up the Valve original as `steam_api64.dll.orig` first. Prefers a local `.dll.gse` (if it's the
+  Goldberg build) over `Multiplayer\tools\goldberg\steam_api64.dll`. Goldberg = offline, so this
+  is **DirectIP-only** testing (`127.0.0.1:14242`), matching the established co-op workflow.
+- **Mods self-heal (fixes the folder-copy trap):** a folder-copy resolves the `Mods\*` junctions
+  into EMPTY real dirs; the bat detects those (and dead junctions), removes them, and re-links
+  every mod as an NTFS junction from the Steam install `Mods\` + workshop `content\839770\`.
+  A REAL dir *with files* is left untouched (dev-build override).
+- **`sync` arg:** `launch-instance.bat sync` runs the dll/mods/appid fixup only, no game launch
+  (use to verify a fresh copy before playing).
+- Supersedes the older per-instance `launch-with-steam-mods.bat` (left in place, harmless).
+
 ## Steps
 - Deploy the mod:
   - `pwsh -NoProfile -File .\deploy.ps1`  (from `E:\DEV\PhoenixPoint\Multiplayer`)
