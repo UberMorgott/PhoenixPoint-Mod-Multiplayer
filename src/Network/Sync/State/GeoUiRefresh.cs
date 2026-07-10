@@ -796,7 +796,38 @@ namespace Multiplayer.Network.Sync.State
             if (conflict) Multiplayer.Harmony.Sync.PersonnelEditRelay.HarvestPendingStatSpend(progModule);
             _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
             if (conflict) _clearBoughtAbility?.Invoke(progModule, null);   // FIX 2
+            // Minus-affordance CONFIRMED decrement: SetCharacterProgression just re-snapshotted the buffer to the
+            // authoritative live model, so _current*Stat == the live stat. Feed each to the optimistic counter — a
+            // DROP vs the last observed value is a landed refund (host self-click or client echo) → net lowered;
+            // a denied click leaves the stat unchanged → no drop → no decrement (respects host authority).
+            ObserveOpenPanelStats(progModule, character);
             return true;
+        }
+
+        /// <summary>Minus-affordance confirmed decrement: read the three live base-stat values off the just
+        /// re-snapshotted module buffer (<c>_current*Stat</c> == live model after SetCharacterProgression) and feed
+        /// each to <see cref="StatEditAffordance.ObserveLiveStat"/> — a DROP vs the last observed value lowers the
+        /// optimistic counter (a landed refund). One-directional + best-effort; a reflection miss is a silent skip.</summary>
+        private static void ObserveOpenPanelStats(object progModule, object character)
+        {
+            try
+            {
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                var t = progModule.GetType();
+                ObserveStat(t, progModule, unitId, 0, "_currentStrengthStat");
+                ObserveStat(t, progModule, unitId, 1, "_currentWillStat");
+                ObserveStat(t, progModule, unitId, 2, "_currentSpeedStat");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoUiRefresh.ObserveOpenPanelStats best-effort failed: " + ex.Message); }
+        }
+
+        private static void ObserveStat(Type t, object progModule, long unitId, int statId, string field)
+        {
+            if (!(AccessTools.Field(t, field)?.GetValue(progModule) is int live)) return;
+            int dec = StatEditAffordance.ObserveLiveStat(unitId, statId, live);
+            if (dec > 0)
+                Debug.Log("[Multiplayer] StatEditAffordance: −click CONFIRMED (live stat dropped " + dec + ") unit=" + unitId
+                          + " stat=" + statId + " net=" + StatEditAffordance.Net(unitId, statId));
         }
 
         /// <summary>FIX 3 commit-seam backstop: unconditionally re-drive the OPEN soldier's progression panel

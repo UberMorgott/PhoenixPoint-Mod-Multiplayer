@@ -574,6 +574,15 @@ namespace Multiplayer.Harmony.Sync
                 int statId = Convert.ToInt32(__0);
                 int signed = __3 ? 1 : -1;
                 __result = 0;   // suppress the optimistic buffer change (native caller does `_current* += __result`)
+                if (signed == 1)
+                {
+                    // Optimistic minus-affordance counter: lift the net on the local +1 click so the (pinned) minus
+                    // button can be forced interactable before the host round-trip. Decrement is CONFIRMED-only
+                    // (StatEditAffordance.ObserveLiveStat on the panel re-drive) — never here.
+                    StatEditAffordance.RecordPlus(unitId, statId);
+                    Debug.Log("[Multiplayer] StatEditAffordance: +click counted unit=" + unitId + " stat=" + statId
+                              + " net=" + StatEditAffordance.Net(unitId, statId));
+                }
                 if (engine.IsHost)
                 {
                     Debug.Log("[Multiplayer] ChangeCharacterStatThinClientPatch: HOST stat click unit=" + unitId
@@ -590,6 +599,63 @@ namespace Multiplayer.Harmony.Sync
                 return false;   // suppress the native buffer math on all peers
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] ChangeCharacterStatThinClientPatch failed: " + ex.Message); return true; }
+        }
+    }
+
+    [HarmonyPatch]
+    public static class StatMinusButtonAffordancePatch
+    {
+        private static MethodBase _target;
+        private static MethodInfo _setInteractable;
+        // DIAG dedup: (unitId*4 + statId) → last logged forced-decision, so the reason is logged ONCE per change,
+        // never per frame (TFTV re-runs the native gate every frame — an unguarded log would flood).
+        private static readonly Dictionary<long, bool> _lastLogged = new Dictionary<long, bool>();
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
+            // NOTE the native typo: "Interactabilty" (missing the second 'i') — decompile-verified.
+            _target = t != null ? AccessTools.Method(t, "SetStatButtonInteractabilty") : null;
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.SetStatButtonInteractabilty minus-affordance " + (_target != null ? "bound" : "NOT FOUND"));
+            return _target != null;
+        }
+        public static MethodBase TargetMethod() => _target;
+
+        // void SetStatButtonInteractabilty(PhoenixGeneralButton statButton, CharacterBaseAttribute stat, bool incrementButton).
+        // The native MINUS branch gates on `_current*Stat > _starting*Stat` — permanently false under thin-client
+        // (buffer pinned == model). When co-op active and the optimistic counter shows net refundable +clicks,
+        // force the minus button interactable so the refund click can actually fire (→ our ChangeCharacterStat
+        // PREFIX → −1 intent; host ledger-validates). Non-co-op / mutoid untouched: net is 0 (mutoid never
+        // RecordPlus'd, native local path), so the force never triggers and native's value stands.
+        // __0 = statButton, __1 = stat (CharacterBaseAttribute), __2 = incrementButton.
+        public static void Postfix(object __instance, object __0, object __1, bool __2)
+        {
+            if (__2) return;   // plus button — native gate is correct
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return;   // single-player: native owns the gate
+                object character = AccessTools.Field(__instance.GetType(), "_character")?.GetValue(__instance);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                int statId = Convert.ToInt32(__1);
+                bool force = StatEditAffordance.Net(unitId, statId) > 0;
+                if (!force) { LogChange(unitId, statId, forced: false); return; }
+                if (_setInteractable == null && __0 != null)
+                    _setInteractable = AccessTools.Method(__0.GetType(), "SetInteractable", new[] { typeof(bool) });
+                _setInteractable?.Invoke(__0, new object[] { true });
+                LogChange(unitId, statId, forced: true);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] StatMinusButtonAffordancePatch failed: " + ex.Message); }
+        }
+
+        // Never-silent, once-per-change: log the minus enabled/disabled verdict only when it flips for this (unit,stat).
+        private static void LogChange(long unitId, int statId, bool forced)
+        {
+            long key = unitId * 4 + statId;
+            if (_lastLogged.TryGetValue(key, out bool prev) && prev == forced) return;
+            _lastLogged[key] = forced;
+            Debug.Log("[Multiplayer] StatEditAffordance: minus button " + (forced ? "FORCED interactable" : "left to native (net=0)")
+                      + " unit=" + unitId + " stat=" + statId + " net=" + StatEditAffordance.Net(unitId, statId));
         }
     }
 

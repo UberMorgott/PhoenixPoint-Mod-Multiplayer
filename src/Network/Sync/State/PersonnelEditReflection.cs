@@ -686,6 +686,7 @@ namespace Multiplayer.Network.Sync.State
                 object dismissed = DismissedReason();
                 if (_killCharacter == null || dismissed == null) return;
                 StatRefundTracker.ResetUnit(unitId);   // a reused GeoUnitId must not inherit this soldier's stat-refund net
+                StatEditAffordance.ResetUnit(unitId);  // ...nor the local minus-button optimistic click counter
                 _killCharacter.Invoke(fac, new[] { soldier, dismissed });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditReflection.Dismiss failed: " + ex.Message); }

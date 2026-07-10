@@ -156,6 +156,7 @@ namespace Multiplayer.Network.Sync
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
             State.StatRefundTracker.ResetSession();              // thin-client stat-refund anti-farm ledger (static; a reused GeoUnitId must not inherit a prior session's net)
+            State.StatEditAffordance.ResetSession();             // thin-client minus-button optimistic click counter (static; UI affordance must not carry a prior session's net)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -233,6 +234,15 @@ namespace Multiplayer.Network.Sync
             // (the reloaded blob is consistent — no orphans by construction). The faction rebind-by-instance
             // guard inside BuildCharacterIndex would catch this too; sweeping here drops the dead refs promptly.
             _reloadReset.Register("personnel-orphan-pool", () => State.PersonnelReflection.ResetOrphanPool("reload boundary"));
+            // Thin-client stat editor: the anti-farm refund ledger + the local minus-button click counter are
+            // per-(unit,stat) session nets. A mid-session save-load can restore a DIFFERENT stat baseline for a
+            // reused GeoUnitId, so a stale net would mis-bound a refund / falsely light the minus button. Both are
+            // reset on session start/end + dismissal already; this closes the reload-boundary gap. Idempotent.
+            _reloadReset.Register("stat-edit-nets", () =>
+            {
+                State.StatRefundTracker.ResetSession();
+                State.StatEditAffordance.ResetSession();
+            });
         }
 
         // ─── Outbound (called by interceptors) ────────────────────────────
