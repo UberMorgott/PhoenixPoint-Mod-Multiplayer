@@ -17,6 +17,20 @@ namespace Multiplayer.Network.MessageLayer
             {
                 bw.Write(join.PlayerGuid.ToByteArray());
                 bw.Write(join.Nickname ?? "");
+                // FIX-4: append the parity manifest as a trailing, backward-compatible block. A present
+                // flag lets a legacy (pre-FIX-4) JOIN — which has no trailing bytes — deserialize with a
+                // null Manifest, which the host treats as "unverifiable parity" (a mod-version mismatch).
+                if (join.Manifest != null)
+                {
+                    bw.Write(true);
+                    var mb = SerializeParityManifest(join.Manifest);
+                    bw.Write(mb.Length);
+                    bw.Write(mb);
+                }
+                else
+                {
+                    bw.Write(false);
+                }
                 return ms.ToArray();
             }
         }
@@ -29,7 +43,68 @@ namespace Multiplayer.Network.MessageLayer
                 var msg = new JoinMessage();
                 msg.PlayerGuid = new Guid(br.ReadBytes(16));
                 msg.Nickname = br.ReadString();
+                // FIX-4: trailing parity manifest (backward-compatible). Only read the present-flag when
+                // the stream still has a byte, so a legacy 2-field JOIN parses with Manifest == null.
+                if (ms.Position < ms.Length && br.ReadBoolean())
+                {
+                    var len = br.ReadInt32();
+                    msg.Manifest = DeserializeParityManifest(br.ReadBytes(len));
+                }
                 return msg;
+            }
+        }
+
+        // ─── Parity manifest (FIX-4): rides inside JOIN; host compares vs its own. ──────────
+        public static byte[] SerializeParityManifest(Parity.ParityManifest m)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(m.Dlc.Count);
+                foreach (var d in m.Dlc) bw.Write(d ?? "");
+
+                bw.Write(m.Mods.Count);
+                foreach (var mod in m.Mods)
+                {
+                    bw.Write(mod.Id ?? "");
+                    bw.Write(mod.Version ?? "");
+                }
+
+                bw.Write(m.Settings.Count);
+                foreach (var s in m.Settings)
+                {
+                    bw.Write(s.ModId ?? "");
+                    bw.Write(s.Hash);
+                    bw.Write(s.Entries.Count);
+                    foreach (var e in s.Entries) bw.Write(e ?? "");
+                }
+                return ms.ToArray();
+            }
+        }
+
+        public static Parity.ParityManifest DeserializeParityManifest(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                var m = new Parity.ParityManifest();
+
+                var dlcCount = br.ReadInt32();
+                for (var i = 0; i < dlcCount; i++) m.Dlc.Add(br.ReadString());
+
+                var modCount = br.ReadInt32();
+                for (var i = 0; i < modCount; i++)
+                    m.Mods.Add(new Parity.ModRef { Id = br.ReadString(), Version = br.ReadString() });
+
+                var setCount = br.ReadInt32();
+                for (var i = 0; i < setCount; i++)
+                {
+                    var s = new Parity.ModSettings { ModId = br.ReadString(), Hash = br.ReadUInt32() };
+                    var entryCount = br.ReadInt32();
+                    for (var j = 0; j < entryCount; j++) s.Entries.Add(br.ReadString());
+                    m.Settings.Add(s);
+                }
+                return m;
             }
         }
 
@@ -403,6 +478,9 @@ namespace Multiplayer.Network.MessageLayer
     {
         public Guid PlayerGuid { get; set; }
         public string Nickname { get; set; }
+        /// <summary>FIX-4: the joiner's co-op parity manifest (DLC + mods + settings). Null on a legacy
+        /// pre-FIX-4 JOIN → the host treats it as an unverifiable-parity (mod-version) mismatch.</summary>
+        public Parity.ParityManifest Manifest { get; set; }
     }
 
     public class PeerListEntry

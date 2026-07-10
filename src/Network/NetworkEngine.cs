@@ -314,6 +314,18 @@ namespace Multiplayer.Network
             Transport?.Send(clientId, data);
         }
 
+        /// <summary>
+        /// FIX-4 / never-silent: surface a host ConnectionRejected reason to the joining client through
+        /// the SAME channel as a connect failure (the existing OnConnectionFailed dialog + lobby
+        /// teardown / return-to-menu). No-op during an intentional local teardown so a leave mid-handshake
+        /// does not pop a spurious box.
+        /// </summary>
+        public void ReportConnectionRejected(string reason)
+        {
+            if (!_intentionalDisconnect)
+                OnConnectionFailed?.Invoke(reason);
+        }
+
         public void SendToHost(NetworkMessage msg)
         {
             if (Transport != null && Session.HostPeerId.HasValue)
@@ -434,7 +446,10 @@ namespace Multiplayer.Network
                 var join = new JoinMessage
                 {
                     PlayerGuid = ClientIdentity.PlayerGuid,
-                    Nickname = SystemInfo.deviceName
+                    Nickname = SystemInfo.deviceName,
+                    // FIX-4: carry this client's parity manifest (DLC + mods + settings) in the JOIN so
+                    // the host can gate the join BEFORE any save transfer.
+                    Manifest = ParityManifestCollector.Collect()
                 };
                 var payload = MessageSerializer.SerializeJoin(join);
                 SendToHost(new NetworkMessage(PacketType.ConnectionRequest, payload));

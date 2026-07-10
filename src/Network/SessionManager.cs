@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using Base.Core;
+using Base.UI.MessageBox;
 using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Parity;
 using Multiplayer.Validation;
 using UnityEngine;
 
@@ -354,6 +357,35 @@ namespace Multiplayer.Network
                 return;
             }
 
+            // FIX-4: host/client PARITY GATE — runs BEFORE onboarding + any save transfer. Compare the
+            // host's live manifest (enabled/owned DLC + enabled mods + per-mod settings) against the
+            // joiner's manifest (carried in JOIN). On ANY mismatch, block the join with a never-silent
+            // dialog listing the EXACT diffs on BOTH sides and do NOT register the client. Host-
+            // authoritative: the host computes the diff and ships it in the rejection reason so the
+            // client shows the identical list. Settings are checked but NOT auto-synced in this
+            // increment (mods read config at load time; distribution is later work).
+            var parityDiffs = ParityComparer.Compare(ParityManifestCollector.Collect(), join.Manifest);
+            if (parityDiffs.Count > 0)
+            {
+                var diffText = ParityComparer.Format(parityDiffs);
+                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: parity mismatch:\n{diffText}");
+                var who = string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname;
+                SystemChat($"— join blocked ({who}): mod / DLC / settings mismatch —");
+                try
+                {
+                    GameUtl.GetMessageBox()?.ShowSimplePrompt(
+                        "Co-op join blocked — the joining player's mods, DLC or mod settings differ from yours:\n\n" + diffText,
+                        MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+                }
+                catch (Exception e) { Debug.LogError("[Multiplayer] parity host prompt failed: " + e.Message); }
+
+                var parityReject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "Co-op requires identical mods, DLC and mod settings on both players.\n\n" + diffText));
+                _engine.SendToClient(clientId, parityReject);
+                return;
+            }
+
             AddClient(clientId, $"Steam({clientId})");
 
             // Bind peerID <-> playerGUID.
@@ -406,6 +438,11 @@ namespace Multiplayer.Network
         {
             var reason = NetworkMessage.ParseStringPayload(msg.Payload);
             Debug.LogError($"[Multiplayer] Connection rejected: {reason}");
+            // Never-silent: surface the rejection to the joining player (was log-only, so the user saw
+            // nothing). Routes through the existing connection-failure path (dialog + lobby teardown /
+            // return-to-menu), covering ALL rejection reasons — empty GUID, identity collision,
+            // mid-session battle, and the FIX-4 parity mismatch (whose reason carries the exact diffs).
+            _engine.ReportConnectionRejected(reason);
         }
 
         public void HandleClientDisconnected(NetworkMessage msg)
