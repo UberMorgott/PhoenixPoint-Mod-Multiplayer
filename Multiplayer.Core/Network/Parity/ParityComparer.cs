@@ -100,17 +100,6 @@ namespace Multiplayer.Network.Parity
         }
 
         private static Dictionary<string, string> ToKvMap(List<string> entries)
-        {
-            var d = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (entries != null)
-                foreach (var e in entries)
-                {
-                    if (e == null) continue;
-                    var i = e.IndexOf('=');
-                    if (i < 0) d[e] = "";
-                    else d[e.Substring(0, i)] = e.Substring(i + 1);
-                }
-            return d;
-        }
+            => ParityAutoApply.ToMap(entries); // one splitter, shared with the auto-apply
     }
 }

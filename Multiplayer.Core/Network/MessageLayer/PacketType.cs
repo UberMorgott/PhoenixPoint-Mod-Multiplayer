@@ -55,6 +55,9 @@ namespace Multiplayer.Network.MessageLayer
         JoinReady = 0x45,       // client->host: a MID-SESSION on-demand joiner reached the live geoscape (Playing) and
                                 // is ready to be re-seeded; host replies with BroadcastFullWallet + BroadcastAllChannels.
                                 // No payload — keyed by sender. See SaveTransferCoordinator on-demand-join path.
+        ParityUpdate = 0x46,    // client->host: refreshed parity manifest after the client auto-applied the host's
+                                // mod settings (host manifest rides ConnectionAccepted). Host re-compares, updates
+                                // that client's roster ParityDiffs and re-broadcasts PEER_LIST (badge/lock clears).
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

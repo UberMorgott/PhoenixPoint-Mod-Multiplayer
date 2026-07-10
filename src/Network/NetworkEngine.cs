@@ -61,6 +61,18 @@ namespace Multiplayer.Network
             try { SteamLobbyCleanup?.Invoke(); } catch { /* never let Steam cleanup break a teardown */ }
         }
 
+        // Parity auto-apply restore hook — same delegate-field pattern (and reason) as SteamLobbyCleanup:
+        // ParityConfigSync references Assembly-CSharp types (ModEntry/ModConfigField), so a direct call
+        // here would break Shutdown/TearDown JIT in game-free test runners. Wired by MultiplayerMain at
+        // mod enable; null in unit tests.
+        public static Action ParityConfigRestore;
+
+        private static void RunParityConfigRestore()
+        {
+            try { ParityConfigRestore?.Invoke(); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] parity config restore failed: " + e.Message); }
+        }
+
         // ─── Events ───────────────────────────────────────────────────────
 
         public event Action OnHostStarted;
@@ -168,6 +180,8 @@ namespace Multiplayer.Network
             // Drop the client-synced research rate: a fast client→client reconnection must not apply the
             // PREVIOUS session's rate in the window between join and the new session's first ch2 seed.
             ClientResearchRate.Reset();
+            // Parity auto-apply: put the client's ORIGINAL mod settings back (no-op when none applied).
+            RunParityConfigRestore();
             IsActive = false;
             IsHost = false;
 
@@ -209,6 +223,8 @@ namespace Multiplayer.Network
             Sync = null;
             // Mirrors Shutdown(): no cross-session research-rate leak on the full-teardown path either.
             ClientResearchRate.Reset();
+            // Parity auto-apply: put the client's ORIGINAL mod settings back (no-op when none applied).
+            RunParityConfigRestore();
 
             IsActive = false;
             IsHost = false;
@@ -589,6 +605,11 @@ namespace Multiplayer.Network
 
                 case PacketType.LoadComplete:
                     SaveTransfer?.OnLoadComplete(msg);
+                    break;
+
+                case PacketType.ParityUpdate:
+                    // Client->host: refreshed parity manifest after the client auto-applied host settings.
+                    Session.HandleParityUpdate(msg);
                     break;
 
                 case PacketType.JoinReady:

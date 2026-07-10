@@ -87,7 +87,8 @@ namespace Multiplayer.Network
         // Deterministic, dependency-free value → string (no Newtonsoft ref in the mod). Scalars stringify
         // identically on host + client; floats use round-trip invariant formatting so 0.30 == 0.3. Complex
         // values fall through to Convert.ToString (typically the type name — stable across peers).
-        private static string SerializeValue(object v)
+        // Internal: ParityConfigSync uses the SAME stringify to decide "already equals host value".
+        internal static string SerializeValue(object v)
         {
             if (v == null) return "null";
             if (v is float f) return f.ToString("R", CultureInfo.InvariantCulture);

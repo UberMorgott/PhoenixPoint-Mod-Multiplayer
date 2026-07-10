@@ -172,6 +172,43 @@ public class ParityTests
         Assert.Equal(7UL, back[0].SteamId);
     }
 
+    // ─── Auto-apply: scalar parse + appliability ───
+
+    private enum TestMode { Off, Fast, Slow }
+
+    [Fact]
+    public void TryParseValue_Scalars_RoundTrip()
+    {
+        Assert.True(ParityAutoApply.TryParseValue(typeof(bool), "True", out var b) && (bool)b);
+        Assert.True(ParityAutoApply.TryParseValue(typeof(int), "42", out var i) && (int)i == 42);
+        Assert.True(ParityAutoApply.TryParseValue(typeof(float), "0.25", out var f) && (float)f == 0.25f);
+        Assert.True(ParityAutoApply.TryParseValue(typeof(double), "1.5", out var d) && (double)d == 1.5);
+        Assert.True(ParityAutoApply.TryParseValue(typeof(string), "text", out var s) && (string)s == "text");
+        Assert.True(ParityAutoApply.TryParseValue(typeof(TestMode), "Fast", out var e)
+                    && (TestMode)e == TestMode.Fast);
+    }
+
+    [Fact]
+    public void TryParseValue_ComplexOrMalformed_NotAppliable()
+    {
+        // Complex (array/list) types are not generically appliable → stay a mismatch (badge persists).
+        Assert.False(ParityAutoApply.TryParseValue(typeof(int[]), "System.Int32[]", out _));
+        Assert.False(ParityAutoApply.TryParseValue(typeof(List<string>), "x", out _));
+        // Malformed value for the type → not appliable either.
+        Assert.False(ParityAutoApply.TryParseValue(typeof(int), "not-a-number", out _));
+        Assert.False(ParityAutoApply.TryParseValue(typeof(TestMode), "NoSuchMember", out _));
+        Assert.False(ParityAutoApply.TryParseValue(typeof(int), null, out _));
+    }
+
+    [Fact]
+    public void ToMap_SplitsSortedEntries()
+    {
+        var m = ParityAutoApply.ToMap(new List<string> { "a=1", "b=x=y", "flag" });
+        Assert.Equal("1", m["a"]);
+        Assert.Equal("x=y", m["b"]); // split on FIRST '=' only
+        Assert.Equal("", m["flag"]);
+    }
+
     [Fact]
     public void StatusTransition_MismatchThenFixed_ClearsAndUnlocksReady()
     {

@@ -361,7 +361,8 @@ namespace Multiplayer.Network
             // the client on its own row) and the client locks its READY button; the host ALSO gates
             // Ready authoritatively in SetClientReady (never trust client UI). Host-authoritative: the
             // host computes the one diff text every UI shows.
-            var parityDiffs = ParityComparer.Compare(ParityManifestCollector.Collect(), join.Manifest);
+            var hostManifest = ParityManifestCollector.Collect();
+            var parityDiffs = ParityComparer.Compare(hostManifest, join.Manifest);
             var parityDiffText = ParityComparer.Format(parityDiffs);
             if (parityDiffs.Count > 0)
                 Debug.LogWarning($"[Multiplayer] JOIN from {clientId} has parity mismatch (soft-gate, " +
@@ -388,8 +389,11 @@ namespace Multiplayer.Network
                 client.Permissions = PermissionManager.GetPermissions(client.PlayerGuid);
             }
 
-            // Send acceptance
-            var acceptMsg = new NetworkMessage(PacketType.ConnectionAccepted);
+            // Send acceptance, carrying the HOST parity manifest so the client can auto-apply the
+            // host's mod settings (ParityConfigSync) and re-send a fresh manifest (ParityUpdate).
+            // A legacy client ignores the payload (it never read one) — harmless.
+            var acceptMsg = new NetworkMessage(PacketType.ConnectionAccepted,
+                MessageSerializer.SerializeParityManifest(hostManifest));
             _engine.SendToClient(clientId, acceptMsg);
 
             // Roster changed → broadcast authoritative peer list.
@@ -414,6 +418,47 @@ namespace Multiplayer.Network
         {
             // Client received host confirmation
             Debug.Log("[Multiplayer] Connection accepted by host");
+
+            // Parity auto-apply (host-authoritative): the accept carries the HOST manifest. Apply the
+            // host's scalar mod settings in-memory (originals snapshotted; restored at teardown), then
+            // re-send a FRESH manifest so the host re-compares — if only config diffs existed the
+            // mismatch clears (badge disappears, READY unlocks via the roster re-broadcast). A legacy
+            // host sends no payload → skip. Unappliable values stay diffs by construction.
+            if (_engine.IsHost || msg.Payload == null || msg.Payload.Length == 0) return;
+            try
+            {
+                var hostManifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+                if (ParityConfigSync.ApplyHostSettings(hostManifest))
+                {
+                    var fresh = ParityManifestCollector.Collect();
+                    _engine.SendToHost(new NetworkMessage(PacketType.ParityUpdate,
+                        MessageSerializer.SerializeParityManifest(fresh)));
+                }
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] parity auto-apply on accept failed: " + e.Message); }
+        }
+
+        /// <summary>
+        /// Host: a client re-sent its parity manifest after auto-applying our settings. Re-compare and,
+        /// on any status change, update its roster row + re-broadcast (badge/ready-lock update flows
+        /// through the SAME PEER_LIST rail as the initial state).
+        /// </summary>
+        public void HandleParityUpdate(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+            if (!_clients.TryGetValue(msg.SenderSteamId, out var client)) return;
+            try
+            {
+                var manifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+                var diffs = ParityComparer.Format(
+                    ParityComparer.Compare(ParityManifestCollector.Collect(), manifest));
+                if (string.Equals(diffs, client.ParityDiffs, StringComparison.Ordinal)) return;
+                client.ParityDiffs = diffs;
+                Debug.Log($"[Multiplayer] parity update from {msg.SenderSteamId}: " +
+                          (diffs.Length == 0 ? "parity OK — READY unlocked." : $"still mismatched:\n{diffs}"));
+                BroadcastPeerList();
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] parity update failed: " + e.Message); }
         }
 
         public void HandleConnectionRejected(NetworkMessage msg)

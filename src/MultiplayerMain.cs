@@ -53,6 +53,10 @@ namespace Multiplayer
             _ui = ModGO.AddComponent<MultiplayerUI>();
             Logger.LogInfo("[Multiplayer] UI initialized");
 
+            // Parity auto-apply: wire the teardown restore hook (delegate field — NetworkEngine must not
+            // reference ParityConfigSync's game types directly, same JIT-safety rule as SteamLobbyCleanup).
+            NetworkEngine.ParityConfigRestore = ParityConfigSync.RestoreOriginals;
+
             // Tactical deploy-sync (Increment 1): arm the SurfaceRouter tactical fast-path so a client can
             // receive host tac.deploy snapshots over the 0x67 envelope rail. Null-guarded + inert until a
             // tactical mission deploys; the deploy/suppress Harmony patches auto-register via PatchAll above.
