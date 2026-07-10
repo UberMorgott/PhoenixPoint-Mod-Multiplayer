@@ -5,17 +5,20 @@ using Multiplayer.Network.Sync.State;
 namespace Multiplayer.Network.Sync.Actions
 {
     /// <summary>
-    /// Progression client intent: SPEND skill points on one base stat (Strength/Will/Speed — the
-    /// soldier-edit stat +/- buttons committed by <c>UIModuleCharacterProgression.CommitStatChanges</c> →
-    /// <c>CharacterProgression.ModifyBaseStat</c>, UIModuleCharacterProgression.cs:367-375). The wire
-    /// carries only the POSITIVE stat delta — never the client's SP arithmetic: the host re-derives each
-    /// point's native cost (<c>GetBaseStatCost(stat, cur+1)</c>) step by step, gates every step on
-    /// <c>CanModifyBaseStat</c> + the combined soldier/faction pool (<see cref="ProgressionSpend"/>), and
-    /// applies via native ModifyBaseStat. Result mirrors on the #9 live-state blob (progression
-    /// _baseStats + SkillPoints ride the GeoCharacter snapshot). <see cref="IHostOnlyApply"/>. Category
-    /// ControlSoldiers → per-soldier ownership gate (PS4 policy). Committed stat spends are never
-    /// refundable in the native UI (decrease is gated to the uncommitted session, :907), so delta ≤ 0 is
-    /// invalid. Wire: <c>i64 unitId, u8 statId (CharacterBaseAttribute), i32 delta</c>.
+    /// Progression client intent: spend/refund skill points on one base stat (Strength/Will/Speed — the
+    /// soldier-edit stat +/- buttons). Relayed PER CLICK at the native chokepoint
+    /// <c>UIModuleCharacterProgression.ChangeCharacterStat</c> (the +/- button handlers, decompile
+    /// UIModuleCharacterProgression.cs:848/857/866 → :875) so each click is instantly reactive on every
+    /// peer's open panel — not deferred to the CommitStatChanges soldier-switch seam. The wire carries only
+    /// the SIGNED per-click delta (+1 = a plus click, −1 = a minus/refund click), never the client's SP
+    /// arithmetic: the host re-derives each point's native cost (<c>GetBaseStatCost</c>) step by step, gates
+    /// on <c>CanModifyBaseStat</c> + the combined soldier/faction pool (<see cref="ProgressionSpend"/>) for a
+    /// spend, and on the per-session net-applied ledger (<c>StatRefundTracker</c> — no farming free SP) for a
+    /// refund, then applies via native ModifyBaseStat (± symmetric price). Result mirrors on the #9 live-state
+    /// blob (progression _baseStats + SkillPoints ride the GeoCharacter snapshot). <see cref="IHostOnlyApply"/>.
+    /// Category ControlSoldiers → per-soldier ownership gate (PS4 policy). Wire: <c>i64 unitId,
+    /// u8 statId (CharacterBaseAttribute), i32 delta (signed)</c> — the i32 was already signed on the wire, so
+    /// allowing a negative delta is codec back-compatible (no format bump).
     /// </summary>
     public sealed class SpendStatPointsAction : ISyncedAction, IHostOnlyApply
     {
@@ -59,7 +62,7 @@ namespace Multiplayer.Network.Sync.Actions
         public bool Validate(GeoRuntime rt, Guid actor)
             => rt != null && rt.IsGeoscapeActive
                && _statId <= 2                         // CharacterBaseAttribute: Strength/Will/Speed
-               && _delta > 0 && _delta <= MaxDelta
+               && _delta != 0 && _delta >= -MaxDelta && _delta <= MaxDelta   // signed: +spend / −refund (host re-prices + ledger-bounds)
                && PersonnelEditReflection.OwnsSoldier(actor, _unitId);
 
         public void Apply(GeoRuntime rt)

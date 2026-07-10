@@ -132,43 +132,79 @@ namespace Multiplayer.Harmony.Sync
             return cur is int c && start is int s ? c - s : 0;
         }
 
-        /// <summary>DISPLAY-ONLY preview broadcast (co-op reactivity mandate): after a native ChangeCharacterStat
-        /// click ran its SP/faction-pool math, ship the current UNCOMMITTED buffer so a watcher on the SAME
-        /// soldier sees the edit live (stat values + the two SP labels moving) before it commits. READ-ONLY — never
-        /// mutates the buffer or the model; carries no authoritative state (the real spend rides SpendStatPoints +
-        /// the #9 blob, which wins). Fires for BOTH host and client spenders (the +/- buttons run native locally on
-        /// either; only the COMMIT is suppressed on a client). The changed stat's <c>_current*Stat</c> is applied by
-        /// the CALLER one line AFTER ChangeCharacterStat returns, so fold the postfix result into that stat's delta.
-        /// Mutoid (mutagen-cost) progression has no SP pool → not previewed. Best-effort.</summary>
-        internal static void BroadcastStatEditPreview(object progModule, int changedStatIdx, int result)
+        /// <summary>HOST spender's own +/- click (thin-client): apply the signed delta authoritatively at the model
+        /// (<see cref="PersonnelEditReflection.SpendStatPoints"/> — spend re-priced/pool-gated, refund ledger-bounded),
+        /// then pin the OPEN progression panel's buffer to the fresh model (local-instant display) and re-drive the
+        /// host's OTHER open surfaces (roster list, shared-pool label). The client counterpart just relays the intent
+        /// and converges on the #9 echo (~RTT). Best-effort; a miss must never break the click.</summary>
+        internal static void ApplyHostSelfStatClick(object module, Type t, long unitId, int statId, int signedDelta)
         {
-            if (progModule == null) return;
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return;                       // single-player: no watchers
-            var t = progModule.GetType();
-            if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(progModule) is bool p && p) return; // mutoid
-            int dStr = Delta(t, progModule, "_currentStrengthStat", "_startingStrengthStat") + (changedStatIdx == 0 ? result : 0);
-            int dWill = Delta(t, progModule, "_currentWillStat", "_startingWillStat") + (changedStatIdx == 1 ? result : 0);
-            int dSpeed = Delta(t, progModule, "_currentSpeedStat", "_startingSpeedStat") + (changedStatIdx == 2 ? result : 0);
-            int soldierSP = AccessTools.Field(t, "_currentSkillPoints")?.GetValue(progModule) is int sp ? sp : 0;
-            int factionSP = AccessTools.Field(t, "_currentFactionPoints")?.GetValue(progModule) is int fp ? fp : 0;
-            object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
-            long unitId = PersonnelReflection.ReadUnitId(character);
-            engine.Sync?.BroadcastStatEditPreview(unitId, dStr, dWill, dSpeed, soldierSP, factionSP);
+            try
+            {
+                var rt = GeoRuntime.Instance;
+                PersonnelEditReflection.SpendStatPoints(rt, unitId, statId, signedDelta);   // authoritative model apply (spend/refund)
+                RebaseModuleToLiveModel(module, t, statId);                                  // pin the OPEN panel buffer to the fresh model
+                GeoUiRefresh.SetProgressionStamp(new[] { unitId }, factionSpChanged: true); // re-drive host's other open surfaces
+                GeoUiRefresh.RefreshNeedsKick(rt);
+                Debug.Log("[Multiplayer] ChangeCharacterStatThinClient: HOST self stat click applied unit=" + unitId
+                          + " stat=" + statId + " delta=" + signedDelta);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.ApplyHostSelfStatClick failed: " + ex.Message); }
         }
 
-        /// <summary>Preview-CLEAR on the commit seam (commit / soldier-switch / screen-exit all route through
-        /// CommitStatChanges): the spender stopped editing this soldier, so watchers drop the preview. The real
-        /// committed state re-drives on the following #9 (or the 10 s watcher-side expiry) — never a forced re-drive
-        /// here that could bounce a watcher's pool UP to the not-yet-mirrored pre-commit value. Best-effort.</summary>
-        internal static void BroadcastStatEditPreviewClear(object progModule)
+        /// <summary>Pin the OPEN progression panel's edit buffer to the LIVE model after a host self-click, so the
+        /// panel shows the authoritative result instantly (the native buffer math was fully suppressed by the
+        /// prefix, so the caller's <c>_current* += 0</c> leaves the buffer where we set it here). Reads the model
+        /// directly (never trusts the buffer): the clicked stat's live value, the soldier SP pool, and the shared
+        /// faction pool — pinning <c>_current* == _starting*</c> for each. Consequence (accepted, thin-client spec
+        /// §4): with current==starting the native minus button renders disabled — refunds ride the intent path, not
+        /// the local gate. buffer==model here is ALSO what makes the later native host CommitStatChanges a no-op
+        /// write-back. Best-effort; a miss leaves the panel to converge on the next stamped re-drive.</summary>
+        private static void RebaseModuleToLiveModel(object module, Type t, int statId)
         {
-            if (progModule == null) return;
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return;
-            object character = AccessTools.Field(progModule.GetType(), "_character")?.GetValue(progModule);
-            engine.Sync?.BroadcastStatEditPreviewClear(PersonnelReflection.ReadUnitId(character));
+            try
+            {
+                object character = AccessTools.Field(t, "_character")?.GetValue(module);
+                object prog = character != null ? AccessTools.Property(character.GetType(), "Progression")?.GetValue(character, null) : null;
+                if (prog != null)
+                {
+                    // (a) clicked stat: pin both baselines to the live model value (post authoritative apply).
+                    var getBaseStat = AccessTools.Method(prog.GetType(), "GetBaseStat");
+                    var cbaType = AccessTools.TypeByName("PhoenixPoint.Common.Entities.Characters.CharacterBaseAttribute");
+                    if (getBaseStat != null && cbaType != null)
+                    {
+                        int liveStat = Convert.ToInt32(getBaseStat.Invoke(prog, new[] { Enum.ToObject(cbaType, statId) }));
+                        switch (statId)
+                        {
+                            case 0: SetIntField(t, module, "_currentStrengthStat", liveStat); SetIntField(t, module, "_startingStrengthStat", liveStat); break;
+                            case 1: SetIntField(t, module, "_currentWillStat", liveStat);     SetIntField(t, module, "_startingWillStat", liveStat);     break;
+                            case 2: SetIntField(t, module, "_currentSpeedStat", liveStat);    SetIntField(t, module, "_startingSpeedStat", liveStat);    break;
+                        }
+                    }
+                    // (b) soldier SP pool.
+                    var spField = AccessTools.Field(prog.GetType(), "SkillPoints");
+                    if (spField != null)
+                    {
+                        int liveSp = Convert.ToInt32(spField.GetValue(prog));
+                        SetIntField(t, module, "_currentSkillPoints", liveSp);
+                        SetIntField(t, module, "_startingSkillPoints", liveSp);
+                    }
+                }
+                // (c) shared faction SP pool.
+                object pf = AccessTools.Field(t, "_phoenixFaction")?.GetValue(module);
+                var facField = pf != null ? AccessTools.Field(pf.GetType(), "Skillpoints") : null;
+                if (facField != null)
+                {
+                    int liveFac = Convert.ToInt32(facField.GetValue(pf));
+                    SetIntField(t, module, "_currentFactionPoints", liveFac);
+                    SetIntField(t, module, "_startingFactionPoints", liveFac);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.RebaseModuleToLiveModel failed: " + ex.Message); }
         }
+
+        private static void SetIntField(Type t, object inst, string field, int value)
+            => AccessTools.Field(t, field)?.SetValue(inst, value);
 
         /// <summary>HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint in
         /// <see cref="GeoUiRefresh.FullRedriveProgression"/> is about to <c>SetCharacterProgression</c> the OPEN
@@ -497,26 +533,63 @@ namespace Multiplayer.Harmony.Sync
     }
 
     [HarmonyPatch]
-    public static class ChangeCharacterStatPreviewPatch
+    public static class ChangeCharacterStatThinClientPatch
     {
         private static MethodBase _target;
         public static bool Prepare()
         {
             var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression");
             _target = t != null ? AccessTools.Method(t, "ChangeCharacterStat") : null;
-            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.ChangeCharacterStat preview " + (_target != null ? "bound" : "NOT FOUND"));
+            Debug.Log("[Multiplayer] PersonnelEditPatches: UIModuleCharacterProgression.ChangeCharacterStat thin-client " + (_target != null ? "bound" : "NOT FOUND"));
             return _target != null;
         }
         public static MethodBase TargetMethod() => _target;
 
-        // DISPLAY-ONLY preview (never suppresses — POSTFIX only, the native +/- math always runs). __0 =
-        // CharacterBaseAttribute (Strength=0/Will=1/Speed=2); __result = the ±1/0 stat delta the caller applies
-        // one line later. A no-op click (__result==0 → buffer unchanged) is not broadcast.
-        public static void Postfix(object __instance, object __0, int __result)
+        // int ChangeCharacterStat(CharacterBaseAttribute baseStat, int cur, int start, bool increase) — the ONE
+        // native chokepoint every +/- button routes through (ChangeStrengthStat/ChangeWillStat/ChangeSpeedStat →
+        // UIModuleCharacterProgression.cs:848/857/866 → :875). THIN-CLIENT (user mandate, final after 4 hybrid
+        // attempts): in an active co-op session the +/- button is a PURE INPUT — the native buffer math is FULLY
+        // suppressed on ALL peers (return false), so there is NO optimistic local compute to disagree with the
+        // authoritative echo (the crooked-SP failure mode that reverted the earlier POSTFIX per-click relay,
+        // 39597c9). We capture only {unitId, statId, ±1 from `increase`}; the HOST applies it at the model + pins
+        // its own panel to the result (local-instant); a CLIENT relays the signed intent (host applies, #9 echo
+        // re-drives, ~RTT — accepted). Mutoid (mutagen-cost) progression is NOT intercepted (item 7): native runs
+        // locally and the existing commit seam handles it. __0 = baseStat (CBA int), __3 = increase (bool);
+        // __result forced to 0 so the caller's `_current* += __result` never mutates the buffer.
+        public static bool Prefix(object __instance, object __0, bool __3, ref int __result)
         {
-            if (__result == 0) return;
-            try { PersonnelEditRelay.BroadcastStatEditPreview(__instance, Convert.ToInt32(__0), __result); }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] ChangeCharacterStatPreviewPatch failed: " + ex.Message); }
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;   // single-player: native owns the buffer + commit
+            if (SyncApplyScope.IsApplying) return true;                    // engine-driven re-drive, not a user click
+            try
+            {
+                var t = __instance.GetType();
+                if (AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool pandoran && pandoran)
+                {
+                    Debug.Log("[Multiplayer] ChangeCharacterStatThinClientPatch: mutoid (mutagen-cost) progression — not intercepted, native local path");
+                    return true;   // item 7: keep current behavior for mutoid
+                }
+                object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
+                long unitId = PersonnelReflection.ReadUnitId(character);
+                int statId = Convert.ToInt32(__0);
+                int signed = __3 ? 1 : -1;
+                __result = 0;   // suppress the optimistic buffer change (native caller does `_current* += __result`)
+                if (engine.IsHost)
+                {
+                    Debug.Log("[Multiplayer] ChangeCharacterStatThinClientPatch: HOST stat click unit=" + unitId
+                              + " stat=" + statId + " delta=" + signed + " → apply+redrive (native suppressed)");
+                    PersonnelEditRelay.ApplyHostSelfStatClick(__instance, t, unitId, statId, signed);
+                }
+                else
+                {
+                    Debug.Log("[Multiplayer] ChangeCharacterStatThinClientPatch: CLIENT stat click unit=" + unitId
+                              + " stat=" + statId + " delta=" + signed + " → relay intent (native suppressed)");
+                    PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
+                        () => new SpendStatPointsAction(unitId, (byte)statId, signed));
+                }
+                return false;   // suppress the native buffer math on all peers
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ChangeCharacterStatThinClientPatch failed: " + ex.Message); return true; }
         }
     }
 
@@ -534,30 +607,29 @@ namespace Multiplayer.Harmony.Sync
         public static MethodBase TargetMethod() => _target;
 
         // CommitStatChanges is the native stat-spend commit (screen exit / soldier switch / confirm —
-        // UIStateEditSoldier.cs:232/363/715, UIModuleCharacterProgression.cs:367-387). Relays ONE
-        // SpendStatPointsAction per raised stat carrying only the positive delta; the local current
-        // values are rolled back to starting so a repeat commit in the same session never double-relays
-        // (native decrease below starting is impossible, :907 — committed spends are non-refundable).
+        // UIStateEditSoldier.cs:232/363/715, UIModuleCharacterProgression.cs:367-387). THIN-CLIENT: the +/- clicks
+        // are already relayed/applied per click (ChangeCharacterStatThinClientPatch fully suppressed the native
+        // buffer math), so this seam has NOTHING to relay — the stat buffer never accumulated a delta.
+        //   • HOST / single-player (ShouldRelay=false → return true): native commit RUNS. It is a safe no-op for
+        //     stats/SP/faction because the buffer always equals the model (clicks suppressed + the host rebases its
+        //     panel to the model after each click, and every remote apply reconciles the open panel) → ModifyBaseStat(0)
+        //     and the SkillPoints/faction write-backs write the model value back to itself. Leaving native to run is
+        //     also what keeps the nested BuyAbility path working: BuyAbility → ConsumeAbilityCost (buffer) →
+        //     CommitStatChanges writes the ability SP cost to the model (:405/375) — suppressing here would grant
+        //     free abilities. Mutoid commits its mutagen cost natively.
+        //   • CLIENT (frozen mirror): suppress the local commit's model writes and roll the buffer back to starting
+        //     (idempotent repeat-commit guard). Nothing to relay. Never-silent DIAG (incl. mutoid path taken).
         public static bool Prefix(object __instance)
         {
-            if (!PersonnelEditRelay.ShouldRelay()) return true;
+            if (!PersonnelEditRelay.ShouldRelay()) return true;   // HOST/SP: native commit runs (no-op write-back; nested BuyAbility SP cost preserved)
             try
             {
                 var t = __instance.GetType();
-                int dStr = PersonnelEditRelay.Delta(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
-                int dWill = PersonnelEditRelay.Delta(t, __instance, "_currentWillStat", "_startingWillStat");
-                int dSpeed = PersonnelEditRelay.Delta(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
                 bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool p && p;
                 object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
                 long unitId = PersonnelReflection.ReadUnitId(character);
-                // DIAG (orphan RCA 2026-07-09 evidence gap): one entry line per native commit (screen exit /
-                // soldier switch / confirm) with the deltas, so a dropped/misrouted stat spend is traceable.
-                Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: entry unitId=" + unitId
-                          + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + " pandoran=" + pandoran);
-                if (!pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
-                    PersonnelEditRelay.RelayStatDeltas(unitId, dStr, dWill, dSpeed);   // shared with the conflict-repaint harvest
-                else if (pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
-                    Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: mutoid (mutagen-cost) stat spend not relayed — commit suppressed");
+                Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: CLIENT commit suppressed (thin-client — per-click owns stat sync) unit="
+                          + unitId + (pandoran ? " [mutoid: native buffer edit dropped on frozen client]" : ""));
                 // Roll local session state back to starting (idempotent repeat-commit guard).
                 Reset(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
                 Reset(t, __instance, "_currentWillStat", "_startingWillStat");
@@ -570,14 +642,9 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] CommitStatChangesProgressionRelayPatch failed: " + ex.Message); return true; }
         }
 
-        // FIX 3 commit-seam backstop + preview-CLEAR — both run on host (native) and client (Prefix suppressed,
-        // Postfix still fires). The commit/soldier-switch/screen-exit all route through CommitStatChanges, so this
-        // is the single seam where the spender stops previewing this soldier.
-        public static void Postfix(object __instance)
-        {
-            PersonnelEditRelay.CommitSeamBackstop();
-            PersonnelEditRelay.BroadcastStatEditPreviewClear(__instance);
-        }
+        // Commit-seam backstop — runs on host (native) and client (Prefix suppressed, Postfix still fires): re-drive
+        // the open progression panel once so a same-unit apply that landed unstamped can't leave it stale.
+        public static void Postfix() => PersonnelEditRelay.CommitSeamBackstop();
 
         private static void Reset(Type t, object inst, string currentField, string startingField)
         {

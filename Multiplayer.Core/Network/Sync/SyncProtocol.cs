@@ -436,42 +436,6 @@ namespace Multiplayer.Network.Sync
             catch { return false; }
         }
 
-        // ─── StatEditPreview (0x6E) — display-only in-progress stat-edit preview ───────────────────────
-        // Payload: [u8 clear][i64 unitId][i32 dStr][i32 dWill][i32 dSpeed][i32 soldierSP][i32 factionSP].
-        // Cosmetic transient; carries NO authoritative state (see StatEditPreviewPayload).
-        public static byte[] EncodeStatEditPreview(long unitId, int dStr, int dWill, int dSpeed,
-            int soldierSP, int factionSP, bool clear)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write((byte)(clear ? 1 : 0));
-                w.Write(unitId);
-                w.Write(dStr); w.Write(dWill); w.Write(dSpeed);
-                w.Write(soldierSP); w.Write(factionSP);
-                return ms.ToArray();
-            }
-        }
-
-        public static bool TryDecodeStatEditPreview(byte[] data, out StatEditPreviewPayload payload)
-        {
-            payload = default;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    bool clear = r.ReadByte() != 0;
-                    long unitId = r.ReadInt64();
-                    int dStr = r.ReadInt32(), dWill = r.ReadInt32(), dSpeed = r.ReadInt32();
-                    int soldierSP = r.ReadInt32(), factionSP = r.ReadInt32();
-                    payload = new StatEditPreviewPayload(unitId, dStr, dWill, dSpeed, soldierSP, factionSP, clear);
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
         public static byte[] EncodeEventDismiss(ushort occurrenceId, string eventId, int choiceIndex = -1)
             => EncodeEventDismiss(occurrenceId, eventId, choiceIndex, null);
 

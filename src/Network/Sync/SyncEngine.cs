@@ -155,6 +155,7 @@ namespace Multiplayer.Network.Sync
             State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
+            State.StatRefundTracker.ResetSession();              // thin-client stat-refund anti-farm ledger (static; a reused GeoUnitId must not inherit a prior session's net)
             SyncRegistration.RegisterAll();   // registers every action reader (inner action bytes on the GeoIntent/GeoOutcome envelope surfaces)
             // Wallet one-writer wiring: RemoveFacilityAction.Apply refunds the scrap ONLY on the
             // authoritative host (client replays are structural-only; refund converges via 0xA0).
@@ -1683,50 +1684,6 @@ namespace Multiplayer.Network.Sync
                 Multiplayer.Harmony.Sync.GeoscapeLogMirror.ApplyMirroredEntry(GeoRuntime.Instance, text, highPriority);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnGeoLogNotice failed: " + ex.Message); }
-        }
-
-        // ─── StatEditPreview (0x6E) — display-only in-progress stat-edit preview ───────────────────────
-        // The SPENDER (host or client) broadcasts its live edit buffer on each +/- click; WATCHERS with the
-        // same soldier's progression panel open write the numbers into the UI labels only (never state). The
-        // real spend still rides SpendStatPoints + #9 and always wins. Topology: client spender -> host (which
-        // relays to every OTHER client + shows on its own UI) ; host spender -> all clients. The sender is never
-        // echoed its own preview (its panel already shows the live buffer natively).
-
-        /// <summary>Spender: broadcast one display-only preview of the current uncommitted stat-edit buffer.</summary>
-        public void BroadcastStatEditPreview(long unitId, int dStr, int dWill, int dSpeed, int soldierSP, int factionSP)
-            => SendStatEditPreview(SyncProtocol.EncodeStatEditPreview(unitId, dStr, dWill, dSpeed, soldierSP, factionSP, clear: false),
-                                   "show unit=" + unitId + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed
-                                   + " soldierSP=" + soldierSP + " factionSP=" + factionSP);
-
-        /// <summary>Spender: broadcast a preview-CLEAR (commit / soldier-switch / screen-exit) for one soldier.</summary>
-        public void BroadcastStatEditPreviewClear(long unitId)
-            => SendStatEditPreview(SyncProtocol.EncodeStatEditPreview(unitId, 0, 0, 0, 0, 0, clear: true),
-                                   "clear unit=" + unitId);
-
-        private void SendStatEditPreview(byte[] payload, string diag)
-        {
-            if (!_engine.IsActiveSession) return;   // single-player: no watchers
-            var msg = new NetworkMessage(PacketType.StatEditPreview, payload);
-            if (_engine.IsHost) _engine.BroadcastToAll(msg);   // host spender -> every client
-            else _engine.SendToHost(msg);                       // client spender -> host relays to the rest
-            Debug.Log("[Multiplayer] SyncEngine: stat-edit preview SENT (" + diag + ")");
-        }
-
-        /// <summary>Inbound preview. On the HOST: relay to every OTHER client, then apply to the host's own UI
-        /// (the host is a watcher of the client's edit). On a CLIENT: apply to the UI. Display-only; a decode
-        /// failure or closed/off-unit panel is a silent no-op inside the reflective UI helper.</summary>
-        public void OnStatEditPreview(ulong senderPeerId, byte[] data)
-        {
-            if (!SyncProtocol.TryDecodeStatEditPreview(data, out var p)) return;
-            // Host: fan the client's preview out to the OTHER clients (never back to the sender).
-            if (_engine.IsHost)
-                _engine.BroadcastExcept(senderPeerId, new NetworkMessage(PacketType.StatEditPreview, data));
-            try
-            {
-                if (p.Clear) GeoUiRefresh.ClearStatEditPreview(GeoRuntime.Instance, p.UnitId);
-                else GeoUiRefresh.ApplyStatEditPreview(GeoRuntime.Instance, p);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnStatEditPreview failed: " + ex.Message); }
         }
 
         // ─── Geoscape report-window mirror (host->all show, Phase-A) ───────
