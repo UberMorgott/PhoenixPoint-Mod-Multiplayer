@@ -63,6 +63,10 @@ namespace Multiplayer.Network
         private const int HeartbeatIntervalMs = 5000;
         private const int HeartbeatTimeoutMs = 20000;
         private long _lastHeartbeatSend;
+        // FIX-2: client-side outbound-liveness clock — the last time the host ACKed one of our
+        // heartbeats. Distinct from _lastHeartbeat[host] (inbound liveness): it detects a HALF-OPEN
+        // send channel (host traffic still arriving, but the host stopped receiving/acking ours).
+        private long _lastHeartbeatAck;
 
         public SessionManager(NetworkEngine engine)
         {
@@ -77,7 +81,9 @@ namespace Multiplayer.Network
         public void SetHostPeer(ulong hostPeerId)
         {
             HostPeerId = hostPeerId;
-            _lastHeartbeat[hostPeerId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            _lastHeartbeat[hostPeerId] = now;
+            _lastHeartbeatAck = now; // FIX-2: seed the outbound-liveness (ack) clock at connect
         }
 
         public void Update()
@@ -113,7 +119,10 @@ namespace Multiplayer.Network
 
             if (loadInFlight)
             {
-                // suspended this tick (see note above).
+                // suspended this tick (see note above). FIX-2: also keep the outbound-liveness (ack)
+                // clock fresh so a long load that starves acks does not false-fire the half-open
+                // detector the instant the load ends.
+                _lastHeartbeatAck = now;
             }
             // Heartbeat timeout check (host only)
             else if (_engine.IsHost)
@@ -147,6 +156,19 @@ namespace Multiplayer.Network
                 {
                     Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
                     HostLeaveHandler.TriggerHostLeft();
+                }
+                // FIX-2: HALF-OPEN detection. Even while host traffic keeps ARRIVING (so the inbound
+                // timeout above does not fire), if the host has not ACKed our heartbeats for the whole
+                // timeout window then our OUTBOUND (client->host) channel is dead — a half-open Steam
+                // P2P session the transport still reports as Connected. We can no longer ack the barrier
+                // or send inputs, so the session is unusable → declare it dead client-side via the SAME
+                // teardown chokepoint (Steam lobby Leave + ClearRichPresence + return-to-menu), but with
+                // a specific never-silent reason.
+                else if (now - _lastHeartbeatAck > HeartbeatTimeoutMs)
+                {
+                    Debug.LogWarning("[Multiplayer] Host heartbeat-ack timed out — outbound channel dead; leaving.");
+                    HostLeaveHandler.TriggerHostLeft(
+                        "Connection to host lost (send channel dead — stage: heartbeat-ack timeout).");
                 }
             }
         }
@@ -422,9 +444,14 @@ namespace Multiplayer.Network
             }
             else
             {
-                // Client received host heartbeat — update host heartbeat time
+                // Client received a host Heartbeat OR HeartbeatAck — both refresh inbound liveness.
                 if (HostPeerId.HasValue)
                     _lastHeartbeat[HostPeerId.Value] = now;
+                // FIX-2: a HeartbeatAck specifically proves our OUTBOUND channel is alive (the host
+                // received our heartbeat and replied). Track it separately so a half-open send channel
+                // (inbound flowing, outbound dead) is detectable while host packets keep arriving.
+                if (msg.Type == PacketType.HeartbeatAck)
+                    _lastHeartbeatAck = now;
             }
         }
 

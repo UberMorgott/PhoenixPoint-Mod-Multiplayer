@@ -77,9 +77,9 @@ namespace Multiplayer.Network
         /// SessionManager.Update routes here when it has not heard from the host within the timeout. The
         /// same one-shot latch dedups this against a graceful HostDisconnected packet or a later real drop.
         /// </summary>
-        public static void TriggerHostLeft()
+        public static void TriggerHostLeft(string reason = null)
         {
-            HandleHostLeft();
+            HandleHostLeft(reason);
         }
 
         /// <summary>True once this session's host-leave has been handled (the menu return fired).</summary>
@@ -124,17 +124,20 @@ namespace Multiplayer.Network
 
         // ONE handler for both triggers. Idempotent (one-shot latch): a graceful HostDisconnected packet
         // followed by the transport drop of the same host must return to the menu only once.
-        private static void HandleHostLeft()
+        private static void HandleHostLeft(string reason = null)
         {
             if (!_latch.TryHandle()) return; // already handled this session
-            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu.");
+            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu. " +
+                             (reason ?? SessionLifecycle.HostEndedSession));
 
             // Session-fatal: a modal prompt is acceptable here (works tactical + geoscape + home).
+            // FIX-2 (half-open): callers may pass a specific never-silent reason (e.g. heartbeat-ack
+            // timeout = dead send channel); default is the generic host-ended-session notice.
             try
             {
                 var box = GameUtl.GetMessageBox();
                 box?.ShowSimplePrompt(
-                    SessionLifecycle.HostEndedSession,
+                    reason ?? SessionLifecycle.HostEndedSession,
                     MessageBoxIcon.Warning, MessageBoxButtons.OK,
                     null, null);
             }

@@ -26,6 +26,11 @@ namespace Multiplayer.Transport
         private Delegate _installedSessionHandler;
         private readonly HashSet<ulong> _connectedPeers = new HashSet<ulong>();
         private readonly Queue<(ulong, byte[])> _incomingQueue = new Queue<(ulong, byte[])>();
+        // FIX-2: consecutive send-failure count per peer. SendP2PPacket can return false (or throw) when
+        // a P2P session is dead; the old catch {} hid this. After N in a row we surface it instead of
+        // silently dropping every packet forever.
+        private readonly Dictionary<ulong, int> _consecutiveSendFailures = new Dictionary<ulong, int>();
+        private const int SendFailureThreshold = 5;
 
         // ─── Facepunch.Steamworks reflection handles (runtime-resolved) ───────────────────
         // GROUNDING (verified 2026-06-20 against the SHIPPED Facepunch.Steamworks.Win64.dll that PP
@@ -306,15 +311,57 @@ namespace Multiplayer.Transport
 
         private void SendPacket(ulong peerId, byte[] data, bool reliable)
         {
+            if (_sendPacketMethod == null) return;
             try
             {
-                if (_sendPacketMethod == null) return;
                 var sendType = reliable ? _p2pSendReliable : _p2pSendUnreliable;
                 // SendP2PPacket(SteamId, byte[], int length=-1, int nChannel=0, P2PSend sendType)
-                _sendPacketMethod.Invoke(null,
+                var result = _sendPacketMethod.Invoke(null,
                     new object[] { MakeSteamId(peerId), data, -1, 0, sendType });
+                // FIX-2: the Facepunch API returns bool (true = queued to the P2P session). A false
+                // return OR a thrown exception is a real send failure — stop swallowing it. A non-bool
+                // result is treated as success (defensive; the resolved overload returns bool).
+                bool ok = !(result is bool b) || b;
+                if (ok) { _consecutiveSendFailures.Remove(peerId); return; }
+                RegisterSendFailure(peerId, "SendP2PPacket returned false");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                RegisterSendFailure(peerId, ex.Message);
+            }
+        }
+
+        // FIX-2: count consecutive send failures per peer; log the first, and after N in a row surface
+        // the dead channel through EXISTING plumbing instead of the old silent catch {}. On a CLIENT
+        // (only peer = the host) a dead send channel is session-fatal → State=Failed → OnStateChanged →
+        // NetworkEngine.OnConnectionFailed (never-silent dialog + teardown). On the HOST a dead channel
+        // to ONE client is just that client dropping → route through the per-peer OnPeerDisconnected path
+        // (Session.RemoveClient + the F1 drop notice), never a host-wide failure.
+        private void RegisterSendFailure(ulong peerId, string reason)
+        {
+            _consecutiveSendFailures.TryGetValue(peerId, out var count);
+            count++;
+            _consecutiveSendFailures[peerId] = count;
+            if (count == 1)
+                UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: send to {peerId} failed (1st): {reason}");
+            if (count < SendFailureThreshold) return;
+
+            _consecutiveSendFailures[peerId] = 0; // reset so we do not re-raise on every subsequent send
+            if (IsHost)
+            {
+                UnityEngine.Debug.LogError($"[Multiplayer] SteamTransport(host): send to client {peerId} failed " +
+                                           $"{SendFailureThreshold}x ({reason}) — treating the client as disconnected.");
+                _connectedPeers.Remove(peerId);
+                OnPeerDisconnected?.Invoke(peerId, $"Steam({peerId})");
+            }
+            else
+            {
+                UnityEngine.Debug.LogError($"[Multiplayer] SteamTransport(client): send to host {peerId} failed " +
+                                           $"{SendFailureThreshold}x ({reason}) — surfacing as transport failure.");
+                LocalEndpoint = $"Steam P2P send channel dead to host: {reason} ({SendFailureThreshold}x)";
+                State = ConnectionState.Failed;
+                OnStateChanged?.Invoke(State);
+            }
         }
 
         private bool IsP2PPacketAvailable()
