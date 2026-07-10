@@ -147,23 +147,36 @@ Fixes from the 2-PC Steam WAN test. Constants: `HeartbeatIntervalMs=5000`, `Hear
   seconds→minutes and precedes both the curtain "Loading" and phase-2 world-load, so it used to be a
   blank screen. The host is never downloading, so no lobby-after-PLAY popup returns.
 
-### Parity gate (host/client DLC + mods + settings)
+### Parity SOFT-gate (host/client DLC + mods + settings)
 
-At the join handshake — BEFORE any save transfer — the client sends a **parity manifest** inside its
-JOIN (`ParityManifestCollector.Collect` → pure `ParityManifest`/`ParityComparer` in `Multiplayer.Core`,
-riding the existing JOIN packet as a backward-compatible trailing block). The host compares it
-host-authoritatively and **blocks the join on any mismatch** with a never-silent dialog on BOTH sides
-(host message box + system-chat; client via `ConnectionRejected` → `OnConnectionFailed`) listing the
-EXACT diffs. `HandleConnectionRejected` is now never-silent for ALL reject reasons (was log-only).
+At the join handshake the client sends a **parity manifest** inside its JOIN (`ParityManifestCollector.
+Collect` → pure `ParityManifest`/`ParityComparer` in `Multiplayer.Core`, backward-compatible trailing
+block on the JOIN packet). A mismatch does **NOT block the join** — the client joins the lobby normally:
 
-- **DLC** (platform entitlements, `GetPlatformEntitlement().IsUserEntitledFor`): blocks only when the
-  host has a DLC the client lacks (extra DLC on the client is fine).
-- **Mods** (`ModManager.Mods` where `Enabled`, id + `MetaData.Version`): missing / extra / version-differ
-  all block.
-- **Settings** (`ModConfig.GetConfigFields`, sorted `key=value` + crc32 per mod): any per-key value diff
-  blocks and is shown (`host=… client=…`).
-- **NOT auto-synced** — mods read config at load time, so settings distribution is a later increment.
-- **Settings-coverage LIMITATION**: values are stringified without a JSON dependency, so scalar settings
-  (bool/int/float/enum/string) diff exactly, but complex/array config values are compared by their stable
-  type-string only (equal values still hash equal; contents aren't shown in a diff). A client on an OLD
-  (pre-parity) Multiplayer build sends no manifest → treated as an unverifiable-parity mismatch → blocked.
+- **READY LOCK**: the mismatched client's READY button greys + relabels "MODS MISMATCH"; the host ALSO
+  ignores a READY from a mismatched client at the `SetClientReady` chokepoint (never trust client UI).
+  Shared pure decision `ParityComparer.ReadyAllowed`.
+- **ROSTER BADGE**: a native-cloned "!" button (warning tint) on the mismatched player's row, on BOTH
+  the host and the affected client (own row). Click → the exact host-computed diff list (missing/extra
+  mods, `version host≠client`, missing DLC, `Setting mod.key: host=… client=…`) via the native message
+  box — the lobby has no hover-tooltip mechanism, the message box is the mod's detail surface. Status
+  rides `PeerListEntry.ParityDiffs` (trailing block on PEER_LIST, legacy-compatible).
+- **AUTO-APPLY of host mod settings**: `ConnectionAccepted` carries the HOST manifest; the client
+  applies the host's **scalar** settings (bool/int/float/enum/string/decimal) IN MEMORY via the game's
+  own `ModConfigField` accessors, fires `ModManager.OnConfigChanged` (mods supporting runtime changes
+  re-read), then re-sends a fresh manifest (`ParityUpdate` 0x46). The host re-compares → if only config
+  diffs existed the mismatch clears: badge disappears, READY unlocks (same PEER_LIST rail).
+  - **Restore**: the client's original values are snapshotted once per (mod, field) and restored at the
+    session teardown chokepoint (`NetworkEngine.Shutdown`/`TearDown` → `ParityConfigRestore` delegate
+    hook). This path never writes disk — `ModConfig.json` persists only via `ModManager.SaveModConfig`
+    (game init + the mod-management UI). CAVEAT: if the user opens+exits the game's MOD SETTINGS screen
+    while host values are applied, the game itself persists them; the teardown restore still puts the
+    in-memory values back, but that one disk write keeps host values until the next own edit.
+- **Diff rules**: DLC diffs only when the host has one the client lacks (extra client DLC is fine);
+  mods missing/extra/version-differ all diff; settings per-key value diffs. Mods/version/DLC are NOT
+  auto-fixable → badge + lock persist with the exact diff.
+- **LIMITATION (settings coverage)**: values are stringified without a JSON dependency — scalars diff
+  exactly and auto-apply; complex/array config values are compared by stable type-string only and are
+  NOT auto-appliable → they stay a mismatch (badge + lock persist; the diff names the mod/key). A client
+  on an OLD (pre-parity) Multiplayer build sends no manifest → permanent "manifest missing" mismatch
+  (joins, but can never ready).
