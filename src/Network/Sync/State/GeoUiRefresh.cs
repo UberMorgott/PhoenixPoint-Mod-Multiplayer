@@ -639,7 +639,8 @@ namespace Multiplayer.Network.Sync.State
             // (SetCharacterProgression) re-reads the model and RESETS the edit buffer, so
             // ProgressionRepaintDecision gates it (reactivity mandate — never defer forever):
             //   Repaint (no pending edit) → full re-drive; ConflictRepaint (open soldier changed remotely
-            //   mid-edit) → full re-drive, remote wins, local clicks discarded; PartialRepaint (a DIFFERENT
+            //   mid-edit) → HARVEST the pending stat allocation (client relays / host commits, FIX 4) then full
+            //   re-drive, remote wins for the rest (unconfirmed ability pick discarded); PartialRepaint (a DIFFERENT
             //   soldier's change moved the shared faction-SP pool) → refresh the shared pool label only, keep
             //   the buffer; Skip → nothing on the panel changed. Never-silent for armed stamps.
             if (_progModuleField != null && _isCharacterChanged != null && _setCharacterProgression != null
@@ -669,7 +670,7 @@ namespace Multiplayer.Network.Sync.State
                         // the stale bought slot) so nothing later written to Skillpoints can go negative.
                         else if (FullRedriveProgression(progModule, geo, character, conflict: true, stampArmed))
                             Debug.Log("[Multiplayer] GeoUiRefresh: progression OVER-COMMITTED SP pool — partial shift unaffordable, "
-                                      + "full ConflictRepaint (remote wins, local buffer discarded) unit=" + viewedUnitId
+                                      + "full ConflictRepaint (pending allocation HARVESTED before re-drive; host clamps the spend to the live pool) unit=" + viewedUnitId
                                       + " stamped=[" + JoinIds(stampIds) + "]");
                     }
                     else if (outcome == ProgressionRepaintDecision.Outcome.Repaint
@@ -680,7 +681,7 @@ namespace Multiplayer.Network.Sync.State
                         {
                             if (conflict)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression CONFLICT repaint — remote changed OPEN unit="
-                                          + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); local uncommitted allocation discarded, remote wins");
+                                          + viewedUnitId + " (stamped=[" + JoinIds(stampIds) + "]); pending stat allocation HARVESTED (committed) before re-drive, unconfirmed ability selection discarded");
                             else if (stampArmed)
                                 Debug.Log("[Multiplayer] GeoUiRefresh: progression re-drive unit=" + viewedUnitId
                                           + " stamped=[" + JoinIds(stampIds) + "] factionSp=" + stampSp);
@@ -769,6 +770,14 @@ namespace Multiplayer.Network.Sync.State
         {
             object viewerFaction = _viewerFactionProp.GetValue(geo, null);
             if (viewerFaction == null) { ProgressionStampDiag(stampArmed, "ViewerFaction null"); return false; }
+            // FIX 4 HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint is about to reset the
+            // stat buffer (SetCharacterProgression → RefreshStats) and DISCARD the local pending allocation before
+            // the deferred CommitStatChanges seam relays it (log-proven: zero SpendStatPoints intents all session —
+            // the host's periodic same-unit #9 re-broadcast wiped the buffer every few seconds). Commit it FIRST:
+            // the client relays a SpendStatPoints intent, the host commits natively — so the panel converges to the
+            // committed values instead of silently losing the spend. The unconfirmed _boughtAbilitySlot is a
+            // pre-confirm selection (not a commit) → discarded by _clearBoughtAbility below, not harvested.
+            if (conflict) Multiplayer.Harmony.Sync.PersonnelEditRelay.HarvestPendingStatSpend(progModule);
             _setCharacterProgression.Invoke(progModule, new[] { viewerFaction, character });
             if (conflict) _clearBoughtAbility?.Invoke(progModule, null);   // FIX 2
             return true;

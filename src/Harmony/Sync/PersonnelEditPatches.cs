@@ -108,6 +108,79 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.CommitSeamBackstop failed: " + ex.Message); }
         }
 
+        /// <summary>Relay one <see cref="SpendStatPointsAction"/> per positive base-stat delta
+        /// (CharacterBaseAttribute: Strength=0, Will=1, Speed=2 — decompile enum order). Shared by the
+        /// commit-seam prefix (<see cref="CommitStatChangesProgressionRelayPatch"/>) and the conflict-repaint
+        /// harvest (<see cref="HarvestPendingStatSpend"/>) — both send the SAME wire the host re-prices natively.</summary>
+        internal static void RelayStatDeltas(long unitId, int dStr, int dWill, int dSpeed)
+        {
+            if (dStr > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 0, dStr));
+            if (dWill > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 1, dWill));
+            if (dSpeed > 0) Relay(ActionCategory.ControlSoldiers, unitId, true,
+                () => new SpendStatPointsAction(unitId, 2, dSpeed));
+        }
+
+        /// <summary>Positive-only int delta between two named int fields of <paramref name="inst"/>
+        /// (<c>_current* − _starting*</c>); 0 when either is unreadable/non-int. Shared by the commit-seam
+        /// prefix and the harvest below.</summary>
+        internal static int Delta(Type t, object inst, string currentField, string startingField)
+        {
+            object cur = AccessTools.Field(t, currentField)?.GetValue(inst);
+            object start = AccessTools.Field(t, startingField)?.GetValue(inst);
+            return cur is int c && start is int s ? c - s : 0;
+        }
+
+        /// <summary>HARVEST-BEFORE-WIPE (commit-seam race RCA 2026-07-10): a ConflictRepaint in
+        /// <see cref="GeoUiRefresh.FullRedriveProgression"/> is about to <c>SetCharacterProgression</c> the OPEN
+        /// soldier's panel — resetting <c>_current*Stat</c> to <c>_starting*Stat</c> and DISCARDING the local
+        /// pending stat allocation before the deferred <c>CommitStatChanges</c> seam ever relays it (log-proven:
+        /// zero SpendStatPoints intents a whole session, because the host's periodic same-unit #9 re-broadcast
+        /// wiped the buffer every few seconds). COMMIT it first, reading the pending deltas straight off the
+        /// module fields the same way the commit-seam prefix does:
+        ///   • co-op CLIENT → relay one SpendStatPoints intent per positive delta (host applies + re-broadcasts
+        ///     → the panel converges to the committed values);
+        ///   • HOST → invoke the native <c>CommitStatChanges()</c> inline (authoritative local commit; the
+        ///     ModifyBaseStat dirty seam mirrors it on #9).
+        /// The unconfirmed <c>_boughtAbilitySlot</c> is a pre-confirm SELECTION (OnTrackSlotPointerClicked arms
+        /// it + opens a confirmation popup — decompile UIModuleCharacterProgression.cs:1031/1035), never a commit,
+        /// so it is NOT harvested — the caller's ClearBoughtAbility correctly discards it. Idempotent: the caller
+        /// runs SetCharacterProgression right after (resets the buffer), so a later repaint sees no pending edit
+        /// and cannot re-harvest. Best-effort; a miss must never break the repaint.</summary>
+        internal static void HarvestPendingStatSpend(object progModule)
+        {
+            try
+            {
+                if (progModule == null) return;
+                var engine = NetworkEngine.Instance;
+                bool active = engine != null && engine.IsActiveSession;
+                bool isHost = active && engine.IsHost;
+                var t = progModule.GetType();
+                int dStr = Delta(t, progModule, "_currentStrengthStat", "_startingStrengthStat");
+                int dWill = Delta(t, progModule, "_currentWillStat", "_startingWillStat");
+                int dSpeed = Delta(t, progModule, "_currentSpeedStat", "_startingSpeedStat");
+                bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(progModule) is bool p && p;
+                switch (StatSpendHarvest.Decide(active, isHost, pandoran, dStr, dWill, dSpeed))
+                {
+                    case StatSpendHarvest.Mode.HostCommit:
+                        AccessTools.Method(t, "CommitStatChanges")?.Invoke(progModule, null);
+                        Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: HOST committed pending stat spend"
+                                  + " before conflict repaint (dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + ")");
+                        break;
+                    case StatSpendHarvest.Mode.ClientRelay:
+                        object character = AccessTools.Field(t, "_character")?.GetValue(progModule);
+                        long unitId = PersonnelReflection.ReadUnitId(character);
+                        Debug.Log("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend: CLIENT harvest before conflict repaint"
+                                  + " unit=" + unitId + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed
+                                  + " — relaying so the allocation commits instead of being discarded");
+                        RelayStatDeltas(unitId, dStr, dWill, dSpeed);
+                        break;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelEditRelay.HarvestPendingStatSpend failed: " + ex.Message); }
+        }
+
         /// <summary>Destination container key for a transfer: (kind 1, VehicleID) for a GeoVehicle, else
         /// (kind 0, SiteId) for a GeoSite/base.</summary>
         internal static void ContainerKey(object container, out int kind, out int id)
@@ -394,9 +467,9 @@ namespace Multiplayer.Harmony.Sync
             try
             {
                 var t = __instance.GetType();
-                int dStr = Delta(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
-                int dWill = Delta(t, __instance, "_currentWillStat", "_startingWillStat");
-                int dSpeed = Delta(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
+                int dStr = PersonnelEditRelay.Delta(t, __instance, "_currentStrengthStat", "_startingStrengthStat");
+                int dWill = PersonnelEditRelay.Delta(t, __instance, "_currentWillStat", "_startingWillStat");
+                int dSpeed = PersonnelEditRelay.Delta(t, __instance, "_currentSpeedStat", "_startingSpeedStat");
                 bool pandoran = AccessTools.Field(t, "_hasPandoranProgression")?.GetValue(__instance) is bool p && p;
                 object character = AccessTools.Field(t, "_character")?.GetValue(__instance);
                 long unitId = PersonnelReflection.ReadUnitId(character);
@@ -405,15 +478,7 @@ namespace Multiplayer.Harmony.Sync
                 Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: entry unitId=" + unitId
                           + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed + " pandoran=" + pandoran);
                 if (!pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
-                {
-                    // CharacterBaseAttribute: Strength=0, Will=1, Speed=2 (decompile enum order).
-                    if (dStr > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
-                        () => new SpendStatPointsAction(unitId, 0, dStr));
-                    if (dWill > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
-                        () => new SpendStatPointsAction(unitId, 1, dWill));
-                    if (dSpeed > 0) PersonnelEditRelay.Relay(ActionCategory.ControlSoldiers, unitId, true,
-                        () => new SpendStatPointsAction(unitId, 2, dSpeed));
-                }
+                    PersonnelEditRelay.RelayStatDeltas(unitId, dStr, dWill, dSpeed);   // shared with the conflict-repaint harvest
                 else if (pandoran && (dStr > 0 || dWill > 0 || dSpeed > 0))
                     Debug.Log("[Multiplayer] CommitStatChangesProgressionRelayPatch: mutoid (mutagen-cost) stat spend not relayed — commit suppressed");
                 // Roll local session state back to starting (idempotent repeat-commit guard).
@@ -430,13 +495,6 @@ namespace Multiplayer.Harmony.Sync
 
         // FIX 3 commit-seam backstop — runs on host (native) and client (Prefix suppressed, Postfix still fires).
         public static void Postfix() => PersonnelEditRelay.CommitSeamBackstop();
-
-        private static int Delta(Type t, object inst, string currentField, string startingField)
-        {
-            object cur = AccessTools.Field(t, currentField)?.GetValue(inst);
-            object start = AccessTools.Field(t, startingField)?.GetValue(inst);
-            return cur is int c && start is int s ? c - s : 0;
-        }
 
         private static void Reset(Type t, object inst, string currentField, string startingField)
         {
