@@ -3,37 +3,62 @@ using System.Collections.Generic;
 namespace Multiplayer.Network.Sync.State
 {
     /// <summary>
-    /// Pure decision for the progression-panel (stats / SP / abilities) mirror repaint — the
-    /// <see cref="AugmentRepaintDecision"/> sibling with the panel's extra dimensions: the shared
-    /// faction-SP pool is DISPLAYED on the panel (a pool-only apply must still repaint), and the panel
-    /// holds an uncommitted local edit buffer (a relevant apply mid-edit is DEFERRED and owed a drain
-    /// on the commit/clear seam, never skipped forever — reactivity mandate). Repainting re-snapshots
-    /// the buffer from the model, so an unrelated apply must never reach it while an edit is pending.
+    /// Pure decision for the progression-panel (stats / SP / abilities) mirror repaint. Reactivity mandate:
+    /// a relevant remote apply is NEVER deferred forever (a watching, non-committing peer used to see nothing
+    /// until it committed or switched soldier — stat-sync RCA 2026-07-10). The panel holds an uncommitted
+    /// local +/- / ability buffer and a FULL re-drive (<c>SetCharacterProgression</c>) re-snapshots that buffer
+    /// from the model, so once an edit is pending the decision splits three ways:
+    ///   • no pending edit → <see cref="Outcome.Repaint"/> (full re-drive; nothing to lose);
+    ///   • pending edit, apply touched a DIFFERENT soldier but moved the shared faction-SP pool (or the caller
+    ///     cannot say what changed) → <see cref="Outcome.PartialRepaint"/> — refresh the shared pool label,
+    ///     KEEP the edit buffer (never SetCharacterProgression);
+    ///   • pending edit, apply POSITIVELY stamped the OPEN soldier → <see cref="Outcome.ConflictRepaint"/> —
+    ///     full re-drive, remote wins, the local uncommitted clicks are discarded.
+    /// Defer is GONE: no code path returns it.
     /// </summary>
     public static class ProgressionRepaintDecision
     {
         public enum Outcome
         {
-            /// <summary>Re-drive the panel from the model now (also consumes an owed deferred repaint).</summary>
+            /// <summary>Full re-drive from the model now (no pending edit, or a relevant idle apply).</summary>
             Repaint,
-            /// <summary>Relevant apply behind a pending local allocation — arm the owed flag, drain later.</summary>
-            Defer,
+            /// <summary>Pending edit + different soldier: refresh the shared faction-SP pool label only, keep the buffer.</summary>
+            PartialRepaint,
+            /// <summary>Pending edit + the OPEN soldier changed remotely: full re-drive, remote wins, local clicks discarded.</summary>
+            ConflictRepaint,
             /// <summary>Nothing shown on the panel changed — keep the buffer, do nothing.</summary>
             Skip,
         }
 
         /// <summary>Decide the panel action for one authoritative apply / fan-out kick.
-        /// <paramref name="stampedUnitIds"/> null = caller cannot say what changed → conservative
-        /// relevant (a missed repaint is a stale mirror forever); empty = nothing stamped.
-        /// <paramref name="factionSpChanged"/> = the shared faction-SP pool value changed (visible on
-        /// the panel for every soldier). <paramref name="repaintOwed"/> = a prior relevant apply was
-        /// deferred behind a pending edit and has not drained yet.</summary>
-        public static Outcome Decide(bool hasPendingLocalEdit, bool repaintOwed, long openUnitId,
+        /// <paramref name="stampedUnitIds"/> null = caller cannot say what changed → conservative (a missed
+        /// repaint is a stale mirror forever, but an unknown apply must never DISCARD a pending edit — that is
+        /// a PartialRepaint, not a Conflict); empty = nothing stamped. <paramref name="factionSpChanged"/> =
+        /// the shared faction-SP pool value (displayed on the panel for every soldier) changed.</summary>
+        public static Outcome Decide(bool hasPendingLocalEdit, long openUnitId,
                                      IReadOnlyList<long> stampedUnitIds, bool factionSpChanged)
         {
-            bool relevant = factionSpChanged || AugmentRepaintDecision.ShouldRepaint(openUnitId, stampedUnitIds);
-            if (hasPendingLocalEdit) return relevant ? Outcome.Defer : Outcome.Skip;
-            return relevant || repaintOwed ? Outcome.Repaint : Outcome.Skip;
+            if (!hasPendingLocalEdit)
+            {
+                bool relevant = factionSpChanged || AugmentRepaintDecision.ShouldRepaint(openUnitId, stampedUnitIds);
+                return relevant ? Outcome.Repaint : Outcome.Skip;
+            }
+
+            // Pending local edit: only a POSITIVE hit on the open soldier discards the buffer (ConflictRepaint).
+            // A null/unknown stamp is NOT a positive hit — it must not eat the user's uncommitted clicks.
+            if (OpenUnitStamped(openUnitId, stampedUnitIds)) return Outcome.ConflictRepaint;
+            if (factionSpChanged || stampedUnitIds == null) return Outcome.PartialRepaint;
+            return Outcome.Skip;
+        }
+
+        /// <summary>True only when the apply POSITIVELY stamped the open soldier — false for a null/unknown
+        /// stamp or an unresolved open id (0), both of which must not discard a pending edit buffer.</summary>
+        private static bool OpenUnitStamped(long openUnitId, IReadOnlyList<long> stampedUnitIds)
+        {
+            if (stampedUnitIds == null || openUnitId == 0) return false;
+            for (int i = 0; i < stampedUnitIds.Count; i++)
+                if (stampedUnitIds[i] == openUnitId) return true;
+            return false;
         }
     }
 }
