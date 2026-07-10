@@ -413,14 +413,97 @@ namespace Multiplayer.Network.Sync.State
             return true;
         }
 
-        /// <summary>Clear + refill the existing PUBLIC list field from the decoded one (keeps the existing
-        /// list INSTANCE — safer for any captured reference than a wholesale swap).</summary>
-        private static void CopyListContents(Type t, string name, object decoded, object existing)
+        /// <summary>Clear + refill the existing list field from the decoded one (keeps the existing list
+        /// INSTANCE — safer for any captured reference than a wholesale swap). Returns false only when the
+        /// member itself does not resolve (a shape/rename break the caller can diag); a null/non-IList value
+        /// on either side is a no-op that still reports the member as present (true).</summary>
+        private static bool CopyListContents(Type t, string name, object decoded, object existing)
         {
             var f = CachedField(t, name);
-            if (!(f?.GetValue(existing) is IList target) || !(f.GetValue(decoded) is IList source)) return;
+            if (f == null) return false;
+            if (!(f.GetValue(existing) is IList target) || !(f.GetValue(decoded) is IList source)) return true;
             target.Clear();
             foreach (var o in source) target.Add(o);
+            return true;
+        }
+
+        /// <summary>Value-copy one member, NEVER-SILENT: names the member if it fails to resolve so a
+        /// game-update rename breaks loudly in the log (the reflection-contract guard on the frozen mirror).</summary>
+        private static void CopyMember(Type t, string name, object decoded, object existing)
+        {
+            if (!CopyField(t, name, decoded, existing))
+                Debug.LogError("[Multiplayer] PersonnelReflection: " + t.Name + "." + name + " not found — not mirrored");
+        }
+
+        private static void CopyListMember(Type t, string name, object decoded, object existing)
+        {
+            if (!CopyListContents(t, name, decoded, existing))
+                Debug.LogError("[Multiplayer] PersonnelReflection: " + t.Name + "." + name + " not found — not mirrored");
+        }
+
+        /// <summary>CLIENT (#9 PS2): mirror the decoded soldier's CharacterProgression into the EXISTING live
+        /// progression instance by VALUE — never the old whole-object by-ref swap. TFTV repaints the open
+        /// progression panel per frame recomputing base+bonus off this object graph (Stats.cs:496-628); a
+        /// mid-frame top-level swap gave torn base-vs-effective reads that never settled ('1+3' split, flicker,
+        /// wrong per-point cost labels — RCA 2026-07-10). Keeping the instance also preserves its live
+        /// StatModifiedCallback / OnAbilityAdded / OnNewSpecializationAdded wiring (no orphan, no rewire).
+        /// Copies every MUTABLE [SerializeMember] of CharacterProgression (decompile CharacterProgression.cs):
+        /// _baseStats / _abilities / _abilityTracks lists, SkillPoints, _secondarySpecializationDef, and the
+        /// readonly-but-mutable LevelProgression inner state. MainSpecDef + BaseStatSheet are readonly Def
+        /// identity set once at construction (a soldier's class/stat-sheet never changes) → intentionally not
+        /// copied. Fallback: a soldier with NO live progression (new-recruit path) adopts the decoded instance
+        /// whole (the only remaining swap, logged).</summary>
+        private static void MirrorProgression(Type geoT, object decoded, object existing)
+        {
+            var pf = CachedField(geoT, "_progression");
+            if (pf == null)
+            {
+                Debug.LogError("[Multiplayer] PersonnelReflection: GeoCharacter._progression not found — progression not mirrored");
+                return;
+            }
+            object deProg = pf.GetValue(decoded);
+            object exProg = pf.GetValue(existing);
+            if (deProg == null)
+            {
+                Debug.LogError("[Multiplayer] PersonnelReflection: decoded _progression is null — progression left unchanged (no blind null overwrite)");
+                return;
+            }
+            if (exProg == null)
+            {
+                pf.SetValue(existing, deProg);   // last-resort swap: new recruit with no live progression to copy into
+                Debug.Log("[Multiplayer] PersonnelReflection: soldier had no live progression — adopted decoded instance (new-recruit fallback)");
+                return;
+            }
+            var pt = exProg.GetType();   // CharacterProgression
+            CopyListMember(pt, "_baseStats", deProg, exProg);
+            CopyListMember(pt, "_abilities", deProg, exProg);
+            CopyListMember(pt, "_abilityTracks", deProg, exProg);
+            CopyMember(pt, "SkillPoints", deProg, exProg);
+            CopyMember(pt, "_secondarySpecializationDef", deProg, exProg);
+            MirrorLevelProgression(pt, deProg, exProg);
+        }
+
+        /// <summary>CAVEAT (decompile LevelProgression.cs): CharacterProgression.LevelProgression is a readonly
+        /// ref holding MUTABLE Level/Experience — value-copy its inner [SerializeMember] state (Experience, Def,
+        /// HasNewLevel) into the EXISTING instance so level/XP keep mirroring while its LevelUpCallback wiring
+        /// (set in CharacterProgression.Init) survives. Level is derived (Def.GetLevel(Experience)) — no field.
+        /// Adopt whole only if the existing side has none.</summary>
+        private static void MirrorLevelProgression(Type progT, object deProg, object exProg)
+        {
+            var lf = CachedField(progT, "LevelProgression");
+            if (lf == null)
+            {
+                Debug.LogError("[Multiplayer] PersonnelReflection: CharacterProgression.LevelProgression not found — level/XP not mirrored");
+                return;
+            }
+            object deLvl = lf.GetValue(deProg);
+            object exLvl = lf.GetValue(exProg);
+            if (deLvl == null) return;
+            if (exLvl == null) { lf.SetValue(exProg, deLvl); return; }   // adopt inner (no live instance to copy into)
+            var lt = exLvl.GetType();   // LevelProgression
+            CopyMember(lt, "Experience", deLvl, exLvl);
+            CopyMember(lt, "Def", deLvl, exLvl);
+            CopyMember(lt, "HasNewLevel", deLvl, exLvl);
         }
 
         /// <summary>Invoke <c>CopyFrom(sameStatType, bool triggerStatChangeEvent:false)</c> on a StatusStat
@@ -475,10 +558,10 @@ namespace Multiplayer.Network.Sync.State
         ///   3. bodypart-HP snapshot + native <c>AggregateBodyPartHealth</c> (the ApllyTacticalResult order);
         ///   4. exact host HP LAST via StatusStat.CopyFrom (UpdateStats ratio-preserves into the new Max
         ///      first; CopyFrom then lands Min/Max/Value exactly, silent).
-        /// The decoded progression is adopted WITHOUT rewiring its events onto the existing character:
-        /// the frozen client never drives progression natively (every change arrives as the next blob),
-        /// and the wired handlers reach global AchievmentTracker/StatisticsManager sim — inert by
-        /// construction. Any failure logs + returns false; the soldier keeps its previous state.
+        /// Progression is mirrored by VALUE into the existing live CharacterProgression instance (see
+        /// <see cref="MirrorProgression"/>) — NOT the old whole-object by-ref swap, which gave TFTV's
+        /// per-frame panel repaint torn base-vs-effective reads (RCA 2026-07-10). Any failure logs +
+        /// returns false; the soldier keeps its previous state.
         /// </summary>
         public static bool ApplySoldierState(object existing, object decoded)
         {
@@ -489,8 +572,7 @@ namespace Multiplayer.Network.Sync.State
                 CopyField(t, "_identity", decoded, existing);
                 CopyField(t, "_corruptionValue", decoded, existing);
                 CopyField(t, "_bonusCharacterStats", decoded, existing);
-                if (!CopyField(t, "_progression", decoded, existing))
-                    Debug.LogError("[Multiplayer] PersonnelReflection: GeoCharacter._progression not found — progression not mirrored");
+                MirrorProgression(t, decoded, existing);
                 CopyField(t, "_armourLoadoutItems", decoded, existing);
                 CopyField(t, "_equipmentLoadoutItems", decoded, existing);
                 CopyField(t, "_inventoryLoadoutItems", decoded, existing);
