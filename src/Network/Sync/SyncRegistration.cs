@@ -68,6 +68,9 @@ namespace Multiplayer.Network.Sync
 
             // Geoscape sim-mutating abilities (ONE generic GeoAbility.Activate relay)
             SyncedActionRegistry.Register(SyncedActionIds.GeoAbilityActivate, GeoAbilityActivateAction.Read);
+
+            // Kaos "The Marketplace" buy (AB DLC5)
+            SyncedActionRegistry.Register(SyncedActionIds.MarketplaceBuy, MarketplaceBuyAction.Read);
         }
     }
 }

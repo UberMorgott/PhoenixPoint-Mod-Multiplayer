@@ -40,7 +40,8 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _choicesProp;  // GeoMarketplace.MarketplaceChoices (List<GeoEventChoice>)
         private static PropertyInfo _reqProp;      // GeoEventChoice.Requirments
         private static PropertyInfo _outcomeProp;  // GeoEventChoice.Outcome
-        private static MemberInfo _resourcesMember; // GeoEventChoiceRequirements.Resources (List<ResourceUnit>)
+        private static MemberInfo _resourcesMember; // GeoEventChoiceRequirements.Resources (ResourcePack)
+        private static MemberInfo _packValuesMember; // ResourcePack.Values (List<ResourceUnit>)
         private static MemberInfo _resValueMember; // ResourceUnit.Value (float)
         private static MemberInfo _itemsMember;    // GeoEventChoiceOutcome.Items (List<ItemUnit>)
         private static MemberInfo _unitsMember;    // GeoEventChoiceOutcome.Units (List<TacCharacterDef>)
@@ -50,6 +51,33 @@ namespace Multiplayer.Network.Sync.State
         private static MethodInfo _genItemChoice;  // GeoMarketplace.GenerateItemChoice(ItemDef, float)
         private static MethodInfo _genResChoice;   // GeoMarketplace.GenerateResearchChoice(ResearchDef, float)
         private static MethodInfo _getResearchById; // GeoLevelController.GetResearchById(string) → ResearchDef
+
+        // ─── host buy + client UI refresh (lazily probed via EnsureBuy) ───
+        private static bool _buyProbed;
+        private static MethodInfo _walletHasResources; // Wallet.HasResources(ResourcePack) → bool
+        private static MethodInfo _walletTake;         // Wallet.Take(ResourcePack, OperationReason) → bool
+        private static object _purchaseReason;         // OperationReason.Purchase
+        private static object _marketplaceSiteTypeValue; // GeoSiteType.Marketplace
+        private static ConstructorInfo _ctxCtor;       // new GeoscapeEventContext(GeoSite, GeoFaction, GeoVehicle)
+        private static FieldInfo _ctxSiteField;         // GeoscapeEventContext.Site
+        private static FieldInfo _ctxVehicleField;      // GeoscapeEventContext.Vehicle
+        private static MethodInfo _genReward;          // GeoEventChoiceOutcome.GenerateFactionReward(GeoFaction, ctx, string)
+        private static MemberInfo _reEnableMember;      // GeoEventChoiceOutcome.ReEneableEvent (bool)
+        private static MethodInfo _rewardApply;        // GeoFactionReward.Apply(GeoFaction, GeoSite, GeoVehicle)
+        private static MemberInfo _mapMember;           // GeoLevelController.Map
+        private static MemberInfo _eventSystemMember;   // GeoLevelController.EventSystem
+        private static MemberInfo _viewMember;          // GeoLevelController.View
+        private static PropertyInfo _activeSitesProp;   // GeoMap.ActiveSites (IList<GeoSite>)
+        private static PropertyInfo _siteTypeProp;      // GeoSite.Type (GeoSiteType)
+        private static MemberInfo _siteVehiclesMember;  // GeoSite.Vehicles (IEnumerable<GeoVehicle>)
+        private static MemberInfo _mpSettingsMember;    // GeoLevelController.TheMarketplaceSettings (field :175)
+        private static MemberInfo _mpEventMember;       // TheMarketplaceSettingsDef.MarketplaceEvent (GeoscapeEventDef, :87)
+        private static MemberInfo _defEventIdMember;    // GeoscapeEventDef.EventID (string, :81)
+        private static MethodInfo _enableEvent;        // GeoscapeEventSystem.EnableGeoscapeEvent(string)
+        private static MemberInfo _modulesMember;       // GeoscapeView.GeoscapeModules
+        private static MemberInfo _marketModuleMember;  // GeoscapeModulesData.TheMarketplaceModule
+        private static FieldInfo _moduleGeoEventField;  // UIModuleTheMarketplace._geoEvent
+        private static MethodInfo _moduleUpdateList;   // UIModuleTheMarketplace.UpdateList(GeoscapeEvent)
 
         private static void Ensure(GeoRuntime rt)
         {
@@ -77,6 +105,10 @@ namespace Multiplayer.Network.Sync.State
                     var resUnitType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceUnit")
                                       ?? AccessTools.TypeByName("ResourceUnit");
                     if (resUnitType != null) _resValueMember = Member(resUnitType, "Value");
+                    // ResourcePack is IEnumerable<ResourceUnit> only (NOT IList) — its indexable list is the
+                    // public `List<ResourceUnit> Values` field (ResourcePack.cs:18); ReadOffer unwraps it.
+                    var resPackType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourcePack");
+                    if (resPackType != null) _packValuesMember = Member(resPackType, "Values");
                 }
                 if (_outcomeProp != null)
                 {
@@ -145,7 +177,9 @@ namespace Multiplayer.Network.Sync.State
             {
                 float price = 0f;
                 var req = _reqProp?.GetValue(choice, null);
-                if (ReadMember(_resourcesMember, req) is IList res && res.Count > 0)
+                // Resources is a ResourcePack (IEnumerable<ResourceUnit>, NOT IList) — unwrap its Values list.
+                var pack = ReadMember(_resourcesMember, req);
+                if ((pack as IList ?? ReadMember(_packValuesMember, pack)) is IList res && res.Count > 0)
                 {
                     object v = ReadMember(_resValueMember, res[0]);
                     if (v != null) price = Convert.ToSingle(v);
@@ -210,6 +244,9 @@ namespace Multiplayer.Network.Sync.State
                 }
                 Debug.Log("[Multiplayer] MarketplaceReflection.ApplyOffers rebuilt MarketplaceChoices built="
                           + built + " skipped=" + skipped + " (host offers=" + snap.MarketplaceOffers.Count + ")");
+                // Reactive mirror: the offer list changed (not SameOffers) — repaint an OPEN marketplace window
+                // now (native UpdateList), instead of waiting for the next open. Guarded no-op when UI is closed.
+                RefreshOpenUI(rt);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] MarketplaceReflection.ApplyOffers failed: " + ex.Message); }
         }
@@ -264,6 +301,239 @@ namespace Multiplayer.Network.Sync.State
                 }
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] MarketplaceReflection.BuildChoice failed: " + ex.Message); return null; }
+        }
+
+        /// <summary>Client: read the clicked <c>GeoEventChoice</c>'s identity {kind, guid, price} for the buy
+        /// intent — the SAME <see cref="ReadOffer"/> mapping the host matches on, so client-sent == host-matched.
+        /// False when the offer can't be read (no relay → the frozen client must not simulate it locally).</summary>
+        public static bool TryReadOffer(GeoRuntime rt, object choice, out byte kind, out string guid, out float price)
+        {
+            kind = 0; guid = null; price = 0f;
+            try
+            {
+                Ensure(rt);
+                var rec = ReadOffer(choice);
+                if (rec == null) return false;
+                kind = rec.Kind; guid = rec.OfferGuid; price = rec.Price;
+                return !string.IsNullOrEmpty(guid);
+            }
+            catch { return false; }
+        }
+
+        // ─── host buy ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>Host: apply a client's marketplace BUY. Finds the live offer matching {kind, guid, price}
+        /// (index-independent — the host list may have shifted) and runs the SAME native sequence
+        /// <c>UIModuleTheMarketplace.OnChoiceSelected</c> does: affordability check → <c>Wallet.Take</c> →
+        /// reward (<c>GenerateFactionReward().Apply</c>, exactly <c>GeoscapeEvent.CompleteMarketplaceEvent</c>,
+        /// UI-free) → remove from <c>MarketplaceChoices</c>. Returns true when applied; a stale/absent/unaffordable
+        /// offer is a logged no-op (false) — the client's list refreshes via the #7 mirror. Best-effort, never throws.</summary>
+        public static bool TryBuy(GeoRuntime rt, byte kind, string guid, float price)
+        {
+            try
+            {
+                Ensure(rt);
+                EnsureBuy(rt);
+                var market = GetMarketplace(rt);
+                if (market == null || _choicesProp == null) return false;
+                if (!(_choicesProp.GetValue(market, null) is IList choices)) return false;
+
+                // Match by VALUE (kind + guid + price) — a bare index would target the wrong offer after any shift.
+                object match = null;
+                foreach (var choice in choices)
+                {
+                    if (choice == null) continue;
+                    var rec = ReadOffer(choice);
+                    if (rec != null && rec.Kind == kind
+                        && string.Equals(rec.OfferGuid ?? "", guid ?? "", StringComparison.Ordinal)
+                        && rec.Price == price)
+                    { match = choice; break; }
+                }
+                if (match == null)
+                {
+                    Debug.Log("[Multiplayer] MarketplaceReflection.TryBuy no matching offer (kind=" + kind
+                              + " guid=" + guid + " price=" + price + ") — stale client list, #7 mirror will refresh it");
+                    return false;
+                }
+
+                var faction = rt?.PhoenixFaction();
+                var wallet = rt?.Wallet();
+                if (faction == null || wallet == null) return false;
+
+                // Affordability: marketplace choices carry ONLY a Resources cost, so Wallet.HasResources is the full
+                // requirements check (no diplomacy/research). Wallet.Take clamps to available + always returns true,
+                // so this pre-check is what actually rejects an unaffordable buy on the authoritative host wallet.
+                var req = _reqProp?.GetValue(match, null);
+                var resources = ReadMember(_resourcesMember, req);
+                if (resources != null && _walletHasResources != null
+                    && !(bool)_walletHasResources.Invoke(wallet, new[] { resources }))
+                {
+                    Debug.Log("[Multiplayer] MarketplaceReflection.TryBuy rejected — insufficient funds (price=" + price + ")");
+                    return false;
+                }
+                if (resources != null && _walletTake != null && _purchaseReason != null)
+                    _walletTake.Invoke(wallet, new[] { resources, _purchaseReason });
+
+                ApplyReward(rt, faction, match);
+                choices.Remove(match);
+                Debug.Log("[Multiplayer] MarketplaceReflection.TryBuy applied (kind=" + kind + " guid=" + guid + " price=" + price + ")");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] MarketplaceReflection.TryBuy failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>Replicate <c>GeoscapeEvent.CompleteMarketplaceEvent</c> (all public game calls, no UI/event
+        /// instance): <c>GenerateFactionReward(faction, ctx, eventId).Apply(faction, ctx.Site, ctx.Vehicle)</c>,
+        /// then re-enable the encounter (<c>ReEneableEvent</c> is always true for a marketplace choice).</summary>
+        private static void ApplyReward(GeoRuntime rt, object faction, object choice)
+        {
+            var geo = rt?.GeoLevel();
+            var outcome = _outcomeProp?.GetValue(choice, null);
+            if (geo == null || outcome == null || _genReward == null || _ctxCtor == null || _rewardApply == null) return;
+
+            var mpSite = FindMarketplaceSite(geo);
+            object vehicle = mpSite != null ? FirstVehicle(mpSite) : null;
+            object startingBase = AccessTools.Property(faction.GetType(), "StartingBase")?.GetValue(faction, null);
+            // The live marketplace GeoscapeEvent's EventID — grounded: GeoscapeEventSystem.IsEventTheMarketplace
+            // (GeoscapeEventSystem.cs:407-410) defines it as TheMarketplaceSettings.MarketplaceEvent.EventID; the
+            // native CompleteMarketplaceEvent's ReEneableEvent re-enable uses exactly this id (NOT the site's
+            // EncounterID field, which is not guaranteed to match).
+            string eventId = ReadMember(_defEventIdMember,
+                ReadMember(_mpEventMember, ReadMember(_mpSettingsMember, geo))) as string;
+
+            object ctx = _ctxCtor.Invoke(new[] { startingBase, faction, vehicle });   // (StartingBase, PhoenixFaction, marketplace vehicle)
+            object reward = _genReward.Invoke(outcome, new[] { faction, ctx, (object)(eventId ?? "") });
+            if (reward == null) return;
+            _rewardApply.Invoke(reward, new[] { faction, _ctxSiteField?.GetValue(ctx), _ctxVehicleField?.GetValue(ctx) });
+
+            bool reEnable = _reEnableMember != null && ReadMember(_reEnableMember, outcome) is bool b && b;
+            if (reEnable && _enableEvent != null && _eventSystemMember != null && !string.IsNullOrEmpty(eventId))
+            {
+                var es = ReadMember(_eventSystemMember, geo);
+                if (es != null) _enableEvent.Invoke(es, new object[] { eventId });
+            }
+        }
+
+        /// <summary>The live marketplace <c>GeoSite</c> (Type == Marketplace), or null (GeoMarketplace.OnLevelStart idiom).</summary>
+        private static object FindMarketplaceSite(object geo)
+        {
+            if (_mapMember == null || _activeSitesProp == null || _siteTypeProp == null || _marketplaceSiteTypeValue == null) return null;
+            var map = ReadMember(_mapMember, geo);
+            if (map == null || !(_activeSitesProp.GetValue(map, null) is IList sites)) return null;
+            foreach (var site in sites)
+            {
+                if (site == null) continue;
+                if (Equals(_siteTypeProp.GetValue(site, null), _marketplaceSiteTypeValue)) return site;
+            }
+            return null;
+        }
+
+        /// <summary>First vehicle at the site (SingleOrDefault-equivalent — a marketplace site has 0-1 player vehicle), or null.</summary>
+        private static object FirstVehicle(object site)
+        {
+            if (_siteVehiclesMember == null) return null;
+            if (ReadMember(_siteVehiclesMember, site) is IEnumerable ve)
+                foreach (var v in ve) return v;
+            return null;
+        }
+
+        // ─── client UI refresh ──────────────────────────────────────────────────────────────
+
+        /// <summary>Client: if the marketplace window is OPEN, repaint its offer buttons via the native private
+        /// <c>UpdateList(_geoEvent)</c> — the exact call <c>OnChoiceSelected</c> makes after mutating the list.
+        /// Guarded no-op when the module is null / closed / not yet shown. Best-effort, never throws.</summary>
+        public static void RefreshOpenUI(GeoRuntime rt)
+        {
+            try
+            {
+                EnsureBuy(rt);
+                var geo = rt?.GeoLevel();
+                if (geo == null || _viewMember == null || _modulesMember == null || _marketModuleMember == null) return;
+                var view = ReadMember(_viewMember, geo);
+                var modules = view != null ? ReadMember(_modulesMember, view) : null;
+                var module = modules != null ? ReadMember(_marketModuleMember, modules) : null;
+                if (!(module is Component comp) || !comp.gameObject.activeInHierarchy) return;   // marketplace UI not open
+                var geoEvent = _moduleGeoEventField?.GetValue(module);
+                if (geoEvent == null || _moduleUpdateList == null) return;
+                _moduleUpdateList.Invoke(module, new[] { geoEvent });
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] MarketplaceReflection.RefreshOpenUI failed: " + ex.Message); }
+        }
+
+        private static void EnsureBuy(GeoRuntime rt)
+        {
+            if (_buyProbed) return;
+            _buyProbed = true;
+            try
+            {
+                var geoLevelType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
+                var geoFactionType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoFaction");
+                var geoSiteType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+                var geoVehicleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoVehicle");
+                var ctxType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEventContext");
+                var walletType = AccessTools.TypeByName("PhoenixPoint.Common.Core.Wallet");
+                var resPackType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourcePack");
+                var opReasonType = AccessTools.TypeByName("PhoenixPoint.Common.Core.OperationReason");
+                var rewardType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoFactionReward");
+                var siteTypeEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.GeoSiteType");
+                var mapType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoMap");
+                var eventSystemType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEventSystem");
+                var moduleType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewModules.UIModuleTheMarketplace");
+                var viewType = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.GeoscapeView");
+                var modulesType = AccessTools.TypeByName("Base.UI.GeoscapeModulesData");
+                var geoEventType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEvent");
+
+                if (walletType != null && resPackType != null)
+                {
+                    _walletHasResources = AccessTools.Method(walletType, "HasResources", new[] { resPackType });
+                    if (opReasonType != null)
+                        _walletTake = AccessTools.Method(walletType, "Take", new[] { resPackType, opReasonType });
+                }
+                if (opReasonType != null) try { _purchaseReason = Enum.Parse(opReasonType, "Purchase"); } catch { }
+                if (siteTypeEnum != null) try { _marketplaceSiteTypeValue = Enum.Parse(siteTypeEnum, "Marketplace"); } catch { }
+
+                if (ctxType != null && geoSiteType != null && geoFactionType != null && geoVehicleType != null)
+                {
+                    _ctxCtor = AccessTools.Constructor(ctxType, new[] { geoSiteType, geoFactionType, geoVehicleType });
+                    _ctxSiteField = AccessTools.Field(ctxType, "Site");
+                    _ctxVehicleField = AccessTools.Field(ctxType, "Vehicle");
+                }
+                if (_outcomeProp != null && geoFactionType != null && ctxType != null)
+                {
+                    _genReward = AccessTools.Method(_outcomeProp.PropertyType, "GenerateFactionReward",
+                        new[] { geoFactionType, ctxType, typeof(string) });
+                    _reEnableMember = Member(_outcomeProp.PropertyType, "ReEneableEvent");
+                }
+                if (rewardType != null && geoFactionType != null && geoSiteType != null && geoVehicleType != null)
+                    _rewardApply = AccessTools.Method(rewardType, "Apply", new[] { geoFactionType, geoSiteType, geoVehicleType });
+
+                if (geoLevelType != null)
+                {
+                    _mapMember = Member(geoLevelType, "Map");
+                    _eventSystemMember = Member(geoLevelType, "EventSystem");
+                    _viewMember = Member(geoLevelType, "View");
+                }
+                if (mapType != null) _activeSitesProp = AccessTools.Property(mapType, "ActiveSites");
+                if (geoSiteType != null)
+                {
+                    _siteTypeProp = AccessTools.Property(geoSiteType, "Type");
+                    _siteVehiclesMember = Member(geoSiteType, "Vehicles");
+                }
+                var mpSettingsType = AccessTools.TypeByName("PhoenixPoint.Common.Core.TheMarketplaceSettingsDef");
+                var geoEventDefType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventDef");
+                if (geoLevelType != null) _mpSettingsMember = Member(geoLevelType, "TheMarketplaceSettings");
+                if (mpSettingsType != null) _mpEventMember = Member(mpSettingsType, "MarketplaceEvent");
+                if (geoEventDefType != null) _defEventIdMember = Member(geoEventDefType, "EventID");
+                if (eventSystemType != null) _enableEvent = AccessTools.Method(eventSystemType, "EnableGeoscapeEvent", new[] { typeof(string) });
+                if (viewType != null) _modulesMember = Member(viewType, "GeoscapeModules");
+                if (modulesType != null) _marketModuleMember = Member(modulesType, "TheMarketplaceModule");
+                if (moduleType != null)
+                {
+                    _moduleGeoEventField = AccessTools.Field(moduleType, "_geoEvent");
+                    if (geoEventType != null) _moduleUpdateList = AccessTools.Method(moduleType, "UpdateList", new[] { geoEventType });
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] MarketplaceReflection.EnsureBuy failed: " + ex.Message); }
         }
     }
 }

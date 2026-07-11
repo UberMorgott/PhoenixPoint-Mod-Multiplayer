@@ -48,6 +48,10 @@ namespace Multiplayer.Network.Sync
         // intent, host authoritative Activate; result mirrors on the existing geoscape state channels)
         public const ushort GeoAbilityActivate = 80; // Harvest/Excavate/EmergencyRepair/Scan/AncientSiteProbe/ActivateBase/AncientGuardianGuard
 
+        // Kaos "The Marketplace" (AB DLC5) 90-99 — client suppress + relay buy intent, host authoritative
+        // purchase; result mirrors on wallet + Inventory/Research/GeoVehicle + ObjectivesChannel(#7 offer list)
+        public const ushort MarketplaceBuy = 90; // buy one GeoMarketplace offer (validated by kind+guid+price)
+
         /// <summary>True for the personnel client-edit intent family (ids 60-79). Every member is
         /// <c>IHostOnlyApply</c> whose authoritative result mirrors back on the #6/#9/#10 state channels
         /// (+ wallet), so the host NEVER needs to echo its GeoOutcome to clients — the client's OnActionApply
