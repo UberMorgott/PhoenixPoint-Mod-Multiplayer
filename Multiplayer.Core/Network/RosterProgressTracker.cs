@@ -62,5 +62,11 @@ namespace Multiplayer.Network
 
         /// <summary>Phase-2 (native world-load) is active from BEGIN (begun) until this peer's load is done.</summary>
         public static bool InPhase2(bool begun, bool loadCompleteSent) => begun && !loadCompleteSent;
+
+        /// <summary>Combined 0..1 overlay fill across BOTH load phases (2 phases): phase 0 (download) maps its
+        /// 0..100% to 0..0.5, phase 1 (native load) to 0.5..1.0. So a peer that finished the instant loopback
+        /// download (phase 0, 100%) shows a HALF bar — not full — and the bar only fills completely when it is
+        /// actually loaded (phase 1, 100%). Continuous across the phase bump: (0,100) and (1,0) both map to 0.5.</summary>
+        public static float CombinedFill(byte phase, byte percent) => (phase * 100 + percent) / 200f;
     }
 }

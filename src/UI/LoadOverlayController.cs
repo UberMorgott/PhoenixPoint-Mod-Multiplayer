@@ -351,16 +351,17 @@ namespace Multiplayer.UI
                 row.Name.text = label;
                 var (phase, percent) = tracker.Get(p.SlotIndex);
 
-                // Render the REAL received value 1:1 — no easing/prediction. The percent already
-                // carries the source peer's live native bar fillAmount (forwarded frequently), so
-                // drive the bar directly and show the raw percent.
-                var fillAmount = percent / 100f;
+                // PHASE-AWARE fill: phase 0 (download) fills the bottom half, phase 1 (native load) the top,
+                // so the instant loopback download (phase 0, 100%) shows a HALF bar and the bar only fills
+                // completely when the peer is actually loaded. The raw percent still labels the current phase.
+                var fillAmount = RosterProgressTracker.CombinedFill(phase, percent);
+                string phaseLabel = phase == 0 ? "Downloading" : "Loading";
 
                 if (row.Native && row.NativeFill != null)
                 {
                     // Native cloned bar (its own Update() disabled): drive ProgressFill directly.
                     row.NativeFill.fillAmount = fillAmount;
-                    if (row.NativePct != null) row.NativePct.text = percent + "%";
+                    if (row.NativePct != null) row.NativePct.text = phaseLabel + " " + percent + "%";
                 }
                 else if (!row.Native && row.Fill != null)
                 {
@@ -368,7 +369,7 @@ namespace Multiplayer.UI
                     // ProgressFill was destroyed at runtime is skipped, not NRE'd (its Fill is null).
                     row.Fill.fillAmount = fillAmount;
                     row.Percent.text = percent + "%";
-                    row.Label.text = phase == 0 ? "Downloading" : "Loading";
+                    row.Label.text = phaseLabel;
                 }
             }
         }

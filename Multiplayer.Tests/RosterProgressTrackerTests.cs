@@ -96,6 +96,24 @@ namespace Multiplayer.Tests
             Assert.Equal(expected, RosterProgressTracker.ProgressByte(progress));
         }
 
+        [Theory]
+        [InlineData((byte)0, (byte)0, 0f)]       // nothing yet
+        [InlineData((byte)0, (byte)100, 0.5f)]   // download done (instant loopback) → HALF bar, NOT full (the bug fix)
+        [InlineData((byte)1, (byte)0, 0.5f)]     // load starts where download ended → continuous, no jump
+        [InlineData((byte)1, (byte)100, 1f)]     // actually loaded → only now is the bar full
+        public void CombinedFill_Maps_Both_Phases_Across_The_Bar(byte phase, byte percent, float expected)
+        {
+            Assert.Equal(expected, RosterProgressTracker.CombinedFill(phase, percent), precision: 3);
+        }
+
+        [Fact]
+        public void CombinedFill_LoadingInProgress_Exceeds_DownloadComplete()
+        {
+            // A peer that has BEGUN loading (phase 1, any percent > 0) must read fuller than a peer that only
+            // finished downloading (phase 0, 100%) — the whole point of phase-aware fill.
+            Assert.True(RosterProgressTracker.CombinedFill(1, 1) > RosterProgressTracker.CombinedFill(0, 100));
+        }
+
         [Fact]
         public void InPhase2_False_Before_Begin()
         {
