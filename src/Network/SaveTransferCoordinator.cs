@@ -158,6 +158,12 @@ namespace Multiplayer.Network
         private long _phase2DeadlineMs;
         private bool _revealed;
         private bool _revealAllSent;
+        // Batch 2 (entry-via-save): the host is holding its loading screen for a tactical-ENTRY transfer.
+        // Set at LAUNCH (OpenTacticalEntryBarrier), cleared at reveal (PerformDeferredLift). Unlike F2/lobby
+        // the host stays in its already-live tactical level (no self-enter), so _begun is NOT reset to false
+        // on this path (keeps SessionStarted true → curtain hold engages + mid-tactical F2 still works). This
+        // flag lets Begin() still fire (broadcast SessionBegin for the client) despite _begun being true.
+        private bool _hostEntryHold;
 
         // ─── rca-4: host post-reload full re-seed (once per F2 mid-session reload) ───
         // Armed ONLY when HostStartSessionInGame actually launches a reload transfer; consumed ONCE at the
@@ -576,9 +582,11 @@ namespace Multiplayer.Network
             var timing = GetTiming();
             if (timing == null) return false;
 
-            // Fresh barrier/reveal run (mirror HostStartSessionInGame's terminal-flag reset). OpenBarrier
-            // (in the coroutine) resets the rest per fresh barrier.
-            _begun = false;
+            // Fresh transfer run. NB: unlike F2/lobby we do NOT reset _begun=false here — the host stays in
+            // its already-live tactical level (it never re-enters), and the reveal-hold armed at LAUNCH
+            // (OpenTacticalEntryBarrier) needs SessionStarted (_begun) to STAY true so the curtain keeps
+            // holding until every client loads. Begin() still fires for the client via the _hostEntryHold
+            // relaxation. The coroutine's OpenBarrier resets the rest of the LOADED-barrier state per run.
             _loadCompleteSent = false;
             _revealAllSent = false;
             _transferId = Guid.NewGuid();
@@ -586,11 +594,13 @@ namespace Multiplayer.Network
             return true;
         }
 
-        // Coroutine: write the mid-tactical save → bytes, ship it, open the barrier. Host stays in its live
-        // level (no PrepareEntryFromBlobCrt / EnterLevel). Marks the host loaded + phase-2 done immediately
-        // (it is already past Playing here) so the client's synchronized reveal fires on AllDone the instant
-        // IT finishes loading — Batch 1 has no host reveal-hold (the host revealed itself when it entered;
-        // the launch-time reveal barrier is Batch 2).
+        // Coroutine (deploy-ready half): write the mid-tactical save → bytes, ship it, and OPEN THE LOADED
+        // barrier (the chunk-transfer half). The reveal-HOLD was already armed at LAUNCH
+        // (OpenTacticalEntryBarrier, Batch 2), so the host is already holding behind its native loading
+        // screen; here it only opens the LOADED barrier for the client's download, marks itself loaded +
+        // done, and never re-enters (no PrepareEntryFromBlobCrt / EnterLevel — it is already live in this
+        // tactical level). The synchronized reveal then fires on AllDone once the client also finishes, or
+        // via the forced/self-reveal fallbacks if the client dies mid-load.
         private IEnumerator<NextUpdate> HostTacticalEntryTransferCrt(PhoenixSaveManager saveManager)
         {
             var bytes = new ByRef<byte[]>();
@@ -607,10 +617,11 @@ namespace Multiplayer.Network
 
             SendBlob(blob, SerializationComponent.DefaultExtension);
 
-            OpenBarrier();
+            OpenBarrier();        // open the LOADED barrier (reveal-hold already armed at launch; _hostEntryHold untouched)
             _hostLoaded = true;   // host holds its state locally (already in the level) → counts as loaded
             SendLoadComplete();   // host is past Playing → mark its slot done (+ TryReleaseBarrier: client not loaded yet)
-            Debug.Log("[Multiplayer] tac-entry: blob sent, barrier open, host marked loaded/done (no self-enter)");
+            Debug.Log("[Multiplayer] tac-entry: blob sent, LOADED barrier open, host marked loaded/done " +
+                      "(reveal-hold armed at launch, no self-enter)");
         }
 
         // Write a mid-tactical save (QuickSave's tactical branch: IsTactical-tagged, TacticalGameParams.
@@ -946,6 +957,28 @@ namespace Multiplayer.Network
             _revealHoldStartedMs = 0;
             _phase2DeadlineMs = 0;
             Debug.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
+        }
+
+        /// <summary>
+        /// Batch 2 host reveal-hold: arm the SYNCHRONIZED-REVEAL barrier at tactical LAUNCH (before the host
+        /// reaches tactical Playing), so CurtainShowPatch.Prefix / CurtainLiftGatePatch hold the host behind
+        /// its native loading screen until every client reports load-complete (RevealAll at AllDone, or the
+        /// forced/self-reveal fallbacks). Ordering-critical (plan Risk #3): _revealed MUST be reset to false
+        /// BEFORE the Loaded→Playing transition, else CurtainShowPatch.Prefix lets the native auto-lift
+        /// through and the host reveals the battle on its own. Only the reveal-hold state is touched here —
+        /// the LOADED barrier (chunk transfer) opens later at deploy-ready in HostTacticalEntryTransferCrt,
+        /// so its phase-1 timeout clock covers only the client's real download+load window. _begun
+        /// (SessionStarted) is deliberately LEFT set (the host is already in a live co-op level) so the
+        /// curtain hold engages and mid-tactical F2 keeps working; Begin() still fires via the _hostEntryHold
+        /// relaxation. Gated by <see cref="Sync.Tactical.TacticalEntryBarrierGate"/> at the call site.
+        /// </summary>
+        public void OpenTacticalEntryBarrier()
+        {
+            _hostEntryHold = true;
+            _revealed = false;        // ordering-critical: arm the hold before Loaded→Playing
+            _reachedPlaying = false;  // so OnReachedPlaying fires again at the tactical Playing (label + host done-mark)
+            Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
+                      $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1326,6 +1359,7 @@ namespace Multiplayer.Network
         {
             if (_revealed) return;
             _revealed = true;
+            _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
             Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
             // Setting _revealed above already opened the curtain gate, so any PARKED lift resumes now.
@@ -1373,7 +1407,14 @@ namespace Multiplayer.Network
         // Host broadcasts BEGIN; every peer (incl. host) then enters its prepared level.
         private void Begin()
         {
-            if (!_engine.IsHost || _begun) return;
+            if (!_engine.IsHost) return;
+            // Entry-via-save (Batch 2): the host is ALREADY in its live tactical level (_begun stayed true so
+            // mid-tactical F2 keeps working), yet must STILL broadcast SessionBegin so the CLIENT enters its
+            // prepared level. _barrierOpen (cleared just below) is the true single-fire guard for BOTH paths
+            // — TryReleaseBarrier and the phase-1 timeout both bail on !_barrierOpen — so relaxing the _begun
+            // guard on the entry path cannot double-fire. EnterLevel() no-ops on the host (its own _begun
+            // guard), so the host never re-enters the level it already built.
+            if (_begun && !_hostEntryHold) return;
             _barrierOpen = false;
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;
@@ -1564,6 +1605,8 @@ namespace Multiplayer.Network
                 _engine.BroadcastToAll(new NetworkMessage(
                     PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                 _loadPhaseActive = false;
+                Debug.LogWarning($"[Multiplayer] host reveal released: timeout fallback ({RevealDeadlineMs}ms) — " +
+                                 $"revealing without all clients (loadedClients={_loadedPeers.Count}).");
                 PerformDeferredLift();
                 HostReseedAfterReveal(); // rca-4: forced-reveal path still re-seeds a reloaded session
             }
@@ -1605,6 +1648,8 @@ namespace Multiplayer.Network
                     Debug.Log("[Multiplayer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
+                    Debug.Log($"[Multiplayer] host reveal released: AllDone — every roster slot load-complete " +
+                              $"(loadedClients={_loadedPeers.Count}).");
                     PerformDeferredLift(); // host reveals at the same instant
                     HostReseedAfterReveal(); // rca-4: every peer entered the loaded level → re-seed now
                 }

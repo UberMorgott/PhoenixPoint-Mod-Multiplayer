@@ -107,7 +107,24 @@ namespace Multiplayer.Harmony.Tactical
             try { TacticalDeploySync.OnTacticalLaunch(mission); }
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnTacticalLaunch failed: {ex}"); }
 
-            if (engine.IsHost) return true;   // host launches authoritatively
+            if (engine.IsHost)
+            {
+                // Batch 2 reveal-hold: arm the host's synchronized-reveal barrier HERE, at LAUNCH (before the
+                // tactical Loading/Playing transitions), so CurtainShowPatch.Prefix suppresses the native
+                // auto-lift and the host holds behind its loading screen until every client reports
+                // load-complete. Ordering-critical (plan Risk #3) — arming later, at deploy-ready, is too late
+                // (the host would already have revealed). Gated to an active, started co-op session + flag on.
+                var coord = engine.SaveTransfer;
+                if (coord != null && TacticalEntryBarrierGate.ShouldArmHostReveal(
+                        isHost: true,
+                        sessionActive: engine.IsActiveSession,
+                        sessionStarted: coord.SessionStarted,
+                        flagOn: TacticalDeploySync.UseSaveTransferEntry))
+                {
+                    coord.OpenTacticalEntryBarrier();
+                }
+                return true;   // host launches authoritatively
+            }
 
             // CLIENT: only the deploy-driven launch is allowed; block any spontaneous self-launch.
             if (TacticalDeploySync.ClientLaunchInProgress) return true;
