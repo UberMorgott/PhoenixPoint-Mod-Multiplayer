@@ -1,3 +1,4 @@
+using System.Net;
 using Multiplayer.Net;
 using Xunit;
 
@@ -5,6 +6,30 @@ namespace Multiplayer.Tests
 {
     public class UpnpParseTests
     {
+        [Fact]
+        public void FilterCandidateIPv4_DropsLoopbackAndApipa_KeepsRoutableInOrder()
+        {
+            var addrs = new[]
+            {
+                IPAddress.Parse("127.0.0.1"),      // loopback -> drop
+                IPAddress.Parse("169.254.10.20"),  // APIPA    -> drop
+                IPAddress.Parse("192.168.1.143"),  // LAN      -> keep
+                IPAddress.Parse("10.120.38.141"),  // ZeroTier -> keep (sprayed too; only IGD-reaching iface answers)
+                IPAddress.Parse("::1"),            // IPv6     -> drop
+            };
+            var kept = UpnpPortMapper.FilterCandidateIPv4(addrs);
+            Assert.Equal(new[] { "192.168.1.143", "10.120.38.141" }, kept);
+        }
+
+        [Fact]
+        public void FilterCandidateIPv4_DedupsAndHandlesNull()
+        {
+            Assert.Empty(UpnpPortMapper.FilterCandidateIPv4(null));
+            var dup = new[] { IPAddress.Parse("192.168.0.5"), IPAddress.Parse("192.168.0.5") };
+            Assert.Single(UpnpPortMapper.FilterCandidateIPv4(dup));
+        }
+
+
         private const string SsdpOk =
             "HTTP/1.1 200 OK\r\n" +
             "CACHE-CONTROL: max-age=120\r\n" +

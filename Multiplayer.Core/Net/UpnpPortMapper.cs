@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -33,8 +34,18 @@ namespace Multiplayer.Net
         public const int MappedPort = 14242;
         private const string Description = "PhoenixPoint Coop";
         private const int LeaseSeconds = 7200;
-        private const int SsdpTimeoutMs = 3000;
+        private const int SsdpTimeoutMs = 4000;
         private const int HttpTimeoutMs = 4000;
+
+        // ST set: IGD device roots + WAN service types. Some routers (e.g. KeeneticOS) answer only a
+        // subset, so ask for several — any hit yields a LOCATION whose XML lists the WAN service.
+        private static readonly string[] SearchTargets =
+        {
+            "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+            "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
+            "urn:schemas-upnp-org:service:WANIPConnection:1",
+            "urn:schemas-upnp-org:service:WANPPPConnection:1",
+        };
 
         private static readonly object _lock = new object();
         private static string _controlUrl;
@@ -123,53 +134,112 @@ namespace Multiplayer.Net
 
         private static (string location, string localIp) Discover()
         {
-            using (var udp = new UdpClient())
-            {
-                udp.Client.ReceiveTimeout = SsdpTimeoutMs;
-                var multicast = new IPEndPoint(IPAddress.Parse("239.255.255.250"), 1900);
-                foreach (var st in new[]
-                {
-                    "urn:schemas-upnp-org:service:WANIPConnection:1",
-                    "urn:schemas-upnp-org:service:WANPPPConnection:1"
-                })
-                {
-                    var msg = "M-SEARCH * HTTP/1.1\r\n" +
-                              "HOST: 239.255.255.250:1900\r\n" +
-                              "MAN: \"ssdp:discover\"\r\n" +
-                              "MX: 2\r\n" +
-                              "ST: " + st + "\r\n\r\n";
-                    var bytes = Encoding.ASCII.GetBytes(msg);
-                    try { udp.Send(bytes, bytes.Length, multicast); } catch { }
-                }
+            // Root cause of the earlier "0 responders": a single Any-bound UdpClient lets the OS pick
+            // the multicast egress interface, which on a multi-homed host (WSL/Hyper-V/ZeroTier NICs)
+            // is often NOT the LAN adapter — so the M-SEARCH never reaches the router. Fix: send from
+            // EVERY private IPv4 interface (socket bound to it + multicast egress pinned to it) and
+            // receive across all sockets at once; whichever interface reaches an IGD answers, and its
+            // bound IP is exactly the AddPortMapping "internal client".
+            var localIps = LocalIPv4Candidates();
+            if (localIps.Count == 0) return (null, null);
 
-                var deadline = DateTime.UtcNow.AddMilliseconds(SsdpTimeoutMs);
+            var sockets = new List<Socket>();
+            var ipOf = new Dictionary<Socket, string>();
+            try
+            {
+                foreach (var ip in localIps)
+                {
+                    var s = TryMakeSearchSocket(ip);
+                    if (s != null) { sockets.Add(s); ipOf[s] = ip; }
+                }
+                if (sockets.Count == 0) return (null, null);
+
+                var multicast = new IPEndPoint(IPAddress.Parse("239.255.255.250"), 1900);
+                SendMSearchBurst(sockets, multicast);
+
+                var start = DateTime.UtcNow;
+                var deadline = start.AddMilliseconds(SsdpTimeoutMs);
+                var resent = false;
+                var buf = new byte[4096];
                 while (DateTime.UtcNow < deadline)
                 {
-                    try
+                    // Resend once mid-window to cover UDP packet loss (M-SEARCH is unreliable by spec).
+                    if (!resent && (DateTime.UtcNow - start).TotalMilliseconds > 1500)
                     {
-                        var from = new IPEndPoint(IPAddress.Any, 0);
-                        var resp = udp.Receive(ref from);
-                        var loc = ParseLocationFromSsdp(Encoding.ASCII.GetString(resp));
-                        if (loc != null) return (loc, LocalIpToReach(from.Address));
+                        SendMSearchBurst(sockets, multicast);
+                        resent = true;
                     }
-                    catch (SocketException) { break; } // receive timeout — no responder
+
+                    var readable = new List<Socket>(sockets);
+                    var leftMs = (deadline - DateTime.UtcNow).TotalMilliseconds;
+                    if (leftMs <= 0) break;
+                    var micros = (int)Math.Min(500, Math.Max(1, leftMs)) * 1000;
+                    try { Socket.Select(readable, null, null, micros); } catch { break; }
+                    foreach (var s in readable)
+                    {
+                        try
+                        {
+                            var from = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
+                            var n = s.ReceiveFrom(buf, ref from);
+                            var loc = ParseLocationFromSsdp(Encoding.ASCII.GetString(buf, 0, n));
+                            if (loc != null) return (loc, ipOf[s]);
+                        }
+                        catch { }
+                    }
                 }
                 return (null, null);
             }
+            finally { foreach (var s in sockets) { try { s.Close(); } catch { } } }
         }
 
-        // The local NIC address that routes to the router — the AddPortMapping "internal client".
-        private static string LocalIpToReach(IPAddress remote)
+        // One M-SEARCH per ST, sent out every interface socket.
+        private static void SendMSearchBurst(List<Socket> sockets, IPEndPoint multicast)
+        {
+            foreach (var st in SearchTargets)
+            {
+                var msg = "M-SEARCH * HTTP/1.1\r\n" +
+                          "HOST: 239.255.255.250:1900\r\n" +
+                          "MAN: \"ssdp:discover\"\r\n" +
+                          "MX: 2\r\n" +
+                          "ST: " + st + "\r\n\r\n";
+                var bytes = Encoding.ASCII.GetBytes(msg);
+                foreach (var s in sockets)
+                    try { s.SendTo(bytes, multicast); } catch { }
+            }
+        }
+
+        // A UDP socket bound to one interface, with multicast egress pinned to that same interface.
+        private static Socket TryMakeSearchSocket(string localIp)
         {
             try
             {
-                using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
-                {
-                    s.Connect(remote, 1900); // no packet sent for a UDP "connect" — just picks the route
-                    return ((IPEndPoint)s.LocalEndPoint).Address.ToString();
-                }
+                var addr = IPAddress.Parse(localIp);
+                var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                s.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                s.Bind(new IPEndPoint(addr, 0));
+                s.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, addr.GetAddressBytes());
+                return s;
             }
             catch { return null; }
+        }
+
+        // Up, non-loopback IPv4 interface addresses to send M-SEARCH from.
+        private static List<string> LocalIPv4Candidates()
+        {
+            var ips = new List<IPAddress>();
+            try
+            {
+                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                        if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
+                            ips.Add(ua.Address);
+                }
+            }
+            catch { }
+            return FilterCandidateIPv4(ips);
         }
 
         // ─── HTTP / SOAP ──────────────────────────────────────────────────
@@ -278,6 +348,24 @@ namespace Multiplayer.Net
                                 RegexOptions.Singleline);
             var ip = m.Success ? m.Groups[1].Value.Trim() : null;
             return string.IsNullOrEmpty(ip) ? null : ip;
+        }
+
+        /// <summary>Keep routable IPv4 to M-SEARCH from: drop loopback + APIPA link-local, dedup, preserve order.</summary>
+        public static List<string> FilterCandidateIPv4(IEnumerable<IPAddress> addresses)
+        {
+            var result = new List<string>();
+            if (addresses == null) return result;
+            var seen = new HashSet<string>();
+            foreach (var a in addresses)
+            {
+                if (a == null || a.AddressFamily != AddressFamily.InterNetwork) continue;
+                var b = a.GetAddressBytes();
+                if (b[0] == 127) continue;                 // loopback
+                if (b[0] == 169 && b[1] == 254) continue;  // APIPA link-local
+                var s = a.ToString();
+                if (seen.Add(s)) result.Add(s);
+            }
+            return result;
         }
 
         /// <summary>Resolve a (possibly relative) controlURL against the device LOCATION url.</summary>
