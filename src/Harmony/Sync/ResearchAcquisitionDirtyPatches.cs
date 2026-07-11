@@ -24,6 +24,7 @@ namespace Multiplayer.Harmony.Sync
     internal static class ResearchDirtyGate
     {
         private static PropertyInfo _elementFactionProp; // ResearchElement.Faction (GeoFaction, ResearchElement.cs:209)
+        private static PropertyInfo _elementStateProp;   // ResearchElement.State  (ResearchElement.cs:195)
 
         internal static Type ResearchType() => AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.Research");
         internal static Type ElementType() => AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Research.ResearchElement");
@@ -56,22 +57,42 @@ namespace Multiplayer.Harmony.Sync
         }
 
         /// <summary>
-        /// State setter: <paramref name="element"/> is the <c>ResearchElement</c> being written. Gate on its
-        /// owning faction == Phoenix and mark on EVERY such write, incl. same-value ones — the diplomacy grant
-        /// pairs the State write with a DIRECT <c>ResearchProgress</c> write (a plain field, ResearchElement.cs:139,
-        /// not Harmony-patchable), and if State is already Unlocked a change-filter would miss that progress
-        /// bump. Dirty-flag coalescing makes the repeated mark free; the faction gate blocks NPC/alien spam.
+        /// Diplomacy-grant hook (patch 5): the method mutates ONLY this Phoenix faction's own Research, so no
+        /// faction gate — mark unconditionally under the host guard. This is the ONLY hook that catches the
+        /// diplomacy grant's progress bump on an ALREADY-Unlocked element: it guards the State write with
+        /// <c>if (State != Unlocked)</c> (GeoPhoenixFaction.cs:1004) so the State setter is never called, yet
+        /// bumps <c>ResearchProgress</c> unconditionally (:1009, a plain field — not patchable).
         /// </summary>
-        public static void MarkForElement(object element)
+        public static void MarkPhoenix()
+        {
+            try
+            {
+                if (!HostActive()) return;
+                MarkDirty();
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchDirtyGate.MarkPhoenix failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// State setter (patch 4): <paramref name="element"/> is the <c>ResearchElement</c> being written. Gate
+        /// on its owning faction == Phoenix and only mark when the incoming <paramref name="newState"/> actually
+        /// differs from the current one — the setter runs <c>OnStateChanged</c> unconditionally, so an equal-value
+        /// write would dirty-spam. Called from the setter Prefix, so the getter still reads the OLD state. (The
+        /// diplomacy grant's progress bump on an already-Unlocked element is handled by <see cref="MarkPhoenix"/>,
+        /// NOT here — that path never calls the setter at all.)
+        /// </summary>
+        public static void MarkForElementState(object element, object newState)
         {
             try
             {
                 if (!HostActive()) return;
                 var fac = ElementFaction(element);
                 if (fac == null || !ReferenceEquals(fac, GeoRuntime.Instance.PhoenixFaction())) return;
+                var current = ElementState(element);                       // OLD value (Prefix, pre-write)
+                if (current != null && current.Equals(newState)) return;   // no-op write → skip
                 MarkDirty();
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchDirtyGate.MarkForElement failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ResearchDirtyGate.MarkForElementState failed: " + ex.Message); }
         }
 
         private static object ElementFaction(object element)
@@ -81,6 +102,15 @@ namespace Multiplayer.Harmony.Sync
                 || !_elementFactionProp.DeclaringType.IsInstanceOfType(element))
                 _elementFactionProp = AccessTools.Property(element.GetType(), "Faction");
             return _elementFactionProp?.GetValue(element, null);
+        }
+
+        private static object ElementState(object element)
+        {
+            if (element == null) return null;
+            if (_elementStateProp == null || _elementStateProp.DeclaringType == null
+                || !_elementStateProp.DeclaringType.IsInstanceOfType(element))
+                _elementStateProp = AccessTools.Property(element.GetType(), "State");
+            return _elementStateProp?.GetValue(element, null);
         }
     }
 
@@ -160,12 +190,13 @@ namespace Multiplayer.Harmony.Sync
     }
 
     /// <summary>
-    /// <c>ResearchElement.State</c> setter (ResearchElement.cs:195) — the diplomacy-threshold reputation grant
-    /// writes <c>State</c> DIRECTLY (GeoPhoenixFaction.cs:952-1014), bypassing every GiveResearch/complete
-    /// method, so this is the only hook that catches it. It also writes <c>ResearchProgress</c> right after
-    /// (a plain field, not patchable), so we mark on EVERY PX-faction write incl. same-value ones — the
-    /// deferred snapshot then carries the paired progress bump. Faction-gated in the shared helper. Reflective
-    /// target (Prepare false → PatchAll skips).
+    /// <c>ResearchElement.State</c> setter (ResearchElement.cs:195) — catches DIRECT state writes that bypass
+    /// every GiveResearch/complete method (incl. the diplomacy grant's State write when an element is not yet
+    /// Unlocked). Change-gated + faction-gated in the shared helper (the setter fires <c>OnStateChanged</c> even
+    /// for equal-value writes). Prefix so the getter still reads the OLD state; void prefix — never suppresses
+    /// the real setter. The diplomacy grant's progress bump on an ALREADY-Unlocked element skips the setter
+    /// entirely (GeoPhoenixFaction.cs:1004 guard) and is covered by <see cref="DiplomacyResearchGrantDirtyPatch"/>.
+    /// Reflective target (Prepare false → PatchAll skips).
     /// </summary>
     [HarmonyPatch]
     public static class ResearchElementStateDirtyPatch
@@ -182,7 +213,36 @@ namespace Multiplayer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        // __instance = the ResearchElement whose State was just written.
-        public static void Postfix(object __instance) => ResearchDirtyGate.MarkForElement(__instance);
+        // __instance = the ResearchElement; value = the incoming ResearchState (boxed enum).
+        public static void Prefix(object __instance, object value)
+            => ResearchDirtyGate.MarkForElementState(__instance, value);
+    }
+
+    /// <summary>
+    /// <c>GeoPhoenixFaction.CheckForSharedResearchesOnDiplomacyChange(GeoFaction, PartyDiplomacyState, int, int)</c>
+    /// (GeoPhoenixFaction.cs:952) — the diplomacy-threshold research grant. It writes <c>State</c> only when NOT
+    /// already Unlocked (:1004-1006) but bumps <c>ResearchProgress</c> UNCONDITIONALLY (:1009, a plain field —
+    /// not Harmony-patchable), so an already-Unlocked element's progress bump reaches NO setter and the
+    /// State-setter hook misses it. This method-level postfix is the root-cause hook: one ch#2 dirty mark per
+    /// grant regardless of the per-element branch. The method mutates only this Phoenix faction's own Research,
+    /// so no faction gate. Bound by NAME only (single method, no overload — private is fine). Reflective target
+    /// (Prepare false → PatchAll skips).
+    /// </summary>
+    [HarmonyPatch]
+    public static class DiplomacyResearchGrantDirtyPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction");
+            if (t == null) return false;
+            _target = AccessTools.Method(t, "CheckForSharedResearchesOnDiplomacyChange");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix() => ResearchDirtyGate.MarkPhoenix();
     }
 }
