@@ -4,17 +4,46 @@ How two players on different networks connect. For same-PC dev testing see
 [`../tools/COOP-TESTING.md`](../tools/COOP-TESTING.md).
 
 The host creates a session (Multiplayer → it auto-hosts on **Direct + STUN + Steam**
-simultaneously); the joiner uses **Join a game…** and pastes one of the targets below.
-The Join box auto-detects which kind of target you paste (`SmartJoinParser`).
+simultaneously, and asks the router to open port 14242 via **UPnP**); the joiner uses
+**Join a game…** and pastes the host's **invite code** (or a raw IP). The Join box
+auto-detects which kind of target you paste (`SmartJoinParser`).
+
+## ONE unified invite code (v2) — steam-free
+
+The host's SHARE rail now shows a **single** `INVITE CODE` (click-to-copy). It packs whatever
+the host has — an optional Steam id **and/or** the best public endpoint (**UPnP-forwarded WAN
+endpoint** preferred over the STUN-discovered one) — into one Crockford string (`UnifiedCode`,
+`Multiplayer.Core/Util/UnifiedCode.cs`). Lengths are unique per variant (9 / 13 / 19 symbols)
+so it never collides with the old formats. No Steam required: a GOG/Epic host still produces a
+usable endpoint code.
+
+Pasting it makes the client **cascade** transports in order until one connects
+(`JoinPlan.Build`): **Steam P2P** (only if the code carries a steam id AND local Steam is
+running) → **STUN UDP hole-punch** → **Direct TCP** to the same endpoint. The connecting box
+names each stage ("Trying Steam… / hole-punch… / direct connection…"); the FIRST that
+handshakes wins, and only the last stage's failure surfaces an error.
 
 ## Which path to use
 
 | Path | Reliability | What to share / paste | Router setup |
 |------|-------------|-----------------------|--------------|
-| **Direct IP** (recommended) | ✅ Works whenever the port is reachable | `"<host-public-ip>:14242"` | **HOST forwards TCP 14242** (client: none) |
+| **Invite code** (recommended) | ✅ UPnP endpoint or Steam usually connects; ⚠️ STUN-only leg fails on symmetric NAT / CGNAT | the single SHARE **INVITE CODE** from the host's lobby | none if UPnP works on the host's router; else host forwards 14242 |
+| **Direct IP** | ✅ Works whenever the port is reachable | `"<host-public-ip>:14242"` | **HOST forwards TCP 14242** (client: none) |
 | **Direct IP over VPN** (easiest) | ✅ Works, no router setup | the host's VPN IP `:14242` | none — VPN/ZeroTier/Radmin/Hamachi makes it a LAN IP |
-| **Invite code** (STUN) | ⚠️ Best-effort — fails on symmetric NAT / CGNAT (common on home/mobile) | the SHARE code from the host's lobby | none, but not guaranteed to traverse |
 | **Steam invite** | ✅ Works between Steam friends (P2P relay, no NAT setup) | nothing — click **INVITE VIA STEAM** | none — Steam relays P2P |
+
+## UPnP automatic port-forward (host)
+
+- On host start (`StartHostAndOpenLobby`) the host fires `UpnpPortMapper.TryMap()`
+  (`Multiplayer.Core/Net/UpnpPortMapper.cs`, hand-rolled SSDP + SOAP, no new dependency): SSDP
+  M-SEARCH → fetch the IGD device XML → `AddPortMapping` **TCP+UDP 14242** to the host's LAN IP
+  (lease 7200 s, auto-refreshed) and `GetExternalIPAddress` for the WAN IP.
+- Success feeds the invite code's endpoint (that WAN IP:14242 is now actually open for BOTH the
+  Direct TCP and the STUN UDP legs) and logs one line to `Player.log`. The mapping is removed on
+  the same teardown chokepoint that drops the Steam lobby (`NetworkEngine.RunSteamLobbyCleanup`
+  → `UpnpPortMapper.Unmap()`).
+- **All best-effort**: routers with UPnP disabled/unsupported just yield no mapping (the code
+  falls back to the STUN endpoint) — never a crash, never log-spam.
 
 ## Direct IP — exact port-forward answer
 
@@ -30,14 +59,16 @@ The Join box auto-detects which kind of target you paste (`SmartJoinParser`).
 - Failure messages now name the cause: **ConnectionRefused** = nothing listening on that
   port (wrong port / host not hosting); **TimedOut** = firewall or port not forwarded.
 
-## Invite code (STUN) — why it can fail
+## Remaining limitation — both-CGNAT
 
-- The lobby SHARE code encodes the host's STUN-discovered public UDP endpoint; joining by
-  code uses UDP hole-punching (`StunTransport`). Many home routers (and all CGNAT / mobile)
-  use symmetric NAT that hole-punching cannot traverse — the join then fails with
-  `no HOLE_PUNCH_ACK from host`. This is a network-environment limit, not a bug.
-- Hole-punching beyond the plain transport is **explicitly out of scope** (see
-  `COOP-SYNC-ROADMAP.md` → OUT of scope). If the code fails, use **Direct IP** above.
+- The cascade removes most failures: if UPnP opened the host's port, the **Direct TCP** leg
+  reaches it even when STUN hole-punch can't; if the host is on Steam, the **Steam** leg relays
+  with no NAT setup at all.
+- What still can't work automatically: **both** players behind carrier-grade NAT (CGNAT / mobile)
+  with **no** UPnP and **no** Steam — there is no reachable endpoint and no relay. The final error
+  box says so and points to the workaround: a LAN/VPN tunnel (Radmin / ZeroTier / Hamachi → then
+  join by the VPN IP as Direct IP), the host forwarding TCP+UDP 14242 by hand, or the Steam build.
+- A built-in relay (TURN-style) is **explicitly out of scope** (see `COOP-SYNC-ROADMAP.md`).
 
 ## Steam invite — IMPLEMENTED (increment 1)
 

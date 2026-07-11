@@ -59,6 +59,21 @@ namespace Multiplayer.Transport
             catch { return null; }
         }
 
+        /// <summary>Our Steam account id (low 32 bits of the SteamID64) for the unified invite code, or
+        /// null when Steam isn't running. Facepunch types stay confined here (JITs only on a Steam path).</summary>
+        public static uint? LocalAccountId()
+        {
+            try { return SteamClient.IsValid ? (uint?)(uint)SteamClient.SteamId.Value : null; }
+            catch { return null; }
+        }
+
+        /// <summary>True when local Steam is running — gates the client cascade's Steam-P2P attempt.</summary>
+        public static bool IsSteamAlive()
+        {
+            try { return SteamClient.IsValid; }
+            catch { return false; }
+        }
+
         // ─── HOST ──────────────────────────────────────────────────────────
 
         /// <summary>

@@ -3,6 +3,7 @@ using Base.Core;
 using Base.Serialization;
 using Base.UI.MessageBox;
 using Multiplayer.Harmony;
+using Multiplayer.Net;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Transport;
@@ -52,6 +53,14 @@ namespace Multiplayer.UI
         // dismiss it programmatically (ForceCloseAllPrompts) on confirm/fail/timeout. On user CANCEL
         // the box closes itself and fires its callback.
         private MessageBox _connectingBox;
+
+        // ─── Client-join cascade ────────────────────────────────────────────
+        // The ordered transports to try for the current join (JoinPlan.Build): a unified code cascades
+        // Steam → STUN → Direct; a legacy code is a single attempt. _joinAttemptIndex is the stage in
+        // flight; on a stage failure OnConnectionFailed advances to the next instead of surfacing the
+        // error, so only the LAST stage's failure reaches the user. Cleared on confirm/cancel/final-fail.
+        private List<JoinAttempt> _joinPlan;
+        private int _joinAttemptIndex;
 
         // True while the lobby overlay is on-screen. Consumed by the main-menu Escape patch
         // (MainMenuPatches) so Escape leaves the lobby instead of opening the Options menu.
@@ -301,6 +310,12 @@ namespace Multiplayer.UI
             // friends-list Join Game) work. Fire-and-forget: the lobby is ready a beat later (reported via
             // SteamInvite.Report); the invite button below no-ops loudly until then. Harmless off Steam.
             SteamInvite.HostPublish();
+            // Steam-free reachability: ask the router (UPnP) to forward TCP+UDP 14242 to this PC so a
+            // GOG/Epic host is directly joinable across the internet. Fire-and-forget off the main
+            // thread; the unified invite code prefers the resulting WAN endpoint once it lands (rail
+            // re-reads every frame). No-op / null when UPnP is unsupported. Torn down via UpnpPortMapper.Unmap
+            // on the same NetworkEngine cleanup chokepoint that drops the Steam lobby.
+            _ = UpnpPortMapper.TryMap();
             // Fresh host: drop any chosen-save carried over from a PRIOR session. Without this the
             // stale _pendingChosenSave (the rich transfer payload) survives a host→PLAY→leave→re-host
             // and PLAY could ship a save the new lobby's clients never chose. (The gate itself now keys
@@ -529,37 +544,24 @@ namespace Multiplayer.UI
                 _lobbyController.Reset();
                 _lobbyController.BeginJoin();
 
-                NetworkEngine.Create();
-                switch (target.Kind)
+                // Build the ordered cascade for this target (unified code → Steam/STUN/Direct; legacy
+                // code → single attempt) and start the first stage. Each stage's async connect is
+                // time-bounded; a stage failure advances to the next in OnConnectionFailed.
+                _joinPlan = JoinPlan.Build(target, SteamInvite.IsSteamAlive());
+                _joinAttemptIndex = 0;
+                if (_joinPlan.Count == 0)
                 {
-                    case JoinKind.DirectIp:
-                    case JoinKind.DirectHost:
-                        // DirectHost carries a DNS hostname in target.Ip; DirectTransport's
-                        // BeginConnect(host, port) resolves it, so the routing is identical to a
-                        // literal IP — just hand the host string + port to the same transport.
-                        NetworkEngine.Instance.Initialize(TransportType.DirectIP);
-                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                        NetworkEngine.Instance.JoinGame(target.Ip, target.Port);
-                        break;
-                    case JoinKind.StunCode:
-                        NetworkEngine.Instance.Initialize(TransportType.StunUDP);
-                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                        NetworkEngine.Instance.JoinGame($"{target.Ip}:{target.Port}", 0);
-                        break;
-                    case JoinKind.SteamId:
-                        NetworkEngine.Instance.Initialize(TransportType.SteamP2P);
-                        NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
-                        NetworkEngine.Instance.JoinGame(target.SteamId.ToString(), 0);
-                        break;
+                    // Only reachable for a unified code that carried ONLY a Steam id while Steam is off —
+                    // nothing here is connectable without Steam.
+                    OnConnectionFailed("that invite code needs Steam, which isn't running — ask the host for their IP or a code with an endpoint");
+                    return;
                 }
-                // DO NOT open the lobby yet. The connect is async + time-bounded (up to 10s) and the
-                // host has not accepted us until its first PEER_LIST arrives — opening the lobby here
-                // would show a FAKE empty lobby that an async failure then kicks us out of. Instead
-                // enter the "connecting" state: keep the lobby HIDDEN (OnLobbyJoinPrompt already hid
-                // it via HideForNativeScreen) behind a native "Connecting…" box with a CANCEL button.
-                // Update() opens the real lobby once the join is confirmed; OnConnectionFailed tears
-                // down + shows the error on failure/timeout; CANCEL aborts. See ShowConnectingBox.
-                ShowConnectingBox();
+                // DO NOT open the lobby yet. The connect is async + time-bounded and the host has not
+                // accepted us until its first PEER_LIST arrives — opening the lobby here would show a
+                // FAKE empty lobby that an async failure then kicks us out of. StartJoinAttempt enters
+                // the "connecting" state (lobby HIDDEN behind a native "Trying…" box with CANCEL);
+                // Update() opens the real lobby once confirmed; OnConnectionFailed advances/aborts.
+                StartJoinAttempt();
             }
             catch (System.Exception ex)
             {
@@ -568,6 +570,39 @@ namespace Multiplayer.UI
                 NetworkEngine.Instance?.Shutdown();
                 OnConnectionFailed($"Join failed: {ex.Message}");
             }
+        }
+
+        // Start (or advance to) the current cascade stage: init the transport for _joinPlan[_joinAttemptIndex]
+        // and begin its async connect, showing a native "Trying…" box for the stage. Reused for the first
+        // stage and each fallback after a stage fails (OnConnectionFailed).
+        private void StartJoinAttempt()
+        {
+            var attempt = _joinPlan[_joinAttemptIndex];
+            NetworkEngine.Create();
+            // Initialize BEFORE subscribing (unchanged from the pre-cascade order): a transport that
+            // reports Failed synchronously inside Initialize (e.g. Steam API unavailable) has no UI
+            // handler yet, so it is swallowed rather than surfacing a spurious first-frame failure.
+            NetworkEngine.Instance.Initialize(attempt.Transport);
+            NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+            // Show the stage box BEFORE the connect so that if JoinGame ever fails synchronously the
+            // retry's Dismiss+Show cleanly replaces this box instead of a stale label stomping the next.
+            ShowConnectingBox(StageLabel(attempt.Transport, _joinAttemptIndex, _joinPlan.Count));
+            NetworkEngine.Instance.JoinGame(attempt.Address, attempt.Port);
+        }
+
+        // Per-stage connecting-box caption. A single-attempt plan keeps the plain "Connecting to host…";
+        // a multi-stage cascade names the transport + progress so the wait is legible.
+        private static string StageLabel(TransportType t, int index, int count)
+        {
+            if (count <= 1) return "Connecting to host…";
+            string what;
+            switch (t)
+            {
+                case TransportType.SteamP2P: what = "Trying Steam…"; break;
+                case TransportType.StunUDP: what = "Trying hole-punch…"; break;
+                default: what = "Trying direct connection…"; break;
+            }
+            return $"{what} ({index + 1}/{count})";
         }
 
         // Footer Join… button → native modal input → OnLobbyJoin.
@@ -606,7 +641,10 @@ namespace Multiplayer.UI
             // CODE), prefill it so the joiner just presses OK. Otherwise fall back to the localhost
             // default endpoint (normal IP-only flow).
             var clip = GUIUtility.systemCopyBuffer;
-            var prefill = (!string.IsNullOrEmpty(clip) && InviteCode.TryDecode(clip, out _))
+            var clipIsCode = !string.IsNullOrEmpty(clip)
+                && (InviteCode.TryDecode(clip, out _)
+                    || UnifiedCode.TryDecode(clip, out _, out _, out _, out _));
+            var prefill = clipIsCode
                 ? clip.Trim()
                 : "127.0.0.1:" + SmartJoinParser.DefaultDirectPort;
             TryUpgradePromptInput("Invite code, IP:port, or STUN code", prefill);
@@ -994,6 +1032,30 @@ namespace Multiplayer.UI
             return code ?? "unavailable (NAT/firewall)";
         }
 
+        // Host's ONE unified invite code (Steam id and/or public endpoint), or a discovery placeholder.
+        // Endpoint priority: the UPnP-forwarded WAN endpoint (actually open for TCP+UDP) over the
+        // STUN-discovered one (UDP hole-punch only). Re-read every frame by the rail, so it fills in
+        // live as UPnP/STUN discovery completes and Steam becomes ready.
+        public string GetOwnUnifiedCode()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "(host to share)";
+
+            uint? steamAccount = SteamInvite.LocalAccountId(); // null off Steam
+            var ep = UpnpPortMapper.Current?.ToEndPoint();      // best: router-forwarded WAN endpoint
+            if (ep == null)
+                ep = FindHostingChild(TransportType.StunUDP)?.PublicEndPoint; // fallback: STUN-discovered
+
+            var code = UnifiedCode.Encode(steamAccount, ep);
+            if (code != null) return code;
+
+            // Nothing to share yet — mirror the STUN discovery state so the placeholder is accurate.
+            var stun = FindHostingChild(TransportType.StunUDP);
+            if (stun != null && stun.LocalEndpoint != null && stun.LocalEndpoint.Contains("unavailable"))
+                return "unavailable (NAT/firewall)";
+            return "discovering…";
+        }
+
         // Resolve the live hosting child transport of a given type from the host's transport,
         // whether that transport is a CompositeTransport (multi-listen) or a single transport.
         private static ITransport FindHostingChild(TransportType type)
@@ -1042,6 +1104,20 @@ namespace Multiplayer.UI
 
         private void OnConnectionFailed(string reason)
         {
+            // CASCADE: this stage failed but the plan has another transport to try. Tear down just THIS
+            // stage's engine and start the next one, keeping the lobby FSM in Joining and _clientConnecting
+            // set — only the LAST stage's failure falls through to the user-facing error below.
+            if (_joinPlan != null && _joinAttemptIndex + 1 < _joinPlan.Count)
+            {
+                _joinAttemptIndex++;
+                DismissConnectingBox();
+                NetworkEngine.Instance?.Disconnect();
+                NetworkEngine.Instance?.Shutdown();
+                StartJoinAttempt();
+                return;
+            }
+            _joinPlan = null;
+
             // A client join in flight just failed/timed out. End the connecting state and close the
             // "Connecting…" box FIRST, so the error box below isn't pushed onto the modal stack behind
             // it (and so the CANCEL callback can't also fire — it self-guards on _clientConnecting).
@@ -1071,7 +1147,12 @@ namespace Multiplayer.UI
                 // the user can re-open the network menu to host or retry the join. NO empty lobby is
                 // ever shown on the client failure path.
                 _lobby?.HideForNativeScreen();
-                mb.ShowSimplePrompt($"Connection failed: {reason}",
+                mb.ShowSimplePrompt(
+                    $"Connection failed: {reason}\n\n" +
+                    "If neither of you uses Steam: the HOST should enable UPnP on their router (or " +
+                    "forward TCP+UDP 14242 to their PC), then re-share the invite code. If you are BOTH " +
+                    "on carrier-grade NAT (CGNAT), a direct link isn't possible — use a LAN/VPN tunnel " +
+                    "(e.g. Radmin, ZeroTier) or the Steam version.",
                     MessageBoxIcon.Error, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { _lobby?.Hide(); }, this);
             }
@@ -1092,11 +1173,11 @@ namespace Multiplayer.UI
         // failure/timeout (OnConnectionFailed). Null-safe: if the MessageBox is unavailable we still
         // set _clientConnecting so Update can open the lobby on confirmation (degraded: no visible
         // indicator, but never a fake lobby and never stuck).
-        private void ShowConnectingBox()
+        private void ShowConnectingBox(string message = "Connecting to host…")
         {
             _clientConnecting = true;
             _connectingBox = GameUtl.GetMessageBox();
-            _connectingBox?.ShowSimplePrompt("Connecting to host…",
+            _connectingBox?.ShowSimplePrompt(message,
                 MessageBoxIcon.Information, MessageBoxButtons.Cancel,
                 delegate (MessageBoxCallbackResult _)
                 {
@@ -1121,6 +1202,7 @@ namespace Multiplayer.UI
         private void CancelClientConnect()
         {
             _clientConnecting = false;
+            _joinPlan = null; // abort the whole cascade
             _connectingBox = null;
             NetworkEngine.Instance?.Disconnect();
             NetworkEngine.Instance?.Shutdown();
@@ -1235,6 +1317,7 @@ namespace Multiplayer.UI
                     (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
                 {
                     _clientConnecting = false;
+                    _joinPlan = null; // cascade succeeded — drop the plan so a later drop doesn't retry
                     // Fix #4: the host's first PEER_LIST IS the explicit accept, so advance the FSM
                     // Joining→ClientLobby here (BeginJoin ran in OnLobbyJoin). Idempotent: JoinConfirmed
                     // no-ops if the FSM is not in Joining, so a re-entered frame can't corrupt the state.

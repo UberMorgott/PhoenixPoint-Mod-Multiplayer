@@ -64,13 +64,11 @@ namespace Multiplayer.UI
         private bool _parityLocked;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
-        private Text _railStunValue;
+        private Text _inviteCodeValue;   // ONE unified invite code (click-to-copy), refreshed live
         private Text _railSaveValue;
         private Button _chooseSaveBtn;
         private Button _newCampaignBtn;
         private Button _inviteBtn;
-        private Button _inviteCodeBtn;
-        private Text _inviteCodeLabel;   // CODE button caption, refreshed live from GetOwnInviteCode()
         // Connect-rail SHARE + SAVE section roots (host-only): gated on/off per frame like _chooseSaveBtn.
         // The JOIN section (and its button) stay always-visible. Section roots own the header + body so
         // hiding the whole section (header + separator + controls) is a single SetActive.
@@ -347,14 +345,17 @@ namespace Multiplayer.UI
             // ── SECTION "SHARE" (host-only): how others connect to you ──────────
             _shareSection = AddRailSection(rail, "SHARE");
 
-            var stunLabel = UiToolkit.CreateText(_shareSection, "StunLabel", Vector2.zero,
-                new Vector2(260, labelH), "Players join you with (click to copy):",
+            var stunLabel = UiToolkit.CreateText(_shareSection, "InviteLabel", Vector2.zero,
+                new Vector2(260, labelH), "INVITE CODE (click to copy):",
                 LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
             stunLabel.color = LobbyTheme.SubText;
             LE(stunLabel.gameObject).minHeight = labelH;
 
-            _railStunValue = MakeCopyableValue(_shareSection, "StunValue", () => _owner.GetRailStunCode());
-            LE(_railStunValue.transform.parent.gameObject).minHeight = LobbyTheme.ScaledRowHeight;
+            // ONE unified invite code: carries Steam id and/or public endpoint, so a friend pastes this
+            // single string into JOIN A GAME and the client cascades Steam → hole-punch → direct. Value
+            // refreshed live in Refresh() (self-heals as UPnP/STUN discovery + Steam become ready).
+            _inviteCodeValue = MakeCopyableValue(_shareSection, "InviteValue", () => _owner.GetOwnUnifiedCode());
+            LE(_inviteCodeValue.transform.parent.gameObject).minHeight = LobbyTheme.ScaledRowHeight;
 
             _inviteBtn = NativeWidgetFactory.CloneMenuButton(_shareSection.transform, "InviteBtn",
                 "INVITE VIA STEAM", () => _owner.InvitePlayers());
@@ -367,23 +368,6 @@ namespace Multiplayer.UI
                     () => _owner.InvitePlayers());
                 LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
-
-            // Friend-free join: the host's own short permanent invite code. Same styling as INVITE
-            // VIA STEAM; click copies the code so a friend can paste it into JOIN A GAME. The label is
-            // refreshed live in Refresh() (self-heals once Steam is ready).
-            _inviteCodeBtn = NativeWidgetFactory.CloneMenuButton(_shareSection.transform, "InviteCodeBtn",
-                "CODE: " + _owner.GetOwnInviteCode(), () => _owner.CopyInviteCode());
-            if (_inviteCodeBtn != null)
-                AddCloneLayoutElement(_inviteCodeBtn, _shareSection.transform, RailButtonSize.x, RailButtonSize.y);
-            else
-            {
-                _inviteCodeBtn = UiToolkit.CreateButton(_shareSection, "InviteCodeBtn",
-                    "CODE: " + _owner.GetOwnInviteCode(), Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.CopyInviteCode());
-                LE(_inviteCodeBtn.gameObject).preferredHeight = RailButtonSize.y;
-            }
-            if (_inviteCodeBtn != null)
-                _inviteCodeLabel = _inviteCodeBtn.GetComponentInChildren<Text>();
 
             // ── SECTION "SAVE" (host-only): the campaign save to load ───────────
             _saveSection = AddRailSection(rail, "SESSION SAVE");
@@ -989,8 +973,7 @@ namespace Multiplayer.UI
             }
 
             // CONNECT RAIL values.
-            if (_railStunValue != null) _railStunValue.text = _owner.GetRailStunCode();
-            if (_inviteCodeLabel != null) _inviteCodeLabel.text = "CODE: " + _owner.GetOwnInviteCode();
+            if (_inviteCodeValue != null) _inviteCodeValue.text = _owner.GetOwnUnifiedCode();
             if (_railSaveValue != null)
             {
                 var n = engine.Session?.ChosenSaveName;

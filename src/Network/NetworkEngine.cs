@@ -59,6 +59,9 @@ namespace Multiplayer.Network
         private static void RunSteamLobbyCleanup()
         {
             try { SteamLobbyCleanup?.Invoke(); } catch { /* never let Steam cleanup break a teardown */ }
+            // Same single teardown chokepoint tears down any UPnP port mapping the host opened (no-op on
+            // a client / when UPnP was off). Fire-and-forget internally, so it never blocks the teardown.
+            try { Multiplayer.Net.UpnpPortMapper.Unmap(); } catch { }
         }
 
         // Parity auto-apply restore hook — same delegate-field pattern (and reason) as SteamLobbyCleanup:

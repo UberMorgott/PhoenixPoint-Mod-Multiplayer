@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace Multiplayer.Util
 {
-    public enum JoinKind { Invalid, DirectIp, DirectHost, StunCode, SteamId }
+    public enum JoinKind { Invalid, DirectIp, DirectHost, StunCode, SteamId, Unified }
 
     public readonly struct JoinTarget
     {
@@ -22,6 +22,9 @@ namespace Multiplayer.Util
         public static JoinTarget DirectHost(string host, int port) => new JoinTarget(JoinKind.DirectHost, host, port, 0);
         public static JoinTarget Stun(IPEndPoint ep) => new JoinTarget(JoinKind.StunCode, ep.Address.ToString(), ep.Port, 0);
         public static JoinTarget Steam(ulong id) => new JoinTarget(JoinKind.SteamId, null, 0, id);
+        // Unified (v2) code: carries a Steam id (0 = none) AND/OR an endpoint (ip = null = none). The
+        // client cascades over whatever is present (JoinPlan.Build).
+        public static JoinTarget Unified(ulong steamId, string ip, int port) => new JoinTarget(JoinKind.Unified, ip, port, steamId);
     }
 
     /// <summary>
@@ -72,6 +75,18 @@ namespace Multiplayer.Util
             {
                 var ep = ConnectCode.Decode(s);
                 if (ep != null) return JoinTarget.Stun(ep);
+            }
+
+            // 3b) Unified (v2) invite code: 9 / 13 / 19 Crockford symbols carrying a Steam id and/or a
+            // public endpoint. Distinct lengths from InviteCode(8)/ConnectCode(10), and checked BEFORE
+            // the bare-SteamID branch so a 19-symbol all-digit code is never misread as a SteamID64.
+            if ((stripped.Length == 9 || stripped.Length == 13 || stripped.Length == 19)
+                && UnifiedCode.TryDecode(s, out var uAccount, out var uHasSteam, out var uEp, out var uHasEp))
+            {
+                return JoinTarget.Unified(
+                    uHasSteam ? InviteCode.ToSteamId64(uAccount) : 0UL,
+                    uHasEp ? uEp.Address.ToString() : null,
+                    uHasEp ? uEp.Port : 0);
             }
 
             // 4) Bare 64-bit SteamID.
