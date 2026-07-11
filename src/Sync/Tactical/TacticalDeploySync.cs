@@ -1535,7 +1535,7 @@ namespace Multiplayer.Sync.Tactical
             {
                 object actor = Registry.TryGet(row.NetId, out var aref) && aref is TacticalActorAdapter ad ? ad.Actor : null;
                 if (actor == null) continue;
-                try { if (TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z))) applied++; }
+                try { if (TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z), forceSnap: true)) applied++; }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyDeployPositions failed for netId " + row.NetId + ": " + ex); }
             }
             return applied;
@@ -1551,7 +1551,7 @@ namespace Multiplayer.Sync.Tactical
             {
                 if (row.NetId != netId) continue;
                 bool applied = false;
-                try { applied = TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z)); }
+                try { applied = TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z), forceSnap: true); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyStoredDeployPos failed: " + ex); }
                 string name = GetProp(actor, "DisplayName") as string ?? actor.GetType().Name;
                 Debug.Log("[Multiplayer][tac][DIAG] late-bind netId=" + netId + " '" + name + "' applied deploy pos=(" +

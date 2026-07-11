@@ -511,7 +511,7 @@ namespace Multiplayer.Sync.Tactical
         /// second Navigate (double-animate) nor snap mid-walk. Once the move rail's nav stops, the next delta
         /// heartbeat converges any residual drift. Re-entrancy-safe: only ever called inside the client's
         /// remote-apply scope. No-op off-mirror / off-session.</summary>
-        public static bool ApplyMirrorPosition(object actor, Vector3 dst)
+        public static bool ApplyMirrorPosition(object actor, Vector3 dst, bool forceSnap = false)
         {
             try
             {
@@ -526,7 +526,7 @@ namespace Multiplayer.Sync.Tactical
 
                 Vector3 cur = GetPos(actor);
                 float dist = Vector3.Distance(cur, dst);
-                var mode = TacticalActorStateDiff.DecidePositionApply(dist);
+                var mode = TacticalActorStateDiff.DecidePositionApply(dist, forceSnap);
                 switch (mode)
                 {
                     case TacticalActorStateDiff.PositionApplyMode.None:

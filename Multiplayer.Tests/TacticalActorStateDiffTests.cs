@@ -418,6 +418,30 @@ public class TacticalActorStateDiffTests
         Assert.True(TacticalActorStateDiff.PositionWalkMinDist < TacticalActorStateDiff.PositionTeleportMaxDist);
     }
 
+    [Theory]
+    [InlineData(1.0f)]    // walk-band floor — walks normally, but on the deploy path must SNAP
+    [InlineData(5f)]
+    [InlineData(40f)]     // walk-band ceiling
+    public void PositionApply_ForceSnap_SnapsWalkBand(float dist)
+    {
+        // The DEPLOY path bypasses the walk band: the client's native deploy rolls its own cells a few units
+        // off the host's, and soldiers must not RUN to their deploy spot at mission start — they snap.
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Walk,
+            TacticalActorStateDiff.DecidePositionApply(dist));                          // normal path still walks
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.Teleport,
+            TacticalActorStateDiff.DecidePositionApply(dist, forceSnap: true));         // deploy path snaps
+    }
+
+    [Fact]
+    public void PositionApply_ForceSnap_ConvergedStillNoOps()
+    {
+        // Converged (≤ epsilon) stays None even under forceSnap — an idle re-apply must not churn the transform.
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.None,
+            TacticalActorStateDiff.DecidePositionApply(0f, forceSnap: true));
+        Assert.Equal(TacticalActorStateDiff.PositionApplyMode.None,
+            TacticalActorStateDiff.DecidePositionApply(TacticalActorStateDiff.PositionEpsilon * 0.5f, forceSnap: true));
+    }
+
     // ─── Inc2: facing-vector change decision (pure, per-component epsilon) ─────────────────────────────
 
     [Fact]

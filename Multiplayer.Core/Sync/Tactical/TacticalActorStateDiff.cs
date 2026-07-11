@@ -258,11 +258,16 @@ namespace Multiplayer.Sync.Tactical
         ///   • <see cref="PositionEpsilon"/> &lt; dist &lt; <see cref="PositionWalkMinDist"/> → Teleport (sub-cell)
         ///   • <see cref="PositionWalkMinDist"/> ≤ dist ≤ <see cref="PositionTeleportMaxDist"/> → Walk
         ///   • dist &gt; <see cref="PositionTeleportMaxDist"/>            → Teleport (disconnected jump)
-        /// A NaN/negative distance is treated as Teleport (safest: snap rather than animate an unknown path).</summary>
-        public static PositionApplyMode DecidePositionApply(float distance)
+        /// A NaN/negative distance is treated as Teleport (safest: snap rather than animate an unknown path).
+        /// <paramref name="forceSnap"/> (the DEPLOY path): any drift beyond <see cref="PositionEpsilon"/> SNAPS
+        /// instead of walking — the client's native deploy rolls its own cells 1–5 units off the host's, and a
+        /// mission-start walk to the deploy spot is wrong; converged (None) still no-ops. Default false leaves the
+        /// live tac.move / actorstate rails' walk band untouched.</summary>
+        public static PositionApplyMode DecidePositionApply(float distance, bool forceSnap = false)
         {
             if (float.IsNaN(distance)) return PositionApplyMode.Teleport;
             if (distance <= PositionEpsilon) return PositionApplyMode.None;
+            if (forceSnap) return PositionApplyMode.Teleport;                            // deploy: snap into place, never walk
             if (distance < PositionWalkMinDist) return PositionApplyMode.Teleport;       // sub-cell nudge → snap
             if (distance > PositionTeleportMaxDist) return PositionApplyMode.Teleport;   // disconnected jump → snap
             return PositionApplyMode.Walk;
