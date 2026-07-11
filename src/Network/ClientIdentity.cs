@@ -28,6 +28,7 @@ namespace Multiplayer.Network
         private const string DirName = "Multiplayer";
         private const string FileName = "identity.json";
         private const string GuidPrefix = "\"playerGUID\":\"";
+        private const string NicknameKey = "Multiplayer_Nickname";
 
         private static Guid _playerGuid = Guid.Empty;
         private static bool _loaded;
@@ -40,6 +41,41 @@ namespace Multiplayer.Network
                 if (!_loaded)
                     Load();
                 return _playerGuid;
+            }
+        }
+
+        /// <summary>
+        /// Local player's chosen lobby display name, persisted across restarts via Unity PlayerPrefs
+        /// (one shared key — multiple same-machine instances intentionally share the stored nick).
+        /// Returns null when never set, so callers apply their own default (host "Host",
+        /// client SystemInfo.deviceName). Wrapped like the file's IO — never throws to the caller.
+        /// </summary>
+        public static string LocalNickname
+        {
+            get
+            {
+                try
+                {
+                    var v = PlayerPrefs.GetString(NicknameKey, "");
+                    return string.IsNullOrEmpty(v) ? null : v;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[Multiplayer] ClientIdentity nickname load failed: " + e.Message);
+                    return null;
+                }
+            }
+            set
+            {
+                try
+                {
+                    PlayerPrefs.SetString(NicknameKey, value ?? "");
+                    PlayerPrefs.Save();
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[Multiplayer] ClientIdentity nickname save failed: " + e.Message);
+                }
             }
         }
 

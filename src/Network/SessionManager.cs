@@ -29,7 +29,7 @@ namespace Multiplayer.Network
         // Host's own lobby identity. The host is NOT in _clients (which holds remote peers only),
         // so its row is injected into the broadcast roster via a self-entry in BuildPeerList. The
         // lobby UI sets these; defaults give a sensible display before the player edits anything.
-        public string HostNickname { get; set; } = "Host";
+        public string HostNickname { get; set; } = ClientIdentity.LocalNickname ?? "Host";
         public bool HostReady { get; set; }
 
         // Host's chosen save (rail display + read-only client mirror). Set on the rail save-pick.
@@ -785,6 +785,9 @@ namespace Multiplayer.Network
         // On the host this is a local edit (HostNickname) handled directly by the lobby UI.
         public void SendRename(string newNickname)
         {
+            // Persist the local player's chosen nick so it survives a restart (loaded back in the
+            // HostNickname default / client JOIN / rename-prompt current above). Typed value wins.
+            ClientIdentity.LocalNickname = newNickname;
             if (_engine.IsHost)
             {
                 HostNickname = newNickname;

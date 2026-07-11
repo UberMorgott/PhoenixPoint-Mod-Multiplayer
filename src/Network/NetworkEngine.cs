@@ -320,7 +320,7 @@ namespace Multiplayer.Network
             var join = new JoinMessage
             {
                 PlayerGuid = ClientIdentity.PlayerGuid,
-                Nickname = SystemInfo.deviceName,
+                Nickname = ClientIdentity.LocalNickname ?? SystemInfo.deviceName,
                 // FIX-4: carry this client's parity manifest (DLC + mods + settings) in the JOIN so
                 // the host can gate the join BEFORE any save transfer.
                 Manifest = ParityManifestCollector.Collect()

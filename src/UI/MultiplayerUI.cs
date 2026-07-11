@@ -697,7 +697,7 @@ namespace Multiplayer.UI
             if (mb == null) return;
             var current = NetworkEngine.Instance?.IsHost == true
                 ? NetworkEngine.Instance.Session?.HostNickname ?? ""
-                : SystemInfo.deviceName;
+                : (ClientIdentity.LocalNickname ?? SystemInfo.deviceName);
 
             // The native MessageBox renders BELOW the lobby overlay, so a prompt opened over the open
             // lobby is occluded. Use the proven Load-screen approach: hide the lobby overlay (restore
