@@ -12,6 +12,12 @@ REM    3. Auto-activates the Goldberg steam_api64.dll (idempotent, keeps .orig).
 REM    4. Syncs Mods\ as NTFS junctions from the Steam install + workshop,
 REM       self-healing empty real dirs left by folder-copying an instance.
 REM    5. Ensures steam_appid.txt + sets SteamAppId/SteamGameId.
+REM    5c. Gives THIS instance a UNIQUE SteamID (real id + N-1, N = trailing
+REM        digits of the folder name, default 2) and seeds Options.jopt +
+REM        ModConfig.json into its LocalLow Steam\<id>\ profile (once, never
+REM        overwriting). Isolates the save pool: all copies sharing the real id
+REM        collided on ONE autosave.zsav -> Sharing violation killed the
+REM        geo->tac transition on the losing instance (RCA 2026-07-11).
 REM    6. Launches PhoenixPointWin64.exe -mods -logFile Player.log (per-instance
 REM       Unity log in the instance root; the shared LocalLow default clobbers
 REM       logs when several instances run at once).
@@ -93,6 +99,45 @@ if exist "%WORKSHOP_DIR%" (
     )
 ) else (
     echo WARNING: Workshop folder not found: "%WORKSHOP_DIR%"
+)
+
+REM --- step 5c: per-instance unique SteamID + save-profile seed -----------------
+REM     ponytail: N from trailing digits of the folder name (default 2) — two
+REM     oddly-named copies would both fall back to 2; rename them PP-InstanceN.
+set "REAL_ID=76561197996210591"
+set "SETTINGS=PhoenixPointWin64_Data\Plugins\x86_64\steam_settings"
+set "INST_N="
+set "NEW_ID="
+for /f "usebackq tokens=1,2" %%A in (`powershell -NoProfile -Command "$n = if ((Split-Path -Leaf $PWD) -match '(\d+)$') { [int]$matches[1] } else { 2 }; Write-Host $n ([long]76561197996210591 + $n - 1)"`) do (
+    set "INST_N=%%A"
+    set "NEW_ID=%%B"
+)
+if not defined NEW_ID (
+    echo WARNING: could not compute per-instance SteamID - keeping existing steam_settings.
+) else (
+    if not exist "%SETTINGS%" mkdir "%SETTINGS%"
+    >"%SETTINGS%\force_steamid.txt" echo !NEW_ID!
+    >"%SETTINGS%\force_account_name.txt" echo Client!INST_N!
+    (
+        echo [user::general]
+        echo # UNIQUE per-instance id = real id + N-1. Isolates the LocalLow save pool so
+        echo # parallel instances stop colliding on ONE autosave.zsav, which stalled the
+        echo # geo-to-tac transition on the losing instance. RCA 2026-07-11. The enabled-mods
+        echo # profile files Options.jopt + ModConfig.json are seeded from the real-id folder
+        echo # by launch-instance.bat step 5c, so mods still load under the new id.
+        echo account_name=Client!INST_N!
+        echo account_steamid=!NEW_ID!
+        echo language=english
+        echo ip_country=US
+    ) >"%SETTINGS%\configs.user.ini"
+    set "SAVES=%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc\Phoenix Point\Steam"
+    if not exist "!SAVES!\!NEW_ID!" mkdir "!SAVES!\!NEW_ID!"
+    for %%F in (Options.jopt ModConfig.json) do (
+        if not exist "!SAVES!\!NEW_ID!\%%F" if exist "!SAVES!\%REAL_ID%\%%F" (
+            copy /Y "!SAVES!\%REAL_ID%\%%F" "!SAVES!\!NEW_ID!\%%F" >nul && echo Seeded profile %%F into Steam\!NEW_ID!
+        )
+    )
+    echo Instance !INST_N!: SteamID !NEW_ID! ^(save pool isolated^).
 )
 
 REM --- step 5b: launch env -----------------------------------------------------

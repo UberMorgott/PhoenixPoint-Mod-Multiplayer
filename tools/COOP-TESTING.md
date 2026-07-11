@@ -46,6 +46,16 @@ One self-contained bat runs any number of local test instances. Master lives at
   into EMPTY real dirs; the bat detects those (and dead junctions), removes them, and re-links
   every mod as an NTFS junction from the Steam install `Mods\` + workshop `content\839770\`.
   A REAL dir *with files* is left untouched (dev-build override).
+- **Unique per-instance SteamID (save-pool isolation, RCA 2026-07-11):** instance N (trailing
+  digits of the folder name, default 2) gets Goldberg id `76561197996210591 + (N-1)` written to
+  `steam_settings\{force_steamid.txt,configs.user.ini}` each run. All copies previously forced the
+  REAL id, so every instance shared ONE `LocalLow ...\Steam\<id>\autosave.zsav` — simultaneous
+  autosaves at the synchronized geo→tac transition threw `IOException: Sharing violation` inside
+  `LaunchTacticalGameCrt`, and the losing instance never reached Playing (the stall). The bat also
+  seeds `Options.jopt` + `ModConfig.json` from the real-id profile into the new `Steam\<id>\` folder
+  once (never overwrites) so the enabled-mods set still loads. The mod additionally skips client
+  autosaves entirely (`ClientAutosaveSkipPatch` — a mirror's autosave is worthless and its failure
+  killed the transition).
 - **`sync` arg:** `launch-instance.bat sync` runs the dll/mods/appid fixup only, no game launch
   (use to verify a fresh copy before playing).
 - Supersedes the older per-instance `launch-with-steam-mods.bat` (left in place, harmless).

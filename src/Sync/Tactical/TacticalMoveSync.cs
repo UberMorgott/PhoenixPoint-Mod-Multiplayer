@@ -144,11 +144,18 @@ namespace Multiplayer.Sync.Tactical
             if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacIntentMove, intent.Nonce)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.NetId);
-            // [DIAG] HOST DECODE: decoded destination + whether the netId resolved to a live actor.
-            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded pos=(" +
-                      intent.X.ToString("0.0") + "," + intent.Y.ToString("0.0") + "," + intent.Z.ToString("0.0") + ")" +
-                      " netId=" + intent.NetId + " actorResolved=" + (actor != null));
-            if (actor == null) { Debug.LogError("[Multiplayer][tac] move intent: no actor for netId " + intent.NetId); return; }
+            // [DIAG] HOST DECODE: decoded destination, whether the netId resolved, and — crucially — the resolved
+            // actor's NAME + CURRENT (start) position. A "wrong start position" divergence shows here as an
+            // actorStartPos far from the requested pos (the host's netId-bound actor standing across the map).
+            Vector3 startPos = actor != null ? GetPos(actor) : Vector3.zero;
+            Debug.Log("[Multiplayer][tac][DIAG] HOSTINTENT decoded pos=(" + F(intent.X) + "," + F(intent.Y) + "," + F(intent.Z) + ")" +
+                      " netId=" + intent.NetId + " actorResolved=" + (actor != null) +
+                      " actor=" + ActorName(actor) + " actorStartPos=(" + F(startPos.x) + "," + F(startPos.y) + "," + F(startPos.z) + ")");
+            if (actor == null)
+            {
+                Debug.LogError("[Multiplayer][tac] move intent: no actor for netId " + intent.NetId + " " + TacticalDeploySync.DescribeLiveActorIds());
+                return;
+            }
 
             try
             {
@@ -177,7 +184,7 @@ namespace Multiplayer.Sync.Tactical
                 {
                     FireReplayGate.ExitHostApply();
                     Debug.Log("[Multiplayer][tac][DIAG] HOSTEXEC builtTarget.PositionToApply=(" +
-                              builtPos.x.ToString("0.0") + "," + builtPos.y.ToString("0.0") + "," + builtPos.z.ToString("0.0") + ")" +
+                              F(builtPos.x) + "," + F(builtPos.y) + "," + F(builtPos.z) + ")" +
                               " ctorPath=" + ctorPath + " activateInvoked=" + activateInvoked + " exception=" + activateExc);
                 }
                 Debug.Log("[Multiplayer][tac] HOST executed move for netId " + intent.NetId);
@@ -205,10 +212,10 @@ namespace Multiplayer.Sync.Tactical
                 Vector3 pos = GetPos(actor);
                 int stopReason = ReadStopReason(actor);
 
-                // [DIAG] HOST OUTCOME CAPTURE: the actor's final landed Pos + StopReason at the moment the
+                // [DIAG] HOST OUTCOME CAPTURE: the actor's NAME + final landed Pos + StopReason at the moment the
                 // host commits to broadcast tac.move (broadcast=true since we reached this point).
-                Debug.Log("[Multiplayer][tac][DIAG] HOSTOUTCOME finalPos=(" +
-                          pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") + ")" +
+                Debug.Log("[Multiplayer][tac][DIAG] HOSTOUTCOME netId=" + netId + " actor=" + ActorName(actor) +
+                          " finalPos=(" + F(pos.x) + "," + F(pos.y) + "," + F(pos.z) + ")" +
                           " stop=" + stopReason + " broadcast=true");
 
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMove);
@@ -263,7 +270,7 @@ namespace Multiplayer.Sync.Tactical
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMoveStart, s.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(s.NetId);
-            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move.start: no actor for netId " + s.NetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move.start: no actor for netId " + s.NetId + " " + TacticalDeploySync.DescribeLiveActorIds()); return; }
 
             var dst = new Vector3(s.X, s.Y, s.Z);
             // Record the requested dst so the END outcome can distinguish a normal completion from an interrupt.
@@ -325,7 +332,7 @@ namespace Multiplayer.Sync.Tactical
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacMove, m.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(m.NetId);
-            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move: no actor for netId " + m.NetId); return; }
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.move: no actor for netId " + m.NetId + " " + TacticalDeploySync.DescribeLiveActorIds()); return; }
 
             var finalPos = new Vector3(m.X, m.Y, m.Z);
             object nav = GetProp(actor, "TacticalNav");
@@ -813,6 +820,19 @@ namespace Multiplayer.Sync.Tactical
         {
             object p = GetProp(actor, "Pos");
             return p is Vector3 v ? v : Vector3.zero;
+        }
+
+        // [DIAG] InvariantCulture float format so move logs are locale-unambiguous ("-6.5", never "-6,5").
+        private static string F(float v) => v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+
+        // [DIAG] best-effort human name for an actor (TacticalActorBase.DisplayName), falling back to the runtime
+        // type name; never throws.
+        private static string ActorName(object actor)
+        {
+            if (actor == null) return "<null>";
+            try { if (GetProp(actor, "DisplayName") is string s && !string.IsNullOrEmpty(s)) return s; }
+            catch { }
+            return actor.GetType().Name;
         }
 
         private static object GetProp(object obj, string name)

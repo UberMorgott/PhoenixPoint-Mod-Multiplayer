@@ -84,6 +84,20 @@ namespace Multiplayer.Sync.Tactical
         {
             if (Registry != null && Registry.TryGet(netId, out var actorRef) && actorRef is TacticalActorAdapter ad)
                 return ad.Actor;
+            // LATE-SPAWN RECOVERY (root cause of "wrong start / no actor for netId N"): the client deploy match
+            // (MatchAndRegister) is a ONE-SHOT snapshot taken the instant HasAnyTurnStarted flips true, but actor
+            // spawning is still in flight then (observed match count swings 118/141 ↔ 139/143 across runs). Player
+            // soldiers (and other actors) that spawn AFTER the snapshot are never bound, so every live rail that
+            // resolves through here (move/equip/combat/…) would miss them. A soldier/vehicle netId (< MintBase) IS
+            // its GeoUnitId (spec §4), so we can rebind it GeoUnitId-EXACT against the CURRENT live actor set with
+            // no extra wire data, REUSING the existing ClientTryLazyRebind matcher. Client-only (the host registry
+            // is authoritative + kept complete via HostEnsureLiveActorsRegistered); minted Pandoran netIds
+            // (>= MintBase) need a position, so they stay on the actorstate-flush lazy path (which passes one).
+            if (IsClientMirroring && netId > 0 && netId < TacticalActorRegistry.MintBase)
+            {
+                object rebound = ClientTryLazyRebind(netId, false, 0f, 0f, 0f);
+                if (rebound != null) return rebound;
+            }
             return null;
         }
 
@@ -176,7 +190,10 @@ namespace Multiplayer.Sync.Tactical
                 if (candidates.Count == 0) return null;
 
                 if (!reg.TryLazyRebind(netId, hasPos, new ActorPos(px, py, pz), candidates)) return null;
-                object bound = ResolveLiveActor(netId);
+                // Direct registry read (NOT ResolveLiveActor): ResolveLiveActor now falls back INTO this method on
+                // a miss, so a failed rebind here would recurse infinitely. TryLazyRebind just bound netId, so a
+                // plain TryGet resolves it.
+                object bound = reg.TryGet(netId, out var boundRef) && boundRef is TacticalActorAdapter boundAd ? boundAd.Actor : null;
                 if (bound != null)
                     Debug.Log("[Multiplayer][tac] lazy-rebound netId=" + netId +
                               " via " + (netId < TacticalActorRegistry.MintBase ? "GeoUnitId" : "pos"));
@@ -1403,6 +1420,24 @@ namespace Multiplayer.Sync.Tactical
             foreach (var a in actors)
                 if (a != null) list.Add(new TacticalActorAdapter(a));
             return list;
+        }
+
+        /// <summary>DIAG: compact list of the CURRENT live-map actor GeoUnitIds (+ count) so a "no actor for
+        /// netId N" failure log can show which soldiers/actors ARE present — revealing a late-spawn / GeoUnitId
+        /// mismatch at a glance on the next in-game run. Best-effort; never throws to the caller.</summary>
+        public static string DescribeLiveActorIds()
+        {
+            object tlc = LiveTlc;
+            if (tlc == null) return "liveGeoIds=<no-live-tlc>";
+            try
+            {
+                var ids = new List<int>();
+                foreach (var aref in EnumerateActorRefs(tlc))
+                    if (aref is TacticalActorAdapter a) ids.Add(a.GeoUnitId);
+                ids.Sort();
+                return "liveGeoIds[" + ids.Count + "]=" + string.Join(",", ids.ConvertAll(i => i.ToString()).ToArray());
+            }
+            catch (Exception ex) { return "liveGeoIds=<err:" + ex.Message + ">"; }
         }
 
         /// <summary>TS1: enumerate the LIVE map actor objects (unwrapped <c>TacticalActorBase</c>) for the current
