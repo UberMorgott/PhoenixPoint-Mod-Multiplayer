@@ -33,6 +33,10 @@ namespace Multiplayer.Sync.Tactical
         private static bool _mirrorArmed;
         public static bool MirrorArmed => _mirrorArmed;
 
+        // CLIENT: the host tac.deploy actor table, retained for the MISSION lifetime (not just the one-shot
+        // hydrate) so late-bound actors can still receive their host deploy position. Null off-mission.
+        private static List<TacticalActorRegistry.ActorRow> _missionActorTable;
+
         /// <summary>True only when this instance is a synced-session CLIENT inside a mirrored tactical
         /// mission — the gate every client-side suppress patch checks.</summary>
         public static bool IsClientMirroring
@@ -174,19 +178,7 @@ namespace Multiplayer.Sync.Tactical
             if (reg == null || tlc == null) return null;
             try
             {
-                // Candidates = live actors NOT already bound (compare the wrapped actor object's reference; a
-                // fresh adapter has no value-equality with the registry's stored adapter).
-                var known = new HashSet<object>();
-                foreach (var kv in reg.Entries)
-                    if (kv.Value is TacticalActorAdapter a && a.Actor != null) known.Add(a.Actor);
-
-                var candidates = new List<IActorRef>();
-                foreach (var aref in EnumerateActorRefs(tlc))
-                {
-                    object actor = (aref as TacticalActorAdapter)?.Actor;
-                    if (actor == null || known.Contains(actor)) continue;
-                    candidates.Add(aref);
-                }
+                var candidates = UnboundLiveCandidates(reg, tlc);
                 if (candidates.Count == 0) return null;
 
                 if (!reg.TryLazyRebind(netId, hasPos, new ActorPos(px, py, pz), candidates)) return null;
@@ -195,8 +187,16 @@ namespace Multiplayer.Sync.Tactical
                 // plain TryGet resolves it.
                 object bound = reg.TryGet(netId, out var boundRef) && boundRef is TacticalActorAdapter boundAd ? boundAd.Actor : null;
                 if (bound != null)
+                {
                     Debug.Log("[Multiplayer][tac] lazy-rebound netId=" + netId +
                               " via " + (netId < TacticalActorRegistry.MintBase ? "GeoUnitId" : "pos"));
+                    // Late-bind PLACEMENT: the one-shot hydrate placement already ran, so this actor still
+                    // stands at its client-native spawn cell. Apply the retained host deploy position now.
+                    // If the triggering message carries a fresher pos (actorstate delta), the caller applies
+                    // it right after and simply overwrites this — deploy pos is only stale if the actor
+                    // moved, and a move is exactly what ships a fresher pos.
+                    ApplyStoredDeployPos(netId, bound);
+                }
                 return bound;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientTryLazyRebind failed: " + ex); return null; }
@@ -807,12 +807,24 @@ namespace Multiplayer.Sync.Tactical
                 //     GeoUnitId), so only genuinely client-rolled extras are removed.
                 int removed = ReconcileUnmatchedActors(restored);
 
-                // 3) Arm mirror mode (frozen pure mirror).
+                // 3) Arm mirror mode (frozen pure mirror). RETAIN the host actor table for the mission's
+                //    lifetime: late-spawned actors bound after this one-shot hydrate (lazy rebind / rematch
+                //    retry) still need their host deploy POSITION from it — discarding it here was why a
+                //    late-bound soldier stood at its client-native spawn cell (wrong placement).
+                _missionActorTable = p.ActorTable;
                 _mirrorArmed = true;
                 _hydratedSiteId = p.MissionSiteId;
                 _pendingClientDeploy = null;
                 LiveTlc = tacticalLevelController;   // live-rail handle for applying tac.move/tac.turn
                 LiveSeq = new TacticalLiveSeq();     // fresh per-mission client guard
+
+                // 3b) INITIAL PLACEMENT: drive every MATCHED actor to the host's authoritative deploy
+                //     position. The client's native deploy rolls its own spawn cells, so even a matched
+                //     soldier can stand on a different cell than the host's (user-visible "soldiers unload
+                //     at wrong positions"). Reuses ApplyMirrorPosition (no-op/walk/teleport per distance);
+                //     runs AFTER mirror-arm because it gates on IsClientMirroring. Pandorans matched by
+                //     position are already within epsilon → cheap no-op.
+                int placed = ApplyDeployPositions(p.ActorTable);
 
                 // 4) Enter the INITIAL turn from the restored snapshot (ProcessInstanceData already set the
                 //    snapshot's _currentFactionIndex). If turn 0 is the player faction, the client must enter
@@ -829,8 +841,19 @@ namespace Multiplayer.Sync.Tactical
 
                 Debug.Log("[Multiplayer][tac] CLIENT hydrated tac.deploy site=" + p.MissionSiteId +
                           " matched=" + matched + "/" + p.ActorTable.Count + " removedExtras=" + removed +
-                          " mirror=ARMED");
+                          " placed=" + placed + " mirror=ARMED");
                 DumpActorTable("CLIENT", p.ActorTable);
+
+                // 6) LATE-SPAWN RETRY: actors still spawning when the one-shot match above ran never bound
+                //    (observed 118/141 vs 139/143 swings). Proactively re-run the SAME matcher on a bounded
+                //    cadence so they get matched + placed without waiting for their first inbound message
+                //    (the ResolveLiveActor lazy-rebind stays as the per-message backstop).
+                if (matched < p.ActorTable.Count)
+                {
+                    object timing = ResolveTiming(tacticalLevelController);
+                    if (timing == null || !InvokeTimingStart(timing, ClientRematchCrt()))
+                        Debug.LogError("[Multiplayer][tac] rematch retry could not start — lazy-rebind fallback only");
+                }
             }
             catch (Exception ex)
             {
@@ -847,6 +870,7 @@ namespace Multiplayer.Sync.Tactical
             //     mission. Doing the local teardown up-front makes the lifecycle reset exception-proof. (N1.)
             _mirrorArmed = false;
             _pendingClientDeploy = null;
+            _missionActorTable = null;   // rematch/lazy-bind coroutines watch this → self-stop
             _launchStallDeadline = 0f;
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
@@ -1480,6 +1504,108 @@ namespace Multiplayer.Sync.Tactical
             }
             if (removed > 0) Debug.Log("[Multiplayer][tac] CLIENT removed " + removed + " unmatched (client-rolled) actor(s)");
             return removed;
+        }
+
+        /// <summary>CLIENT: live actors NOT yet bound in the registry (reference-identity on the wrapped
+        /// actor — a fresh adapter has no value-equality with the registry's stored one). The shared
+        /// candidate builder for lazy rebind + the rematch retry.</summary>
+        private static List<IActorRef> UnboundLiveCandidates(TacticalActorRegistry reg, object tlc)
+        {
+            var known = new HashSet<object>();
+            foreach (var kv in reg.Entries)
+                if (kv.Value is TacticalActorAdapter a && a.Actor != null) known.Add(a.Actor);
+            var candidates = new List<IActorRef>();
+            foreach (var aref in EnumerateActorRefs(tlc))
+            {
+                object actor = (aref as TacticalActorAdapter)?.Actor;
+                if (actor == null || known.Contains(actor)) continue;
+                candidates.Add(aref);
+            }
+            return candidates;
+        }
+
+        /// <summary>CLIENT: drive every table row whose netId is bound to the host's deploy position via
+        /// <see cref="TacticalMoveSync.ApplyMirrorPosition"/> (no-op when already within epsilon). Returns
+        /// the count actually moved/snapped. Direct registry read — never the lazy-rebinding resolver.</summary>
+        private static int ApplyDeployPositions(List<TacticalActorRegistry.ActorRow> rows)
+        {
+            int applied = 0;
+            if (rows == null || Registry == null) return 0;
+            foreach (var row in rows)
+            {
+                object actor = Registry.TryGet(row.NetId, out var aref) && aref is TacticalActorAdapter ad ? ad.Actor : null;
+                if (actor == null) continue;
+                try { if (TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z))) applied++; }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyDeployPositions failed for netId " + row.NetId + ": " + ex); }
+            }
+            return applied;
+        }
+
+        /// <summary>CLIENT: apply the retained host deploy position (+DIAG) to ONE late-bound actor.
+        /// Position only — the deploy table carries no facing; facing converges via the actorstate rail.</summary>
+        private static void ApplyStoredDeployPos(int netId, object actor)
+        {
+            var table = _missionActorTable;
+            if (table == null || actor == null) return;
+            foreach (var row in table)
+            {
+                if (row.NetId != netId) continue;
+                bool applied = false;
+                try { applied = TacticalMoveSync.ApplyMirrorPosition(actor, new Vector3(row.X, row.Y, row.Z)); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyStoredDeployPos failed: " + ex); }
+                string name = GetProp(actor, "DisplayName") as string ?? actor.GetType().Name;
+                Debug.Log("[Multiplayer][tac][DIAG] late-bind netId=" + netId + " '" + name + "' applied deploy pos=(" +
+                          row.X.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "," +
+                          row.Y.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "," +
+                          row.Z.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + ") applied=" + applied);
+                return;
+            }
+        }
+
+        // Rematch retry cadence: ~1 s between attempts (frame-based, same NextFrame pump as the other
+        // deploy coroutines), hard-capped. ponytail: frame-counted seconds assume ~60 fps; good enough
+        // for a retry cadence — switch to realtime if it ever matters.
+        private const int RematchMaxTries = 10;
+        private const int RematchIntervalFrames = 60;
+
+        /// <summary>CLIENT: bounded proactive rematch for actors that spawned AFTER the one-shot hydrate
+        /// match — once per ~second, up to <see cref="RematchMaxTries"/>, until the full host table is
+        /// bound. Newly bound actors immediately get their host deploy position. Self-stops on mission
+        /// exit (watches <see cref="_missionActorTable"/>/<see cref="LiveTlc"/>, both nulled there).</summary>
+        private static IEnumerator<NextUpdate> ClientRematchCrt()
+        {
+            for (int attempt = 1; attempt <= RematchMaxTries; attempt++)
+            {
+                for (int f = 0; f < RematchIntervalFrames; f++) yield return NextUpdate.NextFrame;
+
+                var table = _missionActorTable;
+                var reg = Registry;
+                object tlc = LiveTlc;
+                if (table == null || reg == null || tlc == null) yield break;   // mission exited → self-stop
+
+                var unmatched = new List<TacticalActorRegistry.ActorRow>();
+                foreach (var row in table)
+                    if (!reg.TryGet(row.NetId, out _)) unmatched.Add(row);
+                if (unmatched.Count == 0)
+                {
+                    Debug.Log("[Multiplayer][tac] rematch: full actor table bound (attempt " + attempt + ")");
+                    yield break;
+                }
+
+                int bound = 0, placedNow = 0;
+                try
+                {
+                    var candidates = UnboundLiveCandidates(reg, tlc);
+                    if (candidates.Count > 0) bound = reg.MatchAndRegister(unmatched, candidates);
+                    if (bound > 0) placedNow = ApplyDeployPositions(unmatched);
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientRematchCrt attempt " + attempt + " failed: " + ex); }
+                if (bound > 0)
+                    Debug.Log("[Multiplayer][tac] rematch attempt " + attempt + ": bound " + bound +
+                              " late actor(s), placed " + placedNow + ", stillUnmatched=" + (unmatched.Count - bound));
+            }
+            Debug.LogWarning("[Multiplayer][tac] rematch: gave up after " + RematchMaxTries +
+                             " attempts — remaining actors rely on lazy rebind");
         }
 
         private static MethodInfo _destroyActorMethod;
