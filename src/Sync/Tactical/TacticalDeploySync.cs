@@ -645,6 +645,37 @@ namespace Multiplayer.Sync.Tactical
         /// the coroutine ends.</summary>
         private static IEnumerator<NextUpdate> ClientHydrateCrt(object tacticalLevelController, bool alreadyLoaded)
         {
+            // Wait until the level is genuinely turn-0 ready before hydrating — the SAME readiness gate the host
+            // uses before capture (TacticalDeployReadinessGate / HasAnyTurnStarted). The Playing postfix fires
+            // BEFORE OnLevelStart's DeployForTurn has spawned the client's actors, so an immediate hydrate (a)
+            // enumerated ZERO actors → matched=0/N, and (b) armed mirror mode MID-deployment, so the
+            // IsClientMirroring suppression patches corrupted the in-flight native DoSpawnActor → NRE cascade in
+            // EquipmentComponent.OnActorEnteredPlay. Mirror is NOT armed during the initial native load, so the
+            // native turn-0 runs unmolested and flips HasAnyTurnStarted after DeployForTurn+NextTurnCrt — poll it
+            // with the same bounded fail-safe. (RCA 2026-07-11, friend's client log: matched=0/143 + spawn NRE.)
+            // On the late-deploy-into-a-live-level path (alreadyLoaded from OnDeployReceived) HasAnyTurnStarted is
+            // already true, so this returns CaptureReady on frame 0 — no added delay.
+            int frames = 0;
+            while (true)
+            {
+                bool ready = false;
+                try { ready = ToBool(GetProp(tacticalLevelController, "HasAnyTurnStarted")); }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientHydrateCrt: read HasAnyTurnStarted failed: " + ex); }
+
+                var decision = TacticalDeployReadinessGate.Decide(ready, frames, CaptureReadyMaxFrames);
+                if (decision != TacticalDeployReadinessGate.Decision.Wait)
+                {
+                    if (decision == TacticalDeployReadinessGate.Decision.CaptureTimeout)
+                        Debug.LogError("[Multiplayer][tac] ClientHydrateCrt: readiness gate timed out after " +
+                                       frames + " frames — hydrating anyway (fail-safe)");
+                    else
+                        Debug.Log("[Multiplayer][tac] ClientHydrateCrt: level ready after " + frames +
+                                  " frame(s) → hydrating");
+                    break;
+                }
+                frames++;
+                yield return NextUpdate.NextFrame;
+            }
             ClientHydrateNow(tacticalLevelController, alreadyLoaded);
             yield break;
         }
