@@ -34,7 +34,11 @@ namespace Multiplayer.Sync.Tactical
         private const float CreepSeconds = 30f;     // time-creep denominator when no native progress is readable
         private const float CreepCeiling = 0.95f;   // never let the creep pretend the load finished
         private const float HostMaxSeconds = 45f;   // host heartbeat self-terminates after this (reverse backstop)
-        private const float WatchdogSeconds = 120f; // client lifts the curtain after this much host silence
+        private const float WatchdogSeconds = 120f; // client lifts the curtain after this much silence (outer backstop)
+        // Stage-1 is heartbeat-fed every ~SendInterval, so silence means the host STOPPED pinging (its 45s
+        // backstop hit / aborted return with no save transfer) — lift fast instead of waiting the outer 120s.
+        // Once a download chunk was seen, stage-2 progress owns activity and only the outer watchdog applies.
+        private const float Stage1SilenceSeconds = 15f;
 
         // ─── HOST send state ───────────────────────────────────────────────
         private static bool _hostLoading;
@@ -45,6 +49,9 @@ namespace Multiplayer.Sync.Tactical
         // ─── CLIENT curtain state ──────────────────────────────────────────
         private static bool _curtainUp;
         private static float _lastActivity;
+        // True once any deploy payload (chunk or single) was seen for the current curtain — i.e. we are past
+        // stage 1, so the fast stage-1 silence timeout no longer applies (only the outer watchdog does).
+        private static bool _downloadSeen;
         // Download-chunk progress tracking, keyed by deploy generation (chunks arrive unordered + duplicated).
         private static int _dlGen = int.MinValue;
         private static System.Collections.Generic.HashSet<int> _dlSeen = new System.Collections.Generic.HashSet<int>();
@@ -167,6 +174,7 @@ namespace Multiplayer.Sync.Tactical
             }
             if (chunkIndex >= 0) _dlSeen.Add(chunkIndex);
             float frac = chunkCount > 0 ? (float)_dlSeen.Count / chunkCount : 1f;
+            _downloadSeen = true;
             EnsureCurtain("Downloading mission…");
             NativeWidgetFactory.SetDownloadBar(frac);
         }
@@ -176,6 +184,7 @@ namespace Multiplayer.Sync.Tactical
         public static void ClientOnDeploySingle()
         {
             if (!ClientGuardOpen()) return;
+            _downloadSeen = true;
             EnsureCurtain("Downloading mission…");
             NativeWidgetFactory.SetDownloadBar(1f);
         }
@@ -236,6 +245,7 @@ namespace Multiplayer.Sync.Tactical
         {
             _dlGen = int.MinValue;
             _dlSeen = new System.Collections.Generic.HashSet<int>();
+            _downloadSeen = false;
         }
 
         private static void ClientTick()
@@ -251,7 +261,10 @@ namespace Multiplayer.Sync.Tactical
                 ResetDownloadTracking();
                 return;
             }
-            if (Now - _lastActivity > WatchdogSeconds)
+            float silence = Now - _lastActivity;
+            if (!_downloadSeen && silence > Stage1SilenceSeconds)
+                ClientAbortCurtain("watchdog: no host load-phase ping for " + (int)Stage1SilenceSeconds + "s");
+            else if (silence > WatchdogSeconds)
                 ClientAbortCurtain("watchdog: no host progress for " + (int)WatchdogSeconds + "s");
         }
 

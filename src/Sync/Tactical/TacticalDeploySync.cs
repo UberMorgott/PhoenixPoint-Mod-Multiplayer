@@ -589,12 +589,21 @@ namespace Multiplayer.Sync.Tactical
             // launch so the gate prefix lets it through (a spontaneous client launch is blocked).
             var launch = AccessTools.Method(geo.GetType(), "LaunchTacticalGame");
             if (launch == null) { Debug.LogError("[Multiplayer][tac] ClientLaunchMission: LaunchTacticalGame not found"); return; }
-            // Stage-3 hand-off: our download bar yields to the native level-load bar under the SAME curtain
-            // (the native LaunchTacticalGame drops its own loading progress). EndDownloadBar only — no lift.
-            try { TacticalLoadPhaseSync.ClientHandoff(); } catch { }
             _clientLaunchInProgress = true;
             try { launch.Invoke(geo, new[] { mission, gameParams }); }
+            catch
+            {
+                // The native launch threw → NO native level load will ever take over (or lift) the curtain.
+                // ABORT it here (a hand-off would orphan it: ClientHandoff drops the watchdog without a lift),
+                // then rethrow so the OnDeployReceived caller logs the failure as before.
+                try { TacticalLoadPhaseSync.ClientAbortCurtain("client launch failed"); } catch { }
+                throw;
+            }
             finally { _clientLaunchInProgress = false; }
+            // Stage-3 hand-off AFTER a successful launch: our download bar yields to the native level-load bar
+            // under the SAME curtain (the native path reassigns the bar source itself — the SetLoadingLevel
+            // idiom). EndDownloadBar only — no lift.
+            try { TacticalLoadPhaseSync.ClientHandoff(); } catch { }
             Debug.Log("[Multiplayer][tac] CLIENT launched tactical mission for site " + p.MissionSiteId);
         }
 
