@@ -79,6 +79,19 @@ namespace Multiplayer.Network.Sync.State
             }
         }
 
+        /// <summary>
+        /// FNV-1a 64-bit hash of an encoded payload — the research drift-poll signature. Pure + deterministic
+        /// (Encode lays the state out in stable list order), so equal state → equal hash and any change to
+        /// what we send (completed/queue/progress/order/state/rate) → different hash. Null → 0.
+        /// </summary>
+        public static ulong Fnv1a(byte[] data)
+        {
+            if (data == null) return 0UL;
+            ulong h = 14695981039346656037UL;      // FNV offset basis
+            foreach (byte b in data) { h ^= b; h *= 1099511628211UL; }  // FNV prime
+            return h;
+        }
+
         public static ResearchSnapshot Decode(byte[] data)
         {
             if (data == null) return null;

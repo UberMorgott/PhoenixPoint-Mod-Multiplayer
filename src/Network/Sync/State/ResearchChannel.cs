@@ -23,12 +23,39 @@ namespace Multiplayer.Network.Sync.State
         private object _token;       // opaque faction-event token (Start/Complete) from ResearchStateReflection
         private object _hourToken;   // opaque hourly-tick (HourTicked) token — FIX#1 progress heartbeat
         private object _research;    // the bound Research instance (rebind guard)
+        // Host: FNV-1a signature of the last snapshot Snapshot() built. Snapshot is the SOLE payload builder
+        // and runs only at broadcast time (SyncEngine.FlushChannel), so it equals what clients last received —
+        // PollHostDrift compares the live signature to this and never re-fires what was just sent
+        // (InventoryChannel._lastBroadcastSig idiom). Null = nothing broadcast yet.
+        private ulong? _lastBroadcastSig;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
             var snap = ResearchStateReflection.Snapshot(rt);
             if (snap == null) return null;
-            return ResearchSnapshot.Encode(snap);
+            var bytes = ResearchSnapshot.Encode(snap);
+            _lastBroadcastSig = ResearchSnapshot.Fnv1a(bytes);   // poll baseline = exactly what we send
+            return bytes;
+        }
+
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): hash the live research snapshot and
+        /// mark ch#2 dirty when it drifts from the last broadcast — catching ANY mutation path that never fires
+        /// the faction start/complete events (direct field writes, exotic mods), current and future. The known
+        /// paths (the 5 ResearchAcquisitionDirtyPatches + faction events + hourly heartbeat) still converge
+        /// instantly; this only shrinks the worst-case UNKNOWN-path lag from ~1 in-game hour to the poll cadence.
+        /// Marks only — the per-channel flush stays the sole sender. No-op off-geoscape (null snapshot). We hash
+        /// the ENCODED snapshot (not hand-picked fields): it is the exact wire truth, so any mutation the client
+        /// must mirror changes it, and any mutation that doesn't isn't in the snapshot anyway (nothing to sync).
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null) return;
+            var snap = ResearchStateReflection.Snapshot(rt);
+            if (snap == null) return;                              // not in geoscape yet / mid-load
+            ulong sig = ResearchSnapshot.Fnv1a(ResearchSnapshot.Encode(snap));
+            if (_lastBroadcastSig.HasValue && sig == _lastBroadcastSig.Value) return;  // clients already hold this
+            eng.MarkChannelDirty(ChannelId);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)

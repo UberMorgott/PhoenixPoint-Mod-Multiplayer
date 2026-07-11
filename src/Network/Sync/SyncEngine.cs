@@ -43,6 +43,13 @@ namespace Multiplayer.Network.Sync
         // the post-mission replenish. 30 ticks (~0.5 s @60fps) keeps the full-storage reflection walk off
         // the per-frame path while still converging faster than a player can act on the drift.
         private const int InventoryPollTickInterval = 30;
+        private int _researchPollTick;    // host: frame counter throttling the research signature-drift poll
+        // Research (channel #2) drift-poll cadence. The 5 known out-of-band mutators are patched
+        // (ResearchAcquisitionDirtyPatches) and converge instantly; this poll is the UNIVERSAL backstop for
+        // mutation paths we have never seen (other mods, future game patches — see
+        // ResearchChannel.PollHostDrift). Research changes are rare and the reflection walk + encode is
+        // heavier than inventory's, so 60 ticks (~1 s @60fps) — still far below the old 1-game-hour worst case.
+        private const int ResearchPollTickInterval = 60;
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
         private readonly Queue<uint> _pendingOrder = new Queue<uint>();   // FIFO eviction order for _pending (bounds growth)
 
@@ -2177,6 +2184,17 @@ namespace Multiplayer.Network.Sync
             {
                 _inventoryPollTick = 0;
                 (_channels.Get(SurfaceIds.InventoryChannel) as State.InventoryChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+
+            // Host: research (channel #2) signature-drift POLL — the universal convergence backstop for any
+            // research mutation path that bypasses the 5 patched container mutators (unknown mods, future
+            // game patches; see ResearchChannel.PollHostDrift). Same idiom as the inventory poll above:
+            // throttled, marks dirty only — the per-channel flush below stays the sole sender.
+            if (++_researchPollTick >= ResearchPollTickInterval)
+            {
+                _researchPollTick = 0;
+                (_channels.Get(SurfaceIds.ResearchChannel) as State.ResearchChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
 
