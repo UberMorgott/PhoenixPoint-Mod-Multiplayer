@@ -680,6 +680,12 @@ namespace Multiplayer.Sync.Tactical
                 }
                 else
                 {
+                    // LEGACY / should-not-run: since 2026-07-11 both callers pass alreadyLoaded:true (the client
+                    // always builds its tactical level natively before hydrating), so this fragile snapshot
+                    // ProcessInstanceData path is dead. It empty-graphs on a real client (host round-trips the
+                    // same bytes; client Serializer.Read → ByRef.Value==null). Kept ONLY as a forensic tripwire:
+                    // a regression re-entering here stays visible via the [tac] failure signature below.
+                    Debug.LogWarning("[Multiplayer][tac] ClientHydrateNow: LEGACY snapshot-hydrate path hit (expected dead) — attempting fragile deserialize");
                     object snapshotObj = DeserializeGraph(p.SnapshotBytes, _tacLevelInstType);
                     if (snapshotObj == null)
                     {

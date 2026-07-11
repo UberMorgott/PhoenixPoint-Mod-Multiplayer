@@ -57,10 +57,13 @@ namespace Multiplayer.Harmony.Tactical
             try
             {
                 if (engine.IsHost) TacticalDeploySync.HostOnLevelReady(__instance);
-                // Legacy fresh-load path: this Playing-transition postfix only fires for a level the client
-                // built natively (launch-then-hydrate) ⇒ alwaysLoaded=false (snapshot ProcessInstanceData IS
-                // required). The late-deploy-into-a-live-level path calls ClientOnLevelReady(…, true) directly.
-                else TacticalDeploySync.ClientOnLevelReady(__instance, alreadyLoaded: false);
+                // Fresh deploy-driven launch: the client built this tactical level natively from the SHARED
+                // Site/GeoMission (deterministic map + squads), so turn-0 faction state already matches the
+                // host — hydrate via alreadyLoaded:true (registry rebuild + reconcile + tac.move/vision/turn
+                // rail), SKIPPING the host-snapshot ProcessInstanceData. That snapshot deserialize empty-graphs
+                // on a real client (host round-trips the same 493KB bytes, client Read → ByRef.Value==null),
+                // which is what hung every geo→tac transition (RCA 2026-07-11, friend's client log).
+                else TacticalDeploySync.ClientOnLevelReady(__instance, alreadyLoaded: true);
             }
             catch (System.Exception ex)
             {
