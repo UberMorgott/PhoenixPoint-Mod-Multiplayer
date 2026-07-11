@@ -69,6 +69,8 @@ namespace Multiplayer.UI
         private Button _chooseSaveBtn;
         private Button _newCampaignBtn;
         private Button _inviteBtn;
+        private Button _inviteCodeBtn;
+        private Text _inviteCodeLabel;   // CODE button caption, refreshed live from GetOwnInviteCode()
         // Connect-rail SHARE + SAVE section roots (host-only): gated on/off per frame like _chooseSaveBtn.
         // The JOIN section (and its button) stay always-visible. Section roots own the header + body so
         // hiding the whole section (header + separator + controls) is a single SetActive.
@@ -365,6 +367,23 @@ namespace Multiplayer.UI
                     () => _owner.InvitePlayers());
                 LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
             }
+
+            // Friend-free join: the host's own short permanent invite code. Same styling as INVITE
+            // VIA STEAM; click copies the code so a friend can paste it into JOIN A GAME. The label is
+            // refreshed live in Refresh() (self-heals once Steam is ready).
+            _inviteCodeBtn = NativeWidgetFactory.CloneMenuButton(_shareSection.transform, "InviteCodeBtn",
+                "CODE: " + _owner.GetOwnInviteCode(), () => _owner.CopyInviteCode());
+            if (_inviteCodeBtn != null)
+                AddCloneLayoutElement(_inviteCodeBtn, _shareSection.transform, RailButtonSize.x, RailButtonSize.y);
+            else
+            {
+                _inviteCodeBtn = UiToolkit.CreateButton(_shareSection, "InviteCodeBtn",
+                    "CODE: " + _owner.GetOwnInviteCode(), Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
+                    () => _owner.CopyInviteCode());
+                LE(_inviteCodeBtn.gameObject).preferredHeight = RailButtonSize.y;
+            }
+            if (_inviteCodeBtn != null)
+                _inviteCodeLabel = _inviteCodeBtn.GetComponentInChildren<Text>();
 
             // ── SECTION "SAVE" (host-only): the campaign save to load ───────────
             _saveSection = AddRailSection(rail, "SESSION SAVE");
@@ -971,6 +990,7 @@ namespace Multiplayer.UI
 
             // CONNECT RAIL values.
             if (_railStunValue != null) _railStunValue.text = _owner.GetRailStunCode();
+            if (_inviteCodeLabel != null) _inviteCodeLabel.text = "CODE: " + _owner.GetOwnInviteCode();
             if (_railSaveValue != null)
             {
                 var n = engine.Session?.ChosenSaveName;

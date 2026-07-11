@@ -602,8 +602,14 @@ namespace Multiplayer.UI
             // SmartJoinParser.DefaultDirectPort (single source of truth — not hardcoded here). STUN /
             // SteamId paths still work: select-all + paste a code over the prefill; SmartJoinParser
             // auto-detects. Pressing OK unedited connects to localhost:<DefaultDirectPort> (valid).
-            var prefill = "127.0.0.1:" + SmartJoinParser.DefaultDirectPort;
-            TryUpgradePromptInput("IP:port, or paste a STUN code", prefill);
+            // Zero-friction: if the clipboard already holds a valid invite code (the host clicked
+            // CODE), prefill it so the joiner just presses OK. Otherwise fall back to the localhost
+            // default endpoint (normal IP-only flow).
+            var clip = GUIUtility.systemCopyBuffer;
+            var prefill = (!string.IsNullOrEmpty(clip) && InviteCode.TryDecode(clip, out _))
+                ? clip.Trim()
+                : "127.0.0.1:" + SmartJoinParser.DefaultDirectPort;
+            TryUpgradePromptInput("Invite code, IP:port, or STUN code", prefill);
         }
 
         // ─── Nickname rename (own roster row pencil) ───────────────────────
@@ -1007,6 +1013,27 @@ namespace Multiplayer.UI
         {
             if (string.IsNullOrEmpty(text)) return;
             GUIUtility.systemCopyBuffer = text;
+        }
+
+        // ─── Invite code (host's own short join code) ──────────────────────
+
+        // Host's permanent, friend-free invite code ("XXXX-XXXX") or a placeholder while Steam is
+        // offline. Re-read each frame by the rail (self-heals if Steam becomes ready after build).
+        public string GetOwnInviteCode()
+        {
+            return SteamInvite.LocalInviteCode() ?? "(Steam offline)";
+        }
+
+        // CODE button click: copy the code and confirm via the native prompt (same feedback pattern
+        // as the pause-menu "Copied to clipboard" box). No-ops with a Steam-unavailable prompt offline.
+        public void CopyInviteCode()
+        {
+            var code = SteamInvite.LocalInviteCode();
+            if (string.IsNullOrEmpty(code)) { ShowSteamNotAvailable(); return; }
+            GUIUtility.systemCopyBuffer = code;
+            var mb = GameUtl.GetMessageBox();
+            mb?.ShowSimplePrompt($"Invite code copied:\n{code}\n\nYour friend pastes it into JOIN A GAME.",
+                MessageBoxIcon.Information, MessageBoxButtons.OK, null, this);
         }
 
         // ═══════════════════════════════════════════════════════════════════

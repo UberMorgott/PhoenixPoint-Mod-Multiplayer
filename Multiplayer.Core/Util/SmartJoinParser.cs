@@ -26,8 +26,9 @@ namespace Multiplayer.Util
 
     /// <summary>
     /// Classifies a pasted join string in a fixed precedence (R6): IPv4[:port] first
-    /// (DirectIP), else a Crockford short code (STUN via ConnectCode.Decode), else a bare
-    /// 64-bit number (Steam), else Invalid. Pure — does no networking.
+    /// (DirectIP), else an 8-symbol invite code (decodes to a Steam account id → SteamID64),
+    /// else a 10-symbol Crockford short code (STUN via ConnectCode.Decode), else a bare 64-bit
+    /// number (Steam), else a DNS hostname, else Invalid. Pure — does no networking.
     /// </summary>
     public static class SmartJoinParser
     {
@@ -58,19 +59,26 @@ namespace Multiplayer.Util
                 ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
                 return JoinTarget.Direct(ip.ToString(), port);
 
-            // 2) STUN short code (Crockford base32, optionally dash-grouped).
             var stripped = s.Replace("-", "").Replace(" ", "");
+
+            // 2) Invite code: exactly 8 Crockford symbols with a valid check symbol → a Steam account
+            // id. Checked BEFORE STUN (10 symbols) — distinct length, so the two never collide. The
+            // resolved SteamID64 rides the EXISTING SteamId join path (no new downstream surface).
+            if (stripped.Length == InviteCode.TotalSymbols && InviteCode.TryDecode(s, out var accountId))
+                return JoinTarget.Steam(InviteCode.ToSteamId64(accountId));
+
+            // 3) STUN short code (Crockford base32, optionally dash-grouped).
             if (stripped.Length == 10 && stripped.All(IsCrockford))
             {
                 var ep = ConnectCode.Decode(s);
                 if (ep != null) return JoinTarget.Stun(ep);
             }
 
-            // 3) Bare 64-bit SteamID.
+            // 4) Bare 64-bit SteamID.
             if (ulong.TryParse(s, out var steamId) && s.Length >= 15)
                 return JoinTarget.Steam(steamId);
 
-            // 4) DNS hostname[:port] (e.g. "myhost.ddns.net", "host.com:9000"). Checked LAST so a
+            // 5) DNS hostname[:port] (e.g. "myhost.ddns.net", "host.com:9000"). Checked LAST so a
             // Crockford code or a bare SteamID is never misread as a host. DirectTransport resolves
             // the name via BeginConnect(host, port); only the parser previously rejected it.
             if (IsHostname(hostPart))

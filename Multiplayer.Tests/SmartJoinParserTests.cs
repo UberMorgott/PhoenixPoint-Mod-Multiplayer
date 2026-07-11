@@ -70,6 +70,41 @@ namespace Multiplayer.Tests
         }
 
         [Theory]
+        [InlineData(1u)]
+        [InlineData(111222333u)]
+        [InlineData(uint.MaxValue)]
+        public void InviteCode_ResolvesToSteamId64(uint accountId)
+        {
+            var code = InviteCode.Encode(accountId);
+            var r = SmartJoinParser.Parse(code);
+            Assert.Equal(JoinKind.SteamId, r.Kind);
+            Assert.Equal(InviteCode.ToSteamId64(accountId), r.SteamId);
+
+            // Same result dash-stripped + lower-cased (paste tolerance).
+            var r2 = SmartJoinParser.Parse(code.Replace("-", "").ToLowerInvariant());
+            Assert.Equal(JoinKind.SteamId, r2.Kind);
+            Assert.Equal(InviteCode.ToSteamId64(accountId), r2.SteamId);
+        }
+
+        [Fact]
+        public void InviteCode_DoesNotShadowTenSymbolStunCode()
+        {
+            // A real 10-symbol STUN code must still classify as STUN, never as an 8-symbol invite.
+            var code = ConnectCode.Encode(new IPEndPoint(IPAddress.Parse("198.51.100.9"), 41000));
+            Assert.Equal(JoinKind.StunCode, SmartJoinParser.Parse(code).Kind);
+        }
+
+        [Fact]
+        public void EightSymbolCodeWithBadCheck_IsInvalid_NotMisclassified()
+        {
+            // 8 Crockford symbols but a corrupted check symbol → not an invite, and (no dots, not 10
+            // symbols, not 15+ digits) nothing else claims it → Invalid.
+            var raw = InviteCode.Encode(42u).Replace("-", "");
+            var bad = (raw[0] == '0' ? '1' : '0') + raw.Substring(1);
+            Assert.Equal(JoinKind.Invalid, SmartJoinParser.Parse(bad).Kind);
+        }
+
+        [Theory]
         [InlineData(null)]
         [InlineData("")]
         [InlineData("   ")]

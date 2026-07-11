@@ -1,5 +1,6 @@
 using System;
 using Multiplayer.Network;   // SteamConnect (pure decisions)
+using Multiplayer.Util;      // InviteCode (pure codec)
 using Steamworks;
 using Steamworks.Data;
 using UnityEngine;
@@ -40,6 +41,22 @@ namespace Multiplayer.Transport
             if (isError) Debug.LogError("[Multiplayer][steam-invite] " + msg);
             else Debug.Log("[Multiplayer][steam-invite] " + msg);
             try { Report?.Invoke(msg, isError); } catch { }
+        }
+
+        /// <summary>
+        /// Host's own short invite code (Crockford "XXXX-XXXX") derived from our Steam account id
+        /// (the low 32 bits of our SteamID64). Null when Steam isn't running. The joiner decodes it
+        /// back to our SteamID64 (InviteCode.ToSteamId64) and joins via the existing Steam-P2P path.
+        /// Facepunch types stay confined to this internal class (JITs only when a Steam path runs).
+        /// </summary>
+        public static string LocalInviteCode()
+        {
+            try
+            {
+                if (!SteamClient.IsValid) return null;
+                return InviteCode.Encode((uint)SteamClient.SteamId.Value);
+            }
+            catch { return null; }
         }
 
         // ─── HOST ──────────────────────────────────────────────────────────
