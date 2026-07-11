@@ -116,8 +116,10 @@ namespace Multiplayer.Network.Sync.State
                 ulong sig = SiteSig(s);
                 if (!_lastSentSiteSig.TryGetValue(s.SiteId, out var prev)) { _lastSentSiteSig[s.SiteId] = sig; continue; } // seed-on-first-sight
                 if (sig == prev) continue;                       // client already holds this site
-                MarkSiteDirtyExternal(s.SiteId);                 // drifted off-event → re-emit this ONE site
-                _lastSentSiteSig[s.SiteId] = sig;                // (the flush re-stamps too; harmless)
+                // Drifted off-event → re-emit this ONE site. Baseline NOT stamped here — only the flush (the
+                // sole sender) stamps it (Snapshot ~above), so a dropped flush (site unresolved mid-load) keeps
+                // the drift armed and the next poll re-marks. A redundant pre-flush re-mark is idempotent.
+                MarkSiteDirtyExternal(s.SiteId);
             }
         }
 
