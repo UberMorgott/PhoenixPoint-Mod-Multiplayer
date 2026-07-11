@@ -72,6 +72,7 @@ these; they inform where and how to patch.
 | Doc | Scope |
 |-----|-------|
 | [COOP-SYNC-ROADMAP.md](COOP-SYNC-ROADMAP.md) | **Living roadmap + status tracker.** Vision, invariants, out-of-scope decisions, the 2026-06-17 full-geoscape-replication architecture decision, the decomposed sub-projects (#0–#5 / Inc1–Inc5), the STATUS table (every batch: geoscape channels, world-activity, popup-mirror, personnel, tactical surfaces), and CURRENT POSITION / next actions. **Start here for status.** |
+| [plans/2026-07-12-tactical-entry-save-transfer.md](plans/2026-07-12-tactical-entry-save-transfer.md) | **ACTIVE plan.** Tactical mission ENTRY via host-authored mid-tactical save transfer (replaces client self-launch + reconcile/snap) + host loading-screen barrier. 2 batches, grounded anchors, tests, risks, rollback. |
 
 ## 4. Design history / lineage (SUPERSEDED originals)
 
