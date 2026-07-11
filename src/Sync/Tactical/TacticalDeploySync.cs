@@ -191,6 +191,14 @@ namespace Multiplayer.Sync.Tactical
         private static bool _clientLaunchInProgress;
         public static bool ClientLaunchInProgress => _clientLaunchInProgress;
 
+        // Client launch-stall watchdog (RCA 2026-07-11, 3-instance test): a deploy-driven native launch
+        // whose scene never reaches Playing leaves ONLY a silent "no live TLC" drop-flood — one loud line
+        // instead. Armed after a successful ClientLaunchMission; disarmed by ClientOnLevelReady (Playing
+        // arrived) / OnMissionExit; fires ONCE. Ticked from TacticalLoadPhaseSync.Tick (per-frame pump).
+        private const float LaunchStallSeconds = 60f;
+        private static float _launchStallDeadline;   // 0 = disarmed (Time.realtimeSinceStartup based)
+        private static int _launchStallSiteId;
+
         // ─── Reflection cache ──────────────────────────────────────────────
         private static Type _tlcType;          // TacticalLevelController
         private static Type _tacActorBaseType; // TacticalActorBase
@@ -605,6 +613,21 @@ namespace Multiplayer.Sync.Tactical
             // idiom). EndDownloadBar only — no lift.
             try { TacticalLoadPhaseSync.ClientHandoff(); } catch { }
             Debug.Log("[Multiplayer][tac] CLIENT launched tactical mission for site " + p.MissionSiteId);
+            // Arm the stall watchdog: from here the NATIVE load must reach Playing (which fires the
+            // OnLevelStateChanged postfix → ClientOnLevelReady → disarm). Silence past the deadline = stall.
+            _launchStallDeadline = Time.realtimeSinceStartup + LaunchStallSeconds;
+            _launchStallSiteId = p.MissionSiteId;
+        }
+
+        /// <summary>Per-frame stall check (pumped from <see cref="TacticalLoadPhaseSync.Tick"/>): logs ONE loud
+        /// warning if the native tactical load never reached Playing after a deploy-driven client launch
+        /// (RCA 2026-07-11: instance stalled with only a silent "no live TLC" flood). Cheap early-out when idle.</summary>
+        public static void ClientLaunchStallTick()
+        {
+            if (_launchStallDeadline == 0f || Time.realtimeSinceStartup < _launchStallDeadline) return;
+            _launchStallDeadline = 0f;   // fire once, then disarm
+            Debug.LogWarning("[Multiplayer][tac] tactical load stalled — Playing never reached after launch (site " +
+                             _launchStallSiteId + ")");
         }
 
         /// <summary>
@@ -626,6 +649,7 @@ namespace Multiplayer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
+            _launchStallDeadline = 0f;   // level reached Playing (or live-level hydrate) → stall watchdog off
             if (_pendingClientDeploy == null || tacticalLevelController == null) return;
             EnsureReflection();
 
@@ -806,6 +830,7 @@ namespace Multiplayer.Sync.Tactical
             //     mission. Doing the local teardown up-front makes the lifecycle reset exception-proof. (N1.)
             _mirrorArmed = false;
             _pendingClientDeploy = null;
+            _launchStallDeadline = 0f;
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;

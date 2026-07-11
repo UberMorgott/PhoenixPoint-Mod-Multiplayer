@@ -20,12 +20,34 @@ namespace Multiplayer.Network.Sync.State
 
         private object _token;     // opaque faction research-event token (Start/Complete)
         private object _faction;   // bound faction instance (rebind guard)
+        // Host: FNV-1a of the last snapshot Snapshot() broadcast (poll baseline). Snapshot is the sole
+        // payload builder + runs only at flush, so it equals what clients last received — PollHostDrift
+        // compares the live sig to this and never re-fires what was just sent (ResearchChannel idiom).
+        private ulong? _lastBroadcastSig;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
             var snap = UnlockReflection.Snapshot(rt);
             if (snap == null) return null;
-            return UnlockSnapshot.Encode(snap);
+            var bytes = UnlockSnapshot.Encode(snap);
+            _lastBroadcastSig = ResearchSnapshot.Fnv1a(bytes);   // poll baseline = exactly what we send
+            return bytes;
+        }
+
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): hash the live unlock snapshot and
+        /// mark ch#3 dirty when it drifts from the last broadcast — catching any unlock-set mutation that never
+        /// fires the research-complete event (other mods, future game patches). Marks only — the per-channel
+        /// flush stays the sole sender. No-op off-geoscape (null snapshot). Mirrors <see cref="ResearchChannel.PollHostDrift"/>.
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null) return;
+            var snap = UnlockReflection.Snapshot(rt);
+            if (snap == null) return;                          // not in geoscape yet / mid-load
+            ulong sig = ResearchSnapshot.Fnv1a(UnlockSnapshot.Encode(snap));
+            if (_lastBroadcastSig.HasValue && sig == _lastBroadcastSig.Value) return;  // clients already hold this
+            eng.MarkChannelDirty(ChannelId);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)

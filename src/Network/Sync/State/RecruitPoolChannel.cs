@@ -191,6 +191,49 @@ namespace Multiplayer.Network.Sync.State
             return RecruitPoolSnapshot.Encode(snap);
         }
 
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): re-derive each pool's content hash
+        /// and re-arm the ones that drifted from the last emit — catching pool mutations that bypass the 7
+        /// RecruitPoolPatches seams (other mods, future game patches). Reuses the SAME per-pool baselines the
+        /// flush stamps (_lastNakedHash / _lastCapturedHash / _lastHavenHash) and the SAME static mark methods,
+        /// so marks stay budget/defer-safe and the flush stays the sole sender. A pool never yet emitted (null
+        /// baseline) is skipped — it rode the join blob; its seam re-arms on a genuine change. Havens are polled
+        /// only for ids we've already emitted (a never-emitted haven is covered by its SpawnNewRecruit seam).
+        /// No-op off-geoscape.
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null || rt?.PhoenixFaction() == null) return;   // host, in-geoscape only
+            try
+            {
+                // FULL-SET pools: only re-arm when we've emitted before AND the block hash drifted.
+                if (_lastNakedHash.HasValue)
+                {
+                    var records = RecruitPoolReflection.SnapshotNakedRecruits(rt);
+                    if (records != null
+                        && PersonnelStateFlush.Hash(RecruitPoolSnapshot.EncodeNakedBlock(records)) != _lastNakedHash.Value)
+                        MarkNakedDirtyExternal();
+                }
+                if (_lastCapturedHash.HasValue)
+                {
+                    var blobs = RecruitPoolReflection.SnapshotCapturedUnits(rt);
+                    if (blobs != null
+                        && PersonnelStateFlush.Hash(RecruitPoolSnapshot.EncodeCapturedBlock(blobs)) != _lastCapturedHash.Value)
+                        MarkCapturedDirtyExternal();
+                }
+                // HAVEN slots: re-hash each haven we've emitted; a slot that changed off-seam re-arms just that id.
+                var knownHavens = new List<int>(_lastHavenHash.Keys);   // copy: MarkHavenDirtyExternal is a no-op here on this dict, but iterate a snapshot regardless
+                foreach (var id in knownHavens)
+                {
+                    var src = RecruitPoolReflection.ReadHavenRecruit(rt, id);
+                    if (!src.Resolved) continue;                        // read miss — leave it for the seam
+                    if (_lastHavenHash.TryGetValue(id, out var prev) && RecruitPoolFlush.HashSlot(src.Blob) != prev)
+                        MarkHavenDirtyExternal(id);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] RecruitPoolChannel poll failed: " + ex.Message); }
+        }
+
         public void Apply(GeoRuntime rt, byte[] data)
         {
             var snap = RecruitPoolSnapshot.Decode(data);

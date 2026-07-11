@@ -278,6 +278,7 @@ namespace Multiplayer.Sync.Tactical
         {
             HostTick();
             ClientTick();
+            TacticalDeploySync.ClientLaunchStallTick();   // launch-stall watchdog (one loud line, self-disarms)
         }
 
         /// <summary>Reset at a mission boundary (<c>TacticalDeploySync.OnMissionExit</c>): stop any host

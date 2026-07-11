@@ -27,12 +27,33 @@ namespace Multiplayer.Network.Sync.State
         private object _varToken;   // opaque GeoscapeEventSystem.VariableSet token
         private object _hourToken;  // opaque hourly-tick token (objectives/variables heartbeat)
         private object _faction;    // bound faction instance (rebind guard)
+        // Host: FNV-1a of the last snapshot Snapshot() broadcast (poll baseline; ResearchChannel idiom) —
+        // Snapshot is the sole payload builder + runs only at flush, so it equals what clients last received.
+        private ulong? _lastBroadcastSig;
 
         public byte[] Snapshot(GeoRuntime rt)
         {
             var snap = ObjectivesReflection.Snapshot(rt);
             if (snap == null) return null;
-            return ObjectivesSnapshot.Encode(snap);
+            var bytes = ObjectivesSnapshot.Encode(snap);
+            _lastBroadcastSig = ResearchSnapshot.Fnv1a(bytes);   // poll baseline = exactly what we send
+            return bytes;
+        }
+
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): hash the live objectives+variables
+        /// snapshot and mark ch#7 dirty when it drifts from the last broadcast — catching any mutation that
+        /// bypasses the objective/VariableSet events + the hourly heartbeat (other mods, future game patches).
+        /// Marks only — the per-channel flush stays the sole sender. No-op off-geoscape (null snapshot).
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null) return;
+            var snap = ObjectivesReflection.Snapshot(rt);
+            if (snap == null) return;                          // not in geoscape yet / mid-load
+            ulong sig = ResearchSnapshot.Fnv1a(ObjectivesSnapshot.Encode(snap));
+            if (_lastBroadcastSig.HasValue && sig == _lastBroadcastSig.Value) return;  // clients already hold this
+            eng.MarkChannelDirty(ChannelId);
         }
 
         public void Apply(GeoRuntime rt, byte[] data)

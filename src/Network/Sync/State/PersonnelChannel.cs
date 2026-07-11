@@ -182,6 +182,43 @@ namespace Multiplayer.Network.Sync.State
             return PersonnelSnapshot.Encode(snap);
         }
 
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): re-blob the live roster and, if ANY
+        /// soldier's blob drifted from the last one we sent (<see cref="_lastSentBlobHash"/>), bulk-mark the state
+        /// tail — catching soldier mutations that bypass the PS2 state seams (other mods, future game patches),
+        /// even while the geoscape clock is PAUSED (the hourly bulk driver is idle then). The flush's per-blob
+        /// hash-skip culls the unchanged majority, so the bulk mark ships only the truly-drifted soldiers. Marks
+        /// only — the existing flush stays the sole sender. No-op off-geoscape.
+        /// ponytail: bulk resend on ANY drift + a full-roster re-serialize per poll (the drift detector must
+        /// compare the opaque game-Serializer blob — no cheaper faithful signal). Deliberately reuses the
+        /// per-soldier _lastSentBlobHash baseline (the brief's "upgrade path") rather than a separate walk-sig:
+        /// less state AND it never re-fires after a normal seam flush (the walk-sig would, since any change
+        /// shifts it). A soldier with no baseline yet is treated as drift once, then baselined by that flush.
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null || rt?.PhoenixFaction() == null) return;   // host, in-geoscape only
+            try
+            {
+                var index = PersonnelReflection.BuildCharacterIndex(rt);
+                if (index == null) return;
+                foreach (var kv in index.ById)
+                {
+                    var blob = PersonnelBlob.Write(kv.Value);
+                    if (blob == null || blob.Length == 0) continue;    // serialize miss — leave it for the seam
+                    ulong h = PersonnelStateFlush.Hash(blob);
+                    if (!_lastSentBlobHash.TryGetValue(kv.Key, out var prev) || prev != h)
+                    {
+                        // One drift is enough — bulk-mark (the flush hash-skip ships only changed blobs) and
+                        // stop re-serializing the rest of the roster this poll.
+                        MarkAllSoldiersStateDirtyExternal();
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] PersonnelChannel poll failed: " + ex.Message); }
+        }
+
         public void Apply(GeoRuntime rt, byte[] data)
         {
             _lastStateApplyIds.Clear();   // cleared even on decode/no-op exits — never carries a stale stamp set

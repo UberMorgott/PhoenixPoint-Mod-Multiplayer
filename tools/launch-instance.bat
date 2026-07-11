@@ -12,7 +12,9 @@ REM    3. Auto-activates the Goldberg steam_api64.dll (idempotent, keeps .orig).
 REM    4. Syncs Mods\ as NTFS junctions from the Steam install + workshop,
 REM       self-healing empty real dirs left by folder-copying an instance.
 REM    5. Ensures steam_appid.txt + sets SteamAppId/SteamGameId.
-REM    6. Launches PhoenixPointWin64.exe -mods  (offline / DirectIP testing).
+REM    6. Launches PhoenixPointWin64.exe -mods -logFile Player.log (per-instance
+REM       Unity log in the instance root; the shared LocalLow default clobbers
+REM       logs when several instances run at once).
 REM
 REM  Usage: launch-instance.bat [sync]
 REM         "sync" = do steps 1-5 only (fix links + dll), do NOT launch.
@@ -105,6 +107,6 @@ if /I "%~1"=="sync" (
 
 REM --- step 6: launch ("-mods" enables ModManager + the MODS menu entry) -------
 echo Launching Phoenix Point (test instance, Goldberg, mods synced)...
-start "PhoenixPoint COOP" "%EXE%" -mods
+start "PhoenixPoint COOP" "%EXE%" -mods -logFile "%CD%\Player.log"
 
 endlocal

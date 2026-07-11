@@ -50,6 +50,24 @@ namespace Multiplayer.Network.Sync
         // ResearchChannel.PollHostDrift). Research changes are rare and the reflection walk + encode is
         // heavier than inventory's, so 60 ticks (~1 s @60fps) — still far below the old 1-game-hour worst case.
         private const int ResearchPollTickInterval = 60;
+        // Backstop drift-poll counters for the five channels that otherwise rely only on events/Harmony patches:
+        // unlock #3 / objectives #7 / recruit-pool #10 / GeoSite #5 / personnel #9. Same idiom as the inventory/
+        // research polls above — each host re-derives its channel's authoritative snapshot and, on a hash drift
+        // vs the last broadcast, marks (only) the channel/site/soldier dirty; the existing flush stays the sole
+        // sender. The DISTINCT initial values STAGGER the first (and subsequent) trips so the heavier reflection
+        // walks don't co-land on one frame (first trips at 120/75/90/60/135 ticks). Cadences reflect walk cost:
+        // objectives 90 (obj list + variable table), unlock/recruit/site 120, personnel 180 (a full-roster
+        // re-serialize — the heaviest). Instance-scoped: a fresh session (new SyncEngine) resets the phases.
+        private int _unlockPollTick;
+        private int _objectivesPollTick = 15;
+        private int _recruitPollTick = 30;
+        private int _personnelPollTick = 45;
+        private int _sitePollTick = 60;
+        private const int UnlockPollTickInterval = 120;
+        private const int ObjectivesPollTickInterval = 90;
+        private const int RecruitPollTickInterval = 120;
+        private const int SitePollTickInterval = 120;
+        private const int PersonnelPollTickInterval = 180;
         private readonly Dictionary<uint, ISyncedAction> _pending = new Dictionary<uint, ISyncedAction>();
         private readonly Queue<uint> _pendingOrder = new Queue<uint>();   // FIFO eviction order for _pending (bounds growth)
 
@@ -2195,6 +2213,43 @@ namespace Multiplayer.Network.Sync
             {
                 _researchPollTick = 0;
                 (_channels.Get(SurfaceIds.ResearchChannel) as State.ResearchChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+
+            // Host: FIVE more channel drift-poll backstops — unlock #3 / objectives #7 / recruit-pool #10 /
+            // GeoSite #5 / personnel #9. Same throttled "re-derive the authoritative snapshot, mark dirty on
+            // hash drift, let the ONE existing flush send it" idiom as the inventory/research polls above,
+            // extended to channels that today rely only on events/Harmony patches — so an UNKNOWN mutation path
+            // (other mods, future game patches) still converges within the poll cadence. Staggered phases (the
+            // distinct counter seeds) keep the heavier reflection walks off one frame.
+            if (++_unlockPollTick >= UnlockPollTickInterval)
+            {
+                _unlockPollTick = 0;
+                (_channels.Get(SurfaceIds.UnlockChannel) as State.UnlockChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+            if (++_objectivesPollTick >= ObjectivesPollTickInterval)
+            {
+                _objectivesPollTick = 0;
+                (_channels.Get(SurfaceIds.ObjectivesChannel) as State.ObjectivesChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+            if (++_recruitPollTick >= RecruitPollTickInterval)
+            {
+                _recruitPollTick = 0;
+                (_channels.Get(SurfaceIds.RecruitPoolChannel) as State.RecruitPoolChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+            if (++_sitePollTick >= SitePollTickInterval)
+            {
+                _sitePollTick = 0;
+                (_channels.Get(SurfaceIds.GeoSiteChannel) as State.GeoSiteChannel)
+                    ?.PollHostDrift(GeoRuntime.Instance, this);
+            }
+            if (++_personnelPollTick >= PersonnelPollTickInterval)
+            {
+                _personnelPollTick = 0;
+                (_channels.Get(SurfaceIds.PersonnelChannel) as State.PersonnelChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
 

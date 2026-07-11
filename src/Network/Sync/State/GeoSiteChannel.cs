@@ -44,6 +44,23 @@ namespace Multiplayer.Network.Sync.State
         private readonly HashSet<int> _dirty = new HashSet<int>();
         private readonly object _dirtyLock = new object();
 
+        // Host poll baseline: FNV-1a of the last PER-SITE snapshot we broadcast (stamped in Snapshot). A site
+        // absent here was never flushed by this channel (it rode the join blob), so PollHostDrift SEEDS it
+        // silently instead of marking it — this channel has NO payload budget, so bulk-marking ~70 sites at
+        // once could overflow EncodeStateSync's u16 length. Flush-thread only (poll + Snapshot both run in
+        // SyncEngine.Tick), same as the codebase treats every other per-flush hash map. Cleared on Detach.
+        private readonly Dictionary<int, ulong> _lastSentSiteSig = new Dictionary<int, ulong>();
+
+        // Per-site drift signature = FNV-1a of that ONE site's encoded record (identity + explored + mission +
+        // WA-2/facility tails) — exactly the bytes the channel ships for it, so any field the client mirrors
+        // changes it and any field it doesn't isn't in the DTO anyway. Used identically in Snapshot + poll.
+        private static ulong SiteSig(GeoSiteState s)
+        {
+            var one = new GeoSiteSnapshot();
+            one.Sites.Add(s);
+            return ResearchSnapshot.Fnv1a(GeoSiteSnapshot.Encode(one));
+        }
+
         /// <summary>Out-of-band host dirty-mark (WA-2 mission drift): mark <paramref name="siteId"/> dirty on
         /// the live host-attached channel. No-op when not host-attached (client / no session) — the ONLY
         /// setter of <see cref="_live"/> is the host-branch AttachHost.</summary>
@@ -69,10 +86,39 @@ namespace Multiplayer.Network.Sync.State
             if (sites == null || sites.Count == 0) return null;
             var snap = new GeoSiteSnapshot();
             snap.Sites.AddRange(sites);
+            foreach (var s in sites) _lastSentSiteSig[s.SiteId] = SiteSig(s);   // poll baseline = exactly what we send
             // DIAG (site channel): one line per flush (site-event driven — rare). The whole host→client site
             // path was previously silent end-to-end, which made the explored-state desync invisible in logs.
             Debug.Log("[Multiplayer] GeoSiteChannel flush sites=" + sites.Count + " [" + string.Join(",", snap.Sites) + "]");
             return GeoSiteSnapshot.Encode(snap);
+        }
+
+        /// <summary>
+        /// Host poll backstop (throttled by <see cref="SyncEngine.Tick"/>): walk EVERY live site, re-derive its
+        /// per-site signature and re-mark the ones that drifted from the last broadcast — catching site mutations
+        /// that fire no GeoMap event (other mods, future game patches). Goes far beyond the Inc5 CRC probe, which
+        /// only covers Owner+State; this hashes the full DTO (name / mission / tails). Marks only — the existing
+        /// per-site flush stays the sole sender; a site never yet flushed is seeded silently (it rode the join
+        /// blob). No-op off-geoscape. ponytail: full ~70-site tail walk each poll (hence the longer cadence) —
+        /// reuses TryReadCrcIdentities purely for the id list (a touch wasteful; a dedicated AllSiteIds accessor
+        /// would trim the double walk if it ever bites).
+        /// </summary>
+        public void PollHostDrift(GeoRuntime rt, SyncEngine eng)
+        {
+            if (eng == null) return;
+            if (!GeoSiteReflection.TryReadCrcIdentities(rt, out var ids) || ids == null) return;  // not in geoscape
+            var allIds = new List<int>(ids.Count);
+            foreach (var t in ids) allIds.Add(t.siteId);
+            var sites = GeoSiteReflection.SnapshotDirty(rt, allIds);
+            if (sites == null) return;
+            foreach (var s in sites)
+            {
+                ulong sig = SiteSig(s);
+                if (!_lastSentSiteSig.TryGetValue(s.SiteId, out var prev)) { _lastSentSiteSig[s.SiteId] = sig; continue; } // seed-on-first-sight
+                if (sig == prev) continue;                       // client already holds this site
+                MarkSiteDirtyExternal(s.SiteId);                 // drifted off-event → re-emit this ONE site
+                _lastSentSiteSig[s.SiteId] = sig;                // (the flush re-stamps too; harmless)
+            }
         }
 
         public void Apply(GeoRuntime rt, byte[] data)
@@ -173,6 +219,7 @@ namespace Multiplayer.Network.Sync.State
             _map = null;
             if (_live == this) _live = null;
             lock (_dirtyLock) { _dirty.Clear(); }
+            _lastSentSiteSig.Clear();   // re-seed the poll baseline on the next (re)bind
         }
     }
 }
