@@ -360,10 +360,23 @@ namespace Multiplayer.UI
         {
             if (string.IsNullOrEmpty(diffs)) return;
             var mb = GameUtl.GetMessageBox();
-            mb?.ShowSimplePrompt(
+            if (mb == null) return;
+
+            // The native MessageBox renders BELOW the lobby overlay (sort 4000), so a box shown over
+            // the OPEN lobby is fully occluded — invisible. The user, seeing nothing, re-clicks the
+            // "!" badge; each click stacks another hidden ModalData in the MessageBox's
+            // _modalPopupStack (ShowPromptImpl pushes the current box when one is already showing).
+            // Those stacked boxes only become visible when the overlay tears down on lobby EXIT, then
+            // pour out one-by-one (the "высыпались after exit" bug). Fix at the source by mirroring the
+            // proven rename-prompt path: hide the lobby overlay first so the box shows through, then
+            // re-show the lobby on dismiss — the FIRST click now gives immediate feedback, so nothing
+            // ever queues to spill out later.
+            _lobby?.HideForNativeScreen();
+            mb.ShowSimplePrompt(
                 "Mods / DLC / mod settings differ from the host:\n\n" + diffs +
                 "\n\nREADY unlocks once these match the host.",
-                MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+                MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
         }
 
         // Nickname edit committed in the lobby panel.
