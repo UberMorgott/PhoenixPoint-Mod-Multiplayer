@@ -647,12 +647,18 @@ namespace Multiplayer.Network
             }
 
             // Read the just-written file back to bytes (WriteSavegame set meta.Path → ReadSavegameBinary(meta)
-            // reads it — same read-back the on-demand join uses).
+            // reads it — same read-back the on-demand join uses). CallSafe: a read throw must NOT escape and
+            // skip the DeleteSaveGame below, or the transient coop_tac_xfer file leaks into the save list.
             var result = new ByRef<byte[]>();
-            yield return Timing.Current.Call(saveManager.Serializer.ReadSavegameBinary(meta, result));
-            outBytes.Value = result.Value;
+            var readEx = new ByRef<Exception>();
+            yield return Timing.Current.CallSafe(saveManager.Serializer.ReadSavegameBinary(meta, result), readEx);
+            if (readEx.Value != null)
+                Debug.LogError("[Multiplayer] tac-entry: save read-back failed: " + readEx.Value.Message);
+            else
+                outBytes.Value = result.Value;
 
-            // Transient host-only file — delete it so it never litters the player's save list.
+            // Transient host-only file — ALWAYS delete it (even if read-back failed) so it never litters the
+            // player's save list.
             var delEx = new ByRef<Exception>();
             yield return Timing.Current.CallSafe(saveManager.DeleteSaveGame(meta), delEx);
             if (delEx.Value != null)

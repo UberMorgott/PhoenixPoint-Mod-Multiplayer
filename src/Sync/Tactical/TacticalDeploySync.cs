@@ -223,6 +223,15 @@ namespace Multiplayer.Sync.Tactical
         private static float _launchStallDeadline;   // 0 = disarmed (Time.realtimeSinceStartup based)
         private static int _launchStallSiteId;
 
+        // Entry-via-save stall watchdog (batch-1): a client that suppressed self-launch (UseSaveTransferEntry)
+        // and is waiting on the host save-transfer hangs FOREVER if the host's tactical save write aborted
+        // before SendBlob/OpenBarrier (no chunks + no barrier → the reveal/kick fallbacks never arm). Armed
+        // when the deploy is stashed under the flag; self-disarms once the transfer arrives / the level builds
+        // / the deploy hydrates; on timeout falls back to the legacy ClientLaunchMission. Ticked from
+        // TacticalLoadPhaseSync.Tick alongside the launch-stall watchdog.
+        private const float EntryTransferStallSeconds = 60f;
+        private static float _entryStallDeadline;   // 0 = disarmed (Time.realtimeSinceStartup based)
+
         // ─── Reflection cache ──────────────────────────────────────────────
         private static Type _tlcType;          // TacticalLevelController
         private static Type _tacActorBaseType; // TacticalActorBase
@@ -587,6 +596,9 @@ namespace Multiplayer.Sync.Tactical
                 // is already stashed in _pendingClientDeploy above — just wait for the transfer to build the level.
                 // (LaunchTacticalGameGatePatch already blocks any spontaneous client launch on this path.)
                 Debug.Log("[Multiplayer][tac] CLIENT deploy stashed; awaiting host save-transfer to build the tactical level (UseSaveTransferEntry)");
+                // Arm the stall watchdog: if the host save write aborts (no chunks ever arrive), fall back to
+                // the legacy self-launch instead of hanging forever behind the load indicator.
+                _entryStallDeadline = Time.realtimeSinceStartup + EntryTransferStallSeconds;
             }
             else
             {
@@ -678,6 +690,36 @@ namespace Multiplayer.Sync.Tactical
             _launchStallDeadline = 0f;   // fire once, then disarm
             Debug.LogWarning("[Multiplayer][tac] tactical load stalled — Playing never reached after launch (site " +
                              _launchStallSiteId + ")");
+        }
+
+        /// <summary>Per-frame stall check (pumped from <see cref="TacticalLoadPhaseSync.Tick"/>) for the
+        /// entry-via-save wait: if the host save-transfer never arrives (host write aborted before SendBlob/
+        /// OpenBarrier → no chunks, no barrier, no reveal/kick fallback), fall back to the legacy self-launch
+        /// instead of hanging forever behind the load indicator. Self-disarms the instant a transfer arrives /
+        /// the level builds / the deploy hydrates. Cheap early-out when idle.</summary>
+        public static void ClientEntryTransferStallTick()
+        {
+            if (_entryStallDeadline == 0f) return;
+
+            var st = NetworkEngine.Instance?.SaveTransfer;
+            bool transferArrived = st != null && st.TransferActive;   // first SaveChunk sets _rxTotalBytes>0
+            bool liveTactical = LiveTacticalLevelController() != null;
+            bool stillPending = _pendingClientDeploy != null;
+
+            // Progressing normally (chunks flowing / level built / already hydrated) → stop watching, no fallback.
+            if (!stillPending || transferArrived || liveTactical) { _entryStallDeadline = 0f; return; }
+
+            if (!TacticalEntryStallGate.ShouldFallbackToSelfLaunch(
+                    Time.realtimeSinceStartup >= _entryStallDeadline, stillPending, transferArrived, liveTactical))
+                return;   // deadline not reached yet — keep waiting
+
+            _entryStallDeadline = 0f;
+            var p = _pendingClientDeploy;
+            Debug.LogError("[Multiplayer][tac] entry-via-save STALLED: no host save-transfer within " +
+                           EntryTransferStallSeconds + "s — falling back to legacy self-launch (site " +
+                           p.MissionSiteId + ")");
+            try { ClientLaunchMission(p); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] entry-stall fallback ClientLaunchMission failed: " + ex); }
         }
 
         /// <summary>
@@ -905,6 +947,7 @@ namespace Multiplayer.Sync.Tactical
             _pendingClientDeploy = null;
             _missionActorTable = null;   // rematch/lazy-bind coroutines watch this → self-stop
             _launchStallDeadline = 0f;
+            _entryStallDeadline = 0f;
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;
