@@ -244,6 +244,32 @@ namespace Multiplayer.UI
             }
         }
 
+        // ─── CLIENT tac load-phase curtain (in-game geo↔tac transitions) ────
+        // The co-op loading INDICATOR for host-driven level loads (TacticalLoadPhaseSync). Mirrors
+        // EnterDownloadLoadingScreen but WITHOUT the lobby hide (that is a menu-only concern — these fire
+        // in-game where no lobby is shown) and with a caller-supplied label.
+
+        /// <summary>Drop the native curtain + begin driving the bottom bar with a co-op loading label.
+        /// Idempotent (DropCurtainEarly / BeginDownloadBar are).</summary>
+        public void EnterTacLoadCurtain(string label)
+        {
+            DropCurtainEarly();
+            NativeWidgetFactory.BeginDownloadBar(label);
+        }
+
+        /// <summary>Stage-3 hand-off: stop driving OUR bar so the native level-load bar + default label take
+        /// over the SAME curtain (a native load is starting) — the SaveTransferCoordinator.SetLoadingLevel
+        /// idiom. Does NOT lift the curtain.</summary>
+        public void TacLoadHandoff() => NativeWidgetFactory.EndDownloadBar();
+
+        /// <summary>Abort: stop our bar AND lift the native curtain, because no native level-load will lift it
+        /// (watchdog / disconnect / already-in-tactical). Never leaves the client stuck on a curtain.</summary>
+        public void TacLoadAbort()
+        {
+            NativeWidgetFactory.EndDownloadBar();
+            LiftCurtainEarly();
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         //  Main entry — called from button click
         // ═══════════════════════════════════════════════════════════════════
@@ -1363,6 +1389,11 @@ namespace Multiplayer.UI
             // does real work while the panel is actually on screen.
             if (_lobby != null && _lobby.IsVisible)
                 _lobby.Refresh();
+
+            // Co-op load-phase indicator driver (host progress ping + client curtain watchdog). Runs OUTSIDE
+            // the IsActive branch so a disconnect mid-load still tears the curtain down; each side early-outs
+            // when idle. See TacticalLoadPhaseSync.
+            Multiplayer.Sync.Tactical.TacticalLoadPhaseSync.Tick();
         }
 
         // ═══════════════════════════════════════════════════════════════════

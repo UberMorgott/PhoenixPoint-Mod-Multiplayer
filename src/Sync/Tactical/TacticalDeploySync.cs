@@ -233,6 +233,12 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] OnTacticalLaunch site=" + _launchingSiteId);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnTacticalLaunch failed: " + ex); _launchingSiteId = -1; }
+
+            // Host: begin pinging the client loading INDICATOR (geoscape→tactical). Host-only + idempotent
+            // inside HostBeginLoad; the client shows a curtain on receipt and never sends. Stops when the deploy
+            // snapshot is broadcast (HostCaptureAndBroadcast → HostEndLoad).
+            try { TacticalLoadPhaseSync.HostBeginLoad(); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] load-phase begin failed: " + ex); }
         }
 
         // ─── HOST: capture + broadcast (called from DeployLaunchPatches level-ready postfix) ──
@@ -432,6 +438,7 @@ namespace Multiplayer.Sync.Tactical
                 BroadcastDeploy(siteId, generation, payload);
 
                 _lastBroadcastSiteId = siteId;
+                TacticalLoadPhaseSync.HostEndLoad();     // load-phase indicator: deploy sent → stop the host ping
                 LiveTlc = tacticalLevelController;       // live-rail handle for tac.move/tac.turn/tac.vision
                 // Do NOT recreate LiveSeq here: the level is already turn-0-ready and the pre-deploy tac.turn
                 // (seq=1) has been emitted on the live stream. Recreating it would rewind _hostNext, so the
@@ -515,6 +522,9 @@ namespace Multiplayer.Sync.Tactical
                 // the NetId registry + reconcile + arm mirror (the deploy snapshot's actual job — the actor
                 // set/positions ride the registry + tac.move rail, NOT ProcessInstanceData). (RCA 2026-06-18.)
                 Debug.Log("[Multiplayer][tac] CLIENT deploy arrived with live tactical level → hydrating existing level (no relaunch, skip redundant ProcessInstanceData)");
+                // Stage-3: the client is ALREADY in tactical (no native load to hand off to) → end + lift any
+                // load-phase curtain immediately so we don't leave it hanging over the live level.
+                try { TacticalLoadPhaseSync.ClientAbortCurtain("hydrate-existing"); } catch { }
                 // alreadyLoaded=true travels WITH this call (formerly the free _hydrateLevelAlreadyLoaded static):
                 // the level was natively loaded ⇒ ClientHydrateNow skips the redundant snapshot ProcessInstanceData.
                 try { ClientOnLevelReady(liveTlc, alreadyLoaded: true); }
@@ -579,6 +589,9 @@ namespace Multiplayer.Sync.Tactical
             // launch so the gate prefix lets it through (a spontaneous client launch is blocked).
             var launch = AccessTools.Method(geo.GetType(), "LaunchTacticalGame");
             if (launch == null) { Debug.LogError("[Multiplayer][tac] ClientLaunchMission: LaunchTacticalGame not found"); return; }
+            // Stage-3 hand-off: our download bar yields to the native level-load bar under the SAME curtain
+            // (the native LaunchTacticalGame drops its own loading progress). EndDownloadBar only — no lift.
+            try { TacticalLoadPhaseSync.ClientHandoff(); } catch { }
             _clientLaunchInProgress = true;
             try { launch.Invoke(geo, new[] { mission, gameParams }); }
             finally { _clientLaunchInProgress = false; }
@@ -812,6 +825,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalObjectiveSync.Reset(); }                                 // 0x99: drop the diff cache + pre-hydrate queue
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalLoadPhaseSync.Reset(); }                                 // load-phase indicator: stop host ping + lift any client curtain
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
@@ -843,7 +858,15 @@ namespace Multiplayer.Sync.Tactical
         {
             if (surfaceId == (byte)TacticalSurfaceIds.TacDeploy)
             {
+                // Stage-2: a single-envelope deploy arrived → relabel "Downloading mission…" + bar to 1.0.
+                try { TacticalLoadPhaseSync.ClientOnDeploySingle(); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] load-phase (single) failed: " + ex); }
                 try { OnDeployReceived(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] inbound failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacLoadPhase)
+            {
+                // Stage-1: host-loading progress heartbeat (DISPLAY-only) → show/keep the client curtain.
+                try { TacticalLoadPhaseSync.HandleLoadPhase(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.load.phase failed: " + ex); }
                 return true;
             }
             if (surfaceId == (byte)TacticalSurfaceIds.TacDeployChunk)
@@ -852,6 +875,9 @@ namespace Multiplayer.Sync.Tactical
                 {
                     if (TacticalDeployChunkCodec.TryDecode(payload, out var frag))
                     {
+                        // Stage-2: drive "Downloading mission…" by received-chunks/total (before reassembly).
+                        try { TacticalLoadPhaseSync.ClientOnDeployChunk(frag.DeployGeneration, frag.ChunkIndex, frag.ChunkCount); }
+                        catch (Exception lex) { Debug.LogError("[Multiplayer][tac] load-phase (chunk) failed: " + lex); }
                         byte[] full = _chunkReassembler.Accept(frag);
                         if (full != null)
                         {

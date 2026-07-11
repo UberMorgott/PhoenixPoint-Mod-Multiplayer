@@ -227,5 +227,15 @@ namespace Multiplayer.Sync.Tactical
         // See TacticalInventorySync / TacticalInventoryTransferCodec / InventoryTransferPatches. Next free 0x9A/0x9B.
         public const ushort TacInventoryIntent = 0x9A;     // 154: client→host  "commit inventory-view loot batch"        (intent, carries nonce)
         public const ushort TacInventoryApply  = 0x9B;     // 155: host→all     "authoritative inventory-transfer batch"  (outcome, carries seq)
+
+        // ─── LOAD-PHASE progress heartbeat (client loading indicator, geo↔tac transitions) ────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, DISPLAY-ONLY (no game
+        // state → no seq/dedup): while the host loads the destination level (geoscape→tactical, and stage-1 of
+        // tactical→geoscape) the client would sit on a FROZEN screen with no feedback. The host pings this
+        // heartbeat so the client shows the game's NATIVE loading curtain + bottom bar driven by the fraction;
+        // the client eases its bar toward each ping (a dropped/out-of-order ping is harmless). The tac→geo
+        // DOWNLOAD stage stays owned by SaveTransferCoordinator; the client backs off this heartbeat the moment
+        // that transfer starts (TransferActive/InPhase2). See TacLoadPhaseCodec / TacticalLoadPhaseSync. Next free 0x9C.
+        public const ushort TacLoadPhase = 0x9C;           // 156: host→all     "host is loading a level @ progress01"    (heartbeat, DISPLAY-only, no seq)
     }
 }

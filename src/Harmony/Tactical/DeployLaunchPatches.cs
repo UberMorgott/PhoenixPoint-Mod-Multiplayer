@@ -143,6 +143,14 @@ namespace Multiplayer.Harmony.Tactical
         {
             try { TacticalDeploySync.OnMissionExit(); }
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit failed: {ex}"); }
+
+            // REVERSE (tactical→geoscape) stage-1: the host now loads the geoscape → ping the client loading
+            // indicator so it isn't frozen while the host loads + autosaves. Host-only + idempotent inside
+            // HostBeginLoad; runs AFTER OnMissionExit (whose Reset cleared the prior heartbeat + curtain). The
+            // return's DOWNLOAD stage stays owned by SaveTransferCoordinator (the host ping self-terminates when
+            // that transfer starts; the client backs off then too).
+            try { TacticalLoadPhaseSync.HostBeginLoad(); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] reverse load-phase begin failed: {ex}"); }
         }
     }
 }
