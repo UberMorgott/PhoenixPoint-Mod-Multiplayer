@@ -157,13 +157,33 @@ namespace Multiplayer.Transport
                 if (!ResolveApi(out var reason))
                     throw new InvalidOperationException("Steamworks P2P API unavailable: " + reason);
 
-                // Belt for half-open P2P: EXPLICITLY assert Steam relay fallback so a NAT-punch-only session
-                // that goes one-way is carried by Steam's relay servers instead. This must be set BEFORE any
-                // session is created (Host/Connect run later), so Initialize is the right place. Steam defaults
-                // it ON — normally a confirming no-op — but we set it in case a platform/mod turned it off.
-                // Null-safe: absent in the shipped Facepunch build → reflection stays null → skipped. NOT the
-                // primary half-open fix (that is the client one-shot session-reset + re-JOIN, see ResetPeer).
-                try { _allowRelayMethod?.Invoke(null, new object[] { true }); } catch { }
+                // PRIMARY FIX for one-way NAT / VPN sessions (live-confirmed: a client behind a VPN could
+                // send to the host, but the host→client return died at the VPN exit — inbound UDP filtered).
+                // AllowP2PPacketRelay(true) routes P2P through Valve's relay servers when a direct / NAT-punch
+                // path is one-way, making BOTH directions outbound-only and thus VPN-transparent. Must be set
+                // BEFORE any session is created (Host/Connect run later) → Initialize is the right place. The
+                // mod NEVER called this before, so relay was left to the ambient default, which the VPN case
+                // proved insufficient. Never-silent: log whether it applied or is absent from the shipped
+                // Facepunch build, so the live retest gives clean evidence. (ResetPeer is the resilience layer
+                // on top: a one-shot session reset + re-JOIN if a link still wedges.)
+                if (_allowRelayMethod != null)
+                {
+                    try
+                    {
+                        _allowRelayMethod.Invoke(null, new object[] { true });
+                        UnityEngine.Debug.Log("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) applied — " +
+                                              "relay fallback ON (one-way NAT / VPN resilience).");
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) threw: " + ex.Message);
+                    }
+                }
+                else
+                {
+                    UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay NOT FOUND in the shipped " +
+                                                 "Facepunch build — cannot force relay fallback; one-way NAT / VPN sessions may fail.");
+                }
 
                 // Local SteamId (struct) → ulong via its Value field, for diagnostics/endpoint label.
                 if (_steamClientType != null)
