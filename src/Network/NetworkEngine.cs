@@ -312,6 +312,40 @@ namespace Multiplayer.Network
             }
         }
 
+        // Build + send the JOIN (ConnectionRequest) to the host, carrying our persistent identity and
+        // parity manifest. Used both on first connect (OnPeerConnected) and by RepairHostLink to
+        // re-drive the handshake after a half-open session reset.
+        private void SendJoinToHost()
+        {
+            var join = new JoinMessage
+            {
+                PlayerGuid = ClientIdentity.PlayerGuid,
+                Nickname = SystemInfo.deviceName,
+                // FIX-4: carry this client's parity manifest (DLC + mods + settings) in the JOIN so
+                // the host can gate the join BEFORE any save transfer.
+                Manifest = ParityManifestCollector.Collect()
+            };
+            var payload = MessageSerializer.SerializeJoin(join);
+            SendToHost(new NetworkMessage(PacketType.ConnectionRequest, payload));
+        }
+
+        /// <summary>
+        /// CLIENT half-open recovery (one-shot, driven by SessionManager's heartbeat-ack detector): the
+        /// transport still reports Connected but our client→host packets stopped landing (host quit
+        /// ACKing). Reset the wedged Steam P2P session to the host (a fresh NAT-punch / relay path the
+        /// host re-accepts) then re-send the JOIN so the host re-binds us — its stale "unknown" roster
+        /// row is re-bound by the same peer id (or times out). No teardown here; the detector gives the
+        /// repaired link a fresh window and only tears down if it stays dead. Steam-specific reset via a
+        /// type-check (composite is host-only; a client's transport is a bare concrete transport) — a
+        /// non-Steam client transport skips the reset but still re-JOINs (harmless if the link is live).
+        /// </summary>
+        public void RepairHostLink()
+        {
+            if (IsHost || Transport == null || Session == null || !Session.HostPeerId.HasValue) return;
+            (Transport as SteamTransport)?.ResetPeer(Session.HostPeerId.Value);
+            SendJoinToHost();
+        }
+
         public void Disconnect()
         {
             // Suppress the transport-failed MessageBox: this teardown is user-initiated. Disconnecting
@@ -462,16 +496,7 @@ namespace Multiplayer.Network
                 // Client connected to host: record the host peer and send JOIN carrying our
                 // persistent identity (reshaped ConnectionRequest payload, §2 JOIN).
                 Session.SetHostPeer(peerId);
-                var join = new JoinMessage
-                {
-                    PlayerGuid = ClientIdentity.PlayerGuid,
-                    Nickname = SystemInfo.deviceName,
-                    // FIX-4: carry this client's parity manifest (DLC + mods + settings) in the JOIN so
-                    // the host can gate the join BEFORE any save transfer.
-                    Manifest = ParityManifestCollector.Collect()
-                };
-                var payload = MessageSerializer.SerializeJoin(join);
-                SendToHost(new NetworkMessage(PacketType.ConnectionRequest, payload));
+                SendJoinToHost();
             }
         }
 

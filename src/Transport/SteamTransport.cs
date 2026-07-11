@@ -59,6 +59,7 @@ namespace Multiplayer.Transport
         private static FieldInfo _onP2PSessionRequestField;      // static Action<SteamId>
         private static MethodInfo _acceptSessionMethod;          // AcceptP2PSessionWithUser(SteamId)
         private static MethodInfo _closeSessionMethod;           // CloseP2PSessionWithUser(SteamId)
+        private static MethodInfo _allowRelayMethod;             // AllowP2PPacketRelay(bool) — OPTIONAL (relay fallback)
         private static MethodInfo _isPacketAvailableMethod;      // IsP2PPacketAvailable(int)
         private static MethodInfo _readPacketMethod;             // ReadP2PPacket(int) -> Nullable<P2Packet>
         private static MethodInfo _sendPacketMethod;             // SendP2PPacket(SteamId,byte[],int,int,P2PSend)
@@ -107,6 +108,9 @@ namespace Multiplayer.Transport
             _onP2PSessionRequestField = _steamNetworkingType.GetField("OnP2PSessionRequest", S);
             _acceptSessionMethod = _steamNetworkingType.GetMethod("AcceptP2PSessionWithUser", S, null, new[] { _steamIdType }, null);
             _closeSessionMethod = _steamNetworkingType.GetMethod("CloseP2PSessionWithUser", S, null, new[] { _steamIdType }, null);
+            // OPTIONAL: relay-fallback toggle. Steam defaults P2P packet relay ON, so this is normally a
+            // confirming no-op — resolved best-effort and NOT part of the required-member gate below.
+            _allowRelayMethod = _steamNetworkingType.GetMethod("AllowP2PPacketRelay", S, null, new[] { typeof(bool) }, null);
 
             // IsP2PPacketAvailable has overloads; pick the (int channel) one.
             _isPacketAvailableMethod = _steamNetworkingType.GetMethods(S)
@@ -152,6 +156,14 @@ namespace Multiplayer.Transport
             {
                 if (!ResolveApi(out var reason))
                     throw new InvalidOperationException("Steamworks P2P API unavailable: " + reason);
+
+                // Belt for half-open P2P: EXPLICITLY assert Steam relay fallback so a NAT-punch-only session
+                // that goes one-way is carried by Steam's relay servers instead. This must be set BEFORE any
+                // session is created (Host/Connect run later), so Initialize is the right place. Steam defaults
+                // it ON — normally a confirming no-op — but we set it in case a platform/mod turned it off.
+                // Null-safe: absent in the shipped Facepunch build → reflection stays null → skipped. NOT the
+                // primary half-open fix (that is the client one-shot session-reset + re-JOIN, see ResetPeer).
+                try { _allowRelayMethod?.Invoke(null, new object[] { true }); } catch { }
 
                 // Local SteamId (struct) → ulong via its Value field, for diagnostics/endpoint label.
                 if (_steamClientType != null)
@@ -307,6 +319,19 @@ namespace Multiplayer.Transport
         private void CloseSession(ulong peerId)
         {
             try { _closeSessionMethod?.Invoke(null, new[] { MakeSteamId(peerId) }); } catch { }
+        }
+
+        // Half-open recovery (client-driven, one-shot): tear down the WEDGED P2P session to this peer so
+        // the next SendP2PPacket opens a FRESH session — a new NAT-punch / relay path — which the remote
+        // re-accepts via its still-installed OnP2PSessionRequest handler. The caller re-sends the JOIN
+        // right after, re-driving the handshake. Keep the peer in _connectedPeers (it is still logically
+        // our host) and clear its stale send-failure count. No-op if the API never resolved (test path).
+        // Steam-specific by design — reached via a `Transport as SteamTransport` type-check at the single
+        // call site (NetworkEngine.RepairHostLink), NOT the ITransport surface.
+        public void ResetPeer(ulong peerId)
+        {
+            CloseSession(peerId);
+            _consecutiveSendFailures.Remove(peerId);
         }
 
         private void SendPacket(ulong peerId, byte[] data, bool reliable)
