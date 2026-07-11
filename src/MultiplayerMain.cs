@@ -61,6 +61,13 @@ namespace Multiplayer
             // receive host tac.deploy snapshots over the 0x67 envelope rail. Null-guarded + inert until a
             // tactical mission deploys; the deploy/suppress Harmony patches auto-register via PatchAll above.
             Multiplayer.Sync.Tactical.TacticalDeploySync.ArmInboundHook();
+
+            // [Batch-1 entry-via-save GATE ENABLE] The tactical-entry-via-save-transfer path (client BUILDS
+            // its battle from the host's byte-identical mid-tactical save instead of self-launching) ships
+            // default-OFF in code (TacticalDeploySync.UseSaveTransferEntry = false). This mod has NO config-
+            // file/settings mechanism, so flip it ON here in the dev-deployed build so the user's in-game
+            // 2-instance gate exercises the new path. Rollback = delete this one line (field default is OFF).
+            Multiplayer.Sync.Tactical.TacticalDeploySync.UseSaveTransferEntry = true;
         }
 
         public override void OnModDisabled()

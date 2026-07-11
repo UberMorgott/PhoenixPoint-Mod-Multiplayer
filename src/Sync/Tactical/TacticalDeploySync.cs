@@ -33,6 +33,13 @@ namespace Multiplayer.Sync.Tactical
         private static bool _mirrorArmed;
         public static bool MirrorArmed => _mirrorArmed;
 
+        // ─── Batch-1 feature flag: tactical mission ENTRY via mid-tactical save transfer ────
+        // When ON, the host ships a byte-identical mid-tactical save at deploy-ready and the client BUILDS
+        // its battle from those exact bytes (ClientLoadCrt → PrepareEntryFromBlobCrt → EnterLevel → hydrate)
+        // instead of self-launching + reconciling. Default OFF in code (rollback safety); the dev-deployed
+        // build flips it ON in MultiplayerMain.OnModEnabled so the in-game gate exercises the new path.
+        public static bool UseSaveTransferEntry = false;
+
         // CLIENT: the host tac.deploy actor table, retained for the MISSION lifetime (not just the one-shot
         // hydrate) so late-bound actors can still receive their host deploy position. Null off-mission.
         private static List<TacticalActorRegistry.ActorRow> _missionActorTable;
@@ -490,6 +497,23 @@ namespace Multiplayer.Sync.Tactical
                           " gpBytes=" + gpBytes.Length + " snapBytes=" + snapBytes.Length +
                           " actors=" + table.Count);
                 DumpActorTable("HOST", table);
+
+                // [Batch-1 entry-via-save] After the tac.deploy broadcast, hand every client a byte-identical
+                // mid-tactical save so it BUILDS its tactical level from the host's exact state (positions/
+                // loot/objectives/turn) instead of self-launching + reconciling. Flag-gated (default OFF);
+                // SaveTransferCoordinator self-gates the full precondition set (host/tactical/no-transfer) and
+                // owns the write + ship. Additive: the tac.deploy broadcast above is untouched (still drives
+                // the live NetId registry + move/vision/turn rails after the save-built level hydrates).
+                if (UseSaveTransferEntry)
+                {
+                    try
+                    {
+                        var st = NetworkEngine.Instance?.SaveTransfer;
+                        bool started = st != null && st.HostBeginTacticalEntryTransfer();
+                        Debug.Log("[Multiplayer][tac] entry-via-save: HostBeginTacticalEntryTransfer started=" + started);
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] entry-via-save start failed: " + ex); }
+                }
             }
             catch (Exception ex)
             {
@@ -554,6 +578,15 @@ namespace Multiplayer.Sync.Tactical
                 // the level was natively loaded ⇒ ClientHydrateNow skips the redundant snapshot ProcessInstanceData.
                 try { ClientOnLevelReady(liveTlc, alreadyLoaded: true); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnLevelReady (late-deploy) failed: " + ex); }
+            }
+            else if (UseSaveTransferEntry)
+            {
+                // [Batch-1 entry-via-save] No self-launch: the host is shipping a mid-tactical save that will
+                // BUILD this client's tactical level (SaveChunk/SaveDone → ClientLoadCrt → PrepareEntryFromBlobCrt
+                // → EnterLevel on BEGIN → Playing → ClientOnLevelReady(alreadyLoaded:true) hydrates it). The deploy
+                // is already stashed in _pendingClientDeploy above — just wait for the transfer to build the level.
+                // (LaunchTacticalGameGatePatch already blocks any spontaneous client launch on this path.)
+                Debug.Log("[Multiplayer][tac] CLIENT deploy stashed; awaiting host save-transfer to build the tactical level (UseSaveTransferEntry)");
             }
             else
             {

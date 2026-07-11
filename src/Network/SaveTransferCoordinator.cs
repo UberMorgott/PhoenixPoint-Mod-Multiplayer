@@ -532,6 +532,134 @@ namespace Multiplayer.Network
         }
 
         // ══════════════════════════════════════════════════════════════════
+        //  HOST: Batch-1 tactical mission ENTRY via mid-tactical save transfer
+        //  Ship a byte-identical mid-tactical save so a client BUILDS its battle from the host's exact
+        //  state (positions/loot/objectives/turn) instead of self-launching + reconciling. Reuses the
+        //  F2/lobby machinery VERBATIM (SendBlob + OpenBarrier + LOADED/BEGIN barrier + client load path);
+        //  the ONLY difference from HostSerializeAndSendCrt is (a) a tactical-safe writer instead of
+        //  ReadSavegameBinary(chosenMeta), and (b) the host does NOT re-enter from the blob — it is already
+        //  live in this tactical level.
+        // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>Dedicated transient name for the host-only mid-tactical transfer save. NOT "autosave"/
+        /// "quicksave" (never clobber a user save); deleted immediately after read-back.</summary>
+        public const string TacticalTransferSaveName = "coop_tac_xfer";
+
+        /// <summary>
+        /// HOST (entry-via-save, Batch 1): at deploy-ready, write a byte-identical mid-tactical save and
+        /// ship it over the SAME chunked transfer + LOADED/BEGIN barrier the F2 reload uses, so the client
+        /// builds its tactical level from the host's exact bytes. Self-gated (flag + host + tactical + no
+        /// transfer in flight, via <see cref="Sync.Tactical.TacticalEntryTransferGate"/>). Unlike F2/lobby
+        /// the host does NOT re-enter from the blob (it is already in this live tactical level). Returns
+        /// true iff the write+send coroutine launched.
+        /// </summary>
+        public bool HostBeginTacticalEntryTransfer()
+        {
+            PhoenixGame game;
+            PhoenixSaveManager saveManager;
+            if (!TryGetGame(out game, out saveManager)) return false;
+
+            bool go = Multiplayer.Sync.Tactical.TacticalEntryTransferGate.ShouldSendTacticalSave(
+                isHost: _engine.IsHost,
+                sessionActive: _engine.IsActiveSession,
+                isTactical: saveManager.IsTactical,
+                transferActive: TransferActive,
+                flagOn: Multiplayer.Sync.Tactical.TacticalDeploySync.UseSaveTransferEntry);
+            if (!go)
+            {
+                Debug.LogWarning("[Multiplayer] HostBeginTacticalEntryTransfer blocked: gate closed " +
+                    $"(host={_engine.IsHost}, session={_engine.IsActiveSession}, tactical={saveManager.IsTactical}, " +
+                    $"transferActive={TransferActive}, flag={Multiplayer.Sync.Tactical.TacticalDeploySync.UseSaveTransferEntry}).");
+                return false;
+            }
+
+            var timing = GetTiming();
+            if (timing == null) return false;
+
+            // Fresh barrier/reveal run (mirror HostStartSessionInGame's terminal-flag reset). OpenBarrier
+            // (in the coroutine) resets the rest per fresh barrier.
+            _begun = false;
+            _loadCompleteSent = false;
+            _revealAllSent = false;
+            _transferId = Guid.NewGuid();
+            timing.Start(HostTacticalEntryTransferCrt(saveManager));
+            return true;
+        }
+
+        // Coroutine: write the mid-tactical save → bytes, ship it, open the barrier. Host stays in its live
+        // level (no PrepareEntryFromBlobCrt / EnterLevel). Marks the host loaded + phase-2 done immediately
+        // (it is already past Playing here) so the client's synchronized reveal fires on AllDone the instant
+        // IT finishes loading — Batch 1 has no host reveal-hold (the host revealed itself when it entered;
+        // the launch-time reveal barrier is Batch 2).
+        private IEnumerator<NextUpdate> HostTacticalEntryTransferCrt(PhoenixSaveManager saveManager)
+        {
+            var bytes = new ByRef<byte[]>();
+            var t0 = NowMs();
+            yield return Timing.Current.Call(HostWriteTacticalSaveCrt(saveManager, bytes));
+
+            var blob = bytes.Value;
+            if (blob == null || blob.Length == 0)
+            {
+                Debug.LogError("[Multiplayer] tac-entry: no mid-tactical save bytes produced; aborting entry transfer.");
+                yield break;
+            }
+            Debug.Log($"[Multiplayer] tac-entry: host mid-tactical save written bytes={blob.Length} ms={NowMs() - t0}");
+
+            SendBlob(blob, SerializationComponent.DefaultExtension);
+
+            OpenBarrier();
+            _hostLoaded = true;   // host holds its state locally (already in the level) → counts as loaded
+            SendLoadComplete();   // host is past Playing → mark its slot done (+ TryReleaseBarrier: client not loaded yet)
+            Debug.Log("[Multiplayer] tac-entry: blob sent, barrier open, host marked loaded/done (no self-enter)");
+        }
+
+        // Write a mid-tactical save (QuickSave's tactical branch: IsTactical-tagged, TacticalGameParams.
+        // GlobalTime; showCurtain:false so no save-curtain flash on the live host screen), read it back to
+        // bytes via the game's CONFIGURED serializer (native SaveGame/ReadSavegameBinary — no manual
+        // Serializer round-trip, respecting pp-serializer-context-and-pump), then delete the transient
+        // host-only file. The metadata is built from PUBLIC SaveManager API exactly like the game's own
+        // manual save (UIModuleSaveGame.NewSaveGame cs:190-208) — which works mid-tactical. SaveType.
+        // ManualSave (NOT Quicksave/Autosave) so UpdateSpecialSaves never tracks it as a special save.
+        private IEnumerator<NextUpdate> HostWriteTacticalSaveCrt(PhoenixSaveManager saveManager, ByRef<byte[]> outBytes)
+        {
+            outBytes.Value = null;
+
+            string name = saveManager.EnsureUnique(TacticalTransferSaveName);
+            // Tactical global time (QuickSave pattern). Metadata only — the battle state lives in the
+            // serialized level, not the save's timestamp; default is harmless for a transient transfer.
+            System.DateTime ingameTime = default;
+            var tgp = GameUtl.CurrentLevel()?.LevelParams as TacticalGameParams;
+            if (tgp != null) ingameTime = tgp.GlobalTime;
+
+            var meta = new PPSavegameMetaData(
+                name, saveManager.Serializer.SavegameVersion, saveManager.CurrentGameId, name, ingameTime, "",
+                SaveType.ManualSave, saveManager.IsTactical, saveManager.CurrentDifficulty, saveManager.EnabledDlc);
+
+            var written = new ByRef<bool>(value: false);
+            var ex = new ByRef<Exception>();
+            yield return Timing.Current.CallSafe(
+                saveManager.SaveGame(meta, SerializationComponent.DefaultExtension, written, showCurtain: false), ex);
+            if (ex.Value != null || !written.Value)
+            {
+                Debug.LogError("[Multiplayer] tac-entry: mid-tactical save write failed: " +
+                               (ex.Value != null ? ex.Value.Message : "written=false"));
+                yield break;
+            }
+
+            // Read the just-written file back to bytes (WriteSavegame set meta.Path → ReadSavegameBinary(meta)
+            // reads it — same read-back the on-demand join uses).
+            var result = new ByRef<byte[]>();
+            yield return Timing.Current.Call(saveManager.Serializer.ReadSavegameBinary(meta, result));
+            outBytes.Value = result.Value;
+
+            // Transient host-only file — delete it so it never litters the player's save list.
+            var delEx = new ByRef<Exception>();
+            yield return Timing.Current.CallSafe(saveManager.DeleteSaveGame(meta), delEx);
+            if (delEx.Value != null)
+                Debug.LogWarning("[Multiplayer] tac-entry: transient save delete failed: " + delEx.Value.Message);
+        }
+
+        // ══════════════════════════════════════════════════════════════════
         //  HOST: P1 mid-session on-demand join — unicast the CURRENT state to ONE new peer
         // ══════════════════════════════════════════════════════════════════
 
