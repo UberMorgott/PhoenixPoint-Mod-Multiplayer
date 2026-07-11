@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 using Multiplayer.Util;
 using UnityEngine;
 
@@ -56,7 +57,7 @@ namespace Multiplayer.Network
             {
                 try
                 {
-                    var v = PlayerPrefs.GetString(NicknameKey, "");
+                    var v = ReadNicknamePref();
                     return string.IsNullOrEmpty(v) ? null : v;
                 }
                 catch (Exception e)
@@ -69,14 +70,30 @@ namespace Multiplayer.Network
             {
                 try
                 {
-                    PlayerPrefs.SetString(NicknameKey, value ?? "");
-                    PlayerPrefs.Save();
+                    WriteNicknamePref(value ?? "");
                 }
                 catch (Exception e)
                 {
                     Debug.LogWarning("[Multiplayer] ClientIdentity nickname save failed: " + e.Message);
                 }
             }
+        }
+
+        // PlayerPrefs.* are direct InternalCall externs. A method that references one fails to JIT in a
+        // headless harness (real UnityEngine.CoreModule.dll, no Unity native runtime) with SecurityException
+        // "ECall methods must be packed in a system module" — thrown when JITing the *referencing* method,
+        // BEFORE any try/catch inside it runs. Isolating each ECall in its own NoInlining method keeps that
+        // JIT failure out of LocalNickname's body, so the getter/setter try/catch above actually catches it
+        // (surfaced at the call site) and the "never throws to the caller" contract holds. NoInlining is
+        // required: inlining would fold the ECall reference back into the accessor and reintroduce the fault.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static string ReadNicknamePref() => PlayerPrefs.GetString(NicknameKey, "");
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void WriteNicknamePref(string value)
+        {
+            PlayerPrefs.SetString(NicknameKey, value);
+            PlayerPrefs.Save();
         }
 
         private static string Directory => Path.Combine(Application.persistentDataPath, DirName);
