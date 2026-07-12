@@ -137,13 +137,19 @@ namespace Multiplayer.Sync.Tactical
         private static readonly HashSet<string> AlwaysMirroredStatusTypeNames = new HashSet<string>
         {
             "EvacuatedStatus",     // evac stance (gap-evac) — outcome surface of the relayed ExitMission/EvacuateMounted
+            "PreparingStatus",     // prepare stance ("Подготовка", StartPreparingAbility hurt-reaction) — the def is
+                                   // Hidden on the healthbar (visibility gate would drop it), but its InitVisualState
+                                   // ("Preparing" pose) is the client-relevant visual. Unlike EvacuatedStatus its
+                                   // OnApply has an un-gated side effect (EnableTargeting(false) when the def's
+                                   // DisableTargeting is set), so the mirror-UNAPPLY restores targeting + clears the
+                                   // pose — see TacticalActorStateSync.RestorePreparingMirrorOnUnapply.
         };
 
         /// <summary>PURE mirror decision: a status is mirrored as an INERT healthbar icon iff its host
         /// VisibleOnHealthbar is NOT Hidden (it draws an icon on the host) AND it is not owned by a dedicated
         /// sync surface (<see cref="SurfaceOwnedStatusTypeNames"/>). Stance statuses on
-        /// <see cref="AlwaysMirroredStatusTypeNames"/> (EvacuatedStatus) mirror even when Hidden — their inert
-        /// visual init is the outcome the client needs. Default-DENY otherwise: a Hidden status / a non-
+        /// <see cref="AlwaysMirroredStatusTypeNames"/> (EvacuatedStatus/PreparingStatus) mirror even when Hidden —
+        /// their inert visual init is the outcome the client needs. Default-DENY otherwise: a Hidden status / a non-
         /// tactical status with no visibility (caller passes Hidden) / a surface-owned status is not mirrored.
         /// Unit-tested.</summary>
         public static bool ShouldMirrorStatus(int healthBarVisibility, string simpleTypeName = null)

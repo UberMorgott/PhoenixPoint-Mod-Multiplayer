@@ -205,6 +205,17 @@ public class TacticalActorStateDiffTests
     public void ShouldMirrorStatus_Evacuated_AlwaysMirrored(int visibility)
         => Assert.True(TacticalActorStateDiff.ShouldMirrorStatus(visibility, "EvacuatedStatus"));
 
+    // prepare stance (StartPreparingAbility hurt-reaction, "Подготовка") is force-INCLUDED like EvacuatedStatus:
+    // the def is Hidden on the healthbar (the visibility gate alone would drop it, so the enemy's prepare pose
+    // showed only on the host), but its InitVisualState ("Preparing" pose) is the client-relevant visual. The
+    // mirror is made safe on removal by TacticalActorStateSync (restores EnableTargeting + clears the pose).
+    [Theory]
+    [InlineData(0)]   // Hidden — the real case (PreparingStatusDef.VisibleOnHealthbar == Hidden)
+    [InlineData(1)]   // VisibleWhenSelected
+    [InlineData(5)]   // AlwaysVisible
+    public void ShouldMirrorStatus_Preparing_AlwaysMirrored(int visibility)
+        => Assert.True(TacticalActorStateDiff.ShouldMirrorStatus(visibility, "PreparingStatus"));
+
     // No-regress sweep around the evac include: hidden UNLISTED statuses stay dropped (default-DENY intact,
     // incl. the mount bookkeeping the evac flow also touches), and the surface-owned/faction-safety excludes
     // still win for every visibility value.

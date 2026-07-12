@@ -1062,7 +1062,14 @@ namespace Multiplayer.Sync.Tactical
                 {
                     if (liveByKey.TryGetValue(TacticalActorStateDiff.KeyOf(r), out var liveStatus) && liveStatus != null)
                     {
-                        if (InvokeUnapplyStatus(statusComponent, liveStatus)) removeCount++;
+                        if (InvokeUnapplyStatus(statusComponent, liveStatus))
+                        {
+                            removeCount++;
+                            // PreparingStatus mirror: its OnApply ran an un-gated EnableTargeting(false) + set the
+                            // "Preparing" pose; the native OnUnapply that would reverse them is SKIPPED on the mirror
+                            // by ClientStatusMirrorGuards, so restore them explicitly here.
+                            RestorePreparingMirrorOnUnapply(actor, liveStatus);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -1390,6 +1397,47 @@ namespace Multiplayer.Sync.Tactical
                                " " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
+        }
+
+        /// <summary>Reverse the two side effects a mirrored <c>PreparingStatus</c> ran on the client whose native
+        /// undo is skipped by <c>ClientStatusMirrorGuards</c>. Its <c>OnApply</c> is NOT deserialize-gated (unlike
+        /// stat statuses): (a) <c>EnableTargeting(false)</c> ref-count-disables the actor's colliders when the def's
+        /// <c>DisableTargeting</c> is set — the guarded <c>OnUnapply</c> that would <c>EnableTargeting(true)</c> never
+        /// runs on the mirror, so targeting would STICK disabled (the client could never target/shoot this enemy);
+        /// (b) <c>InitVisualState</c> sets the animator bool <c>"Preparing"</c>, natively cleared only in the guarded
+        /// <c>StartTurn</c>, so the prepare pose would linger. Replicate exactly those reversals (targeting gated on
+        /// the def flag so the <c>DecRef</c> stays balanced with the apply-time <c>IncRef</c>). No-op for any non-
+        /// PreparingStatus mirror. Best-effort — never aborts the reconcile.</summary>
+        private static void RestorePreparingMirrorOnUnapply(object actor, object status)
+        {
+            try
+            {
+                if (actor == null || status == null || status.GetType().Name != "PreparingStatus") return;
+                // 3a: reverse EnableTargeting(false) — only when the def disabled targeting (so DecRef == the apply IncRef).
+                if (GetField(GetProp(status, "Def"), "DisableTargeting") is bool disable && disable)
+                    InvokeEnableTargeting(actor, true);
+                // 3b: clear the lingering "Preparing" pose bool (always set by InitVisualState, regardless of DisableTargeting).
+                InvokeSetBool(GetProp(actor, "Animator"), "Preparing", false);
+            }
+            catch (Exception ex)
+            { Debug.LogError("[Multiplayer][tac] PreparingStatus mirror restore failed: " + ex.GetType().Name + ": " + ex.Message); }
+        }
+
+        /// <summary>Invoke <c>TacticalActorBase.EnableTargeting(bool)</c> (the ref-counted targeting toggle) on the
+        /// mirror actor by reflection (no hard type dep). Best-effort.</summary>
+        private static void InvokeEnableTargeting(object actor, bool enable)
+        {
+            var m = AccessTools.Method(actor.GetType(), "EnableTargeting", new[] { typeof(bool) });
+            m?.Invoke(actor, new object[] { enable });
+        }
+
+        /// <summary>Invoke <c>UnityEngine.Animator.SetBool(string,bool)</c> by reflection (no AnimationModule type
+        /// dep). Null-animator safe. Best-effort.</summary>
+        private static void InvokeSetBool(object animator, string name, bool value)
+        {
+            if (animator == null) return;
+            var m = AccessTools.Method(animator.GetType(), "SetBool", new[] { typeof(string), typeof(bool) });
+            m?.Invoke(animator, new object[] { name, value });
         }
 
         private static float StatValue(object stat)
