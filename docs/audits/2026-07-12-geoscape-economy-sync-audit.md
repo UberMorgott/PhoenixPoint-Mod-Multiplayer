@@ -26,6 +26,26 @@ was **VERIFIED already-synced**. All three gaps closed 2026-07-12.
 3. **Marketplace offer-regen dirty-trigger unconfirmed** — offers ride ObjectivesChannel #7 (Batch-4). **VERIFIED already-synced (no code needed).**
    - `ObjectivesReflection.Snapshot` folds the live offer list in via `MarketplaceReflection.SnapshotOffers` (`ObjectivesReflection.cs:195`), so `ObjectivesChannel.PollHostDrift` (`SyncEngine.cs:2262`) hashes the offers with the rest of the #7 snapshot and re-marks ch#7 dirty on ANY host regen. Belt-and-suspenders: the ch#7 hourly-tick heartbeat (`_hourToken`) unconditionally re-marks #7 every in-game hour. Either mechanism re-flushes the full offer list to clients — host offer-regen lands, no stale list.
 
+## Addendum 2026-07-12 — steal-aircraft / vehicle acquisition (follow-up audit)
+
+Verdict: **SYNCED, canon-compliant** — all vehicle acquisition (manufactured / story-gift / stolen / haven-defense
+reward) rides the single GeoVehicleChannel #6 spine (identity/spawn/tombstone poll, composite key incl. owner,
+crew/loadout tails) + position `0xA5` / travel `0xA6` / explore `0xA7`. No one-off rails.
+
+- Grant path (game): steal-aircraft = ownership TRANSFER, not a spawn — `AircraftMissionOutcomeDef.ApplyToVehicle`
+  (`AircraftMissionOutcomeDef.cs:24-43`) -> `Reward.ExistingVehicles` -> `TakeOverVehicle` flips Owner->Phoenix
+  (`GeoFactionReward.cs:511-528`), triggered from `GeoMission.Complete` -> `ApplyOutcomes` -> `GeoSite.cs:801`.
+- Host completes mission: owner flip changes the #6 composite key -> `HostObserve` emits new identity -> client
+  `SpawnMirrorVehicle` (`GeoVehicleIdentityReflection.cs:259`); old key tombstoned -> `DespawnVehicle`. Fleet tab +
+  geoscape icon refresh. Stolen craft's weapons/modules ride the #6 loadout tail.
+- Client-squad completes mission: client runs native `reward.Apply` locally (transient), #6 idempotent-by-key +
+  diplomacy #4 absolute overwrite reconverge — same pattern as all mission rewards.
+- Open LOWs (ranked, none blocking): (1) pure `ModifyDiplomacy` delta mirrors only on the hourly #4 heartbeat ->
+  host->client lag <=1 in-game hour (masked by client's local apply); (2) current HP of a damaged stolen craft rides
+  no channel -> mirror spawns at full BaseStats, visual drift until repair/next identity change; (3) latent: client
+  local outcome relies on host/client agreeing on the aircraft `StructuralTargetResult` HP (keep/destroy divergence
+  healed by #6 existence; verify 0x96 destructible mirror covers the aircraft structural target).
+
 ## Cross-reference
 
 - Interception time-lock feature landed same day, commits `ebe766b` + `48f50e8` (geoscape usable for non-fighting players during air combat, time control locked).
