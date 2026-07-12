@@ -163,6 +163,41 @@ public class GeoSiteTailTests
     }
 
     [Fact]
+    public void ExtrasRecord_UnknownTrailingBytes_AfterNonEmptyStock_SkippedNotRejected()
+    {
+        // Forward-compat with a POPULATED shelf (E2, review of 89b52c7): the haven payload is
+        // [flags][i32 population][u8 stockCount]{[i32 type][i32 amount]}*; a FUTURE format may append bytes AFTER
+        // the stock list and grow recLen. Proves the reader consumes EXACTLY stockCount units (both survive,
+        // value-for-value) and then skips the trailing bytes via the length-prefixed record slice — it never
+        // mis-reads a future field as a stock unit and never rejects the payload.
+        var known = new GeoSiteSnapshot();
+        known.Sites.Add(Site(1, new GeoHavenTail(500, true, Stock((2, 340), (1, 120)))));
+        var bytes = GeoSiteSnapshot.Encode(known);
+
+        int recLenAt = 19 + 2 + 4;               // after record array + extrasCount + siteId
+        Assert.Equal(22, bytes[recLenAt]);       // recLen = flags(1)+i32 pop(4)+u8 count(1)+2 units×8 = 22 (low byte)
+        Assert.Equal(0, bytes[recLenAt + 1]);    // recLen high byte
+
+        // Grow the extras record by 3 trailing bytes (recLen 22 → 25) AFTER the stock list, without touching flags.
+        var patched = new byte[bytes.Length + 3];
+        System.Array.Copy(bytes, patched, bytes.Length);
+        patched[recLenAt] = 25;                  // recLen = 25 — extend the length-prefixed slice over the future bytes
+        patched[bytes.Length] = 0xDE; patched[bytes.Length + 1] = 0xAD; patched[bytes.Length + 2] = 0xBF;
+
+        var snap = GeoSiteSnapshot.Decode(patched);
+
+        Assert.NotNull(snap);
+        Assert.NotNull(snap.Sites[0].Haven);
+        Assert.Equal(500, snap.Sites[0].Haven.Population);
+        Assert.True(snap.Sites[0].Haven.Infested);
+        Assert.Equal(2, snap.Sites[0].Haven.Stock.Length);        // exactly stockCount units — the tail was NOT read as a unit
+        Assert.Equal(2, snap.Sites[0].Haven.Stock[0].ResourceType);
+        Assert.Equal(340, snap.Sites[0].Haven.Stock[0].Amount);
+        Assert.Equal(1, snap.Sites[0].Haven.Stock[1].ResourceType);
+        Assert.Equal(120, snap.Sites[0].Haven.Stock[1].Amount);
+    }
+
+    [Fact]
     public void ExtrasBlock_Truncated_RejectsWholePayload()
     {
         var snap = new GeoSiteSnapshot();

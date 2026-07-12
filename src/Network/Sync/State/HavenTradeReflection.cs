@@ -46,7 +46,8 @@ namespace Multiplayer.Network.Sync.State
         private static FieldInfo _ratioRecvQtyField;   // TradingRatio.RecieveQuantity (int)
         private static FieldInfo _stockedField;        // GeoHaven.StockedResources (ResourcePack)
         private static MethodInfo _packByResourceType; // ResourcePack.ByResourceType(ResourceType) → ResourceUnit
-        private static PropertyInfo _unitRoundedValueProp; // ResourceUnit.RoundedValue (int)
+        private static PropertyInfo _unitRoundedValueProp; // ResourceUnit.RoundedValue (int, = CeilToInt(Value))
+        private static FieldInfo _unitValueField;      // ResourceUnit.Value (raw float) — floored for the funds gate
         private static MethodInfo _walletGetItem;      // Wallet.get_Item(ResourceType) → ResourceUnit (indexer)
         private static Type _entryType;                // HavenTradingEntry
         private static FieldInfo _entHavenOffers, _entHavenWants, _entOfferQty, _entRecvQty, _entResStock;
@@ -88,7 +89,11 @@ namespace Multiplayer.Network.Sync.State
                 }
                 _stockedField = AccessTools.Field(_geoHavenType, "StockedResources");
                 if (packType != null) _packByResourceType = AccessTools.Method(packType, "ByResourceType", new[] { _resourceTypeEnum });
-                if (unitType != null) _unitRoundedValueProp = AccessTools.Property(unitType, "RoundedValue");
+                if (unitType != null)
+                {
+                    _unitRoundedValueProp = AccessTools.Property(unitType, "RoundedValue");
+                    _unitValueField = AccessTools.Field(unitType, "Value");   // raw float (floored for the funds gate)
+                }
                 if (walletType != null) _walletGetItem = AccessTools.Method(walletType, "get_Item", new[] { _resourceTypeEnum });
 
                 _entHavenOffers = AccessTools.Field(_entryType, "HavenOffers");
@@ -172,7 +177,7 @@ namespace Multiplayer.Network.Sync.State
                 int offerTotal = offerQty * intent.OfferAmount;   // haven gives / faction receives
                 int recvTotal = recvQty * intent.OfferAmount;     // haven receives / faction pays
                 int havenStock = RoundedStock(haven, offerResEnum);
-                int factionFunds = RoundedWallet(wallet, wantResEnum);
+                int factionFunds = FloorWallet(wallet, wantResEnum);
                 if (!Actions.HavenTradeIntent.CanExecute(havenStock, offerTotal, factionFunds, recvTotal))
                 {
                     Debug.Log("[Multiplayer] HavenTradeReflection.TryTrade rejected — insufficient (havenStock="
@@ -230,13 +235,22 @@ namespace Multiplayer.Network.Sync.State
             catch { return 0; }
         }
 
-        private static int RoundedWallet(object wallet, object resEnum)
+        /// <summary>FLOOR of the faction's wallet balance for a resource — NOT <c>RoundedValue</c> (= CeilToInt).
+        /// The affordability gate must never OVER-count funds: a sub-unit balance (e.g. 4.3) ceils to 5 and would
+        /// pass a cost-5 trade the wallet can't actually cover (&lt;1 overdraw at the boundary). Floor is
+        /// conservative and still ≥ native (which has NO gate). Reads the raw <c>ResourceUnit.Value</c> float;
+        /// degrades to RoundedValue only if that field can't be resolved (never worse than the pre-fix behavior).</summary>
+        private static int FloorWallet(object wallet, object resEnum)
         {
             try
             {
-                if (_walletGetItem == null || _unitRoundedValueProp == null) return 0;
+                if (_walletGetItem == null) return 0;
                 var unit = _walletGetItem.Invoke(wallet, new[] { resEnum });
-                return Convert.ToInt32(_unitRoundedValueProp.GetValue(unit, null));
+                if (_unitValueField != null)
+                    return (int)Math.Floor(Convert.ToDouble(_unitValueField.GetValue(unit)));
+                if (_unitRoundedValueProp != null)   // reflection degrade — no worse than the pre-fix ceil read
+                    return Convert.ToInt32(_unitRoundedValueProp.GetValue(unit, null));
+                return 0;
             }
             catch { return 0; }
         }
