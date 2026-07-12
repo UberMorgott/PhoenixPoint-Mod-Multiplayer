@@ -37,6 +37,18 @@ namespace Multiplayer.Sync.Tactical
     /// FOLLOW-UP), never a blind index onto a drifted slot. Deterministic degrade: an unresolvable endpoint / a
     /// missing item / an empty batch → that move is skipped (never applied, never broadcast), no crash.
     ///
+    /// REACTIVE per-gesture rail (canon 2026-07-13: no waiting for screen-close — two players in one container
+    /// must see each other's moves live; the host serializes, a conflicting second move is rejected and the origin
+    /// reconciles): every completed gesture on the tactical inventory screen (<c>AttemptSlotSwap</c> / side-button /
+    /// Undo — see <c>Multiplayer.Harmony.Tactical.InventoryGesturePatches</c>) diffs the UI lists against a
+    /// per-gesture baseline (<see cref="OnTacticalGesture"/>) and rides the SAME 0x9A/0x9B surfaces immediately:
+    /// the client keeps its optimistic UI move (the model stays mirror-only), the host applies natively +
+    /// broadcasts. The host broadcasts even a fully-rejected intent (empty apply) so every open inventory view —
+    /// including the origin's optimistic one — repaints from authoritative truth
+    /// (<see cref="RefreshOpenInventoryView"/>). The close-commit funnel below stays as defense-in-depth for any
+    /// gesture seam the per-gesture rail misses (its diff is empty otherwise, because each relayed gesture
+    /// re-baselines the UI lists).
+    ///
     /// All game types are reached by name via <see cref="AccessTools"/> (reflection boundary); the PURE wire codec
     /// is <see cref="TacticalInventoryTransferCodec"/> (unit-tested).
     /// </summary>
@@ -73,6 +85,8 @@ namespace Multiplayer.Sync.Tactical
                 return mirroring;
             }
 
+            _costChargedForState = null;   // screen session ends at ExitState → re-arm the per-session AP-cost latch
+
             if (mirroring)
             {
                 if (unsyncedDrops > 0)
@@ -81,6 +95,13 @@ namespace Multiplayer.Sync.Tactical
                     Debug.LogWarning("[Multiplayer][tac] client mirror: " + unsyncedDrops + " inventory drag(s) to a " +
                                      "fresh ground spot are NOT synced (co-op loot tracks moves between existing " +
                                      "soldiers/containers only) — item(s) stayed put; use the drop-item button to drop.");
+                if (moves.Count == 0)
+                {
+                    // Normal reactive-rail close: every gesture already relayed + re-baselined, so the close diff is
+                    // empty — nothing to send, just keep the client commit suppressed (model stays mirror-only).
+                    Debug.Log("[Multiplayer][tac] close-commit: empty diff (per-gesture rail already synced) — suppress only");
+                    return true;
+                }
                 bool applyCost = moves.Count > 0;   // any cross-inventory move ⇒ the inventory ability's AP cost is due
                 byte[] payload = Codec.EncodeIntent(actingNetId, applyCost, moves, NextNonce());
                 TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacInventoryIntent, payload);
@@ -119,19 +140,22 @@ namespace Multiplayer.Sync.Tactical
             try
             {
                 var applied = ApplyMoves(intent.Moves, destroyEmptied: true);
-                // AUTHORITY: the host recomputes whether the inventory ability's AP cost is due — it does NOT trust
-                // the client's applyCost flag (kept on the wire for compat only, never for authority). The native UI
-                // rule is "any cross-inventory move ⇒ cost due"; every APPLIED move is exactly that, so cost is due
-                // iff ≥1 move applied. One intent == one inventory-view session, so the host charges AT MOST once here
-                // — the native _alreadyPaidAbility within-session double-charge guard is inherently satisfied (there
-                // is no second charge to make). A stale-client move the host rejected is excluded (uses applied, not requested).
-                if (applied.Count > 0) HostApplyInventoryCost(intent.ActingNetId);
+                // AP: cost is due iff ≥1 move APPLIED (native rule: any cross-inventory move ⇒ cost due; a rejected
+                // move is excluded) AND the origin flags this intent as its screen-session's first (per-gesture rail
+                // sends one intent per gesture; native charges the ability once per inventory-view session, so the
+                // origin's session latch is the only place that knows "first"). A stale/hostile flag can only
+                // UNDER-charge the origin's own soldier — co-op, not adversarial.
+                if (applied.Count > 0 && intent.ApplyCost) HostApplyInventoryCost(intent.ActingNetId);
 
-                // Broadcast ONLY the moves the host actually applied — a stale-client move the host rejected must
-                // not be mirrored (the client already suppressed its local commit, so its item stays put → consistent).
-                if (applied.Count > 0) BroadcastApply(engine, applied);
+                // Broadcast the APPLIED subset — even when empty: a rejected/conflicting move never mirrors (the
+                // origin suppressed its local commit, so its model is consistent), but the empty apply still reaches
+                // every peer so an OPEN inventory view — the origin's optimistic UI above all — repaints from
+                // authoritative truth (the reject-revert mechanism).
+                if (intent.Moves.Count > 0) BroadcastApply(engine, applied);
                 Debug.Log("[Multiplayer][tac] HOST applied tac.intent.inventory acting=" + intent.ActingNetId +
-                          " requested=" + intent.Moves.Count + " applied=" + applied.Count);
+                          " requested=" + intent.Moves.Count + " applied=" + applied.Count +
+                          " rejected=" + (intent.Moves.Count - applied.Count));
+                if (applied.Count > 0) RefreshOpenInventoryView("client-intent");   // host may watch the same crate
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnInventoryIntent failed: " + ex); }
         }
@@ -158,6 +182,10 @@ namespace Multiplayer.Sync.Tactical
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacInventoryApply, apply.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT applied tac.inventory seq=" + apply.Seq +
                           " requested=" + apply.Moves.Count + " applied=" + applied);
+                // Reactive rail: an open inventory view repaints from the just-updated truth. For the origin this is
+                // the echo (repaint == its optimistic move) or the reject-revert (empty apply → item snaps back);
+                // for a bystander watching the same container it's the live mirror of the other player's move.
+                RefreshOpenInventoryView("mirror-apply");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleInventoryApply failed: " + ex); }
         }
@@ -167,6 +195,212 @@ namespace Multiplayer.Sync.Tactical
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacInventoryApply);
             byte[] payload = Codec.EncodeApply(moves, seq);
             TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacInventoryApply, payload);
+        }
+
+        // ─── REACTIVE per-gesture rail (immediate relay, no screen-close wait) ──────────────────────
+        // One AP-cost per screen session (native charges the inventory ability once per view session). The latch is
+        // the state instance of the session that already charged/flagged; ExitState (OnApplyInventoryActions above)
+        // re-arms it. ponytail: a fully-rejected first intent leaves the flag armed → that session under-charges;
+        // acceptable in co-op, upgrade to a host-side per-session ack if AP drift ever matters.
+        private static object _costChargedForState;
+
+        /// <summary>A tactical-inventory gesture completed (slot swap / side-button / Undo). Diff the UI lists
+        /// against the per-gesture baseline — the SAME membership truth the deferred <c>AttemptMoveItems</c> would
+        /// commit at close — and relay it NOW: client sends one 0x9A intent (optimistic UI kept, model mirror-only);
+        /// host applies natively + broadcasts 0x9B. After a relay the lists are RE-BASELINED so the next gesture
+        /// (and the close-commit) diffs only itself. Undo needs no special case: the native restore makes the diff
+        /// == the reverse moves. No-op outside co-op / outside the tactical inventory view. Never throws into the
+        /// native gesture.</summary>
+        public static void OnTacticalGesture()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive) return;   // single-player: pure native
+                bool host = engine.IsHost;
+                if (!host && !TacticalDeploySync.IsClientMirroring) return;
+                object state = ActiveTacticalInventoryState();
+                if (state == null) return;                        // geoscape equip / no inventory view → not ours
+
+                var moves = BuildGestureMoves(state, out object module, out int actingNetId, out int unsynced);
+                if (module == null) return;
+                if (moves.Count > 0)
+                {
+                    bool firstOfSession = !ReferenceEquals(_costChargedForState, state);
+                    if (host)
+                    {
+                        var applied = ApplyMoves(moves, destroyEmptied: true);
+                        if (applied.Count > 0)
+                        {
+                            if (firstOfSession) { HostApplyInventoryCost(actingNetId); _costChargedForState = state; }
+                            BroadcastApply(engine, applied);
+                        }
+                        Debug.Log("[Multiplayer][tac] GESTURE host applied moves=" + applied.Count + "/" + moves.Count +
+                                  " acting=" + actingNetId + " unsynced=" + unsynced);
+                    }
+                    else
+                    {
+                        byte[] payload = Codec.EncodeIntent(actingNetId, firstOfSession, moves, NextNonce());
+                        TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacInventoryIntent, payload);
+                        _costChargedForState = state;
+                        Debug.Log("[Multiplayer][tac] GESTURE client sent tac.intent.inventory moves=" + moves.Count +
+                                  " acting=" + actingNetId + " applyCost=" + firstOfSession + " unsynced=" + unsynced);
+                    }
+                }
+                ReBaseline(module);
+                if (unsynced > 0)
+                {
+                    // Same degrade as the close-commit rail (fresh local ground container / unreadable item), but
+                    // reactive: repaint from truth NOW so the player sees the drag didn't take.
+                    Debug.LogWarning("[Multiplayer][tac] GESTURE " + unsynced + " drag(s) not syncable (fresh ground " +
+                                     "container or unreadable item) — reverting view; use the drop-item button to drop.");
+                    RefreshOpenInventoryView("unsynced-gesture");
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnTacticalGesture failed: " + ex); }
+        }
+
+        /// <summary>The gesture's cross-inventory moves: per UI list in <c>CurrentInventoryLists</c>, diff
+        /// <c>GetRemovedItems()</c>/<c>GetAddedItems()</c> (UnfilteredItems vs the list's <c>_initialItems</c>
+        /// baseline — kept per-gesture by <see cref="ReBaseline"/>), map each list to its real
+        /// <c>InventoryComponent</c> through the state's own <c>OnListRemoveItems</c>/<c>OnListAddItems</c> funcs
+        /// (the exact mapping the deferred <c>AttemptMoveItems</c> uses), then pair removed↔added by reference.
+        /// Item identity = (def guid, index among that def in the source's REAL pre-move items) — identical on both
+        /// sides (client model untouched until mirror; host computes before applying). Unpairable/unresolvable →
+        /// counted in <paramref name="unsynced"/>, never guessed.</summary>
+        private static List<Codec.Move> BuildGestureMoves(object state, out object module, out int actingNetId, out int unsynced)
+        {
+            actingNetId = TacticalDeploySync.NetIdForLiveActor(GetProp(state, "PrimaryActor"));
+            unsynced = 0;
+            var moves = new List<Codec.Move>();
+            module = GetProp(state, "_soldierEquipModule");   // expression-bodied property (GetProp is property-first)
+            if (module == null) return moves;
+            if (!(GetProp(module, "CurrentInventoryLists") is IEnumerable lists)) return moves;
+            var removeMap = GetField(state, "OnListRemoveItems") as IDictionary;   // UIInventoryList → Func<Item, InventoryComponent>
+            var addMap = GetField(state, "OnListAddItems") as IDictionary;
+            if (removeMap == null || addMap == null) return moves;
+
+            var removedFrom = new List<KeyValuePair<object, object>>();            // (item, source InventoryComponent)
+            var addedTo = new Dictionary<object, object>(RefEq.Instance);           // item → target InventoryComponent
+            foreach (var list in lists)
+            {
+                if (list == null) continue;
+                foreach (var it in InvokeEnum(list, "GetRemovedItems"))
+                    removedFrom.Add(new KeyValuePair<object, object>(it, InvokeListMap(removeMap, list, it)));
+                foreach (var it in InvokeEnum(list, "GetAddedItems"))
+                    addedTo[it] = InvokeListMap(addMap, list, it);
+            }
+
+            foreach (var rem in removedFrom)
+            {
+                object item = rem.Key, srcInv = rem.Value;
+                if (item == null || srcInv == null || !addedTo.TryGetValue(item, out object dstInv) || dstInv == null)
+                { unsynced++; continue; }
+                addedTo.Remove(item);
+                ResolveEndpointId(srcInv, out int srcNet, out byte srcSlot);
+                ResolveEndpointId(dstInv, out int dstNet, out byte dstSlot);
+                string guid = DefReflection.GetGuid(GetProp(item, "ItemDef"));
+                int defIdx = (srcNet >= 0 && dstNet >= 0 && !string.IsNullOrEmpty(guid))
+                    ? IndexAmongDefInInventory(srcInv, item, guid) : -1;
+                if (defIdx < 0) { unsynced++; continue; }
+                if (srcNet == dstNet && srcSlot == dstSlot) continue;   // same-inventory shuffle: no membership change
+                moves.Add(new Codec.Move(srcNet, srcSlot, dstNet, dstSlot, guid, defIdx));
+            }
+            return moves;
+        }
+
+        /// <summary>Reset every current UI list's <c>_initialItems</c> baseline to its live contents, so the next
+        /// gesture (and the deferred close-commit) diffs only what happens AFTER this relay. In-place clear+refill
+        /// of the existing List&lt;ICommonItem&gt; — no generic construction across the reflection boundary.</summary>
+        private static FieldInfo _uiListInitialItemsField;
+        private static void ReBaseline(object module)
+        {
+            if (!(GetProp(module, "CurrentInventoryLists") is IEnumerable lists)) return;
+            foreach (var list in lists)
+            {
+                if (list == null) continue;
+                if (_uiListInitialItemsField == null)
+                    _uiListInitialItemsField = AccessTools.Field(list.GetType(), "_initialItems");
+                if (!(_uiListInitialItemsField?.GetValue(list) is IList baseline)) continue;
+                var snapshot = ToObjectList(GetProp(list, "UnfilteredItems"));
+                baseline.Clear();
+                foreach (var it in snapshot) baseline.Add(it);
+            }
+        }
+
+        /// <summary>Repaint an OPEN tactical inventory view from the real (just-mirrored) inventories via the
+        /// state's own <c>InitInventory</c>/<c>InitVehicleInventory</c>, then re-baseline so the repaint itself
+        /// never diffs as a phantom gesture. Skipped mid-drag (a repaint would clobber the dangling drag icon —
+        /// truth lands on the next mirror/close instead). ponytail: refreshes the primary+storage lists only; an
+        /// open secondary trade panel stays stale until reselect/close — upgrade if live soldier↔soldier trading
+        /// across players becomes a real flow.</summary>
+        internal static void RefreshOpenInventoryView(string reason)
+        {
+            try
+            {
+                object state = ActiveTacticalInventoryState();
+                if (state == null) return;
+                object module = GetProp(state, "_soldierEquipModule");
+                if (module == null) return;
+                object dragIcon = GetProp(module, "ItemDragIcon");
+                if (dragIcon != null &&
+                    AccessTools.Method(dragIcon.GetType(), "IsBeingDragged")?.Invoke(dragIcon, null) as bool? == true)
+                {
+                    Debug.Log("[Multiplayer][tac] GESTURE refresh deferred — drag in progress (" + reason + ")");
+                    return;
+                }
+                bool vehicle = GetField(state, "_isVehicleInventory") as bool? == true;
+                AccessTools.Method(state.GetType(), vehicle ? "InitVehicleInventory" : "InitInventory")
+                    ?.Invoke(state, null);
+                ReBaseline(module);
+                Debug.Log("[Multiplayer][tac] GESTURE refreshed open inventory view (" + reason + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] RefreshOpenInventoryView failed: " + ex); }
+        }
+
+        /// <summary>The live <c>UIStateInventory</c> when it is the CURRENT tactical view state, else null (covers
+        /// "screen not open", geoscape, and no live mission — <c>LiveTlc</c> is null outside a mission).</summary>
+        private static Type _uiStateInventoryType;
+        private static bool _uiStateInventoryResolved;
+        private static object ActiveTacticalInventoryState()
+        {
+            if (!_uiStateInventoryResolved)
+            {
+                _uiStateInventoryResolved = true;
+                _uiStateInventoryType = AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateInventory");
+            }
+            if (_uiStateInventoryType == null) return null;
+            object view = GetProp(TacticalDeploySync.LiveTlc, "View");
+            object current = GetProp(view, "CurrentState");
+            return current != null && _uiStateInventoryType.IsInstanceOfType(current) ? current : null;
+        }
+
+        /// <summary>Index of <paramref name="item"/> among items of the same def in the REAL inventory's current
+        /// (pre-move) contents — the wire identity <see cref="NthItemOfDef"/> resolves on the other side. -1 when
+        /// the item is not in that inventory (e.g. it lives in a fresh local ground container).</summary>
+        private static int IndexAmongDefInInventory(object inv, object item, string guid)
+        {
+            if (!(GetProp(inv, "Items") is IEnumerable items)) return -1;
+            int seen = 0;
+            foreach (var it in items)
+            {
+                if (it == null) continue;
+                if (!string.Equals(DefReflection.GetGuid(GetProp(it, "ItemDef")), guid, StringComparison.Ordinal)) continue;
+                if (ReferenceEquals(it, item)) return seen;
+                seen++;
+            }
+            return -1;
+        }
+
+        private static IEnumerable InvokeEnum(object obj, string method)
+            => (AccessTools.Method(obj.GetType(), method)?.Invoke(obj, null) as IEnumerable) ?? new object[0];
+
+        /// <summary>Invoke the state's list→inventory mapping func (<c>Func&lt;Item, InventoryComponent&gt;</c>)
+        /// for one item; null on any failure (missing list key, closure NRE, cast) — the caller degrades.</summary>
+        private static object InvokeListMap(IDictionary map, object list, object item)
+        {
+            try { return (map[list] as Delegate)?.DynamicInvoke(item); }
+            catch { return null; }
         }
 
         // ─── CLIENT capture: compute the batch of cross-inventory MOVES from the view-state queries ──
@@ -238,6 +472,14 @@ namespace Multiplayer.Sync.Tactical
                     unsyncedDrops++;
                 }
             }
+            // TEMP diagnostic — remove after inventory-sync RCA: one throttle-free line per capture disambiguating
+            // "UI diff never populated" (every query rem/add == 0) vs "pairing drops moves" (rem > 0 but moves < rem).
+            var diag = new System.Text.StringBuilder();
+            foreach (var r in recs)
+                diag.Append(" q[net=").Append(r.NetId).Append(",slot=").Append(r.Slot)
+                    .Append(" rem=").Append(r.Removed.Count).Append(" add=").Append(r.Added.Count).Append(']');
+            Debug.Log("[Multiplayer][tac] CaptureMoves actingNetId=" + actingNetId + " queries=" + recs.Count +
+                      " moves=" + moves.Count + " unsyncedDrops=" + unsyncedDrops + " |" + diag);
             return moves;
         }
 
