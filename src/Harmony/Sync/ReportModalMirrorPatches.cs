@@ -283,4 +283,41 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalHideReleasePatch failed: " + ex.Message); }
         }
     }
+
+    /// <summary>
+    /// HOST interception time-lock CLOSE — primary/robust path. Postfix on
+    /// <c>InterceptionGameController.GameStopped()</c> (PhoenixPoint.Geoscape.Interception), which the interception
+    /// coroutine's <c>OnStop</c> delegate invokes on EVERY stop (GeoLevelController.cs:1210-1213) — the normal
+    /// intercept/auto-resolve end AND the ABORT path where the START autosave throws and StartInterceptionCrt bails
+    /// before <c>ShowInterceptionResult</c> (GeoLevelController.cs:1237 guard) so outcome modal 33 never shows.
+    /// Without this the abort path would leave the shared clock locked for the whole session. The outcome-33 Hide
+    /// close (BlockingModalHideReleasePatch) stays as a belt; both call Close() idempotently. Host-only + active
+    /// session; reflective target (Prepare false → skipped on rename).
+    /// </summary>
+    [HarmonyPatch]
+    public static class InterceptionGameStoppedTimeLockPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Geoscape.Interception.InterceptionGameController");
+            if (t == null) return false;
+            _target = AccessTools.Method(t, "GameStopped", Type.EmptyTypes);
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                InterceptionTimeLock.Close();
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] InterceptionGameStoppedTimeLockPatch failed: " + ex.Message); }
+        }
+    }
 }

@@ -34,16 +34,17 @@ namespace Multiplayer.Harmony
 
         public static MethodBase TargetMethod() => _targetMethod;
 
-        // pause = the requested paused state (OnPauseTime's bool arg).
-        public static bool Prefix(bool pause)
+        // pause = the requested paused state (OnPauseTime's bool arg); __instance = the UIModuleTimeControl.
+        public static bool Prefix(bool pause, object __instance)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true; // no session → local
             if (TimeSyncManager.IsApplyingRemote) return true;   // our own remote-apply → let through (host + client)
-            // INTERCEPTION TIME-LOCK: time control is hard-locked for everyone while the host resolves an
-            // air-combat interception. Block the HOST's own pause commit here (the client's is relayed +
-            // host-rejected, and its widget is greyed via the anchor Locked bit). Not our remote-apply (above).
-            if (InterceptionTimeLock.Active) return false;
+            // INTERCEPTION TIME-LOCK: geoscape time control is hard-locked while the host resolves an air-combat
+            // interception. Block the HOST's own pause commit — but ONLY on the GEOSCAPE widget: the interception
+            // spawns a SECOND UIModuleTimeControl (InterceptionTimeControlModule) that drives the minigame's own
+            // clock, and this same patch hits it too, so an unscoped deny would kill pause INSIDE the air combat.
+            if (InterceptionTimeLock.Active && TimeSyncManager.IsGeoscapeTimeControl(__instance)) return false;
             if (engine.IsHost) return true;                      // host commits locally
 
             try
@@ -90,15 +91,16 @@ namespace Multiplayer.Harmony
 
         public static MethodBase TargetMethod() => _targetMethod;
 
-        // presetIndex = the requested speed preset (SelectTimePreset's int arg).
-        public static bool Prefix(int presetIndex)
+        // presetIndex = the requested speed preset (SelectTimePreset's int arg); __instance = UIModuleTimeControl.
+        public static bool Prefix(int presetIndex, object __instance)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true;
             if (TimeSyncManager.IsApplyingRemote) return true;   // our own MirrorSpeedUi call → let through (host + client)
-            // INTERCEPTION TIME-LOCK: block the HOST's own speed commit while an interception is resolving
-            // (client relays are host-rejected + its widget greyed via the anchor). Not our remote-apply (above).
-            if (InterceptionTimeLock.Active) return false;
+            // INTERCEPTION TIME-LOCK: block the HOST's own speed commit while an interception is resolving — but
+            // ONLY on the GEOSCAPE widget (the interception's own InterceptionTimeControlModule sets speed at
+            // UIStateInterception init; an unscoped deny would break the minigame's clock). Not remote-apply (above).
+            if (InterceptionTimeLock.Active && TimeSyncManager.IsGeoscapeTimeControl(__instance)) return false;
             if (engine.IsHost) return true;
 
             try

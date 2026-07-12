@@ -323,6 +323,18 @@ namespace Multiplayer.Network.TimeSync
             return _timeControlCached;
         }
 
+        /// <summary>
+        /// True iff <paramref name="widget"/> IS the geoscape time-control widget — NOT the air-combat
+        /// InterceptionTimeControlModule, a SECOND UIModuleTimeControl instance the interception spawns
+        /// (GeoscapeModulesData.InterceptionTimeControlModule). Scopes the interception time-lock deny to the
+        /// geoscape clock only, so the host keeps pause/speed control INSIDE the air combat. The cached
+        /// FindTimeControl reference is the geoscape widget: it is resolved at geoscape entry (the anchor loop
+        /// runs continuously) and the interception overlay never destroys it, so the cache stays the geoscape
+        /// instance for the whole window while the interception widget is a distinct reference.
+        /// </summary>
+        public static bool IsGeoscapeTimeControl(object widget)
+            => widget != null && ReferenceEquals(widget, FindTimeControl());
+
         // ─── State readers ────────────────────────────────────────────────
 
         private static bool GetPaused(object timing)

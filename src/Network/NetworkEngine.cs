@@ -226,6 +226,9 @@ namespace Multiplayer.Network
             Sync = null;
             // Mirrors Shutdown(): no cross-session research-rate leak on the full-teardown path either.
             ClientResearchRate.Reset();
+            // Same: a return-to-menu mid air-combat must not carry the interception time-lock into the next
+            // session (process-static; the reload-boundary reset alone misses a quit-to-menu without a reload).
+            Multiplayer.Network.Sync.InterceptionTimeLock.Reset();
             // Parity auto-apply: put the client's ORIGINAL mod settings back (no-op when none applied).
             RunParityConfigRestore();
 
