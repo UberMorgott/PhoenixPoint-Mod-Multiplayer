@@ -149,6 +149,30 @@ namespace Multiplayer.Sync.Tactical
 
             try
             {
+                // ─── SELF-HANDOFF GUARD ───────────────────────────────────────────────────────────
+                // A buffered/duplicate tac.turn whose faction is ALREADY the live, playing CurrentFaction on
+                // this client (e.g. ClientEnterInitialTurn started turn-0's player turn, then DrainPendingTurn
+                // feeds the host's turn-0 tac.turn back in for the SAME faction). The normal handoff below
+                // would set that live faction's _endTurnRequested=true (1a) — breaking its just-started
+                // PlayTurnCrt loop — and then the wasPlaying-gated restart (3a-i) would NOT re-start it
+                // (wasPlaying==true) → IsPlayingTurn collapses and the client loses tactical control (stuck in
+                // deploy view). The turn is already live and correctly stamped, so just track the seq and
+                // return — no teardown, no restart. Normal faction-A→faction-B handoffs are unaffected:
+                // _currentFactionIndex still points at the OUTGOING faction A here, != incoming faction B.
+                {
+                    object liveFaction = GetProp(tlc, "CurrentFaction");
+                    int liveIdx = ToInt(Traverse.Create(tlc).Field("_currentFactionIndex").GetValue());
+                    if (liveFaction != null && liveIdx == t.CurrentFactionIndex &&
+                        ToBool(GetProp(liveFaction, "IsPlayingTurn")))
+                    {
+                        TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacTurn, t.Seq);
+                        Debug.Log("[Multiplayer][tac] CLIENT self-handoff for faction " + ResolveFactionDefName(liveFaction) +
+                                  " idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber +
+                                  " — turn already live, skipping teardown/restart");
+                        return;
+                    }
+                }
+
                 // 1a) Exit the OUTGOING turn on every handoff.
                 //   • PLAYER faction: set its _endTurnRequested=true so the native player PlayTurnCrt loop
                 //     (TacticalFaction.cs:479) breaks, runs end-turn side-effects, and clears IsPlayingTurn.
