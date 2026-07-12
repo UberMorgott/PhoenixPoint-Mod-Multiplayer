@@ -37,6 +37,11 @@ namespace Multiplayer
                 // deferred installer that patches them the instant their assembly loads (which precedes
                 // TFTV's synchronous *Logger.Initialize), giving the secondary instance its own log file.
                 Multiplayer.Harmony.TftvLogDeferredInstaller.Install(harmony);
+
+                // Same deferral for the TFTV UI/aircraft/tactical-script GUARD patches: they too gate on a
+                // TFTV type in Prepare(), so PatchAll silently skipped them (TFTV loads after us) and every
+                // TFTV guard was dead in prod (126x geoscape-teardown NRE storm). Bind them when TFTV loads.
+                Multiplayer.Harmony.TftvLateBinder.Install(harmony);
             }
             catch (System.Exception e)
             {

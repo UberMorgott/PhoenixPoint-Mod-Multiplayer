@@ -93,9 +93,10 @@ namespace Multiplayer.Harmony
         {
             _tftvType = AccessTools.TypeByName(ClientTftvTeardownGuardTargets.FoodMutagenTooltipType);
             bool bind = ClientTftvGeoscapeUiTeardownGate.ShouldBindTftvGuard(_tftvType != null); // TFTV not loaded -> Harmony skips this class
-            // Explicit bind confirmation: a silent Prepare-false hides a TFTV rename/absence. Runs once at PatchAll.
-            UnityEngine.Debug.Log("[Multiplayer] TFTV food/mutagen tooltip null-guard "
-                + (bind ? "BOUND (RefreshFoodAndMutagenProductionTooltupUI)" : "skipped (TFTV type absent)"));
+            // Diagnostic ONLY for the skip: at PatchAll TFTV is not loaded yet -> this logs the "type absent"
+            // line, then TftvLateBinder re-runs this class once TFTV's assembly loads (it logs the BOUND line).
+            if (!bind)
+                UnityEngine.Debug.Log("[Multiplayer] TFTV food/mutagen tooltip null-guard: TFTV type absent at this attempt (deferred TftvLateBinder retries on TFTV load)");
             return bind;
         }
 
