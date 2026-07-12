@@ -51,6 +51,7 @@ namespace Multiplayer.Network.Sync
         // Kaos "The Marketplace" (AB DLC5) 90-99 — client suppress + relay buy intent, host authoritative
         // purchase; result mirrors on wallet + Inventory/Research/GeoVehicle + ObjectivesChannel(#7 offer list)
         public const ushort MarketplaceBuy = 90; // buy one GeoMarketplace offer (validated by kind+guid+price)
+        public const ushort HavenTrade = 91;     // trade one haven resource pair N times (host re-derives ratio + validates stock/wallet)
 
         /// <summary>True for the personnel client-edit intent family (ids 60-79). Every member is
         /// <c>IHostOnlyApply</c> whose authoritative result mirrors back on the #6/#9/#10 state channels

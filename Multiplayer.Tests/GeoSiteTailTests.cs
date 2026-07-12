@@ -117,7 +117,8 @@ public class GeoSiteTailTests
     [Fact]
     public void ExtrasBlock_WireBytes_Pinned()
     {
-        // Pin the EXACT extras-block layout: [u16 count][i32 siteId][u16 recLen][u8 flags][i32 population].
+        // Pin the EXACT extras-block layout: [u16 count][i32 siteId][u16 recLen][u8 flags][i32 population][u8 stockCount].
+        // (Empty stock here → stockCount 0; the haven payload rides bit0 with population then the stock list.)
         var snap = new GeoSiteSnapshot();
         snap.Sites.Add(new GeoSiteState(1, "A", 20, 1, "B", "C", haven: new GeoHavenTail(2450, true)));
 
@@ -127,9 +128,10 @@ public class GeoSiteTailTests
         {
             0x01, 0x00,                 // extrasCount = 1
             0x01, 0x00, 0x00, 0x00,     // siteId = 1 (i32 LE)
-            0x05, 0x00,                 // recLen = 5 (flags + i32 population)
+            0x06, 0x00,                 // recLen = 6 (flags + i32 population + u8 stockCount)
             0x11,                       // tailFlags = bit0 HasHaven | bit4 Infested
             0x92, 0x09, 0x00, 0x00,     // population = 2450 (i32 LE)
+            0x00,                       // stockCount = 0 (empty shelf)
         };
         Assert.Equal(19 + extras.Length, bytes.Length);
         Assert.Equal(extras, bytes.Skip(19).ToArray());
@@ -146,11 +148,11 @@ public class GeoSiteTailTests
         known.Sites.Add(Site(1, new GeoHavenTail(500, false)));
         var bytes = GeoSiteSnapshot.Encode(known);
 
-        // Grow the extras record by 3 trailing bytes (recLen 5 → 8) without touching the flags byte.
+        // Grow the extras record by 3 trailing bytes (recLen 6 → 9) without touching the flags byte.
         var patched = new byte[bytes.Length + 3];
         System.Array.Copy(bytes, patched, bytes.Length);
         int recLenAt = 19 + 2 + 4;              // after record array + extrasCount + siteId
-        patched[recLenAt] = 0x08;               // recLen = 8 (flags + i32 population + 3 future bytes)
+        patched[recLenAt] = 0x09;               // recLen = 9 (flags + i32 population + u8 stockCount + 3 future bytes)
         patched[bytes.Length] = 0xDE; patched[bytes.Length + 1] = 0xAD; patched[bytes.Length + 2] = 0xBF;
 
         var snap = GeoSiteSnapshot.Decode(patched);
@@ -198,6 +200,90 @@ public class GeoSiteTailTests
         Assert.NotEqual(Site(3, new GeoHavenTail(100, false)), Site(3, new GeoHavenTail(101, false)));
         Assert.NotEqual(Site(3, new GeoHavenTail(100, false)), Site(3, new GeoHavenTail(100, true)));
         Assert.Equal(Site(3, new GeoHavenTail(100, true)), Site(3, new GeoHavenTail(100, true)));
+    }
+
+    // ─── haven trade-stock mirror (audit gap 2, 2026-07-12) ─────────────────────────────────────
+
+    private static HavenStockUnit[] Stock(params (int type, int amount)[] units)
+    {
+        var arr = new HavenStockUnit[units.Length];
+        for (int i = 0; i < units.Length; i++) arr[i] = new HavenStockUnit(units[i].type, units[i].amount);
+        return arr;
+    }
+
+    [Fact]
+    public void HavenStock_RoundTrips()
+    {
+        // A haven trades Materials(2)/Supplies(1)/Tech(4) — the full shelf must survive value-for-value.
+        var stock = Stock((2, 340), (1, 120), (4, 0));   // includes a zero-amount unit (honest mirror)
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(Site(7, new GeoHavenTail(1800, false, stock)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.NotNull(rt.Sites[0].Haven);
+        Assert.Equal(1800, rt.Sites[0].Haven.Population);
+        Assert.Equal(stock, rt.Sites[0].Haven.Stock);
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+    }
+
+    [Fact]
+    public void HavenStock_EmptyShelf_DistinctFromCarried()
+    {
+        // Empty stock (the 2-arg ctor default) round-trips as empty and stays equal — never null, never a phantom.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(Site(1, new GeoHavenTail(500, false)));                       // empty shelf
+        snap.Sites.Add(Site(2, new GeoHavenTail(500, false, Stock((2, 99)))));       // one unit
+
+        var rt = RoundTrip(snap);
+
+        Assert.Empty(rt.Sites[0].Haven.Stock);
+        Assert.Single(rt.Sites[1].Haven.Stock);
+        Assert.Equal(99, rt.Sites[1].Haven.Stock[0].Amount);
+        Assert.NotEqual(rt.Sites[0].Haven, rt.Sites[1].Haven);
+    }
+
+    [Fact]
+    public void HavenStock_ParticipatesInEquality()
+    {
+        Assert.NotEqual(new GeoHavenTail(100, false), new GeoHavenTail(100, false, Stock((2, 1))));
+        Assert.NotEqual(new GeoHavenTail(100, false, Stock((2, 1))), new GeoHavenTail(100, false, Stock((2, 2))));
+        Assert.NotEqual(new GeoHavenTail(100, false, Stock((2, 1))), new GeoHavenTail(100, false, Stock((1, 1))));
+        Assert.NotEqual(new GeoHavenTail(100, false, Stock((2, 1))), new GeoHavenTail(100, false, Stock((2, 1), (1, 1))));
+        Assert.Equal(new GeoHavenTail(100, false, Stock((2, 1), (1, 3))), new GeoHavenTail(100, false, Stock((2, 1), (1, 3))));
+        Assert.NotEqual(new HavenStockUnit(2, 1), new HavenStockUnit(2, 2));
+        Assert.Equal(new HavenStockUnit(2, 1), new HavenStockUnit(2, 1));
+    }
+
+    [Fact]
+    public void HavenStock_CoexistsWithAllOtherTails()
+    {
+        // Stock rides bit0 alongside population/infested AND every higher-bit tail on the same record.
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(new GeoSiteState(1, "o", 20, 1, "n", "e",
+            haven: new GeoHavenTail(1200, true, Stock((2, 500), (1, 250))),
+            alienBase: new GeoAlienBaseTail("TYPE", new[] { "ADDON" }),
+            excavation: new GeoExcavationTail(true, 42L),
+            weather: new GeoWeatherTail(4),
+            expiringTimer: new GeoExpiringTimerTail(9999L)));
+
+        var rt = RoundTrip(snap);
+
+        Assert.Equal(snap.Sites[0], rt.Sites[0]);
+        Assert.Equal(2, rt.Sites[0].Haven.Stock.Length);
+        Assert.Equal(500, rt.Sites[0].Haven.Stock[0].Amount);
+        Assert.NotNull(rt.Sites[0].AlienBase);
+    }
+
+    [Fact]
+    public void HavenStock_TruncatedInsideUnit_RejectsWholePayload()
+    {
+        var snap = new GeoSiteSnapshot();
+        snap.Sites.Add(Site(1, new GeoHavenTail(5, false, Stock((2, int.MaxValue)))));
+        var bytes = GeoSiteSnapshot.Encode(snap);
+        var truncated = new byte[bytes.Length - 2];   // cut inside the stock unit's i32 amount
+        System.Array.Copy(bytes, truncated, truncated.Length);
+        Assert.Null(GeoSiteSnapshot.Decode(truncated));
     }
 
     // ─── alien-base tail (commit 2, gap 4b) ─────────────────────────────────────────────────────

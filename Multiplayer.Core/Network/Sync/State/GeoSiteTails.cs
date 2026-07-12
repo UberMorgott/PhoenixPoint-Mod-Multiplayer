@@ -2,11 +2,33 @@ using System;
 
 namespace Multiplayer.Network.Sync.State
 {
+    /// <summary>PURE record of ONE stocked-resource entry on a haven's trade shelf — the mirror of one
+    /// <c>ResourceUnit</c> in <c>GeoHaven.StockedResources</c> (GeoHaven.cs:146). <c>ResourceType</c> is the raw
+    /// <c>PhoenixPoint.Common.Core.ResourceType</c> [Flags] enum value (up to 0x800 → i32); <c>Amount</c> is the
+    /// <c>RoundedValue</c> (CeilToInt) the trade screen actually shows, so drift re-emits only when the DISPLAYED
+    /// stock changes (sub-integer hourly accrual is invisible and doesn't churn the poll). BCL-only.</summary>
+    public readonly struct HavenStockUnit : IEquatable<HavenStockUnit>
+    {
+        public readonly int ResourceType;   // raw PhoenixPoint.Common.Core.ResourceType enum value
+        public readonly int Amount;         // StockedResources.ByResourceType(type).RoundedValue
+
+        public HavenStockUnit(int resourceType, int amount)
+        {
+            ResourceType = resourceType;
+            Amount = amount;
+        }
+
+        public bool Equals(HavenStockUnit other) => ResourceType == other.ResourceType && Amount == other.Amount;
+        public override bool Equals(object obj) => obj is HavenStockUnit o && Equals(o);
+        public override int GetHashCode() { unchecked { return (ResourceType * 397) ^ Amount; } }
+        public override string ToString() => $"{Amount}x{ResourceType}";
+    }
+
     /// <summary>
     /// PURE optional-tail record of one HAVEN site's display state — WA-2 of the 2026-07-05 popup-mirror spec
-    /// §5 (audit gap 4d, GeoHaven.cs:172/213). Carried on the versioned EXTRAS BLOCK of
-    /// <see cref="GeoSiteSnapshot"/> (null = not carried: non-haven site, older payload, or host read miss —
-    /// NEVER a clear; a haven never stops being a haven).
+    /// §5 (audit gap 4d, GeoHaven.cs:172/213) + haven trade-stock mirror (audit gap 2, 2026-07-12). Carried on
+    /// the versioned EXTRAS BLOCK of <see cref="GeoSiteSnapshot"/> (null = not carried: non-haven site, older
+    /// payload, or host read miss — NEVER a clear; a haven never stops being a haven).
     ///   • <c>Population</c> — <c>GeoHaven._population</c> (GeoHaven.cs:144, public <c>Population</c> prop
     ///     :172). Host reads the property; the client writes the BACKING FIELD directly: the native setter
     ///     cascades (OnPopulationChanged → ZonesStats.UpdateZonesStats/UpdateRange, and 0 → Site.DestroySite —
@@ -15,6 +37,13 @@ namespace Multiplayer.Network.Sync.State
     ///     (<c>Site.Owner.IsAlienFaction</c>), so the identity mirror's Owner write already flips it
     ///     client-side; the flag is carried as the host-authoritative record (divergence diagnostic +
     ///     wire pin), not stamped.
+    ///   • <c>Stock</c> — mirror of <c>GeoHaven.StockedResources</c> (GeoHaven.cs:146, the trade shelf the trade
+    ///     screen reads via <c>ByResourceType(x).RoundedValue</c>). The sim-frozen client never re-runs the
+    ///     host's trades / hourly restocks, so its stock froze at the join baseline; the host is the ONE writer
+    ///     and the client REWRITES the pack value-only (display mirror, no cascade — StockedResources is a plain
+    ///     field). Never null (empty = honest empty shelf, last-wins). Rides the EXISTING haven presence bit
+    ///     (bit0) — appended to the haven payload after Population, zero new flag/section (spec: new state rides
+    ///     the existing spine).
     /// Zone attrition (HavenPopulationZoneAttrition, GeoMap.cs:281) is a DIRTY TRIGGER only: per-zone health
     /// is NOT carried (spec tail omits it — accepted cosmetic); the re-snapshot refreshes population/state.
     /// </summary>
@@ -22,24 +51,38 @@ namespace Multiplayer.Network.Sync.State
     {
         public readonly int Population;
         public readonly bool Infested;
+        public readonly HavenStockUnit[] Stock;   // never null (empty = honest empty shelf)
 
-        public GeoHavenTail(int population, bool infested)
+        public GeoHavenTail(int population, bool infested, HavenStockUnit[] stock = null)
         {
             Population = population;
             Infested = infested;
+            Stock = stock ?? new HavenStockUnit[0];
         }
 
         public bool Equals(GeoHavenTail other)
-            => other != null && Population == other.Population && Infested == other.Infested;
+        {
+            if (other == null || Population != other.Population || Infested != other.Infested
+                || Stock.Length != other.Stock.Length) return false;
+            for (int i = 0; i < Stock.Length; i++)
+                if (!Stock[i].Equals(other.Stock[i])) return false;
+            return true;
+        }
 
         public override bool Equals(object obj) => obj is GeoHavenTail o && Equals(o);
 
         public override int GetHashCode()
         {
-            unchecked { return (Population * 397) ^ (Infested ? 1 : 0); }
+            unchecked
+            {
+                int h = (Population * 397) ^ (Infested ? 1 : 0);
+                h = (h * 397) ^ Stock.Length;
+                for (int i = 0; i < Stock.Length; i++) h = (h * 397) ^ Stock[i].GetHashCode();
+                return h;
+            }
         }
 
-        public override string ToString() => $"Haven(pop={Population} infested={Infested})";
+        public override string ToString() => $"Haven(pop={Population} infested={Infested} stock={Stock.Length})";
     }
 
     /// <summary>

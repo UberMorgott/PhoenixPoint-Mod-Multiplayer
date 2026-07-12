@@ -27,7 +27,8 @@ namespace Multiplayer.Network.Sync.State
     ///   recLen = byte length of tailFlags + payloads (lets a decoder SKIP a record whose flags carry
     ///   unknown future bits: known payloads always precede unknown ones — new fields take new HIGHER bits —
     ///   so parse-known-then-skip degrades gracefully per record instead of rejecting the payload).
-    ///   tailFlags: bit0 = haven tail       → payload [i32 population]; bit4 = Infested VALUE (no payload).
+    ///   tailFlags: bit0 = haven tail       → payload [i32 population][u8 stockCount]{[i32 resType][i32 amount]}*
+    ///              (stock = GeoHaven.StockedResources rounded-value mirror); bit4 = Infested VALUE (no payload).
     ///              bit1 = alien-base tail  → payload [str typeGuid][u8 nAddons]{[str addonGuid]}*.
     ///              bit2 = excavation tail  → payload [i64 endDateTicks]; bit5 = Excavating VALUE (no payload).
     ///              bit3 = attack-schedule tail → payload [u8 n]{[str attackerGuid][i64 atTicks][i64 forTicks]}*
@@ -171,7 +172,19 @@ namespace Multiplayer.Network.Sync.State
                 if (s.Weather != null) flags |= TailHasWeather;
                 if (s.ExpiringTimer != null) flags |= TailHasExpiringTimer;
                 w.Write(flags);
-                if (s.Haven != null) w.Write(s.Haven.Population);
+                if (s.Haven != null)
+                {
+                    w.Write(s.Haven.Population);
+                    // Stock rides the haven presence bit (bit0), appended after Population — before the higher-bit
+                    // payloads (ascending bit order preserved). u8 count (≤13 resource types); each = raw type + rounded amount.
+                    int ns = s.Haven.Stock.Length > byte.MaxValue ? byte.MaxValue : s.Haven.Stock.Length;
+                    w.Write((byte)ns);
+                    for (int i = 0; i < ns; i++)
+                    {
+                        w.Write(s.Haven.Stock[i].ResourceType);
+                        w.Write(s.Haven.Stock[i].Amount);
+                    }
+                }
                 if (s.AlienBase != null)
                 {
                     WriteStr(w, s.AlienBase.TypeDefGuid);
@@ -352,7 +365,13 @@ namespace Multiplayer.Network.Sync.State
                 byte flags = r.ReadByte();
                 var set = new TailSet();
                 if ((flags & TailHasHaven) != 0)
-                    set.Haven = new GeoHavenTail(r.ReadInt32(), (flags & TailInfested) != 0);
+                {
+                    int population = r.ReadInt32();
+                    int ns = r.ReadByte();
+                    var stock = new HavenStockUnit[ns];
+                    for (int i = 0; i < ns; i++) stock[i] = new HavenStockUnit(r.ReadInt32(), r.ReadInt32());
+                    set.Haven = new GeoHavenTail(population, (flags & TailInfested) != 0, stock);
+                }
                 if ((flags & TailHasAlienBase) != 0)
                 {
                     string typeGuid = ReadStr(r);

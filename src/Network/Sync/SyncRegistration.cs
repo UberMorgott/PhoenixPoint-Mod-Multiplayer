@@ -71,6 +71,9 @@ namespace Multiplayer.Network.Sync
 
             // Kaos "The Marketplace" buy (AB DLC5)
             SyncedActionRegistry.Register(SyncedActionIds.MarketplaceBuy, MarketplaceBuyAction.Read);
+
+            // Haven resource trade (host re-derives ratio + validates stock/wallet; result mirrors on wallet + ch#5)
+            SyncedActionRegistry.Register(SyncedActionIds.HavenTrade, HavenTradeAction.Read);
         }
     }
 }

@@ -1272,6 +1272,17 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _havenPopulationProp; // GeoHaven.Population (host read)
         private static FieldInfo _havenPopulationField;   // GeoHaven._population (client no-cascade write)
         private static PropertyInfo _havenIsInfestedProp; // GeoHaven.IsInfested (derived; host read / client diag)
+        // Trade-stock mirror (audit gap 2, 2026-07-12): GeoHaven.StockedResources (ResourcePack, GeoHaven.cs:146)
+        // — the trade shelf the trade screen reads. StockedResources is a plain public field, so both host read
+        // and client rewrite are value-only (no cascade); the client Clear+AddUnique rebuilds the pack last-wins.
+        private static Type _havenStockResTypeEnum;       // PhoenixPoint.Common.Core.ResourceType (haven-stock region)
+        private static FieldInfo _havenStockedField;      // GeoHaven.StockedResources (ResourcePack)
+        private static FieldInfo _packValuesField;        // ResourcePack.Values (List<ResourceUnit>)
+        private static MethodInfo _packClearMethod;       // ResourcePack.Clear()
+        private static MethodInfo _packAddUniqueMethod;   // ResourcePack.AddUnique(ResourceUnit)
+        private static FieldInfo _resUnitTypeField;       // ResourceUnit.Type (ResourceType)
+        private static PropertyInfo _resUnitRoundedProp;  // ResourceUnit.RoundedValue (int)
+        private static ConstructorInfo _resUnitCtor;      // ResourceUnit(ResourceType, float)
 
         private static void EnsureHavenTail()
         {
@@ -1285,8 +1296,76 @@ namespace Multiplayer.Network.Sync.State
                 _havenPopulationProp = AccessTools.Property(_geoHavenType, "Population");
                 _havenPopulationField = AccessTools.Field(_geoHavenType, "_population");
                 _havenIsInfestedProp = AccessTools.Property(_geoHavenType, "IsInfested");
+                // Stock-mirror members — DELIBERATELY best-effort: a miss disables ONLY the stock mirror
+                // (population/infestation keep flowing). ResourceUnit(ResourceType, float) is the public ctor.
+                _havenStockResTypeEnum = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceType");
+                _havenStockedField = AccessTools.Field(_geoHavenType, "StockedResources");
+                var packType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourcePack");
+                var unitType = AccessTools.TypeByName("PhoenixPoint.Common.Core.ResourceUnit");
+                if (packType != null)
+                {
+                    _packValuesField = AccessTools.Field(packType, "Values");
+                    _packClearMethod = AccessTools.Method(packType, "Clear", Type.EmptyTypes);
+                    if (unitType != null) _packAddUniqueMethod = AccessTools.Method(packType, "AddUnique", new[] { unitType });
+                }
+                if (unitType != null)
+                {
+                    _resUnitTypeField = AccessTools.Field(unitType, "Type");
+                    _resUnitRoundedProp = AccessTools.Property(unitType, "RoundedValue");
+                    if (_havenStockResTypeEnum != null)
+                        _resUnitCtor = AccessTools.Constructor(unitType, new[] { _havenStockResTypeEnum, typeof(float) });
+                }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.EnsureHavenTail failed (haven tail disabled): " + ex.Message); }
+        }
+
+        /// <summary>HOST: read the haven's <c>StockedResources</c> into the wire mirror (raw type + RoundedValue —
+        /// exactly what the trade screen shows), or empty on any miss.</summary>
+        private static HavenStockUnit[] ReadHavenStock(object haven)
+        {
+            try
+            {
+                var pack = _havenStockedField?.GetValue(haven);
+                if (pack == null || _packValuesField == null || _resUnitTypeField == null || _resUnitRoundedProp == null)
+                    return new HavenStockUnit[0];
+                if (!(_packValuesField.GetValue(pack) is IEnumerable units)) return new HavenStockUnit[0];
+                var list = new List<HavenStockUnit>();
+                foreach (var u in units)
+                {
+                    if (u == null) continue;
+                    int type = Convert.ToInt32(_resUnitTypeField.GetValue(u));
+                    int amount = Convert.ToInt32(_resUnitRoundedProp.GetValue(u, null));
+                    list.Add(new HavenStockUnit(type, amount));
+                }
+                return list.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoSiteReflection.ReadHavenStock failed: " + ex.Message);
+                return new HavenStockUnit[0];
+            }
+        }
+
+        /// <summary>CLIENT: rewrite the haven's <c>StockedResources</c> to the mirrored shelf — VALUE-ONLY,
+        /// last-wins (Clear + AddUnique each rounded unit). StockedResources is a plain field so there is no
+        /// cascade; the trade screen re-reads it via ByResourceType(x).RoundedValue.</summary>
+        private static void ApplyHavenStock(object haven, HavenStockUnit[] stock)
+        {
+            if (stock == null) return;
+            try
+            {
+                var pack = _havenStockedField?.GetValue(haven);
+                if (pack == null || _packClearMethod == null || _packAddUniqueMethod == null || _resUnitCtor == null
+                    || _havenStockResTypeEnum == null) return;
+                _packClearMethod.Invoke(pack, null);
+                foreach (var u in stock)
+                {
+                    object resEnum = Enum.ToObject(_havenStockResTypeEnum, u.ResourceType);
+                    object unit = _resUnitCtor.Invoke(new object[] { resEnum, (float)u.Amount });
+                    _packAddUniqueMethod.Invoke(pack, new[] { unit });
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyHavenStock failed (skipped): " + ex.Message); }
         }
 
         /// <summary>The site's live <c>GeoHaven</c> component, or null (not a haven / unbound).</summary>
@@ -1313,7 +1392,7 @@ namespace Multiplayer.Network.Sync.State
                         infested = (bool)_havenIsInfestedProp.GetValue(haven, null);
                 }
                 catch { infested = false; }
-                return new GeoHavenTail(population, infested);
+                return new GeoHavenTail(population, infested, ReadHavenStock(haven));
             }
             catch (Exception ex)
             {
@@ -1343,6 +1422,7 @@ namespace Multiplayer.Network.Sync.State
                     try { _havenPopulationField.SetValue(haven, tail.Population); }
                     catch (Exception ex) { Debug.LogError("[Multiplayer] GeoSiteReflection.ApplyHavenTail population failed (skipped): " + ex.Message); }
                 }
+                ApplyHavenStock(haven, tail.Stock);   // rewrite the trade shelf value-only (last-wins)
                 try
                 {
                     if (_havenIsInfestedProp != null
