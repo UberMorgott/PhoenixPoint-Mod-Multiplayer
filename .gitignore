@@ -29,3 +29,4 @@ desktop.ini
 # Goldberg / second-instance emulator binaries (local test rig only)
 tools/goldberg/*.7z
 tools/goldberg/steam_api64.dll
+audit/
