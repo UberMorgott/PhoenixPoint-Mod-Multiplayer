@@ -3,6 +3,7 @@ using System.Reflection;
 using Base.Core;
 using HarmonyLib;
 using Multiplayer.Network;
+using PhoenixPoint.Geoscape.Levels;
 
 namespace Multiplayer.Harmony
 {
@@ -52,6 +53,30 @@ namespace Multiplayer.Harmony
                 return true; // fail-open: never suppress on an unexpected error, never throw into the game
             }
         }
+
+        /// <summary>
+        /// Precise safety check for TFTV.TFTVCapturePandoransGeoscape.RefreshFoodAndMutagenProductionTooltupUI,
+        /// which derefs GameUtl.CurrentLevel().GetComponent&lt;GeoLevelController&gt;().View.GeoscapeModules
+        /// .ResourcesModule with NO null checks (TFTV-src TFTVCapturePandoransGeoscape.cs:121-122) -> NRE during
+        /// the geo->tactical / save-load teardown window. The coarse CurrentLevel()==null gate MISSES the dominant
+        /// case: mid-transition CurrentLevel() is the TACTICAL level (non-null), so GetComponent&lt;GeoLevelController&gt;()
+        /// is null -> the very next deref NREs. Mirror TFTV's exact chain and skip its body iff any link is null.
+        /// true = chain live (let TFTV run); false = skip (recovered on geoscape re-entry). Fail-SAFE (throw -> skip):
+        /// if we can't prove the chain safe, don't let TFTV run into the NRE. Role-independent (host + client).
+        /// ponytail: Unity fake-null on a Destroy()'d-but-referenced View is backstopped by the try/catch, not by ?.
+        /// </summary>
+        internal static bool FoodMutagenTooltipChainSafe()
+        {
+            try
+            {
+                var level = GameUtl.CurrentLevel();
+                if (level == null) return false;
+                var controller = level.GetComponent<GeoLevelController>();
+                if (controller == null) return false;                            // current level is tactical / torn down
+                return controller.View?.GeoscapeModules?.ResourcesModule != null; // geoscape UI actually built
+            }
+            catch { return false; } // any deref hiccup mid-teardown -> skip; never let TFTV NRE
+        }
     }
 
     // Guards TFTV.TFTVCapturePandoransGeoscape.RefreshFoodAndMutagenProductionTooltupUI() -- a public static
@@ -62,24 +87,39 @@ namespace Multiplayer.Harmony
     public static class ClientTftvFoodMutagenTooltipTeardownGuardPatch
     {
         private static Type _tftvType; // resolved once in Prepare(); used by TargetMethod()
+        private static bool _skipLogged; // throttle: one skip log per teardown streak (never re-introduce popup-storm-scale log spam)
 
         public static bool Prepare()
         {
             _tftvType = AccessTools.TypeByName(ClientTftvTeardownGuardTargets.FoodMutagenTooltipType);
-            return ClientTftvGeoscapeUiTeardownGate.ShouldBindTftvGuard(_tftvType != null); // TFTV not loaded -> Harmony skips this class
+            bool bind = ClientTftvGeoscapeUiTeardownGate.ShouldBindTftvGuard(_tftvType != null); // TFTV not loaded -> Harmony skips this class
+            // Explicit bind confirmation: a silent Prepare-false hides a TFTV rename/absence. Runs once at PatchAll.
+            UnityEngine.Debug.Log("[Multiplayer] TFTV food/mutagen tooltip null-guard "
+                + (bind ? "BOUND (RefreshFoodAndMutagenProductionTooltupUI)" : "skipped (TFTV type absent)"));
+            return bind;
         }
 
         public static MethodBase TargetMethod()
         {
             if (_tftvType == null) return null; // defensive: TFTV absent -> no target
             // Exact, parameterless overload (Type.EmptyTypes) so AccessTools binds the right member.
-            return AccessTools.Method(_tftvType, ClientTftvTeardownGuardTargets.FoodMutagenTooltipMethod, Type.EmptyTypes);
+            var m = AccessTools.Method(_tftvType, ClientTftvTeardownGuardTargets.FoodMutagenTooltipMethod, Type.EmptyTypes);
+            if (m == null) UnityEngine.Debug.LogWarning("[Multiplayer] TFTV food/mutagen tooltip null-guard: method NOT resolved (renamed?) -> guard inert");
+            return m;
         }
 
-        // Returning false SKIPS TFTV's body (no NRE, no rethrow, no popup) during the client teardown window.
+        // Precise defensive null-guard for the TFTV bug ITSELF (host + client): skip TFTV's body iff its own
+        // View/GeoscapeModules/ResourcesModule chain is not live (would NRE), superseding the coarse
+        // CurrentLevel()==null decision for THIS method. One throttled skip log; recovered on geoscape re-entry.
         public static bool Prefix()
         {
-            return ClientTftvGeoscapeUiTeardownDecision.RunTftvUiNormally();
+            if (ClientTftvGeoscapeUiTeardownDecision.FoodMutagenTooltipChainSafe()) { _skipLogged = false; return true; }
+            if (!_skipLogged)
+            {
+                _skipLogged = true;
+                UnityEngine.Debug.Log("[Multiplayer] TFTV RefreshFoodAndMutagenProductionTooltupUI SKIPPED guard=geoscape UI chain not live (level/GeoLevelController/View/modules/bar null in teardown)");
+            }
+            return false;
         }
     }
 
