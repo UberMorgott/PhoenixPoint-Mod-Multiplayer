@@ -85,30 +85,4 @@ namespace Multiplayer.Harmony
         }
     }
 
-    [HarmonyPatch]
-    public static class InventoryActionPatch
-    {
-        private static Type _targetType;
-        private static MethodBase _targetMethod;
-
-        public static bool Prepare()
-        {
-            _targetType = AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateInventory");
-            _targetMethod = AccessTools.Method(_targetType, "AttemptMoveItems");
-            return _targetMethod != null;
-        }
-
-        public static MethodBase TargetMethod() => _targetMethod;
-
-        public static bool Prefix()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActive) return true;
-            if (engine.IsHost) return true;
-
-            var msg = new NetworkMessage(PacketType.TacticalActionRequest);
-            engine.SendToHost(msg);
-            return false;
-        }
-    }
 }
