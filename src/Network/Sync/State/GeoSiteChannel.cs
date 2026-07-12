@@ -212,6 +212,10 @@ namespace Multiplayer.Network.Sync.State
             if (_token == null) { _map = null; return; } // no event bound → retry next frame
             _live = this;                                // host-attached → out-of-band dirty marks target us
             Debug.Log("[Multiplayer] GeoSiteChannel: subscribed site events on live GeoMap (rebind-safe)");
+            // SeedTrace: this fresh-map rebind is the known LAST log line before the host seed-death — arm the
+            // breadcrumb window here so the following poll/flush steps are traced right through the crash.
+            SeedTrace.Arm();
+            SeedTrace.Mark("GeoSiteChannel AttachHost rebound to fresh GeoMap (seed anchor)");
         }
 
         public void DetachHost()

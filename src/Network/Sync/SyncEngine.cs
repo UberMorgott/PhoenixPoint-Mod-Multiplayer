@@ -702,26 +702,33 @@ namespace Multiplayer.Network.Sync
             if (_flushTripwire.OnFlush(channel.ChannelId, _flushClock.ElapsedMilliseconds))
                 Debug.LogWarning("[Multiplayer] TRIPWIRE: state channel #" + channel.ChannelId
                                  + " flushing >5/s sustained 3s — per-frame dirty-mark storm suspected (fix the seam, not this log)");
+            if (SeedTrace.Active) SeedTrace.Mark("flush " + channel.GetType().Name + " (ch=" + channel.ChannelId + ") snapshot-start");
             var payload = channel.Snapshot(GeoRuntime.Instance);
             if (payload == null) return;
+            if (SeedTrace.Active) SeedTrace.Mark("flush " + channel.GetType().Name + " (ch=" + channel.ChannelId + ") snapshot-done len=" + payload.Length);
             byte id = channel.ChannelId;
             _channelVersion.TryGetValue(id, out var v);
             v++;
             _channelVersion[id] = v;
             var stateBytes = SyncProtocol.EncodeStateSync(id, v, payload);
+            if (SeedTrace.Active) SeedTrace.Mark("flush " + channel.GetType().Name + " (ch=" + id + ") encode-done len=" + stateBytes.Length);
             // Rail-unify phase 1: the legacy 0x64 StateSync send is RETIRED — the per-channel state echo now rides
             // ONLY the unified 0x67 envelope rail under the GeoState (0xA1) surface. The inner bytes are the
             // IDENTICAL EncodeStateSync(id, v, payload) the legacy 0x64 carried, so the client applier (OnStateSync,
             // per-channel version-guarded) is unchanged, reached via HandleGeoscapeEnvelope. Sole rail, unconditional.
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                 SyncProtocol.EncodeEnvelope(SurfaceIds.GeoState, SyncKind.StateSnapshot, stateBytes)));
+            if (SeedTrace.Active) SeedTrace.Mark("flush " + channel.GetType().Name + " (ch=" + id + ") broadcast-done");
         }
 
         /// <summary>Host: push every channel's current state (geoscape became active / late joiner ready).</summary>
         public void BroadcastAllChannels()
         {
             if (!_engine.IsHost) return;
+            SeedTrace.Arm();   // full-seed entry point — open the breadcrumb window even if no rebind fired this frame.
+            SeedTrace.Mark("BroadcastAllChannels ENTER (full seed)");
             foreach (var ch in _channels.All) FlushChannel(ch);
+            SeedTrace.Mark("BroadcastAllChannels EXIT");
         }
 
         public void OnStateSync(byte[] data)
@@ -2159,6 +2166,9 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
+            // SeedTrace: age the breadcrumb window once per host tick (auto-silences ~20 s after each seed).
+            SeedTrace.FrameTick();
+
             // Host: broadcast any report deferred for a post-cascade payload read (research nav flag) —
             // by this tick the completion dispatch that queued it has fully settled.
             FlushDeferredReportModals();
@@ -2191,8 +2201,14 @@ namespace Multiplayer.Network.Sync
                 }
             }
 
+            // SeedTrace: wrap the whole host seed/flush sequence. An SO cannot be caught here, but a managed
+            // exception would otherwise be swallowed by the per-frame caller; the breadcrumb Marks below are the
+            // primary tool (last line in multiplayer.log before EOF names the dying step/channel).
+            try
+            {
             // Host: bind every state channel's change-event the same way (idempotent per channel).
             foreach (var ch in _channels.All) ch.AttachHost(this);
+            SeedTrace.Mark("attachhost-loop done");
 
             // Host: inventory (channel #1) signature-drift POLL — the storage convergence backstop for
             // native writers that never raise StorageChanged (post-mission replenish, UIModuleReplenish;
@@ -2201,6 +2217,7 @@ namespace Multiplayer.Network.Sync
             if (++_inventoryPollTick >= InventoryPollTickInterval)
             {
                 _inventoryPollTick = 0;
+                SeedTrace.Mark("poll Inventory (#1)");
                 (_channels.Get(SurfaceIds.InventoryChannel) as State.InventoryChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
@@ -2212,6 +2229,7 @@ namespace Multiplayer.Network.Sync
             if (++_researchPollTick >= ResearchPollTickInterval)
             {
                 _researchPollTick = 0;
+                SeedTrace.Mark("poll Research (#2)");
                 (_channels.Get(SurfaceIds.ResearchChannel) as State.ResearchChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
@@ -2225,37 +2243,46 @@ namespace Multiplayer.Network.Sync
             if (++_unlockPollTick >= UnlockPollTickInterval)
             {
                 _unlockPollTick = 0;
+                SeedTrace.Mark("poll Unlock (#3)");
                 (_channels.Get(SurfaceIds.UnlockChannel) as State.UnlockChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
             if (++_objectivesPollTick >= ObjectivesPollTickInterval)
             {
                 _objectivesPollTick = 0;
+                SeedTrace.Mark("poll Objectives (#7)");
                 (_channels.Get(SurfaceIds.ObjectivesChannel) as State.ObjectivesChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
             if (++_recruitPollTick >= RecruitPollTickInterval)
             {
                 _recruitPollTick = 0;
+                SeedTrace.Mark("poll RecruitPool (#10)");
                 (_channels.Get(SurfaceIds.RecruitPoolChannel) as State.RecruitPoolChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
             if (++_sitePollTick >= SitePollTickInterval)
             {
                 _sitePollTick = 0;
+                SeedTrace.Mark("poll GeoSite (#5, ~70-site reflection walk) start");
                 (_channels.Get(SurfaceIds.GeoSiteChannel) as State.GeoSiteChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
+                SeedTrace.Mark("poll GeoSite (#5) done");
             }
             if (++_personnelPollTick >= PersonnelPollTickInterval)
             {
                 _personnelPollTick = 0;
+                SeedTrace.Mark("poll Personnel (#9)");
                 (_channels.Get(SurfaceIds.PersonnelChannel) as State.PersonnelChannel)
                     ?.PollHostDrift(GeoRuntime.Instance, this);
             }
 
+            SeedTrace.Mark("all drift-polls done");
+
             if (_walletDirty)
             {
                 _walletDirty = false;
+                SeedTrace.Mark("wallet dirty-flush start");
                 var slots = WalletApplier.Snapshot(GeoRuntime.Instance);
                 if (slots != null)
                 {
@@ -2285,12 +2312,19 @@ namespace Multiplayer.Network.Sync
             // Coalesced per-channel flush: snapshot + ++version + broadcast each dirty channel once.
             if (_channelDirty.Count > 0)
             {
+                if (SeedTrace.Active) SeedTrace.Mark("channel-dirty-flush loop start count=" + _channelDirty.Count);
                 foreach (var id in _channelDirty)
                 {
                     var ch = _channels.Get(id);
                     if (ch != null) FlushChannel(ch);
                 }
                 _channelDirty.Clear();
+            }
+            SeedTrace.Mark("host-flush region done");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] SeedTrace: host seed/flush region threw (managed, not the SO): " + ex);
             }
 
             // Inc4 S2 — host-driven travel mirror. Throttled poll of every MOVING vehicle's world placement,
