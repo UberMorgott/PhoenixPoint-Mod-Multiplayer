@@ -47,4 +47,44 @@ namespace Multiplayer.Harmony.Tactical
             }
         }
     }
+
+    /// <summary>
+    /// Inc Vision — HOST turn-boundary vision-push trigger. Postfix on
+    /// <c>TacticalFactionVision.OnFactionStartTurn()</c> (TacticalFactionVision.cs:154). At every faction
+    /// turn start the host ages out located-enemy knowledge (<c>DecrementMyCountersForFaction</c> +
+    /// <c>UpdateVisibilityAll(notifyChange:false)</c>, :166-170) with notifyChange:false → NO
+    /// <c>FactionKnowledgeChanged</c> fires, so <see cref="VisionBroadcastPatch"/> (and the enemy-action
+    /// pushes) never re-broadcast the shrunken set and the client keeps STALE located icons. This postfix
+    /// closes that gap: <see cref="TacticalVisionSync.HostOnFactionStartTurn"/> forces one dedup-guard reset
+    /// + a <c>tac.vision</c> re-baseline so the client drops the aged-out enemies once per turn. Host + co-op
+    /// gated at runtime inside the handler; off-host / single-player → no-op. Coexists with the client-side
+    /// <c>VisionOnFactionStartTurnSuppressPatch</c> prefix on the same method (the suppress prefix runs the
+    /// native body on the host, then this postfix pushes; on the client the handler is host-gated → no-op).
+    /// Auto-registers via PatchAll.
+    /// </summary>
+    [HarmonyPatch]
+    public static class VisionStartTurnBroadcastPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
+            if (t == null) return false;
+            // public void OnFactionStartTurn() — no params (TacticalFactionVision.cs:154).
+            _target = AccessTools.Method(t, "OnFactionStartTurn");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix()
+        {
+            try { TacticalVisionSync.HostOnFactionStartTurn(); }
+            catch (System.Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] VisionStartTurnBroadcastPatch.Postfix failed: " + ex);
+            }
+        }
+    }
 }

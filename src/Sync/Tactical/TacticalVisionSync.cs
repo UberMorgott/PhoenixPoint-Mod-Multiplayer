@@ -66,6 +66,25 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnFactionKnowledgeChanged failed: " + ex); }
         }
 
+        /// <summary>HOST inbound (from the <c>TacticalFactionVision.OnFactionStartTurn</c> postfix): the turn
+        /// boundary ages out this faction's located-enemy knowledge via <c>DecrementMyCountersForFaction</c> +
+        /// <c>UpdateVisibilityAll(notifyChange:false)</c> (TacticalFactionVision.cs:166-170) — a pure "forget"
+        /// that raises NO <c>FactionKnowledgeChanged</c>, so the per-event push (<see cref="HostOnFactionKnowledgeChanged"/>)
+        /// and the enemy-action pushes never run for it, leaving the client holding STALE located enemies.
+        /// FORCE one re-baseline (reset the dedup guard so an unchanged-content snapshot still goes out ONCE
+        /// per faction-turn-start — this also heals a dropped first snapshot) and broadcast the aged-out set.
+        /// Fires for EVERY faction's start (postfix is faction-agnostic); <see cref="HostBroadcastVision"/>
+        /// always re-snapshots the shared PLAYER faction, so the triggering faction is irrelevant. Host + co-op
+        /// only — no-op off-host / when mirroring (both guarded below and inside HostBroadcastVision).</summary>
+        public static void HostOnFactionStartTurn()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            HostResetBroadcastGuard();   // force ONE re-baseline this turn even if the located set is unchanged
+            HostBroadcastVision();
+        }
+
         // ─── HOST: snapshot the player faction's KnownActors → broadcast tac.vision ──────────────────
         /// <summary>HOST: snapshot the player faction's <c>Vision.KnownActors</c> and broadcast <c>tac.vision</c>
         /// to all peers. For each known actor with a resolvable netId: Revealed→2, else Located→1, else skip.</summary>
