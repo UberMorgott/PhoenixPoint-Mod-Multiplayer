@@ -543,6 +543,30 @@ namespace Multiplayer.UI
 
         // ─── Smart-Join (footer Join…) ─────────────────────────────────────
 
+        // True when THIS engine is a LIVE DirectIP host: we hold the host role AND the DirectIP child
+        // transport is actually Connected (bound + listening). Keyed on the DirectIP child's OWN state,
+        // NOT CompositeTransport's aggregate — a 2nd same-box instance whose DirectIP bind FAILED
+        // (AddressAlreadyInUse) is NOT a healthy host even if another child (STUN/Steam) came up, so it
+        // is still allowed to join 127.0.0.1:<port> (the legitimate 2-instance same-box test).
+        private static bool IsHealthyDirectHost()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return false;
+            var t = engine.Transport;
+            if (t == null) return false;
+            ITransport direct = null;
+            if (t is CompositeTransport comp)
+            {
+                foreach (var c in comp.Children)
+                    if (c.TransportType == TransportType.DirectIP) { direct = c; break; }
+            }
+            else if (t.TransportType == TransportType.DirectIP)
+            {
+                direct = t;
+            }
+            return direct != null && direct.State == ConnectionState.Connected;
+        }
+
         // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
         public void OnLobbyJoin(string input)
         {
@@ -558,6 +582,22 @@ namespace Multiplayer.UI
                 _lobby?.HideForNativeScreen();
                 mbErr?.ShowSimplePrompt("Could not read that address or code.",
                     MessageBoxIcon.Error, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                return;
+            }
+
+            // UX-safety guard: a HEALTHY DirectIP host pasting its OWN loopback:port is trying to join
+            // the game it just created. The unconditional teardown below would Disconnect()+Shutdown()
+            // the live host listener, then connect to a port nothing listens on → ConnectionRefused.
+            // Refuse and keep the host session intact instead. (Failed-bind 2nd instance → not healthy →
+            // falls through and still joins 127.0.0.1:<port>.)
+            if (IsHealthyDirectHost() && SmartJoinParser.IsOwnLoopback(target, DefaultDirectPort))
+            {
+                var mbSelf = GameUtl.GetMessageBox();
+                _lobby?.HideForNativeScreen();
+                mbSelf?.ShowSimplePrompt(
+                    "You're already hosting — share your IP or invite code; you can't join your own game.",
+                    MessageBoxIcon.Information, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
                 return;
             }
@@ -683,9 +723,13 @@ namespace Multiplayer.UI
             var clipIsCode = !string.IsNullOrEmpty(clip)
                 && (InviteCode.TryDecode(clip, out _)
                     || UnifiedCode.TryDecode(clip, out _, out _, out _, out _));
+            // A healthy host has no reason to self-join, so don't seed its OWN loopback endpoint (the
+            // footgun); leave the field blank (empty OK is blocked by ValidateResult). A clipboard
+            // invite still prefills, and a non-healthy 2nd same-box instance keeps the localhost default
+            // so the legitimate 2-instance test's one-press OK still works.
             var prefill = clipIsCode
                 ? clip.Trim()
-                : "127.0.0.1:" + SmartJoinParser.DefaultDirectPort;
+                : (IsHealthyDirectHost() ? "" : "127.0.0.1:" + SmartJoinParser.DefaultDirectPort);
             TryUpgradePromptInput("Invite code, IP:port, or STUN code", prefill);
         }
 

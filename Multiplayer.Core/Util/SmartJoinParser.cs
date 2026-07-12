@@ -37,6 +37,16 @@ namespace Multiplayer.Util
     {
         public const int DefaultDirectPort = 14242;
 
+        // True when a parsed target is a plain DirectIP aimed at our OWN loopback:boundPort — i.e. the
+        // endpoint our own auto-host binds. Pure (no networking): callers pair it with a live "am I a
+        // healthy host" check to refuse a host trying to join its own game. IPAddress.IsLoopback covers
+        // the whole 127.0.0.0/8 block and ::1; localhost is already normalized to 127.0.0.1 by Parse.
+        public static bool IsOwnLoopback(JoinTarget target, int boundPort)
+            => target.Kind == JoinKind.DirectIp
+               && target.Port == boundPort
+               && IPAddress.TryParse(target.Ip, out var a)
+               && IPAddress.IsLoopback(a);
+
         public static JoinTarget Parse(string input)
         {
             if (string.IsNullOrWhiteSpace(input)) return JoinTarget.Invalid();

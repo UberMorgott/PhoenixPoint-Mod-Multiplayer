@@ -114,5 +114,23 @@ namespace Multiplayer.Tests
         {
             Assert.Equal(JoinKind.Invalid, SmartJoinParser.Parse(bad).Kind);
         }
+
+        [Theory]
+        [InlineData("127.0.0.1:14242")]   // literal loopback + our port
+        [InlineData("localhost")]         // normalizes to 127.0.0.1:14242
+        [InlineData("127.5.6.7:14242")]   // anywhere in 127.0.0.0/8 is loopback
+        public void IsOwnLoopback_TrueForOwnLoopbackEndpoint(string input)
+        {
+            Assert.True(SmartJoinParser.IsOwnLoopback(SmartJoinParser.Parse(input), 14242));
+        }
+
+        [Theory]
+        [InlineData("127.0.0.1:14243")]     // loopback but wrong (not our) port
+        [InlineData("192.168.1.5:14242")]   // our port but a LAN address, not loopback
+        [InlineData("76561198000000000")]   // not a DirectIP target at all
+        public void IsOwnLoopback_FalseForEverythingElse(string input)
+        {
+            Assert.False(SmartJoinParser.IsOwnLoopback(SmartJoinParser.Parse(input), 14242));
+        }
     }
 }
