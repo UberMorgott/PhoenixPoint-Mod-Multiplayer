@@ -13,6 +13,12 @@ namespace Multiplayer.Network
         private readonly Dictionary<ulong, ClientInfo> _clients = new Dictionary<ulong, ClientInfo>();
         private readonly Dictionary<ulong, long> _lastHeartbeat = new Dictionary<ulong, long>();
         private readonly HashSet<ulong> _readyClients = new HashSet<ulong>();
+        // SECURITY: first-seen binding of a persistent PlayerGuid to the authenticated transport
+        // identity (SteamId) that claimed it. PlayerGuid is public (broadcast in PEER_LIST), so this
+        // binding is what stops a peer from JOINing under another player's guid to inherit their slot /
+        // permissions / owned soldiers (identity takeover). Never pruned — a guid belongs to its owner
+        // for the whole session, even across a disconnect/reconnect.
+        private readonly Dictionary<Guid, ulong> _guidOwners = new Dictionary<Guid, ulong>();
 
         // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
         // BroadcastChat is appended here in arrival order; on a new client fully joining the host
@@ -332,6 +338,24 @@ namespace Multiplayer.Network
                 _engine.SendToClient(clientId, reject);
                 return;
             }
+
+            // HARDENING (identity takeover): PlayerGuid is the permission/ownership key but it is PUBLIC
+            // (broadcast to every peer in PEER_LIST), so a peer could JOIN carrying ANOTHER player's guid
+            // and be treated as that player "reconnecting" — evicting the victim (below) and inheriting
+            // their slot/permissions/owned soldiers. Bind the guid to the authenticated transport identity:
+            // the FIRST SteamId to claim a guid owns it; a JOIN re-asserting that guid from a DIFFERENT
+            // SteamId is a takeover attempt → reject BEFORE any stale-peer eviction. A legit reconnect keeps
+            // the same SteamId (a new transport address does not change it), so it passes and re-binds idempotently.
+            if (_guidOwners.TryGetValue(join.PlayerGuid, out var boundSteamId) && boundSteamId != clientId)
+            {
+                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
+                               $"already bound to a different SteamId {boundSteamId} — identity-takeover attempt.");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+            _guidOwners[join.PlayerGuid] = clientId;
 
             // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
             // in the roster is a reconnect of a known player whose previous connection died (possibly a
@@ -748,7 +772,14 @@ namespace Multiplayer.Network
         // LEAVE (C→H / H→all): graceful lobby/session leave.
         public void HandleLeave(NetworkMessage msg)
         {
-            var peerSteamId = MessageSerializer.DeserializeLeave(msg.Payload);
+            // SECURITY: a client may only leave ITSELF. On the host key the leave off the
+            // transport-authenticated sender (msg.SenderSteamId), NOT the self-asserted payload id —
+            // every peer's SteamId is public via PEER_LIST, so trusting the payload would let any peer
+            // force-disconnect any victim (mirror HandleRename/HandleChat keying). On a client the host
+            // has already stamped the authoritative leaver id into the payload it re-broadcast.
+            var peerSteamId = _engine.IsHost
+                ? msg.SenderSteamId
+                : MessageSerializer.DeserializeLeave(msg.Payload);
             if (_engine.IsHost)
             {
                 // Re-broadcast leave so all peers drop the client (RemoveClient refreshes the roster).
