@@ -957,19 +957,35 @@ namespace Multiplayer.Sync.Tactical
             }
         }
 
-        /// <summary>Disarm mirror mode + clear per-mission state (mission exit). Idempotent.</summary>
-        public static void OnMissionExit()
+        /// <summary>Disarm mirror mode + clear per-mission state (mission exit). Idempotent.
+        /// <paramref name="isReloadBoundary"/>=true marks the SyncEngine reload-boundary sweep (a save-load),
+        /// which — since df9a8d4's entry-via-save — is ALSO how the client ENTERS tactical. In that case an
+        /// in-flight ENTRY deploy is already stashed but not yet hydrated (hydrate fires at the post-reload
+        /// Playing seam), so wiping it here drops 100% of tac.* (the df9a8d4 regression). A pending deploy is
+        /// nulled the instant hydrate arms (see ClientHydrateNow), so <c>_pendingClientDeploy != null</c> here
+        /// uniquely means "entry deploy awaiting hydrate"; a genuine mid-mission F2/save reload has none
+        /// (already hydrated → null), so preserving is a no-op there. Genuine mission-END
+        /// (<c>isReloadBoundary=false</c>, TacticalLevelEndPatch) always clears it.</summary>
+        public static void OnMissionExit(bool isReloadBoundary = false)
         {
+            // Keep a stashed-but-unhydrated ENTRY deploy (+ its entry/launch watchdogs) alive across a
+            // reload-boundary sweep so the post-reload Playing seam can still hydrate. Narrow: only on the
+            // reload-boundary path, only while a deploy is actually pending. (df9a8d4 regression.)
+            bool preserveEntryDeploy = isReloadBoundary && _pendingClientDeploy != null;
+
             // (a) Reset the lifecycle-critical + purely-local statics FIRST — BEFORE any EXTERNAL guard reset
             //     below can throw. The Inc-T1 HostStartFlush coroutine self-stops by watching LiveTlc, so if an
             //     external reset threw and skipped `LiveTlc = null`, that coroutine would LEAK into the next
             //     mission. Doing the local teardown up-front makes the lifecycle reset exception-proof. (N1.)
             _mirrorArmed = false;
             _hydrateScheduled = false;
-            _pendingClientDeploy = null;
             _missionActorTable = null;   // rematch/lazy-bind coroutines watch this → self-stop
-            _launchStallDeadline = 0f;
-            _entryStallDeadline = 0f;
+            if (!preserveEntryDeploy)
+            {
+                _pendingClientDeploy = null;
+                _launchStallDeadline = 0f;
+                _entryStallDeadline = 0f;
+            }
             _lastBroadcastSiteId = int.MinValue;
             _captureScheduledSiteId = int.MinValue;
             _hydratedSiteId = int.MinValue;

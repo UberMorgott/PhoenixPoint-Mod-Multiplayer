@@ -245,7 +245,11 @@ namespace Multiplayer.Network.Sync
             // Tactical per-mission state: a host mid-battle LOAD tears the level down WITHOUT the mission-end
             // path that normally drives OnMissionExit — sweep it here so pending buffers/mirror-arm/live rails
             // never leak into the reloaded session. Documented idempotent (no-op when already exited/never armed).
-            _reloadReset.Register("tactical-mission-state", Multiplayer.Sync.Tactical.TacticalDeploySync.OnMissionExit);
+            // isReloadBoundary:true — a save-load is ALSO the client's tactical ENTRY (entry-via-save, df9a8d4),
+            // so OnMissionExit must NOT wipe an in-flight-but-unhydrated ENTRY deploy here (hydrate fires at the
+            // post-reload Playing seam). It still fully sweeps live rails/mirror/registry. Genuine mission-END
+            // (TacticalLevelEndPatch) calls OnMissionExit() with the default false → clears everything.
+            _reloadReset.Register("tactical-mission-state", () => Multiplayer.Sync.Tactical.TacticalDeploySync.OnMissionExit(isReloadBoundary: true));
             // Client clock re-arm (audit d — did NOT fire on this boundary before): re-burst pings, accept the
             // host's next anchor unconditionally and HARD-SET the display across the reload's game-time jump
             // (no lerp from the dead save's clock); re-pushes the pause/speed widgets. Self-guarded no-op on host.
