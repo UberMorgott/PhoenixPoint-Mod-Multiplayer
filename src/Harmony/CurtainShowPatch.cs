@@ -89,6 +89,16 @@ namespace Multiplayer.Harmony
                         if (playingCoord != null && playingCoord.SessionStarted)
                         {
                             playingCoord.OnReachedPlaying();           // co-op: hold until RevealAll
+
+                            // Save-loaded tactical entry (geo→tac save-transfer) restores ALREADY in Playing, so
+                            // native TacticalLevelController.OnLevelStateChanged never fires → TacticalLevelStateChangedPatch
+                            // never arms the client mirror (everyone controlled all soldiers). Arm it here via the SAME
+                            // path; idempotent + client/host/session/pending-guarded inside → no-op on the direct-launch
+                            // path (already armed) and on the host.
+                            Multiplayer.Sync.Tactical.TacticalDeploySync.ClientOnLevelReadyFromCurtain();
+                            // Only tactical-side clear of the geo→tactical gate that fires on THIS path (the
+                            // TacticalLevelStateChangedPatch clear never runs here). Client-only flag; no-op on host.
+                            Multiplayer.Network.Sync.State.GeoTransitionGate.InTransition = false;
                         }
                         else
                             MultiplayerUI.Instance?.HideLoadOverlay();  // non-co-op: unchanged

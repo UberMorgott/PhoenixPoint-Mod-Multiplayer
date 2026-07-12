@@ -32,6 +32,10 @@ namespace Multiplayer.Sync.Tactical
         // The host is NEVER in mirror mode — it runs the authoritative sim.
         private static bool _mirrorArmed;
         public static bool MirrorArmed => _mirrorArmed;
+        // A client hydrate is scheduled/in-flight (the hydrate DEFERS onto a coroutine, so _pendingClientDeploy
+        // is not cleared until it runs). Dedups the two Playing seams that can both fire the same frame —
+        // TacticalLevelStateChangedPatch (direct launch) + CurtainShowPatch (save-loaded entry). Reset on exit.
+        private static bool _hydrateScheduled;
 
         // ─── Batch-1 feature flag: tactical mission ENTRY via mid-tactical save transfer ────
         // When ON, the host ships a byte-identical mid-tactical save at deploy-ready and the client BUILDS
@@ -743,6 +747,12 @@ namespace Multiplayer.Sync.Tactical
             if (engine == null || !engine.IsActive || engine.IsHost) return;
             _launchStallDeadline = 0f;   // level reached Playing (or live-level hydrate) → stall watchdog off
             if (_pendingClientDeploy == null || tacticalLevelController == null) return;
+            // Idempotent across the two Playing seams (direct-launch TacticalLevelStateChangedPatch +
+            // save-loaded CurtainShowPatch): the hydrate is deferred, so _pendingClientDeploy is not cleared
+            // until it runs — without this a 2nd same-frame call would schedule a 2nd hydrate (double
+            // ProcessInstanceData / double-arm). Reset in OnMissionExit.
+            if (_mirrorArmed || _hydrateScheduled) return;
+            _hydrateScheduled = true;
             EnsureReflection();
 
             object timing = ResolveTiming(tacticalLevelController);
@@ -758,6 +768,17 @@ namespace Multiplayer.Sync.Tactical
                 Debug.LogError("[Multiplayer][tac] CLIENT hydrate: no Timing resolvable — hydrating inline (may throw on serializer)");
             }
             ClientHydrateNow(tacticalLevelController, alreadyLoaded);
+        }
+
+        /// <summary>Save-loaded tactical entry (geo→tac save-transfer): the level restores ALREADY in Playing, so
+        /// native <c>TacticalLevelController.OnLevelStateChanged</c> never fires and TacticalLevelStateChangedPatch
+        /// never arms the client mirror. <c>CurtainShowPatch</c> calls this at its own Playing seam instead. Reuses
+        /// <see cref="ClientOnLevelReady"/> with <c>alreadyLoaded:true</c> (the native save-load already ran
+        /// ProcessInstanceData); the client/host/session/pending/dup guards there make it a safe no-op on the host,
+        /// off-session, with no pending deploy, or when the direct-launch path already armed.</summary>
+        public static void ClientOnLevelReadyFromCurtain()
+        {
+            ClientOnLevelReady(LiveTacticalLevelController(), alreadyLoaded: true);
         }
 
         /// <summary>Resolve a <c>Base.Core.Timing</c> to start the client hydrate coroutine on: prefer the live
@@ -944,6 +965,7 @@ namespace Multiplayer.Sync.Tactical
             //     external reset threw and skipped `LiveTlc = null`, that coroutine would LEAK into the next
             //     mission. Doing the local teardown up-front makes the lifecycle reset exception-proof. (N1.)
             _mirrorArmed = false;
+            _hydrateScheduled = false;
             _pendingClientDeploy = null;
             _missionActorTable = null;   // rematch/lazy-bind coroutines watch this → self-stop
             _launchStallDeadline = 0f;
