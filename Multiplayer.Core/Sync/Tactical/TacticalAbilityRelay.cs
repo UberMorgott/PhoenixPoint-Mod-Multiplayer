@@ -376,12 +376,24 @@ namespace Multiplayer.Sync.Tactical
         /// <c>TacticalView.ResetCharacterSelectedState</c> SELF-GUARDS on <c>CurrentState is UIStateCharacterSelected</c>
         /// (TacticalView.cs:308) → it NO-OPs while one of these sub-states is on top, so the sub-state's
         /// <c>ExitState</c> teardown (overwatch/aim visuals + <c>DoCameraChaseParam</c> camera, restored only by a fresh
-        /// CharacterSelected) never runs → HUD-less, camera-locked wedge. (Shoot uses <c>UIStateShoot</c> but confirms
-        /// with ReplaceTop — never ClearStackAndPush — so it never reaches the suppress gate.)</summary>
+        /// CharacterSelected) never runs → HUD-less, camera-locked wedge.
+        ///
+        /// SHOOT AIM SUB-STATES (added): <c>UIStateFreeCam</c> (first-person manual/body-part aim) and its base
+        /// <c>UIStateShoot</c> (third-person orbit aim). These confirm the shot with <c>ReplaceTop</c> (NOT
+        /// ClearStackAndPush), so <c>SuppressedAbilityViewClearPatch</c> now ALSO gates on this set to intercept that
+        /// ReplaceTop: a mirroring client that suppresses <c>ShootAbility.Activate</c> from here would otherwise let
+        /// native <c>ActivateAbility</c> push <c>UIStateWaiting</c>, which — since the client never consumed the shot
+        /// locally — re-enters the modal aim sub-state → the client wedges in the aim reticle (the reported
+        /// first-person free-aim freeze; the fire-anim prediction still plays, only the aim-state EXIT was missing).
+        /// Full-stack recovery force-exits the aim sub-state back to a fresh <c>UIStateCharacterSelected</c> —
+        /// exactly the working move/melee/overwatch recovery — so the client returns to command after each relayed
+        /// shot (canon: client is display-only; the host drives the shot + any follow-up).</summary>
         public static readonly string[] AimSubStateViewNames =
         {
             "UIStateOverwatchAbilitySelected", // overwatch arm (PushOnTop; ExitState restores cones + StopDrawing)
             "UIStateAbilitySelected",          // bash + other non-shoot abilities (PushOnTop)
+            "UIStateFreeCam",                  // shoot: first-person manual/body-part aim (reported freeze; extends UIStateShoot)
+            "UIStateShoot",                    // shoot: third-person orbit aim (same suppressed-shoot ReplaceTop seam)
         };
 
         private static readonly HashSet<string> _aimSubStates =

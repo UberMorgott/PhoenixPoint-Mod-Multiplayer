@@ -110,6 +110,8 @@ public class TacticalAbilityRelayTests
     [Theory]
     [InlineData("UIStateOverwatchAbilitySelected")] // overwatch arm — the reported critical wedge
     [InlineData("UIStateAbilitySelected")]          // bash (co-affected by the same latent bug)
+    [InlineData("UIStateFreeCam")]                  // shoot: first-person manual aim — the reported aimed-shot freeze
+    [InlineData("UIStateShoot")]                    // shoot: third-person orbit aim — same suppressed-shoot ReplaceTop seam
     public void AimSubState_NeedsFullStackRecovery(string currentViewStateName)
     {
         Assert.True(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
@@ -117,7 +119,6 @@ public class TacticalAbilityRelayTests
 
     [Theory]
     [InlineData("UIStateCharacterSelected")] // Move confirms from here directly → guarded reset works → no full clear
-    [InlineData("UIStateShoot")]             // shoot confirms with ReplaceTop, never reaches the gate → conservative
     [InlineData("UIStateWaiting")]
     [InlineData("UIStateInitial")]
     [InlineData("SomeFutureUnknownState")]

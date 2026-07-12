@@ -102,17 +102,32 @@ namespace Multiplayer.Harmony.Tactical
             {
                 if (!TacticalDeploySync.IsClientMirroring) return true;          // host / single-player → native
                 if (__0 == null) return true;
-                if (!Equals(__2, _clearStackAndPush)) return true;              // ReplaceTop/PushOnTop are safe (incl. shoot)
                 if (!TacticalAbilityRelay.IsClientSuppressedActivation(__0.GetType().Name)) return true; // not suppressed → native
 
-                // Replicate native ActivateAbility lines 300-301, then skip the wedging clear (302-306).
-                //   ability.Activate(target) → triggers the EXISTING suppression prefix EXACTLY ONCE (returns false:
-                //   the tac.intent.* is relayed, real execution suppressed). No double-intent: native line 300 never
-                //   runs because we return false below.
-                _activate.Invoke(__0, new[] { __1 });
-
+                // Resolve the live view + current view-state name UP FRONT: the state drives BOTH the gate below
+                // (which ReplaceTop activations to intercept) AND the recovery choice. The suppressed Activate does
+                // NOT change the view state, so reading it before Activate is equivalent to the old post-Activate read.
                 object ctx = _contextProp.GetValue(__instance, null);
                 object view = ctx != null ? _viewField.GetValue(ctx) : null;
+                string stateName = ReadCurrentStateName(view);
+
+                // GATE. Intercept:
+                //   • the wedging ClearStackAndPush confirm (move / bash / overwatch) — as before; OR
+                //   • a suppressed SHOOT confirm's ReplaceTop fired from a shoot AIM sub-state (UIStateFreeCam /
+                //     UIStateShoot — now in AimSubStateViewNames): there the suppressed ShootAbility.Activate lets
+                //     native ActivateAbility push UIStateWaiting, which — since the client never consumed the shot
+                //     locally — re-enters the modal aim state → the client wedges in the aim reticle (the reported
+                //     first-person free-aim freeze; multiplayer-3.log shows state=UIStateFreeCam stuck after the shot).
+                // Any OTHER ReplaceTop/PushOnTop stays native (e.g. a shoot confirmed from the bare control state).
+                bool clearStackAndPush = Equals(__2, _clearStackAndPush);
+                if (!clearStackAndPush && !TacticalAbilityRelay.NeedsFullStackRecovery(stateName)) return true;
+
+                // Replicate native ActivateAbility lines 300-301, then skip the wedging clear / UIStateWaiting push.
+                //   ability.Activate(target) → triggers the EXISTING suppression prefix EXACTLY ONCE (returns false:
+                //   the tac.intent.* is relayed, real execution suppressed + the client-predicted fire anim starts).
+                //   No double-intent: native line 300 never runs because we return false below.
+                _activate.Invoke(__0, new[] { __1 });
+
                 if (view != null)
                 {
                     var upd = _updateApWp ?? (_updateApWp = AccessTools.Method(view.GetType(), "UpdateSquadMembersActionAndWillPoints"));
@@ -129,11 +144,8 @@ namespace Multiplayer.Harmony.Tactical
                     // out. It SELF-GUARDS on `CurrentState is UIStateCharacterSelected` (NRE-safe + no-op when nothing
                     // is selected or we're in a melee/overwatch sub-state) and re-pushes CharacterSelected — NOT
                     // UIStateWaiting — so HUD and control are preserved. It does NOT change which actor is selected.
-                    // Read CurrentState name BEFORE any recovery mutates the stack — it is BOTH the diag value and the
-                    // input to the PURE recovery decision (TacticalAbilityRelay.NeedsFullStackRecovery). NRE-guarded.
-                    string stateName = "<null>";
-                    try { object cs = AccessTools.Property(view.GetType(), "CurrentState")?.GetValue(view, null); stateName = cs?.GetType().Name ?? "<null>"; }
-                    catch { /* diag only */ }
+                    // stateName was read UP FRONT (before Activate, when the stack was untouched) — reuse it as BOTH
+                    // the diag value and the input to the PURE recovery decision (NeedsFullStackRecovery). NRE-guarded.
                     int actorNet = -1;
                     try { object aActor = AccessTools.Property(__0.GetType(), "TacticalActorBase")?.GetValue(__0, null); if (aActor != null) actorNet = TacticalDeploySync.NetIdForLiveActor(aActor); }
                     catch { /* diag only */ }
@@ -175,6 +187,16 @@ namespace Multiplayer.Harmony.Tactical
                 Debug.LogError("[Multiplayer][tac] SuppressedAbilityViewClearPatch.Prefix failed: " + ex);
                 return true;    // fail-open: never wedge the native path on an unexpected error
             }
+        }
+
+        /// <summary>Read the current tactical view-state's runtime type name off the live View
+        /// (<c>TacticalView.CurrentState</c>); "&lt;null&gt;" when the view or state is unreadable. NRE-guarded —
+        /// a failed read degrades to the conservative "not an aim sub-state" decision (native path preserved).</summary>
+        private static string ReadCurrentStateName(object view)
+        {
+            if (view == null) return "<null>";
+            try { object cs = AccessTools.Property(view.GetType(), "CurrentState")?.GetValue(view, null); return cs?.GetType().Name ?? "<null>"; }
+            catch { return "<null>"; }
         }
 
         /// <summary>CLIENT-only: force-exit a pushed aim sub-state by re-establishing a fresh
