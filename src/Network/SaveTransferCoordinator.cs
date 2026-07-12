@@ -1035,6 +1035,12 @@ namespace Multiplayer.Network
                 // off to the real level-load progress at phase-2 (SetLoadingLevel). Client-only (OnSaveChunk
                 // returns early on the host). Once per transfer (this first-chunk branch runs once per id).
                 _downloadCurtain = true;
+                // Arm the geo->tactical (and any co-op save-apply) transition gate: this transfer will tear the
+                // current level down + rebuild it, during which late host wallet syncs would repaint a half-torn
+                // info bar (TFTV RefreshResourceText NRE). This is the PRODUCTION client entry (save-transfer);
+                // the LaunchTacticalGameGatePatch SET only covers the UseSaveTransferEntry=false path. Cleared at
+                // tactical level-ready / geoscape reload. Skipped wallet syncs recover on level re-entry.
+                Multiplayer.Network.Sync.State.GeoTransitionGate.InTransition = true;
                 Multiplayer.UI.MultiplayerUI.Instance?.EnterDownloadLoadingScreen();
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
