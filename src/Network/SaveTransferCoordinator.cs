@@ -509,10 +509,16 @@ namespace Multiplayer.Network
         private void SendBlob(byte[] blob, string ext)
         {
             var crc = Crc32(blob);
-
             var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
             Debug.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8}");
+            SendBlobCore(blob, ext, _transferId, crc, onDemandJoin: false, m => _engine.BroadcastToAll(m));
+            Debug.Log("[Multiplayer] SendBlob: all chunks + SaveDone broadcast sent");
+        }
 
+        // Shared chunking loop for the broadcast (SendBlob) and unicast (SendBlobTo) transfers: split blob
+        // into SaveChunk messages (sequenced by offset) then a SaveDone(crc), routing each through `send`.
+        private void SendBlobCore(byte[] blob, string ext, Guid transferId, uint crc, bool onDemandJoin, Action<NetworkMessage> send)
+        {
             long offset = 0;
             while (offset < blob.Length)
             {
@@ -522,19 +528,18 @@ namespace Multiplayer.Network
 
                 var msg = new SaveChunkMessage
                 {
-                    TransferId = _transferId,
+                    TransferId = transferId,
                     TotalBytes = blob.Length,
                     Offset = offset,
                     Chunk = chunk
                 };
                 var payload = MessageSerializer.SerializeSaveChunk(msg);
-                _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveChunk, payload));
+                send(new NetworkMessage(PacketType.SaveChunk, payload));
                 offset += len;
             }
 
-            var donePayload = MessageSerializer.SerializeSaveDone(_transferId, blob.Length, ext, crc);
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.SaveDone, donePayload));
-            Debug.Log("[Multiplayer] SendBlob: all chunks + SaveDone broadcast sent");
+            var donePayload = MessageSerializer.SerializeSaveDone(transferId, blob.Length, ext, crc, onDemandJoin);
+            send(new NetworkMessage(PacketType.SaveDone, donePayload));
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -768,28 +773,7 @@ namespace Multiplayer.Network
             var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
             Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: bytes={blob.Length} chunks={chunkCount} " +
                       $"crc=0x{crc:X8} join={onDemandJoin}");
-
-            long offset = 0;
-            while (offset < blob.Length)
-            {
-                var len = (int)Math.Min(ChunkSize, blob.Length - offset);
-                var chunk = new byte[len];
-                Array.Copy(blob, offset, chunk, 0, len);
-
-                var msg = new SaveChunkMessage
-                {
-                    TransferId = transferId,
-                    TotalBytes = blob.Length,
-                    Offset = offset,
-                    Chunk = chunk
-                };
-                var payload = MessageSerializer.SerializeSaveChunk(msg);
-                _engine.SendToClient(peerId, new NetworkMessage(PacketType.SaveChunk, payload));
-                offset += len;
-            }
-
-            var donePayload = MessageSerializer.SerializeSaveDone(transferId, blob.Length, ext, crc, onDemandJoin);
-            _engine.SendToClient(peerId, new NetworkMessage(PacketType.SaveDone, donePayload));
+            SendBlobCore(blob, ext, transferId, crc, onDemandJoin, m => _engine.SendToClient(peerId, m));
             Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: all chunks + SaveDone unicast sent");
         }
 
