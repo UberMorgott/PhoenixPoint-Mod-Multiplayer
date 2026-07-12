@@ -77,8 +77,16 @@ namespace Multiplayer.Sync.Tactical
         // Monotonic wall-clock seconds for the de-dup TTL (client runtime only; the pure guard takes it as a param).
         private static float NowSeconds() => Time.unscaledTime;
 
-        /// <summary>Reset all replay state (mission exit). Idempotent.</summary>
-        public static void Reset() { _replayDepth = 0; _predictedFire.Reset(); }
+        /// <summary>Reset all replay state (mission exit). Idempotent. Also hard-resets the OriginNativeShot window
+        /// (new shoot canon) so a leaked window from an origin shot that never reached OnPlayingActionEnd can't persist.</summary>
+        public static void Reset() { _replayDepth = 0; _predictedFire.Reset(); Multiplayer.Harmony.Tactical.FireReplayGate.ResetOriginNativeShot(); }
+
+        /// <summary>ORIGIN-NATIVE SHOT (new shoot canon): record a shooter so the host's echoed tac.fire.start for it
+        /// is consumed + skipped in <see cref="ClientOnFireStart"/> (<c>ConsumeIfPredicted</c>) → the shot animates
+        /// EXACTLY ONCE. Called from <c>TacticalCombatSync.ClientInterceptAbility</c> when the origin client runs its
+        /// OWN shot NATIVELY (no predicted-replay coroutine — the native Activate provides the animation), so the
+        /// host echo must still be de-duped just as the old predicted-replay path did.</summary>
+        public static void RecordPredictedShooter(int shooterNetId) => _predictedFire.RecordPredicted(shooterNetId, NowSeconds());
 
         // ─── HOST: an attack is STARTING → broadcast tac.fire.start so clients animate concurrently ──
         /// <summary>HOST: at the moment the host's authoritative shot animation BEGINS — the host prefix on
@@ -299,6 +307,21 @@ namespace Multiplayer.Sync.Tactical
             {
                 _replayDepth--;
                 if (_replayDepth < 0) _replayDepth = 0;
+
+                // AIMED-SHOT EXIT: the whole burst/shot has now replayed to completion (this coroutine drove
+                // FireWeaponAtTargetCrt end-to-end). If this client is still wedged in the shooter's shoot AIM
+                // sub-state and the shoot ability is now terminal (host post-shot AP already landed via tac.damage),
+                // exit to command. Firing here (not per-damage) keeps the camera in aim for the whole burst tail.
+                // Client-only, fail-safe: TryExitClientShootAimIfTerminal self-guards on IsClientMirroring + shoot-aim
+                // state + terminal AP, so a still-enabled multi-round volley and non-origin instances are left untouched.
+                try
+                {
+                    object shooter = GetProp(ability, "TacticalActorBase");
+                    int shooterNetId = shooter != null ? TacticalDeploySync.NetIdForLiveActor(shooter) : -1;
+                    if (shooterNetId >= 0)
+                        Multiplayer.Harmony.Tactical.SuppressedAbilityViewClearPatch.TryExitClientShootAimIfTerminal(shooterNetId);
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.fire.start replay aim-exit failed: " + ex); }
             }
         }
 

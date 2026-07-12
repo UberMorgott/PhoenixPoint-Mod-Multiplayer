@@ -107,13 +107,22 @@ namespace Multiplayer.Harmony.Tactical
 
         public static MethodBase TargetMethod() => _target;
 
-        // __instance = the ShootAbility whose action just ended → drop its registry entry so B1/B2 stop applying.
+        // __instance = the ShootAbility whose action just ended → drop its registry entry so B1/B2 stop applying,
+        // AND (new shoot canon) close the ORIGIN client's OriginNativeShot window opened in ClientInterceptAbility.
         public static void Postfix(object __instance)
         {
             try { TacticalCombatSync.EndRelayedShot(__instance); }
             catch (Exception ex)
             {
                 Debug.LogError("[Multiplayer][tac] RelayedShootEndPatch.Postfix failed: " + ex);
+            }
+            // NEW SHOOT CANON: the ORIGIN client ran its OWN shoot NATIVELY inside an OriginNativeShot window; this
+            // action-end (hit/miss/fumble) closes it. Ref-counted + !IsHost-gated + floored at 0, so the host's own
+            // shots (registry path above, never in the window) and any unpaired end are a safe no-op.
+            try { FireReplayGate.ExitOriginNativeShot(); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] RelayedShootEndPatch OriginNativeShot exit failed: " + ex);
             }
         }
     }

@@ -81,6 +81,11 @@ namespace Multiplayer.Harmony
             // Feature C: when the client is deliberately REPLAYING this coroutine to play the attack ANIMATION
             // (projectile-free, camera-silent), let it run — otherwise this prefix would suppress our own replay.
             if (Multiplayer.Sync.Tactical.TacticalFireAnimSync.ReplayActive) return true;
+            // NEW SHOOT CANON: the ORIGIN client runs its OWN shot NATIVELY (native camera + animation) inside an
+            // OriginNativeShot window — let this coroutine run so the real shot plays; damage/ammo stay
+            // host-authoritative via the widened neuters. (ReplayActive above still covers the OTHER-actor
+            // wire-driven replay; this covers the origin's own native shot.)
+            if (Multiplayer.Harmony.Tactical.FireReplayGate.OriginNativeShotActive) return true;
             return false;
         }
     }

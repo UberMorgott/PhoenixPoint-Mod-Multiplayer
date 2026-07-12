@@ -69,6 +69,23 @@ namespace Multiplayer.Harmony.Tactical
         public static void ExitHostApply() { if (_hostApplyDepth > 0) _hostApplyDepth--; }
         public static bool HostApplyingClientAction => IsHost && _hostApplyDepth > 0;
 
+        // ─── ORIGIN-NATIVE SHOT window (new shoot canon) ─────────────────────────────────────────────
+        // Ref-counted window the ORIGIN (mirroring) client raises around its OWN shoot ability while it runs
+        // NATIVELY — real Activate → native camera + animation via FireWeaponAtTargetCrt — instead of the old
+        // damage-less, camera-silent predicted replay. Opened in TacticalCombatSync.ClientInterceptAbility (shoot
+        // only, gated on TacticalAbilityRelay.ShouldBroadcastFireStart), closed at ShootAbility.OnPlayingActionEnd
+        // (RelayedShootEndPatch). While active: FireWeaponPatch lets the native shot through and the damage/ammo/
+        // projectile-event neuters fire LOCALLY so the host (tac.damage + the 0x8F absolute AP flush) stays the sole
+        // OUTCOME authority — but FireCameraHintGuardPatch is DELIBERATELY NOT extended to it (the native aim camera
+        // must establish, the whole point of the new canon). Client-only: the !IsHost backstop (like ClientReplay)
+        // keeps the host's own shot untouched. Ref-counted + floored at 0 so an unbalanced pop can never wedge it
+        // true; TacticalFireAnimSync.Reset() (OnMissionExit) hard-resets a leaked window as a backstop.
+        private static int _originNativeShotDepth;
+        public static void EnterOriginNativeShot() { _originNativeShotDepth++; }
+        public static void ExitOriginNativeShot() { if (_originNativeShotDepth > 0) _originNativeShotDepth--; }
+        public static bool OriginNativeShotActive => _originNativeShotDepth > 0 && !IsHost;
+        public static void ResetOriginNativeShot() { _originNativeShotDepth = 0; }
+
         private static bool IsHost
         {
             get { var e = NetworkEngine.Instance; return e != null && e.IsHost; }
@@ -129,8 +146,9 @@ namespace Multiplayer.Harmony.Tactical
 
         public static bool Prefix()
         {
-            // host / normal client flow → real damage-accum; client replay → skip so _damageAccum stays null.
-            return !FireReplayGate.ClientReplay;
+            // host / normal client flow → real damage-accum; client replay OR origin-native shot → skip so
+            // _damageAccum stays null (host tac.damage is the sole damage authority for both).
+            return !(FireReplayGate.ClientReplay || FireReplayGate.OriginNativeShotActive);
         }
     }
 
@@ -167,9 +185,12 @@ namespace Multiplayer.Harmony.Tactical
         // Weapon.cs:530, melee = BashAbility.BashCrt:525). One shared neuter, no duplicate patch on the method.
         public static bool Prefix(ref bool __result)
         {
-            if (!FireReplayGate.AnyReplay) return true;
+            // AnyReplay (fire/melee replay) OR the origin-native shot — in all cases ammo stays host-authoritative
+            // (frozen at the snapshot until a future ammo-sync surface); the native origin shot's own FireProjectile
+            // decrement is neutered here exactly like the replay's.
+            if (!(FireReplayGate.AnyReplay || FireReplayGate.OriginNativeShotActive)) return true;
             __result = false;   // ModifyCharges returns false when it makes no change → safe no-op result
-            return false;       // skip the original decrement during the replay
+            return false;       // skip the original decrement during the replay / origin-native shot
         }
     }
 
@@ -195,7 +216,7 @@ namespace Multiplayer.Harmony.Tactical
 
         public static bool Prefix(ref object __result)
         {
-            if (!FireReplayGate.ClientReplay) return true;
+            if (!(FireReplayGate.ClientReplay || FireReplayGate.OriginNativeShotActive)) return true;
             var empty = EmptyCrt.Empty();
             if (empty == null) return true;   // couldn't build empty crt → safest to let it run
             __result = empty;
@@ -231,7 +252,7 @@ namespace Multiplayer.Harmony.Tactical
 
         public static bool Prefix(ref object __result)
         {
-            if (!FireReplayGate.ClientReplay) return true;   // host / normal flow → real Destroy
+            if (!(FireReplayGate.ClientReplay || FireReplayGate.OriginNativeShotActive)) return true;   // host / normal flow → real Destroy
             __result = null;   // calling step `weapon.Destroy();` discards the List<Addon> return → null is safe
             return false;      // skip the local inventory-mutating Destroy during the replay
         }

@@ -178,15 +178,23 @@ namespace Multiplayer.Sync.Tactical
                           " targetNetId=" + targetNetId + " bodyPartId=" + bodyPartId +
                           " pos=(" + targetPos.x.ToString("0.0") + "," + targetPos.y.ToString("0.0") + "," + targetPos.z.ToString("0.0") + ")");
 
-                // COMBAT CONCURRENCY FIX (client-predicted local anim): the host's relayed shot is DEFERRED
-                // (EnqueueAction + camera-blend), so its echoed tac.fire.start always arrives LATE — the client would
-                // animate after the host already played the whole shot. Instead, kick off the EXISTING damage-less,
-                // camera-silent fire-anim replay LOCALLY right now so the shooter animates the instant the player
-                // presses. The host still runs the authoritative shot; its echoed fire-start for this shooter is
-                // de-duped (skipped) in ClientOnFireStart so it animates exactly ONCE. Shoot/grenade only + fully
-                // fail-open inside; melee/other abilities no-op there. Damage stays host-authoritative (tac.damage).
-                TacticalFireAnimSync.ClientPredictFireStart(ability, parameter);
-                return false;   // suppress local activation (host is authoritative)
+                // NEW SHOOT CANON (origin-native shot): a SHOOT ability (ShootAbility = shoot+grenade) runs
+                // NATIVELY on the ORIGIN client — real Activate → native camera + animation — while the host keeps
+                // OUTCOME authority (damage via tac.damage, AP/WP via the 0x8F absolute flush). We still record the
+                // shooter so the host's echoed tac.fire.start for it is de-duped (ConsumeIfPredicted) → the shot
+                // animates EXACTLY ONCE (the native one, no predicted replay), and open the OriginNativeShot window
+                // so the damage/ammo/projectile-event neuters fire LOCALLY (host stays sole authority) while the
+                // native aim camera is left free (FireCameraHintGuardPatch does NOT cover this window). The window is
+                // closed at ShootAbility.OnPlayingActionEnd (RelayedShootEndPatch). Non-shoot suppressed abilities
+                // keep the old suppress-and-relay behavior (return false).
+                if (TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name))
+                {
+                    TacticalFireAnimSync.RecordPredictedShooter(actorNetId);
+                    FireReplayGate.EnterOriginNativeShot();
+                    Debug.Log("[Multiplayer][tac] CLIENT origin-native shot (native camera+anim, host outcome authority) actor=" + actorNetId);
+                    return true;    // run the shot NATIVELY on the origin client
+                }
+                return false;   // non-shoot: suppress local activation (host is authoritative)
             }
             catch (Exception ex)
             {
@@ -977,12 +985,9 @@ namespace Multiplayer.Sync.Tactical
                     // selected, re-grey its ability bar NOW so spent-AP buttons don't stay lit until the next 0x8F
                     // flush. Client-only (HandleDamage already returned early on the host). No-op if not selected.
                     TacticalActorStateSync.RefreshClientBarForActor(p.ShooterNetId);
-                    // AIMED-SHOT EXIT: the AUTHORITATIVE post-shot AP just landed. If this client is still sitting in
-                    // the shooter's shoot AIM sub-state (the native follow-up loop re-enters it every round, incl. the
-                    // last one — the client never spends AP locally so its own terminal check read stale-enabled), exit
-                    // to command IFF the shoot ability is now terminal (out of AP/charges). A multi-round volley (still
-                    // enabled) is left on the native loop so it keeps firing at native speed. Client-only, fail-safe.
-                    Multiplayer.Harmony.Tactical.SuppressedAbilityViewClearPatch.TryExitClientShootAimIfTerminal(p.ShooterNetId);
+                    // AIMED-SHOT EXIT moved to TacticalFireAnimSync.ReplayFireCrt's finally: the exit must fire at
+                    // BURST completion, not on the first tac.damage (a burst spends AP once, so AP reads terminal from
+                    // the first hit — exiting here snapped the camera out mid-burst while the tail was still replaying).
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacDamage, p.Seq);
