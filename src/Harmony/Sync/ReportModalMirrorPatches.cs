@@ -320,4 +320,50 @@ namespace Multiplayer.Harmony.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] InterceptionGameStoppedTimeLockPatch failed: " + ex.Message); }
         }
     }
+
+    /// <summary>
+    /// HOST interception time-lock CLOSE — ABORT belt for the first-interception null-field NRE (review of 48f50e8).
+    /// The primary close (<see cref="InterceptionGameStoppedTimeLockPatch"/>) postfixes
+    /// <c>InterceptionGameController.GameStopped</c>, but the coroutine invokes it as <c>_interceptionGame.GameStopped()</c>
+    /// (GeoLevelController.cs:1213) on a FIELD that is still NULL on the FIRST interception of a session when it
+    /// aborts via the start-autosave throw: <c>StartInterceptionCrt</c> bails at its <c>ex.Value</c> guard
+    /// (GeoLevelController.cs:1243) BEFORE ever touching the lazy <c>InterceptionGame</c> property that populates
+    /// <c>_interceptionGame</c> (:326-330), so the call NREs on the null receiver and the GameStopped postfix NEVER
+    /// runs → the shared clock stays locked for the whole session (until a menu/reload reset belt).
+    ///
+    /// This closes the lock on the ONE call the abort path always makes:
+    /// <c>PhoenixSaveManager.ShowAutosaveError(Exception)</c> (GeoLevelController.cs:1239). It cannot miss the
+    /// null-field case (it fires from the coroutine BEFORE the OnStop NRE). Idempotent + host-only: the only
+    /// autosave that can FAIL while the lock is OPEN is the interception-start one (the brief is modal until the
+    /// player confirms, and saving is disabled through the minigame), so a ShowAutosaveError under an open lock is
+    /// exactly the abort; every other ShowAutosaveError site just closes an already-closed lock (a no-op). The
+    /// GameStopped postfix + the outcome-33 Hide close stay as belts (all call <c>Close()</c> idempotently).
+    /// Reflective target (Prepare false → PatchAll skips on rename).
+    /// </summary>
+    [HarmonyPatch]
+    public static class InterceptionAutosaveAbortTimeLockPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Common.Saves.PhoenixSaveManager");
+            if (t == null) return false;
+            _target = AccessTools.Method(t, "ShowAutosaveError", new[] { typeof(Exception) });
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                InterceptionTimeLock.Close();
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] InterceptionAutosaveAbortTimeLockPatch failed: " + ex.Message); }
+        }
+    }
 }
