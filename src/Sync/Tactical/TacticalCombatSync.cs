@@ -892,7 +892,7 @@ namespace Multiplayer.Sync.Tactical
         /// applied result + broadcast <c>tac.damage</c> to all peers. Gated: only on the host, only in a live
         /// session, and NOT while the host is itself applying a relayed result (<see cref="_applyingRemote"/>).
         /// Postfix so it captures the result AFTER the engine finalized it.</summary>
-        public static void OnHostApplyDamage(object target, object damageResultBoxed)
+        public static void OnHostApplyDamage(object target, object damageResultBoxed, int capturedNetId = -1)
         {
             if (_applyingRemote) return;
             var engine = NetworkEngine.Instance;
@@ -902,7 +902,10 @@ namespace Multiplayer.Sync.Tactical
 
             try
             {
-                int targetNetId = TacticalDeploySync.NetIdForLiveActor(target);
+                // Prefer the netId captured by the ApplyDamage PREFIX (before a lethal hit's synchronous
+                // Die→ActorDied→Registry.Remove wiped the minted-id lookup); fall back to a live lookup for
+                // any path that didn't route through the prefix.
+                int targetNetId = capturedNetId >= 0 ? capturedNetId : TacticalDeploySync.NetIdForLiveActor(target);
                 if (targetNetId < 0) return;   // an unregistered actor (e.g. transient destructible) — skip
 
                 var p = FlattenDamage(damageResultBoxed);

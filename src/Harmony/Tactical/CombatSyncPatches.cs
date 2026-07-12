@@ -76,10 +76,22 @@ namespace Multiplayer.Harmony.Tactical
 
         public static MethodBase TargetMethod() => _target;
 
-        // __0 is the DamageResult argument (boxed); pass it by object so the sync layer reflects its fields.
-        public static void Postfix(object __instance, object __0)
+        // Capture the target's netId BEFORE the body runs. A LETHAL hit triggers, synchronously inside
+        // ApplyDamage, Health.Subtract → OnHealthChange → Die → TacticalLevel.ActorDied → the registry
+        // Remove postfix — so by the time our Postfix fires the minted-id lookup already returns -1 and
+        // the death broadcast is dropped. __state carries the pre-death id to Postfix (per-call, so the
+        // return-melee reentrant ApplyDamage nests safely).
+        public static void Prefix(object __instance, out int __state)
         {
-            try { TacticalCombatSync.OnHostApplyDamage(__instance, __0); }
+            __state = -1;
+            try { __state = TacticalDeploySync.NetIdForLiveActor(__instance); }
+            catch { __state = -1; }
+        }
+
+        // __0 is the DamageResult argument (boxed); pass it by object so the sync layer reflects its fields.
+        public static void Postfix(object __instance, object __0, int __state)
+        {
+            try { TacticalCombatSync.OnHostApplyDamage(__instance, __0, __state); }
             catch (System.Exception ex)
             {
                 Debug.LogError("[Multiplayer][tac] ApplyDamagePatch.Postfix failed: " + ex);
