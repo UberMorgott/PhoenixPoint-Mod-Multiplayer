@@ -5,6 +5,12 @@ namespace Multiplayer.Network.MessageLayer
 {
     public class NetworkMessage
     {
+        /// <summary>Hard transport cap for one inbound message payload (FA-0003). payloadLen is read raw off
+        /// the wire in <see cref="Deserialize"/> and drives an eager <c>new byte[payloadLen]</c>; a ~37-byte
+        /// packet could otherwise declare int.MaxValue and force a multi-hundred-MB alloc BEFORE any auth. 8 MB
+        /// clears the largest legitimate payload (save/state blobs are chunked well under this) with margin.</summary>
+        public const int MaxPayloadBytes = 8 * 1024 * 1024;
+
         public PacketType Type { get; set; }
         public ulong SenderSteamId { get; set; }
         public Guid MessageId { get; set; }
@@ -65,6 +71,13 @@ namespace Multiplayer.Network.MessageLayer
             msg.MessageId = new Guid(msgIdBytes); offset += 16;
             msg.Timestamp = BitConverter.ToInt64(buffer, offset); offset += 8;
             var payloadLen = BitConverter.ToInt32(buffer, offset); offset += 4;
+
+            // FA-0003: payloadLen is fully attacker-controlled. Reject BEFORE allocating — it must be
+            // non-negative, actually present in the buffer (offset is now the 37-byte header size), and within
+            // the transport cap; else a tiny packet forces an eager `new byte[payloadLen]`. Throw = the drop
+            // convention (see the header check above); OnPacketReceived catches + logs it as a bad packet.
+            if (payloadLen < 0 || payloadLen > MaxPayloadBytes || payloadLen > buffer.Length - offset)
+                throw new ArgumentException("Invalid message payload length");
 
             if (payloadLen > 0)
             {

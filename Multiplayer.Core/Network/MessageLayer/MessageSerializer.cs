@@ -7,6 +7,13 @@ namespace Multiplayer.Network.MessageLayer
 {
     public static class MessageSerializer
     {
+        /// <summary>Hard sanity cap for the trailing parity-manifest block inside a JOIN (FA-0012). The block
+        /// length is read raw off the wire and fed to <c>BinaryReader.ReadBytes(len)</c>, which allocates
+        /// <c>new byte[len]</c> eagerly — a crafted JOIN could declare ~2e9 and force a multi-GB alloc on the
+        /// host. A real manifest (DLC + mods + settings) is a few KB; 64 KB rejects only hostile/corrupt
+        /// lengths while clearing even a large legitimate modlist.</summary>
+        public const int MaxManifestBytes = 64 * 1024;
+
         // ─── Lobby / Identity Messages ─────────────────────────────────────
 
         // JOIN (reuses ConnectionRequest payload): persistent identity on connect.
@@ -48,6 +55,10 @@ namespace Multiplayer.Network.MessageLayer
                 if (ms.Position < ms.Length && br.ReadBoolean())
                 {
                     var len = br.ReadInt32();
+                    // FA-0012: bound the wire-declared block length BEFORE ReadBytes allocates new byte[len].
+                    // Must be non-negative, within the manifest sanity cap, and actually present in the stream.
+                    if (len < 0 || len > MaxManifestBytes || len > ms.Length - ms.Position)
+                        throw new InvalidDataException("JOIN: implausible manifest block length " + len);
                     msg.Manifest = DeserializeParityManifest(br.ReadBytes(len));
                 }
                 return msg;
@@ -89,18 +100,31 @@ namespace Multiplayer.Network.MessageLayer
             {
                 var m = new Parity.ParityManifest();
 
+                // FA-0012: every wire count below drives a ReadString loop; each entry consumes >=1 byte, so a
+                // count larger than the bytes still in the stream is impossible → reject before looping (else a
+                // huge count spins an allocate-and-throw loop on the host). Keyed off the live stream position.
+                void GuardCount(int c)
+                {
+                    if (c < 0 || c > ms.Length - ms.Position)
+                        throw new InvalidDataException("ParityManifest: implausible collection count " + c);
+                }
+
                 var dlcCount = br.ReadInt32();
+                GuardCount(dlcCount);
                 for (var i = 0; i < dlcCount; i++) m.Dlc.Add(br.ReadString());
 
                 var modCount = br.ReadInt32();
+                GuardCount(modCount);
                 for (var i = 0; i < modCount; i++)
                     m.Mods.Add(new Parity.ModRef { Id = br.ReadString(), Version = br.ReadString() });
 
                 var setCount = br.ReadInt32();
+                GuardCount(setCount);
                 for (var i = 0; i < setCount; i++)
                 {
                     var s = new Parity.ModSettings { ModId = br.ReadString(), Hash = br.ReadUInt32() };
                     var entryCount = br.ReadInt32();
+                    GuardCount(entryCount);
                     for (var j = 0; j < entryCount; j++) s.Entries.Add(br.ReadString());
                     m.Settings.Add(s);
                 }

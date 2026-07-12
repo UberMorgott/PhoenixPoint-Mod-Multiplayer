@@ -29,6 +29,14 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>The fixed chunk-header size in bytes: 6 × i32.</summary>
         public const int HeaderSize = 6 * 4;
 
+        /// <summary>Hard sanity caps on the wire-declared chunk header (FA-0016). count/totalLen are read raw
+        /// and later drive <c>new byte[count][]</c>, <c>new bool[count]</c> and <c>new byte[totalLen]</c> in
+        /// <see cref="ChunkReassembler.Accept"/>; a single crafted chunk with count~2e9 or totalLen~2e9 is an
+        /// alloc bomb (host→client). A full deploy payload is hundreds of KB, so 64 MB / 4096 chunks clears any
+        /// legitimate payload (64 MB / 48 KiB ≈ 1365 chunks) with wide margin.</summary>
+        public const int MaxTotalLen = 64 * 1024 * 1024;
+        public const int MaxChunkCount = 4096;
+
         /// <summary>True when the whole codec payload fits in a SINGLE envelope (no chunking needed). The
         /// threshold leaves headroom under the 65535 cap for the 4-byte envelope header + slack.</summary>
         public const int SingleEnvelopeMax = 60000;
@@ -90,7 +98,11 @@ namespace Multiplayer.Sync.Tactical
                     int count = r.ReadInt32();
                     int totalLen = r.ReadInt32();
                     int fragLen = r.ReadInt32();
-                    if (count <= 0 || idx < 0 || idx >= count || totalLen < 0 || fragLen < 0) return false;
+                    // FA-0016: bound count + totalLen BEFORE returning a Fragment, so the reassembler never
+                    // allocates arrays sized by an attacker's raw wire value. fragLen is already bounded by the
+                    // remaining-bytes check below (and by the u16 envelope cap upstream).
+                    if (count <= 0 || count > MaxChunkCount || idx < 0 || idx >= count
+                        || totalLen < 0 || totalLen > MaxTotalLen || fragLen < 0) return false;
                     if (ms.Length - ms.Position < fragLen) return false;
                     var buf = fragLen > 0 ? r.ReadBytes(fragLen) : new byte[0];
                     if (buf.Length != fragLen) return false;
@@ -163,6 +175,9 @@ namespace Multiplayer.Sync.Tactical
             }
 
             if (p.Completed) return null;                       // already hydrated this set → idempotent drop
+            // FA-0016: every fragment of a (site,generation) set must agree on count + totalLen. A straggler
+            // that disagrees is hostile/corrupt (or a stale re-fragmentation) — drop it, never resize the set.
+            if (f.ChunkCount != p.Count || f.TotalLen != p.TotalLen) return null;
             if (f.ChunkIndex < 0 || f.ChunkIndex >= p.Count) return null;
             if (p.Seen[f.ChunkIndex]) return null;              // duplicate chunk → idempotent drop
 
