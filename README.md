@@ -123,6 +123,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Manufacture completion sync
 - [x] ✅ Scrapping items back down into resources
 - [x] 🧪 Marketplace offers and selection mirror
+- [x] 🧪 Haven resource trade (buy and sell at havens, host-authoritative, stock mirrored)
 
 **Base and facilities**
 - [x] ✅ Build a facility
@@ -140,6 +141,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] 🧪 Mid-game vehicle creation mirror
 - [x] 🧪 Aircraft health and repair
 - [x] 🧪 Crew and loadout
+- [x] 🧪 Air-combat interception (host resolves the fight and holds the clock; clients stay usable)
 
 **Personnel and recruits**
 - [x] 🧪 Roster composition mirror (who is stationed where)
@@ -202,6 +204,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Weapon and equipment swaps
 - [x] ✅ Overwatch arm, clear, and cone
 - [x] 🧪 Deploy turret, deploy shield, open crate, drop and retrieve items
+- [x] 🧪 Live in-mission inventory (each item move syncs as you make it, no waiting for the screen to close)
 - [x] 🧪 Vehicle mount and dismount
 - [x] 🧪 Mind control, frenzy, jet jump, dash, and the other special moves
 
