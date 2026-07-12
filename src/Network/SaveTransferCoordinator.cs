@@ -49,6 +49,12 @@ namespace Multiplayer.Network
         // 32 KB and document the limitation rather than branch the chunk size per transport.
         public const int ChunkSize = 32 * 1024;
 
+        // Upper bound on a transfer's declared TotalBytes (first-chunk sizing). The first chunk's
+        // network-supplied length sizes the reassembly buffer; without a bound a hostile/garbled
+        // large-positive value faults the alloc (leaving _rxBuffer null with _rxTotalBytes>0 =
+        // stuck heartbeat-suspension) or commits a huge buffer. A real PP save is well under this.
+        public const long MaxTransferBytes = 64L * 1024 * 1024;
+
         // Phase-1 (LOADED barrier) timeout: time the host waits, after the barrier opens, for every
         // connected peer to download + prepare its save (ack LOADED) before kicking the stragglers and
         // beginning with whoever is ready. This window covers the chunked transfer AND the in-memory
@@ -987,6 +993,18 @@ namespace Multiplayer.Network
             // First chunk of a transfer (re)initialises the reassembly buffer.
             if (_rxBuffer == null || _rxTransferId != chunk.TransferId)
             {
+                // Bound the network-supplied length BEFORE allocating: a large-positive TotalBytes
+                // otherwise faults `new byte[TotalBytes]` AFTER _rxTotalBytes is set (buffer stays
+                // null, throw swallowed) leaving _rxTotalBytes>0 → TransferActive pins heartbeat
+                // suspension forever. Abort like the incomplete/CRC branches in OnSaveDone.
+                if (chunk.TotalBytes <= 0 || chunk.TotalBytes > MaxTransferBytes)
+                {
+                    Debug.LogError($"[Multiplayer] OnSaveChunk: rejecting transfer {chunk.TransferId} — " +
+                                   $"declared TotalBytes={chunk.TotalBytes} out of bounds (0, {MaxTransferBytes}].");
+                    ResetRx();
+                    AbortDownloadCurtain("invalid transfer size");
+                    return;
+                }
                 _rxTransferId = chunk.TransferId;
                 _rxTotalBytes = chunk.TotalBytes;
                 _rxBuffer = new byte[chunk.TotalBytes];
@@ -1074,6 +1092,10 @@ namespace Multiplayer.Network
             {
                 Debug.LogError("[Multiplayer] SaveDone for an unknown transfer; ignoring.");
                 SendLoaded(transferId, false);
+                // Match the incomplete/CRC branches below: a faulting-alloc transfer left _rxBuffer
+                // null with _rxTotalBytes>0 — without ResetRx TransferActive/IsDownloading stay true
+                // and pin the client's host-heartbeat/half-open detector off forever.
+                ResetRx();
                 return;
             }
 
@@ -1660,6 +1682,15 @@ namespace Multiplayer.Network
             foreach (var clientId in stragglers)
             {
                 Debug.LogWarning($"[Multiplayer] Peer {clientId} did not load in time — kicking.");
+                // Terminal notice BEFORE roster removal + Begin(): RemoveClient does NOT disconnect the
+                // peer at transport, so the still-connected straggler would otherwise receive the
+                // reliable SessionBegin and either strand behind the held load curtain or enter as an
+                // un-commandable ghost. Send the SAME ConnectionRejected the host uses for every other
+                // rejection (SessionManager.HandleConnectionRequest); the client's HandleConnectionRejected
+                // → ReportConnectionRejected → OnConnectionFailed tears its session down (dialog + lobby
+                // return), keeping roster removal and transport state consistent.
+                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload("Load timed out — you were dropped from the session.")));
                 _engine.Session.RemoveClient(clientId);
             }
 
