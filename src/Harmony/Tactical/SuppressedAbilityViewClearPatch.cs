@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Sync.Tactical;
@@ -111,14 +112,13 @@ namespace Multiplayer.Harmony.Tactical
                 object view = ctx != null ? _viewField.GetValue(ctx) : null;
                 string stateName = ReadCurrentStateName(view);
 
-                // GATE. Intercept:
-                //   • the wedging ClearStackAndPush confirm (move / bash / overwatch) — as before; OR
-                //   • a suppressed SHOOT confirm's ReplaceTop fired from a shoot AIM sub-state (UIStateFreeCam /
-                //     UIStateShoot — now in AimSubStateViewNames): there the suppressed ShootAbility.Activate lets
-                //     native ActivateAbility push UIStateWaiting, which — since the client never consumed the shot
-                //     locally — re-enters the modal aim state → the client wedges in the aim reticle (the reported
-                //     first-person free-aim freeze; multiplayer-3.log shows state=UIStateFreeCam stuck after the shot).
-                // Any OTHER ReplaceTop/PushOnTop stays native (e.g. a shoot confirmed from the bare control state).
+                // GATE. Intercept ONLY the wedging ClearStackAndPush confirm (move / bash / overwatch): the
+                // suppressed non-shoot Activate leaves the stack unchanged, so native would empty the bare control
+                // state (move) or no-op the guarded sub-state reset (bash/overwatch) → HUD-less, camera-locked wedge.
+                // A suppressed SHOOT confirm (ReplaceTop from UIStateShoot/UIStateFreeCam) is DELIBERATELY NOT
+                // intercepted — it stays on the native follow-up loop so a multi-round volley keeps firing at native
+                // speed; the single aimed-shot EXIT is driven separately by TryExitClientShootAimIfTerminal once the
+                // host's authoritative post-shot AP lands. Any OTHER ReplaceTop/PushOnTop stays native too.
                 bool clearStackAndPush = Equals(__2, _clearStackAndPush);
                 if (!clearStackAndPush && !TacticalAbilityRelay.NeedsFullStackRecovery(stateName)) return true;
 
@@ -228,6 +228,66 @@ namespace Multiplayer.Harmony.Tactical
             object fresh = ctor.Invoke(new object[] { false /*showPlayersIntroText*/, true /*cameraChaseSelectedCharacter*/ });
             switchTo.Invoke(stack, new[] { fresh, _clearStackAndPush });
             return true;
+        }
+
+        // Shoot AIM sub-states a mirroring client can end up wedged in after a SUPPRESSED relayed shot. UNLIKE
+        // overwatch/bash these are NOT in AimSubStateViewNames: the shoot ReplaceTop stays on the native follow-up
+        // loop (ShootAbilityFinishedExecutionHandler → SwitchToFollowupShootState re-enters a fresh UIStateShoot each
+        // round) so a multi-round volley keeps firing; only the TERMINAL round's exit is driven here.
+        private static readonly HashSet<string> _shootAimStates =
+            new HashSet<string>(new[] { "UIStateShoot", "UIStateFreeCam" }, StringComparer.Ordinal);
+
+        /// <summary>CLIENT terminal-driven aim-EXIT for the relayed SHOOT path. Called the instant the client applies
+        /// a relayed shot's authoritative post-shot AP/WP (<c>TacticalCombatSync.HandleDamage</c> → <c>SetApWp</c>).
+        /// The client never spends AP locally (its shot is suppressed) and its native
+        /// <c>ShootAbilityFinishedExecutionHandler</c> runs BEFORE the host AP lands (the suppressed shot is never in
+        /// <c>ExecutingAbilities</c>, so <c>ShouldViewWaitForMe</c> is false → <c>UIStateWaiting</c> fires the handler
+        /// immediately), so that handler's terminal check (<c>GetDisabledState()!=NotDisabled</c>, UIStateShoot.cs:1346)
+        /// always reads stale-ENABLED → it re-enters aim EVERY round, including the LAST (the reported single aimed-shot
+        /// wedge — client stuck in the reticle). Here, with the AUTHORITATIVE AP now applied, we re-evaluate the SAME
+        /// terminal condition on the aimed <c>ShootAbility</c> (<c>UIStateShoot._ability</c>, UIStateShoot.cs:46): still
+        /// enabled → another round is available → LEAVE the native aim loop alone (fast multi-round volley); now
+        /// disabled (out of AP/charges / no valid target) → the volley is done → force-exit the aim sub-state to a fresh
+        /// <c>UIStateCharacterSelected</c> via the SAME <see cref="DriveFullStackRecovery"/> the move/bash/overwatch
+        /// recovery uses. Fires at most once per terminal transition (the exit removes the aim state). Client-only,
+        /// fully NRE-guarded / fail-safe (any failure leaves the native path untouched — never severs a live volley).</summary>
+        public static bool TryExitClientShootAimIfTerminal(int shooterNetId)
+        {
+            try
+            {
+                if (!TacticalDeploySync.IsClientMirroring || shooterNetId < 0) return false;
+
+                object tlc = TacticalDeploySync.LiveTlc;
+                object view = tlc != null ? AccessTools.Property(tlc.GetType(), "View")?.GetValue(tlc, null) : null;
+                if (view == null) return false;
+
+                object cs = AccessTools.Property(view.GetType(), "CurrentState")?.GetValue(view, null);
+                if (cs == null || !_shootAimStates.Contains(cs.GetType().Name)) return false; // not wedged in a shoot aim state
+
+                // Only the shooter whose shot just resolved: the aim state's selected actor must BE that shooter,
+                // so a shot resolving while the client aims a different soldier never yanks the wrong aim.
+                object selected = AccessTools.Property(view.GetType(), "SelectedActor")?.GetValue(view, null);
+                if (selected == null || TacticalDeploySync.NetIdForLiveActor(selected) != shooterNetId) return false;
+
+                // SAME terminal condition as native ShootAbilityFinishedExecutionHandler (UIStateShoot.cs:1346):
+                // GetDisabledState() with a null filter (the single public overload, TacticalAbility.cs:372).
+                object aimAbility = AccessTools.Field(cs.GetType(), "_ability")?.GetValue(cs);
+                if (aimAbility == null) return false;
+                var getDisabled = AccessTools.Method(aimAbility.GetType(), "GetDisabledState");
+                object gds = getDisabled?.Invoke(aimAbility, new object[] { null });
+                if (gds == null || string.Equals(gds.ToString(), "NotDisabled", StringComparison.Ordinal))
+                    return false; // still enabled → more rounds available → keep the native follow-up aim loop
+
+                bool driven = DriveFullStackRecovery(view);
+                Debug.Log("[Multiplayer][tac] CLIENT shoot-aim terminal exit fired=" + driven + " state=" +
+                          cs.GetType().Name + " shooterNet=" + shooterNetId + " disabled=" + gds);
+                return driven;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] TryExitClientShootAimIfTerminal failed: " + ex);
+                return false; // fail-safe: leave the native path untouched
+            }
         }
     }
 }

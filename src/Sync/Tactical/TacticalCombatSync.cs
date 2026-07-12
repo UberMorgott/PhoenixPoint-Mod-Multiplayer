@@ -977,6 +977,12 @@ namespace Multiplayer.Sync.Tactical
                     // selected, re-grey its ability bar NOW so spent-AP buttons don't stay lit until the next 0x8F
                     // flush. Client-only (HandleDamage already returned early on the host). No-op if not selected.
                     TacticalActorStateSync.RefreshClientBarForActor(p.ShooterNetId);
+                    // AIMED-SHOT EXIT: the AUTHORITATIVE post-shot AP just landed. If this client is still sitting in
+                    // the shooter's shoot AIM sub-state (the native follow-up loop re-enters it every round, incl. the
+                    // last one — the client never spends AP locally so its own terminal check read stale-enabled), exit
+                    // to command IFF the shoot ability is now terminal (out of AP/charges). A multi-round volley (still
+                    // enabled) is left on the native loop so it keeps firing at native speed. Client-only, fail-safe.
+                    Multiplayer.Harmony.Tactical.SuppressedAbilityViewClearPatch.TryExitClientShootAimIfTerminal(p.ShooterNetId);
                 }
 
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacDamage, p.Seq);

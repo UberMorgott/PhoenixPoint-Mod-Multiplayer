@@ -110,8 +110,6 @@ public class TacticalAbilityRelayTests
     [Theory]
     [InlineData("UIStateOverwatchAbilitySelected")] // overwatch arm — the reported critical wedge
     [InlineData("UIStateAbilitySelected")]          // bash (co-affected by the same latent bug)
-    [InlineData("UIStateFreeCam")]                  // shoot: first-person manual aim — the reported aimed-shot freeze
-    [InlineData("UIStateShoot")]                    // shoot: third-person orbit aim — same suppressed-shoot ReplaceTop seam
     public void AimSubState_NeedsFullStackRecovery(string currentViewStateName)
     {
         Assert.True(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
@@ -122,6 +120,11 @@ public class TacticalAbilityRelayTests
     [InlineData("UIStateWaiting")]
     [InlineData("UIStateInitial")]
     [InlineData("SomeFutureUnknownState")]
+    // SHOOT aim states are NOT per-confirm recovered: the suppressed shoot ReplaceTop stays on the native follow-up
+    // loop so a multi-round volley keeps firing; the single-shot exit is driven by the authoritative terminal
+    // condition (SuppressedAbilityViewClearPatch.TryExitClientShootAimIfTerminal), not this per-confirm gate.
+    [InlineData("UIStateFreeCam")]           // shoot: first-person manual aim
+    [InlineData("UIStateShoot")]             // shoot: third-person orbit aim
     public void NonAimSubState_DoesNotNeedFullStackRecovery(string currentViewStateName)
     {
         Assert.False(TacticalAbilityRelay.NeedsFullStackRecovery(currentViewStateName));
