@@ -16,6 +16,10 @@ namespace Multiplayer.Network.TimeSync
     ///   GAnchorTicks — game-time at the change instant = Timing.Now.TimeSpan.Ticks.
     ///   Paused       — host clock paused flag.
     ///   SpeedIndex   — UIModuleTimeControl.SelectedPresetTime (0..2); rate = paused ? 0 : PresetTimes[idx].
+    ///   Locked       — host time control is HARD-LOCKED (an air-combat interception is in progress; see
+    ///                  <see cref="Multiplayer.Network.Sync.InterceptionTimeLock"/>). Rides this existing
+    ///                  periodic channel so the lock self-heals on packet loss + re-syncs late joiners; the
+    ///                  client greys its time widget on it, the host re-broadcasts an unlocked anchor on close.
     /// </summary>
     public struct AnchorPayload
     {
@@ -24,14 +28,16 @@ namespace Multiplayer.Network.TimeSync
         public long GAnchorTicks;
         public bool Paused;
         public int SpeedIndex;
+        public bool Locked;
 
-        public AnchorPayload(long version, long tAnchorTicks, long gAnchorTicks, bool paused, int speedIndex)
+        public AnchorPayload(long version, long tAnchorTicks, long gAnchorTicks, bool paused, int speedIndex, bool locked = false)
         {
             Version = version;
             TAnchorTicks = tAnchorTicks;
             GAnchorTicks = gAnchorTicks;
             Paused = paused;
             SpeedIndex = speedIndex;
+            Locked = locked;
         }
 
         /// <summary>TimeSpan ticks ↔ seconds helpers (exact int64 carriage of double seconds).</summary>
@@ -82,13 +88,13 @@ namespace Multiplayer.Network.TimeSync
     /// <summary>
     /// Unity-FREE pure decode/decision core for the host-authoritative geoscape anchor clock.
     /// All Harmony/Unity/native glue lives in <c>TimeSyncManager</c>; this class is unit-testable.
-    /// Anchor wire layout (29 bytes, little-endian):
+    /// Anchor wire layout (30 bytes, little-endian):
     ///   [0..7]=version(int64) [8..15]=tAnchorTicks(int64) [16..23]=gAnchorTicks(int64)
-    ///   [24]=paused(byte) [25..28]=speedIndex(int32).
+    ///   [24]=paused(byte) [25..28]=speedIndex(int32) [29]=locked(byte).
     /// </summary>
     public static class TimeSyncProtocol
     {
-        public const int WireSize = 8 + 8 + 8 + 1 + 4; // 29
+        public const int WireSize = 8 + 8 + 8 + 1 + 4 + 1; // 30
 
         // ─── Anchor (0x37) encode/decode ──────────────────────────────────
         public static byte[] EncodeAnchor(AnchorPayload p)
@@ -99,6 +105,7 @@ namespace Multiplayer.Network.TimeSync
             Array.Copy(BitConverter.GetBytes(p.GAnchorTicks), 0, buf, 16, 8);
             buf[24] = (byte)(p.Paused ? 1 : 0);
             Array.Copy(BitConverter.GetBytes(p.SpeedIndex), 0, buf, 25, 4);
+            buf[29] = (byte)(p.Locked ? 1 : 0);
             return buf;
         }
 
@@ -112,6 +119,7 @@ namespace Multiplayer.Network.TimeSync
             p.GAnchorTicks = BitConverter.ToInt64(payload, 16);
             p.Paused = payload[24] != 0;
             p.SpeedIndex = BitConverter.ToInt32(payload, 25);
+            p.Locked = payload[29] != 0;
             return true;
         }
 

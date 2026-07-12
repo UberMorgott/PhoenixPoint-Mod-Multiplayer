@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using Multiplayer.Network.TimeSync;
 using UnityEngine;
 
@@ -38,8 +39,12 @@ namespace Multiplayer.Harmony
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true; // no session → local
+            if (TimeSyncManager.IsApplyingRemote) return true;   // our own remote-apply → let through (host + client)
+            // INTERCEPTION TIME-LOCK: time control is hard-locked for everyone while the host resolves an
+            // air-combat interception. Block the HOST's own pause commit here (the client's is relayed +
+            // host-rejected, and its widget is greyed via the anchor Locked bit). Not our remote-apply (above).
+            if (InterceptionTimeLock.Active) return false;
             if (engine.IsHost) return true;                      // host commits locally
-            if (TimeSyncManager.IsApplyingRemote) return true;   // our own remote-apply → let through
 
             try
             {
@@ -90,8 +95,11 @@ namespace Multiplayer.Harmony
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true;
+            if (TimeSyncManager.IsApplyingRemote) return true;   // our own MirrorSpeedUi call → let through (host + client)
+            // INTERCEPTION TIME-LOCK: block the HOST's own speed commit while an interception is resolving
+            // (client relays are host-rejected + its widget greyed via the anchor). Not our remote-apply (above).
+            if (InterceptionTimeLock.Active) return false;
             if (engine.IsHost) return true;
-            if (TimeSyncManager.IsApplyingRemote) return true;   // our own MirrorSpeedUi call → let through
 
             try
             {

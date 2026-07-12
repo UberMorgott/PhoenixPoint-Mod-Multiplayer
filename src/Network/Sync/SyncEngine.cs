@@ -1049,6 +1049,9 @@ namespace Multiplayer.Network.Sync
             // Boundary belt: a save-transfer/reload must never inherit a stale blocking-prompt arm (the modal it
             // guarded is gone with the old geoscape). Re-arms naturally if the restored host reopens the prompt.
             HostBlockingPromptGate.Reset();
+            // Same belt for a stale interception time-lock: its air-combat is gone with the old geoscape, so the
+            // shared clock must not stay locked after a save-transfer/reload (re-opens if the host re-enters one).
+            InterceptionTimeLock.Reset();
             // Same belt for pending research-nav overrides (their mirrored popups died with the old geoscape).
             State.ResearchNavMirror.Reset();
             // Same belt for blocking-modal mirror-origin tags: a stale tag from the old geoscape must never

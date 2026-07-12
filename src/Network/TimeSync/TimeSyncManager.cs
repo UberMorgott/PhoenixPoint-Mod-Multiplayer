@@ -77,6 +77,7 @@ namespace Multiplayer.Network.TimeSync
         private bool _haveCache;
         private bool _cachedPaused;
         private int _cachedSpeedIndex;
+        private bool _cachedLocked;   // interception time-lock state at the last captured anchor (change-detect)
         private float _hbAccum;
         private bool _haveAnchor;
         private AnchorPayload _lastAnchor;
@@ -92,6 +93,10 @@ namespace Multiplayer.Network.TimeSync
         // Idempotency: only re-arm the widget's dirty flags when it actually changes (no per-frame spam).
         private bool _uiPausedKnown;
         private bool _uiPausedShown;
+        // Last interception time-lock state we pushed into the native time widget (grey vs interactable).
+        // Idempotency: only toggle the widget's CanvasGroup when it actually changes (no per-frame spam).
+        private bool _uiLockKnown;
+        private bool _uiLockShown;
         // Ping scheduler.
         private int _nextPingId;
         private int _burstRemaining;
@@ -383,12 +388,16 @@ namespace Multiplayer.Network.TimeSync
             }
             catch { return; }
 
-            // Capture + reliably broadcast a fresh anchor on any real change (covers native auto-pauses).
-            bool changed = !_haveCache || paused != _cachedPaused || idx != _cachedSpeedIndex;
+            // Capture + reliably broadcast a fresh anchor on any real change (covers native auto-pauses AND an
+            // interception time-lock open/close, so the lock bit reaches clients within one frame even when
+            // {paused,speedIndex} did not move — the geoscape is natively paused under the brief).
+            bool locked = Multiplayer.Network.Sync.InterceptionTimeLock.Active;
+            bool changed = !_haveCache || paused != _cachedPaused || idx != _cachedSpeedIndex || locked != _cachedLocked;
             if (changed)
             {
                 _cachedPaused = paused;
                 _cachedSpeedIndex = idx;
+                _cachedLocked = locked;
                 _haveCache = true;
                 _hbAccum = 0f;
                 CaptureAndBroadcastAnchor(paused, idx, gTicks, reliable: true);
@@ -434,7 +443,10 @@ namespace Multiplayer.Network.TimeSync
         {
             _hostVersion = TimeSyncProtocol.NextVersion(_hostVersion);
             long tAnchorTicks = AnchorPayload.SecondsToTicks(LocalRt());
-            var anchor = new AnchorPayload(_hostVersion, tAnchorTicks, gAnchorTicks, paused, speedIndex);
+            // Stamp the current interception time-lock so EVERY anchor (change-driven, scrub, heartbeat re-seed,
+            // per-peer join, post-reload re-anchor) carries the authoritative lock state.
+            var anchor = new AnchorPayload(_hostVersion, tAnchorTicks, gAnchorTicks, paused, speedIndex,
+                                           Multiplayer.Network.Sync.InterceptionTimeLock.Active);
             _lastAnchor = anchor;
             _haveAnchor = true;
             BroadcastAnchor(anchor, reliable);
@@ -703,6 +715,8 @@ namespace Multiplayer.Network.TimeSync
                 }
                 // Keep the pause/running VISUAL (white+blink vs yellow) in sync with the host anchor.
                 MirrorPauseUi(paused);
+                // Grey the time-control buttons while the host's interception time-lock is active (anchor bit).
+                MirrorTimeLockUi(_clientAnchor.Locked);
             }
             catch (Exception ex)
             {
@@ -744,6 +758,12 @@ namespace Multiplayer.Network.TimeSync
         {
             if (_engine == null || !_engine.IsHost) return;
             if (!TimeSyncProtocol.TryDecodeRequest(payload, out var p)) return;
+
+            // INTERCEPTION TIME-LOCK (host-authoritative hard lock): while an air-combat interception is in
+            // progress the shared clock is locked for EVERYONE — reject every relayed client time request
+            // regardless of permission (the client's widget is greyed via the anchor Locked bit; this is the
+            // authoritative belt against an in-flight / forged request). The window-close anchor re-enables it.
+            if (Multiplayer.Network.Sync.InterceptionTimeLock.Active) return;
 
             // PERMISSION GATE (host-authoritative): the ControlTime gate existed only client-side at
             // RelayTimeRequest; a client with the bit revoked (or a malformed/forged packet) could still
@@ -841,6 +861,31 @@ namespace Multiplayer.Network.TimeSync
             _tcUpdatePausedField.SetValue(tc, true);
             _uiPausedKnown = true;
             _uiPausedShown = paused;
+        }
+
+        /// <summary>
+        /// Client: grey / restore the native geoscape time-control widget while the host's interception
+        /// time-lock is active (the anchor <c>Locked</c> bit). Reuses the codebase's native "grey but keep
+        /// readable" pattern (BlockingModalClientLock.SetModalInteractable): a get-or-added CanvasGroup with
+        /// <c>interactable=false</c> renders the child pause/speed buttons' NATIVE disabled grey; alpha and
+        /// blocksRaycasts stay untouched so the clock display + date stay fully readable. Idempotent (toggles
+        /// only on change — no per-frame spam) and best-effort. Never greys unless it has to: if we never
+        /// locked, the widget is left byte-for-byte native (the group is only added on the first lock).
+        /// </summary>
+        private void MirrorTimeLockUi(bool locked)
+        {
+            if (_uiLockKnown && _uiLockShown == locked) return; // unchanged → no-op (idempotent)
+            var tc = FindTimeControl() as Component;
+            if (tc == null) return;                             // widget momentarily absent — retry next frame
+            var cg = tc.gameObject.GetComponent<CanvasGroup>();
+            if (cg == null)
+            {
+                if (!locked) { _uiLockKnown = true; _uiLockShown = false; return; } // never greyed → nothing to add
+                cg = tc.gameObject.AddComponent<CanvasGroup>();
+            }
+            cg.interactable = !locked;
+            _uiLockKnown = true;
+            _uiLockShown = locked;
         }
 
         private static float ScaleForIndex(int idx, object timing)

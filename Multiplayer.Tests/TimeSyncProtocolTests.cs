@@ -5,19 +5,19 @@ namespace Multiplayer.Tests
 {
     public class TimeSyncProtocolTests
     {
-        // ─── Anchor payload roundtrip (0x37, 29-byte: version, tAnchor, gAnchor, paused, speedIdx) ──
+        // ─── Anchor payload roundtrip (0x37, 30-byte: version, tAnchor, gAnchor, paused, speedIdx, locked) ──
         [Theory]
-        // version, tAnchorTicks, gAnchorTicks, paused, speedIndex
-        [InlineData(0L, 0L, 0L, true, 0)]
-        [InlineData(1L, 123456789L, 987654321L, false, 1)]
-        [InlineData(42L, -5000L, 9_000_000_000L, true, 2)]
-        [InlineData(9_000_000_000L, 315576000000000L, 315576000000000L, false, 2)] // ~100 game-years in ticks
-        public void Anchor_EncodeDecode_Roundtrips(long version, long tAnchor, long gAnchor, bool paused, int idx)
+        // version, tAnchorTicks, gAnchorTicks, paused, speedIndex, locked
+        [InlineData(0L, 0L, 0L, true, 0, false)]
+        [InlineData(1L, 123456789L, 987654321L, false, 1, true)]   // interception time-lock set
+        [InlineData(42L, -5000L, 9_000_000_000L, true, 2, true)]
+        [InlineData(9_000_000_000L, 315576000000000L, 315576000000000L, false, 2, false)] // ~100 game-years in ticks
+        public void Anchor_EncodeDecode_Roundtrips(long version, long tAnchor, long gAnchor, bool paused, int idx, bool locked)
         {
-            var p = new AnchorPayload(version, tAnchor, gAnchor, paused, idx);
+            var p = new AnchorPayload(version, tAnchor, gAnchor, paused, idx, locked);
             var bytes = TimeSyncProtocol.EncodeAnchor(p);
             Assert.Equal(TimeSyncProtocol.WireSize, bytes.Length);
-            Assert.Equal(29, bytes.Length);
+            Assert.Equal(30, bytes.Length);
 
             Assert.True(TimeSyncProtocol.TryDecodeAnchor(bytes, out var back));
             Assert.Equal(version, back.Version);
@@ -25,13 +25,14 @@ namespace Multiplayer.Tests
             Assert.Equal(gAnchor, back.GAnchorTicks);
             Assert.Equal(paused, back.Paused);
             Assert.Equal(idx, back.SpeedIndex);
+            Assert.Equal(locked, back.Locked);
         }
 
         [Theory]
         [InlineData(null)]
         [InlineData(new byte[0])]
         [InlineData(new byte[] { 1, 0, 0, 0 })]                  // too short
-        [InlineData(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 })] // 28 bytes, one short
+        [InlineData(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29 })] // 29 bytes, one short of 30
         public void Anchor_Decode_RejectsMalformed(byte[] bad)
         {
             Assert.False(TimeSyncProtocol.TryDecodeAnchor(bad, out _));

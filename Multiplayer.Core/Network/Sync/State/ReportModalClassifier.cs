@@ -289,10 +289,12 @@ namespace Multiplayer.Network.Sync.State
         /// arms from the 0x69 SHOW itself, NOT from a successful client rebuild — a degraded notify-only
         /// fallback still leaves the host rejecting intents (spec P2 hard invariant). The CLIENT view-lock is
         /// the NARROWER <see cref="IsMandatoryBrief"/> (soak 2026-07-05 dead-CLOSE fix). WA-3: the
-        /// InterceptionBrief 32 joins the blocking set — its native open is PauseGame=true
-        /// (OpenModalPersistent, GeoscapeView.cs:861) with the host deciding intercept/disengage; its resolve
-        /// funnels through the SAME ModalResultCallback (:833) → the existing release + hide rails apply.
-        /// InterceptionOutcome 33 is a report — never blocking. PURE.
+        /// InterceptionBrief 32 stays in this set for the HIDE + notice rails (its resolve funnels through the
+        /// SAME ModalResultCallback (:833)) — but the consumer (<c>ReportModalMirror.HostBroadcast</c>) does NOT
+        /// arm the all-intent HostBlockingPromptGate for it. During an air-combat interception clients keep a
+        /// fully usable geoscape and relay intents throughout; ONLY time control is locked, via the dedicated
+        /// <see cref="Multiplayer.Network.Sync.InterceptionTimeLock"/> window (opened at 32-show, closed on
+        /// disengage / outcome-modal close). InterceptionOutcome 33 is a report — never blocking. PURE.
         /// </summary>
         public static bool IsBlockingModal(int modalType)
         {

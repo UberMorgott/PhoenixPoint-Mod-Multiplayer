@@ -135,7 +135,14 @@ namespace Multiplayer.Harmony.Sync
                 // mirror gating: the host is natively modal-locked the instant this window opens, so in-flight
                 // client intents must reject even if the client mirror is off or its payload read degrades.
                 // Released in BlockingModalReleasePatch (ModalResultCallback — every close path funnels there).
-                if (ReportModalClassifier.IsBlockingModal(modalType)) HostBlockingPromptGate.Arm(modalType);
+                // EXCEPTION — INTERCEPTION (32): it is blocking for the hide/notice rails but must NOT arm the
+                // all-intent gate. During an air-combat interception clients keep a fully usable geoscape (they
+                // relay research/manufacturing/roster intents throughout); ONLY time control is locked, via the
+                // dedicated InterceptionTimeLock window (opened here, closed on disengage / outcome-modal close).
+                if (modalType == ReportModalClassifier.InterceptionBrief)
+                    InterceptionTimeLock.Open();
+                else if (ReportModalClassifier.IsBlockingModal(modalType))
+                    HostBlockingPromptGate.Arm(modalType);
                 if (!ReportMirrorGate.Enabled) return;
                 if (SyncApplyScope.IsApplying) return;        // never re-broadcast a reconstructed window
                 if (!ReportModalClassifier.IsReportModal(modalType)) return;
@@ -202,14 +209,21 @@ namespace Multiplayer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        // __0 = modalType (ModalType enum, boxed); result/modalData not needed — ANY resolve releases.
-        public static void Postfix(object __0)
+        // __0 = modalType (ModalType enum, boxed); __1 = ModalResult (boxed) — read only for the interception
+        // disengage branch. For the blocking-gate release ANY resolve releases.
+        public static void Postfix(object __0, object __1)
         {
             try
             {
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
                 int modalType = Convert.ToInt32(__0);
+                // INTERCEPTION TIME-LOCK close (path a — DISENGAGE): the brief resolving to a NON-Confirm result
+                // (ModalResult.Confirm == 0) launches no minigame → the interception is fully over now, close the
+                // window. A Confirm launches the air-combat coroutine; the window stays locked until the outcome
+                // modal (33) closes (path b, BlockingModalHideReleasePatch).
+                if (modalType == ReportModalClassifier.InterceptionBrief && Convert.ToInt32(__1) != 0)
+                    InterceptionTimeLock.Close();
                 if (!ReportModalClassifier.IsBlockingModal(modalType)) return;
                 HostBlockingPromptGate.Release(modalType);
                 engine.Sync?.BroadcastReportModalHide((byte)modalType);
@@ -254,6 +268,11 @@ namespace Multiplayer.Harmony.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
                 int modalType = Convert.ToInt32(__0);
+                // INTERCEPTION TIME-LOCK close (path b — INTERCEPT / AUTO-RESOLVE): the air-battle OUTCOME modal
+                // (33, non-blocking) closing is the end of the minigame path → close the window (the next host
+                // anchor carries Locked=false, re-enabling + re-greying time control everywhere). Placed before
+                // the blocking-gate belt below (33 is not IsBlockingModal, so that belt ignores it).
+                if (modalType == ReportModalClassifier.InterceptionOutcome) InterceptionTimeLock.Close();
                 if (!ReportModalClassifier.IsBlockingModal(modalType)) return;
                 if (!HostBlockingPromptGate.IsArmed) return;   // already released by the primary → silent no-op
                 HostBlockingPromptGate.Release(modalType);
