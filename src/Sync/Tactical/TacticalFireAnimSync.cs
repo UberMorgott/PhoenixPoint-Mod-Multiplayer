@@ -122,6 +122,11 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] HOST broadcast tac.fire.start@shot-start seq=" + seq + " shooter=" + shooterNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid + " attack=" + attackTypeName +
                           " targetNetId=" + targetNetId + " shots=" + shotCount);
+
+                // Vision cadence: covers a stationary enemy that only SHOOTS (never moves) this turn — the move-outcome
+                // push would never fire for it, so without this the client keeps the stale start-of-turn set. Push the
+                // fresh snapshot after the fire broadcast; the _lastBroadcastSig dedup collapses it when nothing changed.
+                TacticalVisionSync.HostBroadcastVision();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastFireStart failed: " + ex); }
         }
@@ -164,8 +169,11 @@ namespace Multiplayer.Sync.Tactical
                 object target = BuildSyncedFireTarget(s);
                 if (target == null) { Debug.LogError("[Multiplayer][tac] tac.fire.start: could not build target"); return; }
 
-                // Enemy-turn chase cam: snap to the shooter for the replayed shot (follow=false → one-shot snap).
-                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, shooter != null))
+                // Enemy-turn chase cam: snap to the shooter for the replayed shot (follow=false → one-shot snap). VISIBILITY
+                // GATE (cheap enemy-turn gate first, then the vision walk): snap ONLY to a mirror-visible enemy — the host
+                // replays every enemy shot for world-state sync (incl. fog-hidden ones). Reuses the exact 0x97 policy.
+                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, shooter != null)
+                    && TacticalEnemyTurnCamera.IsActorVisibleToPlayerFaction(shooter))
                     TacticalEnemyTurnCamera.ChaseActor(shooter, follow: false);
 
                 object tlc = TacticalDeploySync.LiveTlc;

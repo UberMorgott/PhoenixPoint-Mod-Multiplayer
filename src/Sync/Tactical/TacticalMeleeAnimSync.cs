@@ -86,6 +86,11 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] HOST broadcast tac.melee.start seq=" + seq + " attacker=" + attackerNetId +
                           " type=" + ability.GetType().Name + " ability=" + abilityGuid +
                           " targetNetId=" + targetNetId);
+
+                // Vision cadence: covers an already-adjacent enemy that BASHES without moving this turn — the move-outcome
+                // push would never fire for it. Push the fresh snapshot after the melee broadcast; the _lastBroadcastSig
+                // dedup collapses it when nothing changed.
+                TacticalVisionSync.HostBroadcastVision();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastMeleeStart failed: " + ex); }
         }
@@ -127,8 +132,11 @@ namespace Multiplayer.Sync.Tactical
                     return;
                 }
 
-                // Enemy-turn chase cam: snap to the attacker for the replayed swing (follow=false → one-shot snap).
-                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, attacker != null))
+                // Enemy-turn chase cam: snap to the attacker for the replayed swing (follow=false → one-shot snap). VISIBILITY
+                // GATE (cheap enemy-turn gate first, then the vision walk): snap ONLY to a mirror-visible enemy — the host
+                // replays every enemy swing for world-state sync (incl. fog-hidden ones). Reuses the exact 0x97 policy.
+                if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, attacker != null)
+                    && TacticalEnemyTurnCamera.IsActorVisibleToPlayerFaction(attacker))
                     TacticalEnemyTurnCamera.ChaseActor(attacker, follow: false);
 
                 // BashCrt is private: BashAbility.BashCrt(PlayingAction) — drive it directly (NOT via Activate),

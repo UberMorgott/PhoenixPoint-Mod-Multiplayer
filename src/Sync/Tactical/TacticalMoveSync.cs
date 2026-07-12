@@ -224,6 +224,13 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] HOST broadcast tac.move seq=" + seq + " netId=" + netId +
                           " pos=(" + pos.x.ToString("0.0") + "," + pos.y.ToString("0.0") + "," + pos.z.ToString("0.0") +
                           ") stop=" + stopReason);
+
+                // Vision cadence: an enemy MOVE is the dominant vision-changer, but the native start-of-turn
+                // UpdateVisibilityAll + per-move recompute change KnownActors with notifyChange:false → no
+                // FactionKnowledgeChanged → no push, so the client held STALE reveals. Push the fresh snapshot after
+                // each move outcome so the client reconciles promptly. Cheap + idempotent: the _lastBroadcastSig dedup
+                // collapses a no-op snapshot (also covers the host's own player moves).
+                TacticalVisionSync.HostBroadcastVision();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastMoveOutcome failed: " + ex); }
         }
@@ -275,8 +282,12 @@ namespace Multiplayer.Sync.Tactical
             var dst = new Vector3(s.X, s.Y, s.Z);
             // Record the requested dst so the END outcome can distinguish a normal completion from an interrupt.
             _clientStartDst[s.NetId] = dst;
-            // Enemy-turn chase cam: follow the moving actor's live transform across the navigate (follow=true).
-            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null))
+            // Enemy-turn chase cam: follow the moving actor's live transform across the navigate (follow=true). VISIBILITY
+            // GATE (cheap enemy-turn gate first, then the vision walk — mirrors HostBroadcastCameraHint's ordering): chase
+            // ONLY a mirror-visible enemy. The host replays EVERY enemy move for world-state sync (incl. fog-hidden ones),
+            // so without this the client camera would fly to invisible enemies. Reuses the exact 0x97 visibility policy.
+            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null)
+                && TacticalEnemyTurnCamera.IsActorVisibleToPlayerFaction(actor))
                 TacticalEnemyTurnCamera.ChaseActor(actor, follow: true);
             string branch;
             Vector3 cur = GetPos(actor);

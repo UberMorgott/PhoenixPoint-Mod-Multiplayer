@@ -174,11 +174,16 @@ namespace Multiplayer.Sync.Tactical
         private static bool FactionIsControlledByPlayer(object faction)
             => faction != null && GetProp(faction, "IsControlledByPlayer") is bool b && b;
 
-        /// <summary>HOST: is <paramref name="actor"/> currently VISIBLE (revealed or located) to the shared player
-        /// faction? Resolves the player faction off the live TLC, reads its <c>Vision.IsRevealed/IsLocated(actor)</c>.
-        /// Fails CLOSED (returns false → no broadcast) on any resolution failure so a hidden enemy is never revealed
-        /// by the camera. Mirrors the vision read in <see cref="TacticalVisionSync"/> (kept local — camera-scoped).</summary>
-        private static bool IsActorVisibleToPlayerFaction(object actor)
+        /// <summary>HOST or CLIENT-mirror: is <paramref name="actor"/> currently VISIBLE (revealed or located) to the
+        /// shared player faction? Resolves the player faction off the live TLC, reads its
+        /// <c>Vision.IsRevealed/IsLocated(actor)</c> — on the CLIENT that reads the MIRRORED KnownActors (the host
+        /// reveals pushed via <c>tac.vision</c>). The host 0x97 gate feeds it into
+        /// <see cref="ClientEnemyTurnCameraGate.ShouldBroadcastEnemyCameraHint"/>; the client's move/fire/melee
+        /// per-action chases AND it after <see cref="ClientEnemyTurnCameraGate.ShouldChaseEnemyAction"/> so the mirror
+        /// never follows a fog-hidden enemy the host only replays for world-state sync. Fails CLOSED (returns false →
+        /// no chase/broadcast) on any resolution failure so a hidden enemy is never revealed by the camera. Mirrors the
+        /// vision read in <see cref="TacticalVisionSync"/> (kept local — camera-scoped).</summary>
+        public static bool IsActorVisibleToPlayerFaction(object actor)
         {
             try
             {
