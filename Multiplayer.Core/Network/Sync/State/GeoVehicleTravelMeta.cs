@@ -64,6 +64,23 @@ namespace Multiplayer.Network.Sync.State
         public static int AnimatorTravelState(bool travelling)
             => travelling ? AnimStateTravelling : AnimStateParked;
 
+        /// <summary>HOST re-ship window (poll count) for a newly-appeared DAMAGED vehicle's HP tail — see
+        /// <c>GeoVehicleTravelMirror</c>. A stolen / interception-damaged craft ACQUIRED mid-session ships its
+        /// HP tail once, but its GeoVehicleChannel #6 identity mirror may not have SPAWNED the client vehicle yet
+        /// when this change-only tail lands (<c>ApplyTravelMeta.ResolveVehicle</c> no-ops), so the value never
+        /// re-delivers and the mirror shows full BaseStats HP. Re-shipping the tail for a few polls outlasts the
+        /// #6 spawn delivery. ponytail: fixed count, not an ack — the hourly-repair re-ship + the #6/0xA6
+        /// reconverge heal the rare spawn slower than the window.</summary>
+        public const int ReshipWindowPolls = 3;
+
+        /// <summary>PURE: does a vehicle seen for the FIRST time in the host travel poll need a re-ship window?
+        /// Only a genuinely-NEW (unknown-key) vehicle carrying a NON-pristine HP tail (damaged / repairing) —
+        /// exactly the mid-session-acquired damaged craft (stolen / post-interception). An already-KNOWN
+        /// vehicle's HP change is caught by the normal signature change-detect (its mirror already exists on the
+        /// client); a pristine new craft has nothing to deliver. Unit-testable without Unity.</summary>
+        public static bool NeedsReshipWindow(bool known, GeoVehicleHealthTail health)
+            => !known && health != null && !health.IsPristine;
+
         public bool Equals(GeoVehicleTravelMeta o)
         {
             if (OwnerId != o.OwnerId || VehicleId != o.VehicleId || Travelling != o.Travelling

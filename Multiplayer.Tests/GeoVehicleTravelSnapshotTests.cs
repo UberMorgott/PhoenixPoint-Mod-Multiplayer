@@ -25,6 +25,25 @@ public class GeoVehicleTravelSnapshotTests
             Assert.Equal(input[i], outList[i]);   // structural equality incl. the dest-id array
     }
 
+    // ─── HP-tail re-ship window (audit gap B: stolen / post-interception damaged craft) ─────────────
+    // A newly-appeared DAMAGED vehicle needs its one-shot 0xA6 HP tail re-shipped for a few polls so it
+    // outlasts the #6 identity mirror's client spawn (else the change-only tail lands pre-spawn and is lost →
+    // mirror stuck at full BaseStats HP). Only a NEW + non-pristine vehicle qualifies.
+    [Fact]
+    public void NeedsReshipWindow_OnlyForNewlyAppearedDamagedVehicle()
+    {
+        var damaged = new GeoVehicleHealthTail(50, 100, isRepairing: false);
+        var repairing = new GeoVehicleHealthTail(100, 100, isRepairing: true);   // full HP but repairing → not pristine
+        var pristine = new GeoVehicleHealthTail(100, 100, isRepairing: false);
+
+        Assert.True(GeoVehicleTravelMeta.NeedsReshipWindow(known: false, damaged));    // stolen/damaged NEW craft
+        Assert.True(GeoVehicleTravelMeta.NeedsReshipWindow(known: false, repairing));  // repairing NEW craft
+        Assert.False(GeoVehicleTravelMeta.NeedsReshipWindow(known: true, damaged));    // already known → change-detect covers it
+        Assert.False(GeoVehicleTravelMeta.NeedsReshipWindow(known: false, pristine));  // pristine new craft → nothing to deliver
+        Assert.False(GeoVehicleTravelMeta.NeedsReshipWindow(known: false, null));      // no HP tail read
+        Assert.True(GeoVehicleTravelMeta.ReshipWindowPolls >= 2);                      // must span >1 poll to beat the spawn race
+    }
+
     // Same VehicleID under two owners must stay distinct (per-faction VehicleID collision — the bug that broke
     // the 0xA5 mirror). The composite Key must differ so neither host sig cache nor client lookup collapses them.
     [Fact]
