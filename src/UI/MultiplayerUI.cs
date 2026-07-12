@@ -1340,6 +1340,10 @@ namespace Multiplayer.UI
 
         private void Update()
         {
+            // Drive the deferred TFTV guard-patch bind (arms on TFTV assembly load, binds one frame later).
+            // MUST run BEFORE the session gate below: TFTV loads at startup/menu, long before any co-op session.
+            Multiplayer.Harmony.TftvLateBinder.Tick();
+
             var engine = NetworkEngine.Instance;
             if (engine?.IsActive == true)
             {

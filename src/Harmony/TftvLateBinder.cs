@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
@@ -8,20 +7,24 @@ namespace Multiplayer.Harmony
     // Late-binds the TFTV-gated [HarmonyPatch] GUARD classes that PatchAll SILENTLY skipped because TFTV's
     // assembly loads AFTER Multiplayer (PP enables "Morgott.Multiplayer" before "phoenixrising.tftv"). At
     // PatchAll time their TFTV target types are unresolvable -> Prepare() returns false -> the classes never
-    // bind, so every TFTV guard was DEAD in production (Player.log: "TFTV ... null-guard skipped (TFTV type
-    // absent)"; the 126x NRE storm persisted). Same proven mechanism as TftvLogDeferredInstaller
-    // (AppDomain.AssemblyLoad) — the two log-redirect patches already ride that installer, so this binder owns
-    // the REMAINING guards. When TFTV's assembly appears, PatchClassProcessor each listed class ONCE (its own
-    // Prepare now returns true). Idempotent via _done; if TFTV was already loaded at init, PatchAll bound them
-    // and Install() no-ops.
+    // bind, so every TFTV guard was DEAD in production (the 126x geoscape-teardown NRE storm persisted).
+    //
+    // TWO stages, BOTH mandatory (regression 2026-07-12 — TypeInitializationException at startup):
+    //   1. AppDomain.AssemblyLoad callback ONLY sets a pending flag. It must NEVER Patch() here: Harmony
+    //      forces JIT/PrepareMethod on the TFTV target, which runs that TFTV type's static cctor BEFORE
+    //      TFTV.OnModEnabled has populated TFTVMain.Repo/DefCache -> the cctor faults -> the type is
+    //      permanently poisoned -> TFTV's own OnModEnabled then throws and the GAME crashes at startup.
+    //   2. The actual PatchClassProcessor.Patch() runs one Unity FRAME later (Tick, driven by
+    //      MultiplayerUI.Update): TFTV.OnModEnabled runs same-frame as the assembly load, so by the next
+    //      frame Repo/DefCache are populated and the cctors are safe.
+    // Idempotent (_done); if TFTV was already loaded before us, PatchAll bound them and Install() no-ops.
     //
     // ponytail: explicit list — a NEW TFTV-gated [HarmonyPatch] class MUST be added here or it silently dies
     // the same way. Auto-discovery would have to parse each Prepare's TFTV gate — not worth it.
     internal static class TftvLateBinder
     {
         // Every TFTV-type-gated guard class in this assembly EXCEPT the two log-redirect patches (already
-        // late-bound by TftvLogDeferredInstaller). All target types live in the main TFTV assembly
-        // (namespace "TFTV"), so one marker load makes them all resolvable together.
+        // late-bound by TftvLogDeferredInstaller). All target types live in the main TFTV assembly.
         private static readonly Type[] _patchClasses =
         {
             // ClientTftvGeoscapeUiTeardownPatch.cs — geoscape-UI teardown NRE guards (the reported bug).
@@ -46,6 +49,8 @@ namespace Multiplayer.Harmony
         private static readonly object _lock = new object();
         private static HarmonyLib.Harmony _harmony;
         private static AssemblyLoadEventHandler _handler;
+        private static volatile bool _pending; // set by the AssemblyLoad callback once TFTV is resolvable
+        private static int _armedFrame = -1;    // frame Tick first saw _pending — bind on a LATER frame
         private static bool _done;
 
         // Called from MultiplayerMain.OnModEnabled right after PatchAll, with the mod's Harmony instance.
@@ -65,27 +70,39 @@ namespace Multiplayer.Harmony
             _handler = (s, a) => OnAssemblyLoad();
             AppDomain.CurrentDomain.AssemblyLoad += _handler;
             Debug.Log("[Multiplayer] deferred TFTV guard-patch binder armed (" + _patchClasses.Length
-                + " classes); waiting for TFTV assembly load.");
+                + " classes); waiting for TFTV assembly load (bind deferred one frame past load).");
         }
 
         private static bool TftvLoaded() => AccessTools.TypeByName("TFTV.TFTVMain") != null;
 
+        // ARM ONLY — never Patch() here (would JIT TFTV cctors before TFTV.OnModEnabled populated Repo/DefCache
+        // -> cctor poisoning -> startup crash). Actual bind happens in Tick() one frame later. Runs during the
+        // CLR assembly-load stack, so the TFTV assembly (hence TypeByName) is already resolvable when it is TFTV.
         private static void OnAssemblyLoad()
         {
-            // NEVER throw into an AppDomain event — that can destabilize the host. Swallow everything.
-            try
+            try { if (!_pending && !_done && TftvLoaded()) _pending = true; }
+            catch { /* never throw into an AppDomain event */ }
+        }
+
+        // Driven every frame by MultiplayerUI.Update (BEFORE its session gate, so it runs at the main menu
+        // where TFTV loads). No-op until TFTV is pending, then binds on the NEXT frame. Cheap once _done.
+        public static void Tick()
+        {
+            if (_done || !_pending) return;
+            if (_armedFrame < 0)
+            {
+                _armedFrame = Time.frameCount; // wait one more frame so TFTV.OnModEnabled (same frame) finished
+                Debug.Log("[Multiplayer] TFTV guard bind deferred to next frame");
+                return;
+            }
+            if (Time.frameCount <= _armedFrame) return; // still the same frame — hold
+            lock (_lock)
             {
                 if (_done) return;
-                if (!TftvLoaded()) return; // cheap marker gate: no per-class Prepare (or its log) until TFTV is present
-                lock (_lock)
-                {
-                    if (_done) return;
-                    BindAll();
-                    _done = true;
-                    if (_handler != null) { AppDomain.CurrentDomain.AssemblyLoad -= _handler; _handler = null; }
-                }
+                BindAll();
+                _done = true;
             }
-            catch (Exception e) { Debug.LogWarning("[Multiplayer] TFTV late-bind handler failed: " + e.Message); }
+            Unsubscribe();
         }
 
         private static void BindAll()
@@ -108,6 +125,13 @@ namespace Multiplayer.Harmony
                     Debug.LogWarning("[Multiplayer] TFTV patch late-bind FAILED: " + t.Name + " — " + e.Message);
                 }
             }
+        }
+
+        private static void Unsubscribe()
+        {
+            if (_handler == null) return;
+            AppDomain.CurrentDomain.AssemblyLoad -= _handler;
+            _handler = null;
         }
     }
 }
