@@ -71,6 +71,10 @@ namespace Multiplayer.Harmony
                     // re-ships its Exploring=true immediately. Runs regardless of the freeze flag (the set is only
                     // ever populated on the frozen client, so this is a no-op when the flag is OFF).
                     GeoVehicleExploreMirror.ClearClientExploring();
+                    // Lift any geo→tactical transition gate: a launch that ABORTED back to the geoscape (or a
+                    // normal tactical→geoscape return) must not leave wallet apply / bar refresh gated. Idempotent;
+                    // the paired set is in LaunchTacticalGameGatePatch, the other clear at tactical level-ready.
+                    GeoTransitionGate.InTransition = false;
                     Debug.Log("[Multiplayer] ClientGeoSimFreezePatch reached (client geoscape load); "
                         + "ClientSimFreeze.Enabled=" + ClientSimFreeze.Enabled + " freeze=" + freeze
                         + " (client explore-mirror flags cleared)");

@@ -29,6 +29,14 @@ namespace Multiplayer.Network.Sync
 
         public static void Apply(GeoRuntime rt, List<(int type, float value)> target)
         {
+            // Skip during the client geo→tactical transition: a native Wallet apply here fires ResourcesChanged
+            // into a half-torn-down info bar → TFTV RefreshResourceText NRE storm. Recovered by the drift-poll /
+            // full-wallet re-broadcast on geoscape re-entry (State.GeoTransitionGate cleared on level-ready/reload).
+            if (State.GeoTransitionGate.InTransition)
+            {
+                UnityEngine.Debug.Log("[Multiplayer] Wallet apply skipped guard=geo→tactical transition (recovered on geoscape re-entry)");
+                return;
+            }
             var wallet = rt?.Wallet();
             if (wallet == null || target == null) return;
             foreach (var (t, v) in target)

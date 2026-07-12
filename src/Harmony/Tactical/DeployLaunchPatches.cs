@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync.State;
 using Multiplayer.Sync.Tactical;
 using UnityEngine;
 
@@ -53,6 +54,10 @@ namespace Multiplayer.Harmony.Tactical
             int stateVal;
             try { stateVal = System.Convert.ToInt32(state); } catch { return; }
             if (stateVal != _playingStateValue) return;   // only act on the Playing transition
+
+            // Tactical level fully built → geo→tactical transition complete; lift the wallet/bar gate (client-set;
+            // clearing on the host is a harmless no-op since it never set it). Second clear point = geoscape reload.
+            GeoTransitionGate.InTransition = false;
 
             try
             {
@@ -127,7 +132,14 @@ namespace Multiplayer.Harmony.Tactical
             }
 
             // CLIENT: only the deploy-driven launch is allowed; block any spontaneous self-launch.
-            if (TacticalDeploySync.ClientLaunchInProgress) return true;
+            if (TacticalDeploySync.ClientLaunchInProgress)
+            {
+                // geo→tactical transition begins → gate wallet apply + persistent-bar refresh so late host wallet
+                // syncs don't repaint a half-torn-down info bar (TFTV RefreshResourceText NRE storm). Cleared at
+                // tactical level-ready (TacticalLevelStateChangedPatch) and geoscape reload (ClientGeoSimFreezePatch).
+                GeoTransitionGate.InTransition = true;
+                return true;
+            }
             Debug.Log("[Multiplayer][tac] CLIENT spontaneous LaunchTacticalGame GATED (awaiting tac.deploy)");
             return false;
         }

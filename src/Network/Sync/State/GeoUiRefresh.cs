@@ -203,6 +203,14 @@ namespace Multiplayer.Network.Sync.State
         /// </summary>
         public static void RefreshPersistentBars(GeoRuntime rt)
         {
+            // Skip during the client geo→tactical transition: forcing the info bar to repaint while the geoscape
+            // UI is being torn down drives the same TFTV RefreshResourceText NRE storm as a raw wallet apply.
+            // Recovered on geoscape re-entry (GeoTransitionGate cleared on tactical level-ready / geoscape reload).
+            if (GeoTransitionGate.InTransition)
+            {
+                Debug.Log("[Multiplayer] Persistent-bars refresh skipped guard=geo→tactical transition (recovered on geoscape re-entry)");
+                return;
+            }
             try
             {
                 Ensure(rt);
