@@ -324,73 +324,83 @@ namespace Multiplayer.Sync.Tactical
                 {
                     foreach (var rec in batch.Actors)
                     {
-                        object actor = TacticalDeploySync.ResolveLiveActor(rec.NetId);
-                        if (actor == null)
-                            // CLIENT coverage: the netId is unbound (deploy position drift or a mid-mission
-                            // spawn). LAZY re-bind against the live map via the existing deploy matcher
-                            // (GeoUnitId-exact preferred; position fallback within PosEpsilon) before dropping.
-                            actor = TacticalDeploySync.ClientTryLazyRebind(rec.NetId, rec.HasPos, rec.PosX, rec.PosY, rec.PosZ);
-                        if (actor == null) continue;   // truly absent on the frozen client (host-only spawn) → drop (birth)
-                        applied++;
+                        // Per-actor guard: a throwing reflected apply (SetStat / StatChangeEvent subscriber on a
+                        // frozen mirror actor) must NOT abort the batch suffix and skip the post-loop LiveSeq.Mark
+                        // (which would freeze _clientLast → durable silent desync). Log netId+ex and CONTINUE — same
+                        // pattern as TacticalStructDamageSync per-hit guard. Poison actor is skipped each tick; the
+                        // rest of the batch and all later batches still converge because Mark stays AFTER the loop.
+                        try
+                        {
+                            object actor = TacticalDeploySync.ResolveLiveActor(rec.NetId);
+                            if (actor == null)
+                                // CLIENT coverage: the netId is unbound (deploy position drift or a mid-mission
+                                // spawn). LAZY re-bind against the live map via the existing deploy matcher
+                                // (GeoUnitId-exact preferred; position fallback within PosEpsilon) before dropping.
+                                actor = TacticalDeploySync.ClientTryLazyRebind(rec.NetId, rec.HasPos, rec.PosX, rec.PosY, rec.PosZ);
+                            if (actor == null) continue;   // truly absent on the frozen client (host-only spawn) → drop (birth)
+                            applied++;
 
-                        // APPLY ORDER: reconcile STATUSES FIRST, then set AP/WP ABSOLUTE LAST — so the host's
-                        // authoritative absolute AP/WP always WINS over any stat change a status touches (the
-                        // mirrored statuses are INERT via the guards, so they apply no stat delta anyway, but
-                        // the order is kept correct). Body-part HP is independent (own stat) → apply any time.
-                        if (rec.HasStatuses)
-                        {
-                            ReconcileStatuses(actor, rec.Statuses, ref sAdd, ref sRem, ref sRef);
+                            // APPLY ORDER: reconcile STATUSES FIRST, then set AP/WP ABSOLUTE LAST — so the host's
+                            // authoritative absolute AP/WP always WINS over any stat change a status touches (the
+                            // mirrored statuses are INERT via the guards, so they apply no stat delta anyway, but
+                            // the order is kept correct). Body-part HP is independent (own stat) → apply any time.
+                            if (rec.HasStatuses)
+                            {
+                                ReconcileStatuses(actor, rec.Statuses, ref sAdd, ref sRem, ref sRef);
+                            }
+                            if (rec.HasBodyParts)
+                            {
+                                bp += ApplyBodyPartHp(actor, rec.BodyParts);
+                            }
+                            // Feature D: actor-level absolute HEALTH (heal / drift correction), DEATH-SAFE. The host
+                            // only ships the bit when HP > 0, but ShouldApplyHealthMirror double-guards: a non-positive
+                            // value is NEVER set (death owned by tac.damage), and an unchanged value is a no-op.
+                            if (rec.HasHealth)
+                            {
+                                if (ApplyHealthMirror(actor, rec.Health)) hp++;
+                            }
+                            if (rec.HasAp || rec.HasWp)
+                            {
+                                if (SetApWpAbsolute(actor, rec)) { apwp++; apAppliedNetIds.Add(rec.NetId); }
+                            }
+                            // Inc2: apply the host's ABSOLUTE facing BEFORE position. A stationary actor keeps the host
+                            // heading (turn-in-place); a moved actor's Pos may start a Walk — which owns rotation and
+                            // makes ApplyMirrorFacing SKIP (skip-while-navigating) — then the next heartbeat converges
+                            // the final facing. SetForward is absolute/idempotent + sub-epsilon-skipped (no churn / no
+                            // ActorMovedEvent re-fire) — see TacticalMoveSync.ApplyMirrorFacing.
+                            if (rec.HasFacing)
+                            {
+                                if (TacticalMoveSync.ApplyMirrorFacing(
+                                        actor, new Vector3(rec.FacingX, rec.FacingY, rec.FacingZ))) facingCnt++;
+                            }
+                            // Inc1 full-state: drive the actor toward the host's ABSOLUTE position. The native walk
+                            // animation (or an instant snap for a sub-cell nudge / disconnected jump) is triggered by
+                            // TacticalMoveSync.ApplyMirrorPosition, which reuses the SAME mirror NavigationSettings +
+                            // walk/teleport primitives as the tac.move.start rail and SKIPS re-animating an actor that
+                            // the move rail already set navigating (no double-animate while running ADDITIVE). Applied
+                            // LAST (after stats) so the transform move lands on a fully-converged actor.
+                            if (rec.HasPos)
+                            {
+                                if (TacticalMoveSync.ApplyMirrorPosition(
+                                        actor, new Vector3(rec.PosX, rec.PosY, rec.PosZ))) posCnt++;
+                            }
+                            // TS5 (a): value-write per-weapon magazine charges (host-authoritative ammo mirror). Absolute
+                            // + idempotent (a converged weapon is a no-op). Applied under _applyingRemote like the rest.
+                            if (rec.HasAmmo)
+                            {
+                                if (ApplyWeaponAmmo(actor, rec.Ammo)) ammoCnt++;
+                            }
+                            // TS5 (b): DISPLAY-only faction stamp (mind-control / zombify side repaint). Sets the actor's
+                            // TacticalFaction property DIRECTLY + fires the display FactionChangedEvent for the healthbar
+                            // recolor — NEVER the native SetFaction (which would re-home the actor in the sim). Change-gated
+                            // (ShouldApplyFactionDisplay) so an unchanged 4 Hz re-apply never repaints.
+                            if (rec.HasFaction)
+                            {
+                                if (ApplyFactionDisplay(actor, rec.Faction)) facCnt++;
+                            }
                         }
-                        if (rec.HasBodyParts)
-                        {
-                            bp += ApplyBodyPartHp(actor, rec.BodyParts);
-                        }
-                        // Feature D: actor-level absolute HEALTH (heal / drift correction), DEATH-SAFE. The host
-                        // only ships the bit when HP > 0, but ShouldApplyHealthMirror double-guards: a non-positive
-                        // value is NEVER set (death owned by tac.damage), and an unchanged value is a no-op.
-                        if (rec.HasHealth)
-                        {
-                            if (ApplyHealthMirror(actor, rec.Health)) hp++;
-                        }
-                        if (rec.HasAp || rec.HasWp)
-                        {
-                            if (SetApWpAbsolute(actor, rec)) { apwp++; apAppliedNetIds.Add(rec.NetId); }
-                        }
-                        // Inc2: apply the host's ABSOLUTE facing BEFORE position. A stationary actor keeps the host
-                        // heading (turn-in-place); a moved actor's Pos may start a Walk — which owns rotation and
-                        // makes ApplyMirrorFacing SKIP (skip-while-navigating) — then the next heartbeat converges
-                        // the final facing. SetForward is absolute/idempotent + sub-epsilon-skipped (no churn / no
-                        // ActorMovedEvent re-fire) — see TacticalMoveSync.ApplyMirrorFacing.
-                        if (rec.HasFacing)
-                        {
-                            if (TacticalMoveSync.ApplyMirrorFacing(
-                                    actor, new Vector3(rec.FacingX, rec.FacingY, rec.FacingZ))) facingCnt++;
-                        }
-                        // Inc1 full-state: drive the actor toward the host's ABSOLUTE position. The native walk
-                        // animation (or an instant snap for a sub-cell nudge / disconnected jump) is triggered by
-                        // TacticalMoveSync.ApplyMirrorPosition, which reuses the SAME mirror NavigationSettings +
-                        // walk/teleport primitives as the tac.move.start rail and SKIPS re-animating an actor that
-                        // the move rail already set navigating (no double-animate while running ADDITIVE). Applied
-                        // LAST (after stats) so the transform move lands on a fully-converged actor.
-                        if (rec.HasPos)
-                        {
-                            if (TacticalMoveSync.ApplyMirrorPosition(
-                                    actor, new Vector3(rec.PosX, rec.PosY, rec.PosZ))) posCnt++;
-                        }
-                        // TS5 (a): value-write per-weapon magazine charges (host-authoritative ammo mirror). Absolute
-                        // + idempotent (a converged weapon is a no-op). Applied under _applyingRemote like the rest.
-                        if (rec.HasAmmo)
-                        {
-                            if (ApplyWeaponAmmo(actor, rec.Ammo)) ammoCnt++;
-                        }
-                        // TS5 (b): DISPLAY-only faction stamp (mind-control / zombify side repaint). Sets the actor's
-                        // TacticalFaction property DIRECTLY + fires the display FactionChangedEvent for the healthbar
-                        // recolor — NEVER the native SetFaction (which would re-home the actor in the sim). Change-gated
-                        // (ShouldApplyFactionDisplay) so an unchanged 4 Hz re-apply never repaints.
-                        if (rec.HasFaction)
-                        {
-                            if (ApplyFactionDisplay(actor, rec.Faction)) facCnt++;
-                        }
+                        catch (Exception ex)
+                        { Debug.LogError("[Multiplayer][tac] tac.actorstate per-actor apply failed netId=" + rec.NetId + ": " + ex); }
                     }
                 }
                 finally { _applyingRemote = false; }
