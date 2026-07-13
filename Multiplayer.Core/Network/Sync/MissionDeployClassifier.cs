@@ -40,5 +40,16 @@ namespace Multiplayer.Network.Sync
             }
             return anyMission;
         }
+
+        /// <summary>
+        /// True iff a RESOLVED choice should close the client mirror with a plain DISMISS instead of a result
+        /// page: the choice STARTS a tactical mission (its native follow-up is the mission brief / deploy flow,
+        /// never a text page), the rebuilt result body is EMPTY and the dismiss carried NO reward — there is
+        /// nothing to show. Anything renderable (body text or reward lines) → false, normal result page.
+        /// (Live failure 2026-07-13: PROG_AN0_MISS mirrored under the narrowed classifier above; resolving its
+        /// mission choice synthesized a BLANK page with a lone OK button on every client.)
+        /// </summary>
+        public static bool ShouldSuppressEmptyMissionResult(bool choiceStartsMission, bool bodyEmpty, bool rewardEmpty)
+            => choiceStartsMission && bodyEmpty && rewardEmpty;
     }
 }

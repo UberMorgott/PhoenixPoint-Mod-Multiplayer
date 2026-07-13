@@ -1319,6 +1319,19 @@ namespace Multiplayer.Network.Sync
                 switch (decision.Kind)
                 {
                     case State.EventCorrelator.ActionKind.ArmReplay:
+                        // EMPTY MISSION-CHOICE RESULT (live failure 2026-07-13, PROG_AN0_MISS): the decided
+                        // choice LAUNCHES a tactical mission and yields no body/reward — arming would leave a
+                        // window whose only possible resolution is a blank OK page. Terminally consume the arm
+                        // now (same correlator seam as the replay click) and plain-close the mirror instead.
+                        if (EventReflection.IsEmptyMissionResult(rt, eventId, choiceIndex, wireOutcome,
+                                reward == null || reward.IsEmpty))
+                        {
+                            _eventCorrelator.ReplayLocalClick(occId, eventId);   // decided→completed, slot freed
+                            Debug.Log("[Multiplayer] CLIENT OnEventDismiss occId=" + occId + " eventId=" + eventId +
+                                      " → empty mission-choice result — plain Dismiss (no replay arm, no result page)");
+                            State.EventDisplay.Dismiss(rt, occId, eventId);
+                            break;
+                        }
                         // Replay mode: the decided signal arrived for an OPEN window this peer did NOT win. The
                         // window stays LIVE on the choice page — retain the result payload (bounded, correlator-cap
                         // mirror) and REACTIVELY re-arm the live module (grey non-winners + highlight the winner)
@@ -1640,7 +1653,8 @@ namespace Multiplayer.Network.Sync
             if (hasIdentity && EventReflection.ShouldSpawnMirror(
                     hasIdentity, State.GeoSiteReflection.ResolveSiteById(rt, siteId) != null))
                 State.GeoSiteReflection.SpawnMirrorSite(rt, identity);
-            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative, wireTitle);
+            var resultEvent = EventReflection.BuildResultEvent(rt, eventId, choiceIndex, siteId, wireOutcome, wireNarrative, wireTitle,
+                rewardEmpty: reward == null || reward.IsEmpty);
             Debug.Log("[Multiplayer] CLIENT ResolveToResultPage occId=" + occId + " eventId=" + eventId +
                       " choiceIndex=" + choiceIndex + " builtResult=" + (resultEvent != null) +
                       " rewardEmpty=" + (reward == null || reward.IsEmpty) +

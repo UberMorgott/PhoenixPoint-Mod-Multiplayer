@@ -58,4 +58,18 @@ public class MissionDeployClassifierTests
     [Fact]
     public void ShortPayloadArray_MissingEntriesTreatedAsDecline()
         => Assert.True(MissionDeployClassifier.IsPureDeployPrompt(new[] { true, false }, new[] { false }));
+
+    // ── empty mission-choice result → plain dismiss (live failure 2026-07-13, PROG_AN0_MISS) ───
+    [Fact]
+    public void EmptyMissionResult_Suppressed()
+        => Assert.True(MissionDeployClassifier.ShouldSuppressEmptyMissionResult(
+            choiceStartsMission: true, bodyEmpty: true, rewardEmpty: true));
+
+    [Theory]
+    [InlineData(false, true, true)]    // not a mission choice → normal result page
+    [InlineData(true, false, true)]    // body text present → show it
+    [InlineData(true, true, false)]    // reward present → show it
+    [InlineData(false, false, false)]  // plain rewarded story result
+    public void RenderableResult_NotSuppressed(bool startsMission, bool bodyEmpty, bool rewardEmpty)
+        => Assert.False(MissionDeployClassifier.ShouldSuppressEmptyMissionResult(startsMission, bodyEmpty, rewardEmpty));
 }

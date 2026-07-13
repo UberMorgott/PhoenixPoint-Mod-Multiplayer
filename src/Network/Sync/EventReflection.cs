@@ -1264,6 +1264,32 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
+        /// Client: true iff resolving <paramref name="choiceIndex"/> of <paramref name="eventId"/> would
+        /// produce an EMPTY mission-launch result page — the choice STARTS a tactical mission
+        /// (<see cref="ChoiceStartsMission"/>) and there is nothing to render (no wire outcome text, no
+        /// local-def outcome text, no reward). Consulted at the ArmReplay seam (SyncEngine.OnEventDismiss)
+        /// so the mirror plain-closes instead of arming a click whose only possible resolution is a blank
+        /// OK window (the same predicate <see cref="BuildResultEvent"/> applies deep on the build path).
+        /// Fail CLOSED (false) on any read failure — never suppress a legit replay arm.
+        /// </summary>
+        public static bool IsEmptyMissionResult(GeoRuntime rt, string eventId, int choiceIndex, string wireOutcome, bool rewardEmpty)
+        {
+            if (!rewardEmpty || !string.IsNullOrEmpty(wireOutcome) || choiceIndex < 0 || string.IsNullOrEmpty(eventId))
+                return false;
+            try
+            {
+                Ensure();
+                object srcData = ResolveEventData(rt, eventId);
+                var choices = srcData != null && _choicesField != null ? _choicesField.GetValue(srcData) as IList : null;
+                if (choices == null || choiceIndex >= choices.Count) return false;
+                object choice = choices[choiceIndex];
+                return MissionDeployClassifier.ShouldSuppressEmptyMissionResult(
+                    ChoiceStartsMission(choice), bodyEmpty: !ChoiceHasOutcomeText(choice), rewardEmpty: true);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.IsEmptyMissionResult failed: " + ex.Message); return false; }
+        }
+
+        /// <summary>
         /// Host: mirror native <c>UIModuleSiteEncounters.IsSingleChoiceEncounter()</c> (UIModuleSiteEncounters.cs:256-262)
         /// off the live raised event — true iff the event has EXACTLY ONE choice whose
         /// <c>Outcome.OutcomeText.General.LocalizationKey</c> is EMPTY. In that case the host shows the
@@ -1401,7 +1427,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] EventReflection.GetNativeOkLabelKey best-effort failed: " + ex.Message); return null; }
         }
 
-        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null)
+        public static object BuildResultEvent(GeoRuntime rt, string eventId, int choiceIndex, int siteId = -1, string wireOutcome = null, string wireNarrative = null, string wireTitle = null, bool rewardEmpty = false)
         {
             try
             {
@@ -1467,6 +1493,20 @@ namespace Multiplayer.Network.Sync
                           + " outLen=" + (outcomeText?.Length ?? 0) + " narrLen=" + (narrativeText?.Length ?? 0)
                           + " wireOutLen=" + (wireOutcome?.Length ?? 0) + " wireNarrLen=" + (wireNarrative?.Length ?? 0)
                           + " bodyLen=" + (text2?.Length ?? 0) + " oneWindow=" + singleChoiceOneWindow);
+
+                // EMPTY MISSION-CHOICE RESULT (live failure 2026-07-13, PROG_AN0_MISS): a mission-STARTING
+                // choice carries no outcome text — its native follow-up is the mission brief / deploy flow,
+                // never a text page. With an empty body AND no reward there is NOTHING to show; returning null
+                // makes EVERY materialization path (in-place / buffered / advance / replay click) fall back to
+                // ResolveToResultPage's plain Dismiss instead of a phantom blank window with a lone OK button.
+                if (MissionDeployClassifier.ShouldSuppressEmptyMissionResult(
+                        ChoiceStartsMission(choice), string.IsNullOrEmpty(text2), rewardEmpty))
+                {
+                    Debug.Log("[Multiplayer] BuildResultEvent NULL guard=empty-mission-result eventId=" + eventId
+                              + " choiceIndex=" + choiceIndex
+                              + " (mission-start choice, empty body, no reward → plain dismiss)");
+                    return null;
+                }
 
                 // Synthetic closing data: EventID="" (so it is never re-broadcast / re-keyed), one OK button.
                 object data = _eventDataCtor.Invoke(null);
