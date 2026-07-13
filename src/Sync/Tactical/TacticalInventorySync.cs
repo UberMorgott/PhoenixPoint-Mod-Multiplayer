@@ -155,7 +155,7 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] HOST applied tac.intent.inventory acting=" + intent.ActingNetId +
                           " requested=" + intent.Moves.Count + " applied=" + applied.Count +
                           " rejected=" + (intent.Moves.Count - applied.Count));
-                if (applied.Count > 0) RefreshOpenInventoryView("client-intent");   // host may watch the same crate
+                if (applied.Count > 0) ReconcileOpenViewAfterApply(applied, "client-intent");   // host may watch the same crate
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnInventoryIntent failed: " + ex); }
         }
@@ -176,16 +176,18 @@ namespace Multiplayer.Sync.Tactical
                 // Client mirror: DON'T destroy an emptied container here — the host's despawn sweep (0x93) is the
                 // sole authority on container removal (idempotent on the client). Only suppress the mid-batch
                 // inline auto-destroy so a rare put-back into a just-emptied container still lands.
-                int applied;
+                List<Codec.Move> applied;
                 using (SyncApplyScope.Enter())
-                    applied = ApplyMoves(apply.Moves, destroyEmptied: false).Count;
+                    applied = ApplyMoves(apply.Moves, destroyEmptied: false);
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacInventoryApply, apply.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT applied tac.inventory seq=" + apply.Seq +
-                          " requested=" + apply.Moves.Count + " applied=" + applied);
-                // Reactive rail: an open inventory view repaints from the just-updated truth. For the origin this is
-                // the echo (repaint == its optimistic move) or the reject-revert (empty apply → item snaps back);
+                          " requested=" + apply.Moves.Count + " applied=" + applied.Count);
+                // Reactive rail: an open inventory view reconciles from the just-updated truth. For the origin this
+                // is the echo (cell confirm) or the reject-revert (empty apply → full repaint snaps the item back);
                 // for a bystander watching the same container it's the live mirror of the other player's move.
-                RefreshOpenInventoryView("mirror-apply");
+                // SURGICAL per-move UI update (exact destination cell, no full-list scramble); falls back to the
+                // full InitInventory repaint when anything is unresolvable or the apply carried nothing.
+                ReconcileOpenViewAfterApply(applied, "mirror-apply");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleInventoryApply failed: " + ex); }
         }
@@ -209,9 +211,11 @@ namespace Multiplayer.Sync.Tactical
         /// commit at close — and relay it NOW: client sends one 0x9A intent (optimistic UI kept, model mirror-only);
         /// host applies natively + broadcasts 0x9B. After a relay the lists are RE-BASELINED so the next gesture
         /// (and the close-commit) diffs only itself. Undo needs no special case: the native restore makes the diff
-        /// == the reverse moves. No-op outside co-op / outside the tactical inventory view. Never throws into the
-        /// native gesture.</summary>
-        public static void OnTacticalGesture()
+        /// == the reverse moves. A same-list cell move (membership diff EMPTY) is relayed as a REORDER move when
+        /// the slot-swap seam handed us the two slots (<paramref name="srcSlot"/>/<paramref name="dstSlot"/>) —
+        /// pure UI placement on peers, no model change. No-op outside co-op / outside the tactical inventory view.
+        /// Never throws into the native gesture.</summary>
+        public static void OnTacticalGesture(object srcSlot = null, object dstSlot = null)
         {
             try
             {
@@ -224,13 +228,21 @@ namespace Multiplayer.Sync.Tactical
 
                 var moves = BuildGestureMoves(state, out object module, out int actingNetId, out int unsynced, out string listDiag);
                 if (module == null) return;
+                if (moves.Count == 0 && unsynced == 0 && srcSlot != null && dstSlot != null)
+                {
+                    // Same-list cell move: membership unchanged ⇒ empty diff, but the seam handed us both slots.
+                    var reorder = TryBuildReorderMove(state, module, srcSlot, dstSlot);
+                    if (reorder.HasValue) moves.Add(reorder.Value);
+                }
                 if (moves.Count == 0)
                     // TEMP diagnostic — remove after gesture-rail RCA: pin WHY the diff is empty (per-list rem/add
                     // counts disambiguate "UI lists never diff at this seam" vs "pairing dropped every move").
                     Debug.Log("[Multiplayer][tac] GESTURE empty diff unsynced=" + unsynced + " |" + listDiag);
                 if (moves.Count > 0)
                 {
-                    bool firstOfSession = !ReferenceEquals(_costChargedForState, state);
+                    bool anyReal = false;                          // a pure reorder must never charge the ability AP
+                    foreach (var m in moves) if (!Codec.IsReorder(m)) { anyReal = true; break; }
+                    bool firstOfSession = anyReal && !ReferenceEquals(_costChargedForState, state);
                     if (host)
                     {
                         var applied = ApplyMoves(moves, destroyEmptied: true);
@@ -246,7 +258,7 @@ namespace Multiplayer.Sync.Tactical
                     {
                         byte[] payload = Codec.EncodeIntent(actingNetId, firstOfSession, moves, NextNonce());
                         TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacInventoryIntent, payload);
-                        _costChargedForState = state;
+                        if (anyReal) _costChargedForState = state;
                         Debug.Log("[Multiplayer][tac] GESTURE client sent tac.intent.inventory moves=" + moves.Count +
                                   " acting=" + actingNetId + " applyCost=" + firstOfSession + " unsynced=" + unsynced);
                     }
@@ -308,6 +320,7 @@ namespace Multiplayer.Sync.Tactical
 
             var removedFrom = new List<KeyValuePair<object, object>>();            // (item, source InventoryComponent)
             var addedTo = new Dictionary<object, object>(RefEq.Instance);           // item → target InventoryComponent
+            var addedToList = new Dictionary<object, object>(RefEq.Instance);       // item → target UIInventoryList (dst cell)
             var diag = new System.Text.StringBuilder();                             // per-list rem/add counts (empty-diff RCA)
             int listIdx = 0;
             foreach (var list in lists)
@@ -317,7 +330,7 @@ namespace Multiplayer.Sync.Tactical
                 foreach (var it in InvokeEnum(list, "GetRemovedItems"))
                 { removedFrom.Add(new KeyValuePair<object, object>(it, InvokeListMap(removeMap, list, it))); rem++; }
                 foreach (var it in InvokeEnum(list, "GetAddedItems"))
-                { addedTo[it] = InvokeListMap(addMap, list, it); add++; }
+                { addedTo[it] = InvokeListMap(addMap, list, it); addedToList[it] = list; add++; }
                 diag.Append(" l").Append(listIdx++).Append("[rem=").Append(rem).Append(" add=").Append(add).Append(']');
             }
             listDiag = diag.ToString();
@@ -335,9 +348,49 @@ namespace Multiplayer.Sync.Tactical
                     ? IndexAmongDefInInventory(srcInv, item, guid) : -1;
                 if (defIdx < 0) { unsynced++; continue; }
                 if (srcNet == dstNet && srcSlot == dstSlot) continue;   // same-inventory shuffle: no membership change
-                moves.Add(new Codec.Move(srcNet, srcSlot, dstNet, dstSlot, guid, defIdx));
+                addedToList.TryGetValue(item, out object dstList);
+                moves.Add(new Codec.Move(srcNet, srcSlot, dstNet, dstSlot, guid, defIdx, UiCellOfItem(dstList, item)));
             }
             return moves;
+        }
+
+        /// <summary>Same-list cell move (drag within one list — membership diff empty): relay it as a REORDER move
+        /// (identical endpoints + the destination cell) so a peer watching the same list mirrors the placement.
+        /// Null when anything is unresolvable (ground/storage list — an aggregated view with unstable cells —,
+        /// unregistered endpoint, unreadable item) — the gesture stays local-only, exactly as before.</summary>
+        private static Codec.Move? TryBuildReorderMove(object state, object module, object srcSlot, object dstSlot)
+        {
+            try
+            {
+                object list = GetProp(dstSlot, "ParentList");
+                if (list == null || !ReferenceEquals(GetProp(srcSlot, "ParentList"), list)) return null;
+                if (ReferenceEquals(list, GetProp(module, "StorageList"))) return null;   // ground: cells unstable
+                object item = GetProp(dstSlot, "Item");                                    // the dragged item landed here
+                if (item == null) return null;
+                var removeMap = GetField(state, "OnListRemoveItems") as IDictionary;
+                object inv = removeMap != null ? InvokeListMap(removeMap, list, item) : null;
+                if (inv == null) return null;
+                ResolveEndpointId(inv, out int netId, out byte slot);
+                if (netId < 0) return null;
+                string guid = DefReflection.GetGuid(GetProp(item, "ItemDef"));
+                if (string.IsNullOrEmpty(guid)) return null;
+                int defIdx = IndexAmongDefInInventory(inv, item, guid);
+                int cell = UiCellOfItem(list, item);
+                if (defIdx < 0 || cell < 0) return null;
+                return new Codec.Move(netId, slot, netId, slot, guid, defIdx, cell);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The UI cell (index into <c>UIInventoryList.Slots</c>) currently holding <paramref name="item"/>;
+        /// -1 when unknown (null list / item not displayed / stacking list).</summary>
+        private static int UiCellOfItem(object list, object item)
+        {
+            if (list == null || item == null) return -1;
+            if (!(GetProp(list, "Slots") is IList slots)) return -1;
+            for (int i = 0; i < slots.Count; i++)
+                if (ReferenceEquals(GetProp(slots[i], "Item"), item)) return i;
+            return -1;
         }
 
         /// <summary>Reset every current UI list's <c>_initialItems</c> baseline to its live contents, so the next
@@ -356,6 +409,177 @@ namespace Multiplayer.Sync.Tactical
                 var snapshot = ToObjectList(GetProp(list, "UnfilteredItems"));
                 baseline.Clear();
                 foreach (var it in snapshot) baseline.Add(it);
+            }
+        }
+
+        // ─── Surgical open-view reconcile (exact-cell placement, no full-list scramble) ─────────────
+        /// <summary>Mirror an applied move batch into an OPEN tactical inventory view SURGICALLY: per move, remove
+        /// the moved item's UI entry from the visible source list and add it to the visible destination list at the
+        /// move's exact <c>DstUiCell</c> (native <c>UIInventoryList.RemoveItem/AddItem</c> — the same calls
+        /// <c>AttemptSlotSwap</c> makes). Cells of every OTHER item stay untouched — unlike the full
+        /// <c>InitInventory</c> repaint, whose <c>HashSet</c> feed scrambles the whole list (RCA 2026-07-13,
+        /// symptom "random backpack cell"). The ORIGIN's echo degenerates to a cell confirm (its optimistic UI
+        /// already moved the entry). Falls back to <see cref="RefreshOpenInventoryView"/> (full repaint) for an
+        /// empty batch (reject-revert), a vehicle view, or any unresolvable step. Same guards as the full repaint:
+        /// no-op mid-drag / while an un-relayed local diff is pending.</summary>
+        internal static void ReconcileOpenViewAfterApply(IList<Codec.Move> moves, string reason)
+        {
+            try
+            {
+                if (moves == null || moves.Count == 0) { RefreshOpenInventoryView(reason); return; }   // reject-revert
+                object state = ActiveTacticalInventoryState();
+                if (state == null) return;
+                object module = GetProp(state, "_soldierEquipModule");
+                if (module == null) return;
+                if (GetField(state, "_isVehicleInventory") as bool? == true) { RefreshOpenInventoryView(reason); return; }
+                object dragIcon = GetProp(module, "ItemDragIcon");
+                if (dragIcon != null &&
+                    AccessTools.Method(dragIcon.GetType(), "IsBeingDragged")?.Invoke(dragIcon, null) as bool? == true)
+                {
+                    Debug.Log("[Multiplayer][tac] GESTURE reconcile deferred — drag in progress (" + reason + ")");
+                    return;
+                }
+                var pending = BuildGestureMoves(state, out _, out _, out int pendingUnsynced, out _);
+                if (TacticalInventoryGestureDecision.ShouldReBaseline(pending.Count, pendingUnsynced))
+                {
+                    Debug.Log("[Multiplayer][tac] GESTURE reconcile skipped — un-relayed local diff pending (" + reason + ")");
+                    return;
+                }
+
+                foreach (var m in moves)
+                    if (!TrySurgicalViewMove(state, module, m))
+                    {
+                        RefreshOpenInventoryView(reason);   // one unresolvable step → authoritative full repaint
+                        return;
+                    }
+                ReBaseline(module);                         // UI membership changed → next gesture diffs only itself
+                Debug.Log("[Multiplayer][tac] GESTURE reconciled open inventory view (" + reason + ") moves=" + moves.Count);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] ReconcileOpenViewAfterApply failed: " + ex);
+                try { RefreshOpenInventoryView(reason); } catch { }
+            }
+        }
+
+        /// <summary>One move against the open view. TRUE = handled (including "not visible here" no-op);
+        /// FALSE = caller must full-repaint.</summary>
+        private static bool TrySurgicalViewMove(object state, object module, Codec.Move m)
+        {
+            object srcList = ListForEndpoint(state, module, m.SrcNetId, m.SrcSlot);
+            object dstList = ListForEndpoint(state, module, m.DstNetId, m.DstSlot);
+            if (srcList == null && dstList == null) return true;   // move doesn't touch this view
+            if (Codec.IsReorder(m))
+            {
+                if (dstList != null) EnsureCell(dstList, m.ItemDefGuid, m.DstUiCell);
+                return true;
+            }
+            if (srcList != null)
+            {
+                // Drop the UI entry whose instance no longer belongs to the source model inventory. Absent on the
+                // ORIGIN (its optimistic UI already moved the entry) — that's a clean no-op, not a failure.
+                object srcInv = ResolveEndpoint(m.SrcNetId, m.SrcSlot);
+                object gone = FindDisplayedItemNotInInventory(srcList, m.ItemDefGuid, srcInv);
+                if (gone != null &&
+                    !(AccessTools.Method(srcList.GetType(), "RemoveItem")?.Invoke(srcList, new[] { gone, null }) as bool? == true))
+                    return false;
+            }
+            if (dstList != null)
+            {
+                object dstInv = ResolveEndpoint(m.DstNetId, m.DstSlot);
+                if (dstInv == null) return false;
+                object arriving = FindModelItemNotDisplayed(dstList, dstInv, m.ItemDefGuid);
+                if (arriving != null)
+                {
+                    object slot = SlotAt(dstList, m.DstUiCell);
+                    AccessTools.Method(dstList.GetType(), "AddItem")?.Invoke(dstList, new[] { arriving, slot, null });
+                }
+                EnsureCell(dstList, m.ItemDefGuid, m.DstUiCell);
+            }
+            return true;
+        }
+
+        /// <summary>The open view's <c>UIInventoryList</c> showing wire endpoint (netId, slot), or null when that
+        /// endpoint isn't visible: primary soldier → Inventory/Ready list, secondary (trade) soldier → the
+        /// secondary lists, a container whose inventory is in the state's live query set → the aggregated ground
+        /// StorageList.</summary>
+        private static object ListForEndpoint(object state, object module, int netId, byte slot)
+        {
+            if (netId < 0) return null;
+            object prim = GetProp(state, "PrimaryActor");
+            if (prim != null && TacticalDeploySync.NetIdForLiveActor(prim) == netId)
+                return GetProp(module, slot == Codec.SlotEquipments ? "ReadyList" : "InventoryList");
+            object sec = GetField(state, "_secondaryActor");
+            if (sec != null && TacticalDeploySync.NetIdForLiveActor(sec) == netId)
+                return GetProp(module, slot == Codec.SlotEquipments ? "SecondaryReadyList" : "SecondaryInventoryList");
+            // Container endpoint: visible iff its inventory is in the state's own live query set (native truth).
+            object actor = TacticalDeploySync.ResolveLiveActor(netId);
+            object inv = actor != null ? GetProp(actor, "Inventory") : null;
+            if (inv != null)
+                foreach (var q in InvokeEnum(state, "GetLinkedInventoriesOfInventoryQueries"))
+                    if (ReferenceEquals(q, inv)) return GetProp(module, "StorageList");
+            return null;
+        }
+
+        /// <summary>A displayed item of <paramref name="guid"/> whose instance is NOT in <paramref name="inv"/>
+        /// (the model already moved it away) — the UI entry to remove. Null = nothing to do (origin echo).</summary>
+        private static object FindDisplayedItemNotInInventory(object list, string guid, object inv)
+        {
+            if (!(GetProp(list, "Slots") is IList slots)) return null;
+            var invItems = new HashSet<object>(ToObjectList(GetProp(inv, "Items")), RefEq.Instance);
+            foreach (var slot in slots)
+            {
+                object it = GetProp(slot, "Item");
+                if (it == null || invItems.Contains(it)) continue;
+                if (string.Equals(DefReflection.GetGuid(GetProp(it, "ItemDef")), guid, StringComparison.Ordinal)) return it;
+            }
+            return null;
+        }
+
+        /// <summary>A model item of <paramref name="guid"/> in <paramref name="inv"/> that the list does not
+        /// display yet — the arriving instance to add. Null = already displayed (origin echo).</summary>
+        private static object FindModelItemNotDisplayed(object list, object inv, string guid)
+        {
+            var shown = new HashSet<object>(ToObjectList(GetProp(list, "UnfilteredItems")), RefEq.Instance);
+            foreach (var it in ToObjectList(GetProp(inv, "Items")))
+            {
+                if (it == null || shown.Contains(it)) continue;
+                if (string.Equals(DefReflection.GetGuid(GetProp(it, "ItemDef")), guid, StringComparison.Ordinal)) return it;
+            }
+            return null;
+        }
+
+        /// <summary>The list's slot at <paramref name="cell"/> when valid and EMPTY (native AddItem falls back to
+        /// first-available otherwise; <see cref="EnsureCell"/> then swaps it into place).</summary>
+        private static object SlotAt(object list, int cell)
+        {
+            if (cell < 0 || !(GetProp(list, "Slots") is IList slots) || cell >= slots.Count) return null;
+            object slot = slots[cell];
+            return GetProp(slot, "Item") == null ? slot : null;
+        }
+
+        /// <summary>Make the list's <paramref name="cell"/> hold an item of <paramref name="guid"/>: if another
+        /// cell holds one, swap the two slots' Item refs (the setter is visual-only — membership untouched, so no
+        /// phantom gesture diff). No-op when the cell is unknown/out-of-range or already correct.</summary>
+        private static void EnsureCell(object list, string guid, int cell)
+        {
+            if (cell < 0 || !(GetProp(list, "Slots") is IList slots) || cell >= slots.Count) return;
+            object target = slots[cell];
+            object targetItem = GetProp(target, "Item");
+            if (targetItem != null &&
+                string.Equals(DefReflection.GetGuid(GetProp(targetItem, "ItemDef")), guid, StringComparison.Ordinal)) return;
+            for (int i = 0; i < slots.Count; i++)
+            {
+                if (i == cell) continue;
+                object it = GetProp(slots[i], "Item");
+                if (it == null ||
+                    !string.Equals(DefReflection.GetGuid(GetProp(it, "ItemDef")), guid, StringComparison.Ordinal)) continue;
+                var itemProp = AccessTools.Property(target.GetType(), "Item");
+                if (itemProp == null) return;
+                itemProp.SetValue(slots[i], null, null);          // vacate first: SetItem no-ops on identical ref
+                itemProp.SetValue(target, it, null);
+                if (targetItem != null) itemProp.SetValue(slots[i], targetItem, null);
+                return;
             }
         }
 
@@ -565,6 +789,13 @@ namespace Multiplayer.Sync.Tactical
                 {
                     Debug.LogWarning("[Multiplayer][tac] inventory move item not present (def=" + m.ItemDefGuid +
                                      " idx=" + m.SrcDefIndex + " src=" + m.SrcNetId + "/" + m.SrcSlot + ") — skip");
+                    continue;
+                }
+                if (Codec.IsReorder(m))
+                {
+                    // Pure UI cell reorder: membership unchanged — validated (endpoint + item present) but NEVER
+                    // remove/add on the model. It still broadcasts so a watching peer repositions the cell.
+                    applied.Add(m);
                     continue;
                 }
                 resolved.Add((item, src, dst, m));

@@ -39,10 +39,12 @@ namespace Multiplayer.Harmony.Tactical
         }
         public static MethodBase TargetMethod() => _target;
         // __result true = a completed swap (may be TWO moves when the destination item swapped back).
-        public static void Postfix(bool __result)
+        // __0/__1 = the seam's (sourceSlot, destinationSlot) — lets the rail relay a same-list cell REORDER
+        // (empty membership diff) and capture the exact destination cell.
+        public static void Postfix(bool __result, object __0, object __1)
         {
             TacticalInventorySync.LogGestureSeam("AttemptSlotSwap", __result);   // TEMP diag (gesture-rail RCA)
-            if (__result) TacticalInventorySync.OnTacticalGesture();
+            if (__result) TacticalInventorySync.OnTacticalGesture(__0, __1);
         }
     }
 

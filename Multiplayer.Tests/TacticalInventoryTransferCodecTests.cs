@@ -115,7 +115,8 @@ public class TacticalInventoryTransferCodecTests
     {
         var bytes = TacticalInventoryTransferCodec.EncodeIntent(5, true,
             new List<Move> { Mk(1, 0, 2, 1, "g", 0) }, nonce: 1u);
-        var cut = new byte[bytes.Length - 3];               // drop part of the trailing nonce
+        int tailLen = 2 + 2 * 1;                            // optional cell tail (tolerated when cut — see (e))
+        var cut = new byte[bytes.Length - tailLen - 3];     // ALSO drop part of the trailing nonce → must fail
         System.Array.Copy(bytes, cut, cut.Length);
         Assert.False(TacticalInventoryTransferCodec.TryDecodeIntent(cut, out _));
     }
@@ -146,5 +147,60 @@ public class TacticalInventoryTransferCodecTests
         Assert.True(TacticalInventoryTransferCodec.TryDecodeApply(extended, out var a));
         Assert.Equal(9u, a.Seq);
         Assert.Single(a.Moves);
+    }
+
+    // ─── (e) destination UI-cell tail ───────────────────────────────────
+    [Fact]
+    public void CellTail_RoundTrips_OnIntentAndApply()
+    {
+        var moves = new List<Move>
+        {
+            new Move(1001, 0, 5, 0, "medkit-guid", 0, dstUiCell: 3),
+            new Move(5, 1, 1001, 0, "ammo-guid", 1),               // cell not captured → -1
+        };
+        var iBytes = TacticalInventoryTransferCodec.EncodeIntent(5, true, moves, nonce: 7u);
+        Assert.True(TacticalInventoryTransferCodec.TryDecodeIntent(iBytes, out var i));
+        Assert.Equal(3, i.Moves[0].DstUiCell);
+        Assert.Equal(-1, i.Moves[1].DstUiCell);
+        Assert.Equal(7u, i.Nonce);
+
+        var aBytes = TacticalInventoryTransferCodec.EncodeApply(moves, seq: 8u);
+        Assert.True(TacticalInventoryTransferCodec.TryDecodeApply(aBytes, out var a));
+        Assert.Equal(3, a.Moves[0].DstUiCell);
+        Assert.Equal(-1, a.Moves[1].DstUiCell);
+        Assert.Equal(8u, a.Seq);
+    }
+
+    [Fact]
+    public void CellTail_AbsentOnOldPeerBytes_DefaultsMinusOne()
+    {
+        // Old-peer bytes = new bytes with the tail cut off right after the trailer (seq).
+        var moves = new List<Move> { new Move(1, 0, 2, 0, "g", 0, dstUiCell: 5) };
+        var bytes = TacticalInventoryTransferCodec.EncodeApply(moves, seq: 4u);
+        int tailLen = 2 + 2 * moves.Count;                  // [count:u16] + count × i16
+        var legacy = new byte[bytes.Length - tailLen];
+        System.Array.Copy(bytes, legacy, legacy.Length);
+        Assert.True(TacticalInventoryTransferCodec.TryDecodeApply(legacy, out var a));
+        Assert.Equal(4u, a.Seq);
+        Assert.Equal(-1, a.Moves[0].DstUiCell);             // tail absent → unknown cell, decode still succeeds
+    }
+
+    [Fact]
+    public void CellTail_CountMismatch_IgnoredCleanly()
+    {
+        var moves = new List<Move> { Mk(1, 0, 2, 0, "g", 0) };
+        var bytes = TacticalInventoryTransferCodec.EncodeApply(moves, seq: 6u);
+        bytes[bytes.Length - 4] = 9;                        // corrupt the tail count (u16 LE low byte)
+        Assert.True(TacticalInventoryTransferCodec.TryDecodeApply(bytes, out var a));
+        Assert.Equal(-1, a.Moves[0].DstUiCell);             // mismatched tail → ignored, never a decode failure
+    }
+
+    // ─── (f) reorder classification ─────────────────────────────────────
+    [Fact]
+    public void IsReorder_TrueOnlyForIdenticalEndpoints()
+    {
+        Assert.True(TacticalInventoryTransferCodec.IsReorder(new Move(5, 0, 5, 0, "g", 0, 2)));
+        Assert.False(TacticalInventoryTransferCodec.IsReorder(new Move(5, 0, 5, 1, "g", 0)));   // backpack → ready
+        Assert.False(TacticalInventoryTransferCodec.IsReorder(new Move(5, 0, 6, 0, "g", 0)));   // other soldier
     }
 }

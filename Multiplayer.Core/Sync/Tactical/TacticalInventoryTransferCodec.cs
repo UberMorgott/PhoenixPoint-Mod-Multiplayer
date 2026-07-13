@@ -20,10 +20,16 @@ namespace Multiplayer.Sync.Tactical
     ///     same source contents, so the Nth item of a def is the same logical item host↔client. Carrying the def
     ///     guid (not a bare slot index) is the DropItem FOLLOW-UP: host matches by def, never a blind index.
     ///
-    ///   intent  (0x9A): [actingNetId:i32][applyCost:u8][moves][nonce:u32]
-    ///   apply   (0x9B): [moves][seq:u32]
+    ///   intent  (0x9A): [actingNetId:i32][applyCost:u8][moves][nonce:u32][cellTail?]
+    ///   apply   (0x9B): [moves][seq:u32][cellTail?]
     ///   moves        : [count:u16] then count × [srcNetId:i32][srcSlot:u8][dstNetId:i32][dstSlot:u8]
     ///                                            [itemDefGuid:str][srcDefIndex:i32]
+    ///   cellTail     : [count:u16 == moves.count] then count × [dstUiCell:i16] — the destination UI-list cell
+    ///                  of each move (-1 = unknown). Appended AFTER the fixed trailer so an OLD peer ignores it
+    ///                  (trailing-bytes tolerance below); a new peer reading old bytes defaults every cell to -1.
+    ///                  A move with srcEndpoint == dstEndpoint is a pure UI REORDER (cell move within one list):
+    ///                  membership is unchanged, the receiver must NOT remove/add on the model — see
+    ///                  <see cref="IsReorder"/>.
     ///
     /// <c>actingNetId</c>/<c>applyCost</c> carry the looting soldier + whether the inventory ability's AP cost is
     /// due, so the host spends it authoritatively (AP itself rides the 0x8F actor-state delta, not this surface).
@@ -54,15 +60,22 @@ namespace Multiplayer.Sync.Tactical
             public byte DstSlot;
             public string ItemDefGuid;
             public int SrcDefIndex;   // index among items sharing ItemDefGuid in the SOURCE inventory (pre-move)
+            public int DstUiCell;     // destination UI-list cell (slot index); -1 = unknown (old peer / not captured)
 
-            public Move(int srcNetId, byte srcSlot, int dstNetId, byte dstSlot, string itemDefGuid, int srcDefIndex)
+            public Move(int srcNetId, byte srcSlot, int dstNetId, byte dstSlot, string itemDefGuid, int srcDefIndex,
+                        int dstUiCell = -1)
             {
                 SrcNetId = srcNetId; SrcSlot = srcSlot;
                 DstNetId = dstNetId; DstSlot = dstSlot;
                 ItemDefGuid = itemDefGuid ?? "";
                 SrcDefIndex = srcDefIndex;
+                DstUiCell = dstUiCell;
             }
         }
+
+        /// <summary>TRUE when the move's endpoints are identical — a pure UI cell REORDER within one list.
+        /// Membership is unchanged: the receiver skips the model remove/add and only repositions the UI cell.</summary>
+        public static bool IsReorder(Move m) => m.SrcNetId == m.DstNetId && m.SrcSlot == m.DstSlot;
 
         public sealed class Intent
         {
@@ -87,6 +100,7 @@ namespace Multiplayer.Sync.Tactical
                 w.Write((byte)(applyCost ? 1 : 0));
                 WriteMoves(w, moves);
                 w.Write(nonce);
+                WriteCellTail(w, moves);
                 return ms.ToArray();
             }
         }
@@ -98,6 +112,7 @@ namespace Multiplayer.Sync.Tactical
             {
                 WriteMoves(w, moves);
                 w.Write(seq);
+                WriteCellTail(w, moves);
                 return ms.ToArray();
             }
         }
@@ -115,6 +130,7 @@ namespace Multiplayer.Sync.Tactical
                     bool applyCost = r.ReadByte() != 0;
                     if (!ReadMoves(r, out var moves)) return false;
                     uint nonce = r.ReadUInt32();
+                    ReadCellTail(r, moves);
                     intent = new Intent { ActingNetId = actingNetId, ApplyCost = applyCost, Moves = moves, Nonce = nonce };
                     return true;
                 }
@@ -133,6 +149,7 @@ namespace Multiplayer.Sync.Tactical
                 {
                     if (!ReadMoves(r, out var moves)) return false;
                     uint seq = r.ReadUInt32();
+                    ReadCellTail(r, moves);
                     apply = new Apply { Moves = moves, Seq = seq };
                     return true;
                 }
@@ -154,6 +171,33 @@ namespace Multiplayer.Sync.Tactical
                 w.Write(m.ItemDefGuid ?? "");
                 w.Write(m.SrcDefIndex);
             }
+        }
+
+        /// <summary>Versioned tail: per-move destination UI cells, appended after the fixed trailer.</summary>
+        private static void WriteCellTail(BinaryWriter w, IList<Move> moves)
+        {
+            int count = moves?.Count ?? 0;
+            w.Write((ushort)count);
+            for (int i = 0; i < count; i++) w.Write((short)moves[i].DstUiCell);   // slot indices are tiny; -1 = unknown
+        }
+
+        /// <summary>Best-effort tail read: absent (old peer) / short / count-mismatched trailing bytes leave every
+        /// cell at -1 — the tail can never fail an otherwise-valid decode.</summary>
+        private static void ReadCellTail(BinaryReader r, List<Move> moves)
+        {
+            try
+            {
+                if (r.BaseStream.Length - r.BaseStream.Position < 2) return;
+                int count = r.ReadUInt16();
+                if (count != moves.Count || r.BaseStream.Length - r.BaseStream.Position < 2L * count) return;
+                for (int i = 0; i < count; i++)
+                {
+                    var m = moves[i];
+                    m.DstUiCell = r.ReadInt16();
+                    moves[i] = m;
+                }
+            }
+            catch { /* tail is optional by contract */ }
         }
 
         private static bool ReadMoves(BinaryReader r, out List<Move> moves)
