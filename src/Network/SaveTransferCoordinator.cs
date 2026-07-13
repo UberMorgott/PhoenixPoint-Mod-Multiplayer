@@ -335,6 +335,17 @@ namespace Multiplayer.Network
         /// </summary>
         public bool IsDownloading => !_engine.IsHost && _rxTotalBytes > 0;
 
+        /// <summary>
+        /// Overlay fix (2026-07-13): true on the HOST while a MID-SESSION co-op load window is live — the
+        /// LOADED barrier is open (clients downloading/preparing) or phase-2 snapshots are flowing — even
+        /// though the host itself shows NO local load signal (on tac-entry it sits behind the held curtain
+        /// with LoadPhaseStarted/InPhase2/IsDownloading all false, so the overlay never showed and the host
+        /// saw none of the clients' progress). Gated on SessionStarted (_begun): the lobby PLAY window has
+        /// _begun false, so this can never resurrect the early lobby-popup bug ShouldShow's loadStarted gate
+        /// was introduced to fix. Ends when the barrier closes and the roster all-done stops phase-2.
+        /// </summary>
+        public bool HostWaitingOnPeers => _engine.IsHost && _begun && (_barrierOpen || _loadPhaseActive);
+
         /// <summary>This peer's own download percent (0..100), or -1 when not downloading.</summary>
         public int LocalDownloadPercent
         {
@@ -633,6 +644,11 @@ namespace Multiplayer.Network
             OpenBarrier();        // open the LOADED barrier (reveal-hold already armed at launch; _hostEntryHold untouched)
             _hostLoaded = true;   // host holds its state locally (already in the level) → counts as loaded
             SendLoadComplete();   // host is past Playing → mark its slot done (+ TryReleaseBarrier: client not loaded yet)
+            // Overlay fix (2026-07-13): on tac-entry the host never runs the phase-2 pump (_loadCompleteSent is
+            // already true), so the RosterProgress snapshot carried NO host row and clients rendered the host
+            // bar stuck at 0% forever. Publish the terminal value once (OpenBarrier just cleared the aggregate);
+            // every ≤20 Hz snapshot then ships it and clients render the host row COMPLETE.
+            _slotProgress[_engine.Session.LocalSlotIndex] = (1, 100);
             Debug.Log("[Multiplayer] tac-entry: blob sent, LOADED barrier open, host marked loaded/done " +
                       "(reveal-hold armed at launch, no self-enter)");
         }

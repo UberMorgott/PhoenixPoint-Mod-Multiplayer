@@ -323,7 +323,8 @@ namespace Multiplayer.UI
             }
 
             bool shouldShow = LoadOverlayVisibility.ShouldShow(
-                coord.LoadPhaseStarted, coord.InPhase2, coord.IsDownloading, expectedPeers, donePeers);
+                coord.LoadPhaseStarted, coord.InPhase2, coord.IsDownloading, expectedPeers, donePeers,
+                coord.HostWaitingOnPeers); // overlay fix 2026-07-13: host sees clients' progress on tac-entry
 
             if (shouldShow) Show(); else Hide();
 

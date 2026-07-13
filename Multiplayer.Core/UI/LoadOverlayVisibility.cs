@@ -43,14 +43,21 @@ namespace Multiplayer.UI
         ///   ~1 MB save download takes seconds→minutes and precedes BOTH loadStarted and inPhase2, so
         ///   without this signal the download was a blank screen. The host is never downloading and a
         ///   client is only downloading once chunks arrive, so this never re-introduces the lobby popup.</param>
-        public static bool ShouldShow(bool loadStarted, bool inPhase2, bool downloading, int expectedPeers, int donePeers)
+        /// <param name="hostWaitingOnPeers">SaveTransferCoordinator.HostWaitingOnPeers — the HOST's live
+        ///   mid-session load window (barrier open or phase-2 snapshots flowing, session already begun).
+        ///   Overlay fix 2026-07-13: on tac-entry the host holds behind its curtain with ALL local load
+        ///   signals false, so it never saw the clients' download/load progress. Gated on SessionStarted
+        ///   inside the coordinator — false in the lobby, so the early lobby-popup bug stays fixed.</param>
+        public static bool ShouldShow(bool loadStarted, bool inPhase2, bool downloading, int expectedPeers, int donePeers,
+                                      bool hostWaitingOnPeers = false)
         {
             // No genuine load window open → never show. Gate on the ACTUAL load-start (curtain Loading),
-            // phase-2 world-load, OR this client's active download (FIX-3), NOT on the command-time
-            // TransferActive: that prevents the overlay from appearing in the lobby the instant the host
-            // presses PLAY (the bug). The overlay appears when the download starts (client) or the native
-            // loading curtain drops for the mission.
-            if (!loadStarted && !inPhase2 && !downloading) return false;
+            // phase-2 world-load, this client's active download (FIX-3), OR the host's mid-session wait on
+            // its peers (overlay fix 2026-07-13) — NOT on the command-time TransferActive: that prevents
+            // the overlay from appearing in the lobby the instant the host presses PLAY (the bug). The
+            // overlay appears when the download starts (client), the native loading curtain drops for the
+            // mission, or — host only — while its clients are still downloading/loading a sent save.
+            if (!loadStarted && !inPhase2 && !downloading && !hostWaitingOnPeers) return false;
 
             // A load window is open: show until every participating peer has reported done.
             bool allPeersDone = expectedPeers <= 0 || donePeers >= expectedPeers;

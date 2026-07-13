@@ -92,4 +92,34 @@ public class LoadOverlayVisibilityTests
         Assert.False(LoadOverlayVisibility.ShouldShow(
             loadStarted: false, inPhase2: false, downloading: true, expectedPeers: 2, donePeers: 2));
     }
+
+    [Fact]
+    public void HostWaitingOnPeers_NoLocalLoadSignal_Shows()
+    {
+        // Overlay fix 2026-07-13 (tac-entry blind host): the host holds behind its curtain — loadStarted,
+        // inPhase2 and downloading are ALL false — but its clients are still downloading/loading the sent
+        // save (barrier open / phase-2 snapshots flowing) → the overlay must SHOW the clients' progress.
+        Assert.True(LoadOverlayVisibility.ShouldShow(
+            loadStarted: false, inPhase2: false, downloading: false, expectedPeers: 3, donePeers: 1,
+            hostWaitingOnPeers: true));
+    }
+
+    [Fact]
+    public void HostWaitingOnPeers_AllDone_Hides()
+    {
+        // The host wait window closes with the roster: everyone reported done → HIDE even if the flag is
+        // still momentarily true (all-done is the same terminal gate every other signal obeys).
+        Assert.False(LoadOverlayVisibility.ShouldShow(
+            loadStarted: false, inPhase2: false, downloading: false, expectedPeers: 3, donePeers: 3,
+            hostWaitingOnPeers: true));
+    }
+
+    [Fact]
+    public void DefaultHostWaiting_KeepsLegacyBehavior()
+    {
+        // The parameter defaults to false: every pre-existing call/decision is byte-for-byte unchanged —
+        // in particular the pinned lobby case stays hidden.
+        Assert.False(LoadOverlayVisibility.ShouldShow(
+            loadStarted: false, inPhase2: false, downloading: false, expectedPeers: 2, donePeers: 0));
+    }
 }
