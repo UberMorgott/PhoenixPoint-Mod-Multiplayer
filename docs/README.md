@@ -5,7 +5,7 @@ for Phoenix Point.
 
 - A **cooperative campaign** mod built on the official **SDK** + **Harmony** patches.
 - **Not** a traditional turn-based PvP / wait-for-each-other mode.
-- One shared campaign; multiple players co-control a single faction by **ownership + permissions**.
+- One shared campaign; multiple players co-control a single faction — every player can currently control everything (no per-player permission gating).
 - **Authoritative host** model (not lockstep): the host runs all logic + RNG + AI; clients send
   actions and reproduce validated results — clients never simulate.
 
@@ -73,12 +73,6 @@ these; they inform where and how to patch.
 |-----|-------|
 | [COOP-SYNC-ROADMAP.md](COOP-SYNC-ROADMAP.md) | **Living roadmap + status tracker.** Vision, invariants, out-of-scope decisions, the 2026-06-17 full-geoscape-replication architecture decision, the decomposed sub-projects (#0–#5 / Inc1–Inc5), the STATUS table (every batch: geoscape channels, world-activity, popup-mirror, personnel, tactical surfaces), and CURRENT POSITION / next actions. **Start here for status.** |
 | [plans/2026-07-12-tactical-entry-save-transfer.md](plans/2026-07-12-tactical-entry-save-transfer.md) | **ACTIVE plan.** Tactical mission ENTRY via host-authored mid-tactical save transfer (replaces client self-launch + reconcile/snap) + host loading-screen barrier. 2 batches, grounded anchors, tests, risks, rollback. |
-
-### Audits (`audits/`)
-
-| Doc | Scope |
-|-----|-------|
-| [audits/2026-07-12-geoscape-economy-sync-audit.md](audits/2026-07-12-geoscape-economy-sync-audit.md) | Geoscape economy/research sync audit: marketplace, manufacturing, loot, research, unlocks **clean**; haven resource trade **NOT synced** (BUG, only canon violation); haven StockedResources + marketplace offer-regen dirty-trigger unconfirmed |
 
 ## 4. Design history / lineage (SUPERSEDED originals)
 
@@ -184,8 +178,8 @@ of two abandoned netcode directions. Do not apply against current source.
 - **Transport:** pluggable `ITransport` core (transport-agnostic). Steam P2P primary; DirectIP for LAN/dev (loopback solo test); STUN UDP for Steam-less direct P2P.
 - **Connection input:** one box, autodetect IP vs Steam code; + Steam friends invite.
 - **Lobby-first:** create → lobby → all ready → host picks save → gzip transfer → **barrier sync** (all `LOADED` → `BEGIN`) → play. On-disk save = single source of truth at start.
-- **Identity:** persistent client-generated `playerGUID` (the only persistence key) + per-session `peerID` + mutable nickname; ownership/permissions bind to `playerGUID`/`peerID`, never the nickname.
-- **Vanilla save untouched:** ownership/nicks/permissions = mod runtime-state, reconciled each session, never written into the PP save.
+- **Identity:** persistent client-generated `playerGUID` (the only persistence key) + per-session `peerID` + mutable nickname; identity binds to `playerGUID`/`peerID`, never the nickname.
+- **Vanilla save untouched:** nicknames and other mod runtime-state are reconciled each session, never written into the PP save.
 - **Top desync risk:** RNG + hidden game systems → [research/02-rng-analysis.md](research/02-rng-analysis.md).
 - **Blocked on SDK:** UI injection, Steam availability, save/load API, loading-progress hook, 2nd-instance, mid-battle save → [specs/03-open-questions-sdk.md](specs/03-open-questions-sdk.md).
 
@@ -210,7 +204,7 @@ of two abandoned netcode directions. Do not apply against current source.
 |----|--------|-------|
 | 40 | MoveVehicle | `StartTravel` intercept |
 | 41 | ExploreSite | `StartExploringCurrentSite` |
-| 60-65 | Personnel edits | Equip / augment / hire / transfer / dismiss / rename (permission + ownership gated) |
+| 60-65 | Personnel edits | Equip / augment / hire / transfer / dismiss / rename |
 | 80 | GeoAbilityActivateAction | Harvest / Excavate / EmergencyRepair / Scan / AncientSiteProbe / ActivateBase / AncientGuardianGuard (allowlist, `ActionCategory.GeoAbility`) |
 
 ### Tactical Surfaces

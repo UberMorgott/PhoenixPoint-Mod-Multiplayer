@@ -55,7 +55,7 @@ Get TFTV: [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?i
 
 ## Status
 
-This is an in-development mod, not a finished product. A lot of the list below is built and passing its tests but hasn't been through a long two-player session yet. Expect rough edges — file bugs, it helps.
+This is an in-development mod, not a finished product. A lot of the list below is built and passing its tests and gets played two-up, but it hasn't been through a long multi-hour soak session yet. Expect rough edges — file bugs, it helps.
 
 You bring your own legally owned copy of Phoenix Point. The mod is built on Snapshot Games' official modding framework and ships no game code or assets. It's a fan project, not affiliated with, endorsed by, or supported by Snapshot Games.
 
@@ -79,16 +79,14 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 **Participants**
 - [x] ✅ Connection handshake (request, accept, reject)
 - [x] ✅ Live player list
-- [x] ✅ Player rename
-- [x] ✅ Permission and ownership seeding on join
-- [x] 🧪 Roster progress screen
+- [x] ✅ Player rename (remembered across sessions)
+- [x] ✅ In-lobby chat
 
 **Session start**
 - [x] ✅ Ready and un-ready toggles
 - [x] ✅ "Everybody ready" start barrier
 - [x] ✅ Chunked save transfer to pull every client onto the host's exact campaign (32 KB chunks, CRC checked)
 - [x] ✅ Load-progress and "I am loaded" barrier
-- [x] 🧪 Starting a brand-new campaign from the lobby (host picks difficulty, everyone loads the same first frame)
 - [x] 🧪 Mid-session save load (host loads another save, every client follows without restarting)
 - [x] 🧪 Mid-session drop-in on the Geoscape (join a game already in progress)
 - [x] 🧪 Three-plus player topology
@@ -139,23 +137,23 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] 🧪 Facility power-state changes
 
 **Aircraft and vehicles**
-- [x] 🧪 Vehicle world position, smoothly interpolated
-- [x] 🧪 Travel route line (the yellow path on the map)
-- [x] 🧪 Site-exploration progress bar
+- [x] ✅ Vehicle world position, smoothly interpolated
+- [x] ✅ Travel route line (the yellow path on the map)
+- [x] ✅ Site-exploration progress bar
 - [x] 🧪 Move-vehicle and explore-site intents
 - [x] 🧪 Mid-game vehicle creation mirror
 - [x] 🧪 Aircraft health and repair
-- [x] 🧪 Crew and loadout
+- [x] ✅ Crew and loadout
 - [x] 🧪 Air-combat interception (host resolves the fight and holds the clock; clients stay usable)
 
 **Personnel and recruits**
-- [x] 🧪 Roster composition mirror (who is stationed where)
+- [x] ✅ Roster composition mirror (who is stationed where)
 - [x] 🧪 Full soldier live-state
-- [x] ✅ Equip from either side: drag items between doll and inventory, unequip-all button, items returned to storage correctly (permission and ownership gated)
+- [x] ✅ Equip from either side: drag items between doll and inventory, unequip-all button, items returned to storage correctly
 - [x] ✅ Augmentations (bionics and mutations) from either side: reactive UI repaint, wallet cost deducted, body-part sections updated live
-- [x] 🧪 Hire, transfer, dismiss, rename (permission and ownership gated)
+- [x] ✅ Hire, transfer, dismiss, rename
 - [x] 🧪 Recruit pool mirror (available, unarmed, and captured units)
-- [x] 🧪 Level-up spending from a client (buy abilities, spend stat points)
+- [x] ✅ Level-up spending from a client (buy abilities, spend stat points)
 - [x] 🧪 Containment actions from a client (kill or harvest captured units)
 
 **Events and choices**
@@ -181,7 +179,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Diplomacy and reputation
 - [x] ✅ Resources and wallet (one silent balance writer, no double-counting)
 - [x] 🧪 Resource-harvest floating numbers
-- [x] 🧪 Mist and fog field mirror
+- [x] ✅ Mist and fog field mirror
 - [x] 🧪 Site identity and world-activity tails (havens, alien bases, excavations, weather, timers)
 - [x] 🧪 Behemoth presence and status
 - [x] 🧪 One shared relay behind the Geoscape abilities (scan, probe, repair, activate, guard, and the rest)
@@ -261,8 +259,6 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Host-authoritative surface router as the single chokepoint
 - [x] ✅ One-touch registration for new synced state
 - [x] ✅ Nonce dedup and per-surface sequencing (safe under a double-sending reliable transport)
-- [x] ✅ Chunked save-transfer barrier with CRC validation
-- [x] ✅ NTP-style clock sync
 - [x] ✅ Startup reflection self-check: an incompatible game version blocks co-op with a clear error instead of desyncing
 - [x] ✅ 1873 game-free tests, green, buildable with zero game DLLs
 - [x] ✅ `Multiplayer.Core`, a pure logic library that builds and tests anywhere
@@ -291,12 +287,12 @@ This section is for anyone interested in the netcode.
 
 ## Building it
 
-The code is split deliberately, partly because the machine that writes most of it doesn't have the game installed.
+The code is split deliberately so it can be developed across two machines: the game-free core builds and tests anywhere, while the game-facing half needs a Phoenix Point install to compile.
 
 - **`Multiplayer.Core`** is pure logic with no game or engine dependencies. It builds and runs its full test suite on any machine, no Phoenix Point required. The wire formats, dedup, sequencing, and decision logic live here.
 - **The full mod** references the real game DLLs (Assembly-CSharp, the modding framework, Unity, HarmonyLib) and only compiles on a machine with Phoenix Point installed.
 
-CI builds and tests the game-free half on every push. The game-facing half is built and verified separately, by someone who owns the game. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full picture and [`docs/README.md`](docs/README.md) for the design and as-built documentation.
+CI builds and tests the game-free half on every push. The game-facing half is built and verified on the machine that has the game installed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full picture and [`docs/README.md`](docs/README.md) for the design and as-built documentation.
 
 ## About this project
 
@@ -306,7 +302,7 @@ What that involved:
 
 - A sync protocol built from scratch around one transport envelope and a host-authoritative router, instead of separate solutions per feature.
 - Reflection and Harmony patching to hook the methods where the game makes its decisions, plus a version check so a game update fails with a clear error instead of desyncing.
-- A pure logic core (`Multiplayer.Core`) with no game or engine dependencies, so more than 1600 tests build and run in CI without the game.
+- A pure logic core (`Multiplayer.Core`) with no game or engine dependencies, so more than 1800 tests build and run in CI without the game.
 - Around 80k lines of C# and counting, most of it the work of making every screen agree with every other screen.
 
 The most useful things to read are `Multiplayer.Core`, the [`docs/`](docs/README.md) folder, and the netcode section above.
