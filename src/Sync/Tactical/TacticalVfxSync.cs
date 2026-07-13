@@ -52,10 +52,16 @@ namespace Multiplayer.Sync.Tactical
                 // Source actor is a best-effort forward-compat tag; the client anchors on pos, so -1 is fine.
                 int sourceNetId = ResolveSourceNetId(effect);
 
+                // rca-grenade-vfx: the blast prefab a grenade/rocket actually draws is the WEAPON payload's
+                // ObjectToSpawnOnExplosion (native precedence, ExplosionEffect.cs:54 — the shared
+                // ExplosionEffectDef's own ObjectToSpawn is null), so carry the weapon def guid too.
+                string srcDefGuid = ResolveSourceWeaponDefGuid(effect);
+
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacVfx);
-                byte[] payload = TacticalLiveCodec.EncodeVfx(seq, defGuid, pos.x, pos.y, pos.z, sourceNetId);
+                byte[] payload = TacticalLiveCodec.EncodeVfx(seq, defGuid, pos.x, pos.y, pos.z, sourceNetId, srcDefGuid);
                 TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacVfx, payload);
                 Debug.Log("[Multiplayer][tac] HOST broadcast tac.vfx seq=" + seq + " def=" + defGuid +
+                          " srcDef=" + (string.IsNullOrEmpty(srcDefGuid) ? "<none>" : srcDefGuid) +
                           " pos=" + pos + " src=" + sourceNetId + " effect=" + effect.GetType().Name);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastVfx failed: " + ex); }
@@ -77,8 +83,11 @@ namespace Multiplayer.Sync.Tactical
                 object def = Network.Sync.DefReflection.GetDefByGuid(evt.VfxDefGuid);
                 if (def == null) { Debug.Log("[Multiplayer][tac] tac.vfx: def " + evt.VfxDefGuid + " unresolved — skip"); TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacVfx, evt.Seq); return; }
 
-                var prefab = GetProp(def, "ObjectToSpawn") as GameObject;
-                if (prefab == null) { Debug.Log("[Multiplayer][tac] tac.vfx: def " + evt.VfxDefGuid + " has no ObjectToSpawn — skip"); TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacVfx, evt.Seq); return; }
+                // rca-grenade-vfx: prefer the weapon payload's blast prefab — the SAME precedence native
+                // ExplosionEffect.SpawnObject applies (param.ObjectToSpawnOnExplosion first, def.ObjectToSpawn
+                // fallback). Old-peer payload / unresolved weapon → SrcDefGuid "" → fallback only (old behavior).
+                var prefab = ResolvePayloadBlastPrefab(evt.SrcDefGuid) ?? GetProp(def, "ObjectToSpawn") as GameObject;
+                if (prefab == null) { Debug.Log("[Multiplayer][tac] tac.vfx: def " + evt.VfxDefGuid + " srcDef=" + (string.IsNullOrEmpty(evt.SrcDefGuid) ? "<none>" : evt.SrcDefGuid) + " has no blast prefab — skip"); TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacVfx, evt.Seq); return; }
 
                 var pos = new Vector3(evt.X, evt.Y, evt.Z);
                 UnityEngine.Object.Instantiate(prefab, pos, Quaternion.identity);   // self-destructing FX prefab, like native SpawnObject
@@ -86,6 +95,46 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] CLIENT played tac.vfx seq=" + evt.Seq + " def=" + evt.VfxDefGuid + " pos=" + pos);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleVfx failed: " + ex); }
+        }
+
+        /// <summary>HOST: walk the effect's native Source chain to the WEAPON behind the blast and return its
+        /// def guid ("" when unresolved — the client then falls back to the effect def's ObjectToSpawn). Hop
+        /// rule mirrors the native <c>TacUtil.GetSourceOfType</c> chain (TacUtil.cs:31-42): an Effect/Status/
+        /// TacticalItem/TacticalAbility hops via <c>Source</c>, a Projectile/ProjectileLogic via <c>Weapon</c>;
+        /// the first node exposing a readable <c>WeaponDef</c> IS the weapon. Bounded + NRE-guarded.</summary>
+        private static string ResolveSourceWeaponDefGuid(object effect)
+        {
+            try
+            {
+                object node = GetProp(effect, "Source");
+                for (int hop = 0; node != null && hop < 8; hop++)
+                {
+                    object weaponDef = GetProp(node, "WeaponDef");
+                    if (weaponDef != null)
+                    {
+                        string guid = Network.Sync.DefReflection.GetGuid(weaponDef);
+                        return string.IsNullOrEmpty(guid) ? "" : guid;
+                    }
+                    node = GetProp(node, "Weapon") ?? GetProp(node, "Source");
+                }
+            }
+            catch { /* best-effort — "" degrades to the def.ObjectToSpawn fallback */ }
+            return "";
+        }
+
+        /// <summary>CLIENT: resolve the weapon def by guid and read its <c>DamagePayload.ObjectToSpawnOnExplosion</c>
+        /// blast prefab (WeaponDef.cs:20 / DamagePayload.cs:91) — the prefab the native host explosion actually
+        /// spawned. Null on "" / unresolvable guid / payload without a blast prefab (caller falls back).</summary>
+        private static GameObject ResolvePayloadBlastPrefab(string srcDefGuid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(srcDefGuid)) return null;
+                object weaponDef = Network.Sync.DefReflection.GetDefByGuid(srcDefGuid);
+                object damagePayload = weaponDef != null ? GetField(weaponDef, "DamagePayload") : null;
+                return damagePayload != null ? GetField(damagePayload, "ObjectToSpawnOnExplosion") as GameObject : null;
+            }
+            catch { return null; }
         }
 
         /// <summary>Best-effort source-actor netId (the thrower/shooter behind the blast). The effect's

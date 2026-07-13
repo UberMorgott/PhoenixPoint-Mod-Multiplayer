@@ -57,20 +57,32 @@ namespace Multiplayer.Sync.Tactical
         // ObjectToSpawn prefab at the mirrored position — a particle/FX object that applies NO damage. actorNetId
         // is a best-effort source-actor tag (-1 when unresolved); pos is the anchor. Fire/goo/acid voxel volumes
         // ride TS3 (0x94), not this surface. Self-contained tactical seq (last-writer-wins).
-        //   [seq:u32][vfxDefGuid:string][x:f32][y:f32][z:f32][actorNetId:i32]
+        //
+        // srcDefGuid (rca-grenade-vfx, OPTIONAL TAIL): the def guid of the DAMAGE-PAYLOAD SOURCE (the weapon)
+        // behind the blast. Grenades/rockets draw their blast prefab from DamageEffect.Params
+        // .ObjectToSpawnOnExplosion, fed from the WEAPON's DamagePayload (decompile DamageTypeBaseEffect.cs:87);
+        // the effect def's ObjectToSpawn is only a FALLBACK (ExplosionEffect.cs:54) and is NULL on the shared
+        // ExplosionEffectDef, so the effect-def guid alone can never replay a grenade blast. "" when unresolved.
+        // Appended as a TAIL field: an OLD decoder reads the fixed prefix and ignores trailing bytes; a NEW
+        // decoder treats a missing tail as "" (fallback path) — both directions degrade to pre-fix behavior.
+        //   [seq:u32][vfxDefGuid:string][x:f32][y:f32][z:f32][actorNetId:i32]([srcDefGuid:string])
         public struct VfxEvent
         {
             public uint Seq;
             public string VfxDefGuid;
             public float X, Y, Z;
             public int ActorNetId;   // -1 sentinel when the source actor is unresolved
-            public VfxEvent(uint seq, string vfxDefGuid, float x, float y, float z, int actorNetId)
+            public string SrcDefGuid; // "" when the damage-payload source (weapon) def is unresolved / old peer
+            public VfxEvent(uint seq, string vfxDefGuid, float x, float y, float z, int actorNetId,
+                string srcDefGuid = "")
             {
                 Seq = seq; VfxDefGuid = vfxDefGuid ?? ""; X = x; Y = y; Z = z; ActorNetId = actorNetId;
+                SrcDefGuid = srcDefGuid ?? "";
             }
         }
 
-        public static byte[] EncodeVfx(uint seq, string vfxDefGuid, float x, float y, float z, int actorNetId)
+        public static byte[] EncodeVfx(uint seq, string vfxDefGuid, float x, float y, float z, int actorNetId,
+            string srcDefGuid = "")
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -79,6 +91,7 @@ namespace Multiplayer.Sync.Tactical
                 w.Write(vfxDefGuid ?? "");
                 w.Write(x); w.Write(y); w.Write(z);
                 w.Write(actorNetId);
+                w.Write(srcDefGuid ?? "");   // optional tail — old decoders never read past actorNetId
                 return ms.ToArray();
             }
         }
@@ -97,7 +110,12 @@ namespace Multiplayer.Sync.Tactical
                     string guid = r.ReadString();
                     float x = r.ReadSingle(); float y = r.ReadSingle(); float z = r.ReadSingle();
                     int netId = r.ReadInt32();
-                    evt = new VfxEvent(seq, guid, x, y, z, netId);
+                    string srcGuid = "";
+                    if (ms.Position < ms.Length)          // optional tail — absent on an old-peer payload
+                    {
+                        try { srcGuid = r.ReadString(); } catch { srcGuid = ""; }
+                    }
+                    evt = new VfxEvent(seq, guid, x, y, z, netId, srcGuid);
                     return true;
                 }
             }

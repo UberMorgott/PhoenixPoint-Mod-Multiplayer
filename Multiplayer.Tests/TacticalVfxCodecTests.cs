@@ -40,6 +40,34 @@ public class TacticalVfxCodecTests
         Assert.False(TacticalLiveCodec.TryDecodeVfx(null, out _));
     }
 
+    // ─── (a2) rca-grenade-vfx: optional srcDefGuid tail ────────────────
+    [Fact]
+    public void Vfx_RoundTrips_WithSourceWeaponDefGuid()
+    {
+        var bytes = TacticalLiveCodec.EncodeVfx(
+            seq: 7u, vfxDefGuid: "explosion-def", x: 1f, y: 2f, z: 3f, actorNetId: 3,
+            srcDefGuid: "hand-grenade-weapon-def-guid");
+        Assert.True(TacticalLiveCodec.TryDecodeVfx(bytes, out var e));
+        Assert.Equal("hand-grenade-weapon-def-guid", e.SrcDefGuid);
+        Assert.Equal("explosion-def", e.VfxDefGuid);
+        Assert.Equal(3, e.ActorNetId);
+    }
+
+    [Fact]
+    public void Vfx_OldPeerPayload_NoTail_DecodesWithEmptySrcGuid()
+    {
+        // An OLD peer's payload ends at actorNetId. Simulate it by stripping the empty-string tail
+        // (a single 0x00 length byte) the new encoder appends for srcDefGuid:"".
+        var withEmptyTail = TacticalLiveCodec.EncodeVfx(
+            seq: 2u, vfxDefGuid: "g", x: 0f, y: 0f, z: 0f, actorNetId: -1, srcDefGuid: "");
+        var oldShape = new byte[withEmptyTail.Length - 1];
+        System.Array.Copy(withEmptyTail, oldShape, oldShape.Length);
+
+        Assert.True(TacticalLiveCodec.TryDecodeVfx(oldShape, out var e));
+        Assert.Equal("", e.SrcDefGuid);   // missing tail → "" → client falls back to def.ObjectToSpawn
+        Assert.Equal("g", e.VfxDefGuid);
+    }
+
     // ─── (b) host broadcast gate — real application only ──────────────
     [Fact]
     public void Gate_RealApplication_Broadcasts()
