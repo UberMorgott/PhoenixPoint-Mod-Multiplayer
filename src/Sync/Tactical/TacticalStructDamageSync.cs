@@ -53,8 +53,13 @@ namespace Multiplayer.Sync.Tactical
         [ThreadStatic] private static bool _applyingStructDamage;
         public static bool IsApplyingStructDamage => _applyingStructDamage;
 
+        // rca-structdamage: once-per-mission loud-fail latch for an unresolvable SceneObjectIdsComponent
+        // (reset on mission exit). The 2026-07-13 run failed EVERY batch on both clients — one loud line
+        // with full diag beats 8 identical errors.
+        private static bool _idsResolveFailLogged;
+
         /// <summary>Clear the host pending buffer (mission exit / re-deploy). Idempotent.</summary>
-        public static void Reset() { _pending.Clear(); }
+        public static void Reset() { _pending.Clear(); _idsResolveFailLogged = false; }
 
         // ─── HOST: capture (called from the DestructableDamageReceiver.ApplyDamage postfix) ────────────────
 
@@ -164,8 +169,13 @@ namespace Multiplayer.Sync.Tactical
                 object idsComponent = ResolveSceneObjectIds();
                 if (idsComponent == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] HandleStructDamage: no SceneObjectIdsComponent on the current level — skip");
-                    return;   // do NOT mark seq — a later flush re-sends once the level is ready
+                    if (!_idsResolveFailLogged)
+                    {
+                        _idsResolveFailLogged = true;
+                        Debug.LogError("[Multiplayer][tac] HandleStructDamage: no SceneObjectIdsComponent resolvable " +
+                                       "(tag lookup AND full scan both missed) — struct-destruction mirror is DEAD this mission");
+                    }
+                    return;   // do NOT mark seq (batch skipped)
                 }
 
                 bool neuterChain = ClientStructDamageInertGate.ShouldNeuterExplosionChain(TacticalDeploySync.IsClientMirroring);
@@ -321,7 +331,14 @@ namespace Multiplayer.Sync.Tactical
 
         /// <summary>Resolve the current tactical level's <c>SceneObjectIdsComponent</c> (host↔client-shared scene
         /// object registry) — from the live level's scene (mirrors native <c>FindDestructableObject</c>, which uses
-        /// the active scene). Null if the level isn't tactical / has no registry.</summary>
+        /// the active scene). rca-structdamage FALLBACK: native <c>GetForScene</c> only finds an ACTIVE GameObject
+        /// TAGGED "SceneObjectIds" in EXACTLY that scene (SceneObjectIdsComponent.cs:45-55) — on client tactical
+        /// levels that lookup missed EVERY batch (2026-07-13 run, both clients) and destruction never mirrored,
+        /// while the registry itself clearly exists (the host reads GuidInScene off the same live destructibles).
+        /// When the tag/scene path misses, scan all loaded components of the type and take the most-populated
+        /// registry (a single tactical level is loaded; prefab assets are filtered out by scene validity). The
+        /// diag line logs the tried scene + every tagged GO's scene to pin WHY the native lookup missed.
+        /// Null if no registry exists at all (caller loud-fails once per mission).</summary>
         private static object ResolveSceneObjectIds()
         {
             var st = SceneIdsType();
@@ -335,9 +352,56 @@ namespace Multiplayer.Sync.Tactical
 
                 if (_mGetForScene == null)
                     _mGetForScene = AccessTools.Method(st, "GetForScene", new[] { typeof(Scene), typeof(bool) });
-                return _mGetForScene?.Invoke(null, new object[] { scene, true });   // canBeMissing:true → null, no throw
+                object viaTag = _mGetForScene?.Invoke(null, new object[] { scene, true });   // canBeMissing:true → null, no throw
+                if (viaTag != null) return viaTag;
+
+                // ponytail: per-batch full scan — fine at struct-damage batch rates; cache per-level if profiles complain.
+                Component best = null;
+                int bestCount = -1, found = 0;
+                foreach (var o in Resources.FindObjectsOfTypeAll(st))
+                {
+                    var c = o as Component;
+                    if (c == null || !c.gameObject.scene.IsValid()) continue;   // skip prefab/asset instances
+                    found++;
+                    int count = ReadMappingsCount(c);
+                    if (count > bestCount) { bestCount = count; best = c; }
+                }
+
+                // Diag probe: where do the TAGGED GOs actually live vs. the scene we asked for?
+                string taggedScenes = "<none>";
+                try
+                {
+                    var tagged = GameObject.FindGameObjectsWithTag("SceneObjectIds");
+                    if (tagged.Length > 0)
+                    {
+                        var names = new List<string>();
+                        foreach (var go in tagged) names.Add(go.name + "@'" + go.scene.name + "'" + (go.activeInHierarchy ? "" : "(inactive)"));
+                        taggedScenes = string.Join(", ", names.ToArray());
+                    }
+                }
+                catch { /* tag may be undefined in some builds — diag only */ }
+
+                Debug.Log("[Multiplayer][tac] SceneObjectIds fallback: tag lookup missed in scene '" + scene.name +
+                          "' — scan found " + found + " component(s), using " +
+                          (best != null ? "'" + best.gameObject.name + "'@'" + best.gameObject.scene.name + "' entries=" + bestCount : "<none>") +
+                          "; tagged GOs: " + taggedScenes);
+                return best;
             }
             catch { return null; }
+        }
+
+        // Entry count of a registry candidate (IdToObjectMappings public list field,
+        // SceneObjectIdsComponent.cs:14). -1 on any read failure (still a valid candidate, ranked last).
+        private static FieldInfo _fIdToObjectMappings;
+        private static int ReadMappingsCount(Component c)
+        {
+            try
+            {
+                if (_fIdToObjectMappings == null)
+                    _fIdToObjectMappings = AccessTools.Field(SceneIdsType(), "IdToObjectMappings");
+                return _fIdToObjectMappings?.GetValue(c) is System.Collections.ICollection col ? col.Count : -1;
+            }
+            catch { return -1; }
         }
 
         /// <summary>Resolve the <c>DestructableBase</c> for a guid via the scene object registry (the game's OWN
