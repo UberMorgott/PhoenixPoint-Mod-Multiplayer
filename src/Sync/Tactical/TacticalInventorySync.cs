@@ -222,8 +222,12 @@ namespace Multiplayer.Sync.Tactical
                 object state = ActiveTacticalInventoryState();
                 if (state == null) return;                        // geoscape equip / no inventory view → not ours
 
-                var moves = BuildGestureMoves(state, out object module, out int actingNetId, out int unsynced);
+                var moves = BuildGestureMoves(state, out object module, out int actingNetId, out int unsynced, out string listDiag);
                 if (module == null) return;
+                if (moves.Count == 0)
+                    // TEMP diagnostic — remove after gesture-rail RCA: pin WHY the diff is empty (per-list rem/add
+                    // counts disambiguate "UI lists never diff at this seam" vs "pairing dropped every move").
+                    Debug.Log("[Multiplayer][tac] GESTURE empty diff unsynced=" + unsynced + " |" + listDiag);
                 if (moves.Count > 0)
                 {
                     bool firstOfSession = !ReferenceEquals(_costChargedForState, state);
@@ -247,7 +251,11 @@ namespace Multiplayer.Sync.Tactical
                                   " acting=" + actingNetId + " applyCost=" + firstOfSession + " unsynced=" + unsynced);
                     }
                 }
-                ReBaseline(module);
+                // Re-baseline ONLY when the diff carried something: _initialItems IS the diff the native deferred
+                // close-commit (AttemptMoveItems) and the close-rail CaptureMoves consume — wiping it after an
+                // EMPTY diff swallows the move on BOTH commits (items revert at close on host and clients).
+                if (TacticalInventoryGestureDecision.ShouldReBaseline(moves.Count, unsynced))
+                    ReBaseline(module);
                 if (unsynced > 0)
                 {
                     // Same degrade as the close-commit rail (fresh local ground container / unreadable item), but
@@ -260,6 +268,21 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] OnTacticalGesture failed: " + ex); }
         }
 
+        /// <summary>TEMP diagnostic (gesture-rail RCA) — one line per gesture seam firing: the native result
+        /// (swap accepted/denied) and whether the tactical inventory state was detected (false ⇒ the rail no-ops
+        /// before any diff). No-op outside an active session; never throws into the native gesture.</summary>
+        internal static void LogGestureSeam(string seam, bool result)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive) return;
+                Debug.Log("[Multiplayer][tac] GESTURE seam " + seam + " result=" + result +
+                          " tacInvState=" + (ActiveTacticalInventoryState() != null));
+            }
+            catch { }
+        }
+
         /// <summary>The gesture's cross-inventory moves: per UI list in <c>CurrentInventoryLists</c>, diff
         /// <c>GetRemovedItems()</c>/<c>GetAddedItems()</c> (UnfilteredItems vs the list's <c>_initialItems</c>
         /// baseline — kept per-gesture by <see cref="ReBaseline"/>), map each list to its real
@@ -268,28 +291,36 @@ namespace Multiplayer.Sync.Tactical
         /// Item identity = (def guid, index among that def in the source's REAL pre-move items) — identical on both
         /// sides (client model untouched until mirror; host computes before applying). Unpairable/unresolvable →
         /// counted in <paramref name="unsynced"/>, never guessed.</summary>
-        private static List<Codec.Move> BuildGestureMoves(object state, out object module, out int actingNetId, out int unsynced)
+        private static List<Codec.Move> BuildGestureMoves(object state, out object module, out int actingNetId, out int unsynced, out string listDiag)
         {
             actingNetId = TacticalDeploySync.NetIdForLiveActor(GetProp(state, "PrimaryActor"));
             unsynced = 0;
             var moves = new List<Codec.Move>();
             module = GetProp(state, "_soldierEquipModule");   // expression-bodied property (GetProp is property-first)
+            listDiag = " no-module";
             if (module == null) return moves;
+            listDiag = " no-lists";
             if (!(GetProp(module, "CurrentInventoryLists") is IEnumerable lists)) return moves;
             var removeMap = GetField(state, "OnListRemoveItems") as IDictionary;   // UIInventoryList → Func<Item, InventoryComponent>
             var addMap = GetField(state, "OnListAddItems") as IDictionary;
+            listDiag = " no-maps";
             if (removeMap == null || addMap == null) return moves;
 
             var removedFrom = new List<KeyValuePair<object, object>>();            // (item, source InventoryComponent)
             var addedTo = new Dictionary<object, object>(RefEq.Instance);           // item → target InventoryComponent
+            var diag = new System.Text.StringBuilder();                             // per-list rem/add counts (empty-diff RCA)
+            int listIdx = 0;
             foreach (var list in lists)
             {
                 if (list == null) continue;
+                int rem = 0, add = 0;
                 foreach (var it in InvokeEnum(list, "GetRemovedItems"))
-                    removedFrom.Add(new KeyValuePair<object, object>(it, InvokeListMap(removeMap, list, it)));
+                { removedFrom.Add(new KeyValuePair<object, object>(it, InvokeListMap(removeMap, list, it))); rem++; }
                 foreach (var it in InvokeEnum(list, "GetAddedItems"))
-                    addedTo[it] = InvokeListMap(addMap, list, it);
+                { addedTo[it] = InvokeListMap(addMap, list, it); add++; }
+                diag.Append(" l").Append(listIdx++).Append("[rem=").Append(rem).Append(" add=").Append(add).Append(']');
             }
+            listDiag = diag.ToString();
 
             foreach (var rem in removedFrom)
             {
@@ -347,6 +378,17 @@ namespace Multiplayer.Sync.Tactical
                     AccessTools.Method(dragIcon.GetType(), "IsBeingDragged")?.Invoke(dragIcon, null) as bool? == true)
                 {
                     Debug.Log("[Multiplayer][tac] GESTURE refresh deferred — drag in progress (" + reason + ")");
+                    return;
+                }
+                // Don't clobber an un-relayed LOCAL diff: re-Init + ReBaseline below would wipe pending UI moves
+                // (same swallow class as an empty-diff ReBaseline — neither relayed nor natively committed). Skip
+                // the repaint; truth lands at the next gesture relay or the close-commit. ponytail: a bystander's
+                // view stays stale until then; upgrade to a merge-repaint if live shared-container watching matters.
+                var pending = BuildGestureMoves(state, out _, out _, out int pendingUnsynced, out _);
+                if (TacticalInventoryGestureDecision.ShouldReBaseline(pending.Count, pendingUnsynced))
+                {
+                    Debug.Log("[Multiplayer][tac] GESTURE refresh skipped — un-relayed local diff pending (" + reason +
+                              " moves=" + pending.Count + " unsynced=" + pendingUnsynced + ")");
                     return;
                 }
                 bool vehicle = GetField(state, "_isVehicleInventory") as bool? == true;

@@ -39,7 +39,11 @@ namespace Multiplayer.Harmony.Tactical
         }
         public static MethodBase TargetMethod() => _target;
         // __result true = a completed swap (may be TWO moves when the destination item swapped back).
-        public static void Postfix(bool __result) { if (__result) TacticalInventorySync.OnTacticalGesture(); }
+        public static void Postfix(bool __result)
+        {
+            TacticalInventorySync.LogGestureSeam("AttemptSlotSwap", __result);   // TEMP diag (gesture-rail RCA)
+            if (__result) TacticalInventorySync.OnTacticalGesture();
+        }
     }
 
     [HarmonyPatch]
@@ -54,7 +58,11 @@ namespace Multiplayer.Harmony.Tactical
             return _target != null;
         }
         public static MethodBase TargetMethod() => _target;
-        public static void Postfix() => TacticalInventorySync.OnTacticalGesture();
+        public static void Postfix()
+        {
+            TacticalInventorySync.LogGestureSeam("OnSideButtonPressed", true);   // TEMP diag (gesture-rail RCA)
+            TacticalInventorySync.OnTacticalGesture();
+        }
     }
 
     [HarmonyPatch]
@@ -69,6 +77,10 @@ namespace Multiplayer.Harmony.Tactical
             return _target != null;
         }
         public static MethodBase TargetMethod() => _target;
-        public static void Postfix() => TacticalInventorySync.OnTacticalGesture();
+        public static void Postfix()
+        {
+            TacticalInventorySync.LogGestureSeam("UndoInventoryActions", true);   // TEMP diag (gesture-rail RCA)
+            TacticalInventorySync.OnTacticalGesture();
+        }
     }
 }
