@@ -2,8 +2,8 @@
 
 This is a co-op multiplayer mod for Phoenix Point. Before you touch sync code, internalize
 the **sync canon** below — it is what keeps the project from becoming a pile of one-off
-network paths that desync in the field. These rules are distilled from `CLAUDE.md` and
-`AGENT-EXECUTION-PLAN.md`; read those (plus `docs/COOP-SYNC-ROADMAP.md`) for the full design.
+network paths that desync in the field. These rules are distilled from `CLAUDE.md`; read it (plus `docs/COOP-SYNC-ROADMAP.md`)
+for the full design.
 
 ## The sync canon (non-negotiable)
 

@@ -277,12 +277,12 @@ This section is for anyone interested in the netcode.
 
 ## Building it
 
-The code is split deliberately, partly because the machine that writes most of it doesn't have the game installed.
+The code is split deliberately so it can be developed across two machines: the game-free core builds and tests anywhere, while the game-facing half needs a Phoenix Point install to compile.
 
 - **`Multiplayer.Core`** is pure logic with no game or engine dependencies. It builds and runs its full test suite on any machine, no Phoenix Point required. The wire formats, dedup, sequencing, and decision logic live here.
 - **The full mod** references the real game DLLs (Assembly-CSharp, the modding framework, Unity, HarmonyLib) and only compiles on a machine with Phoenix Point installed.
 
-CI builds and tests the game-free half on every push. The game-facing half is built and verified separately, by someone who owns the game. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full picture and [`docs/README.md`](docs/README.md) for the design and as-built documentation.
+CI builds and tests the game-free half on every push. The game-facing half is built and verified on the machine that has the game installed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full picture and [`docs/README.md`](docs/README.md) for the design and as-built documentation.
 
 ## About this project
 
