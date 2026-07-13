@@ -506,6 +506,62 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] TryCancelNavigation failed: " + ex); return false; }
         }
 
+        // ─── rca-jetjump: ORIGIN-NATIVE MOVE window (shoot canon extended to special moves) ───────────
+        // Per-actor window the ORIGIN client opens around its OWN natively-running special move (JetJump):
+        // while open, the 0x8F pos/facing mirror is SUPPRESSED for that actor (the native nav animates the real
+        // flight) and the LATEST host pos is recorded; the move's OnPlayingActionEnd closes the window and
+        // reconciles to that recorded host pos (host stays position authority — a host-side fumble/drop
+        // converges here). TIMEOUT-BOUNDED: a leaked window (Activate threw before PlayAction) self-expires,
+        // after which snaps resume — the convergence backstop is never lost.
+        private static readonly Dictionary<int, int> _originNativeMoveOpenedAt = new Dictionary<int, int>();
+        private static readonly Dictionary<int, Vector3> _originNativeMoveLastPos = new Dictionary<int, Vector3>();
+        private const int OriginNativeMoveTimeoutMs = 15000;   // ponytail: jump ≈2.5 s; generous fixed ceiling
+
+        /// <summary>Open the origin-native-move window for an actor (called from the generic intercept right
+        /// before letting the native Activate run). Clears any stale recorded pos.</summary>
+        public static void OpenOriginNativeMoveWindow(int netId)
+        {
+            if (netId < 0) return;
+            _originNativeMoveOpenedAt[netId] = Environment.TickCount;
+            _originNativeMoveLastPos.Remove(netId);
+        }
+
+        /// <summary>Close the window (move terminal). True + the latest recorded host pos when one arrived while
+        /// the native move played (caller reconciles); false when nothing was suppressed.</summary>
+        public static bool TryCloseOriginNativeMoveWindow(int netId, out Vector3 lastHostPos)
+        {
+            lastHostPos = default(Vector3);
+            _originNativeMoveOpenedAt.Remove(netId);
+            if (!_originNativeMoveLastPos.TryGetValue(netId, out lastHostPos)) return false;
+            _originNativeMoveLastPos.Remove(netId);
+            return true;
+        }
+
+        /// <summary>True while the actor's origin-native-move window is open (and not expired). Expired windows
+        /// are dropped in place so the 0x8F snaps resume (the recorded pos is superseded by the live delta).</summary>
+        private static bool OriginNativeMoveWindowActive(object actor, out int netId)
+        {
+            netId = -1;
+            if (_originNativeMoveOpenedAt.Count == 0) return false;   // hot-path: almost always empty
+            netId = TacticalDeploySync.NetIdForLiveActor(actor);
+            if (netId < 0 || !_originNativeMoveOpenedAt.TryGetValue(netId, out int openedAt)) return false;
+            if (unchecked(Environment.TickCount - openedAt) > OriginNativeMoveTimeoutMs)
+            {
+                _originNativeMoveOpenedAt.Remove(netId);
+                _originNativeMoveLastPos.Remove(netId);
+                Debug.Log("[Multiplayer][tac] origin-native move window EXPIRED for netId=" + netId + " — snaps resume");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Mission-boundary reset (OnMissionExit): drop all origin-native-move windows.</summary>
+        public static void ResetOriginNativeMove()
+        {
+            _originNativeMoveOpenedAt.Clear();
+            _originNativeMoveLastPos.Clear();
+        }
+
         // ─── Inc1 full-state: drive the mirror from an ABSOLUTE position delta (tac.actorstate 0x8F) ──
 
         /// <summary>CLIENT (mirror): present an actor's host-authoritative ABSOLUTE position carried by the
@@ -530,6 +586,15 @@ namespace Multiplayer.Sync.Tactical
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActive || engine.IsHost) return false;   // client-only
                 if (!TacticalDeploySync.IsClientMirroring) return false;
+
+                // rca-jetjump: an ORIGIN-NATIVE special move (JetJump) is animating this actor natively — the
+                // 0x8F snaps must not teleport it mid-flight. Record the latest host pos instead; the move's
+                // OnPlayingActionEnd reconciles it (OriginNativeMovePatches). Timeout-bounded (window self-expires).
+                if (OriginNativeMoveWindowActive(actor, out int windowNetId))
+                {
+                    _originNativeMoveLastPos[windowNetId] = dst;
+                    return false;
+                }
 
                 object nav = GetProp(actor, "TacticalNav");
                 // Move rail owns an in-flight walk → let it finish (no double-animate / no mid-walk snap).
@@ -583,6 +648,7 @@ namespace Multiplayer.Sync.Tactical
                 if (engine == null || !engine.IsActive || engine.IsHost) return false;   // client-only
                 if (!TacticalDeploySync.IsClientMirroring) return false;
                 if (forward == Vector3.zero) return false;                                // SetForward(zero) → invalid LookRotation
+                if (OriginNativeMoveWindowActive(actor, out _)) return false;             // rca-jetjump: native move owns rotation
                 object nav = GetProp(actor, "TacticalNav");
                 if (nav != null && ToBool(GetProp(nav, "IsNavigating"))) return false;    // walk owns rotation
                 Vector3 cur = GetForward(actor);

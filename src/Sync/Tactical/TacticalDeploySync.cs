@@ -1040,6 +1040,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalLoadPhaseSync.Reset(); }                                 // load-phase indicator: stop host ping + lift any client curtain
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalMoveSync.ResetOriginNativeMove(); }                      // rca-jetjump: drop origin-native-move windows
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 

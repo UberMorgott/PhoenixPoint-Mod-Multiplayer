@@ -349,6 +349,20 @@ namespace Multiplayer.Sync.Tactical
                 Debug.Log("[Multiplayer][tac] CLIENT sent tac.intent.generic actor=" + actorNetId +
                           " type=" + typeName + " ability=" + abilityGuid + " kind=" + kind +
                           " targetNetId=" + intent.TargetNetId + " nonce=" + intent.Nonce);
+
+                // rca-jetjump (ORIGIN-NATIVE special move, the 815634b shoot-canon pattern): the intent is
+                // relayed (above) AND the origin runs the real Activate — native flight animation instead of
+                // 4 Hz teleport snaps. Host keeps outcome authority: AP/WP local spend is overwritten by the
+                // 0x8F absolute flush (the same guard the shoot canon uses — these moves have no ammo/damage
+                // funnel); the 0x8F pos/facing mirror is suppressed for this actor while the native move plays
+                // (latest host pos recorded) and reconciled at OnPlayingActionEnd (OriginNativeMovePatches).
+                if (TacticalAbilityRelay.IsOriginNativeMove(typeName))
+                {
+                    TacticalMoveSync.OpenOriginNativeMoveWindow(actorNetId);
+                    Debug.Log("[Multiplayer][tac] CLIENT origin-native move (native flight anim, host outcome authority) actor=" +
+                              actorNetId + " type=" + typeName);
+                    return true;    // run the move NATIVELY on the origin client
+                }
                 return false;   // suppress local activation (host is authoritative)
             }
             catch (Exception ex)

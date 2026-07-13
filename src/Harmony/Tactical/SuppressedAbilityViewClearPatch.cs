@@ -115,7 +115,14 @@ namespace Multiplayer.Harmony.Tactical
                 // trajectory ribbon stuck in UIStateShoot forever (no terminal signal ever comes for the origin:
                 // its own tac.fire.start echo is de-duped as predicted, and a structure-only blast raises no
                 // tac.damage). Enemy-target ReplaceTop shots were never intercepted (gate below) — unchanged.
-                if (TacticalAbilityRelay.ShouldBroadcastFireStart(__0.GetType().Name)) return true;
+                //
+                // rca-jetjump: same early-out for ORIGIN-NATIVE special moves (JetJump) — their Activate also
+                // runs natively on the origin now, so the native ClearStackAndPush confirm from
+                // UIStateAbilitySelected must run untouched: SwitchToState(UIStateWaiting) tears the aim
+                // sub-state down and waits for the executing jump exactly like single-player.
+                string abilityTypeName = __0.GetType().Name;
+                if (TacticalAbilityRelay.ShouldBroadcastFireStart(abilityTypeName) ||
+                    TacticalAbilityRelay.IsOriginNativeMove(abilityTypeName)) return true;
 
                 // Resolve the live view + current view-state name UP FRONT: the state drives BOTH the gate below
                 // (which ReplaceTop activations to intercept) AND the recovery choice. The suppressed Activate does

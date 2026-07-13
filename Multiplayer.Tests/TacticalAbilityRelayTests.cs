@@ -419,4 +419,26 @@ public class TacticalAbilityRelayTests
         Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation("BashAbility"));
         Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStart("BashAbility"));   // → intercept still applies
     }
+
+    // ─── rca-jetjump: origin-native special-move set ───────────────────────────────────────────
+    [Fact]
+    public void OriginNativeMove_IsSubsetOf_GenericRelay_AndPinned()
+    {
+        // Every origin-native move MUST stay on the generic relay (the intent is still sent; the host still
+        // executes authoritatively) — an off-relay entry would run native-only with no host counterpart.
+        foreach (var n in TacticalAbilityRelay.OriginNativeMoveAbilityTypeNames)
+            Assert.True(TacticalAbilityRelay.IsGenericRelayable(n),
+                "Origin-native move " + n + " must be on the generic relay allowlist.");
+
+        // Membership pin: JetJump is origin-native; the deliberately excluded moves (Ram = client-side collision
+        // damage would double-apply; Caterpillar = MoveAbility-subclass wall destruction + move-rail overlap;
+        // Reposition = shares the sealed hurt-reaction base Activate with a second suppressing prefix) are NOT.
+        Assert.True(TacticalAbilityRelay.IsOriginNativeMove("JetJumpAbility"));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove("RamAbility"));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove("CaterpillarMoveAbility"));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove("RepositionAbility"));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove("ShootAbility"));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove(null));
+        Assert.False(TacticalAbilityRelay.IsOriginNativeMove(""));
+    }
 }

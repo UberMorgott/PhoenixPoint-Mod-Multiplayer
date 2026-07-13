@@ -170,6 +170,38 @@ namespace Multiplayer.Sync.Tactical
         public static bool IsGenericRelayable(string abilityTypeName)
             => !string.IsNullOrEmpty(abilityTypeName) && _genericRelayable.Contains(abilityTypeName);
 
+        // ─── rca-jetjump: ORIGIN-NATIVE special moves (the shoot canon, extended to movement) ─────────
+        /// <summary>Generic-relay MOVE abilities that additionally run NATIVELY on the ORIGIN client (the 815634b
+        /// shoot-canon pattern): the intent is still relayed and the host still executes authoritatively (AP/WP
+        /// via the 0x8F absolute flush — the origin's local spend is overwritten, the same double-spend guard the
+        /// shoot canon relies on; no ammo/damage funnel exists for these moves), but the origin ALSO runs the real
+        /// Activate so the player sees the actual flight animation instead of 4 Hz teleport snaps. While the
+        /// native move plays, the 0x8F pos/facing mirror is suppressed for that actor (latest host pos recorded)
+        /// and reconciled at the move's OnPlayingActionEnd — convergence backstop intact (see the
+        /// origin-native-move window in TacticalMoveSync + OriginNativeMovePatches).
+        ///
+        /// DELIBERATELY EXCLUDED (kept on plain suppress-and-relay):
+        ///   • <c>RamAbility</c>          — the charge deals collision damage via ApplyDamage; a native origin
+        ///     run would apply CLIENT-side damage with no neuter surface (the shoot canon's projectile/damage
+        ///     neuters do not cover it) → double damage.
+        ///   • <c>CaterpillarMoveAbility</c> — a MoveAbility SUBCLASS that destroys walls through the move
+        ///     (ApplyDamage funnel) and overlaps the dedicated move-rail machinery.
+        ///   • <c>RepositionAbility</c>   — shares the sealed <c>TacticalHurtReactionAbility.Activate</c> with
+        ///     the reaction set; <c>HurtReactionActivateSuppressPatch</c> prefixes the SAME method and any
+        ///     false-returning prefix suppresses, so a native origin run needs that patch reworked first.</summary>
+        public static readonly string[] OriginNativeMoveAbilityTypeNames =
+        {
+            "JetJumpAbility",   // pure movement (nav-driven parabola, no damage funnel), own Activate override
+        };
+
+        private static readonly HashSet<string> _originNativeMove =
+            new HashSet<string>(OriginNativeMoveAbilityTypeNames, StringComparer.Ordinal);
+
+        /// <summary>True when this generic-relayable MOVE ability runs natively on the origin client (intent
+        /// still relayed, host still authoritative). Unknown / null return false (plain suppress-and-relay).</summary>
+        public static bool IsOriginNativeMove(string abilityTypeName)
+            => !string.IsNullOrEmpty(abilityTypeName) && _originNativeMove.Contains(abilityTypeName);
+
         /// <summary>PURE ability→target-KIND map for the 0x8E generic intent (the discriminator the client writes +
         /// the host reads to build the <c>TacticalAbilityTarget</c>). Covers the ACTIVE relay set AND the
         /// deferred-but-known abilities (so the wire is complete + the map is unit-testable ahead of activation):
