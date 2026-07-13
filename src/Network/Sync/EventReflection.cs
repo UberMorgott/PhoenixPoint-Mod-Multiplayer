@@ -1162,22 +1162,6 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
-        /// PURE: classify an event as a MISSION-DEPLOY prompt from its per-choice "this choice starts a mission"
-        /// flags. True iff ANY choice starts a tactical mission — that choice is a Deploy/Land button, so the whole
-        /// window is a transient host-side PRE-DECISION prompt the client must NOT mirror (the mission itself rides
-        /// the tactical deploy channel; the host's arrive→cancel/deploy decision is host-local). No choices /
-        /// all-false (a plain narrative, scavenge, or diplomacy event) → NOT a deploy prompt → mirrored as normal.
-        /// Null flags → false (fail OPEN to broadcast; never suppress a legit event on a read failure). Unit-tested.
-        /// </summary>
-        public static bool IsMissionDeployByOutcomes(bool[] choiceStartsMission)
-        {
-            if (choiceStartsMission == null) return false;
-            for (int i = 0; i < choiceStartsMission.Length; i++)
-                if (choiceStartsMission[i]) return true;
-            return false;
-        }
-
-        /// <summary>
         /// True iff <paramref name="choice"/>'s outcome STARTS a tactical mission, i.e.
         /// <c>Outcome.StartMission.MissionTypeDef != null</c> — the exact condition the native reward builder uses
         /// to emit a <c>RewardStartCustomMission</c> (GeoEventChoiceOutcome.cs:315). Returns false on null /
@@ -1199,13 +1183,63 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
-        /// Host SOURCE-side exclusion predicate: true iff this live event is a mission-arrival/deploy prompt (ANY
-        /// choice's outcome starts a mission). Such windows are the vehicle-arrival "Deploy / Leave" confirmation
-        /// (e.g. story site PROG_AN2_MISS "Второе посвящение"): a host-local pre-decision prompt whose host-side
-        /// cancel/deploy must produce NO client dialog. When true, <c>EventRaisedDisplayPatch</c> /
+        /// True iff <paramref name="choice"/> carries a REAL outcome payload beyond declining — outcome text
+        /// (<see cref="ChoiceHasOutcomeText"/>) or ANY reward/state field of its live
+        /// <c>GeoEventChoiceOutcome</c>. Walks every public instance field GENERICALLY (grounded
+        /// GeoEventChoiceOutcome.cs:25-105 — resources/items/diplomacy/units/reveal-sites/trigger-set-remove
+        /// encounters/damage-tire ints/skill points/SDI/researches/phoenixpedia/subfaction+timer lists/
+        /// cinematic/game-over faction/bool switches): Unity default-constructs EMPTY lists/packs/texts on
+        /// deserialize, so non-null alone is NOT a signal — payload means non-empty string / non-zero int /
+        /// true bool / any-element IEnumerable (List + ResourcePack) / live UnityEngine.Object reference /
+        /// <c>StartMission.MissionTypeDef != null</c> (the <see cref="ChoiceStartsMission"/> condition) /
+        /// non-empty OutcomeText key. A null <c>Outcome</c> or all-empty outcome → bare decline (false).
+        /// UNREADABLE → TRUE: fail toward "story choice" so the event MIRRORS (the classifier convention —
+        /// never suppress a legit story window on a read failure). Best-effort (never throws).
+        /// </summary>
+        public static bool ChoiceHasOutcomePayload(object choice)
+        {
+            if (choice == null) return false;   // the game keys decline as the null choice
+            try
+            {
+                Ensure();
+                if (_choiceOutcomeField == null) return true;   // unbound → fail toward mirror
+                var outcome = _choiceOutcomeField.GetValue(choice);
+                if (outcome == null) return false;              // no outcome at all → bare decline
+                if (ChoiceHasOutcomeText(choice)) return true;  // result-page text → real story choice
+                foreach (var f in outcome.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (f.Name == "OutcomeText") continue;      // handled above (empty-key aware)
+                    var v = f.GetValue(outcome);
+                    if (v == null) continue;
+                    if (f.Name == "StartMission")
+                    {   // Unity default-constructs an empty OutcomeStartMission — payload iff MissionTypeDef set
+                        if (_startMissionTypeDefField?.GetValue(v) != null) return true;
+                        continue;
+                    }
+                    if (v is bool b) { if (b) return true; }
+                    else if (v is int n) { if (n != 0) return true; }
+                    else if (v is string s) { if (!string.IsNullOrEmpty(s)) return true; }
+                    else if (v is UnityEngine.Object uo) { if (uo) return true; }   // fake-null aware (Cinematic / GameOverVictoryFaction)
+                    else if (v is IEnumerable e) { foreach (var _ in e) return true; }   // lists + ResourcePack: any element
+                    else return true;   // unknown non-null object field → assume payload (fail toward mirror)
+                }
+                return false;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.ChoiceHasOutcomePayload failed: " + ex.Message); return true; }
+        }
+
+        /// <summary>
+        /// Host SOURCE-side exclusion predicate: true iff this live event is a PURE mission-deploy prompt —
+        /// ≥1 choice's outcome starts a mission AND every OTHER choice is a bare decline
+        /// (<see cref="ChoiceHasOutcomePayload"/> false). Such windows are the vehicle-arrival "Deploy / Leave"
+        /// confirmation (e.g. story site PROG_AN2_MISS "Второе посвящение"): a host-local pre-decision prompt whose
+        /// host-side cancel/deploy must produce NO client dialog. When true, <c>EventRaisedDisplayPatch</c> /
         /// <c>CompleteEventDismissPatch</c> SKIP the raise/dismiss broadcast, so the client never opens (nor
-        /// synthesizes a phantom result page for) it. Fail OPEN: null / unreadable choices → false (broadcast as
-        /// before — no regression to legit scavenge / narrative / diplomacy events). Best-effort (never throws).
+        /// synthesizes a phantom result page for) it. NARROWED 2026-07-13 (9e80b24 regression fix): a story event
+        /// whose mission-launch choice is MIXED with real rewarded/outcome-bearing alternatives mirrors again —
+        /// classification is the pure <see cref="MissionDeployClassifier.IsPureDeployPrompt"/> (unit-tested).
+        /// Fail OPEN: null / unreadable choices → false (broadcast as before — no regression to legit scavenge /
+        /// narrative / diplomacy events). Best-effort (never throws).
         /// </summary>
         public static bool IsMissionDeployEvent(object geoscapeEvent)
         {
@@ -1216,10 +1250,15 @@ namespace Multiplayer.Network.Sync
                 var data = _eventDataProp?.GetValue(geoscapeEvent, null);
                 var choices = _choicesField?.GetValue(data) as IList;
                 if (choices == null) return false;   // unreadable → fail OPEN to broadcast
-                var flags = new bool[choices.Count];
+                var startsMission = new bool[choices.Count];
+                var hasPayload = new bool[choices.Count];
                 for (int i = 0; i < choices.Count; i++)
-                    flags[i] = ChoiceStartsMission(choices[i]);
-                return IsMissionDeployByOutcomes(flags);
+                {
+                    startsMission[i] = ChoiceStartsMission(choices[i]);
+                    // payload matters only for NON-mission choices (the classifier ignores it otherwise)
+                    hasPayload[i] = !startsMission[i] && ChoiceHasOutcomePayload(choices[i]);
+                }
+                return MissionDeployClassifier.IsPureDeployPrompt(startsMission, hasPayload);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.IsMissionDeployEvent failed: " + ex.Message); return false; }
         }

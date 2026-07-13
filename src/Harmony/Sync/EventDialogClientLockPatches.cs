@@ -529,7 +529,7 @@ namespace Multiplayer.Harmony.Sync
                 // CHOICE (Choices >= 2) host-picks already broadcast a result-bearing dismiss via
                 // CompleteEventDismissPatch — never duplicate here.
                 if (EventReflection.GetChoiceCount(geoEvent) >= 2) return;
-                // Mission-deploy prompts are never mirrored (raise/dismiss suppressed at the SOURCE) — a
+                // PURE mission-deploy prompts are never mirrored (raise/dismiss suppressed at the SOURCE) — a
                 // single-choice deploy event must not leak a fallback bare-close for a dialog the client never
                 // opened. Symmetric to EventRaisedDisplayPatch / CompleteEventDismissPatch. Fail-open (broadcast as before).
                 if (EventReflection.IsMissionDeployEvent(geoEvent)) return;

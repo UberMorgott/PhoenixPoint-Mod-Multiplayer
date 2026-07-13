@@ -78,8 +78,10 @@ namespace Multiplayer.Harmony.Sync
             {
                 string eventId = EventReflection.GetEventId(geoEvent);
                 if (string.IsNullOrEmpty(eventId)) return;
-                // EXCLUDE mission-arrival/deploy prompts (ANY choice starts a tactical mission) from the client
-                // mirror. These are transient host-side PRE-DECISION windows (vehicle arrives → "Deploy / Leave"):
+                // EXCLUDE PURE mission-deploy prompts (a mission-starting choice + only bare declines — the
+                // narrowed IsMissionDeployEvent; a story event MIXING a mission choice with real rewarded
+                // alternatives mirrors as normal) from the client mirror.
+                // These are transient host-side PRE-DECISION windows (vehicle arrives → "Deploy / Leave"):
                 // a host cancel closes only on the host, but the client — having mirrored the raise — would
                 // synthesize a phantom result page and get stuck (in-game leak: PROG_AN2_MISS "Второе посвящение",
                 // subtitle "МЕСТНОСТЬ РАЗВЕДКИ"). The client = mirror of COMMITTED state only; the deploy decision
@@ -89,7 +91,7 @@ namespace Multiplayer.Harmony.Sync
                 if (EventReflection.IsMissionDeployEvent(geoEvent))
                 {
                     Debug.Log("[Multiplayer] HOST skip BroadcastEventRaised eventId=" + eventId +
-                              " (mission-deploy prompt — client never mirrors an arrival deploy/land confirmation)");
+                              " (pure mission-deploy prompt — client never mirrors an arrival deploy/land confirmation)");
                     return;
                 }
                 int siteId = EventReflection.GetSiteId(geoEvent);
@@ -186,13 +188,13 @@ namespace Multiplayer.Harmony.Sync
             try
             {
                 string eventId = EventReflection.GetEventId(__instance);
-                // SYMMETRIC to the raise-side exclusion: never broadcast a dismiss for a mission-deploy prompt the
-                // client was never shown (the raise was skipped) — it would buffer as an orphan pending-dismiss.
+                // SYMMETRIC to the raise-side exclusion: never broadcast a dismiss for a PURE mission-deploy prompt
+                // the client was never shown (the raise was skipped) — it would buffer as an orphan pending-dismiss.
                 // The arrive→cancel/deploy decision is host-local; on Deploy the mission rides the tactical channel.
                 if (EventReflection.IsMissionDeployEvent(__instance))
                 {
                     Debug.Log("[Multiplayer] HOST skip BroadcastEventDismiss eventId=" + eventId +
-                              " (mission-deploy prompt — not mirrored to client)");
+                              " (pure mission-deploy prompt — not mirrored to client)");
                     return;
                 }
                 // The picked choice's index (off GeoscapeEvent.SelectedChoice, set inside CompleteEvent). >= 0
