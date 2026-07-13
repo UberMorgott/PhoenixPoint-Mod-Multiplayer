@@ -403,4 +403,20 @@ public class TacticalAbilityRelayTests
             Assert.False(TacticalActorStateDiff.ShouldMirrorStatus(vis, "ZombifiedStatus"));
         }
     }
+
+    [Fact]
+    public void OriginNativeShoot_FireStartGate_OverridesViewClearIntercept()
+    {
+        // rca-grenade-ui LAYERING PIN: SuppressedAbilityViewClearPatch early-outs (native view path) for any
+        // ability in the fire-start set BEFORE the suppressed-set intercept — a ShootAbility (shoot + grenade)
+        // runs NATIVELY on the origin client (815634b), so intercepting its ClearStackAndPush confirm (the
+        // ground-targeted grenade path, UIStateShoot default stateStackAction) skipped the native
+        // SwitchToState(UIStateWaiting) and left the trajectory ribbon stuck. The pin: ShootAbility must be in
+        // BOTH sets (suppressed → the patch sees it; fire-start → the patch lets it through), while BashAbility
+        // (melee, still fully suppressed + relayed) must stay intercepted (in suppressed, NOT in fire-start).
+        Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation("ShootAbility"));
+        Assert.True(TacticalAbilityRelay.ShouldBroadcastFireStart("ShootAbility"));   // → native view path wins
+        Assert.True(TacticalAbilityRelay.IsClientSuppressedActivation("BashAbility"));
+        Assert.False(TacticalAbilityRelay.ShouldBroadcastFireStart("BashAbility"));   // → intercept still applies
+    }
 }

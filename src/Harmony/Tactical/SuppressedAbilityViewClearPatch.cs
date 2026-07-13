@@ -105,6 +105,18 @@ namespace Multiplayer.Harmony.Tactical
                 if (__0 == null) return true;
                 if (!TacticalAbilityRelay.IsClientSuppressedActivation(__0.GetType().Name)) return true; // not suppressed → native
 
+                // NEW SHOOT CANON (rca-grenade-ui): a ShootAbility (shoot + grenade) runs NATIVELY on the origin
+                // client (815634b) — its Activate is NOT a stack-unchanged no-op anymore, so the wedge rationale
+                // above no longer applies to it and the native ActivateAbility view flow must run untouched. The
+                // missed case was the GROUND-TARGETED grenade confirm: UIStateShoot confirms it via
+                // ActivateAbility(_ability, AbilityTarget) with the DEFAULT ClearStackAndPush (UIStateShoot.cs
+                // :985/:1303 → default at :1385) — NOT the enemy-target shot's explicit ReplaceTop (:1315) — so
+                // this prefix intercepted it, skipped the native SwitchToState(UIStateWaiting) and left the
+                // trajectory ribbon stuck in UIStateShoot forever (no terminal signal ever comes for the origin:
+                // its own tac.fire.start echo is de-duped as predicted, and a structure-only blast raises no
+                // tac.damage). Enemy-target ReplaceTop shots were never intercepted (gate below) — unchanged.
+                if (TacticalAbilityRelay.ShouldBroadcastFireStart(__0.GetType().Name)) return true;
+
                 // Resolve the live view + current view-state name UP FRONT: the state drives BOTH the gate below
                 // (which ReplaceTop activations to intercept) AND the recovery choice. The suppressed Activate does
                 // NOT change the view state, so reading it before Activate is equivalent to the old post-Activate read.
