@@ -2,8 +2,11 @@
 
 This is a co-op multiplayer mod for Phoenix Point. Before you touch sync code, internalize
 the **sync canon** below — it is what keeps the project from becoming a pile of one-off
-network paths that desync in the field. These rules are distilled from `CLAUDE.md`; read it (plus `docs/COOP-SYNC-ROADMAP.md`)
-for the full design.
+network paths that desync in the field. The canon here is the short version; the full design,
+rationale, and status-safety contract live in the sync-canon spec
+(`docs/superpowers/specs/2026-06-27-multiplayer-sync-canon-design.md`) and the living
+`docs/COOP-SYNC-ROADMAP.md`. (`CLAUDE.md` carries the same canon in compressed form for
+automated agents.)
 
 ## The sync canon (non-negotiable)
 
@@ -28,9 +31,9 @@ for the full design.
 - New buff / field / status → attach to the generic versioned actor-state record on the
   `0x67` rail. If you find yourself designing a new opcode, surface, or channel for it, stop —
   that is almost always the wrong answer under "converge, don't multiply."
-- Statuses are **inert, display-only by contract**: pre-set `Applied=true`, seed null
-  `[SerializeMember]` fields, never live-apply, and hard-exclude faction-flippers
-  (MindControl/Zombified) and surface-owned effects. See the canon section in `CLAUDE.md`.
+- Statuses are **inert, display-only by contract** — never live-apply. The exact rules
+  (`Applied=true` pre-set, atomic field seeding, faction-flipper/surface-owned exclusions,
+  per-status isolation) are in the sync-canon spec §5; follow it exactly.
 
 ## Branch / build split (where your work lands)
 
@@ -65,11 +68,3 @@ Branching:
 - **Game DLLs or any copyrighted game assets** — not in CI, not anywhere in the repo.
 - No Steam-emulator / Goldberg references. Local two-instance testing uses the developer's
   own second Steam-API session; no such tool is named or linked in the repo.
-
-## Do-NOT-do checklist
-
-- Do not add a new sync rail/mechanism — converge onto `0x67`.
-- Do not reuse any retired opcode or surface id.
-- Do not add `UnityEngine`/game references to `Multiplayer.Core`.
-- Do not commit game DLLs or assets.
-- Do not stub game types to make the full mod "build" on a machine without the game.
