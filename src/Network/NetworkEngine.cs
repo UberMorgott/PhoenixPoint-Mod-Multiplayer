@@ -638,6 +638,10 @@ namespace Multiplayer.Network
                     SaveTransfer?.OnLoadComplete(msg);
                     break;
 
+                case PacketType.EntryTransferAbort:
+                    SaveTransfer?.OnEntryTransferAbort(msg);
+                    break;
+
                 case PacketType.ParityUpdate:
                     // Client->host: refreshed parity manifest after the client auto-applied host settings.
                     Session.HandleParityUpdate(msg);

@@ -524,8 +524,17 @@ namespace Multiplayer.Sync.Tactical
                         var st = NetworkEngine.Instance?.SaveTransfer;
                         bool started = st != null && st.HostBeginTacticalEntryTransfer();
                         Debug.Log("[Multiplayer][tac] entry-via-save: HostBeginTacticalEntryTransfer started=" + started);
+                        // A never-started transfer is the same wedge as a failed write: the reveal-hold armed at
+                        // LAUNCH would park the host curtain forever and clients would wait on a save that never
+                        // comes (live 2026-07-13) → release the hold + notify clients now.
+                        if (!started) st?.AbortTacticalEntryTransfer("transfer failed to start");
                     }
-                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] entry-via-save start failed: " + ex); }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError("[Multiplayer][tac] entry-via-save start failed: " + ex);
+                        try { NetworkEngine.Instance?.SaveTransfer?.AbortTacticalEntryTransfer("start exception: " + ex.Message); }
+                        catch { /* abort is best-effort — the log line above already surfaced the failure */ }
+                    }
                 }
             }
             catch (Exception ex)
@@ -724,6 +733,21 @@ namespace Multiplayer.Sync.Tactical
                            p.MissionSiteId + ")");
             try { ClientLaunchMission(p); }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] entry-stall fallback ClientLaunchMission failed: " + ex); }
+        }
+
+        /// <summary>
+        /// CLIENT: the host's tac-entry save transfer ABORTED (<c>PacketType.EntryTransferAbort</c>) — it will
+        /// never build our tactical level. Drop the stashed deploy + stall watchdog, release the geo-transition
+        /// gate and lift the co-op curtain so the player returns to the live geoscape mirror. Deliberately NO
+        /// legacy self-launch: the sim-frozen mirror often has no GeoMission for the site (live failure
+        /// 2026-07-13 — the 60s watchdog's fallback failed exactly there and left every peer wedged).
+        /// </summary>
+        public static void ClientAbortEntryWait(string reason)
+        {
+            _pendingClientDeploy = null;
+            _entryStallDeadline = 0f;
+            try { Multiplayer.Network.Sync.State.GeoTransitionGate.InTransition = false; } catch { }
+            try { TacticalLoadPhaseSync.ClientAbortCurtain("host entry-transfer abort: " + reason); } catch { }
         }
 
         /// <summary>

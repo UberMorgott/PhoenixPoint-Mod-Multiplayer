@@ -58,6 +58,10 @@ namespace Multiplayer.Network.MessageLayer
         ParityUpdate = 0x46,    // client->host: refreshed parity manifest after the client auto-applied the host's
                                 // mod settings (host manifest rides ConnectionAccepted). Host re-compares, updates
                                 // that client's roster ParityDiffs and re-broadcasts PEER_LIST (badge/lock clears).
+        EntryTransferAbort = 0x47, // host->all: the tac-entry save transfer ABORTED (mid-tactical save write failed /
+                                   // transfer never started) — clients drop the stashed deploy + stall watchdog and
+                                   // lift their curtain back to the live geoscape mirror; the host self-reveals.
+                                   // Payload: [reason:str] (diagnostics only — the abort action is unconditional).
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

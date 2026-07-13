@@ -622,6 +622,8 @@ namespace Multiplayer.Network
             if (blob == null || blob.Length == 0)
             {
                 Debug.LogError("[Multiplayer] tac-entry: no mid-tactical save bytes produced; aborting entry transfer.");
+                // Release the reveal-hold + tell clients — otherwise every peer wedges (live 2026-07-13).
+                AbortTacticalEntryTransfer("no save bytes (mid-tactical save write failed)");
                 yield break;
             }
             Debug.Log($"[Multiplayer] tac-entry: host mid-tactical save written bytes={blob.Length} ms={NowMs() - t0}");
@@ -633,6 +635,43 @@ namespace Multiplayer.Network
             SendLoadComplete();   // host is past Playing → mark its slot done (+ TryReleaseBarrier: client not loaded yet)
             Debug.Log("[Multiplayer] tac-entry: blob sent, LOADED barrier open, host marked loaded/done " +
                       "(reveal-hold armed at launch, no self-enter)");
+        }
+
+        /// <summary>
+        /// HOST: the tac-entry transfer can never complete (mid-tactical save write failed / transfer never
+        /// started). The reveal-hold armed at LAUNCH (<see cref="OpenTacticalEntryBarrier"/>) would otherwise
+        /// park the host's curtain forever waiting for clients that will never load, while every client wedges
+        /// on "Downloading mission…" until its 60s watchdog fires a self-launch a sim-frozen mirror cannot honor
+        /// (live failure 2026-07-13: StructuralTarget save-write NRE → all three peers stuck). Release the hold
+        /// NOW (<see cref="PerformDeferredLift"/>: un-park + self-reveal, once-guarded) and broadcast
+        /// <see cref="PacketType.EntryTransferAbort"/> so every client immediately drops its stashed deploy and
+        /// lifts its curtain back to the live geoscape mirror. Host-only; safe to call more than once.
+        /// </summary>
+        public void AbortTacticalEntryTransfer(string reason)
+        {
+            if (!_engine.IsHost) return;
+            Debug.LogError("[Multiplayer] tac-entry transfer ABORT (" + reason + ") — self-reveal + notify clients");
+            try
+            {
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferAbort,
+                    MessageSerializer.SerializeEntryTransferAbort(reason)));
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
+            PerformDeferredLift();
+        }
+
+        /// <summary>
+        /// CLIENT: the host's tac-entry transfer aborted — no save is coming to build our tactical level.
+        /// Drop the stashed deploy + stall watchdog and lift the curtain (the live geoscape mirror is still
+        /// underneath). The host ignores its own broadcast.
+        /// </summary>
+        public void OnEntryTransferAbort(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            string reason = "";
+            try { reason = MessageSerializer.DeserializeEntryTransferAbort(msg.Payload); } catch { /* reason is diagnostics-only */ }
+            Debug.LogError("[Multiplayer] tac-entry transfer aborted by host (" + reason + ") — dropping stashed deploy + lifting curtain");
+            Multiplayer.Sync.Tactical.TacticalDeploySync.ClientAbortEntryWait(reason);
         }
 
         // Write a mid-tactical save (QuickSave's tactical branch: IsTactical-tagged, TacticalGameParams.

@@ -504,6 +504,27 @@ namespace Multiplayer.Network.MessageLayer
             }
         }
 
+        // ─── EntryTransferAbort (tac-entry save transfer will never complete) ────────
+        // A single reason string — diagnostics only; the receiving client's abort action is unconditional.
+        public static byte[] SerializeEntryTransferAbort(string reason)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(reason ?? "");
+                return ms.ToArray();
+            }
+        }
+
+        public static string DeserializeEntryTransferAbort(byte[] data)
+        {
+            using (var ms = new MemoryStream(data))
+            using (var br = new BinaryReader(ms))
+            {
+                return br.ReadString();
+            }
+        }
+
     }
 
     // ─── Action Data Types ─────────────────────────────────────────────────
