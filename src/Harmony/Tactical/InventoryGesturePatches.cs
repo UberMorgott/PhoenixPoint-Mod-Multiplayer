@@ -23,8 +23,8 @@ namespace Multiplayer.Harmony.Tactical
     ///     ponytail: the inventory ability's AP already spent this session is NOT refunded on undo (native would
     ///     refund at close) — accept the drift, AP reconciles via 0x8F; upgrade if players actually undo-loot.
     /// NOT covered (deliberate): reload/ammo (charges ride the 0x8F actor-state delta, membership unchanged),
-    /// manufacture/scrap drop areas (geoscape-only UI), drops onto the fresh LOCAL ground container (unregistered
-    /// actor — degrade-to-notify, same as the close-commit rail; the synced path is DropItemAbility).
+    /// manufacture/scrap drop areas (geoscape-only UI). Bare-ground drops DO relay (GROUND sentinel — the host
+    /// resolves/creates its registered drop container, see TacticalInventorySync.HostResolveGroundInventory).
     /// </summary>
     [HarmonyPatch]
     public static class TacInventorySlotSwapGesturePatch

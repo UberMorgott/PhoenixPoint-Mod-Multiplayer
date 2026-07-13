@@ -139,7 +139,12 @@ namespace Multiplayer.Sync.Tactical
 
             try
             {
-                var applied = ApplyMoves(intent.Moves, destroyEmptied: true);
+                // destroyEmptied only while the HOST's own inventory view is closed: native defers empty-container
+                // destruction to ExitState, and destroying mid-session kills the view's cached _groundInventory
+                // (ground-drop poisoning, RCA 2026-07-13). ponytail: a far-away container emptied by a client while
+                // the host's view is open lingers empty until the host's next screen close — harmless litter.
+                var applied = ApplyMoves(intent.Moves, destroyEmptied: ActiveTacticalInventoryState() == null,
+                                         intent.ActingNetId);
                 // AP: cost is due iff ≥1 move APPLIED (native rule: any cross-inventory move ⇒ cost due; a rejected
                 // move is excluded) AND the origin flags this intent as its screen-session's first (per-gesture rail
                 // sends one intent per gesture; native charges the ability once per inventory-view session, so the
@@ -245,7 +250,11 @@ namespace Multiplayer.Sync.Tactical
                     bool firstOfSession = anyReal && !ReferenceEquals(_costChargedForState, state);
                     if (host)
                     {
-                        var applied = ApplyMoves(moves, destroyEmptied: true);
+                        // destroyEmptied FALSE: the host's own view is open (this IS its gesture). Native never
+                        // destroys an emptied ground container before ExitState — a mid-session destroy kills the
+                        // session-cached _groundInventory and every later ground drag turns unsyncable
+                        // (RCA 2026-07-13: netId 1000137 one-shot-then-never poisoning). ExitState cleans empties.
+                        var applied = ApplyMoves(moves, destroyEmptied: false, actingNetId);
                         if (applied.Count > 0)
                         {
                             if (firstOfSession) { HostApplyInventoryCost(actingNetId); _costChargedForState = state; }
@@ -270,10 +279,11 @@ namespace Multiplayer.Sync.Tactical
                     ReBaseline(module);
                 if (unsynced > 0)
                 {
-                    // Same degrade as the close-commit rail (fresh local ground container / unreadable item), but
-                    // reactive: repaint from truth NOW so the player sees the drag didn't take.
-                    Debug.LogWarning("[Multiplayer][tac] GESTURE " + unsynced + " drag(s) not syncable (fresh ground " +
-                                     "container or unreadable item) — reverting view; use the drop-item button to drop.");
+                    // Same degrade as the close-commit rail (unregistered endpoint / unreadable item — ground drops
+                    // now relay via the GROUND sentinel), but reactive: repaint from truth NOW so the player sees
+                    // the drag didn't take.
+                    Debug.LogWarning("[Multiplayer][tac] GESTURE " + unsynced + " drag(s) not syncable (unregistered " +
+                                     "endpoint or unreadable item) — reverting view.");
                     RefreshOpenInventoryView("unsynced-gesture");
                 }
             }
@@ -335,6 +345,7 @@ namespace Multiplayer.Sync.Tactical
             }
             listDiag = diag.ToString();
 
+            object groundInv = GetField(state, "_groundInventory");   // the session's fresh LOCAL drop container
             foreach (var rem in removedFrom)
             {
                 object item = rem.Key, srcInv = rem.Value;
@@ -343,8 +354,16 @@ namespace Multiplayer.Sync.Tactical
                 addedTo.Remove(item);
                 ResolveEndpointId(srcInv, out int srcNet, out byte srcSlot);
                 ResolveEndpointId(dstInv, out int dstNet, out byte dstSlot);
+                if (dstNet < 0 && groundInv != null && ReferenceEquals(dstInv, groundInv))
+                {
+                    // Bare-ground drop: the fresh drop container is a LOCAL unregistered actor — relay the GROUND
+                    // sentinel; the host resolves/creates its OWN registered container at the acting soldier's tile
+                    // and rewrites the endpoint before broadcast (HostResolveGroundInventory).
+                    dstNet = Codec.GroundNetId;
+                    dstSlot = Codec.SlotInventory;
+                }
                 string guid = DefReflection.GetGuid(GetProp(item, "ItemDef"));
-                int defIdx = (srcNet >= 0 && dstNet >= 0 && !string.IsNullOrEmpty(guid))
+                int defIdx = (srcNet >= 0 && (dstNet >= 0 || dstNet == Codec.GroundNetId) && !string.IsNullOrEmpty(guid))
                     ? IndexAmongDefInInventory(srcInv, item, guid) : -1;
                 if (defIdx < 0) { unsynced++; continue; }
                 if (srcNet == dstNet && srcSlot == dstSlot) continue;   // same-inventory shuffle: no membership change
@@ -689,6 +708,7 @@ namespace Multiplayer.Sync.Tactical
             if (getQueries == null || !(getQueries.Invoke(ui, null) is IEnumerable queries)) return moves;
 
             // Per-query snapshot: endpoint identity + initial/removed/added item sets (reference identity).
+            object groundInv = GetField(ui, "_groundInventory");   // fresh LOCAL drop container → GROUND sentinel
             var recs = new List<QueryRec>();
             foreach (var q in queries)
             {
@@ -696,6 +716,8 @@ namespace Multiplayer.Sync.Tactical
                 object linkedInv = GetField(q, "_linkedInventory");
                 if (linkedInv == null) continue;
                 ResolveEndpointId(linkedInv, out int netId, out byte slot);   // netId < 0 ⇒ unregistered (skipped below)
+                if (netId < 0 && groundInv != null && ReferenceEquals(linkedInv, groundInv))
+                    netId = Codec.GroundNetId;                                // bare-ground drop target (host resolves)
 
                 var initial = ToObjectList(GetField(q, "_initialItems"));
                 var current = ToObjectList(GetField(q, "_currentItems"));
@@ -708,10 +730,10 @@ namespace Multiplayer.Sync.Tactical
                 recs.Add(rec);
             }
 
-            // Map every ADDED item → its target endpoint (only registered endpoints can be a wire target).
+            // Map every ADDED item → its target endpoint (registered endpoints + the GROUND sentinel).
             var addedTo = new Dictionary<object, QueryRec>(RefEq.Instance);
             foreach (var r in recs)
-                if (r.NetId >= 0)
+                if (r.NetId >= 0 || r.NetId == Codec.GroundNetId)
                     foreach (var it in r.Added)
                         addedTo[it] = r;
 
@@ -765,19 +787,28 @@ namespace Multiplayer.Sync.Tactical
         /// funnels native SyncItems uses — the moved INSTANCE is preserved, keeping ammo/charges). Container
         /// auto-destroy-when-empty is suppressed across the batch (like native SyncItems) then, when
         /// <paramref name="destroyEmptied"/> (HOST), emptied crates are destroyed once after all moves; a client
-        /// leaves container removal to the host's despawn sweep. Returns the moves that actually applied (endpoints
-        /// resolved + item present) — the caller broadcasts exactly that set.</summary>
-        private static List<Codec.Move> ApplyMoves(IList<Codec.Move> moves, bool destroyEmptied)
+        /// leaves container removal to the host's despawn sweep. A <see cref="Codec.GroundNetId"/> destination is
+        /// resolved (HOST only) to a real registered ground container at the acting soldier's tile and the move is
+        /// REWRITTEN to that netId — the broadcast set never carries the sentinel. Returns the moves that actually
+        /// applied (endpoints resolved + item present) — the caller broadcasts exactly that set.</summary>
+        private static List<Codec.Move> ApplyMoves(IList<Codec.Move> moves, bool destroyEmptied, int actingNetId = -1)
         {
             var applied = new List<Codec.Move>();
             if (moves == null || moves.Count == 0) return applied;
 
             var resolved = new List<(object item, object src, object dst, Codec.Move move)>();
             var endpoints = new List<object>();   // unique inventory endpoints touched (for the destroy-empty guard)
-            foreach (var m in moves)
+            foreach (var m0 in moves)
             {
+                var m = m0;
                 object src = ResolveEndpoint(m.SrcNetId, m.SrcSlot);
-                object dst = ResolveEndpoint(m.DstNetId, m.DstSlot);
+                object dst;
+                if (m.DstNetId == Codec.GroundNetId)
+                {
+                    dst = HostResolveGroundInventory(actingNetId, out int groundNetId);
+                    if (dst != null) m.DstNetId = groundNetId;   // rewrite: peers mirror the REAL container
+                }
+                else dst = ResolveEndpoint(m.DstNetId, m.DstSlot);
                 if (src == null || dst == null)
                 {
                     Debug.LogWarning("[Multiplayer][tac] inventory move endpoint unresolved (src=" + m.SrcNetId +
@@ -850,6 +881,77 @@ namespace Multiplayer.Sync.Tactical
                 AccessTools.Method(invAbilityType, "ApplyCosts", Type.EmptyTypes)?.Invoke(ability, null);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostApplyInventoryCost failed: " + ex); }
+        }
+
+        /// <summary>HOST: the registered ground <c>InventoryComponent</c> for a <see cref="Codec.GroundNetId"/>
+        /// destination — an existing live <c>ItemContainer</c> within one tile of the acting soldier (reuse), else a
+        /// fresh spawn of the native <c>DropDownItemContainerDef</c> at the soldier's position (the exact
+        /// <c>UIStateInventory.CreateGroundInventory</c> recipe). The spawn's EnterPlay postfix
+        /// (<c>TacticalActorLifecycleSync.HostOnActorEnteredPlay</c>) mints the netId and mirrors the container
+        /// (0x92) BEFORE the move broadcast — same reliable rail, so peers resolve the rewritten endpoint. Null on
+        /// a client / unresolvable soldier / spawn failure (the move degrades to a skip, as any unresolved endpoint).</summary>
+        private static object HostResolveGroundInventory(int actingNetId, out int groundNetId)
+        {
+            groundNetId = -1;
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsHost) return null;   // sentinel is host-resolved only
+                object soldier = TacticalDeploySync.ResolveLiveActor(actingNetId);
+                if (soldier == null) return null;
+                var containerType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.ItemContainer");
+                if (containerType == null) return null;
+                Vector3 pos = (Vector3)GetProp(soldier, "Pos");
+
+                // Reuse: a live REGISTERED container within ~a tile (a previous drop / a crate at our feet).
+                var reg = TacticalDeploySync.Registry;
+                if (reg != null)
+                    foreach (var kv in reg.Entries)
+                    {
+                        object actor = (kv.Value as TacticalActorAdapter)?.Actor;
+                        if (actor == null || !containerType.IsInstanceOfType(actor)) continue;
+                        var uo = actor as UnityEngine.Object;
+                        if (uo == null || !uo) continue;                       // destroyed mirror still in registry
+                        if (((Vector3)GetProp(actor, "Pos") - pos).sqrMagnitude > 2.25f) continue;   // 1.5 units
+                        groundNetId = kv.Key;
+                        return GetProp(actor, "Inventory");
+                    }
+
+                // Spawn the native drop container at the soldier's tile (UIStateInventory.CreateGroundInventory).
+                object setDef = GetProp(GetProp(GetProp(soldier, "TacticalLevel"), "SharedData"), "DropDownItemContainerDef");
+                if (setDef == null) return null;
+                object containerDef = null;
+                var containerDefType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Equipments.ItemContainerDef");
+                if (GetField(setDef, "Components") is IEnumerable comps && containerDefType != null)
+                    foreach (var c in comps)
+                        if (c != null && containerDefType.IsInstanceOfType(c)) { containerDef = c; break; }
+                if (containerDef == null) return null;
+                object inst = AccessTools.Method(containerDef.GetType(), "CreateInstanceData")?.Invoke(containerDef, null);
+                if (inst == null) return null;
+                AccessTools.Field(inst.GetType(), "OverrideTransform")?.SetValue(inst, true);
+                AccessTools.Field(inst.GetType(), "Pos")?.SetValue(inst, pos);
+                AccessTools.Field(inst.GetType(), "Rot")?.SetValue(inst, Quaternion.identity);
+                AccessTools.Field(inst.GetType(), "Source")?.SetValue(inst, setDef);
+                var spawnerType = AccessTools.TypeByName("Base.Entities.ActorSpawner");
+                var spawn = spawnerType != null ? AccessTools.Method(spawnerType, "SpawnActor") : null;
+                object container = spawn != null && spawn.IsGenericMethodDefinition
+                    ? spawn.MakeGenericMethod(containerType).Invoke(null, new object[] { setDef, inst, true })
+                    : null;
+                if (container == null) return null;
+                groundNetId = TacticalDeploySync.NetIdForLiveActor(container);   // minted by the EnterPlay postfix
+                if (groundNetId < 0)
+                {
+                    Debug.LogWarning("[Multiplayer][tac] ground container spawned but not registered — move skipped");
+                    return null;
+                }
+                Debug.Log("[Multiplayer][tac] GROUND host resolved drop container netId=" + groundNetId + " (spawned)");
+                return GetProp(container, "Inventory");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] HostResolveGroundInventory failed: " + ex);
+                return null;
+            }
         }
 
         // ─── Endpoint / item reflection helpers ─────────────────────────────────────────────────────

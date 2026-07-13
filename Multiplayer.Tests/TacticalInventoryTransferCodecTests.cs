@@ -203,4 +203,19 @@ public class TacticalInventoryTransferCodecTests
         Assert.False(TacticalInventoryTransferCodec.IsReorder(new Move(5, 0, 5, 1, "g", 0)));   // backpack → ready
         Assert.False(TacticalInventoryTransferCodec.IsReorder(new Move(5, 0, 6, 0, "g", 0)));   // other soldier
     }
+
+    // ─── (g) ground-drop sentinel ───────────────────────────────────────
+    [Fact]
+    public void GroundSentinel_RoundTrips_AndIsNotAReorder()
+    {
+        // Client bare-ground drop: dst = GROUND sentinel; the host rewrites it before broadcasting.
+        var moves = new List<Move> { Mk(5, TacticalInventoryTransferCodec.SlotEquipments,
+                                        TacticalInventoryTransferCodec.GroundNetId,
+                                        TacticalInventoryTransferCodec.SlotInventory, "grenade-guid", 0) };
+        var bytes = TacticalInventoryTransferCodec.EncodeIntent(5, false, moves, nonce: 2u);
+        Assert.True(TacticalInventoryTransferCodec.TryDecodeIntent(bytes, out var i));
+        Assert.Equal(TacticalInventoryTransferCodec.GroundNetId, i.Moves[0].DstNetId);
+        Assert.False(TacticalInventoryTransferCodec.IsReorder(i.Moves[0]));
+        Assert.NotEqual(TacticalInventoryTransferCodec.NoActor, TacticalInventoryTransferCodec.GroundNetId);
+    }
 }

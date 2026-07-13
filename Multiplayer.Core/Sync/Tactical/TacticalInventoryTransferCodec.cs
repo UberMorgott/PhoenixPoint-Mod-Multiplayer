@@ -48,6 +48,13 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>Sentinel netId when no acting soldier is carried (e.g. a container-only rearrange).</summary>
         public const int NoActor = -1;
 
+        /// <summary>Sentinel DESTINATION netId for a bare-ground drop: the origin's UI drop container is a LOCAL
+        /// unregistered actor (spawned fresh every screen session), so the origin cannot name it on the wire. The
+        /// HOST resolves the sentinel to its own REGISTERED ground container at the acting soldier's tile (reusing
+        /// one or spawning it — the spawn auto-mints a netId and mirrors 0x92) and REWRITES the move to that real
+        /// netId before broadcasting, so a mirroring peer never sees the sentinel.</summary>
+        public const int GroundNetId = -2;
+
         /// <summary>Reject a batch claiming more moves than any real loot session — a garbage/hostile length must
         /// not drive a large allocation or loop. A single inventory-view commit moves at most a few dozen items.</summary>
         public const int MaxMoves = 512;
