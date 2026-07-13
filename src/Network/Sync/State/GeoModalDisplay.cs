@@ -64,6 +64,10 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _uiStateModalDataProp; // UIStateGeoModal.ModalData (public property, :61)
         private static MethodInfo _finishDialog;        // UIStateGeoModal.FinishDialog(ModalResult) (:84 — the button click path)
         private static Type _modalResultType;           // PhoenixPoint.Common.Utils.ModalResult (Confirm = 0)
+        // Client-side squad pick (2026-07-13): open the native deployment window on the INITIATING client.
+        private static ConstructorInfo _deployStateCtor; // UIStateRosterDeployment(GeoMission, GeoFaction, IGeoCharacterContainer, bool)
+        private static FieldInfo _deployModeField;       // GeoscapeView.SetUiInDeploymentMode (public bool, GeoscapeView.cs:104)
+        private static MethodInfo _resetViewState;       // GeoscapeView.ResetViewState(UIStateInitial.Params = null) (:414)
 
         private static void Ensure()
         {
@@ -100,6 +104,18 @@ namespace Multiplayer.Network.Sync.State
             if (_modalResultType != null)
                 // EXACT param match (harmony-accesstools-exact-param-match): FinishDialog(ModalResult).
                 _finishDialog = AccessTools.Method(uiStateType, "FinishDialog", new[] { _modalResultType });
+            // Best-effort (NOT part of _ready): client-side squad pick — native deployment window on the client.
+            var deployStateT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateRosterDeployment");
+            var missionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission");
+            var factionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoFaction");
+            var containerT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.IGeoCharacterContainer");
+            if (deployStateT != null && missionT != null && factionT != null && containerT != null)
+                // EXACT param match (harmony-accesstools-exact-param-match): the 4-arg ctor (UIStateRosterDeployment.cs:74).
+                _deployStateCtor = AccessTools.Constructor(deployStateT, new[] { missionT, factionT, containerT, typeof(bool) });
+            _deployModeField = AccessTools.Field(viewType, "SetUiInDeploymentMode");
+            var initialParamsT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateInitial+Params");
+            if (initialParamsT != null)
+                _resetViewState = AccessTools.Method(viewType, "ResetViewState", new[] { initialParamsT });
 
             _ready = _viewField != null && _switchQueryField != null && _queryStateSwitch != null
                      && _requestStateField != null && _requestCtor != null && _uiStateCtor != null;
@@ -262,6 +278,65 @@ namespace Multiplayer.Network.Sync.State
                 Debug.LogError("[Multiplayer] GeoModalDisplay.TryHostConfirmBlocking failed: " + ex.Message);
                 return false;
             }
+        }
+
+        /// <summary>
+        /// CLIENT (begin-mission squad pick, 2026-07-13): open the NATIVE deployment window
+        /// (<c>UIStateRosterDeployment</c> — the exact state <c>GeoscapeView.ToDeploymentState</c> pushes after a
+        /// host confirm, GeoscapeView.cs:592) on the INITIATING client, over its own mirrored geoscape.
+        /// <paramref name="mission"/> is the mirror brief's rebuilt <c>ModalData</c> mission — it wraps the
+        /// resolved LIVE site, so <c>GetDeploymentSources</c>/<c>MissionDef</c> read real mirror state. Deliberate
+        /// deltas from native ToDeploymentState: PauseGame=false (pause is host-anchored — same reasoning as
+        /// <see cref="Show"/>) — SetUiInDeploymentMode is still set to match native section-bar behavior.
+        /// The window's Launch/Cancel exits are intercepted by DeploymentRelayPatches (client never launches
+        /// locally). Returns false on any miss → caller degrades to the legacy immediate relay (host window).
+        /// </summary>
+        public static bool TryClientOpenDeployment(GeoRuntime rt, object mission)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || _deployStateCtor == null || mission == null) return false;
+                var view = GetView(rt);
+                if (view == null) return false;
+                var query = _switchQueryField.GetValue(view);
+                if (query == null) return false;
+                var faction = rt?.PhoenixFaction();
+                if (faction == null) return false;
+
+                object state = _deployStateCtor.Invoke(new object[] { mission, faction, null, true });
+                object request = _requestCtor.Invoke(new object[] { state, int.MaxValue }); // native priority (GeoscapeView.cs:596)
+                _requestPauseField?.SetValue(request, false);
+                _deployModeField?.SetValue(view, true); // native ToDeploymentState sets this before the push
+                _queryStateSwitch.Invoke(query, new[] { request });
+                Debug.Log("[Multiplayer] GeoModalDisplay.TryClientOpenDeployment → UIStateRosterDeployment queued (client squad pick)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer] GeoModalDisplay.TryClientOpenDeployment best-effort failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// CLIENT: close the squad-pick deployment window after the launch relay was sent — the native
+        /// ToPreviousScreen path MINUS <c>_mission.Cancel()</c> (UIStateRosterDeployment.cs:256-268:
+        /// ResetViewState + FinishQueriedState; our push always uses shouldResetStateOnReturn=true).
+        /// Best-effort: a miss leaves the window up until the host's tac-entry teardown covers it.
+        /// </summary>
+        public static void CloseDeployment(GeoRuntime rt)
+        {
+            try
+            {
+                Ensure();
+                var view = GetView(rt);
+                if (view == null) return;
+                _resetViewState?.Invoke(view, new object[] { null });
+                _finishQueriedState?.Invoke(view, null);
+                Debug.Log("[Multiplayer] GeoModalDisplay.CloseDeployment → ResetViewState + FinishQueriedState");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.CloseDeployment best-effort failed: " + ex.Message); }
         }
 
         /// <summary>True iff the switch query's CURRENT state is a <c>UIStateGeoModal</c> showing <paramref name="modalType"/>.</summary>

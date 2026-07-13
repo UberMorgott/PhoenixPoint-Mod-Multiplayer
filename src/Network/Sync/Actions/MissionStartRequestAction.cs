@@ -34,17 +34,28 @@ namespace Multiplayer.Network.Sync.Actions
     /// </summary>
     public sealed class MissionStartRequestAction : ISyncedAction, IHostOnlyApply, IResolvesOutsideScope
     {
+        /// <summary>Sanity cap for the squad tail (native MaxPlayerUnits is single-digit; a corrupt/hostile
+        /// count above this reads as "no squad" → host falls back to its own native deployment window).</summary>
+        private const int MaxSquadIds = 64;
+        private static readonly long[] NoUnits = new long[0];
+
         private readonly byte _modalType; // native ModalType of the clicked brief (PhoenixPoint.Common.Utils.ModalType)
         private readonly int _siteId;     // GeoSite.SiteId of the brief's mission site; -1 = unreadable (modalType-match only)
+        private readonly long[] _unitIds; // client-picked squad (GeoUnitIds, PersonnelReflection.ReadUnitId); empty = legacy/no pick
 
         public MissionStartRequestAction(byte modalType, int siteId)
+            : this(modalType, siteId, null) { }
+
+        public MissionStartRequestAction(byte modalType, int siteId, long[] unitIds)
         {
             _modalType = modalType;
             _siteId = siteId;
+            _unitIds = unitIds ?? NoUnits;
         }
 
         public byte ModalType => _modalType;
         public int SiteId => _siteId;
+        public long[] UnitIds => _unitIds;
 
         public ushort ActionId => SyncedActionIds.MissionStartRequest;
         public ActionCategory Category => ActionCategory.Dialogs;
@@ -53,22 +64,62 @@ namespace Multiplayer.Network.Sync.Actions
         {
             w.Write(_modalType);
             w.Write(_siteId);
+            // Squad tail (2026-07-13, client-side squad pick): count + GeoUnitIds. Old readers never see it
+            // (they stop after siteId); old writers omit it (tolerant Read below).
+            w.Write(_unitIds.Length);
+            foreach (var id in _unitIds) w.Write(id);
         }
 
         public static ISyncedAction Read(BinaryReader r)
-            => new MissionStartRequestAction(r.ReadByte(), r.ReadInt32());
+        {
+            byte modalType = r.ReadByte();
+            int siteId = r.ReadInt32();
+            // Tolerant tail: each action is framed in its own MemoryStream (SyncEngine.ReadAction), so
+            // "bytes remain" reliably means "new writer with a squad tail".
+            long[] ids = NoUnits;
+            if (r.BaseStream.Position < r.BaseStream.Length)
+            {
+                int n = r.ReadInt32();
+                if (n > 0 && n <= MaxSquadIds)
+                {
+                    ids = new long[n];
+                    for (int i = 0; i < n; i++) ids[i] = r.ReadInt64();
+                }
+            }
+            return new MissionStartRequestAction(modalType, siteId, ids);
+        }
 
         public bool Validate(GeoRuntime rt, Guid actor)
             => rt != null && rt.IsGeoscapeActive && ReportModalClassifier.IsMissionBrief(_modalType);
 
         public void Apply(GeoRuntime rt)
         {
+            // Client-picked squad (2026-07-13): resolve the GeoUnitIds against the host roster and arm the
+            // one-shot LaunchMission override — the native FinishDialog(Confirm) → LaunchMission call below
+            // then launches with THIS squad directly and SKIPS the host's deployment window (the initiating
+            // client already picked). Zero resolved ids → stay unarmed → native window on host (safe fallback).
+            if (_unitIds.Length > 0)
+            {
+                var index = PersonnelReflection.BuildCharacterIndex(rt);
+                var chars = new System.Collections.Generic.List<object>(_unitIds.Length);
+                foreach (var id in _unitIds)
+                    if (index.ById.TryGetValue(id, out var ch)) chars.Add(ch);
+                if (chars.Count > 0)
+                    Multiplayer.Harmony.Sync.MissionLaunchSquadOverride.Arm(chars);
+                Debug.Log("[Multiplayer] HOST MissionStartRequest squad tail: " + chars.Count + "/" +
+                          _unitIds.Length + " GeoUnitId(s) resolved" +
+                          (chars.Count == 0 ? " — falling back to host deployment window" : ""));
+            }
+
             // Resolves against the host's OWN open brief through the native click path; logs apply/reject
             // internally. No channel marks needed: on success the launch itself drives every follow-up rail
             // (ReportModalHide, tac.deploy, save transfer); on reject nothing changed.
             if (!GeoModalDisplay.TryHostConfirmBlocking(rt, _modalType, _siteId))
+            {
+                Multiplayer.Harmony.Sync.MissionLaunchSquadOverride.Disarm(); // reject → never leave a stale arm
                 Debug.Log("[Multiplayer] HOST MissionStartRequest rejected modalType=" + _modalType +
                           " siteId=" + _siteId + " (stale/mismatched brief — logged no-op, client re-mirrors)");
+            }
         }
     }
 }

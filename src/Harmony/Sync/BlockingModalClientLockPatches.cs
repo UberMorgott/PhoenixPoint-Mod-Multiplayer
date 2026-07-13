@@ -177,8 +177,24 @@ namespace Multiplayer.Harmony.Sync
                         Convert.ToInt32(modalResultBoxed) == 0,                    // ModalResult.Confirm = 0
                         ReportModalClassifier.IsMissionBrief(modalType),
                         BlockingModalMirrorRegistry.IsMirrorShown(modalType))) return;
-                int siteId = Multiplayer.Network.Sync.State.ReportModalReflection.GetMissionSiteId(
-                    _stateModalDataProp?.GetValue(uiStateGeoModal, null));
+                object mission = _stateModalDataProp?.GetValue(uiStateGeoModal, null);
+                int siteId = Multiplayer.Network.Sync.State.ReportModalReflection.GetMissionSiteId(mission);
+
+                // SQUAD PICK ON THE INITIATOR (2026-07-13): open the NATIVE deployment window on THIS client
+                // instead of relaying immediately — the relay (now carrying the picked GeoUnitIds) is sent by
+                // DeploySquadRelayPatch when the user clicks DEPLOY. Clearing the mirror tag here releases the
+                // mandatory-mirror lock, so the native FinishDialog pop runs (null mirror DialogCallback =
+                // side-effect-free) and the queued deployment state becomes current.
+                if (mission != null && ClientDeployRelay.TryBeginLocalSquadPick((byte)modalType, siteId, mission))
+                {
+                    BlockingModalMirrorRegistry.ClearMirrorShown(modalType);
+                    Debug.Log("[Multiplayer] CLIENT begin-mission confirm modalType=" + modalType + " siteId=" + siteId +
+                              " → local squad pick opened (relay deferred to DEPLOY)");
+                    return;
+                }
+
+                // Degraded fallback (window open failed / no mission readable): legacy immediate relay —
+                // the deployment window then opens on the HOST, exactly the pre-feature behavior.
                 Debug.Log("[Multiplayer] CLIENT begin-mission relay modalType=" + modalType + " siteId=" + siteId +
                           " → MissionStartRequest sent to host");
                 engine.Sync?.SendActionRequest(
