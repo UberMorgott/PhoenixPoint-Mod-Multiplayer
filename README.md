@@ -94,6 +94,11 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] 🧪 Three-plus player topology
 - [ ] ⬜ Joining a battle that is already underway (parked on purpose)
 
+**Loading and saves**
+- [x] 🧪 Tac-entry transfer abort releases the host curtain and returns everyone to the Geoscape (no eternal "Downloading mission")
+- [x] 🧪 Mid-tactical save survives uninitialized scene actors (story-map NRE guard)
+- [x] 🧪 Load overlay shows the host as complete on clients and client progress rows to the host
+
 **Disconnects**
 - [x] ✅ Clean host-left and client-left signaling
 - [x] 🧪 A dropped client can rejoin the running session (rides the same drop-in path)
@@ -158,6 +163,9 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Choice arbitration when two people answer together (first click wins)
 - [x] ✅ Single-choice prompt advance
 - [x] ✅ Event windows as a notification queue: popups stack in order, unavailable response options are greyed out (already chosen by another player), host-authoritative outcome text and art
+- [x] 🧪 Story events with mission choices mirror to clients (only pure deploy prompts stay local)
+- [x] 🧪 Client "begin mission": squad-selection window opens on the initiating client, the host launches with the picked squad windowless
+- [x] 🧪 Empty mission-choice result pages dismissed (no phantom OK window)
 - [x] 🧪 Ambush events, including the blocking brief that locks the screen
 - [x] 🧪 Point-of-interest exploration (scan, probe, excavate)
 - [x] 🧪 Resource harvesting
@@ -205,14 +213,19 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Overwatch arm, clear, and cone
 - [x] 🧪 Deploy turret, deploy shield, open crate, drop and retrieve items
 - [x] 🧪 Live in-mission inventory (each item move syncs as you make it, no waiting for the screen to close)
+- [x] 🧪 Exact destination cell preserved on peers, same-list reorders sync
+- [x] 🧪 Ground drops sync both directions (host-resolved ground container)
+- [x] 🧪 Item exchange with other players' soldiers
 - [x] 🧪 Vehicle mount and dismount
 - [x] 🧪 Mind control, frenzy, jet jump, dash, and the other special moves
+- [x] 🧪 Origin-native jet jump (real flight animation on the acting client; Ram/Caterpillar/Reposition still on the convergence path)
 
 **Seeing**
 - [x] 🧪 Player-faction vision reconcile
 
 **The battlefield**
 - [x] ✅ Structural destruction, including blowing things up with grenades
+- [x] 🧪 Grenade blast VFX and world destruction mirrored on clients (tac.vfx carries the damage-payload source; SceneObjectIds full-scan fallback)
 - [x] 🧪 Ground surfaces and volumes (fire, goo, acid, mist)
 - [x] 🧪 Window breaks, including glass smashed by soldiers vaulting through
 
@@ -237,6 +250,7 @@ The feature list is big, so it's broken down the way the game is: the lobby, the
 - [x] ✅ Cover snapping (soldiers crouch into cover instead of just standing there)
 - [x] ✅ Enemy-turn camera chase
 - [x] 🧪 Area-effect and explosion VFX replay
+- [x] 🧪 No more stuck trajectory ribbon after a client grenade throw
 
 </details>
 
