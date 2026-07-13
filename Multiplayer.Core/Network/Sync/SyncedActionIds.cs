@@ -53,6 +53,11 @@ namespace Multiplayer.Network.Sync
         public const ushort MarketplaceBuy = 90; // buy one GeoMarketplace offer (validated by kind+guid+price)
         public const ushort HavenTrade = 91;     // trade one haven resource pair N times (host re-derives ratio + validates stock/wallet)
 
+        // Mission deploy 100-109 — client "begin mission" click on a mirrored site-mission brief relays the
+        // CONFIRM intent; the host drives its OWN open brief through the native UIStateGeoModal.FinishDialog
+        // (Confirm) → ModalResultCallback → LaunchMission path (geo→tac co-op deploy flow carries everyone in).
+        public const ushort MissionStartRequest = 100; // confirm a pending mission brief (keyed modalType + siteId)
+
         /// <summary>True for the personnel client-edit intent family (ids 60-79). Every member is
         /// <c>IHostOnlyApply</c> whose authoritative result mirrors back on the #6/#9/#10 state channels
         /// (+ wallet), so the host NEVER needs to echo its GeoOutcome to clients — the client's OnActionApply

@@ -53,5 +53,15 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         public static bool ShouldRejectIntent(bool isHost, bool isActiveSession)
             => IsArmed && isHost && isActiveSession;
+
+        /// <summary>
+        /// Id-aware overload: same decision, EXCEPT the <see cref="SyncedActionIds.MissionStartRequest"/>
+        /// intent is exempt — it is the ONE client action that RESOLVES the armed blocking prompt (client
+        /// "begin mission" click → host FinishDialog(Confirm) → LaunchMission), so rejecting it would make
+        /// the mirrored brief's confirm button permanently dead. Every other intent stays rejected while the
+        /// prompt is pending (the gate's whole point: nothing else may happen under a blocking modal).
+        /// </summary>
+        public static bool ShouldRejectIntent(bool isHost, bool isActiveSession, ushort actionId)
+            => actionId != SyncedActionIds.MissionStartRequest && ShouldRejectIntent(isHost, isActiveSession);
     }
 }

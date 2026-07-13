@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -10,31 +9,36 @@ using UnityEngine;
 namespace Multiplayer.Harmony.Sync
 {
     /// <summary>
-    /// CLIENT view-lock for a mirrored MANDATORY blocking modal (ambush 15 / base defense 11 / ancient
-    /// defence 28 — <c>ReportModalClassifier.IsMandatoryBrief</c>). Native single-player semantics: the
-    /// fullscreen mandatory prompt blocks EVERYTHING until the host starts the mission. OPTIONAL mirrored
-    /// briefs (scavenge 4, ancient attack 26, ActiveMissionBrief family) are NOT locked — their native CLOSE
-    /// performs a pure local dismiss (null mirror DialogCallback; the HOST intent gate, armed for ALL blocking
-    /// briefs, alone prevents racing the host's decision). Soak 2026-07-05: the wider Batch-1 lock left the
-    /// scavenge brief's CLOSE dead on the client for as long as the host kept its copy open. The client
-    /// renders the SAME native modal (report-mirror rail, 0x69) but as a mirror of a HOST-pending decision a
-    /// MANDATORY one must be fully inert:
+    /// CLIENT handling of a mirrored blocking mission brief (report-mirror rail, 0x69). Two layers:
+    ///
+    /// VIEW-LOCK (MANDATORY briefs only — ambush 15 / base defense 11 / ancient defence 28,
+    /// <c>ReportModalClassifier.IsMandatoryBrief</c>; native single-player semantics: the fullscreen mandatory
+    /// prompt blocks everything until the mission starts). OPTIONAL mirrored briefs (scavenge 4, ancient
+    /// attack 26, ActiveMissionBrief family) are NOT locked — their native CLOSE performs a pure local dismiss
+    /// (null mirror DialogCallback; the HOST intent gate, armed for ALL blocking briefs, alone prevents racing
+    /// the host's decision — soak 2026-07-05: the wider Batch-1 lock left the scavenge brief's CLOSE dead).
     ///   • <see cref="BlockingModalFinishDialogLockPatch"/> — swallow <c>UIStateGeoModal.FinishDialog</c>
-    ///     (every modal button — Confirm/Close/Cancel — routes there via <c>UIModal._handler</c>): the client's
-    ///     "begin mission" click does NOTHING (mission start is host-authoritative).
+    ///     (every modal button — Confirm/Close/Cancel — routes there via <c>UIModal._handler</c>) for a
+    ///     mandatory mirror: no local close/skip (release is host-driven).
     ///   • <see cref="BlockingModalCancelLockPatch"/> — swallow <c>UIStateGeoModal.OnCancel</c> (the Esc/back
     ///     path calls <c>FinishQueriedState</c> DIRECTLY, bypassing FinishDialog) so the window is not skippable.
-    ///   • <see cref="BlockingModalButtonGreyPatch"/> / <see cref="BlockingModalButtonRestorePatch"/> — visual
-    ///     inertness: CanvasGroup.interactable=false on the shown UIModal (the same one-toggle grey the event-
-    ///     dialog client lock uses), restored on Hide because the modal prefab instance is REUSED across shows
-    ///     (a host-migrated ex-client must not inherit a dead button).
-    /// RELEASE: only the engine closes this window — host resolve → <c>ReportModalHide</c> →
+    ///
+    /// BEGIN-MISSION RELAY (2026-07-13, ALL mirrored mission briefs): a client CONFIRM in FinishDialog no
+    /// longer dead-ends — <see cref="BlockingModalClientLock.TryRelayBeginMission"/> sends
+    /// <c>MissionStartRequestAction(modalType, siteId)</c> to the host, which drives its OWN open brief through
+    /// the native FinishDialog(Confirm) → LaunchMission path; the geo→tac co-op deploy flow then carries every
+    /// peer in. On a MANDATORY mirror the window stays open (native swallowed) until the host's hide/transition
+    /// lands; on an OPTIONAL mirror the native local pop still runs after the relay (simple, idempotent — the
+    /// host's later ReportModalHide finds it already closed). The former CanvasGroup button-GREY
+    /// (BlockingModalButtonGreyPatch/RestorePatch) is DELETED: it made the confirm click physically impossible.
+    ///
+    /// RELEASE: only the engine closes a mandatory mirror — host resolve → <c>ReportModalHide</c> →
     /// <c>GeoModalDisplay.CloseBlocking</c> → <c>FinishQueriedState</c> (bypasses both swallowed methods), or
-    /// the geoscape→tactical transition tears the whole view down (host confirm → co-op deploy flow).
-    /// ORIGIN CONTRACT (2026-07-05): the lock applies ONLY to a window the MIRROR showed
+    /// the geoscape→tactical transition tears the whole view down (host/relayed confirm → co-op deploy flow).
+    /// ORIGIN CONTRACT (2026-07-05): lock AND relay apply ONLY to a window the MIRROR showed
     /// (<see cref="Multiplayer.Network.Sync.State.BlockingModalMirrorRegistry"/>, tagged by
     /// <c>GeoModalDisplay.Show</c>, cleared by every <c>ReportModalHide</c>): a client-NATIVE blocking-type
-    /// window keeps fully native buttons (no host hide would ever release it), and a mirror window whose hide
+    /// window keeps fully native buttons and never relays a phantom start, and a mirror window whose hide
     /// landed before it entered (queued-show race) comes up unlocked and locally closeable.
     /// Decisions are pure (<see cref="BlockingModalLockDecision"/>, unit-tested); the HOST is NEVER touched
     /// (host transparency) and every patch fails OPEN (unreadable state → native runs). Reflective targets
@@ -57,9 +61,15 @@ namespace Multiplayer.Harmony.Sync
 
         public static MethodBase TargetMethod() => _target;
 
-        // __instance = the UIStateGeoModal; skip native (return false) only per the pure lock decision.
-        public static bool Prefix(object __instance)
-            => !BlockingModalClientLock.ShouldBlock(__instance);
+        // __instance = the UIStateGeoModal; __0 = the clicked ModalResult (boxed; Confirm = 0).
+        // A client CONFIRM on a mirrored mission brief relays the begin-mission intent to the host (works for
+        // both locked-mandatory and optional mirrors); the native body is skipped only per the pure lock
+        // decision (mandatory mirror → stays open awaiting the host; optional mirror → native local pop runs).
+        public static bool Prefix(object __instance, object __0)
+        {
+            BlockingModalClientLock.TryRelayBeginMission(__instance, __0);
+            return !BlockingModalClientLock.ShouldBlock(__instance);
+        }
     }
 
     [HarmonyPatch]
@@ -82,104 +92,29 @@ namespace Multiplayer.Harmony.Sync
             => !BlockingModalClientLock.ShouldBlock(__instance);
     }
 
-    /// <summary>
-    /// Visual inertness: when the CLIENT's modal module shows a blocking modal, grey + input-block its buttons
-    /// via a CanvasGroup on the UIModal root (interactable=false; alpha/blocksRaycasts untouched — the window
-    /// itself stays fully readable and keeps swallowing clicks). Postfix on
-    /// <c>UIModuleModal.Show(ModalType, DialogCallback, object)</c> (the single entry
-    /// <c>UIStateGeoModal.EnterState</c> uses, UIModuleModal.cs:47).
-    /// </summary>
-    [HarmonyPatch]
-    public static class BlockingModalButtonGreyPatch
-    {
-        private static MethodBase _target;
-
-        public static bool Prepare()
-        {
-            _target = BlockingModalClientLock.ResolveModuleMethod("Show", withHandlerAndData: true);
-            return _target != null;
-        }
-
-        public static MethodBase TargetMethod() => _target;
-
-        // __instance = UIModuleModal, __0 = ModalType (boxed).
-        public static void Postfix(object __instance, object __0)
-        {
-            try
-            {
-                int modalType = Convert.ToInt32(__0);
-                var engine = NetworkEngine.Instance;
-                if (!BlockingModalLockDecision.ShouldGreyButtons(
-                        engine != null && engine.IsHost,
-                        engine != null && engine.IsActiveSession,
-                        ReportModalClassifier.IsMandatoryBrief(modalType),   // optional brief → native CLOSE stays live
-                        BlockingModalMirrorRegistry.IsMirrorShown(modalType))) return;   // native-origin / already-hidden → never greyed
-                BlockingModalClientLock.SetModalInteractable(__instance, modalType, false);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalButtonGreyPatch failed: " + ex.Message); }
-        }
-    }
-
-    /// <summary>
-    /// Symmetric restore on <c>UIModuleModal.Hide(ModalType)</c>: the modal GameObject is POOLED (one instance
-    /// per ModalType, re-Shown next time), so a CanvasGroup left non-interactable would permanently kill the
-    /// window for a later HOST use (host migration / session end → native ambush). Restores UNCONDITIONALLY for
-    /// a blocking type (host or client, in or out of session) — interactable=true is the native default.
-    /// </summary>
-    [HarmonyPatch]
-    public static class BlockingModalButtonRestorePatch
-    {
-        private static MethodBase _target;
-
-        public static bool Prepare()
-        {
-            _target = BlockingModalClientLock.ResolveModuleMethod("Hide", withHandlerAndData: false);
-            return _target != null;
-        }
-
-        public static MethodBase TargetMethod() => _target;
-
-        // __instance = UIModuleModal, __0 = ModalType (boxed).
-        public static void Postfix(object __instance, object __0)
-        {
-            try
-            {
-                int modalType = Convert.ToInt32(__0);
-                if (!ReportModalClassifier.IsBlockingModal(modalType)) return;
-                BlockingModalClientLock.SetModalInteractable(__instance, modalType, true);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalButtonRestorePatch failed: " + ex.Message); }
-        }
-    }
-
-    /// <summary>Shared reflection glue for the client blocking-modal lock (game-bound; decisions are pure).</summary>
+    /// <summary>Shared reflection glue for the client blocking-modal lock + begin-mission relay
+    /// (game-bound; decisions are pure).</summary>
     internal static class BlockingModalClientLock
     {
         private static bool _ensured;
         private static PropertyInfo _stateModalTypeProp;   // UIStateGeoModal.ModalType (public property, :63)
-        private static FieldInfo _availableModalsField;    // UIModuleModal.AvailableModals (List<ModalData>)
-        private static FieldInfo _modalDataTypeField;      // ModalData.Type (ModalType)
-        private static FieldInfo _modalDataModalField;     // ModalData.Modal (UIModal : MonoBehaviour)
+        private static PropertyInfo _stateModalDataProp;   // UIStateGeoModal.ModalData (public property, :61)
 
         private static void Ensure()
         {
             if (_ensured) return;
             _ensured = true;
             var stateT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoModal");
-            if (stateT != null) _stateModalTypeProp = AccessTools.Property(stateT, "ModalType");
-            var moduleT = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewModules.UIModuleModal");
-            if (moduleT != null) _availableModalsField = AccessTools.Field(moduleT, "AvailableModals");
-            var dataT = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewModules.UIModuleModal+ModalData");
-            if (dataT == null && moduleT != null) dataT = AccessTools.Inner(moduleT, "ModalData");
-            if (dataT != null)
+            if (stateT != null)
             {
-                _modalDataTypeField = AccessTools.Field(dataT, "Type");
-                _modalDataModalField = AccessTools.Field(dataT, "Modal");
+                _stateModalTypeProp = AccessTools.Property(stateT, "ModalType");
+                _stateModalDataProp = AccessTools.Property(stateT, "ModalData");
             }
         }
 
         /// <summary>Resolve <c>UIModuleModal.Show(ModalType, DialogCallback, object)</c> / <c>Hide(ModalType)</c>
-        /// with EXACT param matches. Null → the visual patches self-skip (Prepare false).</summary>
+        /// with EXACT param matches (shared by the report-mirror Show/Hide belts). Null → callers self-skip
+        /// (Prepare false).</summary>
         internal static MethodBase ResolveModuleMethod(string name, bool withHandlerAndData)
         {
             var moduleT = AccessTools.TypeByName("PhoenixPoint.Common.View.ViewModules.UIModuleModal");
@@ -219,38 +154,37 @@ namespace Multiplayer.Harmony.Sync
         }
 
         /// <summary>
-        /// Toggle the pooled UIModal instance for <paramref name="modalType"/>: CanvasGroup (get-or-add on the
-        /// modal root) interactable flag only — child Selectables render their native disabled grey; alpha and
-        /// blocksRaycasts stay native (window readable, clicks still land on the modal, not through it).
+        /// CLIENT begin-mission relay: if this FinishDialog invocation is a CONFIRM click on a MIRROR-shown
+        /// mission brief (pure <see cref="BlockingModalLockDecision.ShouldRelayBeginMission"/>), send
+        /// <c>MissionStartRequestAction(modalType, siteId)</c> to the host — the host validates against ITS
+        /// open brief and drives the native FinishDialog(Confirm) → LaunchMission path. The site identity is
+        /// read off the mirror's rebuilt <c>ModalData</c> mission (<c>Site.SiteId</c> — the same stable id the
+        /// 0x69 mirror shipped); an unreadable site degrades to -1 (host then matches on modalType alone).
+        /// Purely additive observe — never blocks/alters the caller's own flow; best-effort (never throws).
         /// </summary>
-        internal static void SetModalInteractable(object module, int modalType, bool interactable)
+        internal static void TryRelayBeginMission(object uiStateGeoModal, object modalResultBoxed)
         {
             try
             {
                 Ensure();
-                if (module == null || _availableModalsField == null
-                    || _modalDataTypeField == null || _modalDataModalField == null) return;
-                if (!(_availableModalsField.GetValue(module) is IEnumerable modals)) return;
-                foreach (var entry in modals)
-                {
-                    if (entry == null || Convert.ToInt32(_modalDataTypeField.GetValue(entry)) != modalType) continue;
-                    var modal = _modalDataModalField.GetValue(entry) as Component;
-                    if (modal == null) return;
-                    // Grey (false) get-or-adds the group; restore (true) is GetComponent-only — if we never
-                    // greyed, the host's pristine modal is left byte-for-byte untouched (host transparency).
-                    var cg = modal.gameObject.GetComponent<CanvasGroup>();
-                    if (cg == null)
-                    {
-                        if (interactable) return;
-                        cg = modal.gameObject.AddComponent<CanvasGroup>();
-                    }
-                    cg.interactable = interactable;
-                    Debug.Log("[Multiplayer] BlockingModalClientLock modalType=" + modalType +
-                              " interactable=" + interactable + " (mirror view-lock)");
-                    return;
-                }
+                if (uiStateGeoModal == null || _stateModalTypeProp == null || modalResultBoxed == null) return;
+                int modalType = Convert.ToInt32(_stateModalTypeProp.GetValue(uiStateGeoModal, null));
+                var engine = NetworkEngine.Instance;
+                if (!BlockingModalLockDecision.ShouldRelayBeginMission(
+                        engine != null && engine.IsHost,
+                        engine != null && engine.IsActiveSession,
+                        SyncApplyScope.IsApplying,
+                        Convert.ToInt32(modalResultBoxed) == 0,                    // ModalResult.Confirm = 0
+                        ReportModalClassifier.IsMissionBrief(modalType),
+                        BlockingModalMirrorRegistry.IsMirrorShown(modalType))) return;
+                int siteId = Multiplayer.Network.Sync.State.ReportModalReflection.GetMissionSiteId(
+                    _stateModalDataProp?.GetValue(uiStateGeoModal, null));
+                Debug.Log("[Multiplayer] CLIENT begin-mission relay modalType=" + modalType + " siteId=" + siteId +
+                          " → MissionStartRequest sent to host");
+                engine.Sync?.SendActionRequest(
+                    new Multiplayer.Network.Sync.Actions.MissionStartRequestAction((byte)modalType, siteId));
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalClientLock.SetModalInteractable failed: " + ex.Message); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] BlockingModalClientLock.TryRelayBeginMission failed: " + ex.Message); }
         }
     }
 }

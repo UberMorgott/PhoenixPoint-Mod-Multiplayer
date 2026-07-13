@@ -3,17 +3,20 @@ using Multiplayer.Network.Sync.State;
 using Xunit;
 
 /// <summary>
-/// Pure truth tables for the CLIENT-side view-lock of a mirrored MANDATORY blocking modal (ambush 15 /
-/// base defense 11 / ancient defence 28 — <see cref="ReportModalClassifier.IsMandatoryBrief"/>). The client
-/// renders the same native fullscreen prompt as the host but a MANDATORY one must be inert: no local
-/// close/confirm (mission start is host-authoritative; the window is not skippable) and greyed buttons.
-/// OPTIONAL mirrored briefs (scavenge 4 etc.) are NOT locked — their native CLOSE performs a pure local
-/// dismiss (null mirror DialogCallback); the HOST intent gate alone prevents racing (soak 2026-07-05: the
-/// wider lock left the scavenge brief's CLOSE dead on the client). ORIGIN CONTRACT (2026-07-05): the lock
-/// applies ONLY to a MIRROR-shown window (<see cref="BlockingModalMirrorRegistry"/>) — a client-native
-/// blocking-type window keeps native buttons (Cancel closes locally), and a mirror window whose
-/// ReportModalHide landed before it entered (queued-show race) comes up unlocked. The Harmony glue
-/// (BlockingModalClientLockPatches) binds game types and is exercised in-game; the decisions are pinned here.
+/// Pure truth tables for the CLIENT-side handling of a mirrored blocking mission brief. A MANDATORY mirror
+/// (ambush 15 / base defense 11 / ancient defence 28 — <see cref="ReportModalClassifier.IsMandatoryBrief"/>)
+/// stays UNCLOSEABLE (no local close/skip — release is host-driven) but its buttons are LIVE since
+/// 2026-07-13: a CONFIRM ("begin mission") RELAYS the intent to the host
+/// (<see cref="BlockingModalLockDecision.ShouldRelayBeginMission"/> → MissionStartRequestAction; the former
+/// button-grey is deleted — it made the confirm physically unclickable). OPTIONAL mirrored briefs
+/// (scavenge 4 etc.) are NOT locked — their native CLOSE performs a pure local dismiss (null mirror
+/// DialogCallback) and their CONFIRM also relays; the HOST intent gate alone prevents racing
+/// (soak 2026-07-05: the wider lock left the scavenge brief's CLOSE dead on the client).
+/// ORIGIN CONTRACT (2026-07-05): lock AND relay apply ONLY to a MIRROR-shown window
+/// (<see cref="BlockingModalMirrorRegistry"/>) — a client-native blocking-type window keeps native buttons
+/// (Cancel closes locally, no phantom relay), and a mirror window whose ReportModalHide landed before it
+/// entered (queued-show race) comes up unlocked. The Harmony glue (BlockingModalClientLockPatches) binds
+/// game types and is exercised in-game; the decisions are pinned here.
 /// </summary>
 public class BlockingModalLockDecisionTests
 {
@@ -70,25 +73,58 @@ public class BlockingModalLockDecisionTests
             isHost: false, isActiveSession: true, isApplying: false,
             isMandatoryBrief: ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.GeoScavengeBrief),
             isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(ReportModalClassifier.GeoScavengeBrief)));
-        Assert.False(BlockingModalLockDecision.ShouldGreyButtons(
-            isHost: false, isActiveSession: true,
+    }
+
+    // ── ShouldRelayBeginMission: UIStateGeoModal.FinishDialog prefix (client "begin mission" relay) ──
+    [Fact]
+    public void Relay_ClientConfirmOnMirrorShownMissionBrief_True()
+        => Assert.True(BlockingModalLockDecision.ShouldRelayBeginMission(
+            isHost: false, isActiveSession: true, isApplying: false,
+            isConfirmResult: true, isMissionBrief: true, isMirrorShown: true));
+
+    [Theory]
+    [InlineData(true, true, false, true, true, true)]     // host → native confirm launches directly, never relays
+    [InlineData(false, false, false, true, true, true)]   // no session (solo play) → native
+    [InlineData(false, true, true, true, true, true)]     // engine-driven replay → never a phantom relay
+    [InlineData(false, true, false, false, true, true)]   // Cancel/Close click → swallow/local-dismiss, no relay
+    [InlineData(false, true, false, true, false, true)]   // not a mission brief (report modal / interception) → no relay
+    [InlineData(false, true, false, true, true, false)]   // NOT mirror-shown (client-native window) → no phantom start
+    public void Relay_AnyOtherCombination_False(bool isHost, bool isActiveSession, bool isApplying,
+                                                bool isConfirmResult, bool isMissionBrief, bool isMirrorShown)
+        => Assert.False(BlockingModalLockDecision.ShouldRelayBeginMission(
+            isHost, isActiveSession, isApplying, isConfirmResult, isMissionBrief, isMirrorShown));
+
+    [Fact]
+    public void Relay_MandatoryMirrorConfirm_RelaysWhileCloseStaysBlocked()
+    {
+        // THE feature pin (2026-07-13): on a mirror-shown MANDATORY brief the client confirm both RELAYS the
+        // begin-mission intent AND keeps the native close swallowed (window stays open until the host's hide).
+        BlockingModalMirrorRegistry.MarkMirrorShown(ReportModalClassifier.GeoAmbushBrief);
+        bool mandatory = ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.GeoAmbushBrief);
+        bool missionBrief = ReportModalClassifier.IsMissionBrief(ReportModalClassifier.GeoAmbushBrief);
+        bool mirrorShown = BlockingModalMirrorRegistry.IsMirrorShown(ReportModalClassifier.GeoAmbushBrief);
+        Assert.True(BlockingModalLockDecision.ShouldRelayBeginMission(
+            isHost: false, isActiveSession: true, isApplying: false,
+            isConfirmResult: true, isMissionBrief: missionBrief, isMirrorShown: mirrorShown));
+        Assert.True(BlockingModalLockDecision.ShouldBlockLocalClose(
+            isHost: false, isActiveSession: true, isApplying: false,
+            isMandatoryBrief: mandatory, isMirrorShown: mirrorShown));
+    }
+
+    [Fact]
+    public void Relay_OptionalMirrorConfirm_RelaysAndClosesLocally()
+    {
+        // Optional mirrored brief (scavenge 4): confirm relays AND the native local pop still runs (no lock).
+        BlockingModalMirrorRegistry.MarkMirrorShown(ReportModalClassifier.GeoScavengeBrief);
+        Assert.True(BlockingModalLockDecision.ShouldRelayBeginMission(
+            isHost: false, isActiveSession: true, isApplying: false, isConfirmResult: true,
+            isMissionBrief: ReportModalClassifier.IsMissionBrief(ReportModalClassifier.GeoScavengeBrief),
+            isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(ReportModalClassifier.GeoScavengeBrief)));
+        Assert.False(BlockingModalLockDecision.ShouldBlockLocalClose(
+            isHost: false, isActiveSession: true, isApplying: false,
             isMandatoryBrief: ReportModalClassifier.IsMandatoryBrief(ReportModalClassifier.GeoScavengeBrief),
             isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(ReportModalClassifier.GeoScavengeBrief)));
     }
-
-    // ── ShouldGreyButtons: UIModuleModal.Show postfix (visual inertness) ──────────────────────────
-    [Fact]
-    public void Grey_ClientActiveSessionMirrorShownMandatoryBrief_True()
-        => Assert.True(BlockingModalLockDecision.ShouldGreyButtons(
-            isHost: false, isActiveSession: true, isMandatoryBrief: true, isMirrorShown: true));
-
-    [Theory]
-    [InlineData(true, true, true, true)]     // host → pristine native window (host transparency)
-    [InlineData(false, false, true, true)]   // no session → native
-    [InlineData(false, true, false, true)]   // non-mandatory modal (report / optional brief) → native
-    [InlineData(false, true, true, false)]   // NOT mirror-shown (native origin / hide landed first) → native
-    public void Grey_AnyOtherCombination_False(bool isHost, bool isActiveSession, bool isMandatoryBrief, bool isMirrorShown)
-        => Assert.False(BlockingModalLockDecision.ShouldGreyButtons(isHost, isActiveSession, isMandatoryBrief, isMirrorShown));
 
     // ── BlockingModalMirrorRegistry: the origin tag driving isMirrorShown ─────────────────────────
     [Fact]
@@ -112,9 +148,9 @@ public class BlockingModalLockDecisionTests
         // only class the lock still covers.
         BlockingModalMirrorRegistry.MarkMirrorShown(15);     // GeoModalDisplay.Show (queued)
         BlockingModalMirrorRegistry.ClearMirrorShown(15);    // ReportModalHide before the window entered
-        Assert.False(BlockingModalLockDecision.ShouldGreyButtons(
-            isHost: false, isActiveSession: true, isMandatoryBrief: true,
-            isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(15)));
+        Assert.False(BlockingModalLockDecision.ShouldRelayBeginMission(
+            isHost: false, isActiveSession: true, isApplying: false, isConfirmResult: true,
+            isMissionBrief: true, isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(15)));
         Assert.False(BlockingModalLockDecision.ShouldBlockLocalClose(
             isHost: false, isActiveSession: true, isApplying: false, isMandatoryBrief: true,
             isMirrorShown: BlockingModalMirrorRegistry.IsMirrorShown(15)));

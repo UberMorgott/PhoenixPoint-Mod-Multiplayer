@@ -361,7 +361,9 @@ namespace Multiplayer.Network.Sync
             // EVERY client intent while armed. Armed in ReportModalMirror.HostBroadcast (modal open), released in
             // BlockingModalReleasePatch (ModalResultCallback — mission start or any other resolve); normal relay
             // flow resumes after. The rejected client action stays suppressed locally (standard reject path).
-            if (HostBlockingPromptGate.ShouldRejectIntent(_engine.IsHost, _engine.IsActiveSession))
+            // SOLE EXEMPT (id-aware overload): MissionStartRequest — the client "begin mission" confirm that
+            // RESOLVES the armed prompt itself must pass, or the mirrored brief's button would be dead forever.
+            if (HostBlockingPromptGate.ShouldRejectIntent(_engine.IsHost, _engine.IsActiveSession, id))
             {
                 Debug.Log("[Multiplayer] HOST reject ActionRequest id=" + id + " (blocking prompt pending, modalType="
                           + HostBlockingPromptGate.ArmedModalType + ")");

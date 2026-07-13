@@ -318,8 +318,20 @@ namespace Multiplayer.Network.Sync.State
         }
 
         /// <summary>
-        /// True iff the CLIENT's mirrored copy of <paramref name="modalType"/> must be VIEW-LOCKED (inert
-        /// buttons, no local close — BlockingModalClientLockPatches): ONLY the MANDATORY briefs, whose native
+        /// True iff <paramref name="modalType"/> is a mirrored MISSION BRIEF — a blocking prompt whose
+        /// CONFIRM launches a tactical mission (SiteMissionBrief family {15,4,26,28} + ActiveMissionBrief
+        /// family {0,2,11,20,34,36}) = <see cref="IsBlockingModal"/> MINUS the interception brief 32 (an
+        /// air-combat minigame decision, not a ground-mission launch — and its client mirror is a notify-only
+        /// text prompt anyway). Drives the client "begin mission" relay (<c>MissionStartRequestAction</c>):
+        /// only these types may relay a CONFIRM, and only these validate host-side. PURE.
+        /// </summary>
+        public static bool IsMissionBrief(int modalType)
+            => IsBlockingModal(modalType) && modalType != InterceptionBrief;
+
+        /// <summary>
+        /// True iff the CLIENT's mirrored copy of <paramref name="modalType"/> must be VIEW-LOCKED (no local
+        /// close/skip — BlockingModalClientLockPatches; since 2026-07-13 the buttons stay LIVE and a CONFIRM
+        /// relays the begin-mission intent to the host): ONLY the MANDATORY briefs, whose native
         /// window is unskippable single-player-wise (MissionDef.MandatoryMission → PauseGame + no decline;
         /// GeoscapeView.ShowMissionBriefing :1899): ambush 15, phoenix-base defense 11, ancient-site defence 28.
         /// The OPTIONAL mirrored briefs (scavenge 4, ancient attack 26, ActiveMissionBrief family 0/2/20/34/36)

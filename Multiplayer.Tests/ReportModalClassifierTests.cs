@@ -405,4 +405,23 @@ public class ReportModalClassifierTests
             Assert.False(ReportModalClassifier.IsMandatoryBrief(id));
         }
     }
+
+    // ── IsMissionBrief: the begin-mission relay whitelist (blocking briefs MINUS the interception brief) ──
+    [Fact]
+    public void IsMissionBrief_BlockingBriefsMinusInterception_AcrossEntireModalTypeEnum()
+    {
+        var expected = new[] { 0, 2, 4, 11, 15, 20, 26, 28, 34, 36 };   // SiteMissionBrief + ActiveMissionBrief families
+        for (int id = -1; id <= 40; id++)
+            Assert.Equal(System.Array.IndexOf(expected, id) >= 0, ReportModalClassifier.IsMissionBrief(id));
+        Assert.False(ReportModalClassifier.IsMissionBrief(9999));   // _CustomMission rides the EVENT rail, not this relay
+    }
+
+    [Fact]
+    public void IsMissionBrief_InterceptionBrief_NeverRelays()
+    {
+        // Blocking for the hide/notice rails, but its confirm launches the air-combat minigame, not a ground
+        // mission — and the client mirror is a notify-only text prompt (no UIStateGeoModal to click anyway).
+        Assert.True(ReportModalClassifier.IsBlockingModal(ReportModalClassifier.InterceptionBrief));
+        Assert.False(ReportModalClassifier.IsMissionBrief(ReportModalClassifier.InterceptionBrief));
+    }
 }

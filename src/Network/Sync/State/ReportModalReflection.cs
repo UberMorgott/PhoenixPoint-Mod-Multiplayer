@@ -211,6 +211,28 @@ namespace Multiplayer.Network.Sync.State
         public static int ReadSiteId(object site)
             => site == null ? -1 : GeoSiteReflection.GetSiteId(site);
 
+        /// <summary>
+        /// <c>mission.Site.SiteId</c> off a live <c>GeoMission</c> (any subclass — <c>GeoMission.Site</c> is the
+        /// base public property, GeoMission.cs:136), or -1 on null/unreadable. Used by the begin-mission relay on
+        /// BOTH sides: the client reads it off its rebuilt brief's <c>UIStateGeoModal.ModalData</c> to stamp the
+        /// intent's site identity, the host reads it off ITS open brief to validate the relayed id. Best-effort.
+        /// </summary>
+        public static int GetMissionSiteId(object mission)
+        {
+            if (mission == null) return -1;
+            try
+            {
+                EnsureAmbush();   // binds GeoMission.Site (shared member cache)
+                if (_missionSiteProp == null) return -1;
+                return ReadSiteId(_missionSiteProp.GetValue(mission, null));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer] ReportModalReflection.GetMissionSiteId failed: " + ex.Message);
+                return -1;
+            }
+        }
+
         /// <summary>Host: <c>GeoResearchCompleteData.ResearchElement.ResearchID</c>, or null on any miss.</summary>
         public static string ReadResearchCompleteId(object researchCompleteData)
         {

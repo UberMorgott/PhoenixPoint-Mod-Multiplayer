@@ -60,6 +60,10 @@ namespace Multiplayer.Network.Sync.State
         private static PropertyInfo _uiStateModalTypeProp; // UIStateGeoModal.ModalType (public property, :63)
         private static FieldInfo _currentRequestField;  // GeoscapeViewSwitchQuery._currentStateSwitchRequest
         private static MethodInfo _finishQueriedState;  // GeoscapeView.FinishQueriedState()
+        // Host begin-mission relay (MissionStartRequestAction) — drive the host's OWN open brief natively:
+        private static PropertyInfo _uiStateModalDataProp; // UIStateGeoModal.ModalData (public property, :61)
+        private static MethodInfo _finishDialog;        // UIStateGeoModal.FinishDialog(ModalResult) (:84 — the button click path)
+        private static Type _modalResultType;           // PhoenixPoint.Common.Utils.ModalResult (Confirm = 0)
 
         private static void Ensure()
         {
@@ -90,6 +94,12 @@ namespace Multiplayer.Network.Sync.State
             _uiStateModalTypeProp = AccessTools.Property(uiStateType, "ModalType");
             _currentRequestField = AccessTools.Field(queryType, "_currentStateSwitchRequest");
             _finishQueriedState = AccessTools.Method(viewType, "FinishQueriedState", Type.EmptyTypes);
+            // Best-effort (NOT part of _ready): host-side begin-mission relay resolve (MissionStartRequestAction).
+            _uiStateModalDataProp = AccessTools.Property(uiStateType, "ModalData");
+            _modalResultType = AccessTools.TypeByName("PhoenixPoint.Common.Utils.ModalResult");
+            if (_modalResultType != null)
+                // EXACT param match (harmony-accesstools-exact-param-match): FinishDialog(ModalResult).
+                _finishDialog = AccessTools.Method(uiStateType, "FinishDialog", new[] { _modalResultType });
 
             _ready = _viewField != null && _switchQueryField != null && _queryStateSwitch != null
                      && _requestStateField != null && _requestCtor != null && _uiStateCtor != null;
@@ -209,6 +219,49 @@ namespace Multiplayer.Network.Sync.State
                           " → FinishQueriedState (host resolved its blocking prompt)");
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer] GeoModalDisplay.CloseBlocking best-effort failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// HOST: apply a client's relayed "begin mission" CONFIRM (<c>MissionStartRequestAction</c>) by driving
+        /// the host's OWN currently-open brief through the exact native click path —
+        /// <c>UIStateGeoModal.FinishDialog(ModalResult.Confirm)</c> (the method every modal button routes to,
+        /// UIStateGeoModal.cs:84) → the opener's DialogCallback → <c>GeoscapeView.ModalResultCallback</c> →
+        /// <c>LaunchMission</c> (+ the AncientSiteDefence handler branch, the mandatory-save toggle, the
+        /// HostBlockingPromptGate release and the ReportModalHide broadcast — all native/patched behavior of a
+        /// host click). VALIDATES first: the CURRENT queried state must be a <c>UIStateGeoModal</c> of the SAME
+        /// <paramref name="modalType"/>, and when both site ids are readable its <c>ModalData</c> mission's
+        /// <c>Site.SiteId</c> must equal <paramref name="siteId"/> (stale-request guard: the host may have
+        /// resolved/cancelled meanwhile — the client re-mirrors on the normal hide). Returns TRUE iff the native
+        /// confirm was invoked; FALSE = validated-reject (caller logs the no-op). Never throws.
+        /// </summary>
+        public static bool TryHostConfirmBlocking(GeoRuntime rt, byte modalType, int siteId)
+        {
+            try
+            {
+                Ensure();
+                if (!_ready || _finishDialog == null || _modalResultType == null) return false;
+                var view = GetView(rt);
+                if (view == null) return false;
+                var query = _switchQueryField.GetValue(view);
+                if (query == null || _currentRequestField == null || _requestStateField == null
+                    || _uiStateGeoModalType == null || _uiStateModalTypeProp == null) return false;
+                var req = _currentRequestField.GetValue(query);
+                var state = req != null ? _requestStateField.GetValue(req) : null;
+                if (state == null || !_uiStateGeoModalType.IsInstanceOfType(state)) return false;   // no brief open (already resolved)
+                if (Convert.ToInt32(_uiStateModalTypeProp.GetValue(state, null)) != modalType) return false;   // different window current
+                // Site identity check (both readable → must match; -1 on either side degrades to type-match only).
+                int hostSiteId = ReportModalReflection.GetMissionSiteId(_uiStateModalDataProp?.GetValue(state, null));
+                if (siteId >= 0 && hostSiteId >= 0 && hostSiteId != siteId) return false;   // stale: another site's brief is up
+                Debug.Log("[Multiplayer] HOST MissionStartRequest apply modalType=" + modalType + " siteId=" + siteId +
+                          " hostSiteId=" + hostSiteId + " → FinishDialog(Confirm) (native launch path)");
+                _finishDialog.Invoke(state, new[] { Enum.ToObject(_modalResultType, 0) });   // ModalResult.Confirm = 0
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoModalDisplay.TryHostConfirmBlocking failed: " + ex.Message);
+                return false;
+            }
         }
 
         /// <summary>True iff the switch query's CURRENT state is a <c>UIStateGeoModal</c> showing <paramref name="modalType"/>.</summary>

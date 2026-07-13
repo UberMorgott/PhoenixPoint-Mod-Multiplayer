@@ -74,6 +74,10 @@ namespace Multiplayer.Network.Sync
 
             // Haven resource trade (host re-derives ratio + validates stock/wallet; result mirrors on wallet + ch#5)
             SyncedActionRegistry.Register(SyncedActionIds.HavenTrade, HavenTradeAction.Read);
+
+            // Client "begin mission" confirm on a mirrored site-mission brief (host drives its own open brief
+            // through the native FinishDialog(Confirm) → LaunchMission; geo→tac co-op deploy flow follows)
+            SyncedActionRegistry.Register(SyncedActionIds.MissionStartRequest, MissionStartRequestAction.Read);
         }
     }
 }

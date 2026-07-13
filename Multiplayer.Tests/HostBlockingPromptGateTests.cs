@@ -141,4 +141,40 @@ public class HostBlockingPromptGateTests
         HostBlockingPromptGate.Release(AmbushBrief);
         Assert.False(HostBlockingPromptGate.IsArmed);
     }
+
+    // ── id-aware overload: the ONE intent that RESOLVES the armed prompt must pass ────────────────
+    [Fact]
+    public void Armed_MissionStartRequest_IsExempt()
+    {
+        // The client "begin mission" confirm relay resolves the pending brief — rejecting it would make
+        // the mirrored button permanently dead (the gate would never release from the client side).
+        HostBlockingPromptGate.Arm(AmbushBrief);
+        Assert.False(HostBlockingPromptGate.ShouldRejectIntent(
+            isHost: true, isActiveSession: true, actionId: SyncedActionIds.MissionStartRequest));
+    }
+
+    [Theory]
+    [InlineData(SyncedActionIds.StartResearch)]
+    [InlineData(SyncedActionIds.MoveVehicle)]
+    [InlineData(SyncedActionIds.AnswerEvent)]
+    [InlineData(SyncedActionIds.MarketplaceBuy)]
+    public void Armed_EveryOtherIntent_StillRejected(ushort actionId)
+    {
+        HostBlockingPromptGate.Arm(AmbushBrief);
+        Assert.True(HostBlockingPromptGate.ShouldRejectIntent(
+            isHost: true, isActiveSession: true, actionId: actionId));
+    }
+
+    [Fact]
+    public void Idle_IdAwareOverload_NeverRejects()
+        => Assert.False(HostBlockingPromptGate.ShouldRejectIntent(
+            isHost: true, isActiveSession: true, actionId: SyncedActionIds.StartResearch));
+
+    [Fact]
+    public void Armed_MissionStartRequest_OffHost_StillNeverRejects()
+    {
+        HostBlockingPromptGate.Arm(AmbushBrief);
+        Assert.False(HostBlockingPromptGate.ShouldRejectIntent(
+            isHost: false, isActiveSession: false, actionId: SyncedActionIds.MissionStartRequest));
+    }
 }
