@@ -1305,6 +1305,16 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── rca-inventory part 2: WORLD-VISUAL crate-open mirror (tac.crate.open) ──────────────
+            // Host→all presentation push; client-only apply (side-gated internally, so a stray envelope on the host
+            // is a clean no-op). The client flips its crate mirror's world-visual (lid anim + blue highlight off) via
+            // the native CrateComponent.Open(); loot contents stay owned by 0x9A/0x9B, the loot UI stays origin-only.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacCrateOpen)
+            {
+                try { TacticalCrateSync.HandleCrateOpen(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.crate.open failed: " + ex); }
+                return true;
+            }
+
             // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ──────────────
             // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is a
             // clean no-op). The client re-applies the SAME native damage to the SAME destructible (resolved by its

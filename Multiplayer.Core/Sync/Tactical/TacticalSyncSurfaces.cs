@@ -252,5 +252,17 @@ namespace Multiplayer.Sync.Tactical
         // still-open window (it already ran the native flight). See TacticalMoveSync.HostBroadcastOriginNativeMove /
         // ClientOnNativeMove + TacticalLiveCodec NativeMove. Next free 0x9D.
         public const ushort TacNativeMove = 0x9D;          // 157: host→all     "actor netId begins origin-native move@guid to pos" (start, carries seq)
+
+        // ─── rca-inventory part 2: WORLD-VISUAL crate-open mirror (tac.crate.open) ───────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own
+        // TacticalLiveSeq (last-writer-wins). PRESENTATION ONLY (no sim state — contents ride 0x9A/0x9B). Closes the
+        // gap "a looted crate opens visually only on the host": the lid-open animation + the blue "unlooted"
+        // highlight beam are driven solely by the local CrateComponent.Open() (CrateComponent.cs:31), which never
+        // runs on peers (they don't execute OpenCrateAbility; the auto-open is a host move side-effect that bypasses
+        // the 0x8E ability relay, and 0x8F skips container actors). The host postfixes the ONE native chokepoint
+        // CrateComponent.Open() and broadcasts the crate's netId; every peer calls Open() on its own crate mirror to
+        // flip the same world-visual. DECOUPLED from the loot UI (origin-only) — Open() never pushes UIStateInventory.
+        //   crateopen (0x9E): [seq][crateNetId]. See TacticalCrateSync / CrateComponentOpenBroadcastPatch. Next free 0x9F.
+        public const ushort TacCrateOpen = 0x9E;           // 158: host→all     "crate netId opened (world-visual: lid anim + highlight off)" (carries seq)
     }
 }
