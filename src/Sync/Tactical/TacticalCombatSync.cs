@@ -310,6 +310,11 @@ namespace Multiplayer.Sync.Tactical
                 // real flight animation (not the 4 Hz 0x8F snap arc). Self-gates on IsOriginNativeMove + IsHost, so
                 // a non-move generic (heal/reload/…) or single-player is a clean no-op. Fail-open (logs+swallows).
                 TacticalMoveSync.HostBroadcastOriginNativeMove(ability, parameter);
+                // Feature C (heal): a HEAL STARTING on the host — own click OR a relayed client heal re-Activated in
+                // HostOnGenericIntent, both via this one branch — broadcasts tac.heal.start so every peer replays the
+                // native heal animation (HP/charge stay host-authoritative; the replay neuters them). Self-gates on
+                // HealAbility + IsHost, so any other generic (or single-player) is a clean no-op. Fail-open.
+                TacticalHealAnimSync.HostBroadcastHealStart(ability, parameter);
                 return true;   // host / single-player: native runs
             }
             var engine = NetworkEngine.Instance;

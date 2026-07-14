@@ -1032,6 +1032,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalMeleeAnimSync.Reset(); }                                 // Feature C (melee): symmetry (Phase 1 stateless)
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalHealAnimSync.Reset(); }                                  // Feature C (heal): drop any stuck heal-replay guard depth
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalSurfaceSync.Reset(); }                                   // TS3: drop the pending ground-surface coalesce buffer
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalStructDamageSync.Reset(); }                              // TS6: drop the pending struct-damage buffer
@@ -1322,6 +1324,16 @@ namespace Multiplayer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacItemDestroy)
             {
                 try { TacticalItemDestroySync.ClientOnItemDestroy(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.item.destroy failed: " + ex); }
+                return true;
+            }
+
+            // ─── Feature C (heal): client-side HEAL PRESENTATION rail (tac.heal.start) ────────────────
+            // Host→all START push; client-only play (replays the native HealTargetCrt with HP/charge neutered).
+            // HP stays on 0x8F, charge stays host-owned. Side-gated internally, so a stray envelope on the host is a
+            // clean no-op.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacHealStart)
+            {
+                try { TacticalHealAnimSync.ClientOnHealStart(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.heal.start failed: " + ex); }
                 return true;
             }
 

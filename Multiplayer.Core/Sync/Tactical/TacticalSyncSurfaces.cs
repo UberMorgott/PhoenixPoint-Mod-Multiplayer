@@ -278,5 +278,18 @@ namespace Multiplayer.Sync.Tactical
         // that def in the slot inventory pre-removal) — the exact scheme the loot surface (0x9A/0x9B) uses.
         //   itemdestroy (0x9F): [seq][actorNetId][slot u8: 0=Inventory 1=Equipments][itemDefGuid][defIndex]. Next free 0xA0.
         public const ushort TacItemDestroy = 0x9F;         // 159: host→all     "throwable/consumable item destroyed on actor (remove from mirror inventory)" (carries seq)
+
+        // ─── Feature C (heal): client-side HEAL PRESENTATION (tac.heal.start) ────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own TacticalLiveSeq
+        // (last-writer-wins). The heal counterpart of tac.fire.start (0x90) / tac.melee.start (0x91): HealAbility HP +
+        // medkit charge already sync host-authoritatively (0x8F Health + charge), but NO heal ANIMATION plays on any
+        // peer (the client suppresses its own HealAbility.Activate; no heal presentation surface existed). The host
+        // broadcasts this when it runs a heal (own click OR a relayed client heal — the generic-relay host branch), and
+        // every peer REPLAYS the native HealAbility.HealTargetCrt PRESENTATION with the OUTCOME neutered: HP (BaseStat.Add)
+        // + medkit charge (CommonItemData.ModifyCharges) are skipped for the replay (HP stays owned by 0x8F, charge by the
+        // host) — animation only. Mirror-safe: peers aren't host so the replay never re-broadcasts. Unlike fire there is
+        // NO predicted local play (heal is fully suppressed on the origin), so every peer replays exactly ONCE (no de-dup).
+        //   healstart (0xA0): [seq][healerNetId][abilityDefGuid][targetNetId]. See TacticalHealAnimSync / HealAnimSyncPatches. Next free 0xA1.
+        public const ushort TacHealStart = 0xA0;           // 160: host→all     "actor netId begins heal@guid on target (presentation replay)" (carries seq)
     }
 }

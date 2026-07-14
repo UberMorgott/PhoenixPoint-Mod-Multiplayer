@@ -45,6 +45,10 @@ namespace Multiplayer.Harmony.Tactical
         // backstop so a melee guard can never neuter the host's own authoritative swing.
         public static bool MeleeReplay => TacticalMeleeAnimSync.MeleeReplayActive && !IsHost;
 
+        // True ONLY during a client HEAL-presentation replay (TacticalHealAnimSync.ClientOnHealStart). Same !IsHost
+        // backstop so a heal guard can never neuter the host's own authoritative heal (HP / charge).
+        public static bool HealReplay => TacticalHealAnimSync.HealReplayActive && !IsHost;
+
         // True ONLY during a NON-origin peer's ORIGIN-NATIVE MOVE replay (TacticalMoveSync.ClientOnNativeMove).
         // The replayed JetJump Activate synchronously pushes CameraDirector.Hint(AbilityActivated); on the observer
         // that would fly the camera to the jumping actor — into the FOG for a hidden enemy. Keep the replay
@@ -52,10 +56,11 @@ namespace Multiplayer.Harmony.Tactical
         // backstop so it can never affect the host's own move.
         public static bool NativeMoveReplay => TacticalMoveSync.NativeMoveReplayActive && !IsHost;
 
-        // Shared predicate for guards that must fire during EITHER replay (e.g. the ammo-charge neuter — both
-        // the fire and the melee coroutines spend charges via CommonItemData.ModifyCharges). Fire-only guards
-        // (projectile-damage, wait-for-projectiles, throwable-destroy, camera-hint) stay on ClientReplay.
-        public static bool AnyReplay => ClientReplay || MeleeReplay;
+        // Shared predicate for guards that must fire during ANY replay (e.g. the item-charge neuter — the fire,
+        // melee AND heal coroutines all spend charges via CommonItemData.ModifyCharges: Weapon.cs:530 / BashCrt:525 /
+        // HealTargetCrt:125). Fire-only guards (projectile-damage, wait-for-projectiles, throwable-destroy,
+        // camera-hint) stay on ClientReplay; the heal HP neuter is heal-only (HealReplay).
+        public static bool AnyReplay => ClientReplay || MeleeReplay || HealReplay;
 
         // True ONLY while the HOST is executing a RELAYED CLIENT shot (TacticalCombatSync.RelayedShots is populated
         // solely in HostOnAbilityIntent, drained at OnPlayingActionEnd). Used by the camera-hint guard so the host's
