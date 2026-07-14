@@ -903,21 +903,8 @@ namespace Multiplayer.Sync.Tactical
                 if (containerType == null) return null;
                 Vector3 pos = (Vector3)GetProp(soldier, "Pos");
 
-                // Reuse: a live REGISTERED container within ~a tile (a previous drop / a crate at our feet).
-                var reg = TacticalDeploySync.Registry;
-                if (reg != null)
-                    foreach (var kv in reg.Entries)
-                    {
-                        object actor = (kv.Value as TacticalActorAdapter)?.Actor;
-                        if (actor == null || !containerType.IsInstanceOfType(actor)) continue;
-                        var uo = actor as UnityEngine.Object;
-                        if (uo == null || !uo) continue;                       // destroyed mirror still in registry
-                        if (((Vector3)GetProp(actor, "Pos") - pos).sqrMagnitude > 2.25f) continue;   // 1.5 units
-                        groundNetId = kv.Key;
-                        return GetProp(actor, "Inventory");
-                    }
-
-                // Spawn the native drop container at the soldier's tile (UIStateInventory.CreateGroundInventory).
+                // The native drop-pile def (DropDownItemContainerDef's ItemContainerDef component) — resolved ONCE,
+                // used BOTH to def-filter reuse below AND to spawn a fresh pile. Unresolvable → degrade to skip.
                 object setDef = GetProp(GetProp(GetProp(soldier, "TacticalLevel"), "SharedData"), "DropDownItemContainerDef");
                 if (setDef == null) return null;
                 object containerDef = null;
@@ -926,6 +913,29 @@ namespace Multiplayer.Sync.Tactical
                     foreach (var c in comps)
                         if (c != null && containerDefType.IsInstanceOfType(c)) { containerDef = c; break; }
                 if (containerDef == null) return null;
+
+                // Reuse: a live REGISTERED DROP-PILE within ~a tile (a previous drop). rca-inventory FIX 2: the ≤1.5u
+                // match MUST be def-filtered to our own drop-container def — an unfiltered reuse hijacks a nearby
+                // loot-crate / dead-body drop (both are ItemContainers AND in this radius exactly when looting), so the
+                // item lands in the WRONG container on peers while the origin shows its own pile (the confirmed FIX 2
+                // "wrong container"). Native never reuses (CreateGroundInventory always spawns fresh); def-filtered
+                // reuse keeps repeated-drop consolidation into our pile without the loot-crate hijack.
+                var reg = TacticalDeploySync.Registry;
+                if (reg != null)
+                    foreach (var kv in reg.Entries)
+                    {
+                        object actor = (kv.Value as TacticalActorAdapter)?.Actor;
+                        if (actor == null || !containerType.IsInstanceOfType(actor)) continue;
+                        if (!ReferenceEquals(GetProp(actor, "ItemContainerDef"), containerDef)) continue;   // our own drop piles only, never a loot-crate
+                        var uo = actor as UnityEngine.Object;
+                        if (uo == null || !uo) continue;                       // destroyed mirror still in registry
+                        if (((Vector3)GetProp(actor, "Pos") - pos).sqrMagnitude > 2.25f) continue;   // 1.5 units
+                        groundNetId = kv.Key;
+                        return GetProp(actor, "Inventory");
+                    }
+
+                // No reusable drop pile → spawn a fresh native drop container at the soldier's tile
+                // (UIStateInventory.CreateGroundInventory), using the setDef/containerDef resolved above.
                 object inst = AccessTools.Method(containerDef.GetType(), "CreateInstanceData")?.Invoke(containerDef, null);
                 if (inst == null) return null;
                 AccessTools.Field(inst.GetType(), "OverrideTransform")?.SetValue(inst, true);
