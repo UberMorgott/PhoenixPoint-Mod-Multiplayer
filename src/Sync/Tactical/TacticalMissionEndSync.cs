@@ -68,8 +68,13 @@ namespace Multiplayer.Sync.Tactical
                 // wrappingup: lightweight pre-close notify (no heavy blob) — lets the client order its close.
                 BroadcastPhase(engine, TacticalMissionEndCodec.PhaseWrappingUp, outcome, new byte[0], EmptyEvac, EmptyObj);
 
-                // gameover: full conclusion — result blob + evac + objective state, then the client closes the scene.
-                byte[] resultBlob = SerializeMissionResult(tlc);
+                // gameover: conclusion — objective state only; the client closes the scene on this phase.
+                // Result blob OMITTED: the un-chunked GetMissionResult() graph (~93 KB) overflows the u16 envelope
+                // length field (SyncProtocol.EncodeEnvelope, >65535 → ArgumentOutOfRangeException), so the phase=1
+                // send threw and the client NEVER flipped IsGameOver (stuck in tactical). The client never reads
+                // ResultBlob (HandleMissionEnd) — the outcome DISPLAY is owned by the geoscape popup-mirror 0x69.
+                // If the blob is ever needed, chunk it via TacticalDeployChunkCodec (as the deploy snapshot does).
+                byte[] resultBlob = new byte[0];
                 var evac = ReadEvacZones(tlc);          // empty this cut (documented deviation)
                 var obj = ReadObjectives(tlc);
                 BroadcastPhase(engine, TacticalMissionEndCodec.PhaseGameOver, outcome, resultBlob, evac, obj);
