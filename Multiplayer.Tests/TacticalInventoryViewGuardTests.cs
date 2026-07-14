@@ -12,25 +12,25 @@ public class TacticalInventoryViewGuardTests
     // ── HOST hijack guard: a relayed client move's crate auto-open must not yank the host's screen ──
 
     [Fact]
-    public void Host_UnselectedActor_IsSuppressed()
+    public void Host_RelayedMove_IsSuppressed()
     {
-        // The relayed-move auto-open: the acting soldier (the CLIENT's) is not the host's selected actor.
-        Assert.True(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost: true, actorIsSelected: false));
+        // The relayed-move auto-open: the acting soldier's most recent move was a relayed CLIENT intent.
+        Assert.True(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost: true, lastMoveWasRelayed: true));
     }
 
     [Fact]
-    public void Host_SelectedActor_RunsNative()
+    public void Host_OwnMove_RunsNative()
     {
-        // The host player's own crate walk / backpack click — its soldier is selected → native view opens.
-        Assert.False(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost: true, actorIsSelected: true));
+        // The host player's own crate walk — a host-local move origin → native view opens (must NOT be suppressed).
+        Assert.False(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost: true, lastMoveWasRelayed: false));
     }
 
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
-    public void NonHost_NeverSuppressedByHostGuard(bool isHost, bool actorIsSelected)
+    public void NonHost_NeverSuppressedByHostGuard(bool isHost, bool lastMoveWasRelayed)
     {
         // Single-player / client roles never take the HOST guard.
-        Assert.False(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost, actorIsSelected));
+        Assert.False(TacticalInventoryViewGuard.ShouldSuppressHostAutoInventoryView(isHost, lastMoveWasRelayed));
     }
 }

@@ -55,6 +55,39 @@ namespace Multiplayer.Sync.Tactical
         // from an EARLY INTERRUPT (finalPos far from startDst → cancel-nav + immediate snap). Cleared on apply.
         private static readonly Dictionary<int, Vector3> _clientStartDst = new Dictionary<int, Vector3>();
 
+        // HOST: per-actor ORIGIN of the most recent move — true = a RELAYED client intent (ran via HostOnMoveIntent's
+        // host-apply window), false = the host player's OWN click. Recorded at the single host move-start chokepoint
+        // (HostBroadcastMoveStart) and CONSUMED by the crate auto-open guard (InventoryViewGuardPatches): a relayed
+        // client move's native OpenCrate→InventoryAbility.Activate fires on the HOST from a DEFERRED coroutine (well
+        // after the host-apply window closed — 2026-07-14 log: OpenCrate frame 10616, InventoryAbility 10748), so the
+        // synchronous host-apply flag can't gate it; this per-actor tag persists the origin across the coroutine.
+        // Keyed by netId. ponytail: a relayed move that does NOT end on a crate leaves a stale tag until the actor's
+        // next move overwrites it or a read consumes it — worst case a single host manual inventory-open of that same
+        // client soldier is wrongly suppressed once, then works; upgrade to a host-side ack only if that ever matters.
+        private static readonly Dictionary<int, bool> _lastMoveRelayedByActor = new Dictionary<int, bool>();
+
+        /// <summary>HOST: record whether an actor's move now beginning is a RELAYED client intent
+        /// (<paramref name="relayed"/> = the host-apply window is active) or the host player's OWN move. Called from
+        /// the single host move-start chokepoint so every host move — own click and relayed intent — is tagged.</summary>
+        public static void RecordHostMoveOrigin(int netId, bool relayed)
+        {
+            if (netId < 0) return;
+            _lastMoveRelayedByActor[netId] = relayed;
+        }
+
+        /// <summary>HOST crate auto-open guard: was this actor's most recent move a RELAYED client intent? CONSUMES
+        /// the record (one crate auto-open per move) so a later manual host inventory open on the same soldier is
+        /// never wrongly suppressed. False when unknown (fail-open → native view opens).</summary>
+        public static bool ConsumeLastMoveWasRelayed(int netId)
+        {
+            if (netId >= 0 && _lastMoveRelayedByActor.TryGetValue(netId, out bool relayed))
+            {
+                _lastMoveRelayedByActor.Remove(netId);
+                return relayed;
+            }
+            return false;
+        }
+
         // ─── CLIENT: intercept the local move, send intent, suppress ──────────────────────────────
         /// <summary>
         /// CLIENT (mirroring) prefix on <c>MoveAbility.Activate</c>: capture {netId, PositionToApply}, send
@@ -252,6 +285,13 @@ namespace Multiplayer.Sync.Tactical
                 if (actor == null) return;
                 int netId = TacticalDeploySync.NetIdForLiveActor(actor);
                 if (netId < 0) return;
+
+                // Tag this move's ORIGIN for the crate auto-open guard: a relayed client intent runs inside
+                // HostOnMoveIntent's host-apply window (HostApplyingClientAction), the host player's own click does
+                // not. The deferred OpenCrate→InventoryAbility.Activate reads it to keep the host screen from being
+                // yanked by a client's crate walk while the host's own crate walk still opens (rca-inventory).
+                RecordHostMoveOrigin(netId, FireReplayGate.HostApplyingClientAction);
+
                 if (!TryGetPositionToApply(parameter, out Vector3 dst)) return;
 
                 uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMoveStart);
@@ -562,6 +602,7 @@ namespace Multiplayer.Sync.Tactical
             _originNativeMoveOpenedAt.Clear();
             _originNativeMoveLastPos.Clear();
             _nativeMoveReplayDepth = 0;
+            _lastMoveRelayedByActor.Clear();   // rca-inventory: drop stale crate auto-open origin tags across missions
         }
 
         // ─── rca-jetjump: ORIGIN-NATIVE MOVE presentation replay (tac.nativemove 0x9D) ────────────────
