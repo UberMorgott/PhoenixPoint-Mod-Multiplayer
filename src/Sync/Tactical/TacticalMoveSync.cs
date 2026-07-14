@@ -326,9 +326,20 @@ namespace Multiplayer.Sync.Tactical
             // GATE (cheap enemy-turn gate first, then the vision walk — mirrors HostBroadcastCameraHint's ordering): chase
             // ONLY a mirror-visible enemy. The host replays EVERY enemy move for world-state sync (incl. fog-hidden ones),
             // so without this the client camera would fly to invisible enemies. Reuses the exact 0x97 visibility policy.
-            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null)
-                && TacticalEnemyTurnCamera.IsActorVisibleToPlayerFaction(actor))
+            bool isClientEnemyTurn = TacticalTurnSync.IsClientEnemyTurn;
+            bool chaseCandidate = ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(isClientEnemyTurn, actor != null);
+            bool chaseVisible = chaseCandidate && TacticalEnemyTurnCamera.IsActorVisibleToPlayerFaction(actor);
+            if (chaseVisible)
                 TacticalEnemyTurnCamera.ChaseActor(actor, follow: true);
+            else if (chaseCandidate)
+            {
+                // Enemy-turn chase SKIPPED at the visibility gate — diagnose the unresolved fork: mirror-vision
+                // divergence (actor should be visible → we wrongly skip) vs correct fog suppression (genuinely
+                // hidden). Mirrors the 0x97 CLIENT tac.camerahint telemetry style (30e98b0); chaseVisible is the
+                // raw IsActorVisibleToPlayerFaction result (false here — that's the skip reason).
+                Debug.Log("[Multiplayer][tac] CLIENT tac.move.start chase SKIP netId=" + s.NetId +
+                          " isClientEnemyTurn=" + isClientEnemyTurn + " visible=" + chaseVisible);
+            }
             string branch;
             Vector3 cur = GetPos(actor);
             object nav = GetProp(actor, "TacticalNav");
