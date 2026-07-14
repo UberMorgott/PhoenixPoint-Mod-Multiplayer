@@ -329,6 +329,17 @@ namespace Multiplayer.Network.Sync.State
             => IsBlockingModal(modalType) && modalType != InterceptionBrief;
 
         /// <summary>
+        /// True iff <paramref name="modalType"/> is a mission brief that opens when a VEHICLE ARRIVES at its site
+        /// — the SiteMissionBrief family {4,26,28} + the ActiveMissionBrief family {0,2,11,20,34,36}. These are
+        /// player-initiated deploy UI: the host mirrors them to the INITIATING peer only (never the whole
+        /// session), routed by the <see cref="VehicleTravelInitiator"/> tag. = <see cref="IsMissionBrief"/> MINUS
+        /// the ambush brief 15 — an ambush is a mid-travel random encounter, not an arrival at a chosen site, so
+        /// it has no destination tag and keeps its broadcast-to-all path. PURE.
+        /// </summary>
+        public static bool IsVehicleArrivalBrief(int modalType)
+            => IsMissionBrief(modalType) && modalType != GeoAmbushBrief;
+
+        /// <summary>
         /// True iff the CLIENT's mirrored copy of <paramref name="modalType"/> must be VIEW-LOCKED (no local
         /// close/skip — BlockingModalClientLockPatches; since 2026-07-13 the buttons stay LIVE and a CONFIRM
         /// relays the begin-mission intent to the host): ONLY the MANDATORY briefs, whose native

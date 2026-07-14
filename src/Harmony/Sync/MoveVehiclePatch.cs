@@ -65,7 +65,17 @@ namespace Multiplayer.Harmony.Sync
 
                 var action = new MoveVehicleAction(ownerId, vehicleId, destSiteIds);
                 // Host: defer the broadcast to the Postfix so a throwing original suppresses it (no desync).
-                if (engine.IsHost) { __state = action; return true; }
+                if (engine.IsHost)
+                {
+                    // Co-op brief-on-all fix: tag this HOST-OWN travel's final destination so the arrival mission
+                    // brief is shown locally only (the host is authoritative) and mirrored to no client — vs a
+                    // relayed client travel, tagged with its peer in SyncEngine.OnActionRequest. A relayed order
+                    // never reaches here (IsApplying short-circuits at the top), so this branch is host-own only.
+                    Multiplayer.Network.Sync.State.VehicleTravelInitiator.Record(
+                        destSiteIds[destSiteIds.Length - 1],
+                        Multiplayer.Network.Sync.State.VehicleTravelInitiator.HostSelf);
+                    __state = action; return true;
+                }
                 engine.Sync.SendActionRequest(action);
                 return false;   // client: block the local (frozen) order; host executes + mirrors back
             }

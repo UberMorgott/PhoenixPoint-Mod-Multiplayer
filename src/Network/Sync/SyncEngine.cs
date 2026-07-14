@@ -178,6 +178,7 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleTravelMirror.ResetForNewSession();   // route-line metadata mirror (0xA6) host sig cache
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
+            State.VehicleTravelInitiator.Reset();                // host: destSite→initiator brief-routing tags (never carry a prior session's site ids)
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
             State.StatRefundTracker.ResetSession();              // thin-client stat-refund anti-farm ledger (static; a reused GeoUnitId must not inherit a prior session's net)
@@ -241,6 +242,7 @@ namespace Multiplayer.Network.Sync
                 State.GeoVehicleMirror.ResetForNewSession();
                 State.GeoVehicleTravelMirror.ResetForNewSession();
                 State.GeoVehicleExploreMirror.ResetForNewSession();
+                State.VehicleTravelInitiator.Reset();   // stale destSite→initiator brief-routing tags of the dead geoscape
             });
             // Tactical per-mission state: a host mid-battle LOAD tears the level down WITHOUT the mission-end
             // path that normally drives OnMissionExit — sweep it here so pending buffers/mirror-arm/live rails
@@ -427,6 +429,11 @@ namespace Multiplayer.Network.Sync
                     // DIAG (wave-2): host-apply visibility for the intent rail (send-side twin in SendActionRequest).
                     Debug.Log("[Multiplayer] HOST intent apply id=" + id + " nonce=" + nonce + " peer=" + senderPeerId
                               + " " + DescribeAction(action));
+                    // Co-op brief-on-all fix: tag the FINAL destination of a RELAYED client travel with its
+                    // initiator peer, so the mission brief that opens when the vehicle arrives is mirrored to THAT
+                    // peer only (player-initiated UI), not the whole session. Consumed in ReportModalMirror.
+                    if (action is MoveVehicleAction mv && mv.DestSiteIds.Length > 0)
+                        State.VehicleTravelInitiator.Record(mv.DestSiteIds[mv.DestSiteIds.Length - 1], senderPeerId);
                     // IResolvesOutsideScope actions run OUTSIDE SyncApplyScope; every other action runs INSIDE so its
                     // interceptors pass through (engine-driven replay).
                     if (action is IResolvesOutsideScope) action.Apply(rt);
@@ -1771,6 +1778,17 @@ namespace Multiplayer.Network.Sync
             // displaySeq was stamped by the CALLER at native QueryStateSwitch fire-time (payload.DisplaySeq).
             payload.OccId = State.DisplaySequence.NextReportOccId();
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ReportModalShow,
+                SyncProtocol.EncodeReportModal(payload)));
+        }
+
+        /// <summary>Host: send a report window to ONE peer only — player-initiated UI (a mission brief that opened
+        /// because THIS peer's vehicle arrived), which the rest of the session must not see. Mirrors
+        /// <see cref="BroadcastReportModal"/> but unicast (<c>SendToClient</c>). No-op off-host.</summary>
+        public void SendReportModalTo(ulong peerId, State.ReportModalPayload payload)
+        {
+            if (!_engine.IsHost) return;
+            payload.OccId = State.DisplaySequence.NextReportOccId();
+            _engine.SendToClient(peerId, new NetworkMessage(PacketType.ReportModalShow,
                 SyncProtocol.EncodeReportModal(payload)));
         }
 

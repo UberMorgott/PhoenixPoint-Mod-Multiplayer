@@ -161,6 +161,51 @@ public class ReportModalClassifierTests
                 Assert.True(ReportModalClassifier.IsReportModal(modalType));
     }
 
+    // ── vehicle-arrival brief classification (co-op brief-on-all fix): a mission brief that opens when a
+    // vehicle ARRIVES at its site is player-initiated deploy UI, mirrored to the initiating peer only. =
+    // IsMissionBrief MINUS the ambush 15 (a mid-travel encounter, not an arrival at a chosen site). The
+    // set is exactly the SiteMissionBrief family {4,26,28} + the ActiveMissionBrief family {0,2,11,20,34,36}.
+    [Fact]
+    public void IsVehicleArrivalBrief_OnlyTheArrivalBriefFamilies_AcrossEntireModalTypeEnum()
+    {
+        var arrival = new System.Collections.Generic.HashSet<int>
+        {
+            ReportModalClassifier.GeoScavengeBrief,        // 4
+            ReportModalClassifier.AncientSiteAttackBrief,  // 26
+            ReportModalClassifier.AncientSiteDefenceBrief, // 28
+            ReportModalClassifier.GeoHavenAttackBrief,     // 0
+            ReportModalClassifier.GeoAlienBaseBrief,       // 2
+            ReportModalClassifier.GeoPhoenixBaseDefenseBrief,     // 11
+            ReportModalClassifier.GeoPhoenixBaseInfestationBrief, // 20
+            ReportModalClassifier.BehemothAttackBrief,     // 34
+            ReportModalClassifier.InfestedHavenBrief,      // 36
+        };
+        foreach (var modalType in EnumerateModalTypeValues())
+            Assert.Equal(arrival.Contains(modalType), ReportModalClassifier.IsVehicleArrivalBrief(modalType));
+    }
+
+    [Fact]
+    public void IsVehicleArrivalBrief_ExcludesAmbush_ButAmbushStaysBlocking()
+    {
+        // Ambush 15 is blocking + mirrored, but NOT an arrival-at-a-chosen-site brief → it keeps broadcast-to-all
+        // (no destination tag), so it must be excluded from the initiator-routed set.
+        Assert.False(ReportModalClassifier.IsVehicleArrivalBrief(ReportModalClassifier.GeoAmbushBrief));
+        Assert.True(ReportModalClassifier.IsBlockingModal(ReportModalClassifier.GeoAmbushBrief));
+    }
+
+    [Fact]
+    public void EveryVehicleArrivalBrief_IsAlsoBlockingAndWhitelisted()
+    {
+        // The routed set must stay a subset of the mirrored blocking briefs — routing a non-blocking / unmirrored
+        // modal to one peer would hide a window the rest of the session should see.
+        foreach (var modalType in EnumerateModalTypeValues())
+            if (ReportModalClassifier.IsVehicleArrivalBrief(modalType))
+            {
+                Assert.True(ReportModalClassifier.IsBlockingModal(modalType));
+                Assert.True(ReportModalClassifier.IsReportModal(modalType));
+            }
+    }
+
     private static System.Collections.Generic.IEnumerable<int> EnumerateModalTypeValues()
     {
         yield return -1;      // None

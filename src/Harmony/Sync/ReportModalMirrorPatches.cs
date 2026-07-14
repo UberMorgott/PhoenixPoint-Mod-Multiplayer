@@ -169,6 +169,27 @@ namespace Multiplayer.Harmony.Sync
                 }
                 if (!ReportModalReflection.TryBuildPayload(modalType, modalData, priority, out var payload)) return;
                 payload.DisplaySeq = displaySeq;
+                // Co-op brief-on-all fix: a mission brief that opened because a vehicle ARRIVED at its site is
+                // player-initiated UI — mirror it to the INITIATING peer ONLY, never the whole session. The
+                // initiator was tagged at the travel order (relayed client → SyncEngine.OnActionRequest; host-own
+                // → MoveVehiclePatch). A world/story brief (haven attacked, infestation, …) opens for a site
+                // nobody traveled to → no tag → broadcast-to-all, unchanged. Host-own travel → tag == HostSelf →
+                // the host already shows it natively (S1 transparency), so mirror nothing. The HostBlockingPromptGate
+                // arm above is untouched (host is modal-locked regardless of who sees the mirror).
+                if (ReportModalClassifier.IsVehicleArrivalBrief(modalType)
+                    && VehicleTravelInitiator.TryConsume(payload.SiteId, out ulong initiator))
+                {
+                    if (initiator == VehicleTravelInitiator.HostSelf)
+                    {
+                        Debug.Log("[Multiplayer] HOST brief modalType=" + modalType + " siteId=" + payload.SiteId +
+                                  " host-initiated travel → shown locally, not mirrored");
+                        return;
+                    }
+                    Debug.Log("[Multiplayer] HOST brief modalType=" + modalType + " variant=" + payload.Variant +
+                              " siteId=" + payload.SiteId + " → 0x69 to initiator peer=" + initiator + " ONLY (player-initiated UI)");
+                    engine.Sync?.SendReportModalTo(initiator, payload);
+                    return;
+                }
                 Debug.Log("[Multiplayer] HOST BroadcastReportModal modalType=" + modalType + " variant=" + payload.Variant +
                           " siteId=" + payload.SiteId + " defId=" + payload.DefId + " extras=" + (payload.ExtraIds?.Count ?? 0) +
                           " shareLevel=" + payload.ShareLevel + " priority=" + payload.Priority + " displaySeq=" + displaySeq);
