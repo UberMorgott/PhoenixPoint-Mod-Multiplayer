@@ -264,5 +264,19 @@ namespace Multiplayer.Sync.Tactical
         // flip the same world-visual. DECOUPLED from the loot UI (origin-only) — Open() never pushes UIStateInventory.
         //   crateopen (0x9E): [seq][crateNetId]. See TacticalCrateSync / CrateComponentOpenBroadcastPatch. Next free 0x9F.
         public const ushort TacCrateOpen = 0x9E;           // 158: host→all     "crate netId opened (world-visual: lid anim + highlight off)" (carries seq)
+
+        // ─── rca-inventory part 3: THROWABLE/CONSUMABLE item-DESTROY mirror (tac.item.destroy) ───────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own
+        // TacticalLiveSeq (last-writer-wins). Closes the "phantom throwable" gap: when the host throws a grenade (or a
+        // consumable hits 0 charges) the native TacticalItem.Destroy() removes the item from the actor's inventory on
+        // the HOST only — the equip mirror (0x8B) carries just the SELECTED slot, never REMOVAL — so every client keeps
+        // a phantom item. Re-throwing that phantom sends a tac.intent.ability whose ability guid no longer resolves on
+        // the host (ResolveAbilityByGuid→null) → throw anim, no projectile. The host prefixes the ONE native chokepoint
+        // TacticalItem.Destroy() (covers thrown throwables AND consumables auto-destroyed at 0 charges — OnChargesChanged
+        // → Destroy(), TacticalItem.cs:696) and broadcasts (actorNetId, slot, itemDefGuid, defIndex); each client removes
+        // the SAME item from its mirror inventory via the native Destroy(). Item identity = (ItemDef guid, index among
+        // that def in the slot inventory pre-removal) — the exact scheme the loot surface (0x9A/0x9B) uses.
+        //   itemdestroy (0x9F): [seq][actorNetId][slot u8: 0=Inventory 1=Equipments][itemDefGuid][defIndex]. Next free 0xA0.
+        public const ushort TacItemDestroy = 0x9F;         // 159: host→all     "throwable/consumable item destroyed on actor (remove from mirror inventory)" (carries seq)
     }
 }

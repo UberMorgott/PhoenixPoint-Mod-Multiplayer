@@ -1315,6 +1315,16 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── rca-inventory part 3: THROWABLE/CONSUMABLE item-destroy mirror (tac.item.destroy) ───
+            // Host→all removal push; client-only apply (side-gated internally, so a stray envelope on the host is a
+            // clean no-op). The client removes the SAME phantom item from its mirror inventory via the native
+            // Destroy(), so a thrown grenade / spent consumable can never be re-activated on a stale mirror.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacItemDestroy)
+            {
+                try { TacticalItemDestroySync.ClientOnItemDestroy(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.item.destroy failed: " + ex); }
+                return true;
+            }
+
             // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ──────────────
             // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is a
             // clean no-op). The client re-applies the SAME native damage to the SAME destructible (resolved by its
