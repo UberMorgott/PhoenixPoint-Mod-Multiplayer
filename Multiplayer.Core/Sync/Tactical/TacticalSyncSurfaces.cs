@@ -237,5 +237,20 @@ namespace Multiplayer.Sync.Tactical
         // DOWNLOAD stage stays owned by SaveTransferCoordinator; the client backs off this heartbeat the moment
         // that transfer starts (TransferActive/InPhase2). See TacLoadPhaseCodec / TacticalLoadPhaseSync. Next free 0x9C.
         public const ushort TacLoadPhase = 0x9C;           // 156: host→all     "host is loading a level @ progress01"    (heartbeat, DISPLAY-only, no seq)
+
+        // ─── rca-jetjump: ORIGIN-NATIVE MOVE presentation replay (tac.nativemove) ───────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own
+        // TacticalLiveSeq (last-writer-wins). PRESENTATION ONLY (no sim state — position authority stays with the
+        // 0x8F absolute flush + the move's OnPlayingActionEnd reconcile). Closes the audit gap "observer clients
+        // don't play origin-native moves": a JetJump (nav-driven parabola) only replicated via the 4 Hz 0x8F
+        // position snaps → the mirror snapped THROUGH the flight arc with no animation (frozen-in-air). The host
+        // broadcasts this at the moment an actor BEGINS a JetJump — host-player, enemy-AI, AND a relayed client
+        // intent all run the patched JetJumpAbility.Activate, so ONE host chokepoint (the host branch of
+        // TacticalCombatSync.ClientInterceptGenericAbility) covers every origin. Each NON-origin peer opens an
+        // origin-native-move window + runs the real native Activate (reusing the mirror-safe OriginNativeMovePatches
+        // rail — TriggerOverwatch off, local-fumble neuter, end-reconcile). The ORIGIN de-dups its own echo via its
+        // still-open window (it already ran the native flight). See TacticalMoveSync.HostBroadcastOriginNativeMove /
+        // ClientOnNativeMove + TacticalLiveCodec NativeMove. Next free 0x9D.
+        public const ushort TacNativeMove = 0x9D;          // 157: host→all     "actor netId begins origin-native move@guid to pos" (start, carries seq)
     }
 }

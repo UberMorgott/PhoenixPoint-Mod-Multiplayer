@@ -45,6 +45,13 @@ namespace Multiplayer.Harmony.Tactical
         // backstop so a melee guard can never neuter the host's own authoritative swing.
         public static bool MeleeReplay => TacticalMeleeAnimSync.MeleeReplayActive && !IsHost;
 
+        // True ONLY during a NON-origin peer's ORIGIN-NATIVE MOVE replay (TacticalMoveSync.ClientOnNativeMove).
+        // The replayed JetJump Activate synchronously pushes CameraDirector.Hint(AbilityActivated); on the observer
+        // that would fly the camera to the jumping actor — into the FOG for a hidden enemy. Keep the replay
+        // camera-silent (the wanted visible-enemy camera follow already rides the 0x97 camerahint rail). !IsHost
+        // backstop so it can never affect the host's own move.
+        public static bool NativeMoveReplay => TacticalMoveSync.NativeMoveReplayActive && !IsHost;
+
         // Shared predicate for guards that must fire during EITHER replay (e.g. the ammo-charge neuter — both
         // the fire and the melee coroutines spend charges via CommonItemData.ModifyCharges). Fire-only guards
         // (projectile-damage, wait-for-projectiles, throwable-destroy, camera-hint) stay on ClientReplay.
@@ -115,7 +122,7 @@ namespace Multiplayer.Harmony.Tactical
         // executing a relayed CLIENT shot OR the host is applying ANY relayed client action (BUG2 — move/overwatch/
         // melee/non-shoot, whose synchronous Activate camera hint would otherwise fly the host camera to the client's
         // actor and steal control). The host's OWN actions never enter the HostApplyingClientAction window → full cinematic.
-        public static bool Prefix() => !(FireReplayGate.ClientReplay || FireReplayGate.HostRelayedShotActive || FireReplayGate.HostApplyingClientAction);
+        public static bool Prefix() => !(FireReplayGate.ClientReplay || FireReplayGate.HostRelayedShotActive || FireReplayGate.HostApplyingClientAction || FireReplayGate.NativeMoveReplay);
     }
 
     /// <summary>Client replay: let <c>Weapon.FireProjectile</c> run FULLY (real tracer + flash/smoke/shell/SFX so

@@ -57,6 +57,10 @@ namespace Multiplayer.Sync.Tactical
         public static bool ClientInterceptEquip(object equipmentComponent, object equipment)
         {
             if (_applyingRemote) return true;                         // applying a host outcome → run locally, no re-send
+            // rca-jetjump: during a NON-origin peer's origin-native-move replay (ClientOnNativeMove), JetJump's
+            // base.Activate may SetSelectedEquipment on the NON-owned mirror actor — pass it through natively
+            // (never relay an equip intent for an actor this peer does not own; the origin already relayed it).
+            if (TacticalMoveSync.NativeMoveReplayActive) return true;
             if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player / non-mirror → run + (host) postfix broadcasts
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return true;

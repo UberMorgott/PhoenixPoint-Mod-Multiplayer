@@ -306,5 +306,64 @@ namespace Multiplayer.Sync.Tactical
             }
             catch { return false; }
         }
+
+        // ─── tac.nativemove (host→all, rca-jetjump — ORIGIN-NATIVE MOVE presentation replay) ─────────
+        // The host broadcasts this at the MOMENT an actor BEGINS an origin-native MOVE (JetJump — see
+        // TacticalAbilityRelay.OriginNativeMoveAbilityTypeNames), so every NON-origin peer plays the REAL native
+        // flight animation CONCURRENTLY with the host instead of the 4 Hz 0x8F position snaps (the frozen-in-air
+        // mirror). The host runs the move for its own click AND a relayed client intent (re-Activated in
+        // HostOnGenericIntent) alike, both through the patched JetJumpAbility.Activate — so one host chokepoint
+        // covers host-player + enemy-AI + relayed-client jumps. The ORIGIN client de-dups its own echo via its
+        // still-open origin-native-move window (it already ran the native flight). POSITION authority stays with
+        // the host (the 0x8F absolute flush + the move's OnPlayingActionEnd reconcile); this surface is
+        // presentation-only. Mirrors the MeleeStart layout MINUS the target actor (a JetJump lands at a POSITION).
+        //   [seq:u32][actorNetId:i32][abilityDefGuid:string][tx:f32][ty:f32][tz:f32]
+        public struct NativeMove
+        {
+            public uint Seq;
+            public int ActorNetId;
+            public string AbilityDefGuid;
+            public float TX, TY, TZ;   // landing cell (the JetJump target PositionToApply)
+            public NativeMove(uint seq, int actorNetId, string abilityDefGuid, float tx, float ty, float tz)
+            {
+                Seq = seq; ActorNetId = actorNetId; AbilityDefGuid = abilityDefGuid ?? "";
+                TX = tx; TY = ty; TZ = tz;
+            }
+        }
+
+        public static byte[] EncodeNativeMove(uint seq, int actorNetId, string abilityDefGuid,
+            float tx, float ty, float tz)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write(actorNetId);
+                w.Write(abilityDefGuid ?? "");
+                w.Write(tx); w.Write(ty); w.Write(tz);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeNativeMove(byte[] data, out NativeMove move)
+        {
+            move = default(NativeMove);
+            // Minimum: u32 seq + i32 actor + at least a 1-byte length-prefixed string + 3*f32.
+            if (data == null || data.Length < 4 + 4 + 1 + 12) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    int actor = r.ReadInt32();
+                    string guid = r.ReadString();
+                    float tx = r.ReadSingle(); float ty = r.ReadSingle(); float tz = r.ReadSingle();
+                    move = new NativeMove(seq, actor, guid, tx, ty, tz);
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 }

@@ -297,7 +297,21 @@ namespace Multiplayer.Sync.Tactical
         /// (degrade-to-notify) — it must never execute the ability on the frozen sim.</summary>
         public static bool ClientInterceptGenericAbility(object ability, object parameter)
         {
-            if (!TacticalDeploySync.IsClientMirroring) return true;   // host / single-player: native runs
+            // rca-jetjump OBSERVER replay: this Activate is a NON-origin peer re-running a host-broadcast
+            // origin-native move (JetJump) for a NON-owned actor (TacticalMoveSync.ClientOnNativeMove) — run it
+            // NATIVELY, never relay a spurious intent for it. Must be the FIRST check (the observer IS a mirroring
+            // client, so it would otherwise fall into the relay path below).
+            if (TacticalMoveSync.NativeMoveReplayActive) return true;
+            if (!TacticalDeploySync.IsClientMirroring)
+            {
+                // HOST / single-player: the native ability runs unchanged. rca-jetjump: an ORIGIN-NATIVE move
+                // (JetJump) STARTING on the host — own click, enemy AI, OR a relayed client intent, all via the
+                // patched JetJumpAbility.Activate — broadcasts tac.nativemove so every NON-origin peer plays the
+                // real flight animation (not the 4 Hz 0x8F snap arc). Self-gates on IsOriginNativeMove + IsHost, so
+                // a non-move generic (heal/reload/…) or single-player is a clean no-op. Fail-open (logs+swallows).
+                TacticalMoveSync.HostBroadcastOriginNativeMove(ability, parameter);
+                return true;   // host / single-player: native runs
+            }
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return true;
 

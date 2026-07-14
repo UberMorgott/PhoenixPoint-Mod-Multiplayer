@@ -555,11 +555,166 @@ namespace Multiplayer.Sync.Tactical
             return true;
         }
 
-        /// <summary>Mission-boundary reset (OnMissionExit): drop all origin-native-move windows.</summary>
+        /// <summary>Mission-boundary reset (OnMissionExit): drop all origin-native-move windows + any stuck
+        /// replay-scope depth.</summary>
         public static void ResetOriginNativeMove()
         {
             _originNativeMoveOpenedAt.Clear();
             _originNativeMoveLastPos.Clear();
+            _nativeMoveReplayDepth = 0;
+        }
+
+        // ─── rca-jetjump: ORIGIN-NATIVE MOVE presentation replay (tac.nativemove 0x9D) ────────────────
+        // Closes the audit gap "observer clients don't play origin-native moves": a JetJump (nav-driven parabola)
+        // only replicated via the 4 Hz 0x8F position snaps → the mirror snapped THROUGH the flight arc with no
+        // animation (frozen-in-air). The host broadcasts tac.nativemove at the moment an actor BEGINS a JetJump —
+        // host-player, enemy-AI, AND a relayed client intent all run the patched JetJumpAbility.Activate, so ONE
+        // host chokepoint (the host branch of ClientInterceptGenericAbility) covers every origin. Each NON-origin
+        // peer opens an origin-native-move window + runs the real native Activate (reusing the mirror-safe
+        // OriginNativeMovePatches rail — TriggerOverwatch off, local-fumble neuter, end-reconcile). The ORIGIN
+        // de-dups its own echo via its still-open window (it already ran the native flight). POSITION authority
+        // stays with the host (the 0x8F flush + OnPlayingActionEnd reconcile); this surface is presentation-only.
+
+        // Set only on a NON-origin CLIENT for the SYNCHRONOUS span of one replayed JetJumpAbility.Activate, so the
+        // client suppress-relay prefixes (ClientInterceptGenericAbility / ClientInterceptEquip) pass the replay
+        // THROUGH natively (never relay a spurious intent for the non-owned actor) and FireCameraHintGuardPatch
+        // keeps it camera-silent (the AbilityActivated hint must not fly the observer camera — the wanted
+        // visible-enemy camera follow already rides the 0x97 camerahint rail). Plain static: the JetJump Activate
+        // kicks off the flight coroutine and returns synchronously, and every prefix reads this INSIDE that Invoke.
+        // Ref-counted + floored so an unbalanced pop can never wedge it true (ResetOriginNativeMove hard-resets it).
+        private static int _nativeMoveReplayDepth;
+        public static bool NativeMoveReplayActive => _nativeMoveReplayDepth > 0;
+
+        /// <summary>ORIGIN de-dup for the host's echoed tac.nativemove: true while the actor's origin-native-move
+        /// window is open (opened at the origin's OWN Activate) — the echo is that same move coming back, skip it
+        /// so the actor animates exactly ONCE. Timeout-aware (a leaked window self-expires so a legit later replay
+        /// for the same actor is never suppressed forever). Keyed by netId (the wire carries it directly).</summary>
+        public static bool IsOriginNativeMoveWindowOpen(int netId)
+        {
+            if (netId < 0 || !_originNativeMoveOpenedAt.TryGetValue(netId, out int openedAt)) return false;
+            if (unchecked(Environment.TickCount - openedAt) > OriginNativeMoveTimeoutMs)
+            {
+                _originNativeMoveOpenedAt.Remove(netId);
+                _originNativeMoveLastPos.Remove(netId);
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>HOST: at the moment an actor BEGINS an origin-native MOVE (JetJump) — the host branch of
+        /// <c>TacticalCombatSync.ClientInterceptGenericAbility</c>, which fires for the host's own click, an
+        /// enemy-AI activation, AND a relayed client intent (re-Activated in HostOnGenericIntent), all through the
+        /// patched JetJumpAbility.Activate — read {actorNetId, abilityDefGuid, landing pos} and broadcast
+        /// <c>tac.nativemove</c> to all peers so every NON-origin peer plays the real native flight animation.
+        /// Gated by <see cref="TacticalAbilityRelay.IsOriginNativeMove"/> (JetJump). PRESENTATION-only: POSITION
+        /// rides the 0x8F flush + the OnPlayingActionEnd reconcile. Fail-open: any failure is logged + swallowed so
+        /// the native host move always proceeds. Mirrors <see cref="TacticalMeleeAnimSync.HostBroadcastMeleeStart"/>.</summary>
+        public static void HostBroadcastOriginNativeMove(object ability, object parameter)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || !engine.IsHost) return;
+                if (ability == null) return;
+                if (!TacticalAbilityRelay.IsOriginNativeMove(ability.GetType().Name)) return;
+
+                object actor = GetProp(ability, "TacticalActorBase");
+                if (actor == null) return;
+                int actorNetId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (actorNetId < 0) return;
+
+                string abilityGuid = Network.Sync.DefReflection.GetGuid(GetProp(ability, "BaseDef"));
+                if (string.IsNullOrEmpty(abilityGuid)) return;
+
+                // The landing cell = the target's PositionToApply (JetJump navigates to action.Param.PositionToApply).
+                if (!TryGetPositionToApply(parameter, out Vector3 dst)) return;
+
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacNativeMove);
+                byte[] payload = TacticalLiveCodec.EncodeNativeMove(seq, actorNetId, abilityGuid, dst.x, dst.y, dst.z);
+                BroadcastToAll(engine, TacticalSurfaceIds.TacNativeMove, payload);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.nativemove seq=" + seq + " actor=" + actorNetId +
+                          " type=" + ability.GetType().Name + " ability=" + abilityGuid +
+                          " dst=(" + dst.x.ToString("0.0") + "," + dst.y.ToString("0.0") + "," + dst.z.ToString("0.0") + ")");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastOriginNativeMove failed: " + ex); }
+        }
+
+        /// <summary>CLIENT inbound (<c>tac.nativemove</c> 0x9D): a NON-origin peer plays the origin-native MOVE
+        /// (JetJump) natively so it animates the real flight instead of the 0x8F snap arc. Resolve actor + ability
+        /// (by guid) + landing-pos target, OPEN the origin-native-move window (suppresses the 0x8F snaps for the
+        /// flight + arms the end-reconcile), then run the real Activate under the <see cref="NativeMoveReplayActive"/>
+        /// scope so the suppress-relay prefixes pass it through and the camera stays silent. The OriginNativeMovePatches
+        /// rail keeps it mirror-safe (TriggerOverwatch off, local-fumble neuter, end-reconcile to the host pos). The
+        /// ORIGIN skips its own echo (its window is already open). No-op on host / off-session / stale seq. Mirrors
+        /// <see cref="TacticalMeleeAnimSync.ClientOnMeleeStart"/>.</summary>
+        public static void ClientOnNativeMove(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeNativeMove(payload, out var nm)) { Debug.LogError("[Multiplayer][tac] tac.nativemove decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacNativeMove, nm.Seq)) return;
+
+            // ORIGIN de-dup: this client already ran its OWN native flight (window open) → the host echo is that
+            // same move coming back. Skip so the actor animates exactly ONCE (the native one it already played).
+            if (IsOriginNativeMoveWindowOpen(nm.ActorNetId))
+            {
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacNativeMove, nm.Seq);
+                Debug.Log("[Multiplayer][tac] CLIENT skipped echoed tac.nativemove (own origin-native move) seq=" + nm.Seq +
+                          " actor=" + nm.ActorNetId);
+                return;
+            }
+
+            object actor = TacticalDeploySync.ResolveLiveActor(nm.ActorNetId);
+            if (actor == null) { Debug.LogError("[Multiplayer][tac] tac.nativemove: no actor for netId " + nm.ActorNetId); return; }
+
+            try
+            {
+                object ability = ResolveAbilityByGuid(actor, nm.AbilityDefGuid);
+                if (ability == null) { Debug.LogError("[Multiplayer][tac] tac.nativemove: actor has no ability with guid " + nm.AbilityDefGuid); return; }
+
+                object target = BuildMoveTarget(actor, new Vector3(nm.TX, nm.TY, nm.TZ));
+                if (target == null) { Debug.LogError("[Multiplayer][tac] tac.nativemove: could not build target"); return; }
+
+                var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
+                if (activate == null) { Debug.LogError("[Multiplayer][tac] tac.nativemove: Activate(object) not found on " + ability.GetType().Name); return; }
+
+                // Open the window BEFORE Activate so the 0x8F snaps for this actor are suppressed across the whole
+                // flight (latest host pos recorded, reconciled at OnPlayingActionEnd — JetJumpEndReconcilePatch).
+                OpenOriginNativeMoveWindow(nm.ActorNetId);
+                _nativeMoveReplayDepth++;
+                try { activate.Invoke(ability, new[] { target }); }
+                finally { _nativeMoveReplayDepth--; if (_nativeMoveReplayDepth < 0) _nativeMoveReplayDepth = 0; }
+
+                TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacNativeMove, nm.Seq);
+                Debug.Log("[Multiplayer][tac] CLIENT playing tac.nativemove seq=" + nm.Seq + " actor=" + nm.ActorNetId +
+                          " type=" + ability.GetType().Name);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnNativeMove failed: " + ex); }
+        }
+
+        /// <summary>Resolve a <c>TacticalAbility</c> on an actor whose <c>BaseDef.Guid</c> matches — the
+        /// tac.nativemove ability resolver (JetJump). Identical shape to <c>TacticalMeleeAnimSync.ResolveAbilityByGuid</c>.</summary>
+        private static object ResolveAbilityByGuid(object actor, string abilityGuid)
+        {
+            try
+            {
+                var tacAbilityType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility");
+                if (tacAbilityType == null) return null;
+                var getAbilities = AccessTools.Method(actor.GetType(), "GetAbilities");
+                if (getAbilities == null || !getAbilities.IsGenericMethodDefinition) return null;
+                var gen = getAbilities.MakeGenericMethod(tacAbilityType);
+                if (gen.GetParameters().Length != 0) return null;
+                var result = gen.Invoke(actor, null) as IEnumerable;
+                if (result == null) return null;
+                foreach (var a in result)
+                {
+                    if (a == null) continue;
+                    string g = Network.Sync.DefReflection.GetGuid(GetProp(a, "BaseDef"));
+                    if (g == abilityGuid) return a;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] (nativemove) ResolveAbilityByGuid failed: " + ex); }
+            return null;
         }
 
         // ─── Inc1 full-state: drive the mirror from an ABSOLUTE position delta (tac.actorstate 0x8F) ──

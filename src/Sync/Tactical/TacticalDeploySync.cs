@@ -1178,6 +1178,16 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── rca-jetjump: ORIGIN-NATIVE MOVE presentation replay rail (tac.nativemove) ────────────
+            // Host→all START push; client-only play (each NON-origin peer replays the native JetJump flight; the
+            // origin de-dups via its open window). Side-gated internally, so a stray envelope on the host is a
+            // clean no-op. POSITION stays owned by the 0x8F flush + the move's OnPlayingActionEnd reconcile.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacNativeMove)
+            {
+                try { TacticalMoveSync.ClientOnNativeMove(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.nativemove failed: " + ex); }
+                return true;
+            }
+
             // ─── TS7: PRESENTATION polish rail (enemy-turn camera follow + AoE/explosion VFX) ─────────
             // Host→all outcome pushes; client-only play (each handler is side-gated internally, so a stray envelope
             // on the host is a clean no-op). PRESENTATION ONLY — no state; damage already mirrors via tac.damage.
