@@ -41,6 +41,14 @@ namespace Multiplayer.Network.Sync.State
         /// <summary>Drop per-session host state (recreated per session in the <see cref="SyncEngine"/> ctor).</summary>
         public static void ResetForNewSession() { _lastSig.Clear(); _reship.Clear(); }
 
+        /// <summary>HOST: force the NEXT poll to re-ship every vehicle's travel metadata (drop the signature
+        /// cache) — driven from the host resync chokepoint
+        /// (<see cref="Multiplayer.Network.Sync.SyncEngine.BroadcastAllChannels"/>) when a client (re)joins /
+        /// (re)enters the geoscape. The initial parked-at-site CurrentSite snapshot ships exactly once per
+        /// session; a late joiner wasn't listening then, so without this its native POI interaction stays dead
+        /// until the ship next travels. Idempotent; leaves any open re-ship window intact.</summary>
+        public static void ArmFullReship() => _lastSig.Clear();
+
         // ─── HOST: poll each vehicle's travel metadata + broadcast the changed batch ─────────────────────────
 
         public static void HostPollAndBroadcast(NetworkEngine engine, SurfaceSeq seq)
@@ -71,13 +79,16 @@ namespace Multiplayer.Network.Sync.State
                         _reship[meta.Key] = GeoVehicleTravelMeta.ReshipWindowPolls;
                     else if (forced && --reshipLeft <= 0) _reship.Remove(meta.Key);
                     else if (forced) _reship[meta.Key] = reshipLeft;
-                    // Suppress the initial "parked, never travelled, no route, pristine hull" state — nothing
-                    // for the client to draw or clear. We still record its signature above so it never re-ships.
-                    // Once a vehicle travels (or a previously-shipped one must be cleared), it ships. WA-3: a
-                    // DAMAGED or repairing vehicle ships its initial state too (the HP tail is real display
-                    // state); a pristine one stays 0 bytes exactly like the pre-WA-3 walk.
+                    // Suppress the initial "idle mid-air, never travelled, no route, pristine hull, NOT parked at
+                    // a site" state — nothing for the client to draw. We still record its signature above so it
+                    // never re-ships. A vehicle PARKED AT A SITE (CurrentSiteId >= 0) SHIPS its initial state:
+                    // the client's native POI interaction reads GeoVehicle.CurrentSite (GeoSite.Vehicles =>
+                    // CurrentSite==this; UIStateVehicleSelected contextual-menu / site abilities), which stays
+                    // null — dead site interaction — until the first 0xA6 carries it. Before this, only a
+                    // fly-away+return travel change shipped CurrentSite (POI-dead-on-load bug). WA-3: a DAMAGED/
+                    // repairing vehicle ships its initial HP tail too; a pristine idle-mid-air one stays 0 bytes.
                     if (!known && !meta.Travelling && (meta.DestSiteIds == null || meta.DestSiteIds.Length == 0)
-                        && (meta.Health == null || meta.Health.IsPristine))
+                        && (meta.Health == null || meta.Health.IsPristine) && meta.CurrentSiteId < 0)
                         continue;
                     changed.Add(meta);
                 }

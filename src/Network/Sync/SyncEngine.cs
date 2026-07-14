@@ -734,6 +734,11 @@ namespace Multiplayer.Network.Sync
             SeedTrace.Arm();   // full-seed entry point — open the breadcrumb window even if no rebind fired this frame.
             SeedTrace.Mark("BroadcastAllChannels ENTER (full seed)");
             foreach (var ch in _channels.All) FlushChannel(ch);
+            // A (re)joining / (re)ready client re-seeds here — arm the poll-driven travel-metadata mirror (0xA6)
+            // to re-ship every vehicle's INITIAL state on the next tick. A parked-at-site vehicle's CurrentSite
+            // ships once per session; a late joiner missed it → dead native POI interaction until the ship next
+            // travels (fly-away+return was the only revive). Idempotent; a no-op off the geoscape.
+            State.GeoVehicleTravelMirror.ArmFullReship();
             SeedTrace.Mark("BroadcastAllChannels EXIT");
         }
 
