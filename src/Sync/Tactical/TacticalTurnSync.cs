@@ -213,7 +213,15 @@ namespace Multiplayer.Sync.Tactical
                 // 2) Re-stamp the authoritative TurnNumber (public setter) — corrects any local drift and the
                 //    +1 PlayTurnCrt will apply when we start it (we re-stamp AFTER the start below for player).
                 bool isPlayer = ToBool(GetProp(current, "IsControlledByPlayer"));
+                bool wasClientEnemyTurn = IsClientEnemyTurn;
                 IsClientEnemyTurn = !isPlayer;
+                // CAMERA RELEASE (enemy→player phase exit): a follow=true enemy-turn chase glues the camera to the
+                // acting enemy's transform and never auto-ends (PlanarScrollCamera.cs:747 only ends a
+                // ChaseTransform==null chase), so the resumed player turn would inherit a wedged camera. Clear the
+                // latch via the native low-level release on the true→false transition ONLY — enemy→enemy handoffs
+                // keep following via fresh 0x97/per-action hints. See TacticalEnemyTurnCamera.ReleaseChase.
+                if (wasClientEnemyTurn && !IsClientEnemyTurn)
+                    TacticalEnemyTurnCamera.ReleaseChase();
                 bool viewDown = false;
                 string branch = isPlayer ? "player" : "enemy";
 

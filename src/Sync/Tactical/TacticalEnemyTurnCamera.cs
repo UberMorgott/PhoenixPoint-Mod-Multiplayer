@@ -77,7 +77,18 @@ namespace Multiplayer.Sync.Tactical
             if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacCameraHint, hint.Seq)) return;
 
             object actor = TacticalDeploySync.ResolveLiveActor(hint.ActorNetId);
-            if (ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null))
+            // TELEMETRY (divergence diag): the 0x97 chase path was previously unlogged, so a per-client miss
+            // (hint dropped / actor unresolved / not the client's enemy turn / gate false) was invisible in
+            // Player.log. One line captures every input to the chase decision.
+            bool willChase = ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null);
+            Debug.Log("[Multiplayer][tac] CLIENT tac.camerahint seq=" + hint.Seq + " enemy=" + hint.ActorNetId +
+                      " resolved=" + (actor != null) + " isClientEnemyTurn=" + TacticalTurnSync.IsClientEnemyTurn +
+                      " willChase=" + willChase);
+            // Re-target is automatic even when already latched on another actor: ChaseActor pushes
+            // CameraDirector.Hint(ChaseTarget, p) → PlanarScrollCamera.Chase(p) which OVERWRITES _chaseParams
+            // wholesale (PlanarScrollCamera.cs:825), so a new hint always re-points the follow transform. No
+            // "already latched" guard is needed here.
+            if (willChase)
                 ChaseActor(actor, follow: true);
             TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacCameraHint, hint.Seq);
         }
@@ -125,13 +136,13 @@ namespace Multiplayer.Sync.Tactical
         /// snaps once to the actor's current position (shot/melee).</summary>
         public static void ChaseActor(object actor, bool follow)
         {
-            if (actor == null) return;
+            if (actor == null) { Debug.Log("[Multiplayer][tac] cam CHASE skip: null actor follow=" + follow); return; }
             EnsureResolved();
-            if (_resolveFailed) return;
+            if (_resolveFailed) { Debug.Log("[Multiplayer][tac] cam CHASE skip: resolve failed actor=" + ActorTag(actor) + " follow=" + follow); return; }
             try
             {
                 object director = GetProp(GetProp(TacticalDeploySync.LiveTlc, "View"), "CameraDirector");
-                if (director == null) return;
+                if (director == null) { Debug.Log("[Multiplayer][tac] cam CHASE skip: no director actor=" + ActorTag(actor) + " follow=" + follow); return; }
 
                 object p = Activator.CreateInstance(_chaseParamsType);
                 _fSnapToFloor?.SetValue(p, true);
@@ -140,7 +151,7 @@ namespace Multiplayer.Sync.Tactical
                 if (follow)
                 {
                     Transform tr = (actor as Component)?.transform;
-                    if (tr == null) return;
+                    if (tr == null) { Debug.Log("[Multiplayer][tac] cam CHASE skip: no transform actor=" + ActorTag(actor)); return; }
                     _fChaseTransform?.SetValue(p, tr);
                 }
                 else
@@ -149,10 +160,38 @@ namespace Multiplayer.Sync.Tactical
                 }
 
                 _directorHint.Invoke(director, new object[] { _chaseTargetHint, p });
+                Debug.Log("[Multiplayer][tac] cam CHASE applied actor=" + ActorTag(actor) + " follow=" + follow);
             }
             catch (Exception e)
             {
                 Debug.LogWarning("[Multiplayer][tac] enemy-turn camera chase failed: " + e.Message);
+            }
+        }
+
+        /// <summary>CLIENT: release the enemy-turn chase latch by re-hinting <c>ChaseTarget</c> with a NULL param
+        /// down the SAME low-level path <see cref="ChaseActor"/> uses:
+        /// <c>CameraDirector.Hint(CameraHint.ChaseTarget, null)</c> → <c>CameraManager.Hint</c> →
+        /// <c>PlanarScrollCamera.HandleHint</c> → <c>Chase(null)</c> → <c>_chaseParams = null</c>
+        /// (PlanarScrollCamera.cs:361-365, 825-833). A <c>follow=true</c> chase glues the camera to the actor's
+        /// live transform and NEVER auto-ends — <c>UpdateCameraChase</c> only ends a chase whose
+        /// <c>ChaseTransform == null</c> (PlanarScrollCamera.cs:747) — so nothing clears it until the player
+        /// scrolls (which internally calls the same EndChase). This is that programmatic release, called on the
+        /// client's enemy→player phase transition so the resumed player turn starts with a free camera. Idempotent
+        /// (a no-op re-hint when nothing is latched) + best-effort (swallows resolve / null-director).</summary>
+        public static void ReleaseChase()
+        {
+            EnsureResolved();
+            if (_resolveFailed) return;
+            try
+            {
+                object director = GetProp(GetProp(TacticalDeploySync.LiveTlc, "View"), "CameraDirector");
+                if (director == null) { Debug.Log("[Multiplayer][tac] cam RELEASE skip: no director"); return; }
+                _directorHint.Invoke(director, new object[] { _chaseTargetHint, null });
+                Debug.Log("[Multiplayer][tac] cam RELEASE: chase latch cleared (ChaseTarget<-null)");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Multiplayer][tac] enemy-turn camera release failed: " + e.Message);
             }
         }
 
@@ -170,6 +209,10 @@ namespace Multiplayer.Sync.Tactical
             object p = GetProp(actor, "Pos");
             return p is Vector3 v ? v : Vector3.zero;
         }
+
+        /// <summary>DIAG: cheap actor label for chase telemetry — the Unity object name, else the runtime type.</summary>
+        private static string ActorTag(object actor)
+            => actor is UnityEngine.Object o && o != null ? o.name : (actor?.GetType().Name ?? "null");
 
         private static bool FactionIsControlledByPlayer(object faction)
             => faction != null && GetProp(faction, "IsControlledByPlayer") is bool b && b;
