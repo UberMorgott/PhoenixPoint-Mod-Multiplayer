@@ -271,6 +271,33 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostSweepDespawns failed: " + ex); }
         }
 
+        /// <summary>HOST chokepoint on EVAC (postfix on <c>EvacuatedStatus.InitVisualState</c> — the native evac
+        /// visual, gap-evac). The single reliable point that catches EVERY evac path (ExitMissionAbility, and
+        /// EvacuateMountedActorsAbility for the vehicle + all passengers) since they all funnel through applying
+        /// <c>EvacuatedStatus</c>. An evac'd actor keeps the Evacuated STANCE and STAYS in the host live map set, so
+        /// <see cref="HostSweepDespawns"/> never flags it — without this the client keeps a ghost mirror actor +
+        /// its selection decal forever. Broadcast a despawn (<see cref="TacticalActorLifecycleCodec.ReasonEvacuated"/>)
+        /// on the existing 0x93 rail; the client removes the mirror natively (DestroyActor → OnExitPlay →
+        /// TacticalView.OnActorExitedPlay nulls SelectedActor = clears the decal), NOT via the death path (no corpse).
+        /// Host-only + not-mirroring (a client's EvacuatedStatus mirror runs InitVisualState too — this must no-op there).
+        /// Idempotent: a re-fire for an unmirrored / already-gone actor resolves to netId -1 → skip.</summary>
+        public static void HostOnActorEvacuated(object evacStatus)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (TacticalDeploySync.IsClientMirroring) return;
+            if (evacStatus == null) return;
+            try
+            {
+                object actor = GetProp(evacStatus, "TacticalActorBase");
+                if (actor == null) return;
+                int netId = TacticalDeploySync.NetIdForLiveActor(actor);
+                if (netId < 0) return;   // not mirrored → nothing to despawn
+                HostBroadcastDespawn(netId, TacticalActorLifecycleCodec.ReasonEvacuated);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnActorEvacuated failed: " + ex); }
+        }
+
         // ─── CLIENT: apply ──────────────────────────────────────────────────────────────────────────────
 
         /// <summary>CLIENT inbound (<c>tac.actor.spawn</c> 0x92): seq-guard, then reconstruct + materialize the mirror

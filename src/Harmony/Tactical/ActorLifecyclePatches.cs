@@ -72,4 +72,41 @@ namespace Multiplayer.Harmony.Tactical
             }
         }
     }
+
+    /// <summary>
+    /// HOST postfix on <c>EvacuatedStatus.InitVisualState()</c> (EvacuatedStatus.cs:9) — the native evac visual,
+    /// gap-evac. This is the single reliable EVAC chokepoint: ExitMissionAbility and EvacuateMountedActorsAbility
+    /// (vehicle + every passenger) all funnel through applying <c>EvacuatedStatus</c>, so one postfix catches them
+    /// all. The override is unique to <c>EvacuatedStatus</c> → binds EXACTLY (never the base TacStatus). Fires on
+    /// the host apply branch (TacStatus.OnApply → InitVisualState, TacStatus.cs:113); the client's inert-status
+    /// mirror runs it too, so the sync layer host-gates it. Delegates to
+    /// <see cref="TacticalActorLifecycleSync.HostOnActorEvacuated"/> (broadcasts the missing 0x93 despawn — evac'd
+    /// actors stay in the host live set so the despawn sweep never flags them). Auto-register via PatchAll.
+    /// </summary>
+    [HarmonyPatch]
+    public static class EvacuatedStatusInitVisualStatePatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Statuses.EvacuatedStatus");
+            if (t == null) return false;
+            // protected override void InitVisualState()
+            _target = AccessTools.Method(t, "InitVisualState");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        // Postfix. __instance = the EvacuatedStatus (its TacticalActorBase = the evacuated actor).
+        public static void Postfix(object __instance)
+        {
+            try { TacticalActorLifecycleSync.HostOnActorEvacuated(__instance); }
+            catch (System.Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] EvacuatedStatusInitVisualStatePatch.Postfix failed: " + ex);
+            }
+        }
+    }
 }
