@@ -126,6 +126,17 @@ namespace Multiplayer.Harmony
     /// (flicker/desync). Policy (host-authoritative): a client must NEVER write the shared Timing
     /// locally — so block the local write. The pause BUTTON still works via the OnPauseTime → host
     /// relay; the host-applied path (IsApplyingRemote) still passes through. Host is unaffected.
+    ///
+    /// UNPAUSE relay (vanilla parity, rca 2026-07-16): every native AUTO-unpause is a local
+    /// SetGamePauseState(false) on the machine that clicked — choice-commit UnpauseOnActivate
+    /// (UIStateVehicleSelected.cs:420-422), new travel order (AddTravelSite :895-898,
+    /// UIStateNothingSelected.cs:280-283). Swallowing it silently left the shared clock paused forever
+    /// after a CLIENT picked a POI-arrival option (the relayed ability apply on the host is sim-only —
+    /// no view layer ever unpauses). The native gates (UnpauseOnActivate +
+    /// ShouldUnpauseOnVehicleDestinationSet) already ran on THIS client before the call, so a
+    /// paused==false write is a deliberate player action: relay it to the host (ControlTime-gated at
+    /// both ends) and still block the local write — the host echo mirrors the resumed state back.
+    /// paused==true stays swallowed (the programmatic auto-pause poison fix is untouched).
     /// </summary>
     [HarmonyPatch]
     public static class GeoscapeViewPausePatch
@@ -143,12 +154,22 @@ namespace Multiplayer.Harmony
 
         public static MethodBase TargetMethod() => _targetMethod;
 
-        public static bool Prefix()
+        // paused = the requested state (SetGamePauseState's bool arg).
+        public static bool Prefix(bool paused)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive) return true; // no session → local
             if (engine.IsHost) return true;                      // host owns the shared clock
             if (TimeSyncManager.IsApplyingRemote) return true;   // our host-applied path → let through
+            if (!paused)
+            {
+                try
+                {
+                    var ts = engine.TimeSync;
+                    if (ts != null) ts.RelayTimeRequest(false, ts.CurrentSpeedIndex());
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer] GeoscapeViewPausePatch unpause relay failed: " + ex.Message); }
+            }
             return false;                                        // client: block local shared-clock write
         }
     }

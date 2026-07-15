@@ -777,6 +777,11 @@ namespace Multiplayer.Network.TimeSync
             // authoritative belt against an in-flight / forged request). The window-close anchor re-enables it.
             if (Multiplayer.Network.Sync.InterceptionTimeLock.Active) return;
 
+            // HOST BLOCKING-PROMPT GATE (belt, mirrors the intent-gate): while a blocking native prompt
+            // (ambush / site-mission brief) is pending the host is fully modal-locked — no time flow until
+            // it resolves. Reject relayed time requests the same way the interception lock above does.
+            if (Multiplayer.Network.Sync.HostBlockingPromptGate.IsArmed) return;
+
             // PERMISSION GATE (host-authoritative): the ControlTime gate existed only client-side at
             // RelayTimeRequest; a client with the bit revoked (or a malformed/forged packet) could still
             // drive the host clock. Resolve the sender's player Guid (mirrors SyncEngine.ResolveActor) and
