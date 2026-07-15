@@ -1,8 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using Base.Core;
+using Base.Serialization;
 using HarmonyLib;
 using Multiplayer.Network;
 using PhoenixPoint.Common.Levels.Params;
+using PhoenixPoint.Common.Saves;
 using UnityEngine;
 
 namespace Multiplayer.Harmony
@@ -59,5 +63,57 @@ namespace Multiplayer.Harmony
                 return true;
             }
         }
+    }
+
+    /// <summary>
+    /// CLIENT belt for the post-mission geoscape return. Native
+    /// PhoenixSaveManager.LoadCurrentGeoscape (cs:380-398) opens with
+    /// _currentGeoscapeSection.ContentObjects.First() — a null section throws ArgumentNullException
+    /// INSIDE the master game coroutine (MenuCrt→GeoscapeGameCrt→ProcessTacticalGameResult), killing it:
+    /// the client is then stranded in a dead tactical scene forever (RCA 2026-07-15 mission-end).
+    /// The section is normally filled at co-op tactical entry (SaveTransferCoordinator
+    /// PrepareEntryFromBlobCrt step 1c); this prefix is the safety net if that ever misses: loud log +
+    /// skip with an empty coroutine. The skip leaves _nextSceneBinding null, so GeoscapeGameCrt's next
+    /// RunGameLevel throws under its own CatchException handler → MenuCrt(ErrorLoadingLevel) → main
+    /// menu — degraded, but recoverable (rejoin), instead of a frozen client. Host/SP untouched.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ClientGeoscapeReturnGuardPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            _target = AccessTools.Method(typeof(PhoenixSaveManager), "LoadCurrentGeoscape");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static bool Prefix(PhoenixSaveManager __instance, ref IEnumerator<NextUpdate> __result)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || engine.IsHost) return true;
+
+                var section = AccessTools.Field(typeof(PhoenixSaveManager), "_currentGeoscapeSection")
+                    ?.GetValue(__instance) as SavegameContentSection;
+                if (section != null && section.ContentObjects != null) return true;
+
+                Debug.LogError("[Multiplayer] CLIENT LoadCurrentGeoscape: geoscape return snapshot is EMPTY " +
+                               "(_currentGeoscapeSection not filled at tactical entry) — aborting the native load " +
+                               "instead of killing the game coroutine; the game will fall back to the main menu.");
+                __result = EmptyCrt();
+                return false;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] ClientGeoscapeReturnGuardPatch failed (native load runs): " + e.Message);
+                return true;
+            }
+        }
+
+        private static IEnumerator<NextUpdate> EmptyCrt() { yield break; }
     }
 }

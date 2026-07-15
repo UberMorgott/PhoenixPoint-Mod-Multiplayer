@@ -277,8 +277,9 @@ namespace Multiplayer.Sync.Tactical
         /// <c>EvacuatedStatus</c>. An evac'd actor keeps the Evacuated STANCE and STAYS in the host live map set, so
         /// <see cref="HostSweepDespawns"/> never flags it — without this the client keeps a ghost mirror actor +
         /// its selection decal forever. Broadcast a despawn (<see cref="TacticalActorLifecycleCodec.ReasonEvacuated"/>)
-        /// on the existing 0x93 rail; the client removes the mirror natively (DestroyActor → OnExitPlay →
-        /// TacticalView.OnActorExitedPlay nulls SelectedActor = clears the decal), NOT via the death path (no corpse).
+        /// on the existing 0x93 rail; the client mirrors the NATIVE evac semantics (hide, keep the actor — see
+        /// <see cref="HideEvacuatedActor"/>), NOT DestroyActor (a destroyed selected actor wedged the view machine
+        /// with per-frame NREs, RCA 2026-07-15) and NOT the death path (no corpse).
         /// Host-only + not-mirroring (a client's EvacuatedStatus mirror runs InitVisualState too — this must no-op there).
         /// Idempotent: a re-fire for an unmirrored / already-gone actor resolves to netId -1 → skip.</summary>
         public static void HostOnActorEvacuated(object evacStatus)
@@ -362,9 +363,10 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorSpawn failed: " + ex); }
         }
 
-        /// <summary>CLIENT inbound (<c>tac.actor.despawn</c> 0x93): seq-guard, then remove the mirror actor (native
-        /// DestroyActor under the apply scope) + registry cleanup. Idempotent (an already-gone actor is a registry-only
-        /// remove). No-op on host.</summary>
+        /// <summary>CLIENT inbound (<c>tac.actor.despawn</c> 0x93): seq-guard, then under the apply scope either
+        /// HIDE the mirror actor (ReasonEvacuated — native-evac parity, actor stays registered + in the faction so
+        /// the battle summary can list it) or remove it (native DestroyActor + registry cleanup, all other reasons).
+        /// Idempotent (an already-gone actor is a registry-only remove; a re-hide is a no-op). No-op on host.</summary>
         public static void HandleActorDespawn(byte[] payload)
         {
             var engine = NetworkEngine.Instance;
@@ -375,21 +377,84 @@ namespace Multiplayer.Sync.Tactical
 
             try
             {
+                bool evac = p.Reason == TacticalActorLifecycleCodec.ReasonEvacuated;
                 object actor = TacticalDeploySync.ResolveLiveActor(p.NetId);
                 if (actor != null)
                 {
                     using (SyncApplyScope.Enter())
                     using (TacticalActorStateSync.EnterApplyScope())
                     {
-                        InvokeDestroyActor(actor);
+                        if (evac) HideEvacuatedActor(actor);
+                        else InvokeDestroyActor(actor);
                     }
                 }
-                TacticalDeploySync.Registry.Remove(p.NetId);   // idempotent registry cleanup
+                if (!evac) TacticalDeploySync.Registry.Remove(p.NetId);   // idempotent registry cleanup
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorDespawn, p.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT removed tac.actor.despawn netId=" + p.NetId +
-                          " reason=" + p.Reason + " (mirror " + (actor != null ? "destroyed" : "already gone") + ")");
+                          " reason=" + p.Reason + " (mirror " +
+                          (actor != null ? (evac ? "hidden, kept for summary" : "destroyed") : "already gone") + ")");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorDespawn failed: " + ex); }
+        }
+
+        /// <summary>Native-evac parity for the mirror (RCA 2026-07-15): the host does NOT destroy an evacuated
+        /// actor — EvacuatedStatus just hides it (EvacuatedStatus.HideActor, EvacuatedStatus.cs:14-20) and it STAYS
+        /// in the faction, which is what lets UIModuleBattleSummary list the squad. The old DestroyActor removal
+        /// left the view's SelectedActor pointing at a DESTROYED Unity object → UIStateCharacterSelected.UpdateState
+        /// NRE'd every frame and the view machine wedged (acting client stranded at mission end). Replicates
+        /// HideActor verbatim (force-hide + animator off + cancel actions + forget vision), then clears the
+        /// selection the way TacticalView.OnActorExitedPlay (:1169) did on the destroy path — no exit-play fires
+        /// here, so the decal/ghost-cells clear must be explicit. Per-step best-effort.</summary>
+        private static void HideEvacuatedActor(object actor)
+        {
+            try
+            {
+                object view = GetProp(actor, "TacticalActorView") ?? GetProp(actor, "TacticalActorViewBase");
+                if (view != null) AccessTools.Method(view.GetType(), "RequestForceHidden")?.Invoke(view, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: RequestForceHidden failed: " + ex); }
+            try
+            {
+                if (GetProp(actor, "Animator") is Behaviour animator) animator.enabled = false;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: Animator disable failed: " + ex); }
+            try
+            {
+                object actions = GetProp(actor, "ActionComponent");
+                if (actions != null) AccessTools.Method(actions.GetType(), "CancelAllActions")?.Invoke(actions, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: CancelAllActions failed: " + ex); }
+            try
+            {
+                if (_forgetForAllMethod == null)
+                {
+                    var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
+                    _forgetForAllMethod = t != null ? AccessTools.Method(t, "ForgetForAll") : null;
+                }
+                _forgetForAllMethod?.Invoke(null, new object[] { actor, false });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: ForgetForAll failed: " + ex); }
+            ClearSelectionIfSelected(actor);
+        }
+
+        /// <summary>If the hidden actor is the view's SelectedActor, deselect (clears the selection decal via the
+        /// native setter) and pop the view to UIStateInitial under the SAME guards TacticalView.OnActorExitedPlay
+        /// uses (not game-over, level playing, not UIStateWaiting) so an in-flight presentation isn't yanked.</summary>
+        private static void ClearSelectionIfSelected(object actor)
+        {
+            try
+            {
+                object tlc = TacticalDeploySync.LiveTlc;
+                object view = GetProp(tlc, "View");
+                if (view == null || !ReferenceEquals(GetProp(view, "SelectedActor"), actor)) return;
+                AccessTools.Property(view.GetType(), "SelectedActor")?.SetValue(view, null, null);
+                bool gameOver = GetProp(tlc, "IsGameOver") is bool go && go;
+                bool playing = GetProp(GetProp(tlc, "Level"), "IsPlaying") is bool pl && pl;
+                object cur = GetProp(view, "CurrentState");
+                if (!gameOver && playing && (cur == null || cur.GetType().Name != "UIStateWaiting"))
+                    AccessTools.Method(view.GetType(), "ResetViewState", Type.EmptyTypes)?.Invoke(view, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: selection clear failed: " + ex); }
         }
 
         // ─── Helpers ─────────────────────────────────────────────────────────────────────────────────────
@@ -411,6 +476,7 @@ namespace Multiplayer.Sync.Tactical
         private static Type _tacActorType;
         private static MethodInfo _spawnActorMethod;   // ActorSpawner.SpawnActor<TacticalActorBase>(BaseDef, ActorInstanceData, bool)
         private static MethodInfo _destroyActorMethod; // ActorSpawner.DestroyActor(ActorComponent)
+        private static MethodInfo _forgetForAllMethod; // TacticalFactionVision.ForgetForAll(TacticalActorBase, bool)
         private static FieldInfo _actorSetDefField;    // ActorCreateData.ActorSetDef
         private static FieldInfo _serializeDefContentsField; // BaseDef.SerializeDefContents (static)
         private static bool _defContentsResolved;

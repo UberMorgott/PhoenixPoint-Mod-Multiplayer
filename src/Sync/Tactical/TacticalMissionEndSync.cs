@@ -127,8 +127,11 @@ namespace Multiplayer.Sync.Tactical
                     bool alreadyOver = ReadIsGameOver(tlc);
                     if (TacticalMissionEndGate.ShouldEndClientMission(p.Phase, alreadyOver))
                     {
+                        ApplyOutcome(tlc, p.Outcome);
                         EndClientMission(tlc);
-                        Debug.Log("[Multiplayer][tac] CLIENT ended tactical mission — rode native game-over → geoscape " +
+                        DriveLevelFinishedView(tlc);
+                        Debug.Log("[Multiplayer][tac] CLIENT ended tactical mission — outcome=" + p.Outcome +
+                                  " applied, rode native game-over → level-finished view → geoscape " +
                                   "(outcome modal owned by geoscape popup-mirror 0x69)");
                     }
                 }
@@ -233,6 +236,44 @@ namespace Multiplayer.Sync.Tactical
                 }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyObjectives failed: " + ex); }
+        }
+
+        /// <summary>Value-only repaint of the client player-faction terminal state from the host outcome
+        /// (<c>TacticalFaction.State</c> is a plain public auto-property). The level-finished view
+        /// (UIModuleBattleSummary.Initialize) branches WON/FAILED on it — without this the client always
+        /// renders "mission failed" (RCA 2026-07-15). Skips OutcomeUnknown; degrade-to-notify.</summary>
+        private static void ApplyOutcome(object tlc, int outcome)
+        {
+            if (outcome == TacticalMissionEndCodec.OutcomeUnknown) return;
+            try
+            {
+                object pf = ResolvePlayerFaction(tlc);
+                var prop = pf != null ? AccessTools.Property(pf.GetType(), "State") : null;
+                if (prop == null)
+                { Debug.LogError("[Multiplayer][tac] ApplyOutcome: TacticalFaction.State not resolvable — summary shows failed"); return; }
+                prop.SetValue(pf, Enum.ToObject(prop.PropertyType, outcome), null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ApplyOutcome failed: " + ex); }
+        }
+
+        /// <summary>Deterministically drive the client view to the native level-finished state. Flipping
+        /// <c>IsGameOver</c> alone relies on the UIStateInitial/UIStateWaiting POLLERS — but the client view can be
+        /// wedged in UIStateCharacterSelected (no game-over check in its UpdateState) and then NO state ever polls
+        /// the flag (RCA 2026-07-15: acting client stayed in tactical forever). Invoke the native handler
+        /// <c>TacticalView.OnGameOver</c> (TacticalView.cs:1130) — hint cleanup + the HandlesGameOver-guarded
+        /// switch to GetLevelFinishedViewState — the exact reaction the host's GameOverEvent produces natively.
+        /// Idempotent via the native HandlesGameOver guard; degrade-to-notify.</summary>
+        private static void DriveLevelFinishedView(object tlc)
+        {
+            try
+            {
+                object view = GetProp(tlc, "View");
+                var m = view != null ? AccessTools.Method(view.GetType(), "OnGameOver") : null;
+                if (m == null)
+                { Debug.LogError("[Multiplayer][tac] DriveLevelFinishedView: TacticalView.OnGameOver not resolvable — view stays as-is"); return; }
+                m.Invoke(view, new[] { tlc });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] DriveLevelFinishedView failed: " + ex); }
         }
 
         /// <summary>End the client mission by riding the NATIVE end-of-mission flow: flip the native

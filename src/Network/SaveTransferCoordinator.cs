@@ -1274,6 +1274,37 @@ namespace Multiplayer.Network
             // (cs:625-637), i.e. far more than field-setting — so we replicate ONLY the field set.
             ApplyPrepareLoadGameState(game.SaveManager, meta);
 
+            // 1c. Tactical transfer save (co-op mission entry): also read the embedded "Geoscape" section
+            // into PhoenixSaveManager._currentGeoscapeSection — the native LoadGame path does this in
+            // PrepareLoadGame (PhoenixSaveManager.cs:621-625) and the post-mission return REQUIRES it:
+            // LoadCurrentGeoscape (cs:382) does ContentObjects.First(), and a null section kills the master
+            // game coroutine (MenuCrt→GeoscapeGameCrt) — the client is then stranded in tactical forever
+            // (RCA 2026-07-15 mission-end). The host's tactical transfer save always embeds the section
+            // (SaveGameCrt:204-207 adds it to every tactical save).
+            if (meta is PPSavegameMetaData ppMeta && ppMeta.IsTacticalSave)
+            {
+                var geoSection = AccessTools.Field(typeof(PhoenixSaveManager), "_currentGeoscapeSection")
+                    ?.GetValue(game.SaveManager) as SavegameContentSection;
+                if (geoSection == null)
+                {
+                    Debug.LogError("[Multiplayer] co-op load: _currentGeoscapeSection not reachable via " +
+                                   "reflection (PP/TFTV version mismatch?) — post-mission geoscape return will fail.");
+                }
+                else
+                {
+                    var geoObjects = new ByRef<IEnumerable<object>>();
+                    using (var ms = new System.IO.MemoryStream(blob))
+                    {
+                        yield return Timing.Current.Call(serializer.Serializer.Read(
+                            geoObjects, slice, ext, ms, disposeStream: false, section: geoSection.SectionName));
+                    }
+                    geoSection.ContentObjects = geoObjects.Value;
+                    Debug.Log("[Multiplayer] co-op load: geoscape return snapshot " +
+                              (geoObjects.Value != null ? "captured from transfer blob"
+                                                        : "MISSING in transfer blob — post-mission return will fail"));
+                }
+            }
+
             // 2. Read level params from the same bytes.
             var paramsSource = new Base.Levels.BinaryDataLevelParamsSource(blob, ext);
             var levelParams = new ByRef<Base.Levels.ILevelParams>();
