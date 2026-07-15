@@ -26,8 +26,11 @@ namespace Multiplayer.Sync.Tactical
     ///   [objCount:u16]{ [idLen:u16][id:utf8][state:u8] }*    — per-objective FactionObjectiveState (id = ordinal)
     ///   [statsCount:u16]{ [netId:i32][xpEarned:i32][newSp:i32] }*   — OPTIONAL tail: compact per-soldier
     ///   [factionSpDelta:i32]                                        —   mission XP/SP for the client summary
-    ///     (rides the tolerant tail — a legacy decoder ignores it, a new decoder on a legacy payload reads
-    ///     empty stats / 0 delta; NOT the ~93KB result blob — just what the BattleSummary numbers need)
+    ///   [objXpCount:u16]{ [ordinal:u16][xp:i32] }*                  — OPTIONAL: per-objective ACTUAL XP as the
+    ///     host renders it (BaseExperienceReward × GetCompletion × mult — completion counters live host-only,
+    ///     so the client mirrors the final number, keyed by the same ordinal as the objective list)
+    ///     (all tail segments are tolerant — a legacy decoder ignores them, a new decoder on a legacy payload
+    ///     reads empty stats / 0 delta / empty objXp; NOT the ~93KB result blob — just the summary numbers)
     ///
     /// <c>outcome</c> = the player faction's terminal <c>TacFactionState</c> as an int (<see cref="OutcomeUnknown"/>
     /// when unresolved) — a diagnostic / HUD hint; the authoritative outcome rides the 0x69 modal + the result blob.
@@ -80,6 +83,17 @@ namespace Multiplayer.Sync.Tactical
             public StatsRec(int netId, int xpEarned, int newSp) { NetId = netId; XpEarned = xpEarned; NewSp = newSp; }
         }
 
+        /// <summary>One per-objective ACTUAL-XP record: the number the host's summary renders for an Achieved
+        /// objective (completion counters never mirror, so the client shows the host's final value), keyed by
+        /// the same ordinal the objective list uses.</summary>
+        public sealed class ObjXpRec
+        {
+            public ushort Ordinal;
+            public int Xp;
+            public ObjXpRec() { }
+            public ObjXpRec(ushort ordinal, int xp) { Ordinal = ordinal; Xp = xp; }
+        }
+
         /// <summary>The decoded conclusion payload.</summary>
         public sealed class MissionEndPayload
         {
@@ -91,12 +105,13 @@ namespace Multiplayer.Sync.Tactical
             public List<ObjectiveRec> Objectives;
             public List<StatsRec> Stats;
             public int FactionSpDelta;
+            public List<ObjXpRec> ObjectiveXp;
 
-            public MissionEndPayload() { ResultBlob = new byte[0]; EvacZones = new List<EvacRec>(); Objectives = new List<ObjectiveRec>(); Stats = new List<StatsRec>(); }
+            public MissionEndPayload() { ResultBlob = new byte[0]; EvacZones = new List<EvacRec>(); Objectives = new List<ObjectiveRec>(); Stats = new List<StatsRec>(); ObjectiveXp = new List<ObjXpRec>(); }
 
             public MissionEndPayload(uint seq, byte phase, int outcome, byte[] resultBlob,
                 List<EvacRec> evacZones, List<ObjectiveRec> objectives,
-                List<StatsRec> stats = null, int factionSpDelta = 0)
+                List<StatsRec> stats = null, int factionSpDelta = 0, List<ObjXpRec> objectiveXp = null)
             {
                 Seq = seq;
                 Phase = phase;
@@ -106,6 +121,7 @@ namespace Multiplayer.Sync.Tactical
                 Objectives = objectives ?? new List<ObjectiveRec>();
                 Stats = stats ?? new List<StatsRec>();
                 FactionSpDelta = factionSpDelta;
+                ObjectiveXp = objectiveXp ?? new List<ObjXpRec>();
             }
         }
 
@@ -153,6 +169,14 @@ namespace Multiplayer.Sync.Tactical
                     w.Write(s.NewSp);
                 }
                 w.Write(p != null ? p.FactionSpDelta : 0);
+
+                var objXp = (p != null ? p.ObjectiveXp : null) ?? new List<ObjXpRec>();
+                w.Write((ushort)objXp.Count);
+                foreach (var o in objXp)
+                {
+                    w.Write(o.Ordinal);
+                    w.Write(o.Xp);
+                }
                 return ms.ToArray();
             }
         }
@@ -208,6 +232,7 @@ namespace Multiplayer.Sync.Tactical
                     // count → drop just the tail, never the whole conclusion).
                     var stats = new List<StatsRec>();
                     int spDelta = 0;
+                    var objXp = new List<ObjXpRec>();
                     if (ms.Length - ms.Position >= 2)
                     {
                         int statsCount = r.ReadUInt16();
@@ -216,11 +241,19 @@ namespace Multiplayer.Sync.Tactical
                             for (int i = 0; i < statsCount; i++)
                                 stats.Add(new StatsRec(r.ReadInt32(), r.ReadInt32(), r.ReadInt32()));
                             if (ms.Length - ms.Position >= 4) spDelta = r.ReadInt32();
+                            // OPTIONAL per-objective actual-XP segment (same tolerance rules).
+                            if (ms.Length - ms.Position >= 2)
+                            {
+                                int objXpCount = r.ReadUInt16();
+                                if ((long)objXpCount * 6 <= ms.Length - ms.Position)
+                                    for (int i = 0; i < objXpCount; i++)
+                                        objXp.Add(new ObjXpRec(r.ReadUInt16(), r.ReadInt32()));
+                            }
                         }
                         else stats.Clear();
                     }
 
-                    payload = new MissionEndPayload(seq, phase, outcome, result, evac, obj, stats, spDelta);
+                    payload = new MissionEndPayload(seq, phase, outcome, result, evac, obj, stats, spDelta, objXp);
                     return true;   // trailing bytes (a newer peer's extra fields) are intentionally ignored
                 }
             }

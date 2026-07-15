@@ -81,23 +81,26 @@ namespace Multiplayer.Sync.Tactical
                 // TacticalLevelController.cs:834, so ExperienceEarned/NewSkillPoints/Skillpoints are final here).
                 var stats = ReadMissionStats();
                 int spDelta = ReadFactionSpDelta(tlc);
-                BroadcastPhase(engine, TacticalMissionEndCodec.PhaseGameOver, outcome, resultBlob, evac, obj, stats, spDelta);
+                var objXp = ReadObjectiveXp(tlc);
+                BroadcastPhase(engine, TacticalMissionEndCodec.PhaseGameOver, outcome, resultBlob, evac, obj, stats, spDelta, objXp);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnGameOver failed: " + ex); }
         }
 
         private static void BroadcastPhase(NetworkEngine engine, byte phase, int outcome, byte[] resultBlob,
             List<TacticalMissionEndCodec.EvacRec> evac, List<TacticalMissionEndCodec.ObjectiveRec> obj,
-            List<TacticalMissionEndCodec.StatsRec> stats = null, int factionSpDelta = 0)
+            List<TacticalMissionEndCodec.StatsRec> stats = null, int factionSpDelta = 0,
+            List<TacticalMissionEndCodec.ObjXpRec> objXp = null)
         {
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMissionEnd);
             byte[] payload = TacticalMissionEndCodec.Encode(new TacticalMissionEndCodec.MissionEndPayload(
-                seq, phase, outcome, resultBlob, evac, obj, stats, factionSpDelta));
+                seq, phase, outcome, resultBlob, evac, obj, stats, factionSpDelta, objXp));
             TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacMissionEnd, payload);
             Debug.Log("[Multiplayer][tac] HOST broadcast tac.missionend seq=" + seq + " phase=" + phase +
                       " outcome=" + outcome + " resultLen=" + (resultBlob != null ? resultBlob.Length : 0) +
                       " evac=" + (evac != null ? evac.Count : 0) + " obj=" + (obj != null ? obj.Count : 0) +
-                      " stats=" + (stats != null ? stats.Count : 0) + " spDelta=" + factionSpDelta);
+                      " stats=" + (stats != null ? stats.Count : 0) + " spDelta=" + factionSpDelta +
+                      " objXp=" + (objXp != null ? objXp.Count : 0));
         }
 
         // ─── CLIENT: apply ────────────────────────────────────────────────────────────────────────────
@@ -135,6 +138,9 @@ namespace Multiplayer.Sync.Tactical
                     {
                         ApplyOutcome(tlc, p.Outcome);
                         ApplyStats(tlc, p.Stats, p.FactionSpDelta);   // BEFORE the view — summary reads these
+                        _mirroredObjectiveXp.Clear();                 // objective XP rows (ObjectiveRewardMirrorPatch)
+                        if (p.ObjectiveXp != null)
+                            foreach (var ox in p.ObjectiveXp) _mirroredObjectiveXp[ox.Ordinal] = ox.Xp;
                         EndClientMission(tlc);
                         DriveLevelFinishedView(tlc);
                         Debug.Log("[Multiplayer][tac] CLIENT ended tactical mission — outcome=" + p.Outcome +
@@ -163,7 +169,7 @@ namespace Multiplayer.Sync.Tactical
         private static uint _exitNonce;
 
         /// <summary>Per-mission reset (called from <see cref="TacticalDeploySync.OnMissionExit"/>).</summary>
-        internal static void ResetExitRelay() { _exitGoBroadcast = false; _remoteExitApply = false; }
+        internal static void ResetExitRelay() { _exitGoBroadcast = false; _remoteExitApply = false; _mirroredObjectiveXp.Clear(); }
 
         /// <summary>CLIENT prefix decision for <c>TacticalView.GoToGeoscape</c>: suppress the local exit and
         /// relay an exit-intent instead (true = suppress). Host / single-player / the GO re-entrancy pass through.</summary>
@@ -332,6 +338,63 @@ namespace Multiplayer.Sync.Tactical
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadMissionStats failed: " + ex); }
             return list;
+        }
+
+        /// <summary>Per-objective ACTUAL XP as the host's summary renders it (ObjectiveResultElement.cs:22 —
+        /// Achieved → GetActualExperienceReward(), which multiplies by the virtual GetCompletion(): those
+        /// completion counters live host-only, so the client gets the FINAL number, ordinal-keyed like
+        /// <see cref="ReadObjectives"/>). Zero rows skipped; best-effort per objective.</summary>
+        private static List<TacticalMissionEndCodec.ObjXpRec> ReadObjectiveXp(object tlc)
+        {
+            var list = new List<TacticalMissionEndCodec.ObjXpRec>();
+            try
+            {
+                object pf = ResolvePlayerFaction(tlc);
+                if (pf == null || !(GetProp(pf, "Objectives") is IEnumerable en)) return list;
+                int i = 0;
+                foreach (var o in en)
+                {
+                    try
+                    {
+                        // Achieved = 2 on the shared FactionObjectiveState enum (ObjectiveRec carries the same byte).
+                        if (o != null && GetProp(o, "State") != null && Convert.ToInt32(GetProp(o, "State")) == 2)
+                        {
+                            var m = AccessTools.Method(o.GetType(), "GetActualExperienceReward");
+                            if (m?.Invoke(o, null) is int xp && xp != 0)
+                                list.Add(new TacticalMissionEndCodec.ObjXpRec((ushort)i, xp));
+                        }
+                    }
+                    catch { }
+                    i++;
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadObjectiveXp failed: " + ex); }
+            return list;
+        }
+
+        // CLIENT: host-rendered per-objective XP by ordinal, consumed by ObjectiveRewardMirrorPatch while the
+        // summary builds its rows. Filled on the gameover apply; cleared per mission (ResetExitRelay).
+        private static readonly Dictionary<int, int> _mirroredObjectiveXp = new Dictionary<int, int>();
+
+        /// <summary>Host-rendered XP for this live objective instance (ordinal lookup against the player
+        /// faction's objective list). False when nothing is mirrored (host/SP/pre-conclusion) → native runs.</summary>
+        internal static bool TryGetMirroredObjectiveXp(object objective, out int xp)
+        {
+            xp = 0;
+            if (_mirroredObjectiveXp.Count == 0 || objective == null) return false;
+            try
+            {
+                object pf = ResolvePlayerFaction(ResolveClientTlc());
+                if (pf == null || !(GetProp(pf, "Objectives") is IEnumerable en)) return false;
+                int i = 0;
+                foreach (var o in en)
+                {
+                    if (ReferenceEquals(o, objective)) return _mirroredObjectiveXp.TryGetValue(i, out xp);
+                    i++;
+                }
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>Faction SP earned this mission (Skillpoints − StartingSkillpoints) — the BattleSummary
