@@ -77,21 +77,27 @@ namespace Multiplayer.Sync.Tactical
                 byte[] resultBlob = new byte[0];
                 var evac = ReadEvacZones(tlc);          // empty this cut (documented deviation)
                 var obj = ReadObjectives(tlc);
-                BroadcastPhase(engine, TacticalMissionEndCodec.PhaseGameOver, outcome, resultBlob, evac, obj);
+                // Compact BattleSummary stats (GameOver() already ran GiveExperienceForObjectives at
+                // TacticalLevelController.cs:834, so ExperienceEarned/NewSkillPoints/Skillpoints are final here).
+                var stats = ReadMissionStats();
+                int spDelta = ReadFactionSpDelta(tlc);
+                BroadcastPhase(engine, TacticalMissionEndCodec.PhaseGameOver, outcome, resultBlob, evac, obj, stats, spDelta);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostOnGameOver failed: " + ex); }
         }
 
         private static void BroadcastPhase(NetworkEngine engine, byte phase, int outcome, byte[] resultBlob,
-            List<TacticalMissionEndCodec.EvacRec> evac, List<TacticalMissionEndCodec.ObjectiveRec> obj)
+            List<TacticalMissionEndCodec.EvacRec> evac, List<TacticalMissionEndCodec.ObjectiveRec> obj,
+            List<TacticalMissionEndCodec.StatsRec> stats = null, int factionSpDelta = 0)
         {
             uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacMissionEnd);
             byte[] payload = TacticalMissionEndCodec.Encode(new TacticalMissionEndCodec.MissionEndPayload(
-                seq, phase, outcome, resultBlob, evac, obj));
+                seq, phase, outcome, resultBlob, evac, obj, stats, factionSpDelta));
             TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacMissionEnd, payload);
             Debug.Log("[Multiplayer][tac] HOST broadcast tac.missionend seq=" + seq + " phase=" + phase +
                       " outcome=" + outcome + " resultLen=" + (resultBlob != null ? resultBlob.Length : 0) +
-                      " evac=" + (evac != null ? evac.Count : 0) + " obj=" + (obj != null ? obj.Count : 0));
+                      " evac=" + (evac != null ? evac.Count : 0) + " obj=" + (obj != null ? obj.Count : 0) +
+                      " stats=" + (stats != null ? stats.Count : 0) + " spDelta=" + factionSpDelta);
         }
 
         // ─── CLIENT: apply ────────────────────────────────────────────────────────────────────────────
@@ -128,6 +134,7 @@ namespace Multiplayer.Sync.Tactical
                     if (TacticalMissionEndGate.ShouldEndClientMission(p.Phase, alreadyOver))
                     {
                         ApplyOutcome(tlc, p.Outcome);
+                        ApplyStats(tlc, p.Stats, p.FactionSpDelta);   // BEFORE the view — summary reads these
                         EndClientMission(tlc);
                         DriveLevelFinishedView(tlc);
                         Debug.Log("[Multiplayer][tac] CLIENT ended tactical mission — outcome=" + p.Outcome +
@@ -297,6 +304,87 @@ namespace Multiplayer.Sync.Tactical
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadObjectives failed: " + ex); }
             return list;
+        }
+
+        /// <summary>Per-soldier mission XP/SP for the client BattleSummary numbers, read from the HOST's live
+        /// mirrored actors (Registry gives the netId keying for free). Player-faction soldiers only; a both-zero
+        /// record is skipped. Best-effort per actor.</summary>
+        private static List<TacticalMissionEndCodec.StatsRec> ReadMissionStats()
+        {
+            var list = new List<TacticalMissionEndCodec.StatsRec>();
+            try
+            {
+                var reg = TacticalDeploySync.Registry;
+                if (reg == null) return list;
+                foreach (var kv in reg.Entries)
+                {
+                    try
+                    {
+                        object actor = (kv.Value is TacticalActorAdapter ad) ? ad.Actor : null;
+                        if (actor == null) continue;
+                        if (!(GetProp(GetProp(actor, "TacticalFaction"), "IsControlledByPlayer") is bool pl && pl)) continue;
+                        int xp = GetProp(GetProp(actor, "LevelProgression"), "ExperienceEarned") is int x ? x : 0;
+                        int sp = GetProp(GetProp(actor, "CharacterProgression"), "NewSkillPoints") is int s ? s : 0;
+                        if (xp != 0 || sp != 0) list.Add(new TacticalMissionEndCodec.StatsRec(kv.Key, xp, sp));
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ReadMissionStats failed: " + ex); }
+            return list;
+        }
+
+        /// <summary>Faction SP earned this mission (Skillpoints − StartingSkillpoints) — the BattleSummary
+        /// "total skill points" number. Best-effort; 0 on any failure.</summary>
+        private static int ReadFactionSpDelta(object tlc)
+        {
+            try
+            {
+                object pf = ResolvePlayerFaction(tlc);
+                if (pf != null &&
+                    GetProp(pf, "Skillpoints") is int sp && GetProp(pf, "StartingSkillpoints") is int start)
+                    return sp - start;
+            }
+            catch { }
+            return 0;
+        }
+
+        /// <summary>CLIENT: repaint the summary numbers from the host stats — NATIVE levers only
+        /// (<c>LevelProgression.AddExperience</c> recomputes Level/Earned itself, LevelProgression.cs:77;
+        /// <c>CharacterProgressionDescr.AddSkillPoints</c> feeds both SkillPoints and NewSkillPoints). Faction SP
+        /// value-set to StartingSkillpoints + delta (private setter). Additive — safe exactly once, guarded by
+        /// the caller's ShouldEndClientMission + seq mark. Per-record best-effort.</summary>
+        private static void ApplyStats(object tlc, List<TacticalMissionEndCodec.StatsRec> stats, int factionSpDelta)
+        {
+            if (stats != null)
+            {
+                foreach (var s in stats)
+                {
+                    try
+                    {
+                        object actor = TacticalDeploySync.ResolveLiveActor(s.NetId);
+                        if (actor == null) continue;
+                        object lp = GetProp(actor, "LevelProgression");
+                        if (lp != null && s.XpEarned > 0)
+                            AccessTools.Method(lp.GetType(), "AddExperience")?.Invoke(lp, new object[] { s.XpEarned });
+                        object cp = GetProp(actor, "CharacterProgression");
+                        if (cp != null && s.NewSp > 0)
+                            AccessTools.Method(cp.GetType(), "AddSkillPoints")?.Invoke(cp, new object[] { s.NewSp });
+                    }
+                    catch (Exception ex) { Debug.LogError("[Multiplayer][tac] stats apply failed netId=" + s.NetId + ": " + ex); }
+                }
+            }
+            if (factionSpDelta != 0)
+            {
+                try
+                {
+                    object pf = ResolvePlayerFaction(tlc);
+                    if (pf != null && GetProp(pf, "StartingSkillpoints") is int start)
+                        AccessTools.PropertySetter(pf.GetType(), "Skillpoints")
+                            ?.Invoke(pf, new object[] { start + factionSpDelta });
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][tac] faction SP apply failed: " + ex); }
+            }
         }
 
         /// <summary>Evac-zone unlock state: EMPTY BY DESIGN (gap-evac closure). The client zone-lock state is owned

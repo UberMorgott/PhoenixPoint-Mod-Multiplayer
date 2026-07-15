@@ -24,6 +24,10 @@ namespace Multiplayer.Sync.Tactical
     ///   [resultLen:i32][TacMissionResult blob]              — the native GetMissionResult() graph (empty on wrappingup)
     ///   [evacCount:u16]{ [zoneId:i32][unlocked:u8] }*        — evac-zone unlock state
     ///   [objCount:u16]{ [idLen:u16][id:utf8][state:u8] }*    — per-objective FactionObjectiveState (id = ordinal)
+    ///   [statsCount:u16]{ [netId:i32][xpEarned:i32][newSp:i32] }*   — OPTIONAL tail: compact per-soldier
+    ///   [factionSpDelta:i32]                                        —   mission XP/SP for the client summary
+    ///     (rides the tolerant tail — a legacy decoder ignores it, a new decoder on a legacy payload reads
+    ///     empty stats / 0 delta; NOT the ~93KB result blob — just what the BattleSummary numbers need)
     ///
     /// <c>outcome</c> = the player faction's terminal <c>TacFactionState</c> as an int (<see cref="OutcomeUnknown"/>
     /// when unresolved) — a diagnostic / HUD hint; the authoritative outcome rides the 0x69 modal + the result blob.
@@ -64,6 +68,18 @@ namespace Multiplayer.Sync.Tactical
             public ObjectiveRec(string objectiveId, byte state) { ObjectiveId = objectiveId ?? ""; State = state; }
         }
 
+        /// <summary>One per-soldier mission-stats record (what the BattleSummary numbers need): the XP earned
+        /// this mission (<c>LevelProgression.ExperienceEarned</c>) + the personal SP earned
+        /// (<c>CharacterProgression.NewSkillPoints</c>), keyed by the mirror netId.</summary>
+        public sealed class StatsRec
+        {
+            public int NetId;
+            public int XpEarned;
+            public int NewSp;
+            public StatsRec() { }
+            public StatsRec(int netId, int xpEarned, int newSp) { NetId = netId; XpEarned = xpEarned; NewSp = newSp; }
+        }
+
         /// <summary>The decoded conclusion payload.</summary>
         public sealed class MissionEndPayload
         {
@@ -73,11 +89,14 @@ namespace Multiplayer.Sync.Tactical
             public byte[] ResultBlob;
             public List<EvacRec> EvacZones;
             public List<ObjectiveRec> Objectives;
+            public List<StatsRec> Stats;
+            public int FactionSpDelta;
 
-            public MissionEndPayload() { ResultBlob = new byte[0]; EvacZones = new List<EvacRec>(); Objectives = new List<ObjectiveRec>(); }
+            public MissionEndPayload() { ResultBlob = new byte[0]; EvacZones = new List<EvacRec>(); Objectives = new List<ObjectiveRec>(); Stats = new List<StatsRec>(); }
 
             public MissionEndPayload(uint seq, byte phase, int outcome, byte[] resultBlob,
-                List<EvacRec> evacZones, List<ObjectiveRec> objectives)
+                List<EvacRec> evacZones, List<ObjectiveRec> objectives,
+                List<StatsRec> stats = null, int factionSpDelta = 0)
             {
                 Seq = seq;
                 Phase = phase;
@@ -85,6 +104,8 @@ namespace Multiplayer.Sync.Tactical
                 ResultBlob = resultBlob ?? new byte[0];
                 EvacZones = evacZones ?? new List<EvacRec>();
                 Objectives = objectives ?? new List<ObjectiveRec>();
+                Stats = stats ?? new List<StatsRec>();
+                FactionSpDelta = factionSpDelta;
             }
         }
 
@@ -121,6 +142,17 @@ namespace Multiplayer.Sync.Tactical
                     if (idBytes.Length > 0) w.Write(idBytes);
                     w.Write(o.State);
                 }
+
+                // Tolerant tail: per-soldier mission stats + the faction SP delta (see class summary).
+                var stats = (p != null ? p.Stats : null) ?? new List<StatsRec>();
+                w.Write((ushort)stats.Count);
+                foreach (var s in stats)
+                {
+                    w.Write(s.NetId);
+                    w.Write(s.XpEarned);
+                    w.Write(s.NewSp);
+                }
+                w.Write(p != null ? p.FactionSpDelta : 0);
                 return ms.ToArray();
             }
         }
@@ -172,7 +204,23 @@ namespace Multiplayer.Sync.Tactical
                         obj.Add(new ObjectiveRec(id, state));
                     }
 
-                    payload = new MissionEndPayload(seq, phase, outcome, result, evac, obj);
+                    // OPTIONAL stats tail (absent on a legacy payload → empty stats / 0 delta; a corrupt
+                    // count → drop just the tail, never the whole conclusion).
+                    var stats = new List<StatsRec>();
+                    int spDelta = 0;
+                    if (ms.Length - ms.Position >= 2)
+                    {
+                        int statsCount = r.ReadUInt16();
+                        if ((long)statsCount * 12 <= ms.Length - ms.Position)
+                        {
+                            for (int i = 0; i < statsCount; i++)
+                                stats.Add(new StatsRec(r.ReadInt32(), r.ReadInt32(), r.ReadInt32()));
+                            if (ms.Length - ms.Position >= 4) spDelta = r.ReadInt32();
+                        }
+                        else stats.Clear();
+                    }
+
+                    payload = new MissionEndPayload(seq, phase, outcome, result, evac, obj, stats, spDelta);
                     return true;   // trailing bytes (a newer peer's extra fields) are intentionally ignored
                 }
             }
