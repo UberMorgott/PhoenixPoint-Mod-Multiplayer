@@ -23,21 +23,33 @@ namespace Multiplayer.Sync.Tactical
     /// </summary>
     public sealed class RelayedHostShotRegistry
     {
-        // ability instance -> shooter actor instance. Identity comparer so overridden Equals/GetHashCode on
+        /// <summary>One in-flight relayed shot. Beyond the B1/B2 keys it carries the intent's TARGET netId +
+        /// whether that target took ANY host damage during the shot window — read at <c>End</c> by the miss-
+        /// feedback broadcast (tac.shot.result): TargetNetId ≥ 0 and DamageSeen=false = an authoritative MISS
+        /// the origin client's locally-rolled (damage-neutered) presentation cannot show.</summary>
+        public sealed class Shot
+        {
+            public object Shooter;
+            public int TargetNetId;
+            public bool DamageSeen;
+        }
+
+        // ability instance -> its in-flight shot entry. Identity comparer so overridden Equals/GetHashCode on
         // Unity-derived game objects can never collapse two distinct instances (or alias a fake-null).
-        private readonly Dictionary<object, object> _byAbility =
-            new Dictionary<object, object>(RefIdentityComparer.Instance);
+        private readonly Dictionary<object, Shot> _byAbility =
+            new Dictionary<object, Shot>(RefIdentityComparer.Instance);
 
         /// <summary>Number of in-flight relayed shots (diag / tests).</summary>
         public int Count => _byAbility.Count;
 
         /// <summary>Register a relayed shoot: the host is about to <c>Activate</c> <paramref name="ability"/>
-        /// for <paramref name="shooter"/>. No-op if either is null. Overwrites a leaked prior entry for the
-        /// same ability (self-heal).</summary>
-        public void Begin(object ability, object shooter)
+        /// for <paramref name="shooter"/> at the intent's target actor (<paramref name="targetNetId"/>, -1 for a
+        /// bare-position target — no miss feedback for those). No-op if ability/shooter is null. Overwrites a
+        /// leaked prior entry for the same ability (self-heal).</summary>
+        public void Begin(object ability, object shooter, int targetNetId = -1)
         {
             if (ability == null || shooter == null) return;
-            _byAbility[ability] = shooter;
+            _byAbility[ability] = new Shot { Shooter = shooter, TargetNetId = targetNetId };
         }
 
         /// <summary>B1: is this exact ability instance an in-flight relayed shoot (→ run its action inline)?</summary>
@@ -49,14 +61,28 @@ namespace Multiplayer.Sync.Tactical
         {
             if (actor == null) return false;
             foreach (var kv in _byAbility)
-                if (ReferenceEquals(kv.Value, actor)) return true;
+                if (ReferenceEquals(kv.Value.Shooter, actor)) return true;
             return false;
         }
 
-        /// <summary>Remove an ability's entry at its shot end. No-op if absent / null.</summary>
-        public void End(object ability)
+        /// <summary>Miss feedback: the host's ApplyDamage funnel just broadcast damage to
+        /// <paramref name="targetNetId"/> — flag every in-flight shot aimed at it as a HIT (no tac.shot.result
+        /// at its End). Window-scoped: only shots currently registered can match.</summary>
+        public void MarkDamage(int targetNetId)
         {
-            if (ability != null) _byAbility.Remove(ability);
+            if (targetNetId < 0) return;
+            foreach (var kv in _byAbility)
+                if (kv.Value.TargetNetId == targetNetId) kv.Value.DamageSeen = true;
+        }
+
+        /// <summary>Remove an ability's entry at its shot end and return it (null if absent / null) so the
+        /// caller can read TargetNetId/DamageSeen for the miss-feedback broadcast.</summary>
+        public Shot End(object ability)
+        {
+            if (ability == null) return null;
+            if (!_byAbility.TryGetValue(ability, out var shot)) return null;
+            _byAbility.Remove(ability);
+            return shot;
         }
 
         /// <summary>Drop all entries (session teardown / tests).</summary>

@@ -208,6 +208,64 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnFireStart failed: " + ex); }
         }
 
+        // ─── MISS FEEDBACK (tac.shot.result): host broadcast + client native Missed bark ─────────────
+        /// <summary>HOST: a relayed/origin-native shot just ended (<c>EndRelayedShot</c>) with its intent TARGET
+        /// having taken no host damage — broadcast <c>tac.shot.result</c> so each client raises the native miss
+        /// cue. A HIT needs no result surface (tac.damage already shows it). Fail-open: logged + swallowed.</summary>
+        public static void HostBroadcastShotMiss(object shooter, int targetNetId)
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || !engine.IsHost) return;
+                int shooterNetId = shooter != null ? TacticalDeploySync.NetIdForLiveActor(shooter) : -1;
+                if (shooterNetId < 0) return;
+
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacShotResult);
+                byte[] payload = TacticalLiveCodec.EncodeShotResult(seq, shooterNetId, targetNetId);
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacShotResult, payload);
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.shot.result MISS seq=" + seq +
+                          " shooter=" + shooterNetId + " targetNetId=" + targetNetId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostBroadcastShotMiss failed: " + ex); }
+        }
+
+        /// <summary>CLIENT inbound (<c>tac.shot.result</c>): the host's authoritative shot MISSED its target.
+        /// Raise the NATIVE miss cue on the shooter mirror — the shooter's <c>SharedSoundEvents.Missed</c>
+        /// Eventus voice bark, the exact event the host's own <c>RaiseSoldierShootingEvents</c> raised
+        /// (TacticalAbilityReport.cs:47 — tactical PP ships no miss floater widget; the bark IS the native cue).
+        /// The origin client never got it locally: its <c>WaitForProjectilesToHit</c> callback (which raises the
+        /// shooting events) is neutered during the origin-native shot. No-op off-client / off-session / stale seq.</summary>
+        public static void ClientOnShotResult(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (!TacticalLiveCodec.TryDecodeShotResult(payload, out var s)) { Debug.LogError("[Multiplayer][tac] tac.shot.result decode failed"); return; }
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacShotResult, s.Seq)) return;
+            TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacShotResult, s.Seq);
+
+            try
+            {
+                object shooter = TacticalDeploySync.ResolveLiveActor(s.ShooterNetId);
+                if (shooter == null) return;
+
+                // SharedData.GetSharedDataFromGame(bool fetchAsset = false).SharedSoundEvents.Missed — the
+                // TacticalEventDef the native miss path raises (fields, not properties, hence GetField).
+                var sharedDataType = AccessTools.TypeByName("PhoenixPoint.Common.Core.SharedData");
+                var getShared = sharedDataType != null ? AccessTools.Method(sharedDataType, "GetSharedDataFromGame") : null;
+                object shared = getShared != null ? getShared.Invoke(null, new object[] { false }) : null;
+                object missed = GetField(GetField(shared, "SharedSoundEvents"), "Missed");
+                object eventus = GetProp(shooter, "TacActorEventusComponent");
+                // public override void RaiseEvent(TacticalEventDef, bool onLateUpdate = false, TacticalItem sourceItem = null)
+                var raise = eventus != null ? AccessTools.Method(eventus.GetType(), "RaiseEvent") : null;
+                if (missed == null || raise == null) return;
+                raise.Invoke(eventus, new object[] { missed, false, null });
+                Debug.Log("[Multiplayer][tac] CLIENT played native MISSED bark seq=" + s.Seq +
+                          " shooter=" + s.ShooterNetId + " targetNetId=" + s.TargetNetId);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientOnShotResult failed: " + ex); }
+        }
+
         // ─── CLIENT: PREDICTED local fire animation (Option B — animate instantly on the player's own press) ─
         /// <summary>CLIENT (mirroring): kicked off from <c>TacticalCombatSync.ClientInterceptAbility</c> the instant
         /// the client SUPPRESSES its own shot and sends <c>tac.intent.ability</c>. Plays the EXISTING damage-less /

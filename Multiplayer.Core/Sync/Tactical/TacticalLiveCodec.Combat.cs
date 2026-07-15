@@ -365,5 +365,49 @@ namespace Multiplayer.Sync.Tactical
             }
             catch { return false; }
         }
+
+        // ─── tac.shot.result (host→all, MISS feedback for relayed/origin-native shots) ───────────────
+        // Broadcast when a relayed shot's OnPlayingActionEnd finds its intent TARGET took no host damage
+        // (RelayedHostShotRegistry.DamageSeen stays false) — the client raises the native Missed bark on the
+        // shooter mirror. A HIT needs no result surface (tac.damage 0x88 already shows it).
+        //   [seq:u32][shooterNetId:i32][targetNetId:i32]
+        public struct ShotResult
+        {
+            public uint Seq;
+            public int ShooterNetId;
+            public int TargetNetId;
+            public ShotResult(uint seq, int shooterNetId, int targetNetId)
+            {
+                Seq = seq; ShooterNetId = shooterNetId; TargetNetId = targetNetId;
+            }
+        }
+
+        public static byte[] EncodeShotResult(uint seq, int shooterNetId, int targetNetId)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write(shooterNetId);
+                w.Write(targetNetId);
+                return ms.ToArray();
+            }
+        }
+
+        public static bool TryDecodeShotResult(byte[] data, out ShotResult result)
+        {
+            result = default(ShotResult);
+            if (data == null || data.Length < 4 + 4 + 4) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    result = new ShotResult(r.ReadUInt32(), r.ReadInt32(), r.ReadInt32());
+                    return true;
+                }
+            }
+            catch { return false; }
+        }
     }
 }

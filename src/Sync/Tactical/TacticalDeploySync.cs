@@ -1337,6 +1337,16 @@ namespace Multiplayer.Sync.Tactical
                 return true;
             }
 
+            // ─── MISS FEEDBACK rail (tac.shot.result) ──────────────────────────────────────────────────
+            // Host→all push when a relayed shot ended with its target undamaged; client-only play (raises the
+            // native Missed bark on the shooter mirror). Side-gated internally, so a stray envelope on the host
+            // is a clean no-op. PRESENTATION ONLY — a hit already shows via tac.damage (0x88).
+            if (surfaceId == (byte)TacticalSurfaceIds.TacShotResult)
+            {
+                try { TacticalFireAnimSync.ClientOnShotResult(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.shot.result failed: " + ex); }
+                return true;
+            }
+
             // ─── TS6: STRUCTURAL-DESTRUCTION mirror (destructibles: cover / LoS / nav) ──────────────
             // Host→all outcome push; client-only apply (side-gated internally, so a stray envelope on the host is a
             // clean no-op). The client re-applies the SAME native damage to the SAME destructible (resolved by its

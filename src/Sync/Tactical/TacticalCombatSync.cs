@@ -96,8 +96,16 @@ namespace Multiplayer.Sync.Tactical
             => actor != null && RelayedShots.IsActorActive(actor);
 
         /// <summary>Clear a relayed shoot's registry entry at its <c>OnPlayingActionEnd</c> (hit / miss /
-        /// fumble). No-op for host-own / non-registered abilities.</summary>
-        public static void EndRelayedShot(object ability) => RelayedShots.End(ability);
+        /// fumble). No-op for host-own / non-registered abilities. MISS FEEDBACK: if the shot's intent TARGET
+        /// took no host damage during the window (DamageSeen stays false — set by <see cref="OnHostApplyDamage"/>
+        /// via <c>MarkDamage</c>), broadcast tac.shot.result so each client raises the native Missed bark the
+        /// origin's damage-neutered local presentation can't produce (its WaitForProjectilesToHit is neutered).</summary>
+        public static void EndRelayedShot(object ability)
+        {
+            var shot = RelayedShots.End(ability);
+            if (shot != null && shot.TargetNetId >= 0 && !shot.DamageSeen)
+                TacticalFireAnimSync.HostBroadcastShotMiss(shot.Shooter, shot.TargetNetId);
+        }
 
         // ─── CLIENT: intercept the local gameplay ability, send intent, suppress ───────────────────
         /// <summary>
@@ -261,7 +269,9 @@ namespace Multiplayer.Sync.Tactical
                 bool relayedShoot = TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name);
                 if (relayedShoot)
                 {
-                    RelayedShots.Begin(ability, shooter);
+                    // Carry the intent's target netId so EndRelayedShot can broadcast the miss feedback when
+                    // that target took no host damage (a bare-position/ground target rides -1 → no feedback).
+                    RelayedShots.Begin(ability, shooter, intent.TargetNetId);
                     Debug.Log("[Multiplayer][tac] B1/B2 registered relayed shoot (inline+aim-skip) actor=" + intent.ShooterNetId +
                               " ability=" + ability.GetType().Name);
                 }
@@ -948,6 +958,10 @@ namespace Multiplayer.Sync.Tactical
                 // any path that didn't route through the prefix.
                 int targetNetId = capturedNetId >= 0 ? capturedNetId : TacticalDeploySync.NetIdForLiveActor(target);
                 if (targetNetId < 0) return;   // an unregistered actor (e.g. transient destructible) — skip
+
+                // MISS FEEDBACK: any host damage to an in-flight relayed shot's intent target = a HIT — flag it
+                // so EndRelayedShot skips the tac.shot.result(miss) broadcast for that shot.
+                RelayedShots.MarkDamage(targetNetId);
 
                 var p = FlattenDamage(damageResultBoxed);
                 if (p == null) return;

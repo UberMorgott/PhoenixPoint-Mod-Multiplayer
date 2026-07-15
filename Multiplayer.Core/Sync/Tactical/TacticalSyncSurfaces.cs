@@ -291,5 +291,18 @@ namespace Multiplayer.Sync.Tactical
         // NO predicted local play (heal is fully suppressed on the origin), so every peer replays exactly ONCE (no de-dup).
         //   healstart (0xA0): [seq][healerNetId][abilityDefGuid][targetNetId]. See TacticalHealAnimSync / HealAnimSyncPatches. Next free 0xA1.
         public const ushort TacHealStart = 0xA0;           // 160: host→all     "actor netId begins heal@guid on target (presentation replay)" (carries seq)
+
+        // ─── MISS FEEDBACK for relayed/origin-native shots (tac.shot.result) ────────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own
+        // TacticalLiveSeq (last-writer-wins). PRESENTATION ONLY. Closes the "silent authoritative miss" gap: under
+        // the origin-native shoot canon the client's projectile is rolled LOCALLY (damage-neutered), so when the
+        // HOST's authoritative roll MISSES nothing at all happens on the client (a hit already shows via tac.damage
+        // 0x88) — a legit miss reads as a "no damage" bug. When a relayed shot ends (OnPlayingActionEnd) with its
+        // intent TARGET having taken no host damage (RelayedHostShotRegistry.DamageSeen stays false), the host
+        // broadcasts this and each client raises the NATIVE miss cue on the shooter mirror — the shooter's
+        // SharedSoundEvents.Missed Eventus voice bark, the exact event the host's own RaiseSoldierShootingEvents
+        // raised (TacticalAbilityReport.cs:47; tactical PP ships NO miss floater widget, the bark IS the native cue).
+        //   shotresult (0xA1): [seq][shooterNetId][targetNetId]. Next free 0xA2.
+        public const ushort TacShotResult = 0xA1;          // 161: host→all     "relayed shot ended, target took no damage (native MISSED bark)" (carries seq)
     }
 }
