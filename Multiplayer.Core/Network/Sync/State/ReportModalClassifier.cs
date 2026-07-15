@@ -159,6 +159,12 @@ namespace Multiplayer.Network.Sync.State
         // ── pandoran-evolution intel report (gap AC; ALWAYS notify-only on the client) ──
         public const int AlienResearchBrief = 23;              // ModalType.cs:28 — alien intel report (non-blocking)
 
+        // ── relayed event mission-start deploy (SYNTHETIC — not a native ModalType; CampaignEnd's 255 precedent).
+        // Rides the 0x69 EventMissionDeploy variant host→initiator and the id-100 squad tail client→host; a
+        // mission-start choice answered by a CLIENT has NO brief anywhere (SP goes SelectChoice → LaunchMission
+        // straight to deployment, UIModuleSiteEncounters.cs:598-616), so the modal-type slot carries this marker. ──
+        public const byte EventMissionDeploySentinel = 254;
+
         /// <summary>True iff <paramref name="modalType"/> (native ModalType enum value) is a whitelisted
         /// report modal. Takes the full int value (ModalType is int-backed: None=-1, _CustomMission=9999) so a
         /// non-report id can never alias a whitelisted one. PURE.</summary>

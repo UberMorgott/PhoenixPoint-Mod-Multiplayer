@@ -68,6 +68,7 @@ namespace Multiplayer.Network.Sync.State
         private static ConstructorInfo _deployStateCtor; // UIStateRosterDeployment(GeoMission, GeoFaction, IGeoCharacterContainer, bool)
         private static FieldInfo _deployModeField;       // GeoscapeView.SetUiInDeploymentMode (public bool, GeoscapeView.cs:104)
         private static MethodInfo _resetViewState;       // GeoscapeView.ResetViewState(UIStateInitial.Params = null) (:414)
+        private static MethodInfo _launchMission;        // GeoscapeView.LaunchMission(GeoMission, IGeoCharacterContainer) (:1025)
 
         private static void Ensure()
         {
@@ -112,6 +113,9 @@ namespace Multiplayer.Network.Sync.State
             if (deployStateT != null && missionT != null && factionT != null && containerT != null)
                 // EXACT param match (harmony-accesstools-exact-param-match): the 4-arg ctor (UIStateRosterDeployment.cs:74).
                 _deployStateCtor = AccessTools.Constructor(deployStateT, new[] { missionT, factionT, containerT, typeof(bool) });
+            if (missionT != null && containerT != null)
+                // EXACT param match (harmony-accesstools-exact-param-match): LaunchMission(GeoMission, IGeoCharacterContainer).
+                _launchMission = AccessTools.Method(viewType, "LaunchMission", new[] { missionT, containerT });
             _deployModeField = AccessTools.Field(viewType, "SetUiInDeploymentMode");
             var initialParamsT = AccessTools.TypeByName("PhoenixPoint.Geoscape.View.ViewStates.UIStateInitial+Params");
             if (initialParamsT != null)
@@ -315,6 +319,31 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex)
             {
                 Debug.LogWarning("[Multiplayer] GeoModalDisplay.TryClientOpenDeployment best-effort failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// HOST (event-mission launch, 2026-07-16): drive the native <c>GeoscapeView.LaunchMission(mission,
+        /// null)</c> — the exact SP entry a mission-start event choice takes (UIModuleSiteEncounters.SelectChoice
+        /// → LaunchMission, UIModuleSiteEncounters.cs:612). With <c>MissionLaunchSquadOverride</c> armed the
+        /// override patch launches with the client-picked squad and NO host window; unarmed → the native host
+        /// deployment window opens (degrade). False on any miss — the caller logs the no-op.
+        /// </summary>
+        public static bool TryHostLaunchMission(GeoRuntime rt, object mission)
+        {
+            try
+            {
+                Ensure();
+                if (_launchMission == null || mission == null) return false;
+                var view = GetView(rt);
+                if (view == null) return false;
+                _launchMission.Invoke(view, new[] { mission, null });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] GeoModalDisplay.TryHostLaunchMission failed: " + ex.Message);
                 return false;
             }
         }

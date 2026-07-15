@@ -179,6 +179,7 @@ namespace Multiplayer.Network.Sync
             State.GeoVehicleExploreMirror.ResetForNewSession();  // exploration-progress mirror (0xA7) host sig cache
             State.EquipMirrorRepaint.ResetForNewSession();       // v2 equip edit-session (static; never carry a gesture/pending across sessions)
             State.VehicleTravelInitiator.Reset();                // host: destSite→initiator brief-routing tags (never carry a prior session's site ids)
+            Multiplayer.Harmony.Sync.EventMissionLaunchPending.Clear();   // host: one-shot event-mission launch handle (never carry a prior session's live mission)
             State.AugmentPreviewScope.Reset();                   // preview-transaction latch (static; never carry a stale depth across sessions)
             State.PersonnelReflection.ResetOrphanPool("new session");   // parked roster orphans (static; instances belong to the prior session's level)
             State.StatRefundTracker.ResetSession();              // thin-client stat-refund anti-farm ledger (static; a reused GeoUnitId must not inherit a prior session's net)
@@ -243,6 +244,7 @@ namespace Multiplayer.Network.Sync
                 State.GeoVehicleTravelMirror.ResetForNewSession();
                 State.GeoVehicleExploreMirror.ResetForNewSession();
                 State.VehicleTravelInitiator.Reset();   // stale destSite→initiator brief-routing tags of the dead geoscape
+                Multiplayer.Harmony.Sync.EventMissionLaunchPending.Clear();   // stale event-mission launch handle of the dead geoscape
             });
             // Tactical per-mission state: a host mid-battle LOAD tears the level down WITHOUT the mission-end
             // path that normally drives OnMissionExit — sweep it here so pending buffers/mirror-arm/live rails
@@ -418,7 +420,31 @@ namespace Multiplayer.Network.Sync
                         // applied model-only + armed the host's live window (no forced transition).
                     }
                     else if (!EventReflection.TryHostNativeResolve(rt, answer.OccurrenceId, answer.EventId, answer.ChoiceIndex))
+                    {
                         action.Apply(rt);   // fallback: model-only reflected resolve (IResolvesOutsideScope → no scope)
+                        // SP-PARITY DEPLOY (2026-07-16 RCA: PROG_AN0_MISS dead end): a mission-start choice
+                        // resolved MODEL-ONLY leaves the started mission with NO window anywhere — natively the
+                        // choice goes straight to the deployment screen (UIModuleSiteEncounters.SelectChoice →
+                        // LaunchMission). Re-create that beat for the ANSWERING peer: arm the one-shot host
+                        // launch handle and unicast EventMissionDeploy — the client opens its native squad-pick
+                        // window and DEPLOY returns via the id-100 sentinel tail (MissionStartRequestAction).
+                        // The native/replay resolve branches above keep today's host-side window behavior.
+                        if (EventReflection.TryGetStartMission(answer.OccurrenceId, out var startMission,
+                                out int startSiteId, out string startDefGuid))
+                        {
+                            Multiplayer.Harmony.Sync.EventMissionLaunchPending.Arm(startSiteId, startMission);
+                            SendReportModalTo(senderPeerId, new State.ReportModalPayload
+                            {
+                                ModalType = State.ReportModalClassifier.EventMissionDeploySentinel,
+                                Variant = State.ReportModalVariant.EventMissionDeploy,
+                                SiteId = startSiteId,
+                                DefId = startDefGuid
+                            });
+                            Debug.Log("[Multiplayer] HOST event mission-start by peer=" + senderPeerId
+                                      + " siteId=" + startSiteId + " defId=" + startDefGuid
+                                      + " → EventMissionDeploy unicast (client squad pick) + launch handle armed");
+                        }
+                    }
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer] SyncEngine.OnActionRequest answer resolve failed: " + ex.Message); }
             }
@@ -1932,6 +1958,27 @@ namespace Multiplayer.Network.Sync
                     }
                     State.GeoModalDisplay.ShowIntelReportNotice(p.ModalType);
                     return false;   // notify-only text prompt — never occupies the display queue
+                }
+                // EVENT-MISSION DEPLOY (sentinel 254): THIS client's relayed mission-start event choice resolved
+                // model-only on the host — no brief exists anywhere (SP goes SelectChoice → LaunchMission straight
+                // to the deployment screen). SP parity: rebuild a display-only GeoCustomMission and open the native
+                // squad-pick window HERE, armed on the existing deploy relay — DEPLOY returns the picked GeoUnitIds
+                // via the id-100 sentinel tail and the host launches its pending live mission.
+                if (p.Variant == State.ReportModalVariant.EventMissionDeploy)
+                {
+                    if (!_outcomeDedup.ShouldShow(data))
+                    {
+                        Debug.Log("[Multiplayer] CLIENT OnReportModalShow event-mission-deploy → IGNORED (duplicate delivery)");
+                        return false;
+                    }
+                    object customMission = State.ReportModalReflection.BuildCustomMission(rt, p.SiteId, p.DefId);
+                    if (customMission == null || !Multiplayer.Harmony.Sync.ClientDeployRelay.TryBeginLocalSquadPick(
+                            State.ReportModalClassifier.EventMissionDeploySentinel, p.SiteId, customMission))
+                        Debug.LogWarning("[Multiplayer] CLIENT event-mission deploy OPEN FAILED siteId=" + p.SiteId
+                                         + " defId=" + p.DefId + " — mission stays attached host-side (no local window)");
+                    else
+                        Debug.Log("[Multiplayer] CLIENT event-mission deploy → local squad pick opened siteId=" + p.SiteId);
+                    return false;   // deployment view state, not a GeoModal — never occupies the display queue
                 }
                 // MISSION OUTCOME (Batch-2 P3) takes its own path: consecutive-dup guard (0x69 has no occId until
                 // Batch-3 P5; STUN reliable sends twice) + queue-don't-drop when this client is still in tactical

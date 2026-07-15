@@ -74,6 +74,8 @@ namespace Multiplayer.Network.Sync.State
         InterceptionNotice = 8, // interception brief/outcome (32/33) — ALWAYS notify-only on the client (WA-3)
         CampaignEnd = 9,      // campaign conclusion notice (synthetic sentinel 255) — outro replay / degrade+teardown
         IntelNotice = 10,     // pandoran-evolution intel report (23) — ALWAYS notify-only on the client (gap AC)
+        EventMissionDeploy = 11, // relayed event mission-start choice (synthetic sentinel 254) — open the
+                                 // answering client's native squad-pick window (SP parity: SelectChoice → LaunchMission)
     }
 
     /// <summary>

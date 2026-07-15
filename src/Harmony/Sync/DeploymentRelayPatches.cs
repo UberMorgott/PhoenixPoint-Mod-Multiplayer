@@ -164,6 +164,32 @@ namespace Multiplayer.Harmony.Sync
         }
     }
 
+    /// <summary>HOST: one-shot live-mission handle for a relayed EVENT mission-start choice (2026-07-16
+    /// SP-parity deploy fix). The model-only answer resolve leaves NO open brief — SyncEngine arms this with
+    /// the <c>ChoiceReward.ApplyResult.StartMission</c> instance + unicasts EventMissionDeploy to the answering
+    /// client; the client's DEPLOY returns via the id-100 sentinel (<c>EventMissionDeploySentinel</c>) and
+    /// <c>MissionStartRequestAction.Apply</c> consumes this handle to launch THAT mission natively. Single
+    /// slot: a newer event overwrites (only one relayed mission-start can be in flight per host player);
+    /// session reset clears (SyncEngine) so a dead geoscape's live mission never leaks.</summary>
+    internal static class EventMissionLaunchPending
+    {
+        private static int _siteId = -1;
+        private static object _mission;
+
+        public static void Arm(int siteId, object mission) { _siteId = siteId; _mission = mission; }
+        public static void Clear() { _siteId = -1; _mission = null; }
+
+        /// <summary>One-shot: the handle is cleared on a successful match. A mismatched/absent handle returns
+        /// false and leaves state untouched (stale id-100 after a newer event re-armed → logged no-op).</summary>
+        public static bool TryConsume(int siteId, out object mission)
+        {
+            mission = _mission;
+            if (mission == null || siteId != _siteId) { mission = null; return false; }
+            Clear();
+            return true;
+        }
+    }
+
     /// <summary>HOST: one-shot squad override for the next <c>GeoscapeView.LaunchMission</c> — armed by
     /// <c>MissionStartRequestAction.Apply</c> with the RESOLVED GeoCharacter instances, consumed synchronously
     /// by <see cref="LaunchMissionSquadOverridePatch"/> in the same FinishDialog(Confirm) call stack.</summary>

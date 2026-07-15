@@ -691,6 +691,54 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer] EventReflection.CompleteEventByOccurrence failed: " + ex.Message); }
         }
 
+        // ── relayed event mission-start (SP-parity deploy fix, 2026-07-16): ChoiceReward.ApplyResult.StartMission ──
+        private static bool _startMissionEnsured;
+        private static PropertyInfo _choiceRewardProp;   // GeoscapeEvent.ChoiceReward { get; private set; } (:32)
+        private static FieldInfo _applyResultField;      // GeoFactionReward.ApplyResult (public field, :88)
+        private static FieldInfo _resultStartMissionField; // GeoFactionRewardApplyResult.StartMission (GeoCustomMission)
+
+        /// <summary>
+        /// HOST: after a relayed answer resolved, read the mission the answered choice STARTED —
+        /// <c>ChoiceReward.ApplyResult.StartMission</c>, the live <c>GeoCustomMission</c> that CompleteEvent
+        /// created + attached via <c>Site.CreateCustomMission</c> (GeoFactionReward.cs:234-251). SP would go
+        /// straight to the deployment screen off this (UIModuleSiteEncounters.SelectChoice → LaunchMission,
+        /// UIModuleSiteEncounters.cs:598-616) — the caller re-creates that beat for the answering client.
+        /// True iff a mission was started AND its site id + def guid both read; never throws.
+        /// </summary>
+        public static bool TryGetStartMission(ushort occurrenceId, out object mission, out int siteId, out string defGuid)
+        {
+            mission = null; siteId = -1; defGuid = null;
+            try
+            {
+                if (!_startMissionEnsured)
+                {
+                    _startMissionEnsured = true;
+                    var eventT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Events.GeoscapeEvent");
+                    var rewardT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoFactionReward");
+                    var resultT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Core.GeoFactionRewardApplyResult");
+                    if (eventT != null) _choiceRewardProp = AccessTools.Property(eventT, "ChoiceReward");
+                    if (rewardT != null) _applyResultField = AccessTools.Field(rewardT, "ApplyResult");
+                    if (resultT != null) _resultStartMissionField = AccessTools.Field(resultT, "StartMission");
+                }
+                if (_choiceRewardProp == null || _applyResultField == null || _resultStartMissionField == null) return false;
+                if (!Multiplayer.Harmony.Sync.EventOccurrenceIds.TryGetEvent(occurrenceId, out var geoEvent) || geoEvent == null)
+                    return false;
+                var reward = _choiceRewardProp.GetValue(geoEvent, null);
+                var result = reward != null ? _applyResultField.GetValue(reward) : null;
+                mission = result != null ? _resultStartMissionField.GetValue(result) : null;
+                if (mission == null) return false;
+                siteId = ReportModalReflection.GetMissionSiteId(mission);
+                defGuid = GeoSiteReflection.GetMissionDefGuid(mission);
+                return siteId >= 0 && !string.IsNullOrEmpty(defGuid);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer] EventReflection.TryGetStartMission failed: " + ex.Message);
+                mission = null;
+                return false;
+            }
+        }
+
         /// <summary>The live host <c>UIModuleSiteEncounters</c> instance (GeoLevelController.View →
         /// GeoscapeView.GeoscapeModules → SiteEncountersModule), or null. Shared module locator (same chain as
         /// <see cref="TryHostNativeResolve"/>) reused by the replay-mode button repaint.</summary>

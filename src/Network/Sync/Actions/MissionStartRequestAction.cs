@@ -90,7 +90,11 @@ namespace Multiplayer.Network.Sync.Actions
         }
 
         public bool Validate(GeoRuntime rt, Guid actor)
-            => rt != null && rt.IsGeoscapeActive && ReportModalClassifier.IsMissionBrief(_modalType);
+            => rt != null && rt.IsGeoscapeActive
+               && (ReportModalClassifier.IsMissionBrief(_modalType)
+                   // Relayed event mission-start deploy (2026-07-16): no brief exists — the sentinel routes the
+                   // Apply to the EventMissionLaunchPending handle instead of the open-brief validation.
+                   || _modalType == ReportModalClassifier.EventMissionDeploySentinel);
 
         public void Apply(GeoRuntime rt)
         {
@@ -109,6 +113,22 @@ namespace Multiplayer.Network.Sync.Actions
                 Debug.Log("[Multiplayer] HOST MissionStartRequest squad tail: " + chars.Count + "/" +
                           _unitIds.Length + " GeoUnitId(s) resolved" +
                           (chars.Count == 0 ? " — falling back to host deployment window" : ""));
+            }
+
+            // EVENT-MISSION LAUNCH (sentinel 254, 2026-07-16): no host brief exists — the mission came from a
+            // relayed event mission-start choice (model-only resolve; SyncEngine armed the one-shot handle).
+            // Drive the native GeoscapeView.LaunchMission on it: the armed squad override above launches with
+            // the client-picked squad and NO host window; an empty/unresolved squad leaves the override unarmed
+            // → the native host deployment window opens (same degrade as the legacy empty-tail relay).
+            if (_modalType == ReportModalClassifier.EventMissionDeploySentinel)
+            {
+                if (Multiplayer.Harmony.Sync.EventMissionLaunchPending.TryConsume(_siteId, out var eventMission)
+                    && GeoModalDisplay.TryHostLaunchMission(rt, eventMission))
+                    return;
+                Multiplayer.Harmony.Sync.MissionLaunchSquadOverride.Disarm();   // reject → never leave a stale arm
+                Debug.Log("[Multiplayer] HOST MissionStartRequest(event) rejected siteId=" + _siteId
+                          + " (no pending event mission / native launch failed — logged no-op)");
+                return;
             }
 
             // Resolves against the host's OWN open brief through the native click path; logs apply/reject

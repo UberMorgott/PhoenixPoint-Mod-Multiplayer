@@ -521,6 +521,44 @@ namespace Multiplayer.Network.Sync.State
             catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildSiteMissionBrief failed: " + ex.Message); return null; }
         }
 
+        // ── event-mission deploy rebuild (sentinel 254): GeoCustomMission(CustomMissionTypeDef, GeoSite, MissionParams) ──
+        private static bool _customMissionEnsured;
+        private static ConstructorInfo _customMissionCtor;
+
+        private static void EnsureCustomMission()
+        {
+            if (_customMissionEnsured) return;
+            _customMissionEnsured = true;
+            var missionT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.Missions.GeoCustomMission");
+            var defT = AccessTools.TypeByName("PhoenixPoint.Common.Levels.Missions.CustomMissionTypeDef");
+            var siteT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoSite");
+            var paramsT = AccessTools.TypeByName("PhoenixPoint.Geoscape.Entities.GeoMission+MissionParams");
+            if (missionT != null && defT != null && siteT != null && paramsT != null)
+                // EXACT param match (harmony-accesstools-exact-param-match): GeoCustomMission.cs:28 — (def, site, params).
+                _customMissionCtor = AccessTools.Constructor(missionT, new[] { defT, siteT, paramsT });
+        }
+
+        /// <summary>
+        /// Client: rebuild the DISPLAY-ONLY <c>GeoCustomMission</c> for a mirrored EventMissionDeploy — same
+        /// contract as <see cref="BuildSiteMissionBrief"/> (pure base ctor, NEVER attached to the client's site);
+        /// it only feeds <c>UIStateRosterDeployment</c>'s Site/MissionDef reads, and the window's DEPLOY/CANCEL
+        /// exits are intercepted by DeploymentRelayPatches (a client never launches locally). Null on any
+        /// unresolved piece (caller logs + degrades to no local window; the host-side mission stays attached).
+        /// </summary>
+        public static object BuildCustomMission(GeoRuntime rt, int siteId, string missionDefGuid)
+        {
+            try
+            {
+                EnsureCustomMission();
+                if (_customMissionCtor == null) return null;
+                var site = GeoSiteReflection.ResolveSiteById(rt, siteId);
+                var missionDef = DefReflection.GetDefByGuid(missionDefGuid);
+                if (site == null || missionDef == null) return null;
+                return _customMissionCtor.Invoke(new object[] { missionDef, site, null });
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer] ReportModalReflection.BuildCustomMission failed: " + ex.Message); return null; }
+        }
+
         /// <summary>
         /// Client: resolve the modalData for a mirrored ActiveMissionBrief — the client's OWN
         /// <c>site.ActiveMission</c>, attached by the P1 mission-state mirror (GeoSite channel #5,
