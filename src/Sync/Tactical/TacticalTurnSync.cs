@@ -318,6 +318,9 @@ namespace Multiplayer.Sync.Tactical
                     // ready view).
                     viewDown = EnsureClientViewDown(current);
                     Debug.Log("[Multiplayer][tac] CLIENT entered ENEMY-TURN presentation idx=" + t.CurrentFactionIndex + " turn=" + t.TurnNumber + " (UIStateOtherFactionTurn, host-authoritative)");
+                    // rca-spawn-reveal: a spawn-moment 0x97 processed a tick before this turn message stashed
+                    // itself (IsClientEnemyTurn was still false) — re-fire it now that the flag is up.
+                    TacticalEnemyTurnCamera.TryReplayPendingHint();
                 }
                 else
                 {

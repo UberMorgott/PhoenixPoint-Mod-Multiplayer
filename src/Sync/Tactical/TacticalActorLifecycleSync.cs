@@ -355,6 +355,9 @@ namespace Multiplayer.Sync.Tactical
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorSpawn, p.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT materialized tac.actor.spawn netId=" + p.NetId +
                           " seq=" + p.Seq + " faction=" + p.FactionIndex);
+                // rca-spawn-reveal: a 0x97 hint for THIS actor may have arrived before the spawn (resolved=false
+                // → stashed) — now that the netId resolves, re-fire it.
+                TacticalEnemyTurnCamera.TryReplayPendingHint();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorSpawn failed: " + ex); }
         }

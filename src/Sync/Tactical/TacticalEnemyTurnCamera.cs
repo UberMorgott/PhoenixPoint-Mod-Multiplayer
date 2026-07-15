@@ -89,8 +89,44 @@ namespace Multiplayer.Sync.Tactical
             // wholesale (PlanarScrollCamera.cs:825), so a new hint always re-points the follow transform. No
             // "already latched" guard is needed here.
             if (willChase)
+            {
+                _pendingHintNetId = -1;
                 ChaseActor(actor, follow: true);
+            }
+            else
+            {
+                // rca-spawn-reveal: a spawn-moment hint (EnterPlayAbility reinforcement) races both the turn
+                // message (IsClientEnemyTurn flips a tick AFTER the hint) and the spawn mirror (netId registered
+                // after the hint) — stash it so TryReplayPendingHint can re-fire once the missing precondition
+                // arrives instead of silently dropping the reveal beat.
+                _pendingHintNetId = hint.ActorNetId;
+                _pendingHintTime = Time.realtimeSinceStartup;
+            }
             TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacCameraHint, hint.Seq);
+        }
+
+        // ─── CLIENT: deferred replay of a spawn-moment hint that lost its ordering race ───────────────
+        private static int _pendingHintNetId = -1;
+        private static float _pendingHintTime;
+        private const float PendingHintMaxAgeSec = 3f;   // spawn-race window; older = stale presentation, drop
+
+        /// <summary>CLIENT: re-fire the stashed 0x97 hint once its missing precondition arrives — called from
+        /// <c>TacticalTurnSync.ClientOnTurn</c>'s enemy branch (turn flag flipped after the hint) and after
+        /// <c>TacticalActorLifecycleSync.HandleActorSpawn</c> registers a netId (actor materialized after the
+        /// hint). Same gates as the live path (enemy turn + resolve) plus the visibility gate; freshness-bounded;
+        /// no-op when nothing is pending.</summary>
+        public static void TryReplayPendingHint()
+        {
+            int netId = _pendingHintNetId;
+            if (netId < 0 || Time.realtimeSinceStartup - _pendingHintTime > PendingHintMaxAgeSec) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            object actor = TacticalDeploySync.ResolveLiveActor(netId);
+            if (!ClientEnemyTurnCameraGate.ShouldChaseEnemyAction(TacticalTurnSync.IsClientEnemyTurn, actor != null)) return;
+            if (!IsActorVisibleToPlayerFaction(actor)) return;
+            _pendingHintNetId = -1;
+            Debug.Log("[Multiplayer][tac] CLIENT replayed pending tac.camerahint enemy=" + netId);
+            ChaseActor(actor, follow: true);
         }
 
         private static bool _resolved;

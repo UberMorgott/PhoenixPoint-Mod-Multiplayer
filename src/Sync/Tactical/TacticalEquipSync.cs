@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using UnityEngine;
 
 namespace Multiplayer.Sync.Tactical
@@ -57,6 +58,12 @@ namespace Multiplayer.Sync.Tactical
         public static bool ClientInterceptEquip(object equipmentComponent, object equipment)
         {
             if (_applyingRemote) return true;                         // applying a host outcome → run locally, no re-send
+            // rca-spawn-reveal: SetSelectedEquipment also fires INSIDE a mirror-spawn's enter-play
+            // (HandleActorSpawn → SpawnActor → EquipmentComponent.OnActorEnteredPlay) BEFORE the netId is
+            // registered; suppressing it there leaves SelectedEquipment null and the next native line NREs
+            // (OnActorEnteredPlay IL_00d2), aborting the whole spawn. Any remote-apply window is actor
+            // construction, not a user swap — run it natively.
+            if (SyncApplyScope.IsApplying) return true;
             // rca-jetjump: during a NON-origin peer's origin-native-move replay (ClientOnNativeMove), JetJump's
             // base.Activate may SetSelectedEquipment on the NON-owned mirror actor — pass it through natively
             // (never relay an equip intent for an actor this peer does not own; the origin already relayed it).
