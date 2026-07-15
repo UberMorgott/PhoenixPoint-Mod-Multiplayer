@@ -85,7 +85,12 @@ namespace Multiplayer.Sync.Tactical
                 return mirroring;
             }
 
-            _costChargedForState = null;   // screen session ends at ExitState → re-arm the per-session AP-cost latch
+            // Native charges the InventoryAbility once per view session AT CLOSE (ExitState → ApplyCostsCommand),
+            // leaving AP untouched mid-session so AllowItemSwapHandler keeps passing — the gesture rail relays
+            // moves cost-free and only latches "this session moved something"; the single charge lands HERE.
+            // ponytail: charges even when every relayed move was later moved back (native's close diff would be free).
+            bool sessionHadMove = _sessionMovedState != null;
+            _sessionMovedState = null;   // screen session ends at ExitState → re-arm
 
             if (mirroring)
             {
@@ -98,8 +103,16 @@ namespace Multiplayer.Sync.Tactical
                 if (moves.Count == 0)
                 {
                     // Normal reactive-rail close: every gesture already relayed + re-baselined, so the close diff is
-                    // empty — nothing to send, just keep the client commit suppressed (model stays mirror-only).
-                    Debug.Log("[Multiplayer][tac] close-commit: empty diff (per-gesture rail already synced) — suppress only");
+                    // empty. If the session moved anything, send ONE zero-move cost intent (the host charges; the AP
+                    // change mirrors back via 0x8F) — else nothing to send. Client commit stays suppressed either way.
+                    if (sessionHadMove)
+                    {
+                        TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacInventoryIntent,
+                                                    Codec.EncodeIntent(actingNetId, true, moves, NextNonce()));
+                        Debug.Log("[Multiplayer][tac] close-commit: empty diff — sent session cost intent acting=" + actingNetId);
+                    }
+                    else
+                        Debug.Log("[Multiplayer][tac] close-commit: empty diff (per-gesture rail already synced) — suppress only");
                     return true;
                 }
                 bool applyCost = moves.Count > 0;   // any cross-inventory move ⇒ the inventory ability's AP cost is due
@@ -109,7 +122,13 @@ namespace Multiplayer.Sync.Tactical
                           " moves=" + moves.Count + " applyCost=" + applyCost);
                 return true;   // SUPPRESS native SyncItems — the host is authoritative
             }
-            if (engine.IsHost) _hostPendingMoves = moves;   // native runs; broadcast the same batch in the postfix
+            if (engine.IsHost)
+            {
+                _hostPendingMoves = moves;   // native runs; broadcast the same batch in the postfix
+                // Close diff non-empty ⇒ native ExitState already ran its own ApplyCostsCommand (UI adds present);
+                // charge only a purely rail-relayed session (re-baselined ⇒ invisible to the native charge).
+                if (sessionHadMove && moves.Count == 0) HostApplyInventoryCost(actingNetId);
+            }
             return false;
         }
 
@@ -145,12 +164,11 @@ namespace Multiplayer.Sync.Tactical
                 // the host's view is open lingers empty until the host's next screen close — harmless litter.
                 var applied = ApplyMoves(intent.Moves, destroyEmptied: ActiveTacticalInventoryState() == null,
                                          intent.ActingNetId);
-                // AP: cost is due iff ≥1 move APPLIED (native rule: any cross-inventory move ⇒ cost due; a rejected
-                // move is excluded) AND the origin flags this intent as its screen-session's first (per-gesture rail
-                // sends one intent per gesture; native charges the ability once per inventory-view session, so the
-                // origin's session latch is the only place that knows "first"). A stale/hostile flag can only
-                // UNDER-charge the origin's own soldier — co-op, not adversarial.
-                if (applied.Count > 0 && intent.ApplyCost) HostApplyInventoryCost(intent.ActingNetId);
+                // AP: the origin flags cost-due at its screen-session CLOSE (native charges the ability once per
+                // view session at ExitState) — either on the close-diff intent (moves applied) or as a pure-cost
+                // ZERO-move intent when the per-gesture rail already relayed everything. A stale/hostile flag can
+                // only mis-charge the origin's own soldier — co-op, not adversarial.
+                if (intent.ApplyCost && (applied.Count > 0 || intent.Moves.Count == 0)) HostApplyInventoryCost(intent.ActingNetId);
 
                 // Broadcast the APPLIED subset — even when empty: a rejected/conflicting move never mirrors (the
                 // origin suppressed its local commit, so its model is consistent), but the empty apply still reaches
@@ -205,11 +223,11 @@ namespace Multiplayer.Sync.Tactical
         }
 
         // ─── REACTIVE per-gesture rail (immediate relay, no screen-close wait) ──────────────────────
-        // One AP-cost per screen session (native charges the inventory ability once per view session). The latch is
-        // the state instance of the session that already charged/flagged; ExitState (OnApplyInventoryActions above)
-        // re-arms it. ponytail: a fully-rejected first intent leaves the flag armed → that session under-charges;
-        // acceptable in co-op, upgrade to a host-side per-session ack if AP drift ever matters.
-        private static object _costChargedForState;
+        // AP-cost latch: the state instance of the session that relayed/applied ≥1 REAL move. Gesture intents are
+        // always cost-free — charging mid-session zeroes AP and native AllowItemSwapHandler then denies every
+        // further drag (RCA 2026-07-15) — so the single per-session charge happens at close
+        // (OnApplyInventoryActions above), matching native ExitState → ApplyCostsCommand timing.
+        private static object _sessionMovedState;
 
         /// <summary>A tactical-inventory gesture completed (slot swap / side-button / Undo). Diff the UI lists
         /// against the per-gesture baseline — the SAME membership truth the deferred <c>AttemptMoveItems</c> would
@@ -245,9 +263,8 @@ namespace Multiplayer.Sync.Tactical
                     Debug.Log("[Multiplayer][tac] GESTURE empty diff unsynced=" + unsynced + " |" + listDiag);
                 if (moves.Count > 0)
                 {
-                    bool anyReal = false;                          // a pure reorder must never charge the ability AP
+                    bool anyReal = false;                          // a pure reorder never latches the session cost
                     foreach (var m in moves) if (!Codec.IsReorder(m)) { anyReal = true; break; }
-                    bool firstOfSession = anyReal && !ReferenceEquals(_costChargedForState, state);
                     if (host)
                     {
                         // destroyEmptied FALSE: the host's own view is open (this IS its gesture). Native never
@@ -257,7 +274,7 @@ namespace Multiplayer.Sync.Tactical
                         var applied = ApplyMoves(moves, destroyEmptied: false, actingNetId);
                         if (applied.Count > 0)
                         {
-                            if (firstOfSession) { HostApplyInventoryCost(actingNetId); _costChargedForState = state; }
+                            foreach (var m in applied) if (!Codec.IsReorder(m)) { _sessionMovedState = state; break; }
                             BroadcastApply(engine, applied);
                         }
                         Debug.Log("[Multiplayer][tac] GESTURE host applied moves=" + applied.Count + "/" + moves.Count +
@@ -265,11 +282,12 @@ namespace Multiplayer.Sync.Tactical
                     }
                     else
                     {
-                        byte[] payload = Codec.EncodeIntent(actingNetId, firstOfSession, moves, NextNonce());
+                        // Cost-free relay: the per-session AP charge rides the close intent (see the latch note above).
+                        byte[] payload = Codec.EncodeIntent(actingNetId, false, moves, NextNonce());
                         TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacInventoryIntent, payload);
-                        if (anyReal) _costChargedForState = state;
+                        if (anyReal) _sessionMovedState = state;
                         Debug.Log("[Multiplayer][tac] GESTURE client sent tac.intent.inventory moves=" + moves.Count +
-                                  " acting=" + actingNetId + " applyCost=" + firstOfSession + " unsynced=" + unsynced);
+                                  " acting=" + actingNetId + " unsynced=" + unsynced);
                     }
                 }
                 // Re-baseline ONLY when the diff carried something: _initialItems IS the diff the native deferred
