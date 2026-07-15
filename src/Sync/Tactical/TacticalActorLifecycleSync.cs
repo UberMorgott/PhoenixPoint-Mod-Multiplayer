@@ -380,12 +380,18 @@ namespace Multiplayer.Sync.Tactical
                 bool evac = p.Reason == TacticalActorLifecycleCodec.ReasonEvacuated;
                 if (evac) _evacuatedNetIds.Add(p.NetId);   // client intent gate (see IsNetIdEvacuated)
                 object actor = TacticalDeploySync.ResolveLiveActor(p.NetId);
+                bool nativeEvac = false;
                 if (actor != null)
                 {
                     using (SyncApplyScope.Enter())
                     using (TacticalActorStateSync.EnterApplyScope())
                     {
-                        if (evac) HideEvacuatedActor(actor);
+                        if (evac)
+                        {
+                            nativeEvac = TryApplyNativeEvac(actor);
+                            if (!nativeEvac) HideEvacuatedActor(actor);
+                            ClearSelectionIfSelected(actor);
+                        }
                         else InvokeDestroyActor(actor);
                     }
                 }
@@ -393,7 +399,10 @@ namespace Multiplayer.Sync.Tactical
                 TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacActorDespawn, p.Seq);
                 Debug.Log("[Multiplayer][tac] CLIENT removed tac.actor.despawn netId=" + p.NetId +
                           " reason=" + p.Reason + " (mirror " +
-                          (actor != null ? (evac ? "hidden, kept for summary" : "destroyed") : "already gone") + ")");
+                          (actor != null
+                              ? (evac ? (nativeEvac ? "evacuated NATIVELY, kept for summary" : "hidden (fallback), kept for summary")
+                                      : "destroyed")
+                              : "already gone") + ")");
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorDespawn failed: " + ex); }
         }
@@ -431,18 +440,86 @@ namespace Multiplayer.Sync.Tactical
         /// sibling sync classes) — a stale evacuated netId must not block intents in the next mission.</summary>
         internal static void Reset() => _evacuatedNetIds.Clear();
 
-        /// <summary>Native-evac parity for the mirror (RCA 2026-07-15): the host does NOT destroy an evacuated
-        /// actor — EvacuatedStatus just hides it (EvacuatedStatus.HideActor, EvacuatedStatus.cs:14-20) and it STAYS
-        /// in the faction, which is what lets UIModuleBattleSummary list the squad. The old DestroyActor removal
-        /// left the view's SelectedActor pointing at a DESTROYED Unity object → UIStateCharacterSelected.UpdateState
-        /// NRE'd every frame and the view machine wedged (acting client stranded at mission end). Replicates
-        /// HideActor verbatim (force-hide + animator off + cancel actions + forget vision), then clears the
-        /// selection the way TacticalView.OnActorExitedPlay (:1169) did on the destroy path — no exit-play fires
-        /// here, so the decal/ghost-cells clear must be explicit. Per-step best-effort.
-        /// ponytail: no mounted/off-map parity (ExitMissionAbility.cs:29 ApplyMountedStatus) — live-applying a
-        /// native status to the mirror breaks the inert-status canon, so the ghost stays visible in the squad
-        /// bar / selectable; commands for it are dead ends via IsNetIdEvacuated + HasEvacuatedStatus gates.
-        /// Upgrade path: an off-map removal equivalent if the ghost portrait bothers users.</summary>
+        /// <summary>Full NATIVE evac on the mirror (user directive 2026-07-15, supersedes the hide-only replica —
+        /// that one left a selectable ghost + an empty clickable squad slot). Invokes the actor's OWN
+        /// <c>ExitMissionAbility.HideActorInExitZone(zone)</c> (ExitMissionAbility.cs:25-30): EvacuatedStatus
+        /// (force-hide + animator off + cancel actions + vision forget) + UnapplyAllStatusesFiltered + the zone's
+        /// <c>VehicleComponent.ApplyMountedStatus</c> — the mirror reaches the host's exact end-state (mounted →
+        /// interactable off, follow-socket, standby via TacticalActor.OnStatusApplyUnapply → gone from
+        /// selection/squad bar, vanishes like single-player). Statuses applied here are NATIVE creations, NOT
+        /// spine mirrors, so ClientStatusMirrorGuards do not skip their effects; the caller already holds
+        /// SyncApplyScope so nothing re-relays. Mission-end stays owned by the 0x95 gate; the e2f07b4 intent
+        /// gates stay as belts. False → caller falls back to the legacy hide-only replica.</summary>
+        private static bool TryApplyNativeEvac(object actor)
+        {
+            try
+            {
+                object ability = FindExitMissionAbility(actor);
+                if (ability == null)
+                { Debug.LogWarning("[Multiplayer][tac] native evac: mirror has no ExitMissionAbility — hide-only fallback"); return false; }
+                object zone = FindExitZoneFor(actor);
+                if (zone == null)
+                { Debug.LogWarning("[Multiplayer][tac] native evac: no TacticalExitZone resolved — hide-only fallback"); return false; }
+                var hide = AccessTools.Method(ability.GetType(), "HideActorInExitZone");
+                if (hide == null)
+                { Debug.LogWarning("[Multiplayer][tac] native evac: HideActorInExitZone not found — hide-only fallback"); return false; }
+                hide.Invoke(ability, new[] { zone });
+                return true;
+            }
+            catch (Exception ex)
+            { Debug.LogError("[Multiplayer][tac] native evac failed — hide-only fallback: " + ex); return false; }
+        }
+
+        /// <summary>The actor's own ExitMissionAbility instance — the same <c>GetAbilities&lt;TacticalAbility&gt;()</c>
+        /// walk as TacticalCombatSync.ResolveAbilityByGuid, matched by TYPE NAME (the 0x93 wire carries no guid).</summary>
+        private static object FindExitMissionAbility(object actor)
+        {
+            var tacAbilityType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility");
+            var getAbilities = tacAbilityType != null ? AccessTools.Method(actor.GetType(), "GetAbilities") : null;
+            if (getAbilities == null || !getAbilities.IsGenericMethodDefinition) return null;
+            var gen = getAbilities.MakeGenericMethod(tacAbilityType);
+            if (gen.GetParameters().Length != 0) return null;   // GetAbilities<T>() — the no-arg overload
+            if (!(gen.Invoke(actor, null) is IEnumerable abilities)) return null;
+            foreach (var a in abilities)
+                if (a != null && a.GetType().Name == "ExitMissionAbility") return a;
+            return null;
+        }
+
+        /// <summary>Exit zone for the mounted-status apply: native pick first (unlocked + BoxCollider bounds
+        /// contain the actor — GetZonesContainingActor parity), else ANY zone — the host already validated the
+        /// evac; on the mirror the zone only hosts the mount bookkeeping/socket.</summary>
+        private static object FindExitZoneFor(object actor)
+        {
+            var zoneType = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.ActorDeployment.TacticalExitZone");
+            object map = GetProp(actor, "Map");
+            if (zoneType == null || map == null) return null;
+            MethodInfo gen = null;
+            foreach (var m in map.GetType().GetMethods())
+                if (m.Name == "GetActors" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0)
+                { gen = m.MakeGenericMethod(zoneType); break; }
+            if (!(gen?.Invoke(map, null) is IEnumerable zones)) return null;
+
+            object first = null;
+            Vector3 pos = GetProp(actor, "Pos") is Vector3 p ? p : Vector3.zero;
+            foreach (var z in zones)
+            {
+                if (z == null) continue;
+                if (first == null) first = z;
+                try
+                {
+                    if (AccessTools.Method(z.GetType(), "IsLocked")?.Invoke(z, null) is bool locked && locked) continue;
+                    // Collider type lives in UnityEngine.PhysicsModule (not referenced) — read bounds reflectively.
+                    if (GetProp(GetProp(z, "BoxCollider"), "bounds") is Bounds b && b.Contains(pos)) return z;
+                }
+                catch { }
+            }
+            return first;
+        }
+
+        /// <summary>FALLBACK hide-only replica (used when <see cref="TryApplyNativeEvac"/> can't resolve the
+        /// ability/zone): EvacuatedStatus.HideActor verbatim — force-hide + animator off + cancel actions +
+        /// forget vision. Keeps the actor for the battle summary; the caller clears selection. Ghost stays in
+        /// the squad bar on this path — the intent gates keep it non-commandable. Per-step best-effort.</summary>
         private static void HideEvacuatedActor(object actor)
         {
             try
@@ -472,7 +549,6 @@ namespace Multiplayer.Sync.Tactical
                 _forgetForAllMethod?.Invoke(null, new object[] { actor, false });
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] evac hide: ForgetForAll failed: " + ex); }
-            ClearSelectionIfSelected(actor);
         }
 
         /// <summary>If the hidden actor is the view's SelectedActor, deselect (clears the selection decal via the
