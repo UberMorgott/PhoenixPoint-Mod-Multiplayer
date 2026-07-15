@@ -493,11 +493,13 @@ namespace Multiplayer.Sync.Tactical
             var zoneType = AccessTools.TypeByName("PhoenixPoint.Tactical.Levels.ActorDeployment.TacticalExitZone");
             object map = GetProp(actor, "Map");
             if (zoneType == null || map == null) return null;
+            // Base.Levels.BaseMap.cs:64: GetActors<T>(Func<T,bool> predicate = null) — ONE optional param.
+            // (rca 2026-07-15: a zero-arity filter matched nothing → every evac fell to the hide-only path.)
             MethodInfo gen = null;
             foreach (var m in map.GetType().GetMethods())
-                if (m.Name == "GetActors" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0)
+                if (m.Name == "GetActors" && m.IsGenericMethodDefinition && m.GetParameters().Length == 1)
                 { gen = m.MakeGenericMethod(zoneType); break; }
-            if (!(gen?.Invoke(map, null) is IEnumerable zones)) return null;
+            if (!(gen?.Invoke(map, new object[] { null }) is IEnumerable zones)) return null;
 
             object first = null;
             Vector3 pos = GetProp(actor, "Pos") is Vector3 p ? p : Vector3.zero;
