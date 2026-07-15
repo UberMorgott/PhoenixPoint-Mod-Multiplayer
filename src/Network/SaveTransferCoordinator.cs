@@ -129,6 +129,9 @@ namespace Multiplayer.Network
         private long _lastSnapshotMs = -1;
         private const long SnapshotIntervalMs = 50; // ≈20 Hz — re-broadcast the smooth real fillAmount frequently
         private bool _loadCompleteSent;
+        // Entry settle-hide: OnReachedPlaying deferred its SendLoadComplete because a tac-entry deploy
+        // hydrate is still pending — released by NotifyHydrateSettled (ClientHydrateNow tail).
+        private bool _loadCompleteAwaitsHydrate;
         // Phase-2 native-load driver state (moved here from LoadOverlayController): last percent this
         // peer reported, so the session-scoped pump throttles to whole-percent steps and detects the
         // load finishing (LoadingProgress→null) independently of overlay visibility. -1 = not reporting.
@@ -991,6 +994,7 @@ namespace Multiplayer.Network
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
+            _loadCompleteAwaitsHydrate = false;
             _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
             _loadingLevel = null;      // fresh session: no level captured yet
             _liveProgressBar = null;   // fresh session: live native bar not captured yet
@@ -1024,6 +1028,40 @@ namespace Multiplayer.Network
             _reachedPlaying = false;  // so OnReachedPlaying fires again at the tactical Playing (label + host done-mark)
             Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
+        }
+
+        /// <summary>
+        /// Tactical→geoscape RETURN barrier: re-arm the synchronized-reveal hold on THIS peer at tactical
+        /// teardown (TacticalLevelEndPatch fires on host AND clients). The return has NO save transfer
+        /// (clients ride the native mission-end to the geoscape), so nothing else resets _revealed — the
+        /// first peer to finish its geoscape load used to lift instantly while the rest still loaded
+        /// (live RCA 2026-07-16). Re-arming here re-enters the EXISTING machinery unchanged:
+        /// OnReachedPlaying → hold + LoadComplete; host Update() aggregates → AllDone → RevealAll →
+        /// simultaneous lift. InPhase2 (=_begun &amp;&amp; !_loadCompleteSent) goes true again, so the
+        /// overlay + per-slot progress pump also work for free. Failure belts are the existing ones:
+        /// roster shrink on peer-left, 180 s host forced-reveal + per-peer self-reveal.
+        /// </summary>
+        public void OpenReturnBarrier()
+        {
+            if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
+            if (!_revealed || _barrierOpen) return; // already armed / an entry transfer owns the state
+            _revealed = false;
+            _reachedPlaying = false;
+            _revealHoldStartedMs = 0;
+            _loadCompleteSent = false;
+            _loadCompleteAwaitsHydrate = false;
+            _lastReportedLoadPct = -1;
+            _loadingLevel = null;
+            _liveProgressBar = null;
+            _slotProgress.Clear();
+            _tracker.Reset();
+            _lastSnapshotMs = -1;
+            // Host aggregation + forced-reveal deadline (same Update() path as phase-2; unused off-host).
+            _loadPhaseActive = true;
+            _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
+            _revealAllSent = false;
+            Debug.Log($"[Multiplayer] return barrier armed (tac→geo): host={_engine.IsHost} — " +
+                      "holding reveal until every roster slot reports load-complete.");
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1071,6 +1109,7 @@ namespace Multiplayer.Network
                 // new save — otherwise the client would download + prepare it but never enter the level.
                 _begun = false;
                 _loadCompleteSent = false;
+                _loadCompleteAwaitsHydrate = false;
                 _reachedPlaying = false;
                 _revealed = false;
                 _revealAllSent = false;
@@ -1440,7 +1479,28 @@ namespace Multiplayer.Network
             // This peer is done but HELD (curtain gate parks every native lift until Revealed).
             // Label the held native loading screen so the wait reads as intentional.
             Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
-            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable).
+            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable) —
+            // EXCEPT a client whose tac-entry deploy hydrate is still pending: defer the report until the
+            // hydrate settles (NotifyHydrateSettled from the ClientHydrateNow tail), so the reveal covers
+            // the AP/turn-HUD/vision/placement settle instead of flashing it right after the lift. A
+            // hydrate that never runs is bounded by the existing 180 s forced/self-reveal belts.
+            if (!_engine.IsHost && Multiplayer.Sync.Tactical.TacticalDeploySync.HydratePending)
+            {
+                _loadCompleteAwaitsHydrate = true;
+                Debug.Log("[Multiplayer] OnReachedPlaying: tac-entry hydrate pending → defer SendLoadComplete");
+                return;
+            }
+            SendLoadComplete();
+        }
+
+        /// <summary>CLIENT tac-entry settle-hide: the deploy hydrate finished (called from the
+        /// ClientHydrateNow tail, finally-guarded) → send the LoadComplete that OnReachedPlaying
+        /// deferred. No-op unless a deferral is armed.</summary>
+        public void NotifyHydrateSettled()
+        {
+            if (!_loadCompleteAwaitsHydrate) return;
+            _loadCompleteAwaitsHydrate = false;
+            Debug.Log("[Multiplayer] hydrate settled → deferred SendLoadComplete");
             SendLoadComplete();
         }
 

@@ -73,6 +73,10 @@ namespace Multiplayer.Sync.Tactical
         private static int _launchingSiteId = -1;
         // Client: the pending deploy we received but haven't hydrated yet (waiting for scene Playing).
         private static TacticalDeployCodec.DeployPayload _pendingClientDeploy;
+        /// <summary>CLIENT: a received tac.deploy has not been applied yet (hydrate pending/in-flight).
+        /// SaveTransferCoordinator.OnReachedPlaying defers its LoadComplete on this, so the reveal
+        /// barrier holds until the hydrate settle is applied (settle-hide).</summary>
+        public static bool HydratePending => _pendingClientDeploy != null;
         private static int _hydratedSiteId = int.MinValue;
 
         // The live NetId registry for the current mission (both sides). Rebuilt per deploy.
@@ -872,12 +876,12 @@ namespace Multiplayer.Sync.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive || engine.IsHost) return;
-            if (_pendingClientDeploy == null || tacticalLevelController == null) return;
             EnsureReflection();
 
             var p = _pendingClientDeploy;
             try
             {
+                if (p == null || tacticalLevelController == null) return;
                 // 1) Restore the full battle from the host snapshot (deserialize → ProcessInstanceData) — but
                 //    ONLY when this is a FRESH level (legacy launch-then-hydrate path). When the client is
                 //    hydrating an already-live level (the real co-op flow), the client's own native tactical
@@ -978,6 +982,13 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex)
             {
                 Debug.LogError("[Multiplayer][tac] ClientHydrateNow failed: " + ex);
+            }
+            finally
+            {
+                // Settle-hide release: the hydrate ran (or provably had nothing to apply) → send the
+                // LoadComplete that OnReachedPlaying deferred. finally-guarded so a hydrate throw can
+                // never strand the reveal barrier on this peer.
+                try { engine.SaveTransfer?.NotifyHydrateSettled(); } catch { }
             }
         }
 

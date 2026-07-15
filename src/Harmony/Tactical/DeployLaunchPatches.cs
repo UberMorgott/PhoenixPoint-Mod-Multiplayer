@@ -173,6 +173,13 @@ namespace Multiplayer.Harmony.Tactical
             try { TacticalDeploySync.OnMissionExit(); }
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit failed: {ex}"); }
 
+            // RETURN BARRIER: tactical teardown fires HERE on every peer (host at its own exit, clients
+            // at the exit-go ride-along) = the geoscape return begins → re-arm the synchronized-reveal
+            // hold so the first peer to finish loading holds until all report load-complete. One arm
+            // site for both sides; self-gated inside (live started co-op session only, re-entrancy-safe).
+            try { NetworkEngine.Instance?.SaveTransfer?.OpenReturnBarrier(); }
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] return-barrier arm failed: {ex}"); }
+
             // REVERSE (tactical→geoscape) stage-1: the host now loads the geoscape → ping the client loading
             // indicator so it isn't frozen while the host loads + autosaves. Host-only + idempotent inside
             // HostBeginLoad; runs AFTER OnMissionExit (whose Reset cleared the prior heartbeat + curtain). The
