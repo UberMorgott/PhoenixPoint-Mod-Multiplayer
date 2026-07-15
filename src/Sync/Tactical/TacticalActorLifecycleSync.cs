@@ -378,6 +378,7 @@ namespace Multiplayer.Sync.Tactical
             try
             {
                 bool evac = p.Reason == TacticalActorLifecycleCodec.ReasonEvacuated;
+                if (evac) _evacuatedNetIds.Add(p.NetId);   // client intent gate (see IsNetIdEvacuated)
                 object actor = TacticalDeploySync.ResolveLiveActor(p.NetId);
                 if (actor != null)
                 {
@@ -397,6 +398,39 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleActorDespawn failed: " + ex); }
         }
 
+        // Evacuated mirror netIds THIS mission (cleared via Reset() at OnMissionExit). The hidden actor stays
+        // registered + selectable client-side — this set is what makes it non-COMMANDABLE (intent-send gate).
+        private static readonly HashSet<int> _evacuatedNetIds = new HashSet<int>();
+
+        /// <summary>CLIENT intent gate (RCA 2026-07-15 №2): was this netId evacuated this mission? The hidden
+        /// mirror actor is still selectable (no mounted/off-map parity — see HideEvacuatedActor ceiling), so the
+        /// send chokepoints drop intents for it instead of relaying commands the host can never run.</summary>
+        internal static bool IsNetIdEvacuated(int netId) => _evacuatedNetIds.Contains(netId);
+
+        /// <summary>HOST authoritative intent gate (RCA 2026-07-15 №2): does the live actor carry the native
+        /// <c>EvacuatedStatus</c>? Executing a relayed move/ability on an evacuated host actor (animator natively
+        /// disabled by EvacuatedStatus.HideActor) never finishes its presentation → per-frame animator-time error
+        /// spam + IsWaitingForActiveAndQueuedAbilities stuck true → the host view wedges in UIStateWaiting at
+        /// game-over. Fail-open on reflection (behaves as before the gate).</summary>
+        internal static bool HasEvacuatedStatus(object actor)
+        {
+            try
+            {
+                object status = GetProp(actor, "Status");
+                if (status == null) return false;
+                if (_statusesField == null) _statusesField = AccessTools.Field(status.GetType(), "Statuses");
+                if (_statusesField?.GetValue(status) is IEnumerable list)
+                    foreach (var s in list)
+                        if (s != null && s.GetType().Name == "EvacuatedStatus") return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Per-mission reset (called from <see cref="TacticalDeploySync.OnMissionExit"/> like the
+        /// sibling sync classes) — a stale evacuated netId must not block intents in the next mission.</summary>
+        internal static void Reset() => _evacuatedNetIds.Clear();
+
         /// <summary>Native-evac parity for the mirror (RCA 2026-07-15): the host does NOT destroy an evacuated
         /// actor — EvacuatedStatus just hides it (EvacuatedStatus.HideActor, EvacuatedStatus.cs:14-20) and it STAYS
         /// in the faction, which is what lets UIModuleBattleSummary list the squad. The old DestroyActor removal
@@ -404,7 +438,11 @@ namespace Multiplayer.Sync.Tactical
         /// NRE'd every frame and the view machine wedged (acting client stranded at mission end). Replicates
         /// HideActor verbatim (force-hide + animator off + cancel actions + forget vision), then clears the
         /// selection the way TacticalView.OnActorExitedPlay (:1169) did on the destroy path — no exit-play fires
-        /// here, so the decal/ghost-cells clear must be explicit. Per-step best-effort.</summary>
+        /// here, so the decal/ghost-cells clear must be explicit. Per-step best-effort.
+        /// ponytail: no mounted/off-map parity (ExitMissionAbility.cs:29 ApplyMountedStatus) — live-applying a
+        /// native status to the mirror breaks the inert-status canon, so the ghost stays visible in the squad
+        /// bar / selectable; commands for it are dead ends via IsNetIdEvacuated + HasEvacuatedStatus gates.
+        /// Upgrade path: an off-map removal equivalent if the ghost portrait bothers users.</summary>
         private static void HideEvacuatedActor(object actor)
         {
             try
@@ -477,6 +515,7 @@ namespace Multiplayer.Sync.Tactical
         private static MethodInfo _spawnActorMethod;   // ActorSpawner.SpawnActor<TacticalActorBase>(BaseDef, ActorInstanceData, bool)
         private static MethodInfo _destroyActorMethod; // ActorSpawner.DestroyActor(ActorComponent)
         private static MethodInfo _forgetForAllMethod; // TacticalFactionVision.ForgetForAll(TacticalActorBase, bool)
+        private static FieldInfo _statusesField;       // StatusComponent.Statuses (public List<Status>)
         private static FieldInfo _actorSetDefField;    // ActorCreateData.ActorSetDef
         private static FieldInfo _serializeDefContentsField; // BaseDef.SerializeDefContents (static)
         private static bool _defContentsResolved;

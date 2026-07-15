@@ -160,6 +160,12 @@ namespace Multiplayer.Sync.Tactical
                     Debug.LogError("[Multiplayer][tac] ability intent: unknown actor netId — suppressing local activation");
                     return false;
                 }
+                // rca-evac-command-leak: never relay commands for a hidden evacuated mirror (still selectable).
+                if (TacticalActorLifecycleSync.IsNetIdEvacuated(actorNetId))
+                {
+                    Debug.Log("[Multiplayer][tac] ability intent for evacuated netId " + actorNetId + " — not sent (soldier already evacuated)");
+                    return false;
+                }
 
                 // FIX: read the def guid off Ability.BaseDef (the real guid-bearing def), not "Def" (null).
                 string abilityGuid = DefReflection.GetGuid(GetProp(ability, "BaseDef"));
@@ -229,6 +235,13 @@ namespace Multiplayer.Sync.Tactical
                       " ability=" + intent.AbilityDefGuid + " targetNetId=" + intent.TargetNetId +
                       " shooterResolved=" + (shooter != null));
             if (shooter == null) { Debug.LogError("[Multiplayer][tac] shoot intent: no shooter for netId " + intent.ShooterNetId); return; }
+            // rca-evac-command-leak (authoritative belt): an evacuated actor's animator is natively disabled —
+            // a relayed Activate never finishes and wedges the host view at game-over. Same gate as move/generic.
+            if (TacticalActorLifecycleSync.HasEvacuatedStatus(shooter))
+            {
+                Debug.LogError("[Multiplayer][tac] shoot intent for EVACUATED netId " + intent.ShooterNetId + " — dropped (client selection leak)");
+                return;
+            }
 
             try
             {
@@ -363,6 +376,12 @@ namespace Multiplayer.Sync.Tactical
                 if (actorNetId < 0)
                 {
                     NotifyGenericDegrade(typeName, "unknown caster netId");
+                    return false;
+                }
+                // rca-evac-command-leak: never relay commands for a hidden evacuated mirror (still selectable).
+                if (TacticalActorLifecycleSync.IsNetIdEvacuated(actorNetId))
+                {
+                    Debug.Log("[Multiplayer][tac] generic intent for evacuated netId " + actorNetId + " — not sent (soldier already evacuated)");
                     return false;
                 }
                 string abilityGuid = DefReflection.GetGuid(GetProp(ability, "BaseDef"));
@@ -508,6 +527,12 @@ namespace Multiplayer.Sync.Tactical
 
             object actor = TacticalDeploySync.ResolveLiveActor(intent.ActorNetId);
             if (actor == null) { Debug.LogError("[Multiplayer][tac] generic intent: no caster for netId " + intent.ActorNetId); return; }
+            // rca-evac-command-leak (authoritative belt): same gate as move/shoot — see HasEvacuatedStatus.
+            if (TacticalActorLifecycleSync.HasEvacuatedStatus(actor))
+            {
+                Debug.LogError("[Multiplayer][tac] generic intent for EVACUATED netId " + intent.ActorNetId + " — dropped (client selection leak)");
+                return;
+            }
 
             try
             {

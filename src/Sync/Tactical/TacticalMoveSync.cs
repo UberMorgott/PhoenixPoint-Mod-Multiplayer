@@ -138,6 +138,13 @@ namespace Multiplayer.Sync.Tactical
                               " netId=" + netId + " posToApply=(n/a) action=SUPPRESS");
                     Debug.LogError("[Multiplayer][tac] move intent: unknown netId for actor"); return false;
                 }
+                // rca-evac-command-leak: the hidden evacuated mirror is still selectable — never relay commands
+                // for it (the host actor's animator is natively disabled; an executed move wedges game-over).
+                if (TacticalActorLifecycleSync.IsNetIdEvacuated(netId))
+                {
+                    Debug.Log("[Multiplayer][tac] move intent for evacuated netId " + netId + " — not sent (soldier already evacuated)");
+                    return false;
+                }
 
                 if (!TryGetPositionToApply(parameter, out Vector3 pos))
                 {
@@ -187,6 +194,14 @@ namespace Multiplayer.Sync.Tactical
             if (actor == null)
             {
                 Debug.LogError("[Multiplayer][tac] move intent: no actor for netId " + intent.NetId + " " + TacticalDeploySync.DescribeLiveActorIds());
+                return;
+            }
+            // rca-evac-command-leak (authoritative belt): never execute a relayed move on an EVACUATED actor —
+            // its animator is natively disabled (EvacuatedStatus.HideActor), the move presentation never ends,
+            // and the stuck action wedges the host view in UIStateWaiting at game-over.
+            if (TacticalActorLifecycleSync.HasEvacuatedStatus(actor))
+            {
+                Debug.LogError("[Multiplayer][tac] move intent for EVACUATED netId " + intent.NetId + " — dropped (client selection leak)");
                 return;
             }
 
