@@ -147,9 +147,20 @@ namespace Multiplayer.Network
                 foreach (var clientId in toRemove)
                 {
                     Debug.LogWarning($"[Multiplayer] Client {clientId} timed out");
-                    // F1: a heartbeat timeout removes the client directly (it never reaches the
-                    // transport OnPeerDisconnected path), so post the "-- X left --" line HERE to keep
-                    // the drop notice uniform with crash/graceful-leave. Capture the name before purge.
+                    // ONE disconnect path (same as a crash drop): kick the peer at the TRANSPORT — which
+                    // stops Broadcast writing to the dead id forever — and let its OnPeerDisconnected
+                    // raise funnel through NetworkEngine.OnPeerDisconnected → RemoveClient + the F1 drop
+                    // notice (SessionNotifier chat/toast). Direct/Stun marshal the event to the next
+                    // Update tick, so drop the heartbeat row NOW to keep this timeout from re-firing.
+                    bool kicked = false;
+                    try { kicked = _engine.Transport?.DisconnectPeer(clientId) ?? false; } catch { }
+                    if (kicked)
+                    {
+                        _lastHeartbeat.Remove(clientId);
+                        continue;
+                    }
+                    // Transport never knew the peer → no event will come; purge + notify directly
+                    // (the pre-DisconnectPeer legacy path). Capture the name before the purge.
                     var timedOutNick = TryGetClientName(clientId, out var n) ? n : SessionLifecycle.UnknownPlayer;
                     RemoveClient(clientId);
                     SystemChat(SessionLifecycle.FormatPeerEvent(connected: false, timedOutNick));
@@ -258,6 +269,20 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost) return;
             _engine.BroadcastToAll(new NetworkMessage(PacketType.HostDisconnected));
+        }
+
+        /// <summary>
+        /// Client-only (graceful leave notice): tell the host we are leaving BEFORE the transport goes
+        /// down (menu quit / Alt+F4), so it drops us instantly instead of waiting out the 20 s heartbeat
+        /// timeout (which stays as the crash backstop). Host-side <see cref="HandleLeave"/> posts the
+        /// "— X left —" line and re-broadcasts; the later transport drop then reports wasKnown=false →
+        /// no duplicate notice. Best-effort: a no-op on the host or with no live host link.
+        /// </summary>
+        public void SendClientLeave()
+        {
+            if (_engine.IsHost || !HostPeerId.HasValue) return;
+            _engine.SendToHost(new NetworkMessage(PacketType.ClientLeave,
+                MessageSerializer.SerializeLeave(_engine.LocalSteamId)));
         }
 
         public IEnumerable<ulong> GetConnectedClients()
@@ -790,6 +815,12 @@ namespace Multiplayer.Network
                 SystemChat($"— {leaverNick} left —");
             }
             RemoveClient(peerSteamId);
+            // Host: same transport-registry leak as the heartbeat timeout — without this the leaver
+            // stays in the transport's peer set and Broadcast writes to the dead id forever. The kick's
+            // OnPeerDisconnected raise reports wasKnown=false (roster already purged above) → no
+            // duplicate drop notice.
+            if (_engine.IsHost)
+                try { _engine.Transport?.DisconnectPeer(peerSteamId); } catch { }
         }
 
         // RENAME (any→H→all): live nickname edit.

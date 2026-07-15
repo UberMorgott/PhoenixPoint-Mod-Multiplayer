@@ -28,6 +28,13 @@ namespace Multiplayer.Transport
         void Send(ulong peerId, byte[] data, bool reliable = true);
         void Broadcast(byte[] data, bool reliable = true);
 
+        // Drop ONE peer (heartbeat timeout / graceful leave): close its session/socket AND remove it
+        // from the transport's peer set so Send/Broadcast stop writing to the dead id. Returns true if
+        // the peer was known — an OnPeerDisconnected raise follows (inline, or on the next Update for
+        // transports that marshal peer events); false for an unknown id (no event will fire — the
+        // caller must clean up itself).
+        bool DisconnectPeer(ulong peerId);
+
         void Update();
     }
 }

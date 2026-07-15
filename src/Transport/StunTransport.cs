@@ -361,6 +361,20 @@ namespace Multiplayer.Transport
             OnStateChanged?.Invoke(State);
         }
 
+        // Per-peer kick (heartbeat timeout): forget the peer so Broadcast stops sending to the dead
+        // endpoint (UDP has no close signal — dropping the map entry IS the disconnect). The event
+        // marshals through _peerEventQueue like the other peer events.
+        public bool DisconnectPeer(ulong peerId)
+        {
+            lock (_lock)
+            {
+                if (!_peers.TryGetValue(peerId, out var ep)) return false;
+                _peers.Remove(peerId);
+                _peerEventQueue.Enqueue((false, peerId, ep.ToString()));
+            }
+            return true;
+        }
+
         public void Send(ulong peerId, byte[] data, bool reliable = true)
         {
             lock (_lock)

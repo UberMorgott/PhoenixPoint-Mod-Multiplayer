@@ -234,6 +234,10 @@ namespace Multiplayer.Harmony
                 var engine = Multiplayer.Network.NetworkEngine.Instance;
                 if (engine != null && engine.IsHost && engine.IsActive)
                     engine.Session?.SendHostDisconnected();
+                // Same courtesy in the other direction: a CLIENT returning to the menu tells the host
+                // it is leaving so the host drops it instantly (heartbeat timeout stays the backstop).
+                else if (engine != null && engine.IsActive)
+                    engine.Session?.SendClientLeave();
 
                 engine?.TearDown();
             }

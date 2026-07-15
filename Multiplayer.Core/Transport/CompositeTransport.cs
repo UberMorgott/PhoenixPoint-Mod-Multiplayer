@@ -259,6 +259,20 @@ namespace Multiplayer.Transport
             }
         }
 
+        // Per-peer kick: route to the owning child by outward id. The child's OnPeerDisconnected raise
+        // funnels back through HandleChildDisconnected, which unmaps the peer and re-raises outward.
+        public bool DisconnectPeer(ulong peerId)
+        {
+            ITransport child;
+            ulong rawId;
+            lock (_lock)
+            {
+                if (!_peerToChild.TryGetValue(peerId, out child)) return false;
+                rawId = _outwardToRaw[peerId];
+            }
+            return child.DisconnectPeer(rawId);
+        }
+
         public void Update()
         {
             foreach (var c in _children) c.Update();

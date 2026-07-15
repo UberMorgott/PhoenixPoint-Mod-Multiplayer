@@ -1,4 +1,6 @@
 using System;
+using Base.Core;
+using Base.UI.MessageBox;
 using UnityEngine;
 using PhoenixPoint.Common.View.ViewControllers;
 
@@ -69,8 +71,10 @@ namespace Multiplayer.Network
             try { _attached?.Session?.SystemChat(line); }
             catch (Exception e) { Debug.LogError("[Multiplayer] SessionNotifier chat failed: " + e.Message); }
 
-            // Transient toast on THIS peer where a NotificationController is live (geoscape/menu).
-            ShowToast(line);
+            // Transient toast on THIS peer where a NotificationController is live (geoscape/menu);
+            // in tactical (no controller) fall back to the native prompt — a partner drop is
+            // session-significant and must be VISIBLE, not a chat line nobody has open.
+            ShowToast(line, modalFallback: true);
         }
 
         /// <summary>
@@ -79,13 +83,22 @@ namespace Multiplayer.Network
         /// Never throws. INTERNAL: also the native "diverged" hint surface of the Inc5 CRC probe
         /// (<c>CrcProbeMirror</c>) — one toast per divergence transition, native-UI-first.
         /// </summary>
-        internal static void ShowToast(string message)
+        internal static void ShowToast(string message, bool modalFallback = false)
         {
             try
             {
                 var controller = UnityEngine.Object.FindObjectOfType<NotificationController>();
                 if (controller != null)
+                {
                     controller.ShowNotification(message);
+                    return;
+                }
+                // No toast surface in this context (tactical). Opt-in per call site: the disconnect
+                // notice falls back to the native prompt (same widget the F3 host-leave path uses —
+                // works tactical + geoscape + home); the join toast and CRC divergence hint stay quiet.
+                if (modalFallback)
+                    GameUtl.GetMessageBox()?.ShowSimplePrompt(
+                        message, MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
             }
             catch (Exception e)
             {

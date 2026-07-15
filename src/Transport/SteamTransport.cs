@@ -24,6 +24,8 @@ namespace Multiplayer.Transport
         // Shutdown() only clears the field when it still holds OUR handler — a newer transport that has
         // already overwritten the field (re-host before this teardown runs) must not be clobbered.
         private Delegate _installedSessionHandler;
+        // Same ownership guard for the OnP2PConnectionFailed handler (see _installedSessionHandler).
+        private Delegate _installedConnectFailHandler;
         private readonly HashSet<ulong> _connectedPeers = new HashSet<ulong>();
         private readonly Queue<(ulong, byte[])> _incomingQueue = new Queue<(ulong, byte[])>();
         // FIX-2: consecutive send-failure count per peer. SendP2PPacket can return false (or throw) when
@@ -57,6 +59,7 @@ namespace Multiplayer.Transport
         private static object _p2pSendReliable;                  // boxed P2PSend.Reliable (=2)
         private static object _p2pSendUnreliable;                // boxed P2PSend.Unreliable (=0)
         private static FieldInfo _onP2PSessionRequestField;      // static Action<SteamId>
+        private static FieldInfo _onP2PConnectionFailedField;    // static Action<SteamId, P2PSessionError> — OPTIONAL
         private static MethodInfo _acceptSessionMethod;          // AcceptP2PSessionWithUser(SteamId)
         private static MethodInfo _closeSessionMethod;           // CloseP2PSessionWithUser(SteamId)
         private static MethodInfo _allowRelayMethod;             // AllowP2PPacketRelay(bool) — OPTIONAL (relay fallback)
@@ -106,6 +109,11 @@ namespace Multiplayer.Transport
 
             const BindingFlags S = BindingFlags.Public | BindingFlags.Static;
             _onP2PSessionRequestField = _steamNetworkingType.GetField("OnP2PSessionRequest", S);
+            // OPTIONAL: Steam's authoritative "P2P session died" callback (remote quit / crashed / NAT
+            // path lost). Declared next to OnP2PSessionRequest in the same static-field style. Resolved
+            // best-effort and NOT part of the required-member gate — without it peer-loss detection
+            // falls back to the heartbeat timeout.
+            _onP2PConnectionFailedField = _steamNetworkingType.GetField("OnP2PConnectionFailed", S);
             _acceptSessionMethod = _steamNetworkingType.GetMethod("AcceptP2PSessionWithUser", S, null, new[] { _steamIdType }, null);
             _closeSessionMethod = _steamNetworkingType.GetMethod("CloseP2PSessionWithUser", S, null, new[] { _steamIdType }, null);
             // OPTIONAL: relay-fallback toggle. Steam defaults P2P packet relay ON, so this is normally a
@@ -206,6 +214,32 @@ namespace Multiplayer.Transport
                 _installedSessionHandler = sessionHandler;   // remember OUR handler for a guarded Shutdown clear
                 _onP2PSessionRequestField.SetValue(null, sessionHandler);
 
+                // Wire Steam's session-failed callback the same way. Never-silent: log whether it armed —
+                // a signature miss must be visible in the Player.log, not a silent detection downgrade.
+                if (_onP2PConnectionFailedField != null)
+                {
+                    try
+                    {
+                        var failHandler = BuildConnectFailDelegate();
+                        _installedConnectFailHandler = failHandler;
+                        _onP2PConnectionFailedField.SetValue(null, failHandler);
+                        UnityEngine.Debug.Log("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook armed " +
+                                              "(instant peer-loss detection).");
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook FAILED " +
+                                                   $"to build/install ({ex.Message}) — peer loss falls back to the " +
+                                                   "heartbeat timeout.");
+                    }
+                }
+                else
+                {
+                    UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: OnP2PConnectionFailed field NOT FOUND " +
+                                                 "in the shipped Facepunch build — peer loss falls back to the " +
+                                                 "heartbeat timeout.");
+                }
+
                 State = ConnectionState.Connected;
                 OnStateChanged?.Invoke(State);
             }
@@ -233,6 +267,25 @@ namespace Multiplayer.Transport
             return Expression.Lambda(_onP2PSessionRequestField.FieldType, body, param).Compile();
         }
 
+        // Build a delegate matching the OnP2PConnectionFailed field's exact type
+        // (Action<SteamId, P2PSessionError>) without naming either Steamworks type at compile time:
+        // parameter types come from the field's delegate Invoke signature; SteamId unwraps via .Value
+        // and the error enum converts to int for logging. Mirrors BuildSessionRequestDelegate.
+        private Delegate BuildConnectFailDelegate()
+        {
+            var handlerMi = typeof(SteamTransport).GetMethod("OnP2PConnectFail",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            var invoke = _onP2PConnectionFailedField.FieldType.GetMethod("Invoke");
+            var pars = invoke.GetParameters()
+                .Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
+            var body = Expression.Call(
+                Expression.Constant(this),
+                handlerMi,
+                Expression.Field(pars[0], _steamIdValueField),   // steamId.Value (ulong)
+                Expression.Convert(pars[1], typeof(int)));       // P2PSessionError → int
+            return Expression.Lambda(_onP2PConnectionFailedField.FieldType, body, pars).Compile();
+        }
+
         // Box a ulong into a Steamworks.SteamId struct for passing to the static P2P methods.
         private object MakeSteamId(ulong id)
         {
@@ -258,6 +311,18 @@ namespace Multiplayer.Transport
                 catch { }
             }
             _installedSessionHandler = null;
+            // Same guarded clear for the session-failed handler (never clobber a newer transport's hook).
+            if (_onP2PConnectionFailedField != null && _installedConnectFailHandler != null)
+            {
+                try
+                {
+                    var current = _onP2PConnectionFailedField.GetValue(null) as Delegate;
+                    if (ReferenceEquals(current, _installedConnectFailHandler))
+                        _onP2PConnectionFailedField.SetValue(null, null);
+                }
+                catch { }
+            }
+            _installedConnectFailHandler = null;
             foreach (var peer in _connectedPeers)
             {
                 CloseSession(peer);
@@ -296,6 +361,18 @@ namespace Multiplayer.Transport
             _connectedPeers.Clear();
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);
+        }
+
+        // Per-peer kick (heartbeat timeout / graceful leave): close the P2P session AND forget the peer
+        // so Broadcast stops sending to the dead SteamId forever. Raises OnPeerDisconnected inline —
+        // same-main-thread precedent as RegisterSendFailure's host branch.
+        public bool DisconnectPeer(ulong peerId)
+        {
+            if (!_connectedPeers.Remove(peerId)) return false;
+            CloseSession(peerId);
+            _consecutiveSendFailures.Remove(peerId);
+            OnPeerDisconnected?.Invoke(peerId, $"Steam({peerId})");
+            return true;
         }
 
         public void Send(ulong peerId, byte[] data, bool reliable = true)
@@ -437,6 +514,21 @@ namespace Multiplayer.Transport
             }
             catch { }
             return null;
+        }
+
+        // Steam declared the P2P session to this peer dead (remote quit / crashed / path lost): called
+        // from the compiled shim with the unwrapped ulong + raw P2PSessionError. Route through the SAME
+        // per-peer drop path as a send-failure: on the CLIENT the dropped peer is the host →
+        // NetworkEngine → HostLeaveHandler (F3 menu return, intentional-teardown suppressed); on the
+        // HOST it is a client drop (Session purge + F1 notice). A stale callback for an already-dropped
+        // peer is a no-op.
+        private void OnP2PConnectFail(ulong remoteSteamId, int error)
+        {
+            if (!_connectedPeers.Remove(remoteSteamId)) return;
+            UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: P2P session to {remoteSteamId} failed " +
+                                         $"(P2PSessionError={error}) — dropping peer.");
+            _consecutiveSendFailures.Remove(remoteSteamId);
+            OnPeerDisconnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");
         }
 
         // Inbound peer accepted: called from the compiled Action<SteamId> shim with the unwrapped

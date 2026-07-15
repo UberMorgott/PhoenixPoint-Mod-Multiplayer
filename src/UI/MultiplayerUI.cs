@@ -1329,6 +1329,10 @@ namespace Multiplayer.UI
             // leave always completes cleanly and the client returns to the menu (lobby panel hidden).
             try
             {
+                // Graceful leave notice BEFORE the transport closes: the host drops us instantly
+                // (HandleLeave) instead of waiting out the 20 s heartbeat timeout. Best-effort no-op
+                // on the host / with no live host link.
+                NetworkEngine.Instance?.Session?.SendClientLeave();
                 NetworkEngine.Instance?.Disconnect();
             }
             finally
@@ -1381,6 +1385,23 @@ namespace Multiplayer.UI
         // ═══════════════════════════════════════════════════════════════════
         //  Update
         // ═══════════════════════════════════════════════════════════════════
+
+        // Alt+F4 / native window close never runs the menu-quit path, so without this the other side
+        // waits out the full 20 s heartbeat timeout. Best-effort leave notice on Unity's process-quit
+        // callback (fires on Alt+F4 and normal quit; a hard kill/crash still falls back to the
+        // heartbeat). TCP writes flush synchronously; Steam P2P sends queue to the separate Steam
+        // client process, which delivers them after the game exits.
+        private void OnApplicationQuit()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive) return;
+            try
+            {
+                if (engine.IsHost) engine.Session?.SendHostDisconnected();
+                else engine.Session?.SendClientLeave();
+            }
+            catch { /* quitting — never block the exit */ }
+        }
 
         private void Update()
         {

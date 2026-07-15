@@ -61,6 +61,7 @@ namespace Multiplayer.Tests
             public void Disconnect() { }
             public void Send(ulong peerId, byte[] data, bool reliable = true) => Sent.Add((peerId, data));
             public void Broadcast(byte[] data, bool reliable = true) { }
+            public bool DisconnectPeer(ulong peerId) => false;
             public void Update() { }
 
             public void RaiseConnected(ulong rawId, string endpoint = "ep")

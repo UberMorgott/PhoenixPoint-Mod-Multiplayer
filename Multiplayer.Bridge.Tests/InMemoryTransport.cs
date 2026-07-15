@@ -160,6 +160,9 @@ namespace Multiplayer.Bridge.Tests
             OnStateChanged?.Invoke(State);
         }
 
+        // Bus peers never kick each other in these sims — no per-transport peer set to prune.
+        public bool DisconnectPeer(ulong peerId) => false;
+
         public void Send(ulong peerId, byte[] data, bool reliable = true)
             => _bus.Enqueue(PeerId, peerId, data, "SEND");
 

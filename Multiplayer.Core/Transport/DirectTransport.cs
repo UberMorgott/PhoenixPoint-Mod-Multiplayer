@@ -291,6 +291,25 @@ namespace Multiplayer.Transport
             OnStateChanged?.Invoke(State);
         }
 
+        // Per-peer kick (heartbeat timeout): close ONE client socket and forget it so Broadcast stops
+        // writing to the dead peer. The disconnect event marshals through _peerEventQueue (drained in
+        // Update) like every other peer event; the read loop's own catch — which fires when the kicked
+        // socket's blocking Read aborts — is deduped by its conditional enqueue (peer already gone).
+        public bool DisconnectPeer(ulong peerId)
+        {
+            lock (_lock)
+            {
+                if (!_clients.TryGetValue(peerId, out var client)) return false;
+                _clients.Remove(peerId);
+                string label;
+                try { label = client.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
+                catch { label = "unknown"; }
+                try { client.Close(); } catch { }
+                _peerEventQueue.Enqueue((false, peerId, label));
+            }
+            return true;
+        }
+
         public void Send(ulong peerId, byte[] data, bool reliable = true)
         {
             lock (_lock)
@@ -421,8 +440,11 @@ namespace Multiplayer.Transport
                     // TimeSync.ResetClientState — never runs on this background receive thread.
                     lock (_lock)
                     {
-                        _clients.Remove(peerId);
-                        _peerEventQueue.Enqueue((false, peerId, "connection lost"));
+                        // Only surface the drop if the peer was still registered — a DisconnectPeer kick
+                        // already removed it AND queued the event, so an unconditional enqueue here
+                        // (this catch fires when the kicked socket's Read aborts) would double-fire.
+                        if (_clients.Remove(peerId))
+                            _peerEventQueue.Enqueue((false, peerId, "connection lost"));
                     }
                 }
             }) { IsBackground = true };

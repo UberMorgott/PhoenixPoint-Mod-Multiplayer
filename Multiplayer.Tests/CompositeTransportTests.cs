@@ -47,6 +47,14 @@ namespace Multiplayer.Tests
             public void Disconnect() { }
             public void Send(ulong peerId, byte[] data, bool reliable = true) => Sent.Add((peerId, data));
             public void Broadcast(byte[] data, bool reliable = true) => Broadcasts.Add(data);
+            // Mirrors a real child: kick = raise the disconnect event (composite unmaps on it).
+            public readonly List<ulong> KickedPeers = new List<ulong>();
+            public bool DisconnectPeer(ulong peerId)
+            {
+                KickedPeers.Add(peerId);
+                OnPeerDisconnected?.Invoke(peerId, "kicked");
+                return true;
+            }
             public void Update() { UpdateCalls++; }
 
             // Test drivers (raise the child-side events the composite subscribes to).
