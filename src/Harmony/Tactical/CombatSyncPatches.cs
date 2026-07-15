@@ -98,4 +98,49 @@ namespace Multiplayer.Harmony.Tactical
             }
         }
     }
+
+    /// <summary>
+    /// Miss-feedback HIT detector #2 (beside the ApplyDamage funnel): postfix on the single native status-apply
+    /// funnel <c>StatusComponent.CallApplyStatus(Status)</c> (private, non-virtual — every ApplyStatus/
+    /// ApplyStatusIfUnique overload routes through it, StatusComponent.cs:220-227). A pure-status attack that
+    /// lands NO DamageResult on the target (defensive coverage for status-only payloads) would otherwise read as
+    /// a MISS — mark the status owner as effect-seen for any in-flight relayed attack aimed at it. Gated to the
+    /// hot path by the registry count (host-only populated, ~always 0), so the per-status cost off-window is one
+    /// int compare.
+    /// </summary>
+    [HarmonyPatch]
+    public static class StatusApplyEffectMarkPatch
+    {
+        private static MethodBase _target;
+        private static System.Type _actorBaseType;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("Base.Entities.Statuses.StatusComponent");
+            if (t == null) return false;
+            // private void CallApplyStatus(Status status) — single method, name-only match is exact.
+            _target = AccessTools.Method(t, "CallApplyStatus");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (TacticalCombatSync.RelayedShots.Count == 0) return;   // no relayed attack in flight
+                if (_actorBaseType == null)
+                    _actorBaseType = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.TacticalActorBase");
+                var comp = __instance as UnityEngine.Component;
+                object actor = (comp != null && _actorBaseType != null) ? comp.GetComponent(_actorBaseType) : null;
+                if (actor == null) return;   // a non-actor status holder (geoscape etc.) — not an attack target
+                TacticalCombatSync.RelayedShots.MarkEffect(TacticalDeploySync.NetIdForLiveActor(actor));
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] StatusApplyEffectMarkPatch.Postfix failed: " + ex);
+            }
+        }
+    }
 }

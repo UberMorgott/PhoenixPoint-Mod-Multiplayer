@@ -95,15 +95,16 @@ namespace Multiplayer.Sync.Tactical
         public static bool ShouldForceAimingForRelayedShot(object actor)
             => actor != null && RelayedShots.IsActorActive(actor);
 
-        /// <summary>Clear a relayed shoot's registry entry at its <c>OnPlayingActionEnd</c> (hit / miss /
-        /// fumble). No-op for host-own / non-registered abilities. MISS FEEDBACK: if the shot's intent TARGET
-        /// took no host damage during the window (DamageSeen stays false — set by <see cref="OnHostApplyDamage"/>
-        /// via <c>MarkDamage</c>), broadcast tac.shot.result so each client raises the native Missed bark the
-        /// origin's damage-neutered local presentation can't produce (its WaitForProjectilesToHit is neutered).</summary>
+        /// <summary>Clear a relayed attack's registry entry at its <c>OnPlayingActionEnd</c> (hit / miss /
+        /// fumble; shoot AND melee — the full 0x87 set). No-op for host-own / non-registered abilities. MISS
+        /// FEEDBACK: if NOTHING landed on the attack's intent TARGET during the window (EffectSeen stays false —
+        /// set by <see cref="OnHostApplyDamage"/> for any damage form incl. 0-HP paralysis/viral, and by
+        /// <c>StatusApplyEffectMarkPatch</c> for a bare status apply), broadcast tac.shot.result so each client
+        /// raises the native Missed bark the damage-neutered client presentation can't produce.</summary>
         public static void EndRelayedShot(object ability)
         {
             var shot = RelayedShots.End(ability);
-            if (shot != null && shot.TargetNetId >= 0 && !shot.DamageSeen)
+            if (shot != null && shot.TargetNetId >= 0 && !shot.EffectSeen)
                 TacticalFireAnimSync.HostBroadcastShotMiss(shot.Shooter, shot.TargetNetId);
         }
 
@@ -260,19 +261,24 @@ namespace Multiplayer.Sync.Tactical
                 var activate = AccessTools.Method(ability.GetType(), "Activate", new[] { typeof(object) });
                 if (activate == null) { Debug.LogError("[Multiplayer][tac] ability intent: Activate(object) not found"); return; }
 
-                // FIX B (relayed-shot cosmetic-delay strip): register this CLIENT-ORIGIN shoot so the host runs
-                // it INLINE (B1, read synchronously by the EnqueueAction prefix during Activate) and SKIPS the
-                // aim-up wait (B2, read later by the CurrentlyAiming postfix inside the deferred shot coroutine).
-                // Scoped to the SHOOT coroutine set (ShootAbility = shoot+grenade) — melee (BashAbility) already
-                // runs inline (PlayAction) and never reaches FireWeaponAtTargetCrt's aim-up. The host's OWN shots
-                // are never registered → they keep the full native cinematic. Cleared at OnPlayingActionEnd.
+                // Register this CLIENT-ORIGIN attack (the full 0x87 set: shoot + melee) for the miss-feedback
+                // verdict, and — SHOOT only (FIX B, cosmetic-delay strip) — so the host runs it INLINE (B1, read
+                // synchronously by the EnqueueAction prefix during Activate) and SKIPS the aim-up wait (B2, read
+                // later by the CurrentlyAiming postfix inside the deferred shot coroutine). Melee (BashAbility)
+                // already runs inline (PlayAction) and never reaches FireWeaponAtTargetCrt's aim-up, so it gets
+                // verdict tracking only. The host's OWN attacks are never registered → full native cinematic.
+                // Cleared at OnPlayingActionEnd (RelayedAttackEndPatch on the TacticalAbility base virtual).
                 bool relayedShoot = TacticalAbilityRelay.ShouldBroadcastFireStart(ability.GetType().Name);
-                if (relayedShoot)
+                bool relayedMelee = TacticalAbilityRelay.ShouldBroadcastMeleeStart(ability.GetType().Name);
+                if (relayedShoot || relayedMelee)
                 {
                     // Carry the intent's target netId so EndRelayedShot can broadcast the miss feedback when
-                    // that target took no host damage (a bare-position/ground target rides -1 → no feedback).
-                    RelayedShots.Begin(ability, shooter, intent.TargetNetId);
-                    Debug.Log("[Multiplayer][tac] B1/B2 registered relayed shoot (inline+aim-skip) actor=" + intent.ShooterNetId +
+                    // NOTHING landed on that target (a bare-position/ground target rides -1 → no feedback).
+                    // Melee (BashAbility, incl. stun batons) registers VERDICT-ONLY (cosmeticStrips=false):
+                    // it already animates inline via BashCrt, so B1/B2 must stay shoot-scoped.
+                    RelayedShots.Begin(ability, shooter, intent.TargetNetId, cosmeticStrips: relayedShoot);
+                    Debug.Log("[Multiplayer][tac] registered relayed attack (verdict" +
+                              (relayedShoot ? "+B1/B2 inline+aim-skip" : "") + ") actor=" + intent.ShooterNetId +
                               " ability=" + ability.GetType().Name);
                 }
 
@@ -959,9 +965,10 @@ namespace Multiplayer.Sync.Tactical
                 int targetNetId = capturedNetId >= 0 ? capturedNetId : TacticalDeploySync.NetIdForLiveActor(target);
                 if (targetNetId < 0) return;   // an unregistered actor (e.g. transient destructible) — skip
 
-                // MISS FEEDBACK: any host damage to an in-flight relayed shot's intent target = a HIT — flag it
-                // so EndRelayedShot skips the tac.shot.result(miss) broadcast for that shot.
-                RelayedShots.MarkDamage(targetNetId);
+                // MISS FEEDBACK: any host damage to an in-flight relayed attack's intent target = a HIT — this
+                // funnel carries EVERY damage form (HP, paralysis, viral, acid, daze — a Neurazer hit is a 0-HP
+                // DamageResult through here) — flag it so EndRelayedShot skips the tac.shot.result(miss).
+                RelayedShots.MarkEffect(targetNetId);
 
                 var p = FlattenDamage(damageResultBoxed);
                 if (p == null) return;

@@ -90,6 +90,40 @@ namespace Multiplayer.Harmony.Tactical
         }
     }
 
+    /// <summary>Miss-feedback verdict for the NON-shoot relayed attacks (melee/BashAbility, incl. stun batons):
+    /// postfix on the BASE virtual <c>TacticalAbility.OnPlayingActionEnd</c> (TacticalAbility.cs:1060, fired from
+    /// ClearPlayingAction for EVERY ability whose subclass does not override it — BashAbility doesn't). Drains the
+    /// relayed-attack registry entry → EndRelayedShot broadcasts tac.shot.result when nothing landed on the
+    /// target. For a SHOOT the override (ShootAbility.OnPlayingActionEnd:279) calls base, so this fires FIRST and
+    /// drains the entry; the sibling <see cref="RelayedShootEndPatch"/> then no-ops on the registry (End is
+    /// idempotent) and keeps its shoot-scoped OriginNativeShot close. Registry is host-populated only → client /
+    /// unregistered abilities are a dictionary-miss no-op.</summary>
+    [HarmonyPatch]
+    public static class RelayedAttackEndPatch
+    {
+        private static MethodBase _target;
+
+        public static bool Prepare()
+        {
+            var t = AccessTools.TypeByName("PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility");
+            if (t == null) return false;
+            // protected virtual void OnPlayingActionEnd(PlayingAction action) — the base virtual.
+            _target = AccessTools.Method(t, "OnPlayingActionEnd");
+            return _target != null;
+        }
+
+        public static MethodBase TargetMethod() => _target;
+
+        public static void Postfix(object __instance)
+        {
+            try { TacticalCombatSync.EndRelayedShot(__instance); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] RelayedAttackEndPatch.Postfix failed: " + ex);
+            }
+        }
+    }
+
     [HarmonyPatch]
     public static class RelayedShootEndPatch
     {

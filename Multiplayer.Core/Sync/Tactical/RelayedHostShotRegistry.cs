@@ -23,15 +23,19 @@ namespace Multiplayer.Sync.Tactical
     /// </summary>
     public sealed class RelayedHostShotRegistry
     {
-        /// <summary>One in-flight relayed shot. Beyond the B1/B2 keys it carries the intent's TARGET netId +
-        /// whether that target took ANY host damage during the shot window — read at <c>End</c> by the miss-
-        /// feedback broadcast (tac.shot.result): TargetNetId ≥ 0 and DamageSeen=false = an authoritative MISS
-        /// the origin client's locally-rolled (damage-neutered) presentation cannot show.</summary>
+        /// <summary>One in-flight relayed attack (shoot OR melee — the full 0x87 relayable set). Beyond the
+        /// B1/B2 keys it carries the intent's TARGET netId + whether ANY effect landed on that target during
+        /// the window (damage of any form — HP/paralysis/viral — via the ApplyDamage funnel, or a status via
+        /// the CallApplyStatus funnel) — read at <c>End</c> by the miss-feedback broadcast (tac.shot.result):
+        /// TargetNetId ≥ 0 and EffectSeen=false = an authoritative MISS the origin client's damage-neutered
+        /// presentation cannot show. CosmeticStrips scopes B1/B2 to SHOOT windows only: melee (BashAbility)
+        /// already animates inline via BashCrt and must never see a forced CurrentlyAiming.</summary>
         public sealed class Shot
         {
             public object Shooter;
             public int TargetNetId;
-            public bool DamageSeen;
+            public bool EffectSeen;
+            public bool CosmeticStrips;
         }
 
         // ability instance -> its in-flight shot entry. Identity comparer so overridden Equals/GetHashCode on
@@ -42,41 +46,45 @@ namespace Multiplayer.Sync.Tactical
         /// <summary>Number of in-flight relayed shots (diag / tests).</summary>
         public int Count => _byAbility.Count;
 
-        /// <summary>Register a relayed shoot: the host is about to <c>Activate</c> <paramref name="ability"/>
+        /// <summary>Register a relayed attack: the host is about to <c>Activate</c> <paramref name="ability"/>
         /// for <paramref name="shooter"/> at the intent's target actor (<paramref name="targetNetId"/>, -1 for a
-        /// bare-position target — no miss feedback for those). No-op if ability/shooter is null. Overwrites a
-        /// leaked prior entry for the same ability (self-heal).</summary>
-        public void Begin(object ability, object shooter, int targetNetId = -1)
+        /// bare-position target — no miss feedback for those). <paramref name="cosmeticStrips"/> = true for a
+        /// SHOOT window (B1/B2 apply), false for melee (verdict tracking only). No-op if ability/shooter is
+        /// null. Overwrites a leaked prior entry for the same ability (self-heal).</summary>
+        public void Begin(object ability, object shooter, int targetNetId = -1, bool cosmeticStrips = true)
         {
             if (ability == null || shooter == null) return;
-            _byAbility[ability] = new Shot { Shooter = shooter, TargetNetId = targetNetId };
+            _byAbility[ability] = new Shot { Shooter = shooter, TargetNetId = targetNetId, CosmeticStrips = cosmeticStrips };
         }
 
-        /// <summary>B1: is this exact ability instance an in-flight relayed shoot (→ run its action inline)?</summary>
+        /// <summary>B1: is this exact ability instance an in-flight relayed shoot (→ run its action inline)?
+        /// False for a melee (verdict-only) entry — melee already runs inline natively.</summary>
         public bool IsAbilityActive(object ability)
-            => ability != null && _byAbility.ContainsKey(ability);
+            => ability != null && _byAbility.TryGetValue(ability, out var shot) && shot.CosmeticStrips;
 
-        /// <summary>B2: is this actor the shooter of an in-flight relayed shoot (→ skip the aim-up wait)?</summary>
+        /// <summary>B2: is this actor the shooter of an in-flight relayed shoot (→ skip the aim-up wait)?
+        /// False for a melee (verdict-only) entry — a melee attacker must never see a forced CurrentlyAiming.</summary>
         public bool IsActorActive(object actor)
         {
             if (actor == null) return false;
             foreach (var kv in _byAbility)
-                if (ReferenceEquals(kv.Value.Shooter, actor)) return true;
+                if (kv.Value.CosmeticStrips && ReferenceEquals(kv.Value.Shooter, actor)) return true;
             return false;
         }
 
-        /// <summary>Miss feedback: the host's ApplyDamage funnel just broadcast damage to
-        /// <paramref name="targetNetId"/> — flag every in-flight shot aimed at it as a HIT (no tac.shot.result
-        /// at its End). Window-scoped: only shots currently registered can match.</summary>
-        public void MarkDamage(int targetNetId)
+        /// <summary>Miss feedback: the host just applied SOME effect (any damage form via the ApplyDamage
+        /// funnel, or a status via CallApplyStatus) to <paramref name="targetNetId"/> — flag every in-flight
+        /// attack aimed at it as a HIT (no tac.shot.result at its End). Window-scoped: only attacks currently
+        /// registered can match.</summary>
+        public void MarkEffect(int targetNetId)
         {
             if (targetNetId < 0) return;
             foreach (var kv in _byAbility)
-                if (kv.Value.TargetNetId == targetNetId) kv.Value.DamageSeen = true;
+                if (kv.Value.TargetNetId == targetNetId) kv.Value.EffectSeen = true;
         }
 
         /// <summary>Remove an ability's entry at its shot end and return it (null if absent / null) so the
-        /// caller can read TargetNetId/DamageSeen for the miss-feedback broadcast.</summary>
+        /// caller can read TargetNetId/EffectSeen for the miss-feedback broadcast.</summary>
         public Shot End(object ability)
         {
             if (ability == null) return null;

@@ -209,9 +209,10 @@ namespace Multiplayer.Sync.Tactical
         }
 
         // ─── MISS FEEDBACK (tac.shot.result): host broadcast + client native Missed bark ─────────────
-        /// <summary>HOST: a relayed/origin-native shot just ended (<c>EndRelayedShot</c>) with its intent TARGET
-        /// having taken no host damage — broadcast <c>tac.shot.result</c> so each client raises the native miss
-        /// cue. A HIT needs no result surface (tac.damage already shows it). Fail-open: logged + swallowed.</summary>
+        /// <summary>HOST: a relayed attack (shoot OR melee — the 0x87 set) just ended (<c>EndRelayedShot</c>)
+        /// with NOTHING landed on its intent TARGET (no damage of any form, no status) — broadcast
+        /// <c>tac.shot.result</c> so each client raises the native miss cue. A HIT needs no result surface
+        /// (tac.damage already shows it). Fail-open: logged + swallowed.</summary>
         public static void HostBroadcastShotMiss(object shooter, int targetNetId)
         {
             try
