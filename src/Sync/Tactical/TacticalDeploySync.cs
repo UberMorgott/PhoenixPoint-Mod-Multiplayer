@@ -1046,6 +1046,8 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalActorLifecycleSync.Reset(); }                            // rca-evac-command-leak: drop evacuated netIds
             catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
+            try { TacticalMissionEndSync.ResetExitRelay(); }                       // tac.exit: re-arm the host GO once-guard
+            catch (Exception ex) { Debug.LogError($"[Multiplayer][tac] OnMissionExit external reset failed: {ex}"); }
             try { TacticalTurnSync.IsClientEnemyTurn = false; } catch { }          // Inc3: clear enemy-turn cinematic-camera flag
         }
 
@@ -1356,6 +1358,20 @@ namespace Multiplayer.Sync.Tactical
             if (surfaceId == (byte)TacticalSurfaceIds.TacStructDamage)
             {
                 try { TacticalStructDamageSync.HandleStructDamage(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.structdamage failed: " + ex); }
+                return true;
+            }
+
+            // ─── SIMULTANEOUS tactical exit (tac.exit) ───────────────────────────────────────────────
+            // Intent: a client confirmed the battle exit → the host exits for everyone (its postfix broadcasts GO).
+            // GO: every client runs its own native GoToGeoscape. Both side-gated internally.
+            if (surfaceId == (byte)TacticalSurfaceIds.TacExitIntent)
+            {
+                try { TacticalMissionEndSync.HostOnExitIntent(senderPeerId, payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.exit.intent failed: " + ex); }
+                return true;
+            }
+            if (surfaceId == (byte)TacticalSurfaceIds.TacExitGo)
+            {
+                try { TacticalMissionEndSync.HandleExitGo(payload); } catch (Exception ex) { Debug.LogError("[Multiplayer][tac] tac.exit.go failed: " + ex); }
                 return true;
             }
             return false;

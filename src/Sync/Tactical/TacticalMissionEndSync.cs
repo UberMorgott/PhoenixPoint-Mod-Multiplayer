@@ -143,6 +143,99 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleMissionEnd failed: " + ex); }
         }
 
+        // ─── SIMULTANEOUS EXIT relay (tac.exit 0xA2/0xA3 — user directive 2026-07-15) ────────────────
+        // ANY instance's BattleSummary exit click drives EVERYONE out at once. The click converges on the one
+        // private chokepoint TacticalView.GoToGeoscape (patched by TacticalExitRelayPatch): a CLIENT click is
+        // suppressed → exit-INTENT to host; the HOST (own click or a relayed intent) runs its native exit and
+        // the postfix broadcasts exit-GO; every client then invokes ITS OWN GoToGeoscape under the re-entrancy
+        // flag — the same native path (FinishLevel → ProcessTacticalGameResult → LoadCurrentGeoscape from the
+        // entry-blob geoscape section). NO save re-transfer anywhere on this path.
+
+        [ThreadStatic] private static bool _remoteExitApply;   // lets the relayed/GO invocation through the prefix
+        private static bool _exitGoBroadcast;                   // host once-guard (reset per mission)
+        private static uint _exitNonce;
+
+        /// <summary>Per-mission reset (called from <see cref="TacticalDeploySync.OnMissionExit"/>).</summary>
+        internal static void ResetExitRelay() { _exitGoBroadcast = false; _remoteExitApply = false; }
+
+        /// <summary>CLIENT prefix decision for <c>TacticalView.GoToGeoscape</c>: suppress the local exit and
+        /// relay an exit-intent instead (true = suppress). Host / single-player / the GO re-entrancy pass through.</summary>
+        internal static bool ClientInterceptExit()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || engine.IsHost || _remoteExitApply) return false;
+                TacticalMoveSync.SendToHost(engine, TacticalSurfaceIds.TacExitIntent,
+                    BitConverter.GetBytes(unchecked(++_exitNonce)));
+                Debug.Log("[Multiplayer][tac] CLIENT sent tac.exit.intent nonce=" + _exitNonce +
+                          " (local exit suppressed — waiting for host GO)");
+                return true;
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] ClientInterceptExit failed (native exit runs): " + ex); return false; }
+        }
+
+        /// <summary>HOST postfix on <c>TacticalView.GoToGeoscape</c>: the host is leaving → broadcast exit-GO
+        /// once so every client leaves with it. No-op off-host / off-session / re-entry.</summary>
+        internal static void HostAfterExit()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActive || !engine.IsHost || _exitGoBroadcast) return;
+                _exitGoBroadcast = true;
+                uint seq = TacticalDeploySync.LiveSeq.Next(TacticalSurfaceIds.TacExitGo);
+                TacticalMoveSync.BroadcastToAll(engine, TacticalSurfaceIds.TacExitGo, BitConverter.GetBytes(seq));
+                Debug.Log("[Multiplayer][tac] HOST broadcast tac.exit.go seq=" + seq + " (everyone leaves tactical)");
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostAfterExit failed: " + ex); }
+        }
+
+        /// <summary>HOST inbound (0xA2): a client confirmed the battle exit → run the host's OWN native
+        /// GoToGeoscape (the prefix passes the host through; the postfix then broadcasts GO to all).</summary>
+        public static void HostOnExitIntent(ulong senderPeerId, byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || !engine.IsHost) return;
+            if (payload == null || payload.Length < 4) return;
+            uint nonce = BitConverter.ToUInt32(payload, 0);
+            if (!TacticalDeploySync.IntentDedup.IsNew(senderPeerId, TacticalSurfaceIds.TacExitIntent, nonce)) return;
+            Debug.Log("[Multiplayer][tac] HOST received tac.exit.intent nonce=" + nonce + " → exiting for everyone");
+            InvokeGoToGeoscape();
+        }
+
+        /// <summary>CLIENT inbound (0xA3): the host says GO → run our own native GoToGeoscape under the
+        /// re-entrancy flag (the prefix lets it through). Seq-guarded; not-in-tactical → mark + no-op.</summary>
+        public static void HandleExitGo(byte[] payload)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive || engine.IsHost) return;
+            if (payload == null || payload.Length < 4) return;
+            uint seq = BitConverter.ToUInt32(payload, 0);
+            if (!TacticalDeploySync.LiveSeq.ShouldApply(TacticalSurfaceIds.TacExitGo, seq)) return;
+            TacticalDeploySync.LiveSeq.Mark(TacticalSurfaceIds.TacExitGo, seq);
+            Debug.Log("[Multiplayer][tac] CLIENT received tac.exit.go seq=" + seq + " → native exit to geoscape");
+            _remoteExitApply = true;
+            try { InvokeGoToGeoscape(); }
+            finally { _remoteExitApply = false; }
+        }
+
+        /// <summary>Invoke the live level's private <c>TacticalView.GoToGeoscape()</c> — the exact method the
+        /// BattleSummary button calls (TacticalView.cs:1109-1121). Not in a tactical level → clean no-op.</summary>
+        private static void InvokeGoToGeoscape()
+        {
+            try
+            {
+                object tlc = ResolveClientTlc();
+                object view = tlc != null ? GetProp(tlc, "View") : null;
+                var m = view != null ? AccessTools.Method(view.GetType(), "GoToGeoscape") : null;
+                if (m == null)
+                { Debug.LogError("[Multiplayer][tac] tac.exit: TacticalView.GoToGeoscape not resolvable — no exit"); return; }
+                m.Invoke(view, null);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][tac] InvokeGoToGeoscape failed: " + ex); }
+        }
+
         // ─── HOST reads ──────────────────────────────────────────────────────────────────────────────
 
         /// <summary>Serialize the native <c>GetMissionResult()</c> graph via the ONE game Serializer (spec R2 — never

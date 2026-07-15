@@ -304,5 +304,18 @@ namespace Multiplayer.Sync.Tactical
         // raised (TacticalAbilityReport.cs:47; tactical PP ships NO miss floater widget, the bark IS the native cue).
         //   shotresult (0xA1): [seq][shooterNetId][targetNetId]. Next free 0xA2.
         public const ushort TacShotResult = 0xA1;          // 161: host→all     "relayed shot ended, target took no damage (native MISSED bark)" (carries seq)
+
+        // ─── SIMULTANEOUS tactical exit (tac.exit) — user directive 2026-07-15 ────────────────────────────────
+        // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Closes the "each instance leaves the
+        // battle by its OWN click" gap: the BattleSummary exit click converges on the ONE private chokepoint
+        // TacticalView.GoToGeoscape (TacticalView.cs:1112 → FinishLevel), which is purely LOCAL. Canon
+        // suppress+relay: a CLIENT click is suppressed and relays an exit-INTENT; the HOST (own click, or a
+        // received intent driving its own GoToGeoscape) broadcasts exit-GO, and EVERY instance (host natively,
+        // clients under a re-entrancy flag) runs the SAME native GoToGeoscape → FinishLevel →
+        // ProcessTacticalGameResult → LoadCurrentGeoscape from the mission-entry blob's geoscape section — one
+        // trigger, everyone leaves together, NO save re-transfer. See TacticalMissionEndSync (exit-relay region)
+        // / TacticalExitRelayPatch. Next free ids 0xA2/0xA3.
+        public const ushort TacExitIntent = 0xA2;          // 162: client→host  "player confirmed battle exit on BattleSummary" (intent, carries nonce)
+        public const ushort TacExitGo = 0xA3;              // 163: host→all     "everyone leave tactical NOW (native GoToGeoscape)" (carries seq)
     }
 }
