@@ -150,7 +150,7 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HandleMissionEnd failed: " + ex); }
         }
 
-        // ─── SIMULTANEOUS EXIT relay (tac.exit 0xA2/0xA3 — user directive 2026-07-15) ────────────────
+        // ─── SIMULTANEOUS EXIT relay (tac.exit 0xC2/0xC3 — user directive 2026-07-15) ────────────────
         // ANY instance's BattleSummary exit click drives EVERYONE out at once. The click converges on the one
         // private chokepoint TacticalView.GoToGeoscape (patched by TacticalExitRelayPatch): a CLIENT click is
         // suppressed → exit-INTENT to host; the HOST (own click or a relayed intent) runs its native exit and
@@ -198,7 +198,7 @@ namespace Multiplayer.Sync.Tactical
             catch (Exception ex) { Debug.LogError("[Multiplayer][tac] HostAfterExit failed: " + ex); }
         }
 
-        /// <summary>HOST inbound (0xA2): a client confirmed the battle exit → run the host's OWN native
+        /// <summary>HOST inbound (0xC2): a client confirmed the battle exit → run the host's OWN native
         /// GoToGeoscape (the prefix passes the host through; the postfix then broadcasts GO to all).</summary>
         public static void HostOnExitIntent(ulong senderPeerId, byte[] payload)
         {
@@ -211,7 +211,7 @@ namespace Multiplayer.Sync.Tactical
             InvokeGoToGeoscape();
         }
 
-        /// <summary>CLIENT inbound (0xA3): the host says GO → run our own native GoToGeoscape under the
+        /// <summary>CLIENT inbound (0xC3): the host says GO → run our own native GoToGeoscape under the
         /// re-entrancy flag (the prefix lets it through). Seq-guarded; not-in-tactical → mark + no-op.</summary>
         public static void HandleExitGo(byte[] payload)
         {

@@ -68,4 +68,61 @@ public class SurfaceIdsUniquenessTests
         Assert.Contains(byKind[SurfaceKind.StateChannel], x => x.Name == "GeoSiteChannel");
         Assert.DoesNotContain(byKind[SurfaceKind.GeoEnvelope], x => x.Name == "GeoSiteChannel");
     }
+
+    // ─── Router-level guard: tactical ids share ONE byte space with the geoscape envelope surfaces ───
+    // SurfaceRouter consults the tactical hook FIRST, so a TacticalSurfaceIds value that collides a geoscape
+    // envelope id silently eats that geoscape surface on every peer for the whole session (the 0xA0-0xA3
+    // wallet/state/intent/outcome blackout, RCA 2026-07-15). These tests would have failed all three commits.
+
+    static IReadOnlyList<(string Name, byte Value)> TacticalIds()
+    {
+        return typeof(Multiplayer.Sync.Tactical.TacticalSurfaceIds)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(ushort))
+            .Select(f => (f.Name, (byte)(ushort)f.GetRawConstantValue()))
+            .ToList();
+    }
+
+    [Fact]
+    public void TacticalIdsStayOutOfTheGeoscapePartition()
+    {
+        var tac = TacticalIds();
+        Assert.True(tac.Count > 0, "reflection found no TacticalSurfaceIds consts");
+
+        // Partition map (TacticalSyncSurfaces.cs header): 0x80-0x9F tactical low block, 0xA0-0xBF geoscape
+        // (forbidden), 0xC0+ tactical extension block.
+        var trespassers = tac
+            .Where(t => t.Value >= 0xA0 && t.Value <= 0xBF)
+            .Select(t => $"{t.Name}=0x{t.Value:X2}")
+            .ToList();
+        Assert.True(trespassers.Count == 0,
+            "Tactical surface ids inside the geoscape 0xA0-0xBF partition (the tactical hook would eat the "
+            + "colliding geoscape surface on every peer). Move them to the 0xC0+ extension block:\n  "
+            + string.Join("\n  ", trespassers));
+    }
+
+    [Fact]
+    public void NoRouterLevelCollision_TacticalVsGeoEnvelope_AndWithinTactical()
+    {
+        var tac = TacticalIds();
+
+        var dupes = tac
+            .GroupBy(t => t.Value)
+            .Where(g => g.Count() > 1)
+            .Select(g => $"tactical id 0x{g.Key:X2} shared by: {string.Join(", ", g.Select(x => x.Name))}")
+            .ToList();
+        Assert.True(dupes.Count == 0,
+            "Duplicate ids WITHIN TacticalSurfaceIds:\n  " + string.Join("\n  ", dupes));
+
+        var geo = AllIds()
+            .Where(id => KindOf(id.Name) == SurfaceKind.GeoEnvelope)
+            .ToDictionary(id => id.Value, id => id.Name);
+        var cross = tac
+            .Where(t => geo.ContainsKey(t.Value))
+            .Select(t => $"{t.Name}=0x{t.Value:X2} collides {geo[t.Value]}")
+            .ToList();
+        Assert.True(cross.Count == 0,
+            "Tactical ids colliding geoscape envelope surfaces (router consults tactical FIRST → the geoscape "
+            + "surface goes dark on every peer):\n  " + string.Join("\n  ", cross));
+    }
 }

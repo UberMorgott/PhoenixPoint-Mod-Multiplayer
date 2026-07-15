@@ -6,7 +6,7 @@ using UnityEngine;
 namespace Multiplayer.Harmony.Tactical
 {
     /// <summary>
-    /// SIMULTANEOUS tactical exit (tac.exit 0xA2/0xA3 — user directive 2026-07-15): every BattleSummary
+    /// SIMULTANEOUS tactical exit (tac.exit 0xC2/0xC3 — user directive 2026-07-15): every BattleSummary
     /// "back to geoscape" click converges on the ONE private chokepoint <c>TacticalView.GoToGeoscape</c>
     /// (TacticalView.cs:1109-1121, the BattleSummary finished-callback → FinishLevel). Canon suppress+relay:
     ///   • Prefix, CLIENT in session: suppress the local exit, relay an exit-INTENT to the host

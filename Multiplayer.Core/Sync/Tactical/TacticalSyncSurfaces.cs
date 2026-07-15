@@ -21,9 +21,14 @@ namespace Multiplayer.Sync.Tactical
     /// </summary>
     public static class TacticalSurfaceIds
     {
-        // Tactical surface ids live in a HIGH, non-overlapping byte range (0x80+) so they never collide the
-        // geoscape action surfaces (1-30) or the state-channel ids (1-5). The SurfaceRouter tactical hook
-        // keys on this id to claim the envelope.
+        // PARTITION MAP (router-level: ONE shared byte space; SurfaceRouter consults the tactical hook FIRST,
+        // so a tactical id claims its byte before the geoscape hook ever sees it):
+        //   0x80–0x9F  tactical low block — FULL (0x9F TacItemDestroy took the last id).
+        //   0xA0–0xBF  geoscape envelope partition (SurfaceIds.GeoWallet 0xA0 … spec §2.1) — DO NOT TOUCH:
+        //              a tactical id here silently eats that geoscape surface on every peer for the whole
+        //              session (wallet/state-channel blackout, RCA 2026-07-15).
+        //   0xC0–0xDF  tactical extension block — new tactical surfaces go here. Next free 0xC4.
+        // SurfaceIdsUniquenessTests enforces the partition + router-level uniqueness at build time.
         public const ushort TacDeploy = 0x80;        // 128: host→all full deploy snapshot (single envelope, fits the cap)
         public const ushort TacDeployChunk = 0x81;   // 129: host→all deploy snapshot FRAGMENT (one of N chunks, over-cap path)
 
@@ -289,8 +294,10 @@ namespace Multiplayer.Sync.Tactical
         // + medkit charge (CommonItemData.ModifyCharges) are skipped for the replay (HP stays owned by 0x8F, charge by the
         // host) — animation only. Mirror-safe: peers aren't host so the replay never re-broadcasts. Unlike fire there is
         // NO predicted local play (heal is fully suppressed on the origin), so every peer replays exactly ONCE (no de-dup).
-        //   healstart (0xA0): [seq][healerNetId][abilityDefGuid][targetNetId]. See TacticalHealAnimSync / HealAnimSyncPatches. Next free 0xA1.
-        public const ushort TacHealStart = 0xA0;           // 160: host→all     "actor netId begins heal@guid on target (presentation replay)" (carries seq)
+        //   healstart (0xC0): [seq][healerNetId][abilityDefGuid][targetNetId]. See TacticalHealAnimSync / HealAnimSyncPatches.
+        // (Shipped as 0xA0 for one day — collided with SurfaceIds.GeoWallet, eating every wallet snapshot on
+        // clients; moved to the 0xC0 extension block, RCA 2026-07-15.)
+        public const ushort TacHealStart = 0xC0;           // 192: host→all     "actor netId begins heal@guid on target (presentation replay)" (carries seq)
 
         // ─── MISS FEEDBACK for relayed/origin-native shots (tac.shot.result) ────────────────────────────────────
         // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Host→ALL, carries its own
@@ -302,8 +309,10 @@ namespace Multiplayer.Sync.Tactical
         // broadcasts this and each client raises the NATIVE miss cue on the shooter mirror — the shooter's
         // SharedSoundEvents.Missed Eventus voice bark, the exact event the host's own RaiseSoldierShootingEvents
         // raised (TacticalAbilityReport.cs:47; tactical PP ships NO miss floater widget, the bark IS the native cue).
-        //   shotresult (0xA1): [seq][shooterNetId][targetNetId]. Next free 0xA2.
-        public const ushort TacShotResult = 0xA1;          // 161: host→all     "relayed shot ended, target took no damage (native MISSED bark)" (carries seq)
+        //   shotresult (0xC1): [seq][shooterNetId][targetNetId].
+        // (Shipped as 0xA1 — collided with SurfaceIds.GeoState, eating every state-channel flush on clients;
+        // moved to the 0xC0 extension block, RCA 2026-07-15.)
+        public const ushort TacShotResult = 0xC1;          // 193: host→all     "relayed shot ended, target took no damage (native MISSED bark)" (carries seq)
 
         // ─── SIMULTANEOUS tactical exit (tac.exit) — user directive 2026-07-15 ────────────────────────────────
         // Same 0x67 envelope rail + SurfaceRouter.TacticalInbound fast-path. Closes the "each instance leaves the
@@ -314,8 +323,10 @@ namespace Multiplayer.Sync.Tactical
         // clients under a re-entrancy flag) runs the SAME native GoToGeoscape → FinishLevel →
         // ProcessTacticalGameResult → LoadCurrentGeoscape from the mission-entry blob's geoscape section — one
         // trigger, everyone leaves together, NO save re-transfer. See TacticalMissionEndSync (exit-relay region)
-        // / TacticalExitRelayPatch. Next free ids 0xA2/0xA3.
-        public const ushort TacExitIntent = 0xA2;          // 162: client→host  "player confirmed battle exit on BattleSummary" (intent, carries nonce)
-        public const ushort TacExitGo = 0xA3;              // 163: host→all     "everyone leave tactical NOW (native GoToGeoscape)" (carries seq)
+        // / TacticalExitRelayPatch.
+        // (Shipped as 0xA2/0xA3 — collided with SurfaceIds.GeoIntent/GeoOutcome, eating the geoscape action
+        // relay; moved to the 0xC0 extension block, RCA 2026-07-15. Next free 0xC4.)
+        public const ushort TacExitIntent = 0xC2;          // 194: client→host  "player confirmed battle exit on BattleSummary" (intent, carries nonce)
+        public const ushort TacExitGo = 0xC3;              // 195: host→all     "everyone leave tactical NOW (native GoToGeoscape)" (carries seq)
     }
 }

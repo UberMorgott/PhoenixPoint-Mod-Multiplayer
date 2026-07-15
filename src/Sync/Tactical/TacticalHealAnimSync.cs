@@ -10,7 +10,7 @@ using UnityEngine;
 namespace Multiplayer.Sync.Tactical
 {
     /// <summary>
-    /// Feature C (heal) — client-side HEAL PRESENTATION (tac.heal.start, 0xA0). The heal counterpart of
+    /// Feature C (heal) — client-side HEAL PRESENTATION (tac.heal.start, 0xC0). The heal counterpart of
     /// <see cref="TacticalFireAnimSync"/> / <see cref="TacticalMeleeAnimSync"/>: HealAbility HP + medkit charge
     /// already sync host-authoritatively (0x8F Health bit + the host-owned charge), but NO heal ANIMATION plays on
     /// any peer — a mirroring client SUPPRESSES its own <c>HealAbility.Activate</c> (the generic 0x8E relay) and no
