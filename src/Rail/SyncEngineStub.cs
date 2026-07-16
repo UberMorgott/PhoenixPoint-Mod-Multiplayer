@@ -15,8 +15,9 @@ namespace Multiplayer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
-            // Spike A: research surface rides the geoscape inbound hook (returns false for other ids).
-            Router.GeoscapeInbound = (peer, surfaceId, payload) => ResearchSpike.HandleInbound(_engine, surfaceId, payload);
+            // Research rail (migration #1): deltas + intents ride the geoscape inbound hook
+            // (returns false for other ids). The peer id feeds the host-side IntentDedup.
+            Router.GeoscapeInbound = (peer, surfaceId, payload) => ResearchSync.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
         public bool IsHost => _engine != null && _engine.IsHost;
@@ -27,11 +28,13 @@ namespace Multiplayer.Network.Sync
         public void OnSyncEnvelope(ulong senderPeerId, byte[] payload) => Router.OnInbound(senderPeerId, payload, this);
 
         // Lifecycle seams NetworkEngine / SessionManager / SaveTransferCoordinator drive.
-        // No-ops until the rail owns real surface state (then each becomes the rail's re-seed/reset).
-        public void Tick() => ResearchSpike.HostTick(_engine);
-        public void DetachAllChannels() => ResearchSpike.Reset();
-        public void ResetForReloadBoundary() => ResearchSpike.Reset();
-        public void ResetIntentDedupForPeer(ulong peerId) { }
+        // DetachAllChannels = full session teardown (seq streams reset); ResetForReloadBoundary =
+        // mid-session reload (rca-3 contract: geoscape refs dropped, seq/nonce counters PERSIST so
+        // post-reload deltas keep applying).
+        public void Tick() => ResearchSync.HostTick(_engine);
+        public void DetachAllChannels() => ResearchSync.Reset();
+        public void ResetForReloadBoundary() => ResearchSync.ResetForReloadBoundary();
+        public void ResetIntentDedupForPeer(ulong peerId) => ResearchSync.ResetIntentDedupForPeer(peerId);
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }
     }

@@ -6,6 +6,7 @@ $proj = Join-Path $root "Multiplayer.csproj"
 $out  = Join-Path $root "bin\Release"
 $dest = "D:\Steam\steamapps\common\Phoenix Point\Mods\Multiplayer"
 dotnet build $proj -c Release
+if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item "$out\Multiplayer.dll" $dest -Force
 if (Test-Path "$out\Multiplayer.pdb") { Copy-Item "$out\Multiplayer.pdb" $dest -Force }

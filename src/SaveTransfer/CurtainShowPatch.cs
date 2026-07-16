@@ -89,9 +89,6 @@ namespace Multiplayer.Harmony
                     if (coord.SessionStarted)
                     {
                         coord.OnReachedPlaying();   // co-op: hold + LoadComplete until RevealAll
-                        // Level is live again → clear the transition latch armed at transfer entry
-                        // (SaveTransferCoordinator first-chunk branch). Client-only flag; no-op on host.
-                        Multiplayer.Network.Sync.State.GeoTransitionGate.InTransition = false;
                     }
                 }
             }

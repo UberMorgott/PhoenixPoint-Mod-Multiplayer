@@ -77,6 +77,32 @@ the graph → rail narrows to that part, remainder strangler-style in the OLD re
 becomes reference or is discarded. (Deviation from mandate: spike runs HERE, not in the old repo —
 transport was already quarried in; the fork itself is preserved.)
 
+## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16)
+
+- **Host→all (GeoResearch 0xAA, observe = native event subs + ≤2 Hz poll, zero Harmony):** start
+  (OnResearchStarted → serializer blob; >u16 → value-only fallback), progress (poll value delta),
+  queue-order snapshot (poll — the catch-all for cancel/reorder/queue-add: `Research.Cancel` of a
+  non-current element fires NO native event), complete (OnResearchCompleted → id delta).
+- **Client→host intents (GeoResearchIntent 0xAB):** intent-capture prefixes on
+  `Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/InsertAtPosition`
+  (all UIModuleResearch entry points route there). Client: native call BLOCKED, intent sent. Host:
+  IntentDedup → validate → run the SAME native method; observe seams broadcast the outcome; invalid
+  intent = silent reject (logged). Echo loop closed by `SyncApplyScope` (src/Rail/SyncApplyScope.cs):
+  every client apply wraps itself in it; the capture seam passes native through inside it.
+- **Sim gating (law 4b):** `Research.Update` prefix-skipped on the client (clock not frozen — the
+  local hourly tick would double-progress and locally complete research).
+- **Reward-chain boundary (law 3):** client completion stamps `ResearchElement._state` via the
+  BACKING FIELD — never the native State setter, whose `Complete()` runs the reward chain
+  (ApplyRewards / RewardReputation / Wallet.Give) = host-only logic. Presentation fired directly:
+  native completed modal (`GeoscapeView.OnFactionResearchCompleted`) + log line
+  (`GeoscapeLog.Faction_ResearchCompleted`).
+- **Known limitations (accepted, resolved by later subsystems):** reward side-effects (resources,
+  reputation, manufacture unlocks) reach the client only via their own subsystems (wallet =
+  migration #2, …); dependent-research reveal/unlock cascades arrive with that research's start
+  blob, not at completion (client pedia/stats/GeoscapeEventSystem completion hooks do NOT fire);
+  NPC-faction research is frozen on the client (Research.Update gated for ALL factions); client
+  start-affordability UI reads the client-local wallet until wallet sync lands.
+
 ## Verification (mandate §4)
 
 - Stage 1 differential sim harness: SimCluster/InMemoryTransport host+client, randomized command

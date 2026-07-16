@@ -624,21 +624,10 @@ namespace Multiplayer.Network
                     SaveTransfer?.OnJoinReady(msg);
                     break;
 
-                // ─── Action-sync engine (discrete-command relay + currency echo). ────
-                // Envelope cutover: the legacy raw 0x60 ActionRequest / 0x61 ActionApply / 0x62 ActionReject inbound
-                // routes are RETIRED — the geoscape action relay now rides the unified 0x67 SyncEnvelope rail
-                // (GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4), dispatched by Sync.OnSyncEnvelope ->
-                // SurfaceRouter -> HandleGeoscapeEnvelope, which reaches the SAME OnActionRequest / OnActionApply /
-                // OnActionReject appliers. Zero senders remain for 0x60/0x61/0x62.
-
-                // Rail-unify phase 1: the legacy raw 0x63 WalletSync / 0x64 StateSync inbound routes are RETIRED —
-                // wallet + state now ride the unified 0x67 SyncEnvelope rail (GeoWallet 0xA0 / GeoState 0xA1),
-                // dispatched by Sync.OnSyncEnvelope -> SurfaceRouter -> HandleGeoscapeEnvelope, which still reaches
-                // the SAME OnWalletSync / OnStateSync appliers. Zero senders remain for 0x63/0x64.
-
                 case PacketType.SyncEnvelope:
-                    // Unified surface envelope (actions in Phase 1). One chokepoint routes by surface+kind.
-                    // Additive: lives alongside the legacy ActionRequest/ActionApply cases above (Task 6).
+                    // THE one sync rail: every intent/delta rides this unified envelope, dispatched by
+                    // Sync.OnSyncEnvelope -> SurfaceRouter -> the per-surface hooks (tactical fast-path,
+                    // then geoscape 0xA0-0xBF, e.g. ResearchSync). No other sync packet types exist.
                     Sync?.OnSyncEnvelope(msg.SenderSteamId, msg.Payload);
                     break;
 
