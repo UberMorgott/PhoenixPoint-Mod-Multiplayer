@@ -1,0 +1,997 @@
+using System;
+using System.Collections.Generic;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Parity;
+using Multiplayer.Validation;
+using UnityEngine;
+
+namespace Multiplayer.Network
+{
+    public class SessionManager
+    {
+        private readonly NetworkEngine _engine;
+        private readonly Dictionary<ulong, ClientInfo> _clients = new Dictionary<ulong, ClientInfo>();
+        private readonly Dictionary<ulong, long> _lastHeartbeat = new Dictionary<ulong, long>();
+        private readonly HashSet<ulong> _readyClients = new HashSet<ulong>();
+        // SECURITY: first-seen binding of a persistent PlayerGuid to the authenticated transport
+        // identity (SteamId) that claimed it. PlayerGuid is public (broadcast in PEER_LIST), so this
+        // binding is what stops a peer from JOINing under another player's guid to inherit their slot /
+        // permissions / owned soldiers (identity takeover). Never pruned — a guid belongs to its owner
+        // for the whole session, even across a disconnect/reconnect.
+        private readonly Dictionary<Guid, ulong> _guidOwners = new Dictionary<Guid, ulong>();
+
+        // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
+        // BroadcastChat is appended here in arrival order; on a new client fully joining the host
+        // replays this backlog to ONLY that client (ReplayChatHistoryTo) so late joiners see the
+        // full prior conversation. Host-only — clients render straight from OnChatReceived and never
+        // populate this. Capped to bound memory across a long session; the cap is generous so a
+        // normal lobby never drops a line.
+        private readonly List<ChatMessageData> _chatHistory = new List<ChatMessageData>();
+        private const int ChatHistoryCap = 500;
+
+        public ulong? HostPeerId { get; private set; }
+        public IReadOnlyDictionary<ulong, ClientInfo> Clients => _clients;
+
+        // Host's own lobby identity. The host is NOT in _clients (which holds remote peers only),
+        // so its row is injected into the broadcast roster via a self-entry in BuildPeerList. The
+        // lobby UI sets these; defaults give a sensible display before the player edits anything.
+        public string HostNickname { get; set; } = ClientIdentity.LocalNickname ?? "Host";
+        public bool HostReady { get; set; }
+
+        // Host's chosen save (rail display + read-only client mirror). Set on the rail save-pick.
+        public string ChosenSaveName { get; private set; }
+        public string ChosenSaveMeta { get; private set; }
+
+        // Last roster the CLIENT received from the host (preserves IsHost + every peer's nickname/
+        // ready exactly as the host broadcast it). On the host the live BuildPeerList() is authoritative.
+        private List<PeerListEntry> _clientRoster = new List<PeerListEntry>();
+
+        // Host-side stable slotIndex allocation (host = slot 0; clients in arrival order, reconnect
+        // reuses by PlayerGuid). Lazily built from the host identity on first BuildPeerList.
+        private SlotAllocator _slots;
+        /// <summary>This peer's own host-assigned slot (host = 0; clients learn it from PEER_LIST).</summary>
+        public byte LocalSlotIndex { get; private set; }
+
+        /// <summary>
+        /// Unified lobby roster for UI: host → live BuildPeerList(); client → last received PEER_LIST.
+        /// Always includes the host self-entry (IsHost=true). Never null.
+        /// </summary>
+        public List<PeerListEntry> GetLobbyRoster()
+        {
+            return _engine.IsHost ? BuildPeerList() : _clientRoster;
+        }
+
+        public event Action OnAllClientsReady;
+        public event Action<ulong> OnClientReady;
+        public event Action OnHostDisconnected;
+        public event Action<string, string, bool> OnChatReceived;   // (senderNick, text, isSystem)
+        public event Action<string, string> OnChosenSaveChanged;    // (saveName, saveMeta)
+
+        private const int HeartbeatIntervalMs = 5000;
+        private const int HeartbeatTimeoutMs = 20000;
+        private long _lastHeartbeatSend;
+        // FIX-2: client-side outbound-liveness clock — the last time the host ACKed one of our
+        // heartbeats. Distinct from _lastHeartbeat[host] (inbound liveness): it detects a HALF-OPEN
+        // send channel (host traffic still arriving, but the host stopped receiving/acking ours).
+        private long _lastHeartbeatAck;
+        // Half-open recovery budget: one automatic session-reset + re-JOIN per connection before the
+        // detector declares the link dead. Reset on each (re)connect in SetHostPeer.
+        private bool _halfOpenRepairAttempted;
+
+        public SessionManager(NetworkEngine engine)
+        {
+            _engine = engine;
+        }
+
+        public void InitializeAsHost()
+        {
+            HostPeerId = null; // we are the host
+        }
+
+        public void SetHostPeer(ulong hostPeerId)
+        {
+            HostPeerId = hostPeerId;
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            _lastHeartbeat[hostPeerId] = now;
+            _lastHeartbeatAck = now; // FIX-2: seed the outbound-liveness (ack) clock at connect
+            _halfOpenRepairAttempted = false; // fresh one-shot repair budget per (re)connect
+        }
+
+        public void Update()
+        {
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+
+            // Periodic heartbeat
+            if (now - _lastHeartbeatSend > HeartbeatIntervalMs)
+            {
+                _lastHeartbeatSend = now;
+                var heartbeat = new NetworkMessage(PacketType.Heartbeat,
+                    BitConverter.GetBytes(now));
+
+                if (_engine.IsHost)
+                {
+                    _engine.BroadcastToAll(heartbeat);
+                }
+                else if (HostPeerId.HasValue)
+                {
+                    _engine.SendToHost(heartbeat);
+                }
+            }
+
+            // FIX-1: while a co-op save transfer / world-load is in flight, SUSPEND every heartbeat
+            // timeout. Over WAN a big bulk transfer can starve heartbeats, and a slow-HDD native
+            // world-load can block the busy peer's main thread for >20 s — in both cases the peer is
+            // perfectly alive but no heartbeat gets through the window. The transfer/barrier machinery
+            // proves liveness chunk-by-chunk (and owns its OWN straggler timeout: Phase1LoadTimeoutMs /
+            // RevealDeadlineMs), and RefreshLiveness keeps _lastHeartbeat fresh as chunks arrive, so
+            // nothing false-fires the instant the load ends.
+            var st = _engine.SaveTransfer;
+            bool loadInFlight = st != null && (st.TransferActive || st.InPhase2 || st.LoadPhaseStarted);
+
+            if (loadInFlight)
+            {
+                // suspended this tick (see note above). FIX-2: also keep the outbound-liveness (ack)
+                // clock fresh so a long load that starves acks does not false-fire the half-open
+                // detector the instant the load ends.
+                _lastHeartbeatAck = now;
+            }
+            // Heartbeat timeout check (host only)
+            else if (_engine.IsHost)
+            {
+                var toRemove = new List<ulong>();
+                foreach (var kvp in _lastHeartbeat)
+                {
+                    if (now - kvp.Value > HeartbeatTimeoutMs)
+                        toRemove.Add(kvp.Key);
+                }
+                foreach (var clientId in toRemove)
+                {
+                    Debug.LogWarning($"[Multiplayer] Client {clientId} timed out");
+                    // ONE disconnect path (same as a crash drop): kick the peer at the TRANSPORT — which
+                    // stops Broadcast writing to the dead id forever — and let its OnPeerDisconnected
+                    // raise funnel through NetworkEngine.OnPeerDisconnected → RemoveClient + the F1 drop
+                    // notice (SessionNotifier chat/toast). Direct/Stun marshal the event to the next
+                    // Update tick, so drop the heartbeat row NOW to keep this timeout from re-firing.
+                    bool kicked = false;
+                    try { kicked = _engine.Transport?.DisconnectPeer(clientId) ?? false; } catch { }
+                    if (kicked)
+                    {
+                        _lastHeartbeat.Remove(clientId);
+                        continue;
+                    }
+                    // Transport never knew the peer → no event will come; purge + notify directly
+                    // (the pre-DisconnectPeer legacy path). Capture the name before the purge.
+                    var timedOutNick = TryGetClientName(clientId, out var n) ? n : SessionLifecycle.UnknownPlayer;
+                    RemoveClient(clientId);
+                    SystemChat(SessionLifecycle.FormatPeerEvent(connected: false, timedOutNick));
+                }
+            }
+            // F3 (client side): host HEARTBEAT TIMEOUT. A wedged/half-open host socket may never send
+            // FIN/RST, so OnPeerDisconnected (trigger b) never fires and the client would be stranded.
+            // If we have not heard from the host within the timeout, route into the SAME host-leave
+            // handler (its one-shot latch dedups against a graceful HostDisconnected packet / real drop,
+            // and is also a no-op after the handler already ran). Reuses the existing heartbeat constants.
+            else if (HostPeerId.HasValue && !HostLeaveHandler.AlreadyHandled
+                     && _lastHeartbeat.TryGetValue(HostPeerId.Value, out var hostLast))
+            {
+                if (now - hostLast > HeartbeatTimeoutMs)
+                {
+                    Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
+                    HostLeaveHandler.TriggerHostLeft();
+                }
+                // FIX-2 + P2P auto-repair: HALF-OPEN detection. Even while host traffic keeps ARRIVING
+                // (inbound timeout above does not fire), if the host has not ACKed our heartbeats for the
+                // whole window then our OUTBOUND (client->host) channel is dead — a half-open Steam P2P
+                // session the transport still reports as Connected. Instead of immediately declaring it
+                // dead, attempt ONE automatic repair (reset the P2P session + re-send JOIN); only if the
+                // repaired link is STILL dead a full window later do we tear down via the SAME chokepoint
+                // (Steam lobby Leave + ClearRichPresence + return-to-menu) with a never-silent reason.
+                else switch (HalfOpenRepair.Decide(now, hostLast, _lastHeartbeatAck,
+                                                    HeartbeatTimeoutMs, _halfOpenRepairAttempted))
+                {
+                    case HalfOpenAction.Repair:
+                        _halfOpenRepairAttempted = true;
+                        Debug.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack timed out (client->host " +
+                            "channel dead) — resetting the P2P session and re-sending JOIN (one-shot repair).");
+                        _engine.RepairHostLink();
+                        // Give the repaired link a fresh full window before the fatal path: reseed BOTH
+                        // clocks so neither the inbound nor the ack timeout fires again until the repair
+                        // has had a full HeartbeatTimeoutMs to prove out.
+                        _lastHeartbeatAck = now;
+                        _lastHeartbeat[HostPeerId.Value] = now;
+                        break;
+                    case HalfOpenAction.Fail:
+                        Debug.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack still timed out after repair — " +
+                            "outbound channel dead; leaving.");
+                        HostLeaveHandler.TriggerHostLeft(
+                            "Connection to host lost (send channel dead — stage: heartbeat-ack timeout).");
+                        break;
+                }
+            }
+        }
+
+        // ─── Client Management ────────────────────────────────────────────
+
+        public void AddClient(ulong steamId, string endpoint)
+        {
+            if (!_clients.ContainsKey(steamId))
+            {
+                _clients[steamId] = new ClientInfo
+                {
+                    SteamId = steamId,
+                    Endpoint = endpoint,
+                    ConnectedAt = DateTime.UtcNow
+                };
+                _lastHeartbeat[steamId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+                // SlotIndex is assigned in BuildPeerList (host), keyed by the client's persistent
+                // PlayerGuid so a reconnecting client reuses its slot.
+            }
+        }
+
+        public void RemoveClient(ulong steamId)
+        {
+            var existed = _clients.TryGetValue(steamId, out var client);
+            if (existed)
+                client.IsReady = false;
+            _clients.Remove(steamId);
+            _lastHeartbeat.Remove(steamId);
+            _readyClients.Remove(steamId);
+
+            // Roster changed → host re-broadcasts the authoritative peer list.
+            if (existed && _engine.IsHost)
+                BroadcastPeerList();
+        }
+
+        /// <summary>
+        /// Resolve a connected peer's display name by its transport id. Used by the disconnect
+        /// notifier (F1) to capture the real player name BEFORE <see cref="RemoveClient"/> purges the
+        /// <c>_clients</c> map, so the toast/chat shows the name and not a raw id. Returns false (and
+        /// a null name) for an unknown id — e.g. a transport drop arriving AFTER a graceful leave
+        /// already removed the peer, which lets the caller suppress a duplicate notice.
+        /// </summary>
+        public bool TryGetClientName(ulong steamId, out string name)
+        {
+            if (_clients.TryGetValue(steamId, out var client) && !string.IsNullOrEmpty(client.PlayerName))
+            {
+                name = client.PlayerName;
+                return true;
+            }
+            name = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Host-only (F3 graceful path): tell every client the session is ending so they drop to the
+        /// main menu, BEFORE the host tears the transport down. Idempotent at the call site (the
+        /// teardown chokepoint fires once); a no-op on a client or when no transport is up.
+        /// </summary>
+        public void SendHostDisconnected()
+        {
+            if (!_engine.IsHost) return;
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.HostDisconnected));
+        }
+
+        /// <summary>
+        /// Client-only (graceful leave notice): tell the host we are leaving BEFORE the transport goes
+        /// down (menu quit / Alt+F4), so it drops us instantly instead of waiting out the 20 s heartbeat
+        /// timeout (which stays as the crash backstop). Host-side <see cref="HandleLeave"/> posts the
+        /// "— X left —" line and re-broadcasts; the later transport drop then reports wasKnown=false →
+        /// no duplicate notice. Best-effort: a no-op on the host or with no live host link.
+        /// </summary>
+        public void SendClientLeave()
+        {
+            if (_engine.IsHost || !HostPeerId.HasValue) return;
+            _engine.SendToHost(new NetworkMessage(PacketType.ClientLeave,
+                MessageSerializer.SerializeLeave(_engine.LocalSteamId)));
+        }
+
+        public IEnumerable<ulong> GetConnectedClients()
+        {
+            return _clients.Keys;
+        }
+
+        // (peerId → persistent playerGUID) projection of the live roster, fed to the pure
+        // returning-peer decision (SessionLifecycle.StaleRejoinPeers). Snapshot list, not a lazy
+        // iterator: the caller mutates _clients (RemoveClient) while consuming the result.
+        private List<KeyValuePair<ulong, Guid>> GetClientIdentities()
+        {
+            var ids = new List<KeyValuePair<ulong, Guid>>(_clients.Count);
+            foreach (var c in _clients.Values)
+                ids.Add(new KeyValuePair<ulong, Guid>(c.SteamId, c.PlayerGuid));
+            return ids;
+        }
+
+        /// <summary>All slotIndexes currently in the roster (host slot 0 + every connected client).</summary>
+        public IEnumerable<byte> GetRosterSlots()
+        {
+            yield return 0; // host
+            foreach (var c in _clients.Values) yield return c.SlotIndex;
+        }
+
+        /// <summary>Host: resolve a transport sender id to its slotIndex (host self = slot 0).</summary>
+        public bool TryGetSlotForPeer(ulong peerId, out byte slot)
+        {
+            if (peerId == _engine.LocalSteamId) { slot = 0; return true; }
+            if (_clients.TryGetValue(peerId, out var c)) { slot = c.SlotIndex; return true; }
+            slot = 0;
+            return false;
+        }
+
+        public int ClientCount => _clients.Count;
+
+        // ─── Connection Handshake ─────────────────────────────────────────
+
+        public void HandleConnectionRequest(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+
+            var clientId = msg.SenderSteamId;
+
+            // HARDENING: a JOIN must carry a non-empty persistent playerGUID. Guid.Empty must never
+            // become a live identity, because it is the permission/ownership key — an empty key would
+            // collide across peers and could be granted flags. Quarantine: reject the connection and
+            // do NOT register the client.
+            JoinMessage join = null;
+            if (msg.Payload != null && msg.Payload.Length > 0)
+                join = MessageSerializer.DeserializeJoin(msg.Payload);
+
+            if (join == null || join.PlayerGuid == Guid.Empty)
+            {
+                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: missing/empty playerGUID.");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload("Invalid player identity (empty GUID)."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+
+            // HARDENING (second-line defense): a JOIN whose persistent playerGUID EQUALS the host's own
+            // is a guid collision — both instances loaded the SAME persistentDataPath/identity.json (see
+            // ClientIdentity). Onboarding it would silently collapse the client into host slot 0
+            // (SlotAllocator seeds the host guid at slot 0) AND share the host's permission/ownership key.
+            // REFUSE loudly — a colliding identity is an operational misconfig, not a game state; give the
+            // 2nd same-machine instance a distinct identity (auto identity-N.json, or set MULTIPLAYER_IDENTITY).
+            if (SessionLifecycle.IsSelfIdentityCollision(ClientIdentity.PlayerGuid, join.PlayerGuid))
+            {
+                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: client playerGUID {join.PlayerGuid} " +
+                               "EQUALS the host's own identity — both instances share identity.json (operational " +
+                               "misconfig). Launch the 2nd instance with a distinct identity (auto identity-N.json, " +
+                               "or set MULTIPLAYER_IDENTITY). Refusing to avoid collapsing the client into host slot 0.");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "Identity collision: this instance shares the host's player identity. " +
+                        "Relaunch the client with a distinct MULTIPLAYER_IDENTITY."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+
+            // HARDENING (identity takeover): PlayerGuid is the permission/ownership key but it is PUBLIC
+            // (broadcast to every peer in PEER_LIST), so a peer could JOIN carrying ANOTHER player's guid
+            // and be treated as that player "reconnecting" — evicting the victim (below) and inheriting
+            // their slot/permissions/owned soldiers. Bind the guid to the authenticated transport identity:
+            // the FIRST SteamId to claim a guid owns it; a JOIN re-asserting that guid from a DIFFERENT
+            // SteamId is a takeover attempt → reject BEFORE any stale-peer eviction. A legit reconnect keeps
+            // the same SteamId (a new transport address does not change it), so it passes and re-binds idempotently.
+            if (_guidOwners.TryGetValue(join.PlayerGuid, out var boundSteamId) && boundSteamId != clientId)
+            {
+                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
+                               $"already bound to a different SteamId {boundSteamId} — identity-takeover attempt.");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+            _guidOwners[join.PlayerGuid] = clientId;
+
+            // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
+            // in the roster is a reconnect of a known player whose previous connection died (possibly a
+            // death the transport never reported — crash inside the 20 s heartbeat window — and possibly
+            // over a different transport address, or over the SAME reused peer id). Prune the dead
+            // connection's session residue FIRST, so the returning peer onboards through the SAME
+            // on-demand join path as a brand-new peer with nothing stale counted against the LOADED
+            // barrier or the ready gate: its roster entry (ready flag + heartbeat; a same-id reconnect
+            // is re-added fresh by AddClient below), its per-peer geo intent-dedup window (fresh engine
+            // restarts nonces at 1 — OnJoinReady's reset only covers the arrival leg), and its
+            // save-transfer download/loaded rows (ForgetPeer AFTER RemoveClient so a barrier now
+            // releasable with the remaining peers releases immediately). Decision is pure + idempotent
+            // (SessionLifecycle.StaleRejoinPeers — a double-reconnect race prunes cleanly twice); other
+            // clients keep playing untouched. Permissions need no prune: the grant below keys by the
+            // persistent guid (idempotent) and each client re-seeds from the next PEER_LIST broadcast
+            // (HandlePeerList precedent).
+            foreach (var staleId in SessionLifecycle.StaleRejoinPeers(GetClientIdentities(), join.PlayerGuid))
+            {
+                Debug.Log($"[Multiplayer] Returning peer {join.PlayerGuid} (JOIN from {clientId}): " +
+                          $"pruning stale peer {staleId}.");
+                _engine.Sync?.ResetIntentDedupForPeer(staleId);
+                RemoveClient(staleId);
+                _engine.SaveTransfer?.ForgetPeer(staleId);
+            }
+
+            // P1 mid-session join boundary: a peer that connects AFTER the session started can only be
+            // onboarded while the host is in the live GEOSCAPE (the joiner is reproduced from a geoscape
+            // save; the tactical deploy snapshot is turn-0, so an in-progress battle cannot be joined). If a
+            // battle is live (or the host is mid-load) reject with a user-visible reason instead of adding a
+            // stateless peer. Pre-start (lobby) this is false — the normal lobby join/start path owns it.
+            bool sessionStarted = _engine.SaveTransfer?.SessionStarted == true;
+            if (SessionLifecycle.ShouldRejectMidSessionJoin(sessionStarted, Sync.GeoRuntime.Instance.IsGeoscapeActive))
+            {
+                Debug.LogWarning($"[Multiplayer] Rejecting mid-session JOIN from {clientId}: host is not on the " +
+                                 "Geoscape (a battle is in progress or the host is loading).");
+                var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "Cannot join right now — a battle is in progress. Try again once the host is back on the Geoscape."));
+                _engine.SendToClient(clientId, reject);
+                return;
+            }
+
+            // FIX-4 (SOFT GATE): host/client parity check — the mismatched client still JOINS the lobby
+            // normally, but the host stores the exact diff text on its roster row. The diff rides the
+            // PEER_LIST broadcast, so BOTH sides render the warning badge (host on that player's row,
+            // the client on its own row) and the client locks its READY button; the host ALSO gates
+            // Ready authoritatively in SetClientReady (never trust client UI). Host-authoritative: the
+            // host computes the one diff text every UI shows.
+            var hostManifest = ParityManifestCollector.Collect();
+            var parityDiffs = ParityComparer.Compare(hostManifest, join.Manifest);
+            var parityDiffText = ParityComparer.Format(parityDiffs);
+            if (parityDiffs.Count > 0)
+                Debug.LogWarning($"[Multiplayer] JOIN from {clientId} has parity mismatch (soft-gate, " +
+                                 $"ready locked):\n{parityDiffText}");
+
+            AddClient(clientId, $"Steam({clientId})");
+
+            // Bind peerID <-> playerGUID.
+            if (_clients.TryGetValue(clientId, out var client))
+            {
+                client.PlayerGuid = join.PlayerGuid;
+                if (!string.IsNullOrEmpty(join.Nickname))
+                    client.PlayerName = join.Nickname;
+                client.ParityDiffs = parityDiffText; // "" = parity OK
+
+                // Co-op "allow everything" policy (no per-player permission menu yet): grant the
+                // joining client FullCommander, keyed by its persistent playerGUID (the permission
+                // key). Without this the client has 0 permissions and HostArbiter rejects every
+                // command (e.g. "Missing permission: ManageAircraft"). Host-authoritative arbiter
+                // serializes commands, so "last command wins" naturally. Granted here (not in
+                // AddClient) because PlayerGuid is only bound after AddClient returns. Mirror the
+                // resulting mask onto ClientInfo so the PEER_LIST roster reflects real permissions.
+                PermissionManager.SetPermission(client.PlayerGuid, CampaignPermission.FullCommander, true);
+                client.Permissions = PermissionManager.GetPermissions(client.PlayerGuid);
+            }
+
+            // Send acceptance, carrying the HOST parity manifest so the client can auto-apply the
+            // host's mod settings (ParityConfigSync) and re-send a fresh manifest (ParityUpdate).
+            // A legacy client ignores the payload (it never read one) — harmless.
+            var acceptMsg = new NetworkMessage(PacketType.ConnectionAccepted,
+                MessageSerializer.SerializeParityManifest(hostManifest));
+            _engine.SendToClient(clientId, acceptMsg);
+
+            // Roster changed → broadcast authoritative peer list.
+            BroadcastPeerList();
+
+            // Backlog replay: send the full prior chat history to ONLY this new client (in arrival
+            // order) so a late joiner sees the conversation from the beginning. Done BEFORE the live
+            // "joined" SystemChat below — that notice is then fanned out to everyone (incl. the new
+            // client) exactly once via BroadcastToAll, so it is never duplicated for the joiner.
+            ReplayChatHistoryTo(clientId);
+
+            SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} joined —");
+
+            // P1: if this peer joined AFTER the session started, kick a PER-PEER on-demand save transfer so
+            // it converges to the host's current state. Unicast + no barrier/counter reset, so the already-
+            // connected peers are untouched. A lobby (pre-start) join is handled by the normal start path.
+            if (sessionStarted)
+                _engine.SaveTransfer?.HostOnDemandJoin(clientId);
+        }
+
+        public void HandleConnectionAccepted(NetworkMessage msg)
+        {
+            // Client received host confirmation
+            Debug.Log("[Multiplayer] Connection accepted by host");
+
+            // Parity auto-apply (host-authoritative): the accept carries the HOST manifest. Apply the
+            // host's scalar mod settings in-memory (originals snapshotted; restored at teardown), then
+            // re-send a FRESH manifest so the host re-compares — if only config diffs existed the
+            // mismatch clears (badge disappears, READY unlocks via the roster re-broadcast). A legacy
+            // host sends no payload → skip. Unappliable values stay diffs by construction.
+            if (_engine.IsHost || msg.Payload == null || msg.Payload.Length == 0) return;
+            try
+            {
+                var hostManifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+                if (ParityConfigSync.ApplyHostSettings(hostManifest))
+                {
+                    var fresh = ParityManifestCollector.Collect();
+                    _engine.SendToHost(new NetworkMessage(PacketType.ParityUpdate,
+                        MessageSerializer.SerializeParityManifest(fresh)));
+                }
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] parity auto-apply on accept failed: " + e.Message); }
+        }
+
+        /// <summary>
+        /// Host: a client re-sent its parity manifest after auto-applying our settings. Re-compare and,
+        /// on any status change, update its roster row + re-broadcast (badge/ready-lock update flows
+        /// through the SAME PEER_LIST rail as the initial state).
+        /// </summary>
+        public void HandleParityUpdate(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+            if (!_clients.TryGetValue(msg.SenderSteamId, out var client)) return;
+            try
+            {
+                var manifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+                var diffs = ParityComparer.Format(
+                    ParityComparer.Compare(ParityManifestCollector.Collect(), manifest));
+                if (string.Equals(diffs, client.ParityDiffs, StringComparison.Ordinal)) return;
+                client.ParityDiffs = diffs;
+                Debug.Log($"[Multiplayer] parity update from {msg.SenderSteamId}: " +
+                          (diffs.Length == 0 ? "parity OK — READY unlocked." : $"still mismatched:\n{diffs}"));
+                BroadcastPeerList();
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] parity update failed: " + e.Message); }
+        }
+
+        public void HandleConnectionRejected(NetworkMessage msg)
+        {
+            var reason = NetworkMessage.ParseStringPayload(msg.Payload);
+            Debug.LogError($"[Multiplayer] Connection rejected: {reason}");
+            // Never-silent: surface the rejection to the joining player (was log-only, so the user saw
+            // nothing). Routes through the existing connection-failure path (dialog + lobby teardown /
+            // return-to-menu), covering ALL rejection reasons — empty GUID, identity collision,
+            // mid-session battle, and the FIX-4 parity mismatch (whose reason carries the exact diffs).
+            _engine.ReportConnectionRejected(reason);
+        }
+
+        public void HandleClientDisconnected(NetworkMessage msg)
+        {
+            RemoveClient(msg.SenderSteamId);
+        }
+
+        // ─── Heartbeat ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// FIX-1: refresh a peer's liveness on ANY inbound packet (not just Heartbeat), called from the
+        /// single receive chokepoint (NetworkEngine.OnPacketReceived). Closes the gap where a healthy
+        /// peer streaming non-heartbeat traffic (RosterProgress during a save-pick, SaveChunks during a
+        /// download) was still timed out because only Heartbeat packets refreshed the clock. Refreshes
+        /// ONLY peers we already track (host: clients seeded in AddClient; client: the host seeded in
+        /// SetHostPeer) — it never CREATES an entry for an untracked/pre-registration sender, so a
+        /// rejected JOIN can't leave a phantom entry that later "times out" into a spurious leave notice.
+        /// </summary>
+        public void RefreshLiveness(ulong peerId)
+        {
+            if (_lastHeartbeat.ContainsKey(peerId))
+                _lastHeartbeat[peerId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+        }
+
+        public void HandleHeartbeat(NetworkMessage msg)
+        {
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+
+            if (_engine.IsHost)
+            {
+                _lastHeartbeat[msg.SenderSteamId] = now;
+                // Respond with ack
+                var ack = new NetworkMessage(PacketType.HeartbeatAck,
+                    BitConverter.GetBytes(now));
+                _engine.SendToClient(msg.SenderSteamId, ack);
+            }
+            else
+            {
+                // Client received a host Heartbeat OR HeartbeatAck — both refresh inbound liveness.
+                if (HostPeerId.HasValue)
+                    _lastHeartbeat[HostPeerId.Value] = now;
+                // FIX-2: a HeartbeatAck specifically proves our OUTBOUND channel is alive (the host
+                // received our heartbeat and replied). Track it separately so a half-open send channel
+                // (inbound flowing, outbound dead) is detectable while host packets keep arriving.
+                if (msg.Type == PacketType.HeartbeatAck)
+                    _lastHeartbeatAck = now;
+            }
+        }
+
+        // ─── Ready State ──────────────────────────────────────────────────
+
+        // Back-compat shim: a bare call means "ready up". Toggle off via SetClientReady(steamId, false).
+        public void SetClientReady(ulong steamId) => SetClientReady(steamId, true);
+
+        // Ready is a real toggle. ready=true adds the client + lights its roster flag; ready=false
+        // removes it + clears the flag, which de-arms the host start gate (RefreshGateFacts reads the
+        // authoritative roster Ready flags). Either way the host re-broadcasts the roster and recomputes
+        // AllClientsReady. On the client, this sends the matching ClientReady / ClientUnready packet.
+        public void SetClientReady(ulong steamId, bool ready)
+        {
+            if (_engine.IsHost)
+            {
+                // Parity soft-gate (host-authoritative — never trust the client's locked button): a
+                // client whose roster row carries parity diffs may NOT ready up. Single chokepoint:
+                // HandleReadyState (the ClientReady packet) routes through here too.
+                if (ready && _clients.TryGetValue(steamId, out var pc)
+                          && !ParityComparer.ReadyAllowed(pc.ParityDiffs))
+                {
+                    Debug.LogWarning($"[Multiplayer] Ignoring READY from {steamId}: parity mismatch " +
+                                     $"(soft-gate):\n{pc.ParityDiffs}");
+                    return;
+                }
+                if (ready) _readyClients.Add(steamId);
+                else _readyClients.Remove(steamId);
+                if (_clients.TryGetValue(steamId, out var readyClient))
+                    readyClient.IsReady = ready;
+                OnClientReady?.Invoke(steamId);
+
+                // Ready-state changed → refresh the authoritative roster for all peers.
+                BroadcastPeerList();
+
+                // Re-broadcast the authoritative wallet so a (late) ready client converges. No-op
+                // until the geoscape wallet is bound (BroadcastFullWallet self-guards); versioned, so
+                // already-current peers drop it as stale.
+                _engine.Sync?.BroadcastFullWallet();
+
+                // Same convergence for every state channel (inventory, …). Snapshot self-guards until
+                // the geoscape model is live; versioned per channel, so current peers drop stale echoes.
+                _engine.Sync?.BroadcastAllChannels();
+
+                // AllClientsReady only fires when EVERY connected client is ready. An unready that drops
+                // the count below the bar must NOT broadcast it (the gate de-arms via the roster flags).
+                if (_readyClients.Count >= _clients.Count && _clients.Count > 0)
+                {
+                    var allReady = new NetworkMessage(PacketType.AllClientsReady);
+                    _engine.BroadcastToAll(allReady);
+                    OnAllClientsReady?.Invoke();
+                }
+            }
+            else
+            {
+                var readyMsg = new NetworkMessage(ready ? PacketType.ClientReady : PacketType.ClientUnready);
+                _engine.SendToHost(readyMsg);
+            }
+        }
+
+        // Host-only: clear every connected client's Ready flag and re-broadcast the authoritative
+        // roster. Called when the host swaps the chosen save (clients readied for a specific session).
+        public void ResetAllClientsReady()
+        {
+            if (!_engine.IsHost) return;
+            _readyClients.Clear();
+            foreach (var c in _clients.Values)
+                c.IsReady = false;
+            BroadcastPeerList();
+        }
+
+        public void HandleReadyState(NetworkMessage msg)
+        {
+            if (msg.Type == PacketType.ClientReady && _engine.IsHost)
+            {
+                SetClientReady(msg.SenderSteamId, true);
+            }
+            else if (msg.Type == PacketType.ClientUnready && _engine.IsHost)
+            {
+                SetClientReady(msg.SenderSteamId, false);
+            }
+            else if (msg.Type == PacketType.AllClientsReady)
+            {
+                OnAllClientsReady?.Invoke();
+            }
+        }
+
+        // ─── Lobby Roster / Identity ──────────────────────────────────────
+
+        // PEER_LIST (H→all): authoritative lobby roster broadcast. Build from _clients.
+        public List<PeerListEntry> BuildPeerList()
+        {
+            var peers = new List<PeerListEntry>(_clients.Count + 1);
+
+            // Host owns a single SlotAllocator instance, lazily built from its persistent identity so
+            // the host is always slot 0. Reused across every BuildPeerList call (never recreated), so
+            // a reconnecting client's PlayerGuid maps back to its original slot.
+            if (_slots == null) _slots = new SlotAllocator(ClientIdentity.PlayerGuid);
+            LocalSlotIndex = 0; // host self
+
+            // Co-op "allow everything" policy: the host also gets FullCommander, keyed by its
+            // persistent playerGUID. Idempotent (SetPermission ORs the flag), so safe to call on
+            // every roster rebuild. Even though the host bypasses the HostArbiter gate today, this
+            // keeps the permission model consistent and lets the roster show the host's real mask.
+            PermissionManager.SetPermission(ClientIdentity.PlayerGuid, CampaignPermission.FullCommander, true);
+
+            // Host self-entry first: the host is not in _clients, but the lobby roster (on both the
+            // host and every client) must show it. Marked IsHost so each side can identify the host
+            // row regardless of its display id (LocalSteamId may be 0 on DirectIP).
+            peers.Add(new PeerListEntry
+            {
+                SteamId = _engine.LocalSteamId,
+                PlayerGuid = ClientIdentity.PlayerGuid,
+                Nickname = HostNickname,
+                Permissions = PermissionManager.GetPermissions(ClientIdentity.PlayerGuid),
+                Ready = HostReady,
+                IsHost = true,
+                SlotIndex = 0,
+                ParityDiffs = "" // the host is the parity reference — always OK
+            });
+
+            foreach (var c in _clients.Values)
+            {
+                c.SlotIndex = _slots.Assign(c.PlayerGuid);
+                peers.Add(new PeerListEntry
+                {
+                    SteamId = c.SteamId,
+                    PlayerGuid = c.PlayerGuid,
+                    Nickname = c.PlayerName,
+                    Permissions = c.Permissions,
+                    Ready = c.IsReady,
+                    IsHost = false,
+                    SlotIndex = c.SlotIndex,
+                    ParityDiffs = c.ParityDiffs ?? ""
+                });
+            }
+            return peers;
+        }
+
+        public void BroadcastPeerList()
+        {
+            if (!_engine.IsHost) return;
+            var payload = MessageSerializer.SerializePeerList(BuildPeerList());
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.PlayerListUpdate, payload));
+        }
+
+        // Client receives the authoritative roster; mirror into local _clients map.
+        public void HandlePeerList(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            var peers = MessageSerializer.DeserializePeerList(msg.Payload);
+
+            // Cache the raw roster (incl. host self-entry + IsHost flags) for the lobby UI.
+            _clientRoster = peers;
+
+            // Learn THIS peer's own host-assigned slot by matching the local persistent identity.
+            foreach (var p in peers)
+                if (p.PlayerGuid == ClientIdentity.PlayerGuid)
+                {
+                    LocalSlotIndex = p.SlotIndex;
+                    // Seed the client's local PermissionManager from the authoritative roster mask so
+                    // PermissionGate.Check (which reads ClientIdentity.PlayerGuid) reflects what the host
+                    // actually granted. Without this the client's gate is blind — an empty PermissionManager
+                    // denies every category, so no client action is ever forwarded to the host. Re-runs on
+                    // every roster update, so a future live grant/revoke that re-sends the roster re-seeds the
+                    // client automatically. The host remains the sole authority (it re-checks every
+                    // ActionRequest); this client-side gate is UX only. Live mid-game grant/revoke via a
+                    // dedicated PermissionUpdate packet + a host management UI are deferred future work that
+                    // layers on top of this seeding.
+                    PermissionManager.SetPermissionsRaw(p.PlayerGuid, p.Permissions);
+                }
+
+            // Build the authoritative non-host keep-set while mirroring, then prune any _clients entry
+            // absent from it (next block). The host self-entry is never a _clients key, so excluding it
+            // from the keep-set preserves it by construction.
+            var newClientKeys = new HashSet<ulong>();
+            foreach (var p in peers)
+            {
+                // Do NOT mirror the host self-entry into _clients: _clients holds remote *clients*
+                // only (used by ClientCount and other handlers). The host row is served to the UI
+                // via _clientRoster / GetLobbyRoster() instead.
+                if (p.IsHost) continue;
+
+                newClientKeys.Add(p.SteamId);
+
+                if (!_clients.TryGetValue(p.SteamId, out var client))
+                {
+                    client = new ClientInfo { SteamId = p.SteamId, ConnectedAt = DateTime.UtcNow };
+                    _clients[p.SteamId] = client;
+                }
+                client.PlayerGuid = p.PlayerGuid;
+                client.PlayerName = p.Nickname;
+                client.Permissions = p.Permissions;
+                client.IsReady = p.Ready;
+                client.SlotIndex = p.SlotIndex;
+            }
+
+            // Prune peers that vanished from the roster. On a crash/timeout drop the host re-broadcasts
+            // ONLY PEER_LIST (no ClientLeave packet → no RemoveClient here), so without this a dropped
+            // peer would linger in _clients forever → ClientCount / GetConnectedClients over-count
+            // (client status-bar drift). Mirror RemoveClient's cleanup (heartbeat + ready set) so the
+            // derived counts stay consistent.
+            foreach (var stale in PeerListPrune.PruneKeys(_clients.Keys, newClientKeys))
+            {
+                _clients.Remove(stale);
+                _lastHeartbeat.Remove(stale);
+                _readyClients.Remove(stale);
+            }
+        }
+
+        // LEAVE (C→H / H→all): graceful lobby/session leave.
+        public void HandleLeave(NetworkMessage msg)
+        {
+            // SECURITY: a client may only leave ITSELF. On the host key the leave off the
+            // transport-authenticated sender (msg.SenderSteamId), NOT the self-asserted payload id —
+            // every peer's SteamId is public via PEER_LIST, so trusting the payload would let any peer
+            // force-disconnect any victim (mirror HandleRename/HandleChat keying). On a client the host
+            // has already stamped the authoritative leaver id into the payload it re-broadcast.
+            var peerSteamId = _engine.IsHost
+                ? msg.SenderSteamId
+                : MessageSerializer.DeserializeLeave(msg.Payload);
+            if (_engine.IsHost)
+            {
+                // Re-broadcast leave so all peers drop the client (RemoveClient refreshes the roster).
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.ClientLeave,
+                    MessageSerializer.SerializeLeave(peerSteamId)));
+
+                var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : "a player";
+                SystemChat($"— {leaverNick} left —");
+            }
+            RemoveClient(peerSteamId);
+            // Host: same transport-registry leak as the heartbeat timeout — without this the leaver
+            // stays in the transport's peer set and Broadcast writes to the dead id forever. The kick's
+            // OnPeerDisconnected raise reports wasKnown=false (roster already purged above) → no
+            // duplicate drop notice.
+            if (_engine.IsHost)
+                try { _engine.Transport?.DisconnectPeer(peerSteamId); } catch { }
+        }
+
+        // RENAME (any→H→all): live nickname edit.
+        // RENAME: live nickname edit. Host-authoritative keying — a client cannot know its own
+        // host-side transport peer id, so the host keys the rename by msg.SenderSteamId (the
+        // authoritative routing handle), ignoring any id in the payload. After applying, the host
+        // re-broadcasts the full roster so every lobby re-renders (clients do not handle this packet
+        // directly for state; the PEER_LIST is the single source of truth for the UI).
+        public void HandleRename(NetworkMessage msg)
+        {
+            if (!_engine.IsHost) return;
+
+            var (_, name) = MessageSerializer.DeserializeRename(msg.Payload);
+            var senderId = msg.SenderSteamId;
+
+            if (_clients.TryGetValue(senderId, out var client))
+            {
+                client.PlayerName = name;
+                BroadcastPeerList();
+            }
+        }
+
+        // Client → host: request a nickname change for myself. The host keys it by sender id.
+        // On the host this is a local edit (HostNickname) handled directly by the lobby UI.
+        public void SendRename(string newNickname)
+        {
+            // Persist the local player's chosen nick so it survives a restart (loaded back in the
+            // HostNickname default / client JOIN / rename-prompt current above). Typed value wins.
+            ClientIdentity.LocalNickname = newNickname;
+            if (_engine.IsHost)
+            {
+                HostNickname = newNickname;
+                BroadcastPeerList();
+                return;
+            }
+            // SteamId field is a placeholder; the host substitutes the authoritative sender id.
+            var payload = MessageSerializer.SerializeRename(_engine.LocalSteamId, newNickname);
+            _engine.SendToHost(new NetworkMessage(PacketType.PlayerRename, payload));
+        }
+
+        // HOST_LEFT (H→all): session-end notice.
+        // ─── Chat ─────────────────────────────────────────────────────────
+
+        // Local→network user chat. Host stamps + broadcasts directly; client relays to host.
+        public void SendChat(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            var trimmed = text.Trim();
+
+            if (_engine.IsHost)
+            {
+                BroadcastChat(_engine.LocalSteamId, HostNickname, trimmed, false);
+            }
+            else
+            {
+                var chat = new ChatMessageData
+                {
+                    SenderSteamId = _engine.LocalSteamId,
+                    SenderNick = "",          // host substitutes the authoritative nick
+                    Text = trimmed,
+                    IsSystem = false
+                };
+                _engine.SendToHost(new NetworkMessage(PacketType.ChatMessage,
+                    MessageSerializer.SerializeChat(chat)));
+            }
+        }
+
+        // Host-only: emit a SYSTEM line to everyone (join/leave/host-set-save notices).
+        public void SystemChat(string text)
+        {
+            if (!_engine.IsHost || string.IsNullOrEmpty(text)) return;
+            BroadcastChat(0, null, text, true);
+        }
+
+        // Host-authoritative fan-out: raise locally + push to clients (mirrors BroadcastPeerList).
+        private void BroadcastChat(ulong senderId, string senderNick, string text, bool isSystem)
+        {
+            var chat = new ChatMessageData
+            {
+                SenderSteamId = senderId,
+                SenderNick = senderNick ?? "",
+                Text = text,
+                IsSystem = isSystem
+            };
+            // Record into the host-authoritative backlog (arrival order) BEFORE fan-out so late
+            // joiners can be replayed the full session history. Bounded ring: drop the oldest line
+            // once the cap is hit (matches the panel ChatLog's bounded behaviour).
+            _chatHistory.Add(chat);
+            if (_chatHistory.Count > ChatHistoryCap)
+                _chatHistory.RemoveAt(0);
+
+            OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem); // local echo on host
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.ChatMessage,
+                MessageSerializer.SerializeChat(chat)));
+        }
+
+        // Host-only: replay the entire chat backlog to a SINGLE newly-joined client, in arrival
+        // order, as ordinary ChatMessage packets (the client's existing HandleChat receive path
+        // appends each one). Sent only to that client (SendToClient), so peers already in sync are
+        // never re-sent the backlog. No new packet type — reuses the proven chat serialization.
+        public void ReplayChatHistoryTo(ulong clientId)
+        {
+            if (!_engine.IsHost || _chatHistory.Count == 0) return;
+            foreach (var chat in _chatHistory)
+            {
+                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ChatMessage,
+                    MessageSerializer.SerializeChat(chat)));
+            }
+        }
+
+        public void HandleChat(NetworkMessage msg)
+        {
+            var chat = MessageSerializer.DeserializeChat(msg.Payload);
+
+            if (_engine.IsHost)
+            {
+                // Validate + stamp the authoritative sender (mirror HandleRename keying).
+                if (chat.IsSystem) return; // clients may not inject system lines
+                var nick = "Player";
+                if (_clients.TryGetValue(msg.SenderSteamId, out var c))
+                    nick = c.PlayerName;
+                BroadcastChat(msg.SenderSteamId, nick, chat.Text, false);
+            }
+            else
+            {
+                // Client: render exactly what the host broadcast.
+                OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem);
+            }
+        }
+
+        // ─── Chosen save (host picks; clients mirror read-only) ───────────
+
+        // Host-only: record the chosen save, broadcast it (SetSave) + a SYSTEM chat line.
+        public void SetChosenSave(string saveName, string saveMeta)
+        {
+            if (!_engine.IsHost) return;
+            ChosenSaveName = saveName;
+            ChosenSaveMeta = saveMeta;
+            OnChosenSaveChanged?.Invoke(saveName, saveMeta);
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.SetSave,
+                MessageSerializer.SerializeSetSave(saveName, saveMeta)));
+            SystemChat($"— host set save: {saveName} —");
+        }
+
+        public void HandleSetSave(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;
+            var (name, meta) = MessageSerializer.DeserializeSetSave(msg.Payload);
+            ChosenSaveName = name;
+            ChosenSaveMeta = meta;
+            OnChosenSaveChanged?.Invoke(name, meta);
+        }
+
+        public void HandleHostDisconnected(NetworkMessage msg)
+        {
+            Debug.LogWarning("[Multiplayer] Host disconnected — session ended");
+            OnHostDisconnected?.Invoke();
+        }
+    }
+
+    public class ClientInfo
+    {
+        public ulong SteamId { get; set; }            // per-session peerID (transport handle)
+        public Guid PlayerGuid { get; set; }          // persistent identity (JOIN); permission/ownership key
+        public string Endpoint { get; set; }
+        public string PlayerName { get; set; } = "Unknown";
+        public int Permissions { get; set; }
+        public bool IsReady { get; set; }             // mirror of _readyClients for PEER_LIST broadcast
+        public string ParityDiffs { get; set; } = ""; // FIX-4 soft-gate: exact diff text ("" = parity OK)
+        public int LatencyMs { get; set; }
+        public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)
+        public DateTime ConnectedAt { get; set; }
+    }
+}

@@ -1,0 +1,1658 @@
+using System.Collections.Generic;
+using Base.Core;
+using Base.Serialization;
+using Base.UI.MessageBox;
+using Multiplayer.Harmony;
+using Multiplayer.Net;
+using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
+using Multiplayer.Transport;
+using Multiplayer.Util;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace Multiplayer.UI
+{
+    public class MultiplayerUI : MonoBehaviour
+    {
+        public static MultiplayerUI Instance { get; private set; }
+
+        // ─── Minimal mod canvas — IN-GAME STATUS BAR ONLY ──────────────────
+        // The lobby + save-picker now clone NATIVE widgets and parent under the game's
+        // own main-menu Canvas (captured in OnMenuReady), so they need no overlay canvas.
+        // The in-game status bar, however, is an in-GEOSCAPE element: the menu Canvas dies
+        // on the menu→geoscape scene load, so the bar keeps a tiny dedicated overlay Canvas
+        // that lives with ModGO. This is the only remaining from-code canvas.
+        private Canvas _barCanvas;
+        private Transform _barRoot;
+
+        // ─── In-game bottom bar ─────────────────────────────────────────────
+        private GameObject _inGameBar;
+        private Text _barStatusText;
+
+        // ─── Lobby panel (built once the menu Canvas is captured) ───────────
+        private LobbyPanel _lobby;
+        private bool _panelsBuilt;
+
+        // The lobby lifecycle FSM + start gate (single source of truth; pure logic). The UI reads its
+        // State/CanStart and drives transitions (BeginHost/CommitStart/Reset); it never lets the
+        // Play-button visual be the sole start guard (that was Bug B).
+        private readonly LobbyController _lobbyController = new LobbyController();
+        public LobbyController Lobby => _lobbyController;
+
+        // ─── Client-join connecting state ───────────────────────────────────
+        // True from the moment a CLIENT smart-join is kicked off (OnLobbyJoin) until that attempt
+        // resolves — confirmed (first host PEER_LIST arrives, Update opens the lobby), failed/timed
+        // out (OnConnectionFailed), or cancelled (the connecting box's CANCEL button). It gates the
+        // optimistic lobby Show: while it is true the lobby stays HIDDEN behind a native
+        // "Connecting…" box, so a client never sees a fake empty lobby for a join that hasn't been
+        // accepted yet. The HOST path never sets this (hosting is instant/local).
+        private bool _clientConnecting;
+        // The native "Connecting to host…" MessageBox shown during _clientConnecting, kept so we can
+        // dismiss it programmatically (ForceCloseAllPrompts) on confirm/fail/timeout. On user CANCEL
+        // the box closes itself and fires its callback.
+        private MessageBox _connectingBox;
+
+        // ─── Client-join cascade ────────────────────────────────────────────
+        // The ordered transports to try for the current join (JoinPlan.Build): a unified code cascades
+        // Steam → STUN → Direct; a legacy code is a single attempt. _joinAttemptIndex is the stage in
+        // flight; on a stage failure OnConnectionFailed advances to the next instead of surfacing the
+        // error, so only the LAST stage's failure reaches the user. Cleared on confirm/cancel/final-fail.
+        private List<JoinAttempt> _joinPlan;
+        private int _joinAttemptIndex;
+
+        // True while the lobby overlay is on-screen. Consumed by the main-menu Escape patch
+        // (MainMenuPatches) so Escape leaves the lobby instead of opening the Options menu.
+        public bool IsLobbyOpen => _lobby?.IsVisible == true;
+
+        private void Awake()
+        {
+            Instance = this;
+
+            // Bar canvas first so the in-geoscape status bar has a valid render root.
+            EnsureBarCanvas();
+            CreateInGameBar();
+            _inGameBar.SetActive(false);
+
+            // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
+            _lobby = new LobbyPanel(this);
+
+            WireSteamInvite();
+        }
+
+        // One-time wiring of the Steam invite/join subsystem. Registered here (persistent ModGO) so an
+        // invite accepted from the MAIN MENU — before the co-op lobby is even opened — still routes into
+        // the join flow. The join callback reuses OnLobbyJoin (full client join + OnConnectionFailed
+        // diagnostics); the report callback surfaces every stage (errors → native message box, never a
+        // silent no-op). Idempotent: SteamInvite.RegisterJoinHandlers self-guards against re-subscribe.
+        private void WireSteamInvite()
+        {
+            SteamInvite.OnJoinResolved = joinString => OnLobbyJoin(joinString);
+            SteamInvite.Report = (msg, isError) =>
+            {
+                if (!isError) return; // successes already reach Player.log inside SteamInvite
+                var mb = GameUtl.GetMessageBox();
+                mb?.ShowSimplePrompt("Steam invite: " + msg, MessageBoxIcon.Error,
+                    MessageBoxButtons.OK, null, this);
+            };
+            // Lifecycle hooks: EVERY teardown path routes through NetworkEngine.Shutdown/TearDown,
+            // which invoke these to leave the invite lobby + clear rich presence (canonical Valve
+            // lifecycle — rich presence never auto-clears while the game keeps running). The joinable
+            // gate is driven from the engine's peer connect/disconnect hooks (session full ↔ freed).
+            NetworkEngine.SteamLobbyCleanup = SteamInvite.LeaveHostLobby;
+            NetworkEngine.SteamLobbySetJoinable = SteamInvite.SetLobbyJoinable;
+            SteamInvite.RegisterJoinHandlers();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Menu hook — native Canvas captured by InjectNetworkButtonPatch
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Called from InjectNetworkButtonPatch.Postfix once the main-menu Canvas + native
+        // button template are captured. Builds the lobby + save-picker as cloned NATIVE
+        // widgets parented to the menu's own Canvas (native look + correct CanvasScaler/sort).
+        public void OnMenuReady(Canvas menuCanvas)
+        {
+            if (_panelsBuilt || menuCanvas == null) return;
+            _lobby.Build(menuCanvas);
+            _panelsBuilt = true;
+
+            // Cold start: if the game was launched by accepting a Steam invite ("+connect_lobby <id>"),
+            // kick the join now that the menu + lobby panel are ready (OnLobbyJoin needs them).
+            SteamInvite.HandleColdStart();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Minimal overlay Canvas for the in-game status bar
+        // ═══════════════════════════════════════════════════════════════════
+
+        private Transform EnsureBarCanvas()
+        {
+            if (_barRoot != null) return _barRoot;
+
+            var go = new GameObject("MultiplayerBarCanvas");
+            // Parent under ModGO so the Canvas shares the mod's persistent lifetime.
+            go.transform.SetParent(transform, false);
+
+            _barCanvas = go.AddComponent<Canvas>();
+            _barCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _barCanvas.sortingOrder = 5000;
+
+            // Responsive: native aspect-adaptive scaler (match WIDTH <=16:9 / HEIGHT >16:9), replacing
+            // the old fixed match=0.5, so the status bar scales consistently with the lobby/picker.
+            var scaler = go.AddComponent<CanvasScaler>();
+            LobbyTheme.ConfigureScaler(scaler);
+
+            _barRoot = go.transform;
+            return _barRoot;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Co-op loading overlay (own ScreenSpaceOverlay canvas, sortingOrder 7000)
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Lazily created on first SHOW (Tasks 11/12 wire the curtain-driven activation).
+        private LoadOverlayController _loadOverlay;
+
+        private LoadOverlayController EnsureLoadOverlay()
+        {
+            if (_loadOverlay == null)
+                _loadOverlay = gameObject.AddComponent<LoadOverlayController>();
+            return _loadOverlay;
+        }
+
+        public void ShowLoadOverlay() => EnsureLoadOverlay().Show();
+        public void HideLoadOverlay() => _loadOverlay?.Hide();
+
+        /// <summary>
+        /// CLIENT: on the first received save chunk, enter the game's NATIVE loading screen for the
+        /// download IMMEDIATELY (instead of sitting in the lobby with only the top-right plaque). Drops
+        /// the native curtain (full-screen loading page), begins driving its bottom bar with the download
+        /// %, and hides the lobby behind it. The bar hands off to the real level-load progress at phase-2
+        /// (SaveTransferCoordinator.SetLoadingLevel). The top-right plaque still shows on top (sort 7000)
+        /// as secondary per-peer detail. Idempotent per transfer (the coordinator guards the first-chunk call).
+        /// </summary>
+        public void EnterDownloadLoadingScreen()
+        {
+            DropCurtainEarly();                                        // full-screen native loading page
+            NativeWidgetFactory.BeginDownloadBar("Downloading save…"); // drive the bottom bar with download %
+            _lobby?.HideForNativeScreen();                            // lobby out of the way, session intact
+        }
+
+        /// <summary>
+        /// CLIENT never-silent: the save transfer failed WHILE the native loading screen is up (bad blob /
+        /// checksum / prepare fail). Lift the curtain + hide the plaque so the player is not stranded on a
+        /// stuck bar, then surface the staged failure via the native message box and return to the lobby
+        /// (the session is still connected; the host owns the straggler timeout).
+        /// </summary>
+        public void OnClientTransferFailed(string stage)
+        {
+            LiftCurtainEarly();
+            HideLoadOverlay();
+            var mb = GameUtl.GetMessageBox();
+            if (mb != null)
+            {
+                _lobby?.HideForNativeScreen();
+                mb.ShowSimplePrompt($"Save transfer failed ({stage}). Returning to the lobby.",
+                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
+            else
+            {
+                _lobby?.Show();
+            }
+        }
+
+        // Force the native curtain down early so phase-1 (download) shows under a vanilla-style
+        // loading screen. Resolved dynamically; on any failure we fall back to the overlay's own
+        // opaque backdrop (the overlay panel already paints a dark background).
+        private void DropCurtainEarly()
+        {
+            try
+            {
+                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                if (t == null) return;
+                var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                if (ctrl == null) return;
+                var m = HarmonyLib.AccessTools.Method(t, "DropCurtainInstant", new System.Type[0]);
+                m?.Invoke(ctrl, null);
+            }
+            catch (System.Exception e)
+            {
+                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
+            }
+        }
+
+        // Reverse of DropCurtainEarly: lift the native curtain back up. Used only when a committed start
+        // FAILED downstream (no scene load happens, so the native Loaded→Playing lift never fires) and
+        // we must restore the lobby to its pre-press visible state. Best-effort + dynamic, like the drop.
+        private void LiftCurtainEarly()
+        {
+            try
+            {
+                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                if (t == null) return;
+                var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                if (ctrl == null) return;
+                var m = HarmonyLib.AccessTools.Method(t, "LiftCurtain", new System.Type[0]);
+                m?.Invoke(ctrl, null);
+            }
+            catch (System.Exception e)
+            {
+                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain lift failed: " + e.Message);
+            }
+        }
+
+        // ─── CLIENT tac load-phase curtain (in-game geo↔tac transitions) ────
+        // The co-op loading INDICATOR for host-driven level loads (TacticalLoadPhaseSync). Mirrors
+        // EnterDownloadLoadingScreen but WITHOUT the lobby hide (that is a menu-only concern — these fire
+        // in-game where no lobby is shown) and with a caller-supplied label.
+
+        /// <summary>Drop the native curtain + begin driving the bottom bar with a co-op loading label.
+        /// Idempotent (DropCurtainEarly / BeginDownloadBar are).</summary>
+        public void EnterTacLoadCurtain(string label)
+        {
+            DropCurtainEarly();
+            NativeWidgetFactory.BeginDownloadBar(label);
+        }
+
+        /// <summary>Stage-3 hand-off: stop driving OUR bar so the native level-load bar + default label take
+        /// over the SAME curtain (a native load is starting) — the SaveTransferCoordinator.SetLoadingLevel
+        /// idiom. Does NOT lift the curtain.</summary>
+        public void TacLoadHandoff() => NativeWidgetFactory.EndDownloadBar();
+
+        /// <summary>Abort: stop our bar AND lift the native curtain, because no native level-load will lift it
+        /// (watchdog / disconnect / already-in-tactical). Never leaves the client stuck on a curtain.</summary>
+        public void TacLoadAbort()
+        {
+            NativeWidgetFactory.EndDownloadBar();
+            LiftCurtainEarly();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Main entry — called from button click
+        // ═══════════════════════════════════════════════════════════════════
+
+        public void ShowNetworkMenu()
+        {
+            if (NetworkEngine.Instance?.IsActive == true)
+            {
+                // Already in a session → just (re)show the live lobby panel.
+                _lobby?.Show();
+                return;
+            }
+            StartHostAndOpenLobby();
+        }
+
+        // Phase 5b version-guard co-op gate: when the startup reflection guard latched an
+        // incompatibility (ReflectionGuard.IsCompatible == false), refuse to host or join a co-op
+        // session — the spec intent "disable networking rather than proceeding". INERT on a green
+        // install (all curated bindings resolve → IsCompatible stays true), so zero behavior change on
+        // the current PP build. Returns true when the attempt must be aborted; NEVER throws.
+        private bool CoopGuardBlocks(string action)
+        {
+            // ReflectionGuard stayed in the quarry with the legacy sync reflection it curated; the rail
+            // has no binding list yet, so the version gate is always green. Re-arm when bindings return.
+            return false;
+        }
+
+        // Default DirectIP listen port for the host (matches the client connect default).
+        private const int DefaultDirectPort = 14242;
+
+        // CREATE (lobby-first): start hosting on Direct + STUN + Steam SIMULTANEOUSLY in one
+        // session and open the lobby panel immediately. A joiner arriving by DirectIP, by STUN
+        // invite-code, or by Steam all land in the same peer list (CompositeTransport namespaces
+        // their ids). No campaign is loaded here — the host picks a save only after everyone is
+        // ready (Play). CompositeTransport.Host wraps each child so one failing transport (e.g.
+        // Steam unavailable) does not abort the others.
+        private void StartHostAndOpenLobby()
+        {
+            if (CoopGuardBlocks("host a co-op session"))
+                return;
+            NetworkEngine.Create();
+            var composite = new CompositeTransport(new ITransport[]
+            {
+                new DirectTransport(),
+                new StunTransport(),
+                new SteamTransport()
+            });
+            NetworkEngine.Instance.Initialize(composite);
+            NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+            NetworkEngine.Instance.StartHost(DefaultDirectPort);
+            // Publish a friends-only Steam lobby advertising our SteamID64 so "Invite via Steam" (and the
+            // friends-list Join Game) work. Fire-and-forget: the lobby is ready a beat later (reported via
+            // SteamInvite.Report); the invite button below no-ops loudly until then. Harmless off Steam.
+            SteamInvite.HostPublish();
+            // Steam-free reachability: ask the router (UPnP) to forward TCP+UDP 14242 to this PC so a
+            // GOG/Epic host is directly joinable across the internet. Fire-and-forget off the main
+            // thread; the unified invite code prefers the resulting WAN endpoint once it lands (rail
+            // re-reads every frame). No-op / null when UPnP is unsupported. Torn down via UpnpPortMapper.Unmap
+            // on the same NetworkEngine cleanup chokepoint that drops the Steam lobby.
+            _ = UpnpPortMapper.TryMap();
+            // Fresh host: drop any chosen-save carried over from a PRIOR session. Without this the
+            // stale _pendingChosenSave (the rich transfer payload) survives a host→PLAY→leave→re-host
+            // and PLAY could ship a save the new lobby's clients never chose. (The gate itself now keys
+            // on the authoritative Session.ChosenSaveName, which is null on a fresh lobby because
+            // Initialize() above builds a new SessionManager — the field is never carried over.)
+            _pendingChosenSave = null;
+            _lobbyController.Reset();      // fresh lobby (idempotent; clears any stale lock)
+            _lobbyController.BeginHost();
+            ShowInGameBar();
+            _lobby?.Show();
+        }
+
+        // ═══ Lobby panel callbacks ═════════════════════════════════════════
+
+        // LEAVE button on the lobby panel: tear down the session and hide the lobby + bar.
+        public void OnLobbyLeave()
+        {
+            _lobby?.Hide();
+            OnDisconnectClicked();
+        }
+
+        // Ready toggle from the lobby panel.
+        public void OnLobbyToggleReady(bool ready)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine?.Session == null) return;
+
+            // Host has NO Ready toggle (it is the starter, not a ready-gated player — spec §5). Only a
+            // CLIENT readies/unreadies; the host's own start gate is LobbyController.CanStart (all
+            // non-host peers ready + save chosen), projected via RefreshGateFacts.
+            if (engine.IsHost) return;
+
+            // Client → host ClientReady / ClientUnready per the local intent (keyed by sender; the host
+            // broadcasts the updated roster, which un-arms PLAY on an unready).
+            engine.Session.SetClientReady(engine.LocalSteamId, ready);
+        }
+
+        // Parity soft-gate: the roster "!" badge's click-through detail — the exact host-computed diff
+        // list. The lobby has no hover-tooltip mechanism; the native message box IS this mod's canonical
+        // never-silent detail surface.
+        public void OnLobbyShowParityDiffs(string diffs)
+        {
+            if (string.IsNullOrEmpty(diffs)) return;
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+
+            // The native MessageBox renders BELOW the lobby overlay (sort 4000), so a box shown over
+            // the OPEN lobby is fully occluded — invisible. The user, seeing nothing, re-clicks the
+            // "!" badge; each click stacks another hidden ModalData in the MessageBox's
+            // _modalPopupStack (ShowPromptImpl pushes the current box when one is already showing).
+            // Those stacked boxes only become visible when the overlay tears down on lobby EXIT, then
+            // pour out one-by-one (the "высыпались after exit" bug). Fix at the source by mirroring the
+            // proven rename-prompt path: hide the lobby overlay first so the box shows through, then
+            // re-show the lobby on dismiss — the FIRST click now gives immediate feedback, so nothing
+            // ever queues to spill out later.
+            _lobby?.HideForNativeScreen();
+            mb.ShowSimplePrompt(
+                "Mods / DLC / mod settings differ from the host:\n\n" + diffs +
+                "\n\nREADY unlocks once these match the host.",
+                MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+        }
+
+        // Nickname edit committed in the lobby panel.
+        public void OnLobbyRename(string newName)
+        {
+            if (string.IsNullOrWhiteSpace(newName)) return;
+            NetworkEngine.Instance?.Session?.SendRename(newName.Trim());
+        }
+
+        // Host PLAY transfers the already-chosen save (rail-selected). If no save is chosen yet it
+        // does NOT start the session and does NOT open a fallback picker (that produced a broken
+        // undismissable window); it shows a native warning to choose a save first.
+        public void OnLobbyPlay()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return;
+
+            // Press-time re-validation of the SAME start gate (defense-in-depth vs the stale-frame
+            // race, Bug B H2): never trust the Play button's lit visual alone. Project the live roster
+            // facts into the FSM through the SINGLE shared projection point (RefreshGateFacts — the
+            // exact same one the Play-button VISUAL uses), then attempt CommitStart — which only
+            // succeeds when >=1 client is connected, ALL connected clients are ready, and a save is
+            // chosen, and which LOCKS the lobby on success so no mid-start ready flip can race in.
+            RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen);
+
+            // Shared reopen path: the gate passed and we LOCKED the lobby, but the start could not
+            // proceed (HostStartSession returned false OR threw in its synchronous portion —
+            // timing.Start / first MoveNext of HostSerializeAndSendCrt). Reopen instead of leaving the
+            // lobby permanently dead-locked: unlock the FSM, undo the visible commit side effects
+            // (overlay + early curtain drop), re-show the lobby, and warn. The cached facts are intact,
+            // so the gate is satisfied again on reopen.
+            void ReopenAfterFailedStart()
+            {
+                _lobbyController.CancelStart();
+                HideLoadOverlay();
+                LiftCurtainEarly();
+                var failBox = GameUtl.GetMessageBox();
+                if (failBox != null)
+                {
+                    _lobby?.HideForNativeScreen();
+                    failBox.ShowSimplePrompt("Failed to start session. Please try again.",
+                        MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                        delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                }
+                else
+                {
+                    _lobby?.Show();
+                }
+            }
+
+            if (_lobbyController.CommitStart())
+            {
+                DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
+                // NOTE: do NOT ShowLoadOverlay() here. The overlay visibility is fully state-driven
+                // (LoadOverlayController.Update → LoadOverlayVisibility.ShouldShow) and now gates on the
+                // NATIVE load-start (LoadPhaseStarted = curtain entered "Loading"), NOT on the command-time
+                // TransferActive. An eager show here would only flash the overlay in the LOBBY one frame
+                // before any mission load began (the reported bug). It appears on its own at real load-start
+                // via CurtainShowPatch.Postfix (state=="Loading"). Curtain drop stays — phase-1 seamlessness.
+                bool started;
+                try
+                {
+                    started = engine.SaveTransfer?.HostStartSession(_pendingChosenSave) ?? false;
+                }
+                catch (System.Exception e)
+                {
+                    // The synchronous portion of HostStartSession threw AFTER the lobby was locked.
+                    // Without this the exception would escape with the gate stuck false forever → dead
+                    // Play button. Run the EXACT SAME reopen sequence as the started==false branch, log
+                    // the cause, and swallow (the user is informed via the same warning box).
+                    Debug.LogError("[Multiplayer] HostStartSession threw during start: " + e);
+                    ReopenAfterFailedStart();
+                    return;
+                }
+                if (started) return;
+
+                ReopenAfterFailedStart();
+                return;
+            }
+
+            // Gate closed at press time. Tell the host exactly what is missing, reading the SAME
+            // projected facts (no parallel rule) so the message can never contradict the gate.
+            string why = !saveChosen ? "Choose a save before starting."
+                : clientCount < 1 ? "Wait for a player to join before starting."
+                : "All players must be ready before starting.";
+            var mb = GameUtl.GetMessageBox();
+            if (mb != null)
+            {
+                _lobby?.HideForNativeScreen();
+                mb.ShowSimplePrompt(why,
+                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
+        }
+
+        // ─── Start-gate projection (THE single source of truth feed) ────────────────────────────
+        // Project the authoritative lobby roster down to the primitive gate facts and push them into
+        // the LobbyController FSM. This is the ONE place the non-host/all-ready rule is applied (via
+        // LobbyController.AllClientsReady) — both the Play-button VISUAL (EvaluateStartGate) and the
+        // press-time guard (OnLobbyPlay) call through here, so they can never derive a different gate.
+        //   • clientCount      = connected NON-host peers (host self-entry excluded).
+        //   • allClientsReady  = LobbyController.AllClientsReady over the non-host ready flags.
+        //   • saveChosen       = the AUTHORITATIVE broadcast value Session.ChosenSaveName is non-empty
+        //                        (single source of truth; see the gate-vs-rail divergence note below).
+        // UpdateLobby ignores updates while the FSM is locked, so this is safe to call every frame.
+        private void RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen)
+        {
+            var engine = NetworkEngine.Instance;
+            var roster = engine?.Session?.GetLobbyRoster();
+
+            var nonHostReady = new List<bool>();
+            if (roster != null)
+                foreach (var p in roster)
+                    if (!p.IsHost) nonHostReady.Add(p.Ready);
+
+            clientCount = nonHostReady.Count;
+            allClientsReady = LobbyController.AllClientsReady(nonHostReady);
+            // SINGLE SOURCE OF TRUTH for "a save is chosen": the AUTHORITATIVE broadcast value
+            // (Session.ChosenSaveName, set only by SetChosenSave which also broadcasts SetSave + drives
+            // the rail), NOT the local _pendingChosenSave field. A stale _pendingChosenSave surviving a
+            // re-host used to arm the gate while ChosenSaveName was null and the rail read "(none)" and
+            // nothing was broadcast — gate, rail and broadcast could diverge. Keying the gate on the
+            // broadcast value makes them converge: PLAY can never arm unless a save was really broadcast.
+            saveChosen = !string.IsNullOrEmpty(engine?.Session?.ChosenSaveName);
+
+            _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
+        }
+
+        // Refresh the FSM from the live roster, then return the FULL start gate (clients>=1 && all
+        // clients ready && save chosen && HostLobby && !locked). The Play-button VISUAL calls this so
+        // its enabled state matches the press-time gate on EVERY dimension — including save-chosen and
+        // the post-commit lock — not just the all-ready dimension.
+        public bool EvaluateStartGate()
+        {
+            RefreshGateFacts(out _, out _, out _);
+            return _lobbyController.CanStart;
+        }
+
+        // ─── Smart-Join (footer Join…) ─────────────────────────────────────
+
+        // True when THIS engine is a LIVE DirectIP host: we hold the host role AND the DirectIP child
+        // transport is actually Connected (bound + listening). Keyed on the DirectIP child's OWN state,
+        // NOT CompositeTransport's aggregate — a 2nd same-box instance whose DirectIP bind FAILED
+        // (AddressAlreadyInUse) is NOT a healthy host even if another child (STUN/Steam) came up, so it
+        // is still allowed to join 127.0.0.1:<port> (the legitimate 2-instance same-box test).
+        private static bool IsHealthyDirectHost()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return false;
+            var t = engine.Transport;
+            if (t == null) return false;
+            ITransport direct = null;
+            if (t is CompositeTransport comp)
+            {
+                foreach (var c in comp.Children)
+                    if (c.TransportType == TransportType.DirectIP) { direct = c; break; }
+            }
+            else if (t.TransportType == TransportType.DirectIP)
+            {
+                direct = t;
+            }
+            return direct != null && direct.State == ConnectionState.Connected;
+        }
+
+        // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
+        public void OnLobbyJoin(string input)
+        {
+            if (CoopGuardBlocks("join a co-op session"))
+                return;
+            var target = SmartJoinParser.Parse(input ?? "");
+            if (target.Kind == JoinKind.Invalid)
+            {
+                // Reached via OnLobbyJoinPrompt's OK path, which left the lobby HIDDEN. Keep it hidden
+                // behind this error box (HideForNativeScreen is idempotent) so the native error shows
+                // through cleanly, then re-show the lobby when the box is dismissed.
+                var mbErr = GameUtl.GetMessageBox();
+                _lobby?.HideForNativeScreen();
+                mbErr?.ShowSimplePrompt("Could not read that address or code.",
+                    MessageBoxIcon.Error, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                return;
+            }
+
+            // UX-safety guard: a HEALTHY DirectIP host pasting its OWN loopback:port is trying to join
+            // the game it just created. The unconditional teardown below would Disconnect()+Shutdown()
+            // the live host listener, then connect to a port nothing listens on → ConnectionRefused.
+            // Refuse and keep the host session intact instead. (Failed-bind 2nd instance → not healthy →
+            // falls through and still joins 127.0.0.1:<port>.)
+            if (IsHealthyDirectHost() && SmartJoinParser.IsOwnLoopback(target, DefaultDirectPort))
+            {
+                var mbSelf = GameUtl.GetMessageBox();
+                _lobby?.HideForNativeScreen();
+                mbSelf?.ShowSimplePrompt(
+                    "You're already hosting — share your IP or invite code; you can't join your own game.",
+                    MessageBoxIcon.Information, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                return;
+            }
+
+            // Tear down the auto-hosted session, then connect as a client (overlay stays open;
+            // Update's _lobby.Refresh() re-binds it to the new client session). The whole setup +
+            // connect is wrapped so that NO exception (transport construction, Initialize, a
+            // malformed target, etc.) can ever escape to freeze/crash the game — on any failure we
+            // route to the same error dialog (OnConnectionFailed) and the lobby stays usable for a
+            // retry. The actual socket connect inside JoinGame is already non-blocking + time-bounded
+            // (DirectTransport/StunTransport surface their outcome from Update on the main thread),
+            // so an unreachable host produces an error dialog within the connect timeout, never a
+            // frozen UI.
+            try
+            {
+                NetworkEngine.Instance?.Disconnect();
+                NetworkEngine.Instance?.Shutdown();
+
+                // Fix #4: drive the lobby FSM down the CLIENT path. We may be in HostLobby (the menu
+                // auto-hosts) when the user pastes a join target, so Reset() returns the FSM to Idle
+                // first, then BeginJoin() moves it Idle→Joining. JoinConfirmed() fires later, when the
+                // first host PEER_LIST roster arrives (see Update), moving Joining→ClientLobby.
+                _lobbyController.Reset();
+                _lobbyController.BeginJoin();
+
+                // Build the ordered cascade for this target (unified code → Steam/STUN/Direct; legacy
+                // code → single attempt) and start the first stage. Each stage's async connect is
+                // time-bounded; a stage failure advances to the next in OnConnectionFailed.
+                _joinPlan = JoinPlan.Build(target, SteamInvite.IsSteamAlive());
+                _joinAttemptIndex = 0;
+                if (_joinPlan.Count == 0)
+                {
+                    // Only reachable for a unified code that carried ONLY a Steam id while Steam is off —
+                    // nothing here is connectable without Steam.
+                    OnConnectionFailed("that invite code needs Steam, which isn't running — ask the host for their IP or a code with an endpoint");
+                    return;
+                }
+                // DO NOT open the lobby yet. The connect is async + time-bounded and the host has not
+                // accepted us until its first PEER_LIST arrives — opening the lobby here would show a
+                // FAKE empty lobby that an async failure then kicks us out of. StartJoinAttempt enters
+                // the "connecting" state (lobby HIDDEN behind a native "Trying…" box with CANCEL);
+                // Update() opens the real lobby once confirmed; OnConnectionFailed advances/aborts.
+                StartJoinAttempt();
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[Multiplayer] Join attempt failed: {ex}");
+                // Reset any half-open session so a subsequent retry / host still works cleanly.
+                NetworkEngine.Instance?.Shutdown();
+                OnConnectionFailed($"Join failed: {ex.Message}");
+            }
+        }
+
+        // Start (or advance to) the current cascade stage: init the transport for _joinPlan[_joinAttemptIndex]
+        // and begin its async connect, showing a native "Trying…" box for the stage. Reused for the first
+        // stage and each fallback after a stage fails (OnConnectionFailed).
+        private void StartJoinAttempt()
+        {
+            var attempt = _joinPlan[_joinAttemptIndex];
+            NetworkEngine.Create();
+            // Initialize BEFORE subscribing (unchanged from the pre-cascade order): a transport that
+            // reports Failed synchronously inside Initialize (e.g. Steam API unavailable) has no UI
+            // handler yet, so it is swallowed rather than surfacing a spurious first-frame failure.
+            NetworkEngine.Instance.Initialize(attempt.Transport);
+            NetworkEngine.Instance.OnConnectionFailed += OnConnectionFailed;
+            // Show the stage box BEFORE the connect so that if JoinGame ever fails synchronously the
+            // retry's Dismiss+Show cleanly replaces this box instead of a stale label stomping the next.
+            ShowConnectingBox(StageLabel(attempt.Transport, _joinAttemptIndex, _joinPlan.Count));
+            NetworkEngine.Instance.JoinGame(attempt.Address, attempt.Port);
+        }
+
+        // Per-stage connecting-box caption. A single-attempt plan keeps the plain "Connecting to host…";
+        // a multi-stage cascade names the transport + progress so the wait is legible.
+        private static string StageLabel(TransportType t, int index, int count)
+        {
+            if (count <= 1) return "Connecting to host…";
+            string what;
+            switch (t)
+            {
+                case TransportType.SteamP2P: what = "Trying Steam…"; break;
+                case TransportType.StunUDP: what = "Trying hole-punch…"; break;
+                default: what = "Trying direct connection…"; break;
+            }
+            return $"{what} ({index + 1}/{count})";
+        }
+
+        // Footer Join… button → native modal input → OnLobbyJoin.
+        public void OnLobbyJoinPrompt()
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+
+            // Hide the lobby overlay (proven Load-screen approach) so the native input prompt shows
+            // through cleanly, then bring it back on dismiss. CANCEL re-shows the lobby here. On OK we
+            // hand off to OnLobbyJoin while the lobby is STILL hidden — OnLobbyJoin owns the visibility
+            // from there: its valid path re-shows the lobby after connecting (ShowInGameBar + Show),
+            // and its invalid-input branch shows its OWN error box (lobby hidden behind it) and
+            // re-shows the lobby on that box's dismiss. This sequences the chained prompts so the
+            // visible element is always on top and the lobby always returns once everything is gone.
+            _lobby?.HideForNativeScreen();
+            mb.ShowInputPrompt("Paste IP or code… (auto-detect)", "", null,
+                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
+                delegate (MessageBoxCallbackResult res)
+                {
+                    // Empty submit is impossible through OK (the native ValidateResult blocks
+                    // whitespace-only OK), and an empty string reaching OnLobbyJoin classifies as
+                    // Invalid → error box, never a connect-to-nothing. So empty == cancel/no-op.
+                    if (res.DialogResult == MessageBoxResult.OK)
+                        OnLobbyJoin(res.InputTextResult ?? "");
+                    else
+                        _lobby?.Show();
+                }, this);
+
+            // Normal flow is IP-only: prefill the default direct endpoint and pre-select the IP portion
+            // so the user overwrites just the IP, leaving ":<port>" intact. Port comes from
+            // SmartJoinParser.DefaultDirectPort (single source of truth — not hardcoded here). STUN /
+            // SteamId paths still work: select-all + paste a code over the prefill; SmartJoinParser
+            // auto-detects. Pressing OK unedited connects to localhost:<DefaultDirectPort> (valid).
+            // Zero-friction: if the clipboard already holds a valid invite code (the host clicked
+            // CODE), prefill it so the joiner just presses OK. Otherwise fall back to the localhost
+            // default endpoint (normal IP-only flow).
+            var clip = GUIUtility.systemCopyBuffer;
+            var clipIsCode = !string.IsNullOrEmpty(clip)
+                && (InviteCode.TryDecode(clip, out _)
+                    || UnifiedCode.TryDecode(clip, out _, out _, out _, out _));
+            // A healthy host has no reason to self-join, so don't seed its OWN loopback endpoint (the
+            // footgun); leave the field blank (empty OK is blocked by ValidateResult). A clipboard
+            // invite still prefills, and a non-healthy 2nd same-box instance keeps the localhost default
+            // so the legitimate 2-instance test's one-press OK still works.
+            var prefill = clipIsCode
+                ? clip.Trim()
+                : (IsHealthyDirectHost() ? "" : "127.0.0.1:" + SmartJoinParser.DefaultDirectPort);
+            TryUpgradePromptInput("Invite code, IP:port, or STUN code", prefill);
+        }
+
+        // ─── Nickname rename (own roster row pencil) ───────────────────────
+
+        public void OnLobbyRenamePrompt()
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+            var current = NetworkEngine.Instance?.IsHost == true
+                ? NetworkEngine.Instance.Session?.HostNickname ?? ""
+                : (ClientIdentity.LocalNickname ?? SystemInfo.deviceName);
+
+            // The native MessageBox renders BELOW the lobby overlay, so a prompt opened over the open
+            // lobby is occluded. Use the proven Load-screen approach: hide the lobby overlay (restore
+            // menu chrome + hide the status bar) so the native prompt shows through cleanly, then
+            // re-show the lobby in EVERY dialog-result path (OK and Cancel) so it never gets stuck
+            // hidden. On OK the rename commits/propagates (the host BroadcastPeerList in
+            // SendRename/HandleRename pushes it to every other peer); the lobby's per-frame Refresh
+            // reflects the new nickname once it is shown again.
+            _lobby?.HideForNativeScreen();
+            // Pass `current` as suggestedText so that IF the InputField can't be located
+            // (TryUpgradePromptInput == false) the prompt gracefully falls back to the OLD
+            // prefilled-value behavior instead of an empty, hint-less field.
+            mb.ShowInputPrompt("New nickname", current, null,
+                MessageBoxIcon.Question, MessageBoxButtons.OKCancel,
+                delegate (MessageBoxCallbackResult res)
+                {
+                    // OnLobbyRename no-ops on empty/whitespace, and the native ValidateResult
+                    // already blocks an empty OK — so an empty submit keeps the current nickname.
+                    if (res.DialogResult == MessageBoxResult.OK)
+                        OnLobbyRename(res.InputTextResult ?? "");
+                    _lobby?.Show();
+                }, this);
+
+            // Web-style: clear the prefilled value and show it as a grey placeholder hint behind a
+            // blinking caret instead, so the user can type immediately without selecting/deleting.
+            TryUpgradePromptInput(string.IsNullOrEmpty(current) ? "Nickname" : current);
+        }
+
+        // Reconfigure the just-opened native input prompt into a web-style field: empty text with a
+        // grey placeholder hint and an already-blinking caret (no extra click). The native
+        // MessageBoxInputPromptController.Show() runs synchronously inside ShowInputPrompt and
+        // activates + focuses the field in the same call, so this can run immediately afterward.
+        //
+        // Returns true if the InputField was found and reconfigured. On false the caller's prefilled
+        // suggestedText (if any) remains untouched as a graceful fallback — nothing breaks.
+        //
+        // Native grounding (decompiled, source-provenance authoritative):
+        //   MessageBoxInputPromptController.cs:11   private InputField _inputField   (UnityEngine.UI, legacy)
+        //   MessageBoxInputPromptController.cs:13-22 Show() sets _inputField.text = SuggestedText, SetActive(true)
+        //   MessageBoxInputPromptController.cs:32-33 OnShowReady() Select()+ActivateInputField()
+        //   MessageBoxInputPromptController.cs:50-57 ValidateResult blocks OK on whitespace-only text
+        // Also normalizes the field so ALL characters type (BUG A: prefab characterValidation rejected
+        // ".") and forces a readable dark text/caret on the light field (BUG B: white-on-white text).
+        private static bool TryUpgradePromptInput(string placeholderHint, string prefill = null)
+        {
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return false;
+
+            // The InputField lives on the (active) input-prompt controller under the MessageBox.
+            var field = mb.GetComponentInChildren<InputField>(true);
+            if (field == null) return false;
+
+            // BUG A fix — accept ALL characters (periods/colons for IP:port, base32 for STUN codes).
+            // The native prompt prefab serializes this InputField with a restrictive characterValidation,
+            // so "." (and other punctuation) is silently rejected by the engine's per-keystroke validation
+            // — an IPv4 address can't be typed. The console-hotkey patch (doc 11) already stopped the dev
+            // console from eating the dot; this normalizes the FIELD-side filter that was the remaining
+            // cause. Forcing ContentType.Standard runs Unity's EnforceContentType (resets validation to
+            // None, single-line, etc.); we then set CharacterValidation.None explicitly and clear any
+            // leftover onValidateInput (the shared native field is reused across dialogs). Re-applied on
+            // every prompt so prior-use state never leaks in.
+            //   Native grounding: MessageBoxInputPromptController.cs:11 (the InputField),
+            //   :19 (combines data.InputValidator into onValidateInput — ours is null).
+            field.contentType = InputField.ContentType.Standard;
+            field.characterValidation = InputField.CharacterValidation.None;
+            field.onValidateInput = null;
+
+            // Prefill (when supplied) seeds the field with a sensible default (e.g. "127.0.0.1:14242")
+            // so the normal Join is IP-only — the user overwrites just the IP and keeps ":port". When no
+            // prefill is given, clear any prefilled value so the placeholder hint shows instead. An empty
+            // submit can never rename/connect to nothing because the native ValidateResult rejects an
+            // empty OK.
+            bool hasPrefill = !string.IsNullOrEmpty(prefill);
+            field.text = hasPrefill ? prefill : string.Empty;
+
+            // BUG B fix — the typed text was white-on-white (invisible). PP's prompt prefab serializes
+            // the input Text white and renders over a light field background in our usage; the dev
+            // console itself overrides this same color at runtime (GameConsoleWindow.cs:611:
+            // ((Graphic)_inputField.textComponent).color = style.InputFieldTextColor), confirming the
+            // native default isn't readable on its own. Force a near-black text + caret that contrasts
+            // the light field, and darken the placeholder hint so it's visible yet distinct (alpha 0.45
+            // vs solid text). textComponent is null-guarded.
+            var inkColor = new Color(0.10f, 0.10f, 0.10f, 1f); // near-black, readable on light field
+            if (field.textComponent != null)
+                field.textComponent.color = inkColor;
+            field.customCaretColor = true;
+            field.caretColor = inkColor;
+
+            // InputField.placeholder is a Graphic, normally a Text in PP's prefab.
+            if (field.placeholder is Text ph)
+            {
+                ph.text = placeholderHint ?? string.Empty;
+                ph.color = new Color(0.10f, 0.10f, 0.10f, 0.45f); // dark translucent hint on light field
+            }
+
+            // Focus immediately so the caret blinks without an extra click. Reinforces the engine's
+            // own Select()+ActivateInputField from OnShowReady (harmless to repeat).
+            EventSystem.current?.SetSelectedGameObject(field.gameObject);
+            field.ActivateInputField();
+
+            if (hasPrefill)
+            {
+                // Pre-select the IP portion (everything before the LAST ':') so the user's first
+                // keystroke replaces just the IP while the ":port" suffix stays intact. For
+                // "127.0.0.1:14242" the last ':' is at index 9 → selection covers "127.0.0.1". If there
+                // is no ':' (bare host), select the whole text. Selection must be set AFTER
+                // ActivateInputField (the field must be focused/active for the highlight to stick).
+                //   uGUI: selectionAnchorPosition = fixed end, selectionFocusPosition = moving end /
+                //   where the caret renders; a non-empty selection exists when anchor != focus. We do
+                //   NOT set caretPosition here — its setter collapses anchor+focus to one point and
+                //   would clear the highlight.
+                int lastColon = prefill.LastIndexOf(':');
+                int ipLen = lastColon >= 0 ? lastColon : prefill.Length;
+                field.selectionAnchorPosition = 0;
+                field.selectionFocusPosition = ipLen;
+            }
+            else
+            {
+                field.caretPosition = 0;
+            }
+            return true;
+        }
+
+        // ─── Chat send ─────────────────────────────────────────────────────
+
+        public void OnLobbyChatSend(string text)
+        {
+            NetworkEngine.Instance?.Session?.SendChat(text);
+        }
+
+        // ─── Choose save (host only) ───────────────────────────────────────
+
+        // Host rail "Choose save…": open the game's OWN native Load screen and INTERCEPT the pick so
+        // it hands back the chosen SavegameMetaData WITHOUT loading the campaign (see
+        // Harmony/SaveLoadInterceptPatch). We stopped hand-building the row list (it kept rendering
+        // empty); the native screen is the game's verified save UI. ALWAYS use the native screen —
+        // there is no custom fallback (a second click used to silently fall to the wrong custom
+        // window once the cached native button went stale).
+        public void OnLobbyChooseSave()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return;
+
+            // The handler that records + broadcasts the chosen save (identical to the old picker path).
+            System.Action<SavegameMetaData> onPicked = CaptureLobbySavePick;
+
+            // Arm the intercept, hide our overlay so the native screen shows through, then open it by
+            // driving the home-screen state stack straight to UIStateHomeLoadGame (robust on EVERY
+            // click — see SaveLoadInterceptPatch.OpenNativeLoadScreen). If the native open genuinely
+            // fails we disarm and re-show the lobby (NO custom fallback window): the host can retry.
+            SaveLoadInterceptPatch.Arm(onPicked);
+            _lobby?.HideForNativeScreen();
+            if (!SaveLoadInterceptPatch.OpenNativeLoadScreen())
+            {
+                SaveLoadInterceptPatch.Disarm();
+                _lobby?.Show();
+                Debug.LogWarning("[Multiplayer] Could not open the native Load screen for Choose-Save; try again.");
+            }
+        }
+
+        // ─── New campaign (host only, P0 co-op bootstrap) ───────────────────
+
+        // Host rail "New campaign…": open the game's OWN native new-game settings screen (difficulty /
+        // DLC choices stay host-only, native). This button is pure NAVIGATION — the co-op arming
+        // happens at the native CONFIRM chokepoint (NewCampaignInterceptPatch, a durable gate that
+        // also covers any other native route to that screen), and BACK returns to the lobby via the
+        // OnSettingsBackClicked postfix. After confirm the campaign is created natively; at its first
+        // playable geoscape frame the coordinator autosaves + re-runs the EXISTING chunked transfer.
+        public void OnLobbyNewCampaign()
+        {
+            var engine = NetworkEngine.Instance;
+            var coord = engine?.SaveTransfer;
+            if (engine == null || coord == null || !engine.IsHost) return;
+
+            // Press-time projection of the SAME Core gate the confirm intercept arms under — the
+            // button never opens a screen whose confirm would be refused.
+            if (!SessionLifecycle.NewCampaignArmGuard(engine.IsHost, engine.IsActiveSession,
+                    coord.SessionStarted, coord.TransferActive))
+            {
+                Debug.LogWarning("[Multiplayer] New-campaign bootstrap unavailable (session started or transfer in flight).");
+                return;
+            }
+
+            _lobby?.HideForNativeScreen();
+            if (!NewCampaignInterceptPatch.OpenNativeNewGameScreen())
+            {
+                _lobby?.Show();
+                Debug.LogWarning("[Multiplayer] Could not open the native New Game screen; try again.");
+            }
+        }
+
+        /// <summary>Re-show the lobby overlay (host backed out of the native new-game settings —
+        /// NewCampaignInterceptPatch.SettingsBack_Postfix). Idempotent.</summary>
+        public void ShowLobby() => _lobby?.Show();
+
+        // Two picked saves are the SAME selection iff they reference the same on-disk save, identified
+        // by the filesystem Path (unique, set when the meta is loaded). If Path is unset/empty on either
+        // side the identity is unknown, so the saves are treated as DIFFERENT (never equal by name/time).
+        private static bool SameSave(SavegameMetaData a, SavegameMetaData b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+            // Path is the only reliable save identity. If it is unset/empty on EITHER side, treat the
+            // saves as DIFFERENT rather than falling back to name/time equality — otherwise two distinct
+            // saves that happen to share a display-name + creation-time (both with empty Path) compare
+            // equal, so a genuine save swap fails to reset client Ready (stale ready survives).
+            if (string.IsNullOrEmpty(a.Path) || string.IsNullOrEmpty(b.Path))
+                return false;
+            return string.Equals(a.Path, b.Path, System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Called from SaveLoadInterceptPatch when the native Load screen closes (after a pick OR a
+        // cancel). Re-show the lobby (which re-hides the native chrome) and, if a save was chosen,
+        // deliver it to the chosen-save handler. Runs on the main thread (Harmony Postfix on
+        // UIStateHomeLoadGame.ExitState).
+        public void OnNativeSaveScreenClosed(SavegameMetaData chosen, System.Action<SavegameMetaData> onPicked)
+        {
+            _lobby?.Show();
+            if (chosen != null) onPicked?.Invoke(chosen);
+        }
+
+        /// <summary>
+        /// Record + broadcast the host's chosen lobby save (label only — NO campaign load). This is the
+        /// single source of truth for "host picked a save in the lobby": OnLobbyChooseSave's armed path
+        /// hands its onPicked straight to this, AND the durable un-armed lobby gate
+        /// (<see cref="OnLobbyLoadPickCaptured"/>) calls it too, so the chosen-save behaviour is identical
+        /// regardless of whether the static intercept flag happened to be armed at click time.
+        /// </summary>
+        public void CaptureLobbySavePick(SavegameMetaData chosen)
+        {
+            if (chosen == null) return;
+
+            // Reset every client's Ready ONLY on a GENUINE save change. Clients readied for a
+            // specific session, so swapping to a DIFFERENT save invalidates that — but the first
+            // pick (no prior session) and re-picking the SAME save must NOT drop anyone's ready,
+            // or the gate's all-ready bit keeps collapsing and PLAY never lights.
+            var previousChosen = _pendingChosenSave;
+            _pendingChosenSave = chosen;
+            bool genuineChange = previousChosen != null && !SameSave(previousChosen, chosen);
+            if (genuineChange)
+            {
+                // Drop the FSM's cached ready fact and clear the authoritative roster ready bits
+                // so the gate re-closes until everyone re-readies for the new save.
+                _lobbyController.SaveChangedShouldResetReady();
+                NetworkEngine.Instance?.Session?.ResetAllClientsReady();
+            }
+
+            var name = SaveDisplayName(chosen);
+            var meta = SaveDisplayMeta(chosen);
+            NetworkEngine.Instance?.Session?.SetChosenSave(name, meta);
+        }
+
+        /// <summary>
+        /// DURABLE lobby save-pick capture. Called from the OnLoadGamePressed prefix when
+        /// <see cref="SessionLifecycle.ShouldCaptureAsLobbyPick"/> is true (host in an active lobby whose
+        /// session has NOT started) — REGARDLESS of the intercept's <c>_armed</c> flag. The host can reach
+        /// a native Load screen un-armed (the lobby re-makes native menu buttons clickable), and the old
+        /// flag-only guard then let the real load run. This records the pick as the lobby's chosen save and
+        /// re-shows the lobby; the campaign load happens ONLY via host PLAY → CommitStart → HostStartSession.
+        /// Self-contained: works even when _armed==false / no onPicked callback is set.
+        /// </summary>
+        public void OnLobbyLoadPickCaptured(SavegameMetaData chosen)
+        {
+            CaptureLobbySavePick(chosen);
+            // Re-show the lobby (re-hides the native chrome restored when the Load screen opened). The
+            // prefix already closed the native Load screen via CloseModule, so we must not be left on it.
+            _lobby?.Show();
+        }
+
+        // ─── F2: host loads ANY save mid-session (tactical OR geoscape) ─────
+        // Called from InGameLoadArmPatch (postfix on UIModulePauseScreen.OnLoadPressed). Arms the save
+        // intercept in PREFIX-delivery mode IFF the live engine is the host in an active, already-started
+        // session (in-game, not lobby) with >=1 connected client and NO transfer already in flight.
+        // Returns true iff armed. On false the caller disarms so the host's load runs as normal.
+        public bool TryArmInGameHostLoad()
+        {
+            var engine = NetworkEngine.Instance;
+            var coord = engine?.SaveTransfer;
+            bool ok = SessionLifecycle.HostLoadGuard(
+                isHost: engine?.IsHost ?? false,
+                isActiveSession: engine?.IsActiveSession ?? false,
+                sessionStarted: coord?.SessionStarted ?? false,
+                connectedClientCount: engine?.Session?.ClientCount ?? 0,
+                transferActive: coord?.TransferActive ?? false);
+            if (!ok) return false;
+
+            SaveLoadInterceptPatch.ArmInPrefix(OnInGameLoadPicked);
+            Debug.Log("[Multiplayer] F2: armed in-game host load intercept (pause-menu Load).");
+            return true;
+        }
+
+        // The picked save from the in-game pause-menu Load (delivered straight from the intercept
+        // prefix). Re-run the EXISTING chunked transfer + 2-phase barrier so every client reloads into
+        // it. The host is mid-game (tactical or geoscape); SaveTransferCoordinator's ClientLoadCrt /
+        // PrepareEntryFromBlobCrt tears down the current level via the native FinishLevel path on BEGIN,
+        // so this is a host-authoritative InGame->InGame transition — clients follow unconditionally.
+        public void OnInGameLoadPicked(SavegameMetaData chosen)
+        {
+            var engine = NetworkEngine.Instance;
+            if (chosen == null || engine == null || !engine.IsHost) return;
+
+            // Re-validate the guard at delivery time (defense-in-depth: state may have changed between
+            // arming on OnLoadPressed and the host actually clicking a slot).
+            var coord = engine.SaveTransfer;
+            bool ok = SessionLifecycle.HostLoadGuard(
+                isHost: engine.IsHost,
+                isActiveSession: engine.IsActiveSession,
+                sessionStarted: coord?.SessionStarted ?? false,
+                connectedClientCount: engine.Session?.ClientCount ?? 0,
+                transferActive: coord?.TransferActive ?? false);
+            if (!ok)
+            {
+                Debug.LogWarning("[Multiplayer] F2: in-game load guard closed at delivery; ignoring pick.");
+                return;
+            }
+
+            // Do NOT ShowLoadOverlay() here. As with OnLobbyPlay, overlay visibility is state-driven and
+            // gates on the NATIVE load-start (LoadPhaseStarted, curtain "Loading") via CurtainShowPatch —
+            // showing it on the F2 pick would pop it mid-game before the load curtain dropped. HideLoadOverlay
+            // on the failure path stays (idempotent: clears any overlay if the in-game start never began).
+            bool started = coord.HostStartSessionInGame(chosen);
+            if (!started)
+            {
+                HideLoadOverlay();
+                Debug.LogWarning("[Multiplayer] F2: HostStartSessionInGame did not start (see prior log).");
+            }
+        }
+
+        // The save the host chose in the rail (consumed by PLAY); null until a pick is made.
+        public SavegameMetaData PendingChosenSave => _pendingChosenSave;
+        private SavegameMetaData _pendingChosenSave;
+
+        private static string SaveDisplayName(SavegameMetaData meta)
+        {
+            if (meta == null) return "(none)";
+            var name = meta.Name;
+            if (meta is PPSavegameMetaData pp
+                && !string.IsNullOrEmpty(pp.UserSetName))
+                name = pp.UserSetName;
+            return string.IsNullOrEmpty(name) ? "(unnamed)" : name;
+        }
+
+        private static string SaveDisplayMeta(SavegameMetaData meta)
+        {
+            try { return meta?.SaveCreated?.DisplayDateTime ?? ""; }
+            catch { return ""; }
+        }
+
+        // ─── Connect rail values + clipboard ───────────────────────────────
+
+        // Host STUN short code (or a status placeholder while discovering / on failure).
+        // The host's CompositeTransport always includes a hosting StunTransport, so the code
+        // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.
+        public string GetRailStunCode()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "(host on STUN to share)";
+            var stun = FindHostingChild(TransportType.StunUDP);
+            if (stun == null) return "(host on STUN to share)";
+            if (stun.PublicEndPoint == null)
+            {
+                // Mirror the StunTransport discovery thread's state messages (it retries across a
+                // pool of Google STUN servers and only marks itself unavailable after exhausting all
+                // rounds). "unavailable" = environmentally blocked (symmetric NAT / firewall); the
+                // rail re-reads every frame, so a late success still appears live without reopening.
+                if (stun.LocalEndpoint.Contains("unavailable"))
+                    return "unavailable (NAT/firewall)";
+                return "discovering…";
+            }
+            var code = ConnectCode.Encode(stun.PublicEndPoint);
+            return code ?? "unavailable (NAT/firewall)";
+        }
+
+        // Host's ONE unified invite code (Steam id and/or public endpoint), or a discovery placeholder.
+        // Endpoint priority: the UPnP-forwarded WAN endpoint (actually open for TCP+UDP) over the
+        // STUN-discovered one (UDP hole-punch only). Re-read every frame by the rail, so it fills in
+        // live as UPnP/STUN discovery completes and Steam becomes ready.
+        public string GetOwnUnifiedCode()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost) return "(host to share)";
+
+            uint? steamAccount = SteamInvite.LocalAccountId(); // null off Steam
+            var ep = UpnpPortMapper.Current?.ToEndPoint();      // best: router-forwarded WAN endpoint
+            if (ep == null)
+                ep = FindHostingChild(TransportType.StunUDP)?.PublicEndPoint; // fallback: STUN-discovered
+
+            var code = UnifiedCode.Encode(steamAccount, ep);
+            if (code != null) return code;
+
+            // Nothing to share yet — mirror the STUN discovery state so the placeholder is accurate.
+            var stun = FindHostingChild(TransportType.StunUDP);
+            if (stun != null && stun.LocalEndpoint != null && stun.LocalEndpoint.Contains("unavailable"))
+                return "unavailable (NAT/firewall)";
+            return "discovering…";
+        }
+
+        // Resolve the live hosting child transport of a given type from the host's transport,
+        // whether that transport is a CompositeTransport (multi-listen) or a single transport.
+        private static ITransport FindHostingChild(TransportType type)
+        {
+            var t = NetworkEngine.Instance?.Transport;
+            if (t == null) return null;
+            if (t is CompositeTransport composite)
+            {
+                foreach (var child in composite.Children)
+                    if (child.TransportType == type && child.IsHost) return child;
+                return null;
+            }
+            return t.TransportType == type && t.IsHost ? t : null;
+        }
+
+        public void CopyToClipboard(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            GUIUtility.systemCopyBuffer = text;
+        }
+
+        // ─── Invite code (host's own short join code) ──────────────────────
+
+        // Host's permanent, friend-free invite code ("XXXX-XXXX") or a placeholder while Steam is
+        // offline. Re-read each frame by the rail (self-heals if Steam becomes ready after build).
+        public string GetOwnInviteCode()
+        {
+            return SteamInvite.LocalInviteCode() ?? "(Steam offline)";
+        }
+
+        // CODE button click: copy the code and confirm via the native prompt (same feedback pattern
+        // as the pause-menu "Copied to clipboard" box). No-ops with a Steam-unavailable prompt offline.
+        public void CopyInviteCode()
+        {
+            var code = SteamInvite.LocalInviteCode();
+            if (string.IsNullOrEmpty(code)) { ShowSteamNotAvailable(); return; }
+            GUIUtility.systemCopyBuffer = code;
+            var mb = GameUtl.GetMessageBox();
+            mb?.ShowSimplePrompt($"Invite code copied:\n{code}\n\nYour friend pastes it into JOIN A GAME.",
+                MessageBoxIcon.Information, MessageBoxButtons.OK, null, this);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Connection events
+        // ═══════════════════════════════════════════════════════════════════
+
+        private void OnConnectionFailed(string reason)
+        {
+            // CASCADE: this stage failed but the plan has another transport to try. Tear down just THIS
+            // stage's engine and start the next one, keeping the lobby FSM in Joining and _clientConnecting
+            // set — only the LAST stage's failure falls through to the user-facing error below.
+            if (_joinPlan != null && _joinAttemptIndex + 1 < _joinPlan.Count)
+            {
+                _joinAttemptIndex++;
+                DismissConnectingBox();
+                NetworkEngine.Instance?.Disconnect();
+                NetworkEngine.Instance?.Shutdown();
+                StartJoinAttempt();
+                return;
+            }
+            _joinPlan = null;
+
+            // A client join in flight just failed/timed out. End the connecting state and close the
+            // "Connecting…" box FIRST, so the error box below isn't pushed onto the modal stack behind
+            // it (and so the CANCEL callback can't also fire — it self-guards on _clientConnecting).
+            // No-op for a host or an already-resolved attempt.
+            _clientConnecting = false;
+            DismissConnectingBox();
+
+            // Tear down the failed/half-open session NOW so no leaked socket, worker thread, or stuck
+            // "Connecting/Failed" engine lingers — a subsequent Join or Host then starts from a clean
+            // slate. Shutdown also disposes any in-flight connect worker (DirectTransport/StunTransport
+            // abort + join their connect thread) and clears the engine's OnConnectionFailed handler so
+            // it can't double-fire. The in-game bar is hidden because this session is over.
+            NetworkEngine.Instance?.Disconnect();
+            NetworkEngine.Instance?.Shutdown();
+            // Fix #5: a dropped/failed connect must also reset the local FSM + clear the stale chosen
+            // save, exactly like LEAVE/cancel — otherwise the next host/join inherits a HostLobby/
+            // Starting FSM state and a phantom _pendingChosenSave from the session that just failed.
+            TeardownLobbyState();
+            _inGameBar?.SetActive(false);
+
+            var mb = GameUtl.GetMessageBox();
+            if (mb != null)
+            {
+                // Fires asynchronously after a smart-join attempt while the lobby is still HIDDEN (we
+                // never opened it for an unconfirmed join). Keep it hidden behind this error box, then
+                // HIDE it on dismiss: the session is gone, so we return to the plain main menu where
+                // the user can re-open the network menu to host or retry the join. NO empty lobby is
+                // ever shown on the client failure path.
+                _lobby?.HideForNativeScreen();
+                mb.ShowSimplePrompt(
+                    $"Connection failed: {reason}\n\n" +
+                    "If neither of you uses Steam: the HOST should enable UPnP on their router (or " +
+                    "forward TCP+UDP 14242 to their PC), then re-share the invite code. If you are BOTH " +
+                    "on carrier-grade NAT (CGNAT), a direct link isn't possible — use a LAN/VPN tunnel " +
+                    "(e.g. Radmin, ZeroTier) or the Steam version.",
+                    MessageBoxIcon.Error, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Hide(); }, this);
+            }
+            else
+            {
+                _lobby?.Hide();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Client-join connecting state machine
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Enter the connecting state for a client smart-join: keep the lobby HIDDEN and put up a
+        // native "Connecting to host…" box with a CANCEL button. The box renders ON TOP of the
+        // (hidden) lobby via the same approach the other prompts use; CANCEL aborts the connect. The
+        // box is dismissed programmatically by DismissConnectingBox() on confirm (Update) or
+        // failure/timeout (OnConnectionFailed). Null-safe: if the MessageBox is unavailable we still
+        // set _clientConnecting so Update can open the lobby on confirmation (degraded: no visible
+        // indicator, but never a fake lobby and never stuck).
+        private void ShowConnectingBox(string message = "Connecting to host…")
+        {
+            _clientConnecting = true;
+            _connectingBox = GameUtl.GetMessageBox();
+            _connectingBox?.ShowSimplePrompt(message,
+                MessageBoxIcon.Information, MessageBoxButtons.Cancel,
+                delegate (MessageBoxCallbackResult _)
+                {
+                    // User pressed CANCEL. Guard on _clientConnecting: a programmatic dismiss
+                    // (confirm/fail) uses ForceCloseAllPrompts which does NOT fire this callback, and
+                    // it also clears the flag first, so a late/stale invocation here no-ops.
+                    if (_clientConnecting)
+                        CancelClientConnect();
+                }, this);
+        }
+
+        // Close the "Connecting…" box without firing its CANCEL callback. Idempotent + null-safe.
+        private void DismissConnectingBox()
+        {
+            _connectingBox?.ForceCloseAllPrompts();
+            _connectingBox = null;
+        }
+
+        // CANCEL during connect: leave the connecting state, abort the in-flight connect (Shutdown
+        // disposes the connect worker + aborts the socket), and return to the plain network menu —
+        // no error dialog, no lobby. The box already closed itself on the CANCEL press.
+        private void CancelClientConnect()
+        {
+            _clientConnecting = false;
+            _joinPlan = null; // abort the whole cascade
+            _connectingBox = null;
+            NetworkEngine.Instance?.Disconnect();
+            NetworkEngine.Instance?.Shutdown();
+            TeardownLobbyState();
+            _inGameBar?.SetActive(false);
+            _lobby?.Hide();
+        }
+
+        // SINGLE teardown hook for the lobby's local FSM + chosen-save state. Every path that ends a
+        // session (LEAVE / connect-cancel / connection-failure) routes through here so the FSM can
+        // never carry a stale HostLobby/Starting state and _pendingChosenSave can never carry a stale
+        // save into the NEXT host/join. Pure-local + idempotent (the network teardown is done by the
+        // caller's Disconnect/Shutdown); safe to call more than once.
+        private void TeardownLobbyState()
+        {
+            _lobbyController.Reset();
+            _pendingChosenSave = null;
+            // If a session ends (LEAVE / connect-cancel / connection-fail / host-left) while the client is
+            // on the native download loading screen, lift the curtain + hide the plaque so we return to a
+            // usable menu, never a stuck bar. Idempotent no-op when no curtain was dropped.
+            LiftCurtainEarly();
+            HideLoadOverlay();
+        }
+
+        // Public teardown entry for the F3 host-leave path. When the HOST ends/leaves the session, the
+        // CLIENT is returned to the main menu by HostLeaveHandler (native FinishLevelAndGoToLobby +
+        // NetworkEngine.TearDown). That path tears down the NETWORK session but never touched this UI's
+        // lobby FSM / chosen-save, so a stale ClientLobby/Starting state + phantom _pendingChosenSave
+        // would survive into the next host/join (the same Fix #5 bug LEAVE/cancel/OnConnectionFailed
+        // already guard against, just on the host-left trigger). Routes through the single
+        // TeardownLobbyState hook so the reset stays consistent. Null-safe via the static Instance.
+        public void TeardownLobbyOnSessionEnd() => TeardownLobbyState();
+
+        private void OnDisconnectClicked()
+        {
+            // Defense-in-depth: a transport-layer exception during Disconnect() (e.g. the old
+            // ObjectDisposedException from reading a just-closed peer socket) must NEVER prevent the
+            // session from being fully shut down + the lobby torn down. Without this, an escaping throw
+            // aborted the leave before Shutdown()/TeardownLobbyState() (and HostLeaveHandler.Detach via
+            // Shutdown) ran → the client froze in a half-torn-down lobby. The finally guarantees the
+            // leave always completes cleanly and the client returns to the menu (lobby panel hidden).
+            try
+            {
+                // Graceful leave notice BEFORE the transport closes: the host drops us instantly
+                // (HandleLeave) instead of waiting out the 20 s heartbeat timeout. Best-effort no-op
+                // on the host / with no live host link.
+                NetworkEngine.Instance?.Session?.SendClientLeave();
+                NetworkEngine.Instance?.Disconnect();
+            }
+            finally
+            {
+                NetworkEngine.Instance?.Shutdown();  // also drops the Steam invite lobby + rich presence (SteamLobbyCleanup hook)
+                TeardownLobbyState();
+                _inGameBar.SetActive(false);
+                _lobby?.Hide();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  In-game bar
+        // ═══════════════════════════════════════════════════════════════════
+
+        public void ShowInGameBar()
+        {
+            // Status bar removed (user feedback: useless + half-hidden at screen bottom).
+            // No-op so the in-game bar never appears. The GameObject is still built once at startup
+            // (kept inactive) so the existing _inGameBar.SetActive(false) call sites stay valid.
+        }
+
+        public void HideInGameBar()
+        {
+            _inGameBar.SetActive(false);
+        }
+
+        private void CreateInGameBar()
+        {
+            var bar = new GameObject("MultiplayerStatusBar");
+            bar.transform.SetParent(EnsureBarCanvas(), false);
+            var rect = bar.AddComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0, 0);
+            rect.anchorMax = new Vector2(1, 0);
+            // Bar height scales with the theme so the bigger status font fits.
+            var barH = LobbyTheme.ScaledRowFontSize + LobbyTheme.ScaledPadding / 2;
+            rect.sizeDelta = new Vector2(0, barH);
+            rect.anchoredPosition = new Vector2(0, 0);
+
+            var bg = bar.AddComponent<Image>();
+            bg.color = LobbyTheme.PageBackdrop;   // themed dark navy backing (was black@0.7)
+
+            _barStatusText = CreateText(bar, "Status",
+                new Vector2(10, 2), new Vector2(500, barH),
+                "Not connected");
+
+            _inGameBar = bar;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Update
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Alt+F4 / native window close never runs the menu-quit path, so without this the other side
+        // waits out the full 20 s heartbeat timeout. Best-effort leave notice on Unity's process-quit
+        // callback (fires on Alt+F4 and normal quit; a hard kill/crash still falls back to the
+        // heartbeat). TCP writes flush synchronously; Steam P2P sends queue to the separate Steam
+        // client process, which delivers them after the game exits.
+        private void OnApplicationQuit()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActive) return;
+            try
+            {
+                if (engine.IsHost) engine.Session?.SendHostDisconnected();
+                else engine.Session?.SendClientLeave();
+            }
+            catch { /* quitting — never block the exit */ }
+        }
+
+        private void Update()
+        {
+            // Drive the deferred TFTV guard-patch bind (arms on TFTV assembly load, binds one frame later).
+            // MUST run BEFORE the session gate below: TFTV loads at startup/menu, long before any co-op session.
+            Multiplayer.Harmony.TftvLateBinder.Tick();
+
+            var engine = NetworkEngine.Instance;
+            if (engine?.IsActive == true)
+            {
+                engine.Update();
+
+                // CLIENT-JOIN CONFIRMATION GATE. While a client join is in flight, open the real
+                // lobby ONLY once the host has genuinely accepted us. The strongest available signal
+                // is the host's first PEER_LIST: HandleConnectionRequest accepts the JOIN and then
+                // BroadcastPeerList()s, and the client's HandlePeerList populates the roster. A bare
+                // TCP connect (OnPeerConnected) is premature — the host may still reject the JOIN
+                // (e.g. empty GUID) — so we wait for the roster, which is the host's explicit accept.
+                // engine.Update() above drains this frame's packets first, so the roster is current.
+                if (_clientConnecting && !engine.IsHost &&
+                    (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
+                {
+                    _clientConnecting = false;
+                    _joinPlan = null; // cascade succeeded — drop the plan so a later drop doesn't retry
+                    // Fix #4: the host's first PEER_LIST IS the explicit accept, so advance the FSM
+                    // Joining→ClientLobby here (BeginJoin ran in OnLobbyJoin). Idempotent: JoinConfirmed
+                    // no-ops if the FSM is not in Joining, so a re-entered frame can't corrupt the state.
+                    _lobbyController.JoinConfirmed();
+                    DismissConnectingBox();   // close "Connecting…" before showing the lobby
+                    ShowInGameBar();
+                    _lobby?.Show();           // real, populated roster — never a fake empty lobby
+                }
+
+                if (_barStatusText != null)
+                {
+                    _barStatusText.text = $"MP: {engine.Transport?.State ?? ConnectionState.Disconnected}" +
+                        $" | {(engine.IsHost ? "Host" : "Client")}" +
+                        $" | {engine.Session?.ClientCount ?? 0} player(s)";
+                }
+            }
+            else
+            {
+                if (_barStatusText != null)
+                    _barStatusText.text = "Not connected";
+            }
+
+            // Refresh the lobby panel EVERY frame while it is visible — UNCONDITIONALLY, i.e. not
+            // gated on engine.IsActive. This is the fix for the "CONNECT rail empty on first open"
+            // bug: the rail values (IP / Same-PC / STUN code) are re-pushed by LobbyPanel.Refresh,
+            // so they fill within one frame of the host becoming ready on the FIRST open (no need to
+            // reopen the lobby). It also makes a late-arriving STUN code appear LIVE once background
+            // discovery resolves. Refresh() self-guards (hides itself if the engine is null/inactive
+            // or the session has started), so calling it outside the IsActive branch is safe; it only
+            // does real work while the panel is actually on screen.
+            if (_lobby != null && _lobby.IsVisible)
+                _lobby.Refresh();
+
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Helpers
+        // ═══════════════════════════════════════════════════════════════════
+
+        private static Text CreateText(GameObject parent, string name,
+            Vector2 pos, Vector2 size, string content)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent.transform, false);
+            var rect = go.AddComponent<RectTransform>();
+            rect.anchoredPosition = pos;
+            rect.sizeDelta = size;
+
+            var text = go.AddComponent<Text>();
+            text.font = LobbyTheme.Font;                       // native menu font (was Arial)
+            text.fontSize = LobbyTheme.ScaledRowFontSize;      // themed, scales with UiScale (was 12)
+            text.color = LobbyTheme.BodyText;
+            text.alignment = TextAnchor.MiddleLeft;
+            text.text = content;
+            return text;
+        }
+
+        public void InvitePlayers()
+        {
+            try
+            {
+                var asm = FindSteamworksAssembly();
+                if (asm == null)
+                {
+                    ShowSteamNotAvailable();
+                    return;
+                }
+
+                var utilsType = asm.GetType("Steamworks.SteamUtils");
+                if (utilsType != null)
+                {
+                    var overlayProp = utilsType.GetProperty("IsOverlayEnabled",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (overlayProp != null)
+                    {
+                        var enabled = (bool)overlayProp.GetValue(null, null);
+                        if (!enabled)
+                        {
+                            ShowSteamOverlayUnavailable();
+                            return;
+                        }
+                    }
+                }
+
+                // Open Steam's invite dialog for the host lobby (published at host start). SteamInvite
+                // reports its own stage (overlay opened, or "lobby not ready — try again") so the button
+                // is never a silent no-op; when the friend accepts, the Steam-P2P join path auto-connects.
+                SteamInvite.OpenInviteOverlay();
+            }
+            catch { ShowSteamNotAvailable(); }
+        }
+
+        private static void ShowSteamNotAvailable()
+        {
+            var mb = GameUtl.GetMessageBox();
+            mb?.ShowSimplePrompt("Steam overlay is not available.",
+                MessageBoxIcon.Error, MessageBoxButtons.OK, null, null);
+        }
+
+        private static void ShowSteamOverlayUnavailable()
+        {
+            var mb = GameUtl.GetMessageBox();
+            mb?.ShowSimplePrompt("Steam overlay is disabled.\nEnable it in Steam settings.",
+                MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+        }
+
+        private static System.Reflection.Assembly FindSteamworksAssembly()
+        {
+            foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var name = asm.GetName().Name;
+                if (name == "Facepunch.Steamworks.Win64")
+                    return asm;
+            }
+            return null;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Pause menu — shown when NETWORK is clicked during gameplay
+        // ═══════════════════════════════════════════════════════════════════
+
+        public void ShowPauseMenu()
+        {
+            var engine = NetworkEngine.Instance;
+            var mb = GameUtl.GetMessageBox();
+            if (mb == null) return;
+
+            if (engine == null || !engine.IsActive)
+            {
+                StartHostAndOpenLobby();
+                return;
+            }
+
+            var info = BuildConnectionInfo(engine);
+            var labels = new Dictionary<MessageBoxButtons, string>();
+
+            labels[MessageBoxButtons.Yes] = "DISCONNECT";
+            labels[MessageBoxButtons.Cancel] = "CLOSE";
+
+            var transport = engine.Transport;
+            if (transport != null)
+            {
+                if (transport.TransportType == TransportType.SteamP2P)
+                    labels[MessageBoxButtons.No] = "COPY STEAM ID";
+                else if (transport.TransportType == TransportType.DirectIP)
+                    labels[MessageBoxButtons.No] = "COPY IP:PORT";
+                else
+                    labels[MessageBoxButtons.No] = "COPY STUN CODE";
+            }
+            else
+            {
+                labels[MessageBoxButtons.No] = "COPY INFO";
+            }
+
+            labels[MessageBoxButtons.Abort] = "INVITE FRIEND";
+
+            mb.ShowSimplePrompt(info, MessageBoxIcon.Information,
+                MessageBoxButtons.Yes | MessageBoxButtons.No | MessageBoxButtons.Abort | MessageBoxButtons.Cancel,
+                labels, OnPauseMenuResult, this);
+        }
+
+        private static string BuildConnectionInfo(NetworkEngine engine)
+        {
+            var transport = engine.Transport;
+            var transportName = transport != null ? transport.TransportType.ToString() : "None";
+            var endpoint = transport?.LocalEndpoint ?? "N/A";
+            var role = engine.IsHost ? "HOST" : "CLIENT";
+            var steamId = engine.LocalSteamId != 0 ? engine.LocalSteamId.ToString() : "N/A";
+
+            var clientsStr = "";
+            if (engine.Session != null)
+            {
+                var count = engine.Session.ClientCount;
+                clientsStr = $"\n  Players: {count + 1} (including you)";
+                if (count > 0)
+                {
+                    clientsStr += "\n  Connected:";
+                    foreach (var c in engine.Session.GetConnectedClients())
+                        clientsStr += $"\n    \u2022 {c}";
+                }
+            }
+
+            var copyable = GetCopyableInfo(engine);
+
+            return $"Network Session\n" +
+                   $"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+                   $"Transport: {transportName}\n" +
+                   $"Role: {role}\n" +
+                   $"Steam ID: {steamId}\n" +
+                   $"Endpoint: {endpoint}" +
+                   clientsStr +
+                   $"\n\nCopyable: {copyable}";
+        }
+
+        private static string GetCopyableInfo(NetworkEngine engine)
+        {
+            if (engine.Transport == null) return engine.LocalSteamId.ToString();
+
+            switch (engine.Transport.TransportType)
+            {
+                case TransportType.SteamP2P:
+                    return engine.LocalSteamId.ToString();
+                case TransportType.DirectIP:
+                    return engine.Transport.LocalEndpoint
+                        .Replace("DirectIP(host:", "")
+                        .Replace("DirectIP(client:", "")
+                        .Replace(")", "");
+                case TransportType.StunUDP:
+                    return engine.Transport.LocalEndpoint
+                        .Replace("STUN(", "")
+                        .Replace(")", "");
+                default:
+                    return engine.Transport.LocalEndpoint;
+            }
+        }
+
+        private void OnPauseMenuResult(MessageBoxCallbackResult res)
+        {
+            if (res.DialogResult == MessageBoxResult.Yes)
+            {
+                OnDisconnectClicked();
+            }
+            else if (res.DialogResult == MessageBoxResult.No)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine != null)
+                {
+                    var text = GetCopyableInfo(engine);
+                    GUIUtility.systemCopyBuffer = text;
+                    var mb = GameUtl.GetMessageBox();
+                    if (mb != null)
+                        mb.ShowSimplePrompt($"Copied to clipboard:\n{text}",
+                            MessageBoxIcon.Information, MessageBoxButtons.OK, null, this);
+                }
+            }
+            else if (res.DialogResult == MessageBoxResult.Abort)
+            {
+                InvitePlayers();
+            }
+        }
+    }
+}
