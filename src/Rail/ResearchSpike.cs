@@ -10,6 +10,7 @@ using Multiplayer.Rail;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -58,6 +59,8 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(Research), "OnResearchStarted");
         private static readonly System.Reflection.FieldInfo TrackerNeedsRefreshField =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
+        private static readonly System.Reflection.MethodInfo SetupQueueMethod =
+            AccessTools.Method(typeof(UIModuleResearch), "SetupQueue");
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
@@ -233,7 +236,7 @@ namespace Multiplayer.Network.Sync
                 try { (OnResearchStartedField?.GetValue(research) as Delegate)?.DynamicInvoke(live); }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ResearchSpike: OnResearchStarted raise failed: " + ex); }
             }
-            NudgeAgendaTracker();
+            if (!RebuildOpenResearchScreen()) NudgeAgendaTracker();
 
             Seq.Mark(SurfaceIds.GeoResearch, seq);
             Debug.Log("[Multiplayer][rail] ResearchSpike CLIENT applied start " + researchId +
@@ -245,9 +248,35 @@ namespace Multiplayer.Network.Sync
         {
             var live = LocateLive(factionGuid, researchId, out _);
             if (live == null) return;
-            live.ResearchProgress = progress; // pure value-copy; the bar reads Progress01 live
+            live.ResearchProgress = progress; // pure value-copy
+            RebuildOpenResearchScreen(); // ProgressBar.value is set only in ResearchQueueItem.Init — must rebuild
             Seq.Mark(SurfaceIds.GeoResearch, seq);
             Debug.Log("[Multiplayer][rail] ResearchSpike CLIENT progress " + researchId + " = " + progress);
+        }
+
+        // Law 11 (RCA 2026-07-16): UIModuleResearch is a pull-model snapshot — SetupQueue() runs only
+        // at Init + its own button callbacks, ResearchQueueItem sets ProgressBar.value only in Init.
+        // A delta landing while the research screen is OPEN must rebuild it in place; SetupQueue is
+        // idempotent (pure re-read of Research.Current/ResearchQueue). Returns true when the screen
+        // was open (tracker nudge then unnecessary: it is Uninit'd during UIStateResearch, and every
+        // geoscape state re-entry re-Inits it from Research.Current — decompile UIStateVehicleSelected
+        // EnterState / UIStateNothingSelected EnterState — so the return path self-heals natively).
+        private static bool RebuildOpenResearchScreen()
+        {
+            try
+            {
+                var geo = GeoLevel();
+                var view = geo == null ? null : geo.View;
+                if (view == null || !(view.CurrentViewState is UIStateResearch)) return false;
+                var module = view.GeoscapeModules == null ? null : view.GeoscapeModules.ResearchModule;
+                if (module != null) SetupQueueMethod?.Invoke(module, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer][rail] ResearchSpike: research screen rebuild failed: " + ex.Message);
+                return true; // screen was open — a tracker nudge would not help here
+            }
         }
 
         // The agenda tracker (top-right research row) has NO started-event subscription — natively it
