@@ -1,172 +1,123 @@
-# Phoenix Point Co-op — Мандат реворка синхронизации (v2, финальный)
+# Phoenix Point Co-op — Sync Rework Mandate (v2, final)
 
-> Verbatim developer mandate, received 2026-07-16. Binding source for this repo; reconciliation
-> with recon facts lives in `../ARCHITECTURE.md` (authoritative where they diverge).
+> Developer mandate v2 (final), received 2026-07-16, translated from Russian original
+> (verbatim original preserved in git history at commit 4f5a5fb); reconciliation with recon
+> facts lives in `../ARCHITECTURE.md` and is authoritative where they diverge.
 
-Статус: консенсус трёх независимых ревьюеров + разработчика. Документ — рабочий мандат для
-автономного агента: архитектурные решения принимаются по нему без уточнений у разработчика.
-Разногласий не осталось; спорные пункты v1 разрешены и вшиты в законы.
+Status: consensus of three independent reviewers + developer. Document = working mandate for
+autonomous agent: architecture decisions follow it without developer clarification.
+No remaining disagreements; disputed v1 points resolved and embedded in laws.
 
-## 1. Контекст (кратко)
+## 1. Context (brief)
 
-Co-op мод Phoenix Point, host-authoritative, TFTV-совместимый. Один разработчик + AI-агенты.
-Репо: ~118k LOC C#, 640 файлов; 246 [HarmonyPatch] в 96 файлах (intent-capture ~31, sim-gating
-~28, presentation ~19, state-mirroring ~12); инфра-обвязка channel/codec/mirror/reflection — 323
-файла (главный kill-set). Прошлая попытка той же архитектуры (Unified Sync Backbone, 2026-06-26,
-spec e837379) заглохла процессно: additive-first, legacy не ретирился, два мира параллельно.
+- Co-op mod for Phoenix Point, host-authoritative, TFTV-compatible
+- Single developer + AI agents
+- Repo: ~118k LOC C#, 640 files; 246 `[HarmonyPatch]` in 96 files (intent-capture ~31, sim-gating ~28, presentation ~19, state-mirroring ~12)
+- Infrastructure scaffolding (channel/codec/mirror/reflection) = 323 files (primary kill-set)
+- Previous attempt with same architecture (Unified Sync Backbone, 2026-06-26, spec e837379) stalled on process: additive-first, legacy never retired, two worlds in parallel
 
-Смена парадигмы: с репликации ПОВЕДЕНИЯ (ручное зеркалирование каждой подсистемы) на репликацию
-СОСТОЯНИЯ (обобщённый дифф сейв-графа).
+Paradigm shift: from replicating BEHAVIOR (manual mirroring of each subsystem) to replicating STATE (generalized diff of the save graph).
 
-## 2. Законы архитектуры
+## 2. Architecture Laws
 
-**З1. Два примитива на проводе.** Intent (клиент → хост) и Delta (хост → всем). Третьих типов
-сообщений не существует. Reconnect/join — не отдельный тип (см. З6).
+**L1. Two primitives on the wire.** Intent (client -> host) and Delta (host -> all). No third message type exists. Reconnect/join is NOT a separate type (see L6).
 
-**З2. Адресация.** Мутации адресуются стабильными ID: Delta = (entityId, field, value);
-entityId = GeoSite ID / actor ID / def GUID — никогда индексы коллекций. Пути со стабильными
-ключами (geo/research/byId/<GUID>/progress) — схема подписок UI и CRC-поддеревьев. Гибрид
-намеренный: ID решает mutation target, префикс пути решает subscription. Не упрощать до одного
-из двух.
+**L2. Addressing.** Mutations addressed by stable IDs: Delta = (entityId, field, value); entityId = GeoSite ID / actor ID / def GUID -- never collection indices. Stable-keyed paths (`geo/research/byId/<GUID>/progress`) = scheme for UI subscriptions and CRC subtrees. Hybrid is intentional: ID resolves mutation target, path prefix resolves subscription. Do not collapse to one or the other.
 
-**З3. Клиент = проектор + эмиттер.** Клиент не исполняет игровую логику и не мутирует
-авторитетное состояние вне единственной точки Apply(). Apply состоит из универсальных
-value-appliers и явного небольшого набора structural appliers. Граница идентичности:
-value-мутации никогда не создают identity; structural-мутации могут (создание/уничтожение
-сущностей: сайт, солдат, транспорт — живые Unity-views, ссылочная целостность). Structural-слой
-закладывается с первого дня, не «обобщим потом».
+**L3. Client = projector + emitter.** Client does not execute game logic, does not mutate authoritative state outside the single Apply() entry point. Apply = universal value-appliers + explicit small set of structural appliers. Identity boundary: value-mutations never create identity; structural mutations may (create/destroy of entities: site, soldier, vehicle -- live Unity views, referential integrity). Structural layer is designed from day one, not "generalize later".
 
-**З4. Три легальных шва для Harmony.** Патчи существуют только для: (а) захвата намерений,
-(б) гейтинга симуляции клиента, (в) презентации. Любой патч, переносящий или зеркалящий
-состояние, — удаляется; его работу делает рельс. Kill-set — 323 файла
-channel/codec/mirror/reflection-обвязки.
+**L4. Three legal Harmony seams.** Patches exist only for: (a) intent capture, (b) sim gating, (c) presentation. Any patch that transfers or mirrors state is removed; the rail does that work. Kill-set = 323 channel/codec/mirror/reflection infrastructure files.
 
-**З5. Разделение слоёв.** Геоскейп — по дифф-рельсу: хост исполняет нативную логику →
-Serialize(current) в память → Diff(previous, current) → Delta → клиенты применяют через Apply()
-→ UI по подпискам на префиксы. Тактика — карантин: сохраняется текущий гибрид (презентация
-локально у действующего, исход считает только хост); детерминизм (общий сид) — отдельный будущий
-проект после RNG-разведки (docs/research/02-rng-analysis.md). Рельс тактические баги не чинит —
-ожидания зафиксированы.
+**L5. Layer split.** Geoscape rides the diff rail: host runs native logic -> Serialize(current) in memory -> Diff(previous, current) -> Delta -> clients apply via Apply() -> UI via path-prefix subscriptions. Tactical = quarantine: current hybrid preserved (presentation local to actor, outcomes host-computed only); shared-seed determinism = separate future project after RNG recon (`docs/research/02-rng-analysis.md`). Rail does NOT fix tactical bugs -- expectations fixed.
 
-**З6. Реконсиляция и вход в сессию.** Периодический CRC по поддеревьям путей; расхождение →
-досылка снимка только разошедшегося поддерева. Join/reconnect — через нативный save-loader игры
-(battle-tested), НЕ через прогон полного снимка по delta-пути.
+**L6. Reconciliation and session join.** Periodic CRC per path subtrees; divergence -> resend snapshot of only the diverged subtree. Join/reconnect uses game's native save-loader (battle-tested), NOT a full snapshot pushed through the delta path.
 
-**З7. Контракт доставки.** Один writer, один порядок: единый упорядоченный поток с seq.
-Обязательны: идемпотентность Apply (повторная доставка той же Delta = тот же результат),
-устойчивость к out-of-order (поздний seq после раннего ничего не ломает), resync-on-gap
-(пропуск → запрос снимка поддерева). Коммутативность независимых изменений НЕ требуется и не
-является законом (single-writer topology; CRDT-требования сюда не переносятся).
-SurfaceSeq/IntentDedup переносятся из карьера как есть.
+**L7. Delivery contract.** Single writer, single order: one ordered stream with seq. Required: idempotent Apply (redelivery of same Delta = same result), out-of-order resilience (late seq after earlier one breaks nothing), resync-on-gap (gap -> request subtree snapshot). Commutativity of independent changes NOT required and NOT a law (single-writer topology; CRDT requirements do not apply). SurfaceSeq/IntentDedup quarried as-is.
 
-**З8. Канонический дифф.** Для одного и того же состояния Diff обязан порождать байт-идентичную
-Delta: фиксированный порядок обхода (сортировка по стабильным ID, фиксированный порядок полей),
-никакого недетерминированного обхода словарей. Требуется для журнала, replay, сравнения логов и
-регрессионных тестов.
+**L8. Canonical diff.** For identical state, Diff must produce byte-identical Delta: fixed traversal order (sorted by stable IDs, fixed field order), no nondeterministic dictionary walks. Required for journal, replay, log comparison, and regression tests.
 
-**З9. Односторонний поток, две петли закрыты.** Цикл всегда Intent → Host → Diff → Delta →
-Apply. Запрещены обе обратные петли: (а) прямая — Apply никогда не порождает Diff/Delta;
-(б) косвенная — применение дельты на клиенте дёргает игровые события, которые может захватить
-шов намерений и отправить эхо-Intent на хост; внутри Apply-scope захват намерений подавлен
-(механизм уровня SyncApplyScope) + IntentDedup как вторая линия.
+**L9. One-way flow, both echo loops closed.** Cycle: Intent -> Host -> Diff -> Delta -> Apply. Both reverse loops forbidden: (a) direct -- Apply never emits Diff/Delta; (b) indirect -- applying a delta on client fires game events that an intent-capture seam could catch and send echo-Intent to host; intent capture suppressed inside Apply scope (`SyncApplyScope` mechanism) + IntentDedup as second line.
 
-**З10. Журнал — наблюдательный, никогда не авторитетный.** Journal(Intent, Delta, CRC) пишется
-ПОСЛЕ дифф-пайплайна как производный артефакт: не требует патчей, не участвует в вычислении
-состояния, не может разойтись с сетью (журналируется уже отправленная Delta). Даёт replay,
-отладку и regression-записи бесплатно. Может существовать только в debug-сборках. ЗАПРЕЩЕНО
-реализовывать журнал как перехват мутаций (Native → Hook → Journal → Network) — это возврат к
-250-патчевой архитектуре.
+**L10. Journal = observational, never authoritative.** Journal(Intent, Delta, CRC) written AFTER the diff pipeline as derived artifact: requires no patches, does not participate in state computation, cannot diverge from the network (journals already-sent Delta). Provides replay, debugging, and regression records for free. May exist only in debug builds. FORBIDDEN to implement journaling as mutation interception (Native -> Hook -> Journal -> Network) -- that is the 250-patch architecture returning.
 
-**З11. Паритет модов — блокирующий.** Форма сейв-графа обязана совпадать у всех пиров:
-одинаковый набор модов и конфигов. ParityManifest блокирует вход при расхождении, не логирует.
-Логику исполняет только хост; клиентам нужна идентичная форма контейнера. Пересылка кода модов
-по сети исключена.
+**L11. Mod parity is blocking.** Save-graph shape must match on all peers: identical mod set and configs. ParityManifest BLOCKS join on mismatch, does not merely log. Host executes logic; clients need only the identical container shape. Shipping mod code over the wire is excluded.
 
-## 3. Спайк (обязательная спецификация, дни, в СТАРОМ репе)
+## 3. Spike (mandatory spec, days, in the OLD repo)
 
-Несущее допущение всего плана: save-сериализатор пригоден как live object graph serializer, и
-применённое состояние сохраняет runtime-инварианты. Главный риск (переоценён консенсусом):
-save-граф и runtime-граф совпадают лишь частично — кэши, подписчики, scheduler, lazy lookup,
-Unity views, обратные ссылки НЕ сериализуются. Опаснейший сценарий: CRC сошёлся, но игра
-фактически повреждена (ложно-зелёный).
+- Core assumption of the entire plan: save serializer is viable as a live object-graph serializer, and applied state preserves runtime invariants
+- Primary risk (consensus-identified): save graph and runtime graph overlap only partially -- caches, subscribers, scheduler, lazy lookups, Unity views, back-references are NOT serialized
+- Most dangerous scenario: CRC matches but game is actually corrupted (false-green)
+- Known serializer fact: `GameUtl.GameComponent<SerializationComponent>().Serializer` (NOT `new Serializer(null)`) + `Timing.RunUntilComplete` pump, else silently empty graph (verified 2026-06-18)
 
-Известная конкретика: сериализатор — GameUtl.GameComponent<SerializationComponent>().Serializer
-(НЕ new Serializer(null)) + прокачка Timing.RunUntilComplete, иначе молча пустой граф
-(проверено 2026-06-18).
+Spike must prove:
 
-Спайк обязан доказать:
+1. Value-apply to live `GeoscapeState` (resources, progress, timers)
+2. Structural-apply (create/destroy entity with live Unity view)
+3. Runtime invariants after Apply: events and subscribers fire; UI reacts; scheduler/timers alive; cached dictionaries and lookup tables consistent; Unity views bound; back-references intact
+4. Idempotency: `Apply(delta); Apply(delta)` = same result
+5. Out-of-order: late seq after earlier one does not corrupt state
+6. No dangling references after object deletion (high-probability Unity issue)
 
-1. Value-apply к живому GeoscapeState (ресурсы, прогресс, таймеры).
-2. Structural-apply (создание/уничтожение сущности с живым Unity-view).
-3. Runtime-инварианты после Apply: события и подписчики срабатывают; UI реагирует;
-   scheduler/таймеры живы; кэшированные словари и lookup-таблицы согласованы; Unity views
-   привязаны; обратные ссылки целы.
-4. Идемпотентность: Apply(delta); Apply(delta) = тот же результат.
-5. Out-of-order: поздний seq после раннего не ломает состояние.
-6. Отсутствие висячих ссылок после удаления объекта (высоковероятная Unity-проблема).
+Spike outcome = fork decision:
+- Live-apply works broadly -> new repo skeleton `Rail/ Intents/ Seams/ Views/ Tactical(quarantine)/`; old repo = untouched shipped mod + knowledge quarry
+- Works only for part of the graph -> strangler in old repo, rail scoped to viable portion, no new repo created
 
-Выход спайка — развилка: live-apply работает широко → новый репо-скелет Rail/ Intents/ Seams/
-Views/ Tactical(карантин)/, старый репо = нетронутый shipped-мод и карьер знаний. Работает лишь
-для части графа → strangler в старом репе, рельс сужается до пригодной части, новый репо не
-создаётся.
+## 4. Two-stage verification (both mandatory)
 
-## 4. Верификация — двухступенчатая, обе обязательны
+**Stage 1 -- differential sim harness** (fast gate, every agent step):
+- Host + client (`SimCluster`/`InMemoryTransport`) run randomized command sequences (research/build/cancel/move/produce/trade/pause/resume/save...)
+- After EVERY applied step: `CRC(host) == CRC(client)` + trace (seed, step, intent, delta, entity, field)
+- Mismatch -> first diverged step visible immediately, bug reproducible by seed+step
+- Journal (L10) carries the trace
+- Seconds to run, automatic, gates every night-agent commit
 
-**Ступень 1 — дифференциальный сим-харнесс** (быстрый гейт, каждый шаг агента). Host + client
-(SimCluster/InMemoryTransport) прогоняются через рандомизированные последовательности команд
-(research/build/cancel/move/produce/trade/pause/resume/save...). После КАЖДОГО applied-шага:
-CRC(host) == CRC(client) + трасса (seed, step, intent, delta, entity, field). Несовпадение →
-первый разошедшийся шаг виден сразу, баг воспроизводится по seed+step. Журнал (З10) — носитель
-трассы. Секунды, автоматически, гейтит каждый коммит ночного агента.
+**Stage 2 -- in-game gate** (slow gate, every subsystem):
+- Migrated subsystem verified in live game BEFORE starting the next one (lesson: `no-blind-mega-builds`)
 
-**Ступень 2 — in-game gate** (медленный гейт, каждая подсистема). Мигрированная подсистема
-проверяется в живой игре ДО начала следующей (урок no-blind-mega-builds).
+**"Done" for a subsystem** = harness green + in-game gate passed + legacy files of that subsystem physically deleted.
 
-Определение «готово» для подсистемы: харнесс зелёный + in-game gate пройден + legacy-файлы
-подсистемы физически удалены.
+## 5. Process and retirement enforcement
 
-## 5. Процесс и принуждение ретирмента
+Root cause of first attempt's failure: additive-first with no retirement. Enforcement is mechanical, not declarative:
 
-Причина провала первой попытки — additive-first без ретирмента. Принуждение механическое, не
-декларативное:
+- **CI dependency gate (hard):** forbidden namespaces/types (`Legacy.`, `Mirror`, `ReflectionCodec`, old channels). New code depending on them = red CI. File-count can be gamed by renaming; dependency ban cannot.
+- **Legacy file count** = progress metric toward milestone (not a gate)
+- **WIP limit = 1:** one subsystem in flight; next does not start until previous subsystem's files are deleted
+- **Fire isolation:** shipped-mod bugfixes live in old repo, never pull work into building out legacy channels (the funnel that killed the first attempt)
+- **Night-agent rules:** one subsystem = one commit with green Stage 1; red harness -> revert, do not proceed; `Tactical/` out of scope; strictly strangler -- legacy deleted only after rail replaces it and harness confirms
 
-- CI-гейт по зависимостям (жёсткий): запрещённые namespace/типы (Legacy., Mirror,
-  ReflectionCodec, старые каналы). Новый код, зависящий от них, — красный CI. Счётчик файлов
-  обыгрывается переименованием; запрет зависимости — нет.
-- Счётчик legacy-файлов — как метрика прогресса на милстоун (не гейт).
-- WIP-лимит = 1: одна подсистема в полёте; следующая не начинается, пока файлы предыдущей не
-  удалены.
-- Изоляция пожаров: багфиксы shipped-мода живут в старом репе и не втягивают в достройку
-  legacy-каналов (воронка, убившая первую попытку).
-- Правила ночного агента: одна подсистема = один коммит с зелёной ступенью 1; красный харнесс →
-  откат, не идти дальше; Tactical/ вне скоупа; строго strangler — legacy удаляется только после
-  того, как рельс его заменил и харнесс подтвердил.
+## 6. Migration order (ascending structural complexity)
 
-## 6. Очерёдность миграции — по возрастанию structural-сложности
+1. Research -- almost no identity, first end-to-end
+2. Wallet/Resources -- pure value-only
+3. Manufacturing -- queue, minimal identity
+4. Diplomacy -- mostly values
+5. Personnel -- structural begins: soldiers, inventory, references
+6. Aircraft -- more complex
+7. GeoSites -- appearance/disappearance, fog, Unity views
+8. Mission generation -- last
 
-1. Research — почти нет identity, первый end-to-end.
-2. Wallet/Resources — чистый value-only.
-3. Manufacturing — очередь, минимальная identity.
-4. Diplomacy — в основном values.
-5. Personnel — начало structural: солдаты, инвентарь, ссылки.
-6. Aircraft — сложнее.
-7. GeoSites — появление/исчезновение, fog, Unity views.
-8. Mission generation — последним.
+## 7. Quarry transfers (as-is, no rewriting)
 
-## 7. Переносится из карьера как есть (без переписывания)
+- `Transport/` (7 files: Steam, DirectIP, STUN, invite)
+- Lobby
+- SurfaceSeq/IntentDedup
+- All NRE workarounds
+- Hook-point knowledge (which methods to patch)
+- `docs/research/` in its entirety
+- ParityManifest (upgrade to blocking)
+- Graphify already indexes old repo as quarry
 
-Transport/ (7 файлов: Steam, DirectIP, STUN, invite), lobby, SurfaceSeq/IntentDedup, все
-NRE-обходы, знание хук-точек (какие методы патчить), docs/research целиком, ParityManifest
-(доработать до блокирующего). Graphify уже индексирует старый репо как карьер.
+## 8. Calibrated expectations
 
-## 8. Калиброванные ожидания
+**Eliminated:**
+- Coverage bugs ("forgot a field") -- rail enumerates state generically
+- Coupling bugs ("fixed X, broke Y") -- single writer, single Apply, two-primitive vocabulary
+- Geoscape infra: 323 files -> rail at single-digit thousands of lines; src realistically 67k -> 40-50k LOC
+- LOC is a side effect; goal = minimize breakage surface on change
 
-Убиваются: баги покрытия («забыл поле» — рельс перечисляет состояние обобщённо) и баги
-связности («починил X — сломал Y» — один writer, один Apply, словарь из двух примитивов).
-Геоскейп-код: 323 инфра-файла → рельс на единицы тысяч строк; src реалистично 67k → 40–50k.
-LOC — побочный эффект; цель — минимум мест, ломающихся при изменении.
-
-НЕ исчезают: тактические баги (карантин), возня с презентацией и живыми панелями, хрупкость
-рефлексии к обновлениям игры (сужается до границы сериализации + трёх швов). Freeze клиента —
-известная небесплатная зона (clock overwrite двигает Timing.Now → scheduler поднимает свои
-события) — шов гейтинга остаётся ручной работой.
+**NOT eliminated:**
+- Tactical bugs (quarantine)
+- Presentation and live-panel wrangling
+- Reflection fragility on game updates (narrowed to serialization boundary + three seams)
+- Client freeze is a known non-free zone (clock overwrite moves `Timing.Now` -> scheduler raises its own events) -- sim-gating seam remains manual work
