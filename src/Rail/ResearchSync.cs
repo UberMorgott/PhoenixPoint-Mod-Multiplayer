@@ -248,7 +248,7 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             if (SyncApplyScope.Active) return true;              // law 8: applying a delta never echoes an intent
-            if (research?.Faction == null || element == null) return true;
+            if (research?.Faction == null || element == null) return false; // law 3: client never runs native logic — block, nothing to send
             if (!research.Faction.IsViewerFaction) return true;  // NPC sim paths stay native (and un-synced)
 
             try
@@ -334,6 +334,14 @@ namespace Multiplayer.Network.Sync
                 {
                     Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (unknown research " +
                                      researchId + ") op=" + op + " peer=" + senderPeerId);
+                    return true;
+                }
+                // Ownership check: LocateLive resolves ANY factionGuid — never let a client intent drive
+                // NPC-faction (Anu/NJ/Synedrion/alien) research.
+                if (!research.Faction.IsViewerFaction)
+                {
+                    Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (non-player faction " +
+                                     factionGuid + ") op=" + op + " peer=" + senderPeerId);
                     return true;
                 }
 
@@ -475,10 +483,8 @@ namespace Multiplayer.Network.Sync
                 var queue = research.ResearchQueue;
                 var desired = ids.Select(research.GetResearchById).Where(r => r != null).ToList();
 
-                // Dropped from the queue (cancel arrived as a snapshot): value-level un-mark. Native Cancel
-                // keeps ResearchProgress (resuming later keeps the invested points) — mirror that exactly.
-                foreach (var gone in queue.Where(q => !desired.Contains(q)).ToList())
-                    IsInProgressSetter?.Invoke(gone, new object[] { false });
+                // Cancel-dropped elements keep IsInProgress=true — native Cancel never writes false, and the
+                // host keeps it true; mirror host state exactly (un-marking here diverged CanResearch checks).
 
                 // Rebuild the live list IN PLACE to the host's exact order (same List instance — the game
                 // exposes it by reference via Research.ResearchQueue).
