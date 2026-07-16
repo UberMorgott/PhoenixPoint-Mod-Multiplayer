@@ -12,7 +12,12 @@ namespace Multiplayer.Network.Sync
         private readonly NetworkEngine _engine;
         public readonly SurfaceRouter Router = new SurfaceRouter();
 
-        public SyncEngine(NetworkEngine engine) { _engine = engine; }
+        public SyncEngine(NetworkEngine engine)
+        {
+            _engine = engine;
+            // Spike A: research surface rides the geoscape inbound hook (returns false for other ids).
+            Router.GeoscapeInbound = (peer, surfaceId, payload) => ResearchSpike.HandleInbound(_engine, surfaceId, payload);
+        }
 
         public bool IsHost => _engine != null && _engine.IsHost;
         public Guid ResolveActor(ulong peerId) => Guid.Empty; // ponytail: rail wires the real peer→player map when intents land
@@ -23,9 +28,9 @@ namespace Multiplayer.Network.Sync
 
         // Lifecycle seams NetworkEngine / SessionManager / SaveTransferCoordinator drive.
         // No-ops until the rail owns real surface state (then each becomes the rail's re-seed/reset).
-        public void Tick() { }
-        public void DetachAllChannels() { }
-        public void ResetForReloadBoundary() { }
+        public void Tick() => ResearchSpike.HostTick(_engine);
+        public void DetachAllChannels() => ResearchSpike.Reset();
+        public void ResetForReloadBoundary() => ResearchSpike.Reset();
         public void ResetIntentDedupForPeer(ulong peerId) { }
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }

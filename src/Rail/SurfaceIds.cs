@@ -77,5 +77,6 @@ namespace Multiplayer.Network.Sync
         public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)
         public const byte GeoHarvestFloat = 0xA8;  // host→all resource-harvest FLOAT mirror (Batch-2 P6: occId/siteId/resourceType/value; inner = HarvestFloatCodec.Encode) — display-only, client replays its own native GeoSite.ShowResourceHarvested; the wallet 0xA0 stays the one silent balance writer
         public const byte GeoCrcProbe = 0xA9;  // host→all rolling CRC divergence probe (Inc5 part 1: once per in-game hour, CRC32 per deterministic state SUBSET; inner = CrcProbeCodec.Encode(round, entries), round rides SurfaceSeq) — detection only: client recomputes+compares (DivergenceMonitor), loud log + toast on divergence, NEVER auto-resyncs
+        public const byte GeoResearch = 0xAA;  // SPIKE A (rail rewrite): host→all research start (native-serializer ResearchElement blob) + ≤2 Hz progress value delta; inner = ResearchSpike codec ([msg:u8][seq:u32][factionGuid][researchId]…), seq rides SurfaceSeq
     }
 }
