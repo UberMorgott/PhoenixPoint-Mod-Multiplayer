@@ -1,27 +1,33 @@
-# Architecture — rail rewrite (recon-grounded, 2026-07-16)
+# Architecture — rail rewrite (recon-grounded + mandate v2, 2026-07-16)
 
-Recon verdict (4-reader workflow over decompile + old repo + docs/research):
+Sources: recon workflow (4 readers over decompile + old repo + docs/research) + developer mandate
+`docs/MANDATE-v2.md` (verbatim, binding). Where mandate wording and recon facts diverge, the
+reconciliation below is authoritative.
 
-## What is NOT feasible (do not attempt)
+## Mandate ↔ recon reconciliation (the one real conflict)
 
-- **Raw serialized-graph diffing.** Serializer ObjectIDs are session-local nondeterministic ints
-  (`SerializationWriter._object2ID`, hash-collection traversal order); wire format is not
-  structurally diffable; `SerializationReader.ReadObjects` always builds NEW graphs via
-  `Activator.CreateInstance` — never in-place. Two processes holding the same logical state
-  produce different blobs.
+Mandate З5/З8 says "Serialize(current) → Diff(previous, current)". Literal blob-diffing is NOT
+feasible (recon): serializer ObjectIDs are session-local nondeterministic ints
+(`SerializationWriter._object2ID`, hash-collection traversal order); wire format not structurally
+diffable; `SerializationReader.ReadObjects` always builds NEW graphs (`Activator.CreateInstance`).
+**Implementation of the law:** the diff engine walks the LIVE game object graph, addressed by
+stable game IDs, using the save serializer's TYPE METADATA (`[SerializeType]` + AQN field
+discovery) to enumerate persistent fields generically — this preserves the mandate's goals
+(generalized enumeration kills "forgot the field"; canonical byte-identical deltas via sorted-ID
+traversal + fixed field order; TFTV fields ride free) without depending on blob determinism.
+Serializer blobs remain ONLY as payloads for structural creates (spawn → blob → deserialize →
+attach → fire native added-event).
 
-## What IS feasible (proven by old-repo code)
+## What IS proven (old-repo code)
 
 - Per-entity blob roundtrip: `TacticalDeploySync.SerializeGraph/DeserializeGraph`
-  (old repo `src\Sync\Tactical\TacticalDeploySync.cs:1490-1629`) — extract into
+  (old repo `src/Sync/Tactical/TacticalDeploySync.cs:1490-1629`) → extracted to
   `src/Rail/SerializerRoundtrip.cs`.
 - Live hot-apply by field-copy onto running instances: `PersonnelChannel.Apply` →
   `PersonnelReflection.ApplySoldierState`; spawn path `TacticalActorLifecycleSync.HandleActorSpawn`
   → `ActorSpawner.SpawnActor`.
 - Stable game-side addressing: `GeoSite.SiteId`, `GeoTacUnitId`, `GeoVehicle.VehicleID`,
   `PPFactionDef` / `ResearchDef` GUIDs.
-- Mod-agnostic serialization: `[SerializeType]` + assembly-qualified-name generic reflection —
-  TFTV types serialize without our code knowing them.
 
 ## Rail design
 
@@ -31,63 +37,92 @@ Recon verdict (4-reader workflow over decompile + old repo + docs/research):
 `GeoVehicle` pos (`GeoNavComponent`)/HP/name; ALL of `GeoCharacter` (plain class, no scene
 binding — cleanest); `ItemManufacturing` progress; `Timing.Now`; mist/event vars.
 
-**Structural appliers (hand-written, explicit list — the ONLY bespoke sync code allowed):**
-site spawn/destroy (GO lifecycle + `GeoMap.SiteAdded/Removed`); vehicle add/loss (scene binding +
-`VehicleAdded/Removed`); soldier hire/death (`_tacUnits` registry + `CharacterAdded/Died`);
-base build (facility graph); haven zone built/destroyed; research-complete reward chain;
-manufacture-complete item creation; mission start/end deployment.
+**Structural appliers (hand-written, explicit list — the ONLY bespoke sync code allowed;
+identity boundary per law 3):** site spawn/destroy (GO lifecycle + `GeoMap.SiteAdded/Removed`);
+vehicle add/loss (scene binding + `VehicleAdded/Removed`); soldier hire/death (`_tacUnits`
+registry + `CharacterAdded/Died`); base build (facility graph); haven zone built/destroyed;
+research-complete reward chain; manufacture-complete item creation; mission start/end deployment.
 
 **Wire:** SyncProtocol envelope over SurfaceRouter (quarried), SurfaceSeq + IntentDedup per
-surface, CRC backstop. Join/reconnect = native save transfer (SaveTransferCoordinator, quarried).
+surface, CRC per path-subtree backstop (diverged subtree resent alone). Join/reconnect = native
+save transfer (SaveTransferCoordinator, quarried). Journal (law 9): written post-pipeline,
+observational, debug builds OK.
 
-## Spike (first in-game gate): host starts research → client bar moves, no reload
+## Spike — split A/B (mandate §3 proof list)
 
-- Host, on `GeoFaction.ResearchStarted`: `blob = SerializeGraph(new[]{ researchElement },
-  quiet:true)` (configured serializer + `Timing.RunUntilComplete`, `TimeSlice(3600f)`,
-  `ByRef<byte[]>` via `new object[]{null}`). Send `(factionDefGuid, researchDefGuid, blob)`.
-- Client: defer apply via scheduling-gate pattern (network callback has no `Timing.Current`);
-  `DeserializeGraph(blob, typeof(ResearchElement), quiet:true)`; find LIVE element in faction
-  `Research` queue by `ResearchDef` key; field-copy progress onto it; fire faction research event
-  so GeoscapeView (push-model) repaints.
-- Then periodic host ticks = pure value delta (defGuid + progress ints, no blob).
-- **Log blob byte count + object count** (risk 1 test below).
+The load-bearing assumption: save serializer usable as live-graph mechanism AND applied state
+preserves runtime invariants (caches, subscribers, scheduler, Unity views, backrefs are NOT
+serialized — the false-green scenario "CRC matches, game corrupted" is the top danger).
 
-## Quarry transfer list (verbatim, ~45 files)
+**Spike A (in flight, first in-game gate): host starts research → client bar moves, no reload.**
+- Host, on research start: `blob = SerializeGraph(new[]{ researchElement }, quiet:true)`
+  (configured serializer + `Timing.RunUntilComplete`, `TimeSlice(3600f)`, `ByRef<byte[]>` via
+  `new object[]{null}`). Send `(factionDefGuid, researchDefGuid, blob)`.
+- Client: defer to game loop (no `Timing.Current` in network callbacks); locate LIVE element by
+  `ResearchDef` key; field-copy progress; fire faction research event → GeoscapeView repaints.
+- Periodic host ticks = pure value delta (defGuid + progress ints, no blob).
+- Logs blob byte + object count (risk 1 probe).
 
-Transport (ITransport, TransportType, DirectTransport, CompositeTransport, SteamTransport,
-StunTransport, SteamInvite); MessageLayer (PacketType, NetworkMessage, MessageSerializer);
-Lobby (LobbyController, SessionLifecycle, SlotAllocator, SteamConnect, ParityManifest,
-SessionManager, NetworkEngine, ClientIdentity, HostLeaveHandler, SessionNotifier, LobbyPanel,
-LobbyTheme, MultiplayerUI, UiToolkit, NativeWidgetFactory, LoadOverlayController,
-LoadOverlayVisibility, ChatLog, MainMenuPatches); Sync primitives (SurfaceSeq, IntentDedup,
-SurfaceIds, SyncKind, SyncProtocol, SurfaceRouter, ISyncSink); Bootstrap (MultiplayerMain,
-meta.json, Multiplayer.csproj, deploy.ps1, MultiplayerLog, TftvLateBinder, Crc32);
-SaveTransferCoordinator + SaveTransferMath; connect-code utils (ConnectCode, InviteCode,
-UnifiedCode, SmartJoinParser, JoinPlan, LanIpResolver, UpnpPortMapper).
+**Spike B (next batch, before rail generalization):**
+1. Structural-apply probe: create/destroy an entity with a live Unity view on the client
+   (site spawn or vehicle add) via blob + native added/removed event.
+2. Runtime-invariant checklist after Apply: events/subscribers fire; UI reacts; scheduler/timers
+   alive; cached dicts/lookups consistent; Unity views bound; backrefs intact.
+3. Idempotence: Apply(delta); Apply(delta) → same state.
+4. Out-of-order: late seq after newer seq → no damage.
+5. No dangling refs after entity destroy (top Unity hazard).
 
-EXTRACT (not copy): SerializeGraph/DeserializeGraph/ResolveGameSerializer +
-TacticalHydrateSchedulingGate → one new `src/Rail/SerializerRoundtrip.cs`.
-STUB: `NetworkEngine.Sync` property (new-rail sink). Everything else stays in the quarry.
+**Fork (mandate §3):** live-apply works broadly → continue in this repo. Works only for part of
+the graph → rail narrows to that part, remainder strangler-style in the OLD repo; this repo
+becomes reference or is discarded. (Deviation from mandate: spike runs HERE, not in the old repo —
+transport was already quarried in; the fork itself is preserved.)
+
+## Verification (mandate §4)
+
+- Stage 1 differential sim harness: SimCluster/InMemoryTransport host+client, randomized command
+  sequences (research/build/cancel/move/produce/trade/pause/resume/save...), after every applied
+  step CRC(host)==CRC(client) + trace (seed, step, intent, delta, entity, field). Gates every
+  commit. Feasibility note: check quarry `Multiplayer.GameTests`/test infra for reusable headless
+  bootstrap before building from scratch.
+- Stage 2 in-game 2-instance gate per subsystem.
+- Done = stage 1 green + stage 2 passed + legacy counterpart not ported.
 
 ## Top risks + cheapest early tests
 
-1. **Graph-chase blowup** — serializer walks all non-embedded refs from a root; one
-   `ResearchElement` blob may drag the whole level. Day-1 test: serialize one element, log
-   byte/object count; if huge → boundary via DTO structs, blobs reserved for structural creates.
-2. **Client double-execution** — client sim not frozen by nature; applied delta + local sim tick =
-   divergence/duplicates. Test: one wallet delta with sim-gating seam active; verify no second
-   event cascade, no local tick fighting host value.
-3. **Reflection-copy burden per type** — deserialized blobs are NEW instances; each entity type
-   needs a field-copier. Test: copier for ResearchElement (spike), time-box a GeoSite copier;
-   if 3rd type still costs days → pivot: value-tuples on wire for value deltas, blobs only for
-   structural creates.
+1. **Graph-chase blowup** — serializer walks all non-embedded refs from a root; one blob may drag
+   the whole level. Spike A logs byte/object count; if huge → DTO boundary, blobs only for creates.
+2. **Client double-execution** — client sim not frozen by nature (clock advance drives its
+   scheduler); applied delta + local tick = divergence. Wallet delta test with sim-gating seam
+   active (migration step 2).
+3. **Reflection-copy burden per type** — blobs deserialize to NEW instances; each type needs a
+   field-copier. If 3rd copier still costs days → value-tuples on wire for value deltas, blobs
+   only for structural creates. (Metadata-guided generic copier is the intended escape — same
+   serializer metadata as the diff engine.)
+4. **False-green** — CRC matches but runtime invariants broken. Spike B checklist is the probe;
+   in-game gates stay mandatory regardless of harness green.
 
-## Migration order (each step = in-game gate before next)
+## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
-1. Skeleton: quarry transfer builds green, mod loads, lobby + DirectIP connect works.
-2. Spike: research live delta (above).
-3. Wallet/resources value-deltas + sim-gating seam (risk 2 test).
-4. Remaining value-delta subsystems (diplomacy, sites, vehicles, characters, manufacturing).
-5. Structural appliers one by one.
-6. Intents (client actions → host authorize → delta out).
-7. Tactical: port from quarry mostly as-is, quarantined under `src/Tactical/`.
+1. Research (almost no identity) — end-to-end first.
+2. Wallet/Resources (pure value) + sim-gating seam + risk-2 test.
+3. Manufacturing (queue, minimal identity).
+4. Diplomacy (mostly values).
+5. Personnel (structural begins: soldiers, inventory, refs).
+6. Aircraft.
+7. GeoSites (spawn/despawn, fog, Unity views).
+8. Mission generation — last.
+Tactical: quarantined port from quarry, mostly as-is, `src/Tactical/` — separate track.
+
+## Quarry transfer list (verbatim, ~45 files — landed by skeleton stage)
+
+Transport (ITransport, TransportType, DirectTransport, CompositeTransport, SteamTransport,
+StunTransport, SteamInvite); MessageLayer (PacketType, NetworkMessage, MessageSerializer);
+Lobby (LobbyController, SessionLifecycle, SlotAllocator, SteamConnect, ParityManifest → upgrade
+to BLOCKING per law 10, SessionManager, NetworkEngine, ClientIdentity, HostLeaveHandler,
+SessionNotifier, LobbyPanel, LobbyTheme, MultiplayerUI, UiToolkit, NativeWidgetFactory,
+LoadOverlayController, LoadOverlayVisibility, ChatLog, MainMenuPatches); Sync primitives
+(SurfaceSeq, IntentDedup, SurfaceIds, SyncKind, SyncProtocol, SurfaceRouter, ISyncSink);
+Bootstrap (MultiplayerMain, meta.json, Multiplayer.csproj, deploy.ps1, MultiplayerLog,
+TftvLateBinder, Crc32); SaveTransferCoordinator + SaveTransferMath; connect-code utils
+(ConnectCode, InviteCode, UnifiedCode, SmartJoinParser, JoinPlan, LanIpResolver, UpnpPortMapper).
+EXTRACT: SerializerRoundtrip.cs (done by skeleton stage). STUB: NetworkEngine.Sync.
