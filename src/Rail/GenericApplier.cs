@@ -94,6 +94,7 @@ namespace Multiplayer.Network.Sync
                 for (int i = 0; i < defCount; i++) RegisterKind(r.ReadByte(), r.ReadString(), r.ReadUInt16());
 
                 int n = r.ReadUInt16();
+                _pathCache.Clear(); // batch-local: a new instance under the same key (re-queued research) must re-resolve
                 var touched = new HashSet<object>();
                 using (SyncApplyScope.Enter())
                 {
