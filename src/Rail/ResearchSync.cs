@@ -22,12 +22,14 @@ namespace Multiplayer.Network.Sync
     /// ≤2 Hz poll in <see cref="HostTick"/>, zero Harmony):
     ///   • MsgStart    — Research.OnResearchStarted → native-serializer ResearchElement blob
     ///                   (value-only fallback when the blob exceeds the u16 envelope).
-    ///   • MsgProgress — poll: Current (id, progress) changed → pure value delta.
-    ///   • MsgQueue    — poll: full queue ORDER (ResearchIDs) changed → snapshot delta. One catch-all
-    ///                   for cancel/reorder/queue-add (there is no native event for a non-current
-    ///                   cancel — Research.Cancel just mutates the list), and the convergence belt for
-    ///                   any start delta lost to the seq guard.
+    ///   • MsgQueue    — poll: full queue ORDER (ResearchIDs) changed → snapshot delta. KEPT off the
+    ///                   generic rail because a List's ORDER cannot be expressed as value fields (the
+    ///                   rail addresses collection elements by stable key, never by index — law 2);
+    ///                   also the one catch-all for cancel/reorder/queue-add (no native event covers a
+    ///                   non-current cancel) and the convergence belt for a start lost to the seq guard.
     ///   • MsgComplete — Research.OnResearchCompleted → id delta.
+    /// RETIRED (2026-07-17): MsgProgress + the 2 Hz progress poll — ResearchElement.ResearchProgress is
+    /// a plain [SerializeMember] value field, so it now rides the generic value rail (DiffEngine 0xAC).
     ///
     /// CLIENT (projector, law 3): applies mutate the LIVE Research/ResearchElement instances by
     /// field/value copy only, inside <see cref="SyncApplyScope"/> (law 8), then repaint via the native
@@ -51,8 +53,8 @@ namespace Multiplayer.Network.Sync
     public static class ResearchSync
     {
         // Inner payload discriminator (the SurfaceRouter hands us surfaceId + payload, not the SyncKind).
+        // 2 (MsgProgress) retired 2026-07-17 — progress rides the generic value rail (0xAC). Never reuse.
         private const byte MsgStart = 1;
-        private const byte MsgProgress = 2;
         private const byte MsgQueue = 3;
         private const byte MsgComplete = 4;
 
@@ -74,8 +76,6 @@ namespace Multiplayer.Network.Sync
         // ─── Host observe state ────────────────────────────────────────────
         private static Research _hooked;                 // faction Research we subscribed to (unhook on level change)
         private static float _nextTickAt;                // realtime throttle (0.5 s → max 2 Hz)
-        private static string _lastSentId;
-        private static float _lastSentProgress = float.NaN;
         private static string _lastSentQueue;            // joined queue ResearchIDs (order-sensitive)
 
         // ─── Reflection (private members only; everything else is typed) ──
@@ -116,8 +116,6 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             Unhook();
-            _lastSentId = null;
-            _lastSentProgress = float.NaN;
             _lastSentQueue = null;
         }
 
@@ -173,15 +171,7 @@ namespace Multiplayer.Network.Sync
                 _lastSentQueue = queueKey;
                 Send(engine, EncodeQueue(Seq.Next(SurfaceIds.GeoResearch), factionGuid, queueIds));
             }
-
-            // Pure value delta — sent ONLY when (id, progress) actually changed. Idle = zero traffic.
-            var cur = research.Current;
-            if (cur == null) { _lastSentId = null; _lastSentProgress = float.NaN; return; }
-            if (cur.ResearchID == _lastSentId && cur.ResearchProgress == _lastSentProgress) return;
-            _lastSentId = cur.ResearchID;
-            _lastSentProgress = cur.ResearchProgress;
-            Send(engine, EncodeProgress(Seq.Next(SurfaceIds.GeoResearch),
-                factionGuid, cur.ResearchID, cur.ResearchProgress));
+            // Progress value deltas retired 2026-07-17: ResearchProgress rides the generic rail (0xAC).
         }
 
         private static void HostOnResearchStarted(ResearchElement research)
@@ -289,10 +279,6 @@ namespace Multiplayer.Network.Sync
                             // Deserialize needs a running IUpdateable — network callbacks have none.
                             SerializerRoundtrip.RunOnTiming(GeoLevel(),
                                 () => ApplyStartCrt(factionGuid, startId, startProgress, blob, seq));
-                            break;
-                        case MsgProgress:
-                            string progressId = r.ReadString();
-                            ApplyProgress(factionGuid, progressId, r.ReadSingle(), seq);
                             break;
                         case MsgQueue:
                             int n = r.ReadByte();
@@ -460,18 +446,6 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        private static void ApplyProgress(string factionGuid, string researchId, float progress, uint seq)
-        {
-            var live = LocateLive(factionGuid, researchId, out _);
-            if (live == null) return;
-            using (SyncApplyScope.Enter())
-            {
-                live.ResearchProgress = progress; // pure value-copy
-                RebuildOpenResearchScreen(); // ProgressBar.value is set only in ResearchQueueItem.Init — must rebuild
-                Seq.Mark(SurfaceIds.GeoResearch, seq);
-            }
-        }
-
         private static void ApplyQueue(string factionGuid, List<string> ids, uint seq)
         {
             var geo = GeoLevel();
@@ -540,6 +514,12 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Law 11 repaint entry for the generic rail (UiEventMap): research values changed.</summary>
+        internal static void RepaintResearchUi()
+        {
+            if (!RebuildOpenResearchScreen()) NudgeAgendaTracker();
+        }
+
         // Law 11 (RCA 2026-07-16): UIModuleResearch is a pull-model snapshot — SetupQueue() runs only
         // at Init + its own button callbacks, ResearchQueueItem sets ProgressBar.value only in Init.
         // A delta landing while the research screen is OPEN must rebuild it in place; SetupQueue is
@@ -594,20 +574,6 @@ namespace Multiplayer.Network.Sync
                 w.Write(progress);
                 w.Write(blob == null ? 0 : blob.Length);
                 if (blob != null) w.Write(blob);
-                return ms.ToArray();
-            }
-        }
-
-        private static byte[] EncodeProgress(uint seq, string factionGuid, string researchId, float progress)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(MsgProgress);
-                w.Write(seq);
-                w.Write(factionGuid ?? "");
-                w.Write(researchId ?? "");
-                w.Write(progress);
                 return ms.ToArray();
             }
         }

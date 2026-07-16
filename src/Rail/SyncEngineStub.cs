@@ -15,9 +15,12 @@ namespace Multiplayer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
-            // Research rail (migration #1): deltas + intents ride the geoscape inbound hook
-            // (returns false for other ids). The peer id feeds the host-side IntentDedup.
-            Router.GeoscapeInbound = (peer, surfaceId, payload) => ResearchSync.HandleInbound(_engine, peer, surfaceId, payload);
+            // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
+            // ResearchSync (0xAA/0xAB structural-ish research messages + intents) and the generic value
+            // rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side dedups.
+            Router.GeoscapeInbound = (peer, surfaceId, payload) =>
+                ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
         public bool IsHost => _engine != null && _engine.IsHost;
@@ -31,9 +34,25 @@ namespace Multiplayer.Network.Sync
         // DetachAllChannels = full session teardown (seq streams reset); ResetForReloadBoundary =
         // mid-session reload (rca-3 contract: geoscape refs dropped, seq/nonce counters PERSIST so
         // post-reload deltas keep applying).
-        public void Tick() => ResearchSync.HostTick(_engine);
-        public void DetachAllChannels() => ResearchSync.Reset();
-        public void ResetForReloadBoundary() => ResearchSync.ResetForReloadBoundary();
+        public void Tick()
+        {
+            ResearchSync.HostTick(_engine);
+            DiffEngine.HostTick(_engine);
+        }
+
+        public void DetachAllChannels()
+        {
+            ResearchSync.Reset();
+            DiffEngine.Reset();
+            GenericApplier.Reset();
+        }
+
+        public void ResetForReloadBoundary()
+        {
+            ResearchSync.ResetForReloadBoundary();
+            DiffEngine.ResetForReloadBoundary();
+            GenericApplier.ResetForReloadBoundary();
+        }
         public void ResetIntentDedupForPeer(ulong peerId) => ResearchSync.ResetIntentDedupForPeer(peerId);
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }

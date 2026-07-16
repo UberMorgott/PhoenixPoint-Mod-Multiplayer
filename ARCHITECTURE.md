@@ -77,12 +77,80 @@ the graph → rail narrows to that part, remainder strangler-style in the OLD re
 becomes reference or is discarded. (Deviation from mandate: spike runs HERE, not in the old repo —
 transport was already quarried in; the fork itself is preserved.)
 
+## Rail engine (implemented 2026-07-17) — THE generic value rail (laws 3/6/11)
+
+One generic mechanism covers the whole geoscape VALUE layer; no more per-subsystem hand sync.
+Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
+
+**Components (src/Rail/):**
+- `RailMeta.cs` — per-type field tables from the game's OWN serializer metadata
+  (`Serializer.GetSerializedMembers` on the configured instance; TFTV fields ride free). Two generic
+  sources: direct (`[SerializeType]` members) or the `*InstanceData` DTO bridge (GeoFaction/GeoVehicle/
+  GeoSite("GeoSiteInstaceData" game typo)/Timing): DTO metadata gives NAMES, resolved onto the live type
+  by same-name then unique-same-class-type match; unresolved → EXCLUDED + reported. Field classes:
+  Leaf / Descend / EntityCollection / LeafList (canonical one-value list, HashSet sorted) / LeafDict
+  (per-subKey entries, e.g. `Wallet._resources`) / Excluded. Canonical leaf codec (bool/ints/floats/
+  string/enum/TimeSpan/Vector3/Quaternion/DefRef(GUID)/EntityRef(root key)/Composite(struct via its own
+  metadata, e.g. TimeUnit/ResourceUnit)).
+- `IdentityResolver.cs` — the ONLY place that names things (law 2). ID-probe table
+  SiteId/VehicleID/ResearchID/Id/Def-GUID; root registry `T | F#<defGuid> | S#<siteId> | U#<tacUnitId> |
+  V#<vehicleId>` (level clock + the level's actor registries — the entire hand-written table); path
+  grammar `root.Member.Member#elemKey…`; resolution symmetric on the client (same keys over its own graph).
+  No stable key derivable → subtree EXCLUDED from the value rail (never index-addressed) + reported.
+- `DiffEngine.cs` (host) — universal walk (visited-set cycle-safe, depth 12 / 50k-entity brakes), flat
+  snapshot (path, fieldIdx, subKey)→encoded bytes, diff vs previous, emit only changed pairs. Canonical
+  (law 6): sorted roots/children/subkeys, fixed metadata field order. First walk per boundary = BASELINE,
+  no emit (join state comes from the native save transfer, law 1). Dict-key removals → null tombstones.
+  Perf logged every tick with traffic (walk/diff ms, entity/field/changed counts) + 10 s heartbeat;
+  amortize across frames ONLY if measurements demand it.
+- `GenericApplier.cs` (client) — whole batch in `SyncApplyScope` (law 8); entity located via
+  IdentityResolver (path cache, invalidated on miss + reload boundary); set through cached metadata
+  accessor; LeafList applied in-place (game exposes lists by reference). Unknown entity/path → log once
+  + skip (identity creation = structural layer, law 3). Seq gap → resync request (throttled), host
+  resends ALL covered pairs — just a big delta (law 7).
+- `UiEventMap.cs` (law 11) — per entity kind the native repaint: Wallet → raise its own
+  `ResourcesChanged` (GeoscapeView relays → info bar/manufacturing/replenish repaint natively);
+  Research/ResearchElement → ResearchSync repaint path (open-screen SetupQueue rebuild, else
+  agenda-tracker `_needsRefresh` nudge); Timing → none needed (Paused/Scale applied through native
+  property setters which fire OnPausedEvent/EffectiveScaleChangedEvent); unknown kind → logged once.
+- `ClientSimGate.cs` (law 4b) — client sim not frozen (clock ticks); gated local mutators:
+  `GeoLevelController.LevelHourlyUpdateCrt` (ONE chokepoint: faction `ResourceIncome.Apply(Wallet)`,
+  UpdateHavens, UpdateBasesHourly, UpdateResearch wallet drain, `Manufacture.Update`, GenerateRecruits,
+  RepairFactionAircrafts, DailyUpdate — prefix-skipped on client, reschedule preserved) +
+  `Research.Update` (kept in ResearchSync — reachable outside the hourly tick).
+
+**Wire (0xAC inner):** delta = `[MsgDelta:u8][seq:u32][kindDefCount:u8]{[kindId:u8][typeFullName]
+[fieldCount:u16]}*[entryCount:u16]{[kindId:u8][path][fieldIdx:u16][subKey][valLen:u16][value]}*`,
+chunked ≤ ~45 KB per envelope, each chunk its own SurfaceSeq. Field name→index = per-type table sorted
+by metadata name — derived identically on both peers; kindDef fieldCount mismatch = parity alarm (kind
+skipped loudly). Client→host resync request = `[MsgResyncRequest:u8]`.
+
+**Coverage report (the opt-out guarantee):** first full walk dumps every visited type — covered fields
+(class, live alias) vs excluded (reason) + walk incidents (unkeyable collections etc.) — to log +
+`persistentDataPath/Multiplayer/rail-coverage.txt`. The AUTHORITATIVE covered-kind/field list is that
+runtime report (read it, don't discover by bug). Expected day-one coverage: Wallet resources (per-type
+dict entries), ResearchElement `_state`/`ResearchProgress`/`IsInProgress` + requirement data,
+Research `Paused`, Timing `Paused`/`Scale`, GeoCharacter values (+ identity/progression/fatigue/health
+sub-objects), GeoVehicle scalar subset (Travelling/CanRedirect/CurrentSite/VehicleID…), GeoSite scalar
+subset (State/Weather/ExpiringTimerAt…), faction GameTags/UnlockedAugmentations. Known excluded-by-design:
+manufacture queue items (no stable element key — duplicates legal), research queue ORDER (list order ≠
+value field, law 2), Timing.OwnNow (read-only — client clock ticks locally; Paused/Scale mirror),
+vehicle SurfacePos/HitPoints (no live name match; travel mirror is a later migration), per-subsystem
+`*InstanceData`-only scalars (NextUpdate schedule bookkeeping — host-only sim, client gated anyway).
+
+**What stays manual (by design):** structural creates/destroys (law 3 identity boundary), intents
+(law 4a seams), the UiEventMap table (presentation knowledge), ResearchSync start-blob/complete/queue
+messages, sim gates (law 4b).
+
 ## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16)
 
 - **Host→all (GeoResearch 0xAA, observe = native event subs + ≤2 Hz poll, zero Harmony):** start
-  (OnResearchStarted → serializer blob; >u16 → value-only fallback), progress (poll value delta),
-  queue-order snapshot (poll — the catch-all for cancel/reorder/queue-add: `Research.Cancel` of a
-  non-current element fires NO native event), complete (OnResearchCompleted → id delta).
+  (OnResearchStarted → serializer blob; >u16 → value-only fallback), queue-order snapshot (poll — the
+  catch-all for cancel/reorder/queue-add: `Research.Cancel` of a non-current element fires NO native
+  event), complete (OnResearchCompleted → id delta). RETIRED 2026-07-17 onto the generic rail:
+  MsgProgress + the 2 Hz progress poll (`ResearchProgress` is a plain value field → DiffEngine 0xAC).
+  MsgQueue KEPT: a List's ORDER cannot be expressed as value fields — the rail addresses collection
+  elements by stable key, never by index (law 2).
 - **Client→host intents (GeoResearchIntent 0xAB):** intent-capture prefixes on
   `Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/InsertAtPosition`
   (all UIModuleResearch entry points route there). Client: native call BLOCKED, intent sent. Host:
@@ -97,11 +165,12 @@ transport was already quarried in; the fork itself is preserved.)
   native completed modal (`GeoscapeView.OnFactionResearchCompleted`) + log line
   (`GeoscapeLog.Faction_ResearchCompleted`).
 - **Known limitations (accepted, resolved by later subsystems):** reward side-effects (resources,
-  reputation, manufacture unlocks) reach the client only via their own subsystems (wallet =
-  migration #2, …); dependent-research reveal/unlock cascades arrive with that research's start
-  blob, not at completion (client pedia/stats/GeoscapeEventSystem completion hooks do NOT fire);
-  NPC-faction research is frozen on the client (Research.Update gated for ALL factions); client
-  start-affordability UI reads the client-local wallet until wallet sync lands.
+  reputation, manufacture unlocks) reach the client only via their own subsystems; dependent-research
+  reveal/unlock cascades arrive with that research's start blob, not at completion (client pedia/
+  stats/GeoscapeEventSystem completion hooks do NOT fire); NPC-faction research is frozen on the
+  client (Research.Update gated for ALL factions). RESOLVED 2026-07-17 by the generic rail: research
+  reward RESOURCES and start-affordability now correct — the client wallet mirrors the host wallet
+  (`Wallet._resources` rides DiffEngine 0xAC, repaint via native ResourcesChanged).
 
 ## Verification (mandate §4)
 

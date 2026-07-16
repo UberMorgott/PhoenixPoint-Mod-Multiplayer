@@ -79,5 +79,6 @@ namespace Multiplayer.Network.Sync
         public const byte GeoCrcProbe = 0xA9;  // host→all rolling CRC divergence probe (Inc5 part 1: once per in-game hour, CRC32 per deterministic state SUBSET; inner = CrcProbeCodec.Encode(round, entries), round rides SurfaceSeq) — detection only: client recomputes+compares (DivergenceMonitor), loud log + toast on divergence, NEVER auto-resyncs
         public const byte GeoResearch = 0xAA;  // Research rail (migration #1) host→all deltas: start (native-serializer blob, value-only fallback) / ≤2 Hz progress value / queue-order snapshot / complete; inner = ResearchSync codec ([msg:u8][seq:u32][factionGuid]…), seq rides SurfaceSeq
         public const byte GeoResearchIntent = 0xAB;  // Research rail client→host INTENT ([nonce:u32][op:u8][factionGuid][researchId][pos:i32], op = start/cancel/front/up/down/insertAt); nonce rides the peer-aware IntentDedup; host validates + executes NATIVELY, outcome returns via 0xAA
+        public const byte GeoRail = 0xAC;  // THE generic value rail (laws 5/6): host→all canonical metadata-guided diff deltas (inner = DiffEngine [MsgDelta:u8][seq:u32][kindDefs][entries], seq rides SurfaceSeq); client→host full-resend request on seq gap (inner = [MsgResyncRequest:u8], law 7 resync-on-gap)
     }
 }
