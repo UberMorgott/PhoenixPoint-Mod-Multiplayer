@@ -232,6 +232,26 @@ namespace Multiplayer.Network.Sync
                         }
                         break;
                     }
+                    case FieldClass.GeoItemDict:
+                    {
+                        if (val == null) break;
+                        if (!(val is IDictionary items)) { Incident(rt.Type, f.Name, "GeoItemDict without non-generic IDictionary (" + val.GetType().Name + ")", path); break; }
+                        // Guard (per-instance): only faction/auto-unload storages carry lossless 3-int entries.
+                        // A non-auto-unload storage could hold a loaded weapon whose nested ammo we'd drop → exclude it.
+                        if (!GeoItemCodec.OwnerAutoUnloads(obj)) { Incident(rt.Type, f.Name, "non-faction storage (loaded-weapon ammo would be lost) — excluded", path); break; }
+                        var entries = new List<(string sub, object v)>();
+                        foreach (DictionaryEntry de in items)
+                            if (de.Key != null && de.Value != null) entries.Add((GeoItemCodec.SubKey(de.Key), de.Value));
+                        entries.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub)); // canonical (law 6)
+                        foreach (var (sub, v) in entries)
+                        {
+                            byte[] enc;
+                            try { enc = GeoItemCodec.Encode(v); }
+                            catch (Exception ex) { Incident(rt.Type, f.Name, "GeoItem encode failed: " + ex.Message, path); continue; }
+                            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc });
+                        }
+                        break;
+                    }
                     case FieldClass.Descend:
                         if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, index, depth + 1);
                         break;

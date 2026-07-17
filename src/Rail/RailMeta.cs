@@ -36,7 +36,8 @@ namespace Multiplayer.Network.Sync
         EntityCollection = 2,// collection of keyable entities → descend per element at path.Name#key
         LeafList = 3,        // collection of leaf-encodable elements → ONE canonical list value
         LeafDict = 4,        // dictionary with simple keys → per-subKey leaf entries
-        Excluded = 5         // not on the rail; reason in RailField.Exclude, surfaced by the report
+        Excluded = 5,        // not on the rail; reason in RailField.Exclude, surfaced by the report
+        GeoItemDict = 6      // Dictionary<BaseDef, GeoItem> (ItemStorage._storageItems) → per-def structural entry (GeoItemCodec)
     }
 
     public enum LeafKind : byte
@@ -167,6 +168,8 @@ namespace Multiplayer.Network.Sync
             {
                 if (RailMeta.IsSimpleKey(dictArgs[0]) && RailMeta.LeafKindOf(dictArgs[1], 0, out _))
                 { f.Class = FieldClass.LeafDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
+                if (GeoItemCodec.Handles(dictArgs[0], dictArgs[1]))
+                { f.Class = FieldClass.GeoItemDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
                 f.Class = FieldClass.Excluded; f.Exclude = "dictionary with non-simple key/value (" + dictArgs[0].Name + "," + dictArgs[1].Name + ")";
                 return f;
             }

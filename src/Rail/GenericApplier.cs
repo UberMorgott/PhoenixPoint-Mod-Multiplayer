@@ -182,6 +182,22 @@ namespace Multiplayer.Network.Sync
                         ApplyList(entity, field, isNull ? null : items);
                         break;
                     }
+                    case FieldClass.GeoItemDict:
+                    {
+                        var target = field.GetValue(entity);
+                        if (!(target is IDictionary dict))
+                        {
+                            if (target != null) LogMissOnce("GeoItemDict field not a non-generic IDictionary at " + path + "." + field.Name + " (" + target.GetType().Name + ")");
+                            return;
+                        }
+                        var def = GeoItemCodec.ResolveDef(subKey); // key IS the ItemDef
+                        if (def == null) { LogMissOnce("GeoItemDict unknown item def " + subKey + " at " + path); return; }
+                        // DIRECT dict write / remove — NOT AddItem/RemoveItem (those fire StorageChanged/ItemAdded
+                        // events + faction ammo-unload = gameplay side-effects a projector client must not run).
+                        if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { dict.Remove(def); break; }
+                        dict[def] = GeoItemCodec.Decode(value, def);
+                        break;
+                    }
                     default:
                         return; // Descend/EntityCollection never carry values
                 }
