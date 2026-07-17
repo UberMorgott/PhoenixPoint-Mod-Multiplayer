@@ -89,6 +89,12 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
         private static readonly System.Reflection.MethodInfo SetupQueueMethod =
             AccessTools.Method(typeof(UIModuleResearch), "SetupQueue");
+        // SetupQueue rebuilds ONLY the queue panel (right side). The AVAILABLE list (left) is a separate
+        // pull-model snapshot rebuilt only by ShowAvailable — which the native Cancel/StartResearch handlers
+        // ALSO call. Mirror that: a host research delta changes availability (a cancelled research returns to
+        // the list, a queued one leaves it), so law 11 requires the list to repaint too, not just the queue.
+        private static readonly System.Reflection.MethodInfo ShowAvailableMethod =
+            AccessTools.Method(typeof(UIModuleResearch), "ShowAvailable");
         // Native research-complete PRESENTATION handlers (private), invoked directly on the client so the
         // completed modal + log line appear WITHOUT raising GeoFaction.ResearchCompletedEventHandler
         // (whose other subscribers — GeoscapeEventSystem, stats, pedia — are host-side logic/state).
@@ -365,8 +371,17 @@ namespace Multiplayer.Network.Sync
                         break;
                 }
                 if (ok)
+                {
+                    // Law 11 (host side): the host's own UIModuleResearch is PULL-MODEL. We executed the
+                    // native method DIRECTLY here — not through a UIModuleResearch button handler — so none
+                    // of the native SetupQueue()/ShowAvailable() rebuilds ran, and the host's open research
+                    // screen stays stale (this is why a client's research action shows on every OTHER peer —
+                    // they mirror it through their own client-apply repaint — but NOT on the host itself).
+                    // Repaint the host's screen exactly like the client-apply paths do.
+                    RepaintResearchUi();
                     Debug.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
                               researchId + " peer=" + senderPeerId);
+                }
                 else
                     Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (invalid state) op=" +
                                      op + " research=" + researchId + " peer=" + senderPeerId);
@@ -535,7 +550,14 @@ namespace Multiplayer.Network.Sync
                 var view = geo == null ? null : geo.View;
                 if (view == null || !(view.CurrentViewState is UIStateResearch)) return false;
                 var module = view.GeoscapeModules == null ? null : view.GeoscapeModules.ResearchModule;
-                if (module != null) SetupQueueMethod?.Invoke(module, null);
+                if (module != null)
+                {
+                    SetupQueueMethod?.Invoke(module, null);   // queue panel (right)
+                    ShowAvailableMethod?.Invoke(module, null); // available list (left) — a cancelled research
+                                                               // returns here, a queued one leaves; the queue
+                                                               // panel stays visible under any list tab, so
+                                                               // this is safe for the reorder-observe path too.
+                }
                 return true;
             }
             catch (Exception ex)
