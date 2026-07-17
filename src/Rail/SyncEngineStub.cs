@@ -20,6 +20,7 @@ namespace Multiplayer.Network.Sync
             // rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side dedups.
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
@@ -37,12 +38,14 @@ namespace Multiplayer.Network.Sync
         public void Tick()
         {
             ResearchSync.HostTick(_engine);
+            ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
         }
 
         public void DetachAllChannels()
         {
             ResearchSync.Reset();
+            ManufactureSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
         }
@@ -50,10 +53,15 @@ namespace Multiplayer.Network.Sync
         public void ResetForReloadBoundary()
         {
             ResearchSync.ResetForReloadBoundary();
+            ManufactureSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
-        public void ResetIntentDedupForPeer(ulong peerId) => ResearchSync.ResetIntentDedupForPeer(peerId);
+        public void ResetIntentDedupForPeer(ulong peerId)
+        {
+            ResearchSync.ResetIntentDedupForPeer(peerId);
+            ManufactureSync.ResetIntentDedupForPeer(peerId);
+        }
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }
     }

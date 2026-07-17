@@ -1,0 +1,465 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using Base.Core;
+using HarmonyLib;
+using Multiplayer.Network.MessageLayer;
+using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
+using UnityEngine;
+
+namespace Multiplayer.Network.Sync
+{
+    // ponytail: ManufactureSync + ResearchSync are now TWO order-channel seams sharing the same
+    // primitives (SurfaceSeq/IntentDedup/SyncApplyScope/queue-snapshot+intent shape). Do NOT extract a
+    // generic OrderChannel yet — it would touch the in-game-verified ResearchSync. Extract once a 3rd
+    // queue appears, or after both are in-game-verified.
+
+    /// <summary>
+    /// Migration step 3 — MANUFACTURING QUEUE on the rail. The timed manufacture queue
+    /// (<see cref="ItemManufacturing"/>._queue) is an inherently UN-KEYABLE list: duplicate item defs are
+    /// allowed, so its elements have no stable id and the generic value rail (DiffEngine 0xAC) EXCLUDES the
+    /// whole collection at walk time ("element has no stable key"). This is the sanctioned catalog seam the
+    /// mandate permits for such a list: a host→all ORDER snapshot carrying the queue as an explicit ordered
+    /// list of (RelatedItemDef.Guid, AccumulatedPoints), plus client→host action intents. Scope = STEP 1:
+    /// the queue + client intents only. STEP 2 (a made/finished item landing in the client item locker) is
+    /// a separate cross-cutting inventory structural gap and is NOT addressed here.
+    ///
+    /// HOST → ALL (surface GeoManufacture 0xAD): the full PhoenixFaction queue ORDER + per-element
+    /// AccumulatedPoints, pushed on every structural change (native OnItemAdded/OnItemRemoved/OnItemCompleted/
+    /// OnQueueReordered event = an apply point → immediate push) and by the ≤2 Hz poll as the drift backstop
+    /// (which also carries progress-only AccumulatedPoints changes — those fire no native event). The whole
+    /// queue is the delta; there is no separate value channel (the generic rail cannot address un-keyable
+    /// elements). _lastSentQueue coalesces an immediate push and the following poll tick into one send.
+    ///
+    /// CLIENT (projector, law 3): rebuilds ItemManufacturing.Queue IN PLACE (same List instance) from the
+    /// snapshot — resolve each def guid to the live ManufacturableItem, new ManufactureQueueItem, restore
+    /// AccumulatedPoints — inside SyncApplyScope (law 8), then repaints the open manufacturing screen
+    /// (SetupQueue, law 11). No game logic runs on the client (no ManufactureItem/FinishManufactureItem).
+    ///
+    /// CLIENT → HOST (surface GeoManufactureIntent 0xAE): the manufacturing screen's entry points
+    /// (ItemManufacturing.ManufactureItem / Cancel(int) / Cancel(ManufactureQueueItem) / PutInFromOfQueue /
+    /// PutUpInQueue / PutDownInQueue — all reachable from UIModuleManufacturing) are intent-capture Harmony
+    /// prefixes (law 4a): on the client they BLOCK the native call and send an intent addressed by def guid
+    /// (add) or by queue INDEX + a def-at-index guard (cancel/reorder — the un-keyable list is addressed by
+    /// position); on the host (and inside SyncApplyScope) native code runs untouched. Host: IntentDedup →
+    /// validate (def-at-index still matches, else the client's view was stale → reject) → execute the SAME
+    /// native method → the observe seams broadcast the outcome. Invalid intents rejected silently (logged).
+    ///
+    /// SIM GATING (law 4b): NOT added here — ItemManufacturing.Update() is driven only by
+    /// GeoLevelController.LevelHourlyUpdateCrt, which <see cref="ClientSimGate"/> already freezes on clients.
+    /// </summary>
+    public static class ManufactureSync
+    {
+        // Intent ops (GeoManufactureIntent inner payload) — each maps 1:1 onto a native ItemManufacturing method.
+        private const byte OpQueue = 1;   // ManufactureItem(def)  — add/start (also the instant path when cost==0)
+        private const byte OpCancel = 2;  // Cancel(index)
+        private const byte OpFront = 3;   // PutInFromOfQueue(element)
+        private const byte OpUp = 4;      // PutUpInQueue(element)
+        private const byte OpDown = 5;    // PutDownInQueue(element)
+
+        private static readonly SurfaceSeq Seq = new SurfaceSeq();
+        private static readonly IntentDedup Intents = new IntentDedup();
+        private static uint _nextIntentNonce;
+
+        // ─── Host observe state ────────────────────────────────────────────
+        private static ItemManufacturing _hooked;   // faction Manufacture we subscribed to (unhook on level change)
+        private static float _nextTickAt;            // realtime throttle (0.5 s → max 2 Hz)
+        private static string _lastSentQueue;        // "guid:intPts|"… joined (order + rounded-points sensitive)
+
+        private static readonly MethodInfo SetupQueueMethod =
+            AccessTools.Method(typeof(UIModuleManufacturing), "SetupQueue");
+
+        // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
+
+        public static void Reset()
+        {
+            ResetForReloadBoundary();
+            Seq.Reset();
+            Intents.Reset();
+        }
+
+        /// <summary>Mid-session reload boundary (rca-3 contract): drop the dying-geoscape hook + the last-sent
+        /// mark (post-reload state re-emitted), KEEP the seq streams + intent nonce (persist symmetrically).</summary>
+        public static void ResetForReloadBoundary()
+        {
+            Unhook();
+            _lastSentQueue = null;
+        }
+
+        public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
+
+        private static GeoLevelController GeoLevel()
+        {
+            var level = GameUtl.CurrentLevel();
+            return level == null ? null : level.GetComponent<GeoLevelController>();
+        }
+
+        private static ItemManufacturing PhoenixManufacture() => GeoLevel()?.PhoenixFaction?.Manufacture;
+
+        // ─── HOST: hook management + ≤2 Hz queue snapshot poll ─────────────
+
+        public static void HostTick(NetworkEngine engine)
+        {
+            if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
+            if (Time.realtimeSinceStartup < _nextTickAt) return;
+            _nextTickAt = Time.realtimeSinceStartup + 0.5f;
+
+            var manufacture = PhoenixManufacture();
+            if (manufacture == null) { Unhook(); return; }
+            if (!ReferenceEquals(manufacture, _hooked))
+            {
+                Unhook();
+                manufacture.OnItemAdded += HostOnOrderChanged;
+                manufacture.OnItemRemoved += HostOnOrderChanged;
+                manufacture.OnItemCompleted += HostOnItemChanged;
+                manufacture.OnQueueReordered += HostOnReordered;
+                _hooked = manufacture;
+                Debug.Log("[Multiplayer][rail] ManufactureSync: hooked queue events (host)");
+            }
+
+            // Drift backstop (≤2 Hz): the known apply points push immediately (HandleIntent success + the
+            // structural events above), so a change no longer waits up to 500 ms for this tick. This tick is
+            // the sole carrier of progress-only AccumulatedPoints changes (no native event fires for those).
+            PushQueueSnapshot(engine);
+        }
+
+        private static void HostOnOrderChanged(ItemManufacturing.ManufactureQueueItem item, int index) => HostPush();
+        private static void HostOnItemChanged(ItemManufacturing.ManufactureQueueItem item) => HostPush();
+        private static void HostOnReordered() => HostPush();
+
+        private static void HostPush()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine != null && engine.IsHost && engine.IsActiveSession) PushQueueSnapshot(engine);
+        }
+
+        /// <summary>Send the full queue snapshot NOW if it changed since the last send (order + rounded
+        /// points). Shared behind the poll and the immediate pushes; the _lastSentQueue compare doubles as
+        /// the double-send guard, so an immediate push then a poll tick landing right after is a no-op.</summary>
+        private static void PushQueueSnapshot(NetworkEngine engine)
+        {
+            if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
+            var manufacture = PhoenixManufacture();
+            if (manufacture == null) return;
+
+            var entries = new List<KeyValuePair<string, float>>(manufacture.Queue.Count);
+            var sb = new StringBuilder();
+            foreach (var qi in manufacture.Queue)
+            {
+                var def = qi?.ManufacturableItem?.RelatedItemDef;
+                if (def == null) continue;
+                entries.Add(new KeyValuePair<string, float>(def.Guid, qi.AccumulatedPoints));
+                // int points in the key (production accrues in integer steps → no float jitter → no churn).
+                sb.Append(def.Guid).Append(':').Append((int)qi.AccumulatedPoints).Append('|');
+            }
+            string queueKey = sb.ToString();
+            if (queueKey == _lastSentQueue) return;
+            _lastSentQueue = queueKey;
+            Send(engine, EncodeSnapshot(Seq.Next(SurfaceIds.GeoManufacture), entries));
+        }
+
+        private static void Unhook()
+        {
+            if (_hooked == null) return;
+            try
+            {
+                _hooked.OnItemAdded -= HostOnOrderChanged;
+                _hooked.OnItemRemoved -= HostOnOrderChanged;
+                _hooked.OnItemCompleted -= HostOnItemChanged;
+                _hooked.OnQueueReordered -= HostOnReordered;
+            }
+            catch { }
+            _hooked = null;
+        }
+
+        private static void Send(NetworkEngine engine, byte[] inner)
+        {
+            try
+            {
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufacture, SyncKind.StateDelta, inner);
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
+            }
+            catch (ArgumentOutOfRangeException ex)
+            {
+                Debug.LogError("[Multiplayer][rail] ManufactureSync: payload exceeds envelope u16 — " + ex.Message);
+            }
+        }
+
+        // ─── Inbound (armed as part of SurfaceRouter.GeoscapeInbound) ──────
+
+        /// <summary>Returns true when the surface was consumed (GeoManufacture / GeoManufactureIntent).</summary>
+        public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        {
+            if (surfaceId == SurfaceIds.GeoManufactureIntent) return HandleIntent(engine, senderPeerId, payload);
+            if (surfaceId != SurfaceIds.GeoManufacture) return false;
+            if (engine == null || engine.IsHost) return true; // host never applies its own surface
+            try
+            {
+                using (var ms = new MemoryStream(payload))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    uint seq = r.ReadUInt32();
+                    if (!Seq.ShouldApply(SurfaceIds.GeoManufacture, seq)) return true; // stale re-send
+                    int n = r.ReadUInt16();
+                    var entries = new List<KeyValuePair<string, float>>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        string guid = r.ReadString();
+                        float pts = r.ReadSingle();
+                        entries.Add(new KeyValuePair<string, float>(guid, pts));
+                    }
+                    ApplySnapshot(entries, seq);
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ManufactureSync inbound failed: " + ex); }
+            return true;
+        }
+
+        // ─── HOST: intent apply (dedup → validate → execute NATIVELY) ──────
+
+        private static bool HandleIntent(NetworkEngine engine, ulong senderPeerId, byte[] payload)
+        {
+            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
+            try
+            {
+                uint nonce; byte op; string defGuid; int index;
+                using (var ms = new MemoryStream(payload))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                {
+                    nonce = r.ReadUInt32();
+                    op = r.ReadByte();
+                    defGuid = r.ReadString();
+                    index = r.ReadInt32();
+                }
+                if (!Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce)) return true; // double-send
+
+                var manufacture = PhoenixManufacture();
+                if (manufacture == null)
+                {
+                    Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (no manufacture) op=" + op + " peer=" + senderPeerId);
+                    return true;
+                }
+
+                bool ok = false;
+                if (op == OpQueue)
+                {
+                    var item = manufacture.ManufacturableItems.FirstOrDefault(
+                        i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == defGuid);
+                    ok = item != null && manufacture.CanManufacture(item) == ItemManufacturing.ManufactureFailureReason.None;
+                    if (ok) manufacture.ManufactureItem(item);
+                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (cannot manufacture " + defGuid + ") peer=" + senderPeerId);
+                }
+                else
+                {
+                    var queue = manufacture.Queue;
+                    // Address the un-keyable list by position, but guard against an index race: the def at that
+                    // index must still be the one the client acted on (else its view was stale → reject; the
+                    // next snapshot re-syncs it).
+                    if (index < 0 || index >= queue.Count ||
+                        queue[index]?.ManufacturableItem?.RelatedItemDef?.Guid != defGuid)
+                    {
+                        Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (stale index " + index +
+                                         " def=" + defGuid + ") op=" + op + " peer=" + senderPeerId);
+                        return true;
+                    }
+                    var element = queue[index];
+                    switch (op)
+                    {
+                        case OpCancel: manufacture.Cancel(index); ok = true; break;
+                        case OpFront: manufacture.PutInFromOfQueue(element); ok = true; break;   // native self-guards element!=Current
+                        case OpUp: manufacture.PutUpInQueue(element); ok = true; break;          // native self-guards element!=Current
+                        case OpDown: manufacture.PutDownInQueue(element); ok = true; break;      // native self-guards element!=Last
+                    }
+                }
+
+                if (ok)
+                {
+                    // The native call fires the observe events (→ HostPush → snapshot) already; the explicit
+                    // push is the belt (coalesced by _lastSentQueue). The host executed the native method
+                    // DIRECTLY (not via a UIModuleManufacturing button), so its own open screen is pull-model
+                    // stale — repaint it like the client-apply path does.
+                    RepaintManufacturingUi();
+                    PushQueueSnapshot(engine);
+                    Debug.Log("[Multiplayer][rail] ManufactureSync HOST intent APPLIED op=" + op + " def=" + defGuid +
+                              " idx=" + index + " peer=" + senderPeerId);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Native validation throws double as the reject path — silent + logged.
+                Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (native throw): " + ex.Message);
+            }
+            return true;
+        }
+
+        // ─── CLIENT: snapshot apply (inside SyncApplyScope, law 8) ─────────
+
+        private static void ApplySnapshot(List<KeyValuePair<string, float>> entries, uint seq)
+        {
+            var manufacture = PhoenixManufacture();
+            if (manufacture == null) return;
+            using (SyncApplyScope.Enter())
+            {
+                // Rebuild the live queue IN PLACE (same List instance — Queue exposes _queue by reference) to
+                // the host's exact order. No native game logic runs: we build ManufactureQueueItems directly.
+                var queue = manufacture.Queue;
+                queue.Clear();
+                foreach (var e in entries)
+                {
+                    var item = manufacture.ManufacturableItems.FirstOrDefault(
+                        i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == e.Key);
+                    if (item == null)
+                    {
+                        Debug.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
+                        continue;
+                    }
+                    queue.Add(new ItemManufacturing.ManufactureQueueItem(item) { AccumulatedPoints = e.Value });
+                }
+                RepaintManufacturingUi();
+                Seq.Mark(SurfaceIds.GeoManufacture, seq);
+                Debug.Log("[Multiplayer][rail] ManufactureSync CLIENT applied queue count=" + queue.Count);
+            }
+        }
+
+        // Law 11: UIModuleManufacturing is pull-model (SetupQueue rebuilds the current item + queue panel;
+        // it subscribes to no ItemManufacturing model events). A snapshot/intent landing while the screen is
+        // OPEN must rebuild it in place; SetupQueue is idempotent (pure re-read of Manufacture.Current/Queue).
+        // Screen closed → no-op (next open re-Inits from the live queue natively).
+        internal static void RepaintManufacturingUi()
+        {
+            try
+            {
+                var view = GeoLevel()?.View;
+                if (view == null || !(view.CurrentViewState is UIStateManufacturing)) return;
+                var module = view.GeoscapeModules?.ManufacturingModule;
+                if (module != null) SetupQueueMethod?.Invoke(module, null);
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ManufactureSync: screen rebuild failed: " + ex.Message); }
+        }
+
+        // ─── CLIENT: intent capture (fed by the Harmony prefixes below) ────
+
+        /// <summary>TRUE = run the native method (host, no session, apply scope, or a non-Phoenix manufacture);
+        /// FALSE = client blocks it (caller sends the intent instead).</summary>
+        private static bool ShouldRunNative(ItemManufacturing instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            if (SyncApplyScope.Active) return true;                       // law 8: applying never echoes an intent
+            return !ReferenceEquals(instance, PhoenixManufacture());      // NPC/foreign manufacture stays native (un-synced)
+        }
+
+        private static void SendIntent(byte op, string defGuid, int index)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null) return;
+            try
+            {
+                var inner = EncodeIntent(++_nextIntentNonce, op, defGuid, index);
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, inner);
+                engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
+                Debug.Log("[Multiplayer][rail] ManufactureSync CLIENT intent op=" + op + " def=" + defGuid +
+                          " idx=" + index + " nonce=" + _nextIntentNonce);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ManufactureSync: intent send failed: " + ex); }
+        }
+
+        private static bool CaptureAdd(ItemManufacturing instance, ManufacturableItem item)
+        {
+            if (ShouldRunNative(instance)) return true;
+            var def = item?.RelatedItemDef;
+            if (def == null) return false;
+            SendIntent(OpQueue, def.Guid, 0);
+            return false;
+        }
+
+        private static bool CaptureIndex(ItemManufacturing instance, int index, byte op)
+        {
+            if (ShouldRunNative(instance)) return true;
+            var queue = instance.Queue;
+            if (index < 0 || index >= queue.Count) return false;
+            var def = queue[index]?.ManufacturableItem?.RelatedItemDef;
+            if (def == null) return false;
+            SendIntent(op, def.Guid, index);
+            return false;
+        }
+
+        private static bool CaptureElement(ItemManufacturing instance, ItemManufacturing.ManufactureQueueItem element, byte op)
+        {
+            if (ShouldRunNative(instance)) return true;
+            int index = instance.Queue.IndexOf(element);
+            var def = element?.ManufacturableItem?.RelatedItemDef;
+            if (index < 0 || def == null) return false;
+            SendIntent(op, def.Guid, index);
+            return false;
+        }
+
+        // ─── Harmony seams (the ONLY patches this subsystem owns, law 4a) ──
+
+        /// <summary>Intent capture (law 4a): every manufacturing-screen entry point on ItemManufacturing.</summary>
+        [HarmonyPatch(typeof(ItemManufacturing))]
+        internal static class IntentCapturePatches
+        {
+            [HarmonyPrefix, HarmonyPatch(nameof(ItemManufacturing.ManufactureItem))]
+            private static bool ManufacturePrefix(ItemManufacturing __instance, ManufacturableItem item)
+                => CaptureAdd(__instance, item);
+
+            [HarmonyPrefix, HarmonyPatch("Cancel", new[] { typeof(int) })]
+            private static bool CancelIndexPrefix(ItemManufacturing __instance, int index)
+                => CaptureIndex(__instance, index, OpCancel);
+
+            [HarmonyPrefix, HarmonyPatch("Cancel", new[] { typeof(ItemManufacturing.ManufactureQueueItem) })]
+            private static bool CancelElementPrefix(ItemManufacturing __instance, ItemManufacturing.ManufactureQueueItem element)
+                => CaptureElement(__instance, element, OpCancel);
+
+            [HarmonyPrefix, HarmonyPatch(nameof(ItemManufacturing.PutInFromOfQueue))]
+            private static bool FrontPrefix(ItemManufacturing __instance, ItemManufacturing.ManufactureQueueItem element)
+                => CaptureElement(__instance, element, OpFront);
+
+            [HarmonyPrefix, HarmonyPatch(nameof(ItemManufacturing.PutUpInQueue))]
+            private static bool UpPrefix(ItemManufacturing __instance, ItemManufacturing.ManufactureQueueItem element)
+                => CaptureElement(__instance, element, OpUp);
+
+            [HarmonyPrefix, HarmonyPatch(nameof(ItemManufacturing.PutDownInQueue))]
+            private static bool DownPrefix(ItemManufacturing __instance, ItemManufacturing.ManufactureQueueItem element)
+                => CaptureElement(__instance, element, OpDown);
+        }
+
+        // ─── Wire codecs (inner payloads) ───────────────────────────────────
+
+        private static byte[] EncodeSnapshot(uint seq, List<KeyValuePair<string, float>> entries)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write((ushort)Math.Min(entries.Count, ushort.MaxValue));
+                for (int i = 0; i < entries.Count && i < ushort.MaxValue; i++)
+                {
+                    w.Write(entries[i].Key ?? "");
+                    w.Write(entries[i].Value);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        private static byte[] EncodeIntent(uint nonce, byte op, string defGuid, int index)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(nonce);
+                w.Write(op);
+                w.Write(defGuid ?? "");
+                w.Write(index);
+                return ms.ToArray();
+            }
+        }
+    }
+}
