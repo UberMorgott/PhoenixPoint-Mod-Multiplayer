@@ -1,3 +1,6 @@
+> ## PRIME DIRECTIVE — read before any work (universal-first)
+> This rewrite exists to replace ALL per-subsystem hand-sync with ONE universal mechanism that mirrors every game-state value host→client by default; we then OPT OUT (exclude) what we don't want. When something looks broken in co-op (manufacturing, inventory, salvage, sites, vehicles…), the fix is almost always a CROSS-CUTTING GENERIC gap — stable-keying for un-keyed collection elements, structural create/destroy, or wiring one of the small generic seams — which unlocks many subsystems at once. NEVER propose a per-subsystem hand-sync: that is the exact pattern that killed the old repo (MANDATE S5, "additive-first, no retirement"). The "migration order" (Research → Wallet → Manufacturing → …) is NOT re-implementing sync per subsystem; it is the order in which to WIRE the small fixed catalog of generic seams (intents / order-channel / structural appliers / sim-gates / UI-repaint) and DELETE the legacy code for that area. Default lens for every task: "which generic gap is this?" — not "which subsystem do I patch?".
+
 # Multiplayer2 — PhoenixPoint co-op mod (rail rewrite)
 
 Ground-up rewrite of the co-op campaign mod. Mod name stays **Multiplayer** (same meta.json id,
