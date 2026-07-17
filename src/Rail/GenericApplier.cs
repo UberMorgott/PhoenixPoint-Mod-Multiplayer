@@ -131,7 +131,13 @@ namespace Multiplayer.Network.Sync
         private static void ApplyEntry(GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
                                        string subKey, byte[] value, HashSet<object> touched)
         {
-            if (!_kinds.TryGetValue(kindId, out var rt)) return; // broken/unknown kind — logged once at register
+            if (!_kinds.TryGetValue(kindId, out var rt))
+            {
+                // Broken kind already logged at register; a kindId never registered at all (def packet
+                // lost before its first referencing entry) would otherwise drop silently — log it once.
+                if (!_brokenKinds.Contains(kindId)) LogMissOnce("unknown kindId " + kindId + " (def not received — resync?)");
+                return;
+            }
             if (fieldIdx >= rt.Fields.Count) return;
             var field = rt.Fields[fieldIdx];
             if (field.Class == FieldClass.Excluded) return;
@@ -158,11 +164,16 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.LeafDict:
                     {
-                        if (!(field.GetValue(entity) is IDictionary dict)) return;
+                        var target = field.GetValue(entity);
+                        if (!(target is IDictionary dict))
+                        {
+                            if (target != null) LogMissOnce("dict field not a non-generic IDictionary at " + path + "." + field.Name + " (" + target.GetType().Name + ")");
+                            return;
+                        }
                         var key = RailMeta.DecodeDictKey(subKey, field.KeyType);
-                        var v = RailMeta.DecodeFieldValue(value, field, geo, out var isNull);
-                        if (isNull) dict.Remove(key);
-                        else dict[key] = v;
+                        // Explicit delete carries the tombstone sentinel; LeafKind.Null is a genuine present-null value.
+                        if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { dict.Remove(key); break; }
+                        dict[key] = RailMeta.DecodeFieldValue(value, field, geo, out _);
                         break;
                     }
                     case FieldClass.LeafList:
@@ -185,6 +196,12 @@ namespace Multiplayer.Network.Sync
         /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.</summary>
         private static void ApplyList(object entity, RailField field, List<object> items)
         {
+            // Unresolved EntityRef/DefRef elements decode to null (referent not spawned / def unknown on the
+            // client). A null in a live game list can NRE native code that dereferences elements — drop the
+            // holes rather than inserting null (the structural layer / a later diff re-adds them once resolvable).
+            if (items != null && (IdentityResolver.IsRootEntityType(field.ElemType) ||
+                                  typeof(Base.Defs.BaseDef).IsAssignableFrom(field.ElemType)))
+                items.RemoveAll(it => it == null);
             var current = field.GetValue(entity);
             if (current is IList list && !(current is Array))
             {

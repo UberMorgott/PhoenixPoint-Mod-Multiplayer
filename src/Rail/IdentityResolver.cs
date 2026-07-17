@@ -70,13 +70,19 @@ namespace Multiplayer.Network.Sync
         private static string FormatKeyValue(object v)
         {
             if (v == null) return null;
-            if (v is BaseDef def) return def.Guid;
-            if (v is string s) return s.Length == 0 ? null : s;
+            if (v is BaseDef def) return Reserved(def.Guid);
+            if (v is string s) return s.Length == 0 ? null : Reserved(s);
             if (v is int i) return i < 0 ? null : i.ToString(CultureInfo.InvariantCulture); // GeoSite.SiteId==-1 = unassigned
             // GeoTacUnitId and friends: implicit int conversion or plain ToString are both stable.
             try { return Convert.ToInt64(v, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture); }
-            catch { return v.ToString(); }
+            catch { return Reserved(v.ToString()); }
         }
+
+        // Path grammar reserves '.' (segment join) and '#' (element-key intro). A key containing either
+        // would corrupt addressing → treat as no-key (null): the DiffEngine walk then Incident-excludes the
+        // collection (visible in the coverage report), and the client Resolve simply never matches it.
+        private static string Reserved(string key) =>
+            key == null || key.IndexOf('.') >= 0 || key.IndexOf('#') >= 0 ? null : key;
 
         // ─── Root-registry entity kinds (cross-tree one-string refs) ───────
 
@@ -139,7 +145,13 @@ namespace Multiplayer.Network.Sync
         public static object Resolve(GeoLevelController geo, string path, Dictionary<string, object> cache)
         {
             if (geo == null || string.IsNullOrEmpty(path)) return null;
-            if (cache != null && cache.TryGetValue(path, out var hit)) return hit;
+            if (cache != null && cache.TryGetValue(path, out var hit))
+            {
+                // Unity fake-null: a destroyed GeoSite/GeoVehicle is ref-nonnull but == null under Unity's
+                // overloaded operator. Evict such entries (ReferenceEquals would keep the corpse cached).
+                if (!(hit is UnityEngine.Object uo) || uo != null) return hit;
+                cache.Remove(path);
+            }
 
             var segments = path.Split('.');
             object cur = ResolveRoot(geo, segments[0]);
@@ -166,6 +178,9 @@ namespace Multiplayer.Network.Sync
                     }
                 }
             }
+            // A freshly resolved but Unity-destroyed instance (still lingering in a live list) is fake-null
+            // too — treat as unresolved, and never cache the corpse.
+            if (cur is UnityEngine.Object fresh && fresh == null) return null;
             if (cur != null && cache != null) cache[path] = cur;
             return cur;
         }

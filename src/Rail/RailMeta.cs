@@ -398,6 +398,9 @@ namespace Multiplayer.Network.Sync
                 }
             }
             if (f.Unordered) items.Sort(CompareBytes); // canonical: HashSet iteration order is nondeterministic
+            if (items.Count > ushort.MaxValue && _loggedTruncations.Add(f.Name))
+                Debug.LogWarning("[Multiplayer][rail] EncodeList: '" + f.Name + "' has " + items.Count +
+                                 " elements — wire caps at " + ushort.MaxValue + "; tail dropped (this field will desync)");
             w.Write((ushort)Math.Min(items.Count, ushort.MaxValue));
             for (int i = 0; i < items.Count && i < ushort.MaxValue; i++) w.Write(items[i]);
         }
@@ -463,6 +466,13 @@ namespace Multiplayer.Network.Sync
         }
 
         private const byte ListMarker = 14;
+
+        /// <summary>LeafDict subkey deletion sentinel. A first byte that is never a valid encoded leaf
+        /// (LeafKinds 0-13, list marker 14), so an explicit dict-key delete stays distinguishable on the
+        /// wire from a genuine present-null value (LeafKind.Null = 0).</summary>
+        public const byte DictTombstone = 0xFF;
+
+        private static readonly HashSet<string> _loggedTruncations = new HashSet<string>(StringComparer.Ordinal);
 
         private static List<object> DecodeList(BinaryReader r, RailField f, GeoLevelController geo)
         {

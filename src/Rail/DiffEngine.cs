@@ -134,11 +134,19 @@ namespace Multiplayer.Network.Sync
                 if (_forceFull || !_snapshot.TryGetValue(key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value))
                     changed.Add(e);
             }
+            var livePaths = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var e in ordered) livePaths.Add(e.Path);
             foreach (var kv in _snapshot)
             {
                 if (kv.Value.SubKey.Length == 0 || newSnap.ContainsKey(kv.Key)) continue;
-                // dictionary key removed on host → explicit null tombstone (entity-vanish is structural, skipped)
-                changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { (byte)LeafKind.Null } });
+                // Suppress the tombstone when the whole entity path is gone (moved/vanished) — that is a
+                // structural change, not a dict-key delete; emitting one would false-delete on the client
+                // (and could hit a different entity that took over the old path). ponytail: an entity whose
+                // ONLY covered field is this dict would lose its stale keys here, but such entities don't exist.
+                if (!livePaths.Contains(kv.Value.Path)) continue;
+                // dictionary key removed on host while the entity persists → explicit tombstone (distinct
+                // sentinel so the client never confuses it with a genuine present-null value).
+                changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone } });
             }
             long diffMs = sw.ElapsedMilliseconds - walkMs;
             _snapshot = newSnap;
@@ -180,7 +188,7 @@ namespace Multiplayer.Network.Sync
         {
             if (obj == null || !visited.Add(obj)) return;
             if (depth > MaxDepth) { Incident(obj.GetType(), "(depth)", "max depth exceeded", path); return; }
-            if (visited.Count > MaxEntities) return; // brake logged by caller volume
+            if (visited.Count > MaxEntities) { Incident(obj.GetType(), "(brake)", "entity cap " + MaxEntities + " exceeded — graph tail not walked", path); return; }
 
             var rt = RailType.Get(obj.GetType());
             if (rt == null) return;
@@ -210,7 +218,8 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.LeafDict:
                     {
-                        if (!(val is IDictionary dict)) break;
+                        if (val == null) break;
+                        if (!(val is IDictionary dict)) { Incident(rt.Type, f.Name, "IDictionary<> without non-generic IDictionary (" + val.GetType().Name + ") — not walked", path); break; }
                         var keys = new List<(string sub, object v)>();
                         foreach (DictionaryEntry de in dict) keys.Add((RailMeta.EncodeDictKey(de.Key), de.Value));
                         keys.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
