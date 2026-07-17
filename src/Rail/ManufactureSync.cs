@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using Base.Core;
+using Base.Defs;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Entities.Items;
@@ -312,12 +313,21 @@ namespace Multiplayer.Network.Sync
                 queue.Clear();
                 foreach (var e in entries)
                 {
+                    // Fast path: reuse the client's local ManufacturableItem (carries any host-applied cost
+                    // multiplier) — populated for STARTING items only. Fall back to the def repo by GUID for
+                    // RESEARCH-unlocked items: the unlock chain is host-only, so those are ABSENT from the
+                    // client's ManufacturableItems and the local lookup misses (most real items are researched).
                     var item = manufacture.ManufacturableItems.FirstOrDefault(
                         i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == e.Key);
                     if (item == null)
                     {
-                        Debug.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
-                        continue;
+                        var def = GameUtl.GameComponent<DefRepository>()?.GetDef(e.Key) as ItemDef;
+                        if (def == null)
+                        {
+                            Debug.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
+                            continue;
+                        }
+                        item = new ManufacturableItem(def);
                     }
                     queue.Add(new ItemManufacturing.ManufactureQueueItem(item) { AccumulatedPoints = e.Value });
                 }
