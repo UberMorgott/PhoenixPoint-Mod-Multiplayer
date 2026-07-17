@@ -76,6 +76,13 @@ namespace Multiplayer.Network.Sync
         private static readonly MethodInfo SetupQueueMethod =
             AccessTools.Method(typeof(UIModuleManufacturing), "SetupQueue");
 
+        // DoFilter(Predicate<ItemDef>, Func<ItemDef,IComparable>) rebuilds the available-item LIST + owned
+        // counts (RefreshFilters+GetItems+RefreshItemList) — the part SetupQueue misses. null,null = keep the
+        // active tab (GetFilter(_useClassFilter)) + default order (verified null-safe in the decompile).
+        private static readonly MethodInfo DoFilterMethod =
+            AccessTools.Method(typeof(UIModuleManufacturing), "DoFilter",
+                new[] { typeof(Predicate<ItemDef>), typeof(Func<ItemDef, IComparable>) });
+
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
         public static void Reset()
@@ -345,10 +352,11 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        // Law 11: UIModuleManufacturing is pull-model (SetupQueue rebuilds the current item + queue panel;
-        // it subscribes to no ItemManufacturing model events). A snapshot/intent landing while the screen is
-        // OPEN must rebuild it in place; SetupQueue is idempotent (pure re-read of Manufacture.Current/Queue).
-        // Screen closed → no-op (next open re-Inits from the live queue natively).
+        // Law 11: UIModuleManufacturing is pull-model (it subscribes to no ItemManufacturing / ItemStorage
+        // model events). A snapshot/intent/storage delta landing while the screen is OPEN must rebuild it in
+        // place. SetupQueue rebuilds the current-item + queue sub-panel; DoFilter rebuilds the available-item
+        // list + owned counts. Both are idempotent (pure re-read of the live model), reproducing exactly the
+        // native queue-add + tab-switch refresh. Screen closed → no-op (next open re-Inits natively).
         internal static void RepaintManufacturingUi()
         {
             try
@@ -356,7 +364,9 @@ namespace Multiplayer.Network.Sync
                 var view = GeoLevel()?.View;
                 if (view == null || !(view.CurrentViewState is UIStateManufacturing)) return;
                 var module = view.GeoscapeModules?.ManufacturingModule;
-                if (module != null) SetupQueueMethod?.Invoke(module, null);
+                if (module == null) return;
+                SetupQueueMethod?.Invoke(module, null);
+                DoFilterMethod?.Invoke(module, new object[] { null, null });
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ManufactureSync: screen rebuild failed: " + ex.Message); }
         }
