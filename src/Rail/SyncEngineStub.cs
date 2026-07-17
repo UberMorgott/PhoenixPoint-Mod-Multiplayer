@@ -40,6 +40,9 @@ namespace Multiplayer.Network.Sync
             ResearchSync.HostTick(_engine);
             ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
+            // Law 11 UNIVERSAL (client): flush one open-screen re-enter per frame if a mirror batch landed
+            // this frame. Inert on the host (never marks dirty) and when no batch applied.
+            OpenUiRepaint.FlushIfDirty();
         }
 
         public void DetachAllChannels()

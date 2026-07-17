@@ -109,6 +109,11 @@ namespace Multiplayer.Network.Sync
                     }
                 }
                 UiEventMap.Fire(touched, geo);
+                // Law 11 UNIVERSAL: after the batch, re-drive the open geoscape screen through its native
+                // full-rebuild so ALL screens repaint with no per-panel code. Dirty flag only — coalesced
+                // to one re-enter per frame by OpenUiRepaint.FlushIfDirty (SyncEngine.Tick). Skip a no-op
+                // batch (every entry missed → nothing changed on this client).
+                if (touched.Count > 0) OpenUiRepaint.MarkDirty();
             }
         }
 
