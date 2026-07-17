@@ -22,7 +22,9 @@ namespace Multiplayer.Network.Sync
     ///     fire OnPausedEvent/EffectiveScaleChangedEvent; the clock readout polls Timing.Now per frame.
     ///   • ItemStorage → raise its own <c>StorageChanged</c> (GeoItemDict apply wrote _storageItems
     ///     directly, bypassing AddItem/RemoveItem = no native notify) → free-space info bar +
-    ///     inventory/manufacturing views (which subscribe to it) repaint. Covers GeoFaction + GeoSite.
+    ///     inventory views (which subscribe to it) repaint. Manufacturing is PULL-model (no
+    ///     StorageChanged subscription) → also nudge ManufactureSync.RepaintManufacturingUi (SetupQueue
+    ///     rebuild, no-op unless open). Covers GeoFaction + GeoSite.
     ///   • Unknown kind → logged ONCE — the to-do list for the next event-map entry.
     /// </summary>
     public static class UiEventMap
@@ -51,6 +53,11 @@ namespace Multiplayer.Network.Sync
                             break; // native setter events already fired during apply
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
+                            // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
+                            // so the item list + owned-count won't repaint from the event above. Nudge it
+                            // the same way the queue path does (SetupQueue rebuild); self-guards to a no-op
+                            // unless UIStateManufacturing is the open screen.
+                            ManufactureSync.RepaintManufacturingUi();
                             break;
                         default:
                             if (_loggedUnknown.Add(entity.GetType().Name))

@@ -253,7 +253,15 @@ namespace Multiplayer.Network.Sync
                     var item = manufacture.ManufacturableItems.FirstOrDefault(
                         i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == defGuid);
                     ok = item != null && manufacture.CanManufacture(item) == ItemManufacturing.ManufactureFailureReason.None;
-                    if (ok) manufacture.ManufactureItem(item);
+                    if (ok)
+                    {
+                        manufacture.ManufactureItem(item);
+                        // [mfgdiag] boundary: resulting host storage count for this def (real-loss vs visual proof; remove after diag).
+                        var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                        int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
+                            ? gi.CommonItemData.Count : -1;
+                        Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
+                    }
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (cannot manufacture " + defGuid + ") peer=" + senderPeerId);
                 }
                 else
