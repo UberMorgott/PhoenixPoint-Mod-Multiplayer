@@ -9,6 +9,8 @@ using Base.Defs;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Interception.Equipments;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -63,6 +65,9 @@ namespace Multiplayer.Network.Sync
         private const byte OpFront = 3;   // PutInFromOfQueue(element)
         private const byte OpUp = 4;      // PutUpInQueue(element)
         private const byte OpDown = 5;    // PutDownInQueue(element)
+        // Instant scrap (UIModuleManufacturing.ScrapAllItems, no queue). index slot is reused as the item COUNT.
+        private const byte OpScrap = 6;        // GeoFaction.ScrapItem(item, count)   — item-storage scrap
+        private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly IntentDedup Intents = new IntentDedup();
@@ -82,6 +87,12 @@ namespace Multiplayer.Network.Sync
         private static readonly MethodInfo DoFilterMethod =
             AccessTools.Method(typeof(UIModuleManufacturing), "DoFilter",
                 new[] { typeof(Predicate<ItemDef>), typeof(Func<ItemDef, IComparable>) });
+
+        // Client scrap carts (UI-local, not game state) — read to build scrap intents, then cleared optimistically.
+        private static readonly AccessTools.FieldRef<UIModuleManufacturing, ItemStorage> ScrapItemsField =
+            AccessTools.FieldRefAccess<UIModuleManufacturing, ItemStorage>("_scrapItems");
+        private static readonly AccessTools.FieldRef<UIModuleManufacturing, VehicleEquipmentStorage> VehicleScrapItemsField =
+            AccessTools.FieldRefAccess<UIModuleManufacturing, VehicleEquipmentStorage>("_vehicleEquipmentScrapItems");
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
@@ -271,6 +282,36 @@ namespace Multiplayer.Network.Sync
                     }
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (cannot manufacture " + defGuid + ") peer=" + senderPeerId);
                 }
+                else if (op == OpScrap)
+                {
+                    // index carries the scrap COUNT. GeoFaction.ScrapItem refunds+subtracts in place but does NOT
+                    // remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems removes it) — so we do.
+                    var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
+                    var storage = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                    if (def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
+                        gi.CommonItemData.Count >= index)
+                    {
+                        GeoLevel().PhoenixFaction.ScrapItem(gi, index);
+                        if (gi.CommonItemData.IsEmpty()) storage.RemoveItem(gi);
+                        ok = true;
+                    }
+                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrap REJECT (missing/insufficient " +
+                                          defGuid + " need=" + index + ") peer=" + senderPeerId);
+                    Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
+                }
+                else if (op == OpScrapVehicle)
+                {
+                    var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as GeoVehicleEquipmentDef;
+                    var air = GeoLevel()?.PhoenixFaction?.AircraftItemStorage;
+                    if (def != null && air != null && air.HasItem(def))
+                    {
+                        var veh = air.PopItem(def);   // removes from storage
+                        if (veh != null) { GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
+                    }
+                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrapVehicle REJECT (missing " +
+                                          defGuid + ") peer=" + senderPeerId);
+                    Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
+                }
                 else
                 {
                     var queue = manufacture.Queue;
@@ -457,6 +498,47 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix, HarmonyPatch(nameof(ItemManufacturing.PutDownInQueue))]
             private static bool DownPrefix(ItemManufacturing __instance, ItemManufacturing.ManufactureQueueItem element)
                 => CaptureElement(__instance, element, OpDown);
+        }
+
+        /// <summary>Intent capture for INSTANT scrap (UIModuleManufacturing.ScrapAllItems). On the client:
+        /// send one scrap intent per staged cart entry, optimistically empty the local carts, BLOCK the native
+        /// call (no local storage/wallet mutation → no revert-flicker). Host result rides the storage (0xAC) +
+        /// wallet (0xA0) value rails; the universal open-UI repaint refreshes every client screen.</summary>
+        [HarmonyPatch(typeof(UIModuleManufacturing), nameof(UIModuleManufacturing.ScrapAllItems))]
+        internal static class ScrapCapturePatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(UIModuleManufacturing __instance)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
+                    return true; // host / no session / apply-scope → run native authoritatively
+
+                var scrapCart = ScrapItemsField(__instance);
+                foreach (var kv in scrapCart.Items)
+                {
+                    int count = kv.Value?.CommonItemData?.Count ?? 0;
+                    if (kv.Key == null || count <= 0) continue;
+                    SendIntent(OpScrap, kv.Key.Guid, count);
+                    Debug.Log("[MP][scrap] sent Op=" + OpScrap + " def=" + kv.Key.Guid + " count=" + count);
+                }
+                var vehCart = VehicleScrapItemsField(__instance);
+                foreach (var ve in vehCart.Items)
+                {
+                    var def = ve?.EquipmentDef;
+                    if (def == null) continue;
+                    SendIntent(OpScrapVehicle, def.Guid, 0);
+                    Debug.Log("[MP][scrap] sent Op=" + OpScrapVehicle + " def=" + def.Guid + " count=1");
+                }
+
+                // Optimistic UI: empty the carts + disable the button + rebuild the scrap panel (mirrors native's
+                // own post-scrap UI; the real storage/wallet change arrives via the host rails).
+                scrapCart.Clear();
+                vehCart.Clear();
+                __instance.ScrapAllButton.SetInteractable(isInteractable: false);
+                SetupQueueMethod?.Invoke(__instance, null);
+                return false;
+            }
         }
 
         // ─── Wire codecs (inner payloads) ───────────────────────────────────
