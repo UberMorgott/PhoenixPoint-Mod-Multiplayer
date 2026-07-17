@@ -166,18 +166,30 @@ namespace Multiplayer.Network.Sync
                 Debug.Log("[Multiplayer][rail] ResearchSync: hooked OnResearchStarted/OnResearchCompleted (host)");
             }
 
-            string factionGuid = research.Faction.Def.Guid;
-
-            // Queue ORDER snapshot — sent ONLY when the joined id list changed. The one catch-all
-            // observe seam for cancel / reorder / non-current queue-add (no native event covers all).
-            var queueIds = research.ResearchQueue.Select(r => r.ResearchID).ToList();
-            string queueKey = string.Join("", queueIds.ToArray());
-            if (queueKey != _lastSentQueue)
-            {
-                _lastSentQueue = queueKey;
-                Send(engine, EncodeQueue(Seq.Next(SurfaceIds.GeoResearch), factionGuid, queueIds));
-            }
+            // Queue ORDER snapshot. This poll is now only the DRIFT BACKSTOP (<=2 Hz): the known apply
+            // points push immediately (HandleIntent success, host start/complete), so on localhost a
+            // change no longer waits up to 500 ms for the next tick. _lastSentQueue coalesces the two
+            // (an immediate push already advanced it -> the following poll tick is a no-op).
+            PushQueueSnapshot(engine);
             // Progress value deltas retired 2026-07-17: ResearchProgress rides the generic rail (0xAC).
+        }
+
+        /// <summary>
+        /// Send the full queue-order snapshot NOW if it changed since the last send. Shared primitive
+        /// behind both the &lt;=2 Hz poll (drift backstop) and the immediate pushes at the known apply
+        /// points. The _lastSentQueue compare doubles as the double-send guard: an immediate push
+        /// updates it, so a poll tick (or a second push) landing right after is a no-op.
+        /// </summary>
+        private static void PushQueueSnapshot(NetworkEngine engine)
+        {
+            if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
+            var research = GeoLevel()?.PhoenixFaction?.Research;
+            if (research == null) return;
+            var queueIds = research.ResearchQueue.Select(r => r.ResearchID).ToList();
+            string queueKey = string.Join("", queueIds.ToArray());
+            if (queueKey == _lastSentQueue) return;
+            _lastSentQueue = queueKey;
+            Send(engine, EncodeQueue(Seq.Next(SurfaceIds.GeoResearch), research.Faction.Def.Guid, queueIds));
         }
 
         private static void HostOnResearchStarted(ResearchElement research)
@@ -187,6 +199,9 @@ namespace Multiplayer.Network.Sync
             // The serializer coroutine needs a running IUpdateable — a UI-click start has no
             // Timing.Current, so defer onto the geoscape level Timing (GeoLevelController.Timing).
             SerializerRoundtrip.RunOnTiming(GeoLevel(), () => SendStartCrt(engine, research));
+            // Host-initiated start also reorders the queue (new current at front) — push it NOW so
+            // clients' queue panel isn't left waiting on the poll. MsgStart still rides SendStartCrt.
+            PushQueueSnapshot(engine);
         }
 
         private static void HostOnResearchCompleted(ResearchElement research)
@@ -195,6 +210,8 @@ namespace Multiplayer.Network.Sync
             if (engine == null || !engine.IsHost || !engine.IsActiveSession || research == null) return;
             Send(engine, EncodeComplete(Seq.Next(SurfaceIds.GeoResearch),
                 research.Faction.Def.Guid, research.ResearchID));
+            // Completion drops the item from the queue (next becomes current) — push the new order NOW.
+            PushQueueSnapshot(engine);
             Debug.Log("[Multiplayer][rail] ResearchSync HOST complete " + research.ResearchID);
         }
 
@@ -379,6 +396,9 @@ namespace Multiplayer.Network.Sync
                     // they mirror it through their own client-apply repaint — but NOT on the host itself).
                     // Repaint the host's screen exactly like the client-apply paths do.
                     RepaintResearchUi();
+                    // Immediate push (localhost lag fix): the queue changed by this intent reaches every
+                    // OTHER peer NOW instead of at the next <=2 Hz poll tick. Guarded/coalesced by _lastSentQueue.
+                    PushQueueSnapshot(engine);
                     Debug.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
                               researchId + " peer=" + senderPeerId);
                 }
