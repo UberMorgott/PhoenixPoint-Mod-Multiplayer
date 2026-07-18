@@ -167,6 +167,11 @@ namespace RailCheck
         {
             var vt = f.ValueType;
             if (!vt.IsArray && typeof(IList).IsAssignableFrom(vt)) return "IList";
+            // Mirrors ApplyList's interface-first probe: an explicit ICollection<T>.Add (LinkedList<T>) is
+            // invisible to a name probe on the concrete type, so checking the interface is what keeps L1
+            // from reporting a strategy the applier does not actually have — or missing one it does.
+            if (!vt.IsArray && f.ElemType != null &&
+                typeof(ICollection<>).MakeGenericType(f.ElemType).IsAssignableFrom(vt)) return "ICollection<T>";
             if (!vt.IsArray &&
                 HarmonyLib.AccessTools.Method(vt, "Clear") != null &&
                 HarmonyLib.AccessTools.Method(vt, "Add", new[] { f.ElemType }) != null) return "Clear+Add";
@@ -342,6 +347,7 @@ namespace RailCheck
                 (typeof(float), 1.5f), (typeof(double), -2.25), (typeof(string), "abc"),
                 (typeof(PhoenixPoint.Geoscape.Entities.Research.ResearchState), PhoenixPoint.Geoscape.Entities.Research.ResearchState.Unlocked),
                 (typeof(TimeSpan), TimeSpan.FromTicks(1234567)),
+                (typeof(Base.Core.TimeUnit), Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(1234567))),
                 (typeof(Vector3), new Vector3(1f, -2f, 3.5f)), (typeof(Quaternion), new Quaternion(0f, .5f, 0f, .5f)),
                 (typeof(string), null),
             })
@@ -382,6 +388,30 @@ namespace RailCheck
                 if (a.N != 7 || a.S != "x" || !a.L.SequenceEqual(new[] { 1, 2 }) || b.N != -1 || b.S != null)
                     yield return "L4 entitylist-round-trip: value mismatch (" + a.N + "," + a.S + ",[" + string.Join(",", a.L) + "] / " + b.N + "," + b.S + ")";
             }
+
+            // ApplyList EXECUTED, not mirrored. L1's ListStrategy only RESTATES what ApplyList would do, so
+            // the two can drift; this runs the real applier. LinkedList<T> implements ICollection<T>.Add
+            // EXPLICITLY, so a name probe on the concrete type finds no Add at all and the applier threw —
+            // the same failure class as the GeoFacilityComponent[] resync storm. HashSet rides along to
+            // prove the interface-first probe did not regress the containers that already worked.
+            var holder = new ListHolder();
+            foreach (var fname in new[] { "Linked", "Set" })
+            {
+                var fi = typeof(ListHolder).GetField(fname);
+                var af = new RailField { Name = fname, Class = FieldClass.LeafList, ValueType = fi.FieldType, ElemType = typeof(int), Fi = fi };
+                string aerr = null;
+                try { RailMeta.ApplyList(holder, af, new List<object> { 1, 2, 3 }); }
+                catch (Exception ex) { aerr = ex.GetType().Name + ": " + ex.Message; }
+                if (aerr != null) yield return "L4 applylist-" + fname + " threw " + aerr;
+                else if (((IEnumerable<int>)fi.GetValue(holder)).Count() != 3)
+                    yield return "L4 applylist-" + fname + ": expected 3 elements after apply";
+            }
+        }
+
+        private sealed class ListHolder
+        {
+            public LinkedList<int> Linked = new LinkedList<int>();
+            public HashSet<int> Set = new HashSet<int>();
         }
 
         // ─── Plumbing ───────────────────────────────────────────────────────

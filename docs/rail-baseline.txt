@@ -157,7 +157,7 @@ PhoenixPoint.Geoscape.Entities.Research.Research  [direct]  covered=5/6
   + Descend CurrentResearch (ResearchElement)
   + Leaf Paused (Boolean)
   - EXCLUDED _factionDef (PPFactionDef): read-only
-  + EntityCollection _oldResearchQueue (LinkedList`1) unordered=no apply=NONE
+  + EntityCollection _oldResearchQueue (LinkedList`1) unordered=no apply=ICollection<T>
   + EntityCollection _researchQueue (List`1) unordered=no apply=IList
 PhoenixPoint.Geoscape.Entities.Research.ResearchElement  [direct]  covered=5/6
   + Leaf IsInProgress (Boolean)
@@ -216,7 +216,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   + EntityCollection Objectives (List`1) -> live _objectives unordered=no apply=IList
   - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
   + Descend Research (Research)
-  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=Clear+Add
+  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
 PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=10/20
@@ -237,7 +237,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   + EntityCollection Objectives (List`1) -> live _objectives unordered=no apply=IList
   - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
   + Descend Research (Research)
-  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=Clear+Add
+  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
 PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=10/20
@@ -258,7 +258,7 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   + EntityCollection Objectives (List`1) -> live _objectives unordered=no apply=IList
   - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
   + Descend Research (Research)
-  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=Clear+Add
+  + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
 
@@ -278,5 +278,4 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
 
 summary: covered=157 excluded=61 blobbable=12
 
-known law violations (1) — each one is a rail bug, not a harness limit:
-  ! L1 no-list-apply-strategy: PhoenixPoint.Geoscape.Entities.Research.Research._oldResearchQueue (LinkedList`1) rides as EntityCollection but ApplyList would throw
+known law violations (0) — each one is a rail bug, not a harness limit:
