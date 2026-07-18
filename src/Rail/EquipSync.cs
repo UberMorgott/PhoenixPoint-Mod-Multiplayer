@@ -35,8 +35,9 @@ namespace Multiplayer.Network.Sync
     /// natively on the client again — local optimistic apply, cheap) fires the postfix which sends ONE
     /// intent per gesture carrying the resulting three lists (RailMeta EntityList codec, no second DTO).
     /// The host echo via the normal 0xAC rail is the source of truth and overwrites the optimistic
-    /// state; the ONLY client write-gate left is apply-scope-only (ClientApplyScopeEquipFlushGate) so
-    /// the OpenUiRepaint re-enter can't stomp just-applied deltas with a stale view-model flush.
+    /// state; no client write-gate remains — the one stale-flush hazard (OpenUiRepaint re-entering
+    /// the commit-on-exit UIStateEditSoldier inside apply scope) is cut off at the source by that
+    /// screen's opt-out in OpenUiRepaint.RepaintOpenGeoscapeScreen.
     ///
     /// HOST (unchanged): dedup (shared ManufactureSync.Intents) → resolve character by the rail's stable
     /// key (IdentityResolver "U#&lt;charId&gt;") → decode lists → validate that every item the loadout
