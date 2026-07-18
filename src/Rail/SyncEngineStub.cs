@@ -49,21 +49,14 @@ namespace Multiplayer.Network.Sync
         {
             ResearchSync.Reset();
             ManufactureSync.Reset();
-            EquipSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
-            // Rail statics that survive an engine teardown and had no home in this aggregate until the
-            // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset
-            // list, and TearDown (which SessionEnd drives) is what calls it.
-            OpenUiRepaint.Reset();
-            SyncApplyScope.Reset();
         }
 
         public void ResetForReloadBoundary()
         {
             ResearchSync.ResetForReloadBoundary();
             ManufactureSync.ResetForReloadBoundary();
-            EquipSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }

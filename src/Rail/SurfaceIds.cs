@@ -82,14 +82,5 @@ namespace Multiplayer.Network.Sync
         public const byte GeoRail = 0xAC;  // THE generic value rail (laws 5/6): host→all canonical metadata-guided diff deltas (inner = DiffEngine [MsgDelta:u8][seq:u32][kindDefs][entries], seq rides SurfaceSeq); client→host full-resend request on seq gap (inner = [MsgResyncRequest:u8], law 7 resync-on-gap)
         public const byte GeoManufacture = 0xAD;  // Manufacturing queue rail (migration #3) host→all ORDER snapshot: [seq:u32][count:u16][(itemDefGuid, accumulatedPoints:float)×N]; the un-keyable _queue (dup defs → excluded from the generic rail) is carried by explicit order, seq rides SurfaceSeq
         public const byte GeoManufactureIntent = 0xAE;  // Manufacturing rail client→host INTENT ([nonce:u32][op:u8][itemDefGuid][index:i32], op = queue/cancel/front/up/down/scrap/scrapVehicle; for scrap the index slot carries the item COUNT); nonce rides IntentDedup; host validates (def-at-index still matches, or storage has count) + executes NATIVELY, queue outcome returns via 0xAD and scrap outcome via the storage 0xAC + wallet 0xA0 value rails
-        // 0xAF RETIRED (never reuse) — was GeoItemClaim, the ephemeral drag-claim advisory (ClaimSync,
-        // added a4f3b2b, removed same day). It greyed remote-held items via UIInventorySlot
-        // .EventHandlersEnabled=false, but that same flag gates UIInventorySlot.OnEndDrag (:633) and
-        // OnPointerClick (:555): a remote claim for the same def landing MID-DRAG greyed the DRAGGER'S OWN
-        // source slot, so EndDrag never fired, the release was never sent, _isBeingDragged stayed true and
-        // the slot art was never restored — a permanent "item in hand AND still in its slot" wedge, with
-        // OpenUiRepaint then re-arming _dirty every frame forever. The 30 s TTL covered only REMOTE claims.
-        // Restore with `git show a4f3b2b:src/Rail/ClaimSync.cs` if it is ever revisited — but only with
-        // per-INSTANCE claim identity (claims were keyed by def GUID alone) and a local-drag TTL.
     }
 }

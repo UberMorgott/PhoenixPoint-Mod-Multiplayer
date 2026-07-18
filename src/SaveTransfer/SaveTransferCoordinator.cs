@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
-using Base.Input;
 using Base.Platforms;
 using Base.Serialization;
 using Base.Utils;
@@ -13,7 +12,6 @@ using Multiplayer.UI;
 using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Params;
 using PhoenixPoint.Common.Saves;
-using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
 
 namespace Multiplayer.Network
@@ -1528,46 +1526,6 @@ namespace Multiplayer.Network
             catch (Exception e) { Debug.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
         }
 
-        // The reveal machinery above REMOVES the game's only input-unlock edge; this puts it back.
-        // GeoscapeView.InitView():340 takes RequestOverrideInputSet(LoadingScreenInputSet), and the sole
-        // native release is GeoscapeView.OnCurtainLifted():2160 (ClearOverrideInputSet), raised only at the
-        // tail of a COMPLETED LevelSwitchCurtainController.LiftCurtainCrt (:113-114). Co-op breaks that edge
-        // on purpose — CurtainShowPatch.Prefix suppresses the Loaded→Playing auto-lift and CurtainLiftGatePatch
-        // parks every lift — and re-issues it from PerformDeferredLift. Any run where the re-issued lift never
-        // reaches its tail (stopped by a competing _currentFadingRoutine?.Stop(), or completing before
-        // InitView:340 re-applies the lock) latches the override forever, and the failure is SILENT:
-        // InputController.SetInputSets:520-527 applies a new set ONLY while no override is held, so every
-        // UIState*.EnterState SetInputState("VehicleSelected"/…) is stored and discarded. The world still
-        // renders at full fps (PauseObjectRendering is cleared at LiftCurtainCrt:108, BEFORE the yield) with
-        // zero exceptions — camera and clicks simply dead. An edge we can lose must be held as a STATE, so
-        // converge on it every frame. Engine-scoped by construction: keyed on _revealed, which EVERY peer
-        // sets in PerformDeferredLift — no IsHost branch here or anywhere below it.
-        private static readonly System.Reflection.FieldInfo OverrideSetsField =
-            AccessTools.Field(typeof(InputController), "_overrideInputSets");
-
-        private void RepairRevealInputLock()
-        {
-            if (!_revealed) return;
-            try
-            {
-                var view = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
-                // CurrentViewState non-null ⇒ the geoscape state machine is live, so the only legitimate
-                // holder of the loading-screen override is a lift still fading — and clearing a frame early
-                // there is harmless, it is exactly what that fade's own tail is about to do.
-                if (view == null || view.CurrentViewState == null || view.LoadingScreenInputSet == null) return;
-                var input = GameUtl.GameComponent<InputController>();
-                if (input == null || !input.HaveOverrideInput) return;
-                // Identity-checked: a MessageBox (MessageBoxPromptController:97) or cure-confirmation
-                // (UIModuleCureConfirmation:76) override is a DIFFERENT set and must never be cleared here.
-                if (!(OverrideSetsField?.GetValue(input) is InputSetDef[] active)) return;
-                if (Array.IndexOf(active, view.LoadingScreenInputSet) < 0) return;
-                input.ClearOverrideInputSet();
-                Debug.Log("[Multiplayer] reveal input-lock repair: cleared latched LoadingScreenInputSet " +
-                          "(curtain lift never reached OnCurtainLifted)");
-            }
-            catch (Exception e) { Debug.LogError("[Multiplayer] RepairRevealInputLock failed: " + e.Message); }
-        }
-
         /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>
         public void OnLoadComplete(NetworkMessage msg)
         {
@@ -1713,10 +1671,6 @@ namespace Multiplayer.Network
 
         public void Update()
         {
-            // Converge the reveal input-lock invariant before anything else: a peer that has revealed must
-            // never be left holding the geoscape loading-screen input override (see RepairRevealInputLock).
-            RepairRevealInputLock();
-
             // Phase-1 (download) native bottom-bar driver — client only. While the save blob is arriving,
             // feed the game's own loading-screen bar the exact download fraction so it fills 0..100% under
             // the dropped curtain. When the download finishes we hold the bar full + relabel "Waiting for

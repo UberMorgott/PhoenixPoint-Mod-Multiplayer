@@ -50,8 +50,7 @@ namespace Multiplayer.Network.Sync
                             if (!researchDone) { researchDone = true; ResearchSync.RepaintResearchUi(); }
                             break;
                         case Timing _:
-                        case TimingInstanceData _: // the TimeAnchor scratch DTO
-                            break; // native setter events already fired during apply; the clock widget polls
+                            break; // native setter events already fired during apply
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
@@ -61,13 +60,8 @@ namespace Multiplayer.Network.Sync
                             ManufactureSync.RepaintManufacturingUi();
                             break;
                         default:
-                            // Law 11 universal cover, guaranteed HERE: any kind without a per-kind
-                            // native event still repaints the open geoscape screen through the
-                            // generic seam — no unmapped type is ever silently repaint-less,
-                            // regardless of what the caller does after Fire().
-                            OpenUiRepaint.MarkDirty();
                             if (_loggedUnknown.Add(entity.GetType().Name))
-                                Debug.Log("[Multiplayer][rail] UiEventMap: no per-kind mapping for " + entity.GetType().Name + " — universal open-screen repaint (logged once)");
+                                Debug.Log("[Multiplayer][rail] UiEventMap: no repaint mapping for " + entity.GetType().Name + " (logged once)");
                             break;
                     }
                 }

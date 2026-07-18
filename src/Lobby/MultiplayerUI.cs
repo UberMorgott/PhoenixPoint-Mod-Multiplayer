@@ -1218,15 +1218,12 @@ namespace Multiplayer.UI
                 // the user can re-open the network menu to host or retry the join. NO empty lobby is
                 // ever shown on the client failure path.
                 _lobby?.HideForNativeScreen();
-                // Show the REASON, nothing else. This handler serves two very different failures and a
-                // fixed networking paragraph was wrong for both: a host-authored ConnectionRejected
-                // ("identity already in use", "a battle is in progress") arrives over an ALREADY-WORKING
-                // socket, so advising UPnP/port-forwarding/CGNAT sent the user to fix a link that was never
-                // broken; and a genuine transport failure already carries a better, per-transport hint that
-                // NetworkEngine.BuildTransportFailureReason builds into `reason` itself. Any connectivity
-                // advice belongs there, next to the transport that knows which one failed.
                 mb.ShowSimplePrompt(
-                    $"Connection failed: {reason}",
+                    $"Connection failed: {reason}\n\n" +
+                    "If neither of you uses Steam: the HOST should enable UPnP on their router (or " +
+                    "forward TCP+UDP 14242 to their PC), then re-share the invite code. If you are BOTH " +
+                    "on carrier-grade NAT (CGNAT), a direct link isn't possible — use a LAN/VPN tunnel " +
+                    "(e.g. Radmin, ZeroTier) or the Steam version.",
                     MessageBoxIcon.Error, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { _lobby?.Hide(); }, this);
             }

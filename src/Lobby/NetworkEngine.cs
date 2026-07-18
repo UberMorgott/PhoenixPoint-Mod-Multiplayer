@@ -118,9 +118,6 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
-            // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
-            // session ended and re-started without a level switch in between).
-            SessionEnd.Reset();
         }
 
         /// <summary>
@@ -154,9 +151,6 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
-            // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
-            // session ended and re-started without a level switch in between).
-            SessionEnd.Reset();
         }
 
         public void Shutdown()
@@ -454,9 +448,7 @@ namespace Multiplayer.Network
                 case TransportType.DirectIP:
                     hint = "Check the address and that the HOST forwarded TCP 14242 to their PC "
                          + "(you, the client, need no port-forwarding). ConnectionRefused = wrong port / host "
-                         + "not hosting; TimedOut = firewall or port not forwarded. If the host cannot forward "
-                         + "the port at all (carrier-grade NAT), no direct link is possible — use a LAN/VPN "
-                         + "tunnel (e.g. Radmin, ZeroTier) or the Steam version.";
+                         + "not hosting; TimedOut = firewall or port not forwarded.";
                     break;
                 case TransportType.SteamP2P:
                     hint = "The Steam P2P link to the host could not be established. Make sure both players "

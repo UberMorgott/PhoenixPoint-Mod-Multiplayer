@@ -232,18 +232,7 @@ namespace Multiplayer.Network
         {
             var existed = _clients.TryGetValue(steamId, out var client);
             if (existed)
-            {
                 client.IsReady = false;
-                // RELEASE the guid→peer binding: this is the host-side peer-DETACH chokepoint, so the
-                // attach in HandleJoin has exactly one symmetric partner here and every drop path
-                // (transport disconnect, heartbeat reaper, graceful leave, stale-rejoin prune) inherits it.
-                // Without this a returning player was refused forever — its peer id is a per-connection
-                // counter, so a reconnect can never present the id the guid was bound to.
-                // NOT cleared: the guid-keyed slot and permissions, which intentionally survive a detach so
-                // a reconnecting player gets its own slot and rights back.
-                if (client.PlayerGuid != Guid.Empty)
-                    _guidOwners.Remove(client.PlayerGuid);
-            }
             _clients.Remove(steamId);
             _lastHeartbeat.Remove(steamId);
             _readyClients.Remove(steamId);
@@ -378,25 +367,20 @@ namespace Multiplayer.Network
             // HARDENING (identity takeover): PlayerGuid is the permission/ownership key but it is PUBLIC
             // (broadcast to every peer in PEER_LIST), so a peer could JOIN carrying ANOTHER player's guid
             // and be treated as that player "reconnecting" — evicting the victim (below) and inheriting
-            // their slot/permissions/owned soldiers. Bind the guid to the peer id that claimed it, and
-            // refuse a DIFFERENT peer re-asserting the same guid → reject BEFORE any stale-peer eviction.
-            //
-            // SCOPE (do not over-read this check): the binding is released in RemoveClient, so it only ever
-            // covers a guid held by a CURRENTLY CONNECTED peer — which is the only window in which takeover
-            // means anything. It deliberately does NOT survive a disconnect: on DirectTransport `clientId` is
-            // a per-connection counter (DirectTransport._nextPeerId), NOT a stable authenticated identity, so
-            // every reconnect legitimately arrives under a NEW id. Holding the binding past disconnect locked
-            // returning players out of their own identity forever. Real cross-session identity authentication
-            // needs a stable per-peer key the transport can vouch for; a counter cannot provide one.
+            // their slot/permissions/owned soldiers. Bind the guid to the authenticated transport identity:
+            // the FIRST SteamId to claim a guid owns it; a JOIN re-asserting that guid from a DIFFERENT
+            // SteamId is a takeover attempt → reject BEFORE any stale-peer eviction. A legit reconnect keeps
+            // the same SteamId (a new transport address does not change it), so it passes and re-binds idempotently.
             if (_guidOwners.TryGetValue(join.PlayerGuid, out var boundSteamId) && boundSteamId != clientId)
             {
                 Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
-                               $"already bound to connected peer {boundSteamId} — identity-takeover attempt.");
+                               $"already bound to a different SteamId {boundSteamId} — identity-takeover attempt.");
                 var reject = new NetworkMessage(PacketType.ConnectionRejected,
                     NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
                 _engine.SendToClient(clientId, reject);
                 return;
             }
+            _guidOwners[join.PlayerGuid] = clientId;
 
             // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
             // in the roster is a reconnect of a known player whose previous connection died (possibly a
@@ -458,11 +442,6 @@ namespace Multiplayer.Network
             if (_clients.TryGetValue(clientId, out var client))
             {
                 client.PlayerGuid = join.PlayerGuid;
-                // ATTACH the guid→peer binding HERE, paired with the release in RemoveClient, and only once
-                // the peer is actually on the roster. Binding at the takeover check instead (where it used to
-                // live) leaked on every reject that returns after it — and the stale-rejoin prune below runs
-                // RemoveClient for the SAME guid, which would wipe a binding made any earlier.
-                _guidOwners[join.PlayerGuid] = clientId;
                 if (!string.IsNullOrEmpty(join.Nickname))
                     client.PlayerName = join.Nickname;
                 client.ParityDiffs = parityDiffText; // "" = parity OK
@@ -805,12 +784,14 @@ namespace Multiplayer.Network
             // Prune peers that vanished from the roster. On a crash/timeout drop the host re-broadcasts
             // ONLY PEER_LIST (no ClientLeave packet → no RemoveClient here), so without this a dropped
             // peer would linger in _clients forever → ClientCount / GetConnectedClients over-count
-            // (client status-bar drift). Go through RemoveClient rather than re-implementing its cleanup:
-            // this was the one detach path that bypassed the chokepoint, so anything RemoveClient starts
-            // releasing was silently skipped here. Client-only code (host returns at the top of this
-            // method), so RemoveClient's host-gated peer-list re-broadcast cannot recurse.
+            // (client status-bar drift). Mirror RemoveClient's cleanup (heartbeat + ready set) so the
+            // derived counts stay consistent.
             foreach (var stale in PeerListPrune.PruneKeys(_clients.Keys, newClientKeys))
-                RemoveClient(stale);
+            {
+                _clients.Remove(stale);
+                _lastHeartbeat.Remove(stale);
+                _readyClients.Remove(stale);
+            }
         }
 
         // LEAVE (C→H / H→all): graceful lobby/session leave.

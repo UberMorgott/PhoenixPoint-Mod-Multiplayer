@@ -5,12 +5,10 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using Base.Core;
 using Base.Defs;
 using Base.Serialization;
 using Base.Serialization.General;
-using Multiplayer.Util;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
 
@@ -39,9 +37,7 @@ namespace Multiplayer.Network.Sync
         LeafList = 3,        // collection of leaf-encodable elements → ONE canonical list value
         LeafDict = 4,        // dictionary with simple keys → per-subKey leaf entries
         Excluded = 5,        // not on the rail; reason in RailField.Exclude, surfaced by the report
-        GeoItemDict = 6,     // Dictionary<BaseDef, GeoItem> (ItemStorage._storageItems) → per-def structural entry (GeoItemCodec)
-        EntityList = 7       // list of KEYLESS entities → the WHOLE list is ONE canonical value blob; element
-                             // order rides INSIDE the payload, never in the path (law 2 forbids index addresses)
+        GeoItemDict = 6      // Dictionary<BaseDef, GeoItem> (ItemStorage._storageItems) → per-def structural entry (GeoItemCodec)
     }
 
     public enum LeafKind : byte
@@ -158,10 +154,6 @@ namespace Multiplayer.Network.Sync
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo };
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
-            if (RailMeta.IsPresentation(valType))
-            { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
-            var optOut = RailMeta.OptOutReason(live.DeclaringType, name);
-            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
 
             // Leaf?
             if (RailMeta.LeafKindOf(valType, 0, out var kind))
@@ -186,8 +178,6 @@ namespace Multiplayer.Network.Sync
             var elem = RailMeta.ElemTypeOf(valType);
             if (elem != null)
             {
-                if (RailMeta.IsPresentation(elem))
-                { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
                 if (RailMeta.LeafKindOf(elem, 0, out _))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
@@ -196,15 +186,7 @@ namespace Multiplayer.Network.Sync
                     return f;
                 }
                 if (elem.IsClass && RailMeta.HasPersistentMembers(elem))
-                {
-                    // Keyable element type → per-element descend at path.Name#key. Keyless (GeoItem,
-                    // AbilityTrack…) → the whole list is ONE canonical value blob (EntityList); the walk
-                    // additionally falls back per instance when a keyable-looking list turns out
-                    // unkeyable/duplicate at runtime (DiffEngine.EntityCollection case).
-                    f.ElemType = elem;
-                    f.Class = RailMeta.TypeKeyable(elem) ? FieldClass.EntityCollection : FieldClass.EntityList;
-                    return f;
-                }
+                { f.Class = FieldClass.EntityCollection; f.ElemType = elem; return f; }
                 f.Class = FieldClass.Excluded; f.Exclude = "collection of un-keyable/unsupported " + elem.Name;
                 return f;
             }
@@ -225,67 +207,16 @@ namespace Multiplayer.Network.Sync
     public static class RailMeta
     {
         // ─── Game serializer access (typed; the ONE configured instance) ───
-
-        /// <summary>Headless seam for tools/RailCheck ONLY — the game component does not exist outside the
-        /// game process, but the serializer's METADATA discovery (GetSerializedMembers) is pure attribute
-        /// reflection and works on a bare <c>new Serializer(null)</c>. Always null in game.</summary>
-        internal static Serializer SerializerOverride;
-
         public static Serializer GameSerializer
         {
             get
             {
-                if (SerializerOverride != null) return SerializerOverride;
                 try { return GameUtl.GameComponent<SerializationComponent>()?.Serializer; }
                 catch { return null; }
             }
         }
 
         internal static Type MemberType(MemberInfo mi) => (mi as FieldInfo)?.FieldType ?? ((PropertyInfo)mi).PropertyType;
-
-        // ─── Presentation refusal (same principle as the Unity-scene-object refusal) ───
-        // Rendering artifacts are never game state, so they never ride the rail — regardless of the fact
-        // that the save serializer happens to persist them. LocalizedTextBind is a CLASS with a writable
-        // public LocalizationKey (decompile Base.UI/LocalizedTextBind.cs:9-13), so it fails the IsValueType
-        // composite test and would otherwise classify as Descend (member) or EntityList/EntityCollection
-        // (element) — i.e. the client would WRITE localization keys. Live proof from the last full walk
-        // (rail-coverage.txt:26-28): 874 instances reached, LocalizationKey + _doNotLocalize as leaves,
-        // owned by GeoSiteInstaceData.Motto/.Name (428) and GeoPhoenixBase+InstanceData.LocationDescription
-        // (18). Nothing on a client can legitimately need a localization key shipped to it, and where an
-        // instance is shared with a def the write would land in shared def state.
-        private static readonly HashSet<string> _presentationTypes = new HashSet<string>
-        {
-            "Base.UI.LocalizedTextBind",
-        };
-
-        internal static bool IsPresentation(Type t) => t != null && _presentationTypes.Contains(t.FullName);
-
-        // ─── Explicit member opt-out ───────────────────────────────────────
-        // Same principle as the presentation refusal above, one granularity down (PRIME DIRECTIVE: mirror
-        // everything by default, then OPT OUT what we don't want). An entry earns its place only with a
-        // reason about the VALUE's own nature — never a subsystem's convenience — and it is visible in the
-        // coverage report and the RailCheck baseline like any other exclusion.
-        private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
-            // LOCAL realtime on every peer — the client's sim is deliberately unfrozen (see ClientSimGate).
-            // So mirroring the host's raw base on top of the client's own accrual double-counts: the two
-            // clocks keep the same pace and never agree on the value. The clock rides as an ANCHOR instead
-            // (TimeAnchor, rail root "TA"): the host's whole clock state, loaded through the game's own
-            // Timing.ProcessInstanceData seam, which OVERWRITES the accrual rather than adding to it.
-            // Both members were already excluded before TimeUnit became a leaf ("no persistent members"),
-            // so this keeps today's behavior — it just states the reason instead of relying on an accident.
-            { "Base.Core.Timing.StartTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
-            { "Base.Core.Timing.StartFixedTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
-        };
-
-        /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.</summary>
-        internal static string OptOutReason(Type owner, string name)
-        {
-            if (owner == null) return null;
-            _optOutMembers.TryGetValue(owner.FullName + "." + name, out var why);
-            return why;
-        }
 
         /// <summary>Persistent members of a type per the game's own discovery (ReadWrite mode only).</summary>
         internal static List<MemberInfo> SerializedMembers(Serializer ser, Type t)
@@ -388,12 +319,7 @@ namespace Multiplayer.Network.Sync
             if (t == typeof(double)) { kind = LeafKind.Double; return true; }
             if (t == typeof(string)) { kind = LeafKind.String; return true; }
             if (t.IsEnum) { kind = LeafKind.Enum; return true; }
-            // TimeUnit rides BESIDE TimeSpan rather than as its own kind: it is a struct wrapping ONE
-            // readonly TimeSpan (decompile Base.Core/TimeUnit.cs:16-17), so BuildField excludes that member
-            // as read-only, the Composite gate below then fails (no Leaf field left) and every TimeUnit in
-            // the game fell out as "no persistent members" — research/travel/manufacture ETAs, site timers.
-            // Ticks are the entire value, so the existing TimeSpanTicks codec already expresses it exactly.
-            if (t == typeof(TimeSpan) || t == typeof(TimeUnit)) { kind = LeafKind.TimeSpanTicks; return true; }
+            if (t == typeof(TimeSpan)) { kind = LeafKind.TimeSpanTicks; return true; }
             if (t == typeof(Vector3)) { kind = LeafKind.Vector3; return true; }
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
@@ -441,7 +367,7 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Double: w.Write((double)v); break;
                 case LeafKind.String: w.Write((string)v); break;
                 case LeafKind.Enum: w.Write(Convert.ToInt64(v, CultureInfo.InvariantCulture)); break;
-                case LeafKind.TimeSpanTicks: w.Write((v is TimeUnit tu ? tu.TimeSpan : (TimeSpan)v).Ticks); break;
+                case LeafKind.TimeSpanTicks: w.Write(((TimeSpan)v).Ticks); break;
                 case LeafKind.Vector3: { var x = (Vector3)v; w.Write(x.x); w.Write(x.y); w.Write(x.z); break; }
                 case LeafKind.Quaternion: { var q = (Quaternion)v; w.Write(q.x); w.Write(q.y); w.Write(q.z); w.Write(q.w); break; }
                 case LeafKind.DefRef: w.Write(((BaseDef)v).Guid ?? ""); break;
@@ -507,13 +433,7 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Double: return Coerce(r.ReadDouble(), declared);
                 case LeafKind.String: return r.ReadString();
                 case LeafKind.Enum: return Enum.ToObject(declared, r.ReadInt64());
-                case LeafKind.TimeSpanTicks:
-                {
-                    // Keyed on the DECLARED type (both peers derive it from the same table), because the
-                    // wire form is identical for TimeSpan and TimeUnit — ticks.
-                    var ts = new TimeSpan(r.ReadInt64());
-                    return declared == typeof(TimeUnit) ? (object)TimeUnit.FromTimeSpan(ts) : ts;
-                }
+                case LeafKind.TimeSpanTicks: return new TimeSpan(r.ReadInt64());
                 case LeafKind.Vector3: return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.Quaternion: return new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.DefRef:
@@ -554,60 +474,6 @@ namespace Multiplayer.Network.Sync
         /// (LeafKinds 0-13, list marker 14), so an explicit dict-key delete stays distinguishable on the
         /// wire from a genuine present-null value (LeafKind.Null = 0).</summary>
         public const byte DictTombstone = 0xFF;
-
-        // ─── MEMBERSHIP STATEMENT (the convergence primitive) ──────────────
-        // The diff rail can only ever express keys the HOST HAS; a key only the CLIENT has is invisible to
-        // it and survives forever (the mirror becomes host-state PLUS client garbage). A membership entry
-        // fixes that class of gap for EVERY keyed field at once: it is the host stating "this collection
-        // contains EXACTLY these keys, nothing else". It rides the ordinary Entry shape under a reserved
-        // subKey, so it is diffed, chunked, sequenced and tombstoned by the existing machinery — and, being
-        // diffed, it costs wire bytes ONLY on the ticks where the key set actually changed. A statement is
-        // therefore always authoritative-COMPLETE, never incremental: "no statement emitted" is itself the
-        // assertion "the set did not change", so the last statement the client holds is always current.
-        //
-        // Payload = the key set as sorted CRC-32s, not the key strings: 4 bytes/key instead of ~36 for a
-        // def GUID (an ItemStorage with 250 defs is 1 KB, not 9 KB — the 8 KB per-entry cap is real).
-        // The client only ever asks "is MY key in the host's set", so a hash collision can only make it
-        // KEEP a stale key, never delete a live one — collisions fail safe by construction.
-
-        /// <summary>Reserved subKey marking an Entry as a membership statement instead of a value.
-        /// Control char: real subKeys are def GUIDs, enum ints or IdentityResolver keys, none of which
-        /// may contain one (the same assumption the \u0001 / \u0002 separators already rely on).</summary>
-        public const string MembershipSubKey = "\u0003";
-
-        /// <summary>Stable across peers and processes (String.GetHashCode is randomized — never use it here).</summary>
-        internal static uint KeyHash(string key) => Crc32.Compute(Encoding.UTF8.GetBytes(key));
-
-        /// <summary>Sorted ascending = canonical (law 6): same key set ⇒ byte-identical statement.</summary>
-        internal static byte[] EncodeMembership(List<uint> hashes)
-        {
-            hashes.Sort();
-            var buf = new byte[2 + 4 * hashes.Count];
-            buf[0] = (byte)(hashes.Count & 0xFF);
-            buf[1] = (byte)(hashes.Count >> 8);
-            for (int i = 0; i < hashes.Count; i++)
-            {
-                uint h = hashes[i];
-                int o = 2 + 4 * i;
-                buf[o] = (byte)h; buf[o + 1] = (byte)(h >> 8); buf[o + 2] = (byte)(h >> 16); buf[o + 3] = (byte)(h >> 24);
-            }
-            return buf;
-        }
-
-        /// <summary>Null when the payload is not a well-formed statement (never sweep on a garbled one).</summary>
-        internal static HashSet<uint> DecodeMembership(byte[] v)
-        {
-            if (v == null || v.Length < 2) return null;
-            int n = v[0] | (v[1] << 8);
-            if (v.Length != 2 + 4 * n) return null;
-            var set = new HashSet<uint>();
-            for (int i = 0; i < n; i++)
-            {
-                int o = 2 + 4 * i;
-                set.Add((uint)(v[o] | (v[o + 1] << 8) | (v[o + 2] << 16) | (v[o + 3] << 24)));
-            }
-            return set;
-        }
 
         private static readonly HashSet<string> _loggedTruncations = new HashSet<string>(StringComparer.Ordinal);
 
@@ -654,402 +520,6 @@ namespace Multiplayer.Network.Sync
             var l = long.Parse(s, CultureInfo.InvariantCulture);
             if (keyType.IsEnum) return Enum.ToObject(keyType, l);
             return Convert.ChangeType(l, keyType, CultureInfo.InvariantCulture);
-        }
-
-        // ─── EntityList: keyless-entity list codec ─────────────────────────
-        // The whole list travels as ONE canonical value blob; element order lives inside the payload
-        // (law 2: a path may never contain an element index). Elements are reconstructed the way the
-        // game's OWN serializer does it: the type's [SerializeCustomCreate] static method, whose
-        // parameters (after SerializedObjectData) are serialized members matched BY NAME — that is how
-        // WriteOnly "create param" members (GeoItem.ItemDef) travel: as constructor arguments
-        // (SerializationType.InitCustomCreate/CustomCreateObject). No custom create → the game uses
-        // Activator.CreateInstance(nonPublic) — so do we. Post-read callbacks are fired afterwards
-        // (AbilityTrack rebinds its slot back-refs there).
-
-        internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
-
-        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5;
-        private const int MaxBlobDepth = 8;
-
-        private struct Fixup { public object Target; public RailField Field; public int Idx; }
-
-        private sealed class CreateInfo { public MethodDelegate Method; public MemberInfo[] Params; }
-        private static readonly Dictionary<Type, CreateInfo> _createInfoCache = new Dictionary<Type, CreateInfo>();
-        private static readonly Dictionary<Type, bool> _blobContentCache = new Dictionary<Type, bool>();
-        private static readonly HashSet<string> _blobWarned = new HashSet<string>(StringComparer.Ordinal);
-        private static readonly string[] IdProbesMirror = { "SiteId", "VehicleID", "ResearchID", "Id", "Def" };
-
-        /// <summary>Static mirror of IdentityResolver's keyability probe (id-member names + unique-BaseDef
-        /// fallback). IdentityResolver stays the runtime authority; drift here only coarsens granularity —
-        /// a keyable-looking type still falls back to EntityList per instance at walk time.</summary>
-        internal static bool TypeKeyable(Type t)
-        {
-            if (IdentityResolver.IsRootEntityType(t)) return true;
-            foreach (var p in IdProbesMirror)
-                if (HarmonyLib.AccessTools.Field(t, p) != null || HarmonyLib.AccessTools.Property(t, p) != null) return true;
-            var ser = GameSerializer;
-            if (ser == null) return true; // pre-init: keep today's (EntityCollection) behavior
-            int defs = 0;
-            foreach (var mi in SerializedMembers(ser, t))
-                if (typeof(BaseDef).IsAssignableFrom(MemberType(mi))) defs++;
-            return defs == 1; // unique-def key (GeoVehicleEquipment._equipmentDef)
-        }
-
-        private static void WarnOnce(string msg)
-        {
-            if (_blobWarned.Count < 200 && _blobWarned.Add(msg))
-                Debug.LogWarning("[Multiplayer][rail] " + msg);
-        }
-
-        /// <summary>Custom-create contract of a type per the game's serializer, or null when it has none.
-        /// A null slot in Params means a parameter name matched no serialized member → not reconstructible.</summary>
-        private static CreateInfo CreateInfoOf(Serializer ser, Type t)
-        {
-            if (_createInfoCache.TryGetValue(t, out var ci)) return ci;
-            var md = ser.GetTypeCustomCreateMethod(t, out _);
-            if (md?.Method != null)
-            {
-                var byName = new Dictionary<string, MemberInfo>(StringComparer.Ordinal);
-                foreach (var mwa in ser.GetSerializedMembers(t)) // ALL modes — WriteOnly create params included
-                    if (mwa.MemberInfo != null && !byName.ContainsKey(mwa.MemberInfo.Name))
-                        byName.Add(mwa.MemberInfo.Name, mwa.MemberInfo);
-                var ps = Serializer.CustomCreateParameterNames(md.Method)
-                                   .Select(n => byName.TryGetValue(n, out var mi) ? mi : null).ToArray();
-                ci = new CreateInfo { Method = md, Params = ps };
-            }
-            _createInfoCache[t] = ci;
-            return ci;
-        }
-
-        private static object GetMemberValue(MemberInfo mi, object o) =>
-            mi is FieldInfo fi ? fi.GetValue(o) : ((PropertyInfo)mi).GetValue(o, null);
-
-        /// <summary>True when a blob of this type would carry anything (covered fields, salvageable
-        /// read-only leaf fields, or create params). Contentless sub-objects (AmmoManager: only
-        /// interface-typed members) are dropped rather than reconstructed empty.</summary>
-        private static bool HasBlobContent(Serializer ser, Type t)
-        {
-            if (_blobContentCache.TryGetValue(t, out var v)) return v;
-            v = CreateInfoOf(ser, t) != null;
-            var rt = RailType.Get(t);
-            if (!v && rt != null)
-                foreach (var f in rt.Fields)
-                    if (f.Class == FieldClass.Leaf || f.Class == FieldClass.LeafList || f.Class == FieldClass.Descend ||
-                        f.Class == FieldClass.EntityCollection || f.Class == FieldClass.EntityList ||
-                        (f.Class == FieldClass.Excluded && f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _)))
-                    { v = true; break; }
-            _blobContentCache[t] = v;
-            return v;
-        }
-
-        public static byte[] EncodeEntityList(RailField f, object listVal)
-        {
-            var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8))
-            {
-                w.Write(EntityListMarker);
-                if (listVal == null) { w.Write(false); return ms.ToArray(); }
-                w.Write(true);
-                var items = new List<object>();
-                foreach (var e in (IEnumerable)listVal) items.Add(e);
-                if (items.Count > ushort.MaxValue) throw new InvalidOperationException("entity list too large (" + items.Count + ")");
-                w.Write((ushort)items.Count);
-                foreach (var e in items)
-                    EncodeValue(w, ser, f.ElemType, e, new List<object>(), 0); // locals scope = one element
-                return ms.ToArray();
-            }
-        }
-
-        private static void EncodeValue(BinaryWriter w, Serializer ser, Type declared, object v, List<object> locals, int depth)
-        {
-            if (v == null) { w.Write(TagNull); return; }
-            if (LeafKindOf(declared, 0, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
-            for (int i = 0; i < locals.Count; i++)
-                if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
-            var t = v.GetType();
-            if (t != declared) throw new NotSupportedException("polymorphic value " + t.Name + " as " + declared.Name);
-            if (depth >= MaxBlobDepth) throw new NotSupportedException("blob depth cap at " + t.Name);
-            if (typeof(UnityEngine.Object).IsAssignableFrom(t)) throw new NotSupportedException("Unity object " + t.Name);
-            if (!HasBlobContent(ser, t))
-            {
-                // Nothing expressible inside (e.g. AmmoManager: interface members only) — drop rather than
-                // reconstruct an EMPTY husk that would shadow saner defaults (Ammo=null → _charges fallback).
-                WarnOnce("blob: " + t.Name + " has no encodable content — dropped");
-                w.Write(TagNull);
-                return;
-            }
-            w.Write(TagBlob);
-            EncodeObjectBody(w, ser, t, v, locals, depth);
-        }
-
-        private static void EncodeObjectBody(BinaryWriter w, Serializer ser, Type t, object o, List<object> locals, int depth)
-        {
-            locals.Add(o); // registration order is the deterministic back-ref index space (mirrored on decode)
-
-            var ci = CreateInfoOf(ser, t);
-            if (ci != null)
-            {
-                foreach (var p in ci.Params)
-                    if (p == null) throw new NotSupportedException(t.Name + " create param unmatched");
-                w.Write((byte)ci.Params.Length);
-                foreach (var mi in ci.Params)
-                    EncodeValue(w, ser, MemberType(mi), GetMemberValue(mi, o), locals, depth + 1);
-            }
-            else w.Write((byte)0);
-
-            var rt = RailType.Get(t);
-            using (var fms = new MemoryStream())
-            using (var fw = new BinaryWriter(fms, System.Text.Encoding.UTF8))
-            {
-                int n = 0;
-                for (int i = 0; i < rt.Fields.Count; i++)
-                {
-                    var f = rt.Fields[i];
-                    if (!f.CanRead) continue;
-                    object v;
-                    try { v = f.GetValue(o); } catch { continue; }
-                    switch (f.Class)
-                    {
-                        case FieldClass.Leaf:
-                            fw.Write((ushort)i); fw.Write(TagLeaf); EncodeLeaf(fw, f.ValueType, v); n++;
-                            break;
-                        case FieldClass.LeafList:
-                            fw.Write((ushort)i); fw.Write(TagLeafList); EncodeList(fw, f, v); n++;
-                            break;
-                        case FieldClass.Descend:
-                            fw.Write((ushort)i); EncodeValue(fw, ser, f.ValueType, v, locals, depth + 1); n++;
-                            break;
-                        case FieldClass.EntityCollection:
-                        case FieldClass.EntityList:
-                        {
-                            if (IdentityResolver.IsRootEntityType(f.ElemType))
-                            { WarnOnce("blob: root-entity list " + t.Name + "." + f.Name + " not carried (identity creation is structural, law 3)"); break; }
-                            fw.Write((ushort)i);
-                            if (v == null) fw.Write(TagNull);
-                            else
-                            {
-                                var elems = new List<object>();
-                                foreach (var e in (IEnumerable)v) elems.Add(e);
-                                fw.Write(TagList); fw.Write((ushort)elems.Count);
-                                foreach (var e in elems) EncodeValue(fw, ser, f.ElemType, e, locals, depth + 1);
-                            }
-                            n++;
-                            break;
-                        }
-                        case FieldClass.Excluded:
-                        {
-                            // Two salvage cases the game's own serializer handles that flat classification
-                            // cannot: (a) read-only leaf FIELDS (readonly AbilityTrack.Source) — the game
-                            // sets those via FieldInfo.SetValue (SerializationMember.CanSetValue), so can
-                            // we; (b) interface/object refs pointing BACK at an object already inside this
-                            // blob (CommonItemData.OwnerItem → its GeoItem) — the game restores them as
-                            // graph references; within one element blob a local back-index is the same
-                            // thing. Anything else stays excluded (never null-stomped: absent ≠ null).
-                            if (f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _))
-                            { fw.Write((ushort)i); fw.Write(TagLeaf); EncodeLeaf(fw, f.ValueType, v); n++; break; }
-                            if (v != null && (f.ValueType.IsInterface || f.ValueType == typeof(object)))
-                                for (int b = 0; b < locals.Count; b++)
-                                    if (ReferenceEquals(locals[b], v))
-                                    { fw.Write((ushort)i); fw.Write(TagBackRef); fw.Write((ushort)b); n++; break; }
-                            break;
-                        }
-                        // LeafDict / GeoItemDict inside a blob: none exist on current element types.
-                        // ponytail: not carried (warned once); add sub-key encode here when one appears.
-                        case FieldClass.LeafDict:
-                        case FieldClass.GeoItemDict:
-                            WarnOnce("blob: dict field " + t.Name + "." + f.Name + " not carried");
-                            break;
-                    }
-                }
-                w.Write((byte)n);
-                w.Write(fms.ToArray());
-            }
-        }
-
-        public static List<object> DecodeEntityList(byte[] bytes, RailField f, GeoLevelController geo)
-        {
-            var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
-            using (var ms = new MemoryStream(bytes))
-            using (var r = new BinaryReader(ms, System.Text.Encoding.UTF8))
-            {
-                if (r.ReadByte() != EntityListMarker) throw new IOException("bad entity-list marker");
-                if (!r.ReadBoolean()) return null;
-                int n = r.ReadUInt16();
-                var list = new List<object>(n);
-                for (int i = 0; i < n; i++)
-                {
-                    var locals = new List<object>();
-                    var fixups = new List<Fixup>();
-                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0);
-                    foreach (var fx in fixups)
-                    {
-                        try { fx.Field.SetValue(fx.Target, locals[fx.Idx]); }
-                        catch (Exception ex) { WarnOnce("blob fixup failed on " + fx.Target.GetType().Name + "." + fx.Field.Name + ": " + ex.Message); }
-                    }
-                    foreach (var lo in locals) InvokePostReadSafe(ser, lo);
-                    list.Add(v);
-                }
-                return list;
-            }
-        }
-
-        private static void InvokePostReadSafe(Serializer ser, object o)
-        {
-            if (o == null) return;
-            try { ser.GetSerializationType(o.GetType())?.InvokePostRead(o, null); }
-            catch (Exception ex) { WarnOnce("blob post-read on " + o.GetType().Name + " threw " + ex.GetType().Name); }
-        }
-
-        private static object DecodeValue(BinaryReader r, Serializer ser, Type declared, GeoLevelController geo,
-                                          List<object> locals, List<Fixup> fixups, int depth)
-        {
-            byte tag = r.ReadByte();
-            switch (tag)
-            {
-                case TagNull: return null;
-                case TagLeaf: return DecodeLeaf(r, declared, geo);
-                case TagBackRef:
-                {
-                    int bi = r.ReadUInt16();
-                    var v = bi < locals.Count ? locals[bi] : null;
-                    if (v == null) WarnOnce("blob back-ref to unconstructed local #" + bi + " (" + declared.Name + ") — null substituted");
-                    return v;
-                }
-                case TagBlob: return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
-                default: throw new IOException("bad blob tag " + tag);
-            }
-        }
-
-        private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
-                                               List<object> locals, List<Fixup> fixups, int depth)
-        {
-            int myIdx = locals.Count;
-            locals.Add(null); // placeholder: mirrors encode registration order; backfilled after construction
-
-            int cpCount = r.ReadByte();
-            var ci = CreateInfoOf(ser, t);
-            object o;
-            if (ci != null && ci.Params.Length == cpCount)
-            {
-                var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
-                for (int i = 0; i < cpCount; i++)
-                    args[i + 1] = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1);
-                o = ci.Method.Invoke(args);
-                if (o == null) throw new IOException("custom create returned null for " + t.Name);
-            }
-            else
-            {
-                for (int i = 0; i < cpCount; i++) DecodeValue(r, ser, typeof(object), geo, locals, fixups, depth + 1); // drift: consume
-                o = Activator.CreateInstance(t, true);
-            }
-            locals[myIdx] = o;
-
-            var rt = RailType.Get(t);
-            int fCount = r.ReadByte();
-            for (int i = 0; i < fCount; i++)
-            {
-                int idx = r.ReadUInt16();
-                if (rt == null || idx >= rt.Fields.Count) throw new IOException("blob field idx " + idx + " out of range for " + t.Name);
-                var f = rt.Fields[idx];
-                byte tag = r.ReadByte();
-                switch (tag)
-                {
-                    case TagNull:
-                        if (!f.ValueType.IsValueType) f.SetValue(o, null);
-                        break;
-                    case TagLeaf:
-                        f.SetValue(o, DecodeLeaf(r, f.ValueType, geo));
-                        break;
-                    case TagBackRef:
-                        fixups.Add(new Fixup { Target = o, Field = f, Idx = r.ReadUInt16() });
-                        break;
-                    case TagBlob:
-                        f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1));
-                        break;
-                    case TagList:
-                    {
-                        if (f.ElemType == null) throw new IOException("blob list tag on non-list field " + t.Name + "." + f.Name);
-                        int en = r.ReadUInt16();
-                        var elems = new List<object>(en);
-                        for (int j = 0; j < en; j++)
-                            elems.Add(DecodeValue(r, ser, f.ElemType, geo, locals, fixups, depth + 1));
-                        ApplyList(o, f, elems);
-                        break;
-                    }
-                    case TagLeafList:
-                    {
-                        if (f.ElemType == null) throw new IOException("blob leaf-list tag on non-list field " + t.Name + "." + f.Name);
-                        ApplyList(o, f, DecodeList(r, f, geo));
-                        break;
-                    }
-                    default: throw new IOException("bad blob field tag " + tag);
-                }
-            }
-            return o;
-        }
-
-        /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.
-        /// Shared by the client applier (top-level LeafList/EntityList fields) and the blob codec
-        /// (nested lists on freshly constructed elements).</summary>
-        internal static void ApplyList(object entity, RailField field, List<object> items)
-        {
-            // Unresolved EntityRef/DefRef elements decode to null (referent not spawned / def unknown on the
-            // client). A null in a live game list can NRE native code that dereferences elements — drop the
-            // holes rather than inserting null (the structural layer / a later diff re-adds them once resolvable).
-            if (items != null && (IdentityResolver.IsRootEntityType(field.ElemType) ||
-                                  typeof(BaseDef).IsAssignableFrom(field.ElemType)))
-                items.RemoveAll(it => it == null);
-            var current = field.GetValue(entity);
-            if (current == null && items == null) return; // both absent — nothing to reconcile
-            bool created = false;
-            if (current == null && !field.ValueType.IsArray && field.IsWritable())
-            {
-                // Container never constructed on this instance: blob elements are built via the
-                // parameterless ctor, so ctor-assigned containers arrive null (ManufacturableItem.
-                // ManufacturePrice/ScrapReward = ResourcePack). Construct one generically, fill it
-                // below through the normal strategies, then attach it to the field.
-                try { current = Activator.CreateInstance(field.ValueType, true); created = true; }
-                catch { /* no parameterless ctor — falls through to the strategy error below */ }
-            }
-            if (current is IList list && !(current is Array))
-            {
-                list.Clear();
-                if (items != null) foreach (var it in items) list.Add(it);
-                if (created) field.SetValue(entity, current);
-                return;
-            }
-            if (current != null && !(current is Array))
-            {
-                // ICollection<T>-shaped (HashSet, LinkedList, ResourcePack…). Resolve Clear/Add through the
-                // INTERFACE whenever the container implements it: LinkedList<T> implements ICollection<T>.Add
-                // EXPLICITLY, so a name probe on the concrete type finds nothing at all (the explicit impl is
-                // a private method named "System.Collections.Generic.ICollection<T>.Add") and the field would
-                // throw on apply — the same failure class as the GeoFacilityComponent[] resync storm.
-                // Interface dispatch resolves explicit implementations at runtime, so this covers both shapes.
-                // The name probe stays as the fallback for containers that expose Clear/Add without
-                // implementing ICollection<T> (ResourcePack).
-                var ct = current.GetType();
-                var icoll = typeof(ICollection<>).MakeGenericType(field.ElemType);
-                bool viaInterface = icoll.IsInstanceOfType(current);
-                var clear = viaInterface ? icoll.GetMethod("Clear") : HarmonyLib.AccessTools.Method(ct, "Clear");
-                var add = viaInterface ? icoll.GetMethod("Add") : HarmonyLib.AccessTools.Method(ct, "Add", new[] { field.ElemType });
-                if (clear != null && add != null)
-                {
-                    clear.Invoke(current, null);
-                    if (items != null) foreach (var it in items) add.Invoke(current, new[] { it });
-                    if (created) field.SetValue(entity, current);
-                    return;
-                }
-            }
-            if (field.IsWritable() && field.ValueType.IsArray)
-            {
-                var arr = Array.CreateInstance(field.ElemType, items?.Count ?? 0);
-                if (items != null) for (int i = 0; i < items.Count; i++) arr.SetValue(items[i], i);
-                field.SetValue(entity, arr);
-                return;
-            }
-            throw new InvalidOperationException("no list apply strategy for " + field.ValueType.Name);
         }
     }
 }
