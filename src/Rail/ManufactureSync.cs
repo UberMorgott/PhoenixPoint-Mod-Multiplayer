@@ -69,8 +69,8 @@ namespace Multiplayer.Network.Sync
         // internal: EquipSync's GeoFaction.ScrapItem capture (equip-screen scrap dialog) reuses this op.
         internal const byte OpScrap = 6;       // GeoFaction.ScrapItem(item, count)   — item-storage scrap
         private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
-        // Soldier-loadout intent (GeoCharacter.SetItems chokepoint) — rides THIS surface (0xAE) but its
-        // payload after [nonce][op] is EquipSync's own ([charId][flags][blobs]); HandleIntent branches early.
+        // Soldier-loadout intent (per-GESTURE, sent by EquipSync's UI seams) — rides THIS surface (0xAE) but
+        // its payload after [nonce][op] is EquipSync's own ([charId][flags][blobs]); HandleIntent branches early.
         internal const byte OpSetItems = 8;
         // Augment install (UIModuleMutate/UIModuleBionics.OnAugmentApplied confirm). The augment def is
         // BOUGHT on the spot (Wallet.Take(ManufacturePrice)), never taken from storage, so it cannot ride

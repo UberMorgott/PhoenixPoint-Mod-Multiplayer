@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewStates;
 
@@ -34,29 +35,32 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// Sim gating (law 4b), second narrow seam: the equip screens' private <c>UpdateStorage()</c>
-    /// (UIStateEditSoldier:564 / UIStateEditVehicle:384) rewrites the LIVE faction/site
-    /// <c>ItemStorage</c> from the screen's own view-model list (Except-diff both ways) — on a client
-    /// that stomps the mirrored storage with stale UI content on every UpdateState/ExitState,
-    /// INCLUDING the OpenUiRepaint Exit→Enter (which runs inside SyncApplyScope — hence blocked
-    /// unconditionally, not scope-gated). Storage changes are host-derived from the loadout intent
-    /// (<see cref="EquipSync"/>) and mirror back via the GeoItemDict rail; the client never writes
-    /// storage. The paired soldier-model write (<c>GeoCharacter.SetItems</c>) is gated in
-    /// EquipSync.SetItemsCapturePatch, which also turns it into the intent.
+    /// Sim gating (law 4b), second narrow seam — APPLY-SCOPE ONLY, never per-frame. The universal
+    /// open-UI re-enter (<see cref="OpenUiRepaint"/>) runs the equip screens' ExitState inside
+    /// SyncApplyScope, and ExitState flushes the screen's view-model into the live model
+    /// (<c>UpdateStorage()</c>'s Except-diff over the faction <c>ItemStorage</c> +
+    /// <c>UpdateSoldierEquipment</c>'s <c>GeoCharacter.SetItems</c>) with PRE-apply content — that
+    /// flush would stomp the deltas just applied, and no correcting delta would follow (the diff rail
+    /// only resends on a host-side change). Outside apply scope everything runs native: the client's
+    /// per-frame flush is a cheap local no-op, gestures apply optimistically, and the host echo on
+    /// 0xAC overwrites (see EquipSync — the per-frame write-gate that encoded/compared the loadout
+    /// every frame is gone).
     /// </summary>
     [HarmonyPatch]
-    internal static class ClientEquipStorageGate
+    internal static class ClientApplyScopeEquipFlushGate
     {
         private static IEnumerable<MethodBase> TargetMethods()
         {
             yield return AccessTools.Method(typeof(UIStateEditSoldier), "UpdateStorage");
             yield return AccessTools.Method(typeof(UIStateEditVehicle), "UpdateStorage");
+            yield return AccessTools.Method(typeof(GeoCharacter), nameof(GeoCharacter.SetItems));
         }
 
         private static bool Prefix()
         {
+            if (!SyncApplyScope.Active) return true; // native everywhere outside a delta apply
             var engine = NetworkEngine.Instance;
-            return engine == null || !engine.IsActiveSession || engine.IsHost; // client: storage is host-derived
+            return engine == null || !engine.IsActiveSession || engine.IsHost; // client mid-apply: stale flush = stomp
         }
     }
 }

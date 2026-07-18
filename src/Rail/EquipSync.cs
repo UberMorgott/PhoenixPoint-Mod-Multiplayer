@@ -10,54 +10,55 @@ using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Common.View.ViewControllers.Inventory;
+using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View.ViewControllers.AugmentationScreen;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Soldier-loadout intent seam on the ONE model-level chokepoint <c>GeoCharacter.SetItems</c>
-    /// (every equip path funnels there: drag/drop, side-button quick-add, reload, loadout load/unload,
-    /// replenish, edit-vehicle crew, roster deployment — UI-gesture hooks would miss some).
+    /// Soldier-loadout intent seam, GESTURE level (law 4a). The model chokepoint (GeoCharacter.SetItems)
+    /// proved wrong in live 3-instance testing: UIStateEditSoldier.UpdateState re-flushes SetItems EVERY
+    /// FRAME with identical content, so a model-level gate had to canonically encode the whole loadout
+    /// per frame just to drop it (~60 encodes/s, sustained CPU burn) and its dedup swallowed genuine
+    /// user gestures. A pure slot REPOSITION never changes the model at all (GeoItem has no position
+    /// field; UIInventoryList packs first-fit from list order), so that seam cannot tell a gesture from
+    /// per-frame noise. Quarry: old mod's EquipGesturePatches used the same UI chokepoints.
     ///
-    /// CLIENT (law 3 projector + law 4a capture, Gap C+D): SetItems is ALWAYS blocked — the mirrored
-    /// model is written only by the rail's field appliers, never by UI view-model flushes (the open
-    /// equip screen re-flushes its stale view-model from UpdateState/ExitState, incl. inside the
-    /// OpenUiRepaint re-enter, which would stomp every just-applied delta). Outside SyncApplyScope the
-    /// blocked write becomes an intent on the shared manufacturing intent surface (0xAE, OpSetItems),
-    /// but ONLY on real content change: the proposed loadout is canonically encoded (the same
-    /// RailMeta.EncodeEntityList codec the DiffEngine uses for these very fields) and compared against
-    /// BOTH the character's current mirrored content (drops the no-op re-flush storm) and the last-sent
-    /// payload (drops resends while the host echo is in flight).
-    /// ponytail: that content-compare IS the send-rate cap — the old mod relayed this per-frame path
-    /// unconditionally and produced ~60 intents/sec + FPS collapse; here a no-change frame sends
-    /// NOTHING, so the ceiling is one intent per actual user gesture.
+    /// CLIENT now: the UI gesture seams below (AttemptSlotSwap / side-button / reload / loadout
+    /// load-unload / scrap-off-doll) MARK a pending gesture; the native flush that follows (SetItems runs
+    /// natively on the client again — local optimistic apply, cheap) fires the postfix which sends ONE
+    /// intent per gesture carrying the resulting three lists (RailMeta EntityList codec, no second DTO).
+    /// The host echo via the normal 0xAC rail is the source of truth and overwrites the optimistic
+    /// state; the ONLY client write-gate left is apply-scope-only (ClientApplyScopeEquipFlushGate) so
+    /// the OpenUiRepaint re-enter can't stomp just-applied deltas with a stale view-model flush.
     ///
-    /// HOST: dedup (shared ManufactureSync.Intents) → resolve character by the rail's stable key
-    /// (IdentityResolver "U#&lt;tacUnitId&gt;") → decode lists → validate that every item the loadout
+    /// HOST (unchanged): dedup (shared ManufactureSync.Intents) → resolve character by the rail's stable
+    /// key (IdentityResolver "U#&lt;charId&gt;") → decode lists → validate that every item the loadout
     /// GAINS is available in storage (stale client view → reject whole intent) → native
     /// GeoCharacter.SetItems → storage side-effects DERIVED from old-vs-new per-def counts (returned
-    /// items AddItem'd back, gained items PopItem'd out — the client never writes storage). The result
-    /// reaches everyone through the normal rail (GeoCharacter EntityList fields + storage GeoItemDict
-    /// on DiffEngine 0xAC) — no bespoke echo channel.
+    /// items AddItem'd back, gained items PopItem'd out). The result reaches everyone through the normal
+    /// rail (GeoCharacter EntityList fields + storage GeoItemDict on DiffEngine 0xAC) — no bespoke echo.
     /// </summary>
     public static class EquipSync
     {
         private static readonly string[] ListFieldNames = { "_armourItems", "_equipmentItems", "_inventoryItems" };
 
-        // ─── CLIENT state ──────────────────────────────────────────────────
-        private static readonly Dictionary<int, byte[]> _lastSent = new Dictionary<int, byte[]>();
-        private static int _suppressed; // dedup-killed SetItems flushes since last send (storm telemetry)
+        // ─── CLIENT state: one pending flag, set per user gesture ──────────
+        private static bool _gesturePending;
+        private static string _gestureSource; // for the per-gesture [MP][equip] log line
 
         public static void Reset() => ResetForReloadBoundary();
 
         public static void ResetForReloadBoundary()
         {
-            _lastSent.Clear();
-            _suppressed = 0;
+            _gesturePending = false;
+            _gestureSource = null;
         }
 
         private static GeoLevelController GeoLevel()
@@ -69,47 +70,90 @@ namespace Multiplayer.Network.Sync
         private static RailField ListField(int i) =>
             RailType.Get(typeof(GeoCharacter))?.FieldByName(ListFieldNames[i]);
 
-        // ─── CLIENT: the write-gate + intent capture (Harmony seam, law 4a/4b) ─
+        // ─── CLIENT: gesture seams (law 4a) — mark, then send on the next native flush ─
 
-        /// <summary>Gap C+D. FALSE = client: never mutate the mirror locally; emit intent when warranted.</summary>
-        [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
-        internal static class SetItemsCapturePatch
+        /// <summary>A user equip gesture completed on this client. The next native GeoCharacter.SetItems
+        /// flush (per-frame on the open equip screens, so within a frame) carries the committed result and
+        /// <see cref="SetItemsGestureSendPatch"/> turns it into ONE intent. Marking instead of sending here
+        /// keeps one mechanism for BOTH equip screens (UIStateEditVehicle maps its lists into SetItems
+        /// differently) and reads the exact model-committed lists, not a hand-rebuilt copy.</summary>
+        internal static void MarkGesture(string source)
         {
-            private static bool Prefix(GeoCharacter __instance,
-                IEnumerable<GeoItem> armour, IEnumerable<GeoItem> equipment, IEnumerable<GeoItem> inventory,
-                bool freeReload)
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+            if (SyncApplyScope.Active) return; // apply-driven UI churn is not a user gesture (law 8)
+            if (GeoLevel() == null) return;    // tactical UIStateInventory shares these widgets — geoscape only
+            _gesturePending = true;
+            _gestureSource = source;
+        }
+
+        /// <summary>Every drag-drop / click-move / double-click equip-unequip funnels through
+        /// <c>UIModuleSoldierEquip.AttemptSlotSwap</c> (:1128); __result true = the swap happened.</summary>
+        [HarmonyPatch(typeof(UIModuleSoldierEquip), "AttemptSlotSwap")]
+        internal static class SlotSwapGesturePatch
+        {
+            private static void Postfix(bool __result) { if (__result) MarkGesture("slot-swap"); }
+        }
+
+        /// <summary>Side-button quick-add / ammo-load (<c>UIInventorySlotSideButton.OnSideButtonPressed</c>
+        /// :303) bypasses AttemptSlotSwap — it moves items between lists directly.</summary>
+        [HarmonyPatch(typeof(UIInventorySlotSideButton), "OnSideButtonPressed")]
+        internal static class SideButtonGesturePatch
+        {
+            private static void Postfix() => MarkGesture("side-button");
+        }
+
+        /// <summary>Reload button (<c>UIModuleSoldierEquip.ReloadItemHandler</c> — TryLoadAmmo changes ammo
+        /// bytes on equipped items without any slot move).</summary>
+        [HarmonyPatch(typeof(UIModuleSoldierEquip), "ReloadItemHandler")]
+        internal static class ReloadGesturePatch
+        {
+            private static void Postfix() => MarkGesture("reload");
+        }
+
+        /// <summary>Loadout-preset load (both button routes call LoadLoadout(GeoCharacter)), unequip-all
+        /// (UnloadLoadout() button entry), and scrap-off-the-doll (ItemScrappedHandler removes the item from
+        /// the soldier/vehicle lists; its wallet+storage half already rides OpScrap via ScrapItemCapturePatch).</summary>
+        [HarmonyPatch]
+        internal static class LoadoutButtonsGesturePatch
+        {
+            private static IEnumerable<MethodBase> TargetMethods()
             {
+                yield return AccessTools.Method(typeof(UIStateEditSoldier), "LoadLoadout", new[] { typeof(GeoCharacter) });
+                yield return AccessTools.Method(typeof(UIStateEditSoldier), "UnloadLoadout", Type.EmptyTypes);
+                yield return AccessTools.Method(typeof(UIStateEditSoldier), "ItemScrappedHandler");
+                yield return AccessTools.Method(typeof(UIStateEditVehicle), "ItemScrappedHandler");
+            }
+
+            private static void Postfix() => MarkGesture("loadout-button");
+        }
+
+        /// <summary>The send point: first native SetItems flush after a marked gesture (the equip screens
+        /// flush per-frame, so this fires within a frame of the gesture). Cost on every other flush = one
+        /// bool check. Inside SyncApplyScope the flag survives untouched — the next natural flush outside
+        /// apply sends it (law 8: nothing is emitted from apply scope).</summary>
+        [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
+        internal static class SetItemsGestureSendPatch
+        {
+            private static void Postfix(GeoCharacter __instance, bool freeReload)
+            {
+                if (!_gesturePending || SyncApplyScope.Active) return;
                 var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
-                // CLIENT: always block — even inside SyncApplyScope (the OpenUiRepaint re-enter runs the
-                // screen's ExitState in apply scope, and its stale view-model flush is exactly the stomp).
-                if (SyncApplyScope.Active) return false; // blocked silently, never an intent (law 8)
-                try { CaptureIntent(engine, __instance, armour, equipment, inventory, freeReload); }
-                catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT capture failed: " + ex.Message); }
-                return false;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) { _gesturePending = false; return; }
+                _gesturePending = false;
+                try { SendLoadoutIntent(engine, __instance, freeReload); }
+                catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT gesture send failed: " + ex.Message); }
             }
         }
 
-        private static void CaptureIntent(NetworkEngine engine, GeoCharacter character,
-            IEnumerable<GeoItem> armour, IEnumerable<GeoItem> equipment, IEnumerable<GeoItem> inventory, bool freeReload)
+        /// <summary>ONE intent per gesture: [nonce][OpSetItems][charId][flags+3 EntityList blobs] on the
+        /// shared 0xAE surface — decoded host-side by <see cref="HandleIntent"/> (unchanged).</summary>
+        private static void SendLoadoutIntent(NetworkEngine engine, GeoCharacter character, bool freeReload)
         {
             int charId = (int)character.Id;
-            var proposed = EncodeBody(freeReload,
-                armour == null ? null : armour.ToList(),
-                equipment == null ? null : equipment.ToList(),
-                inventory == null ? null : inventory.ToList());
-            if (proposed == null) return; // codec miss (pre-init) — logged inside
-
-            // Dedup line 1: no-op flush (UpdateState/ExitState re-writing what the mirror already holds).
-            // NOTE: compares with the SAME freeReload flag so a genuine free-reload of depleted items
-            // (different ammo bytes) still goes through, while the per-frame identical flush dies here.
-            var current = EncodeBody(freeReload,
+            var body = EncodeBody(freeReload,
                 ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
-            if (current != null && RailMeta.BytesEqual(proposed, current)) { Suppress(); return; }
-            // Dedup line 2: identical to the payload already in flight (host echo not applied yet).
-            if (_lastSent.TryGetValue(charId, out var last) && RailMeta.BytesEqual(proposed, last)) { Suppress(); return; }
-
-            _lastSent[charId] = proposed;
+            if (body == null) return; // codec miss (pre-init) — logged inside
             uint nonce = ManufactureSync.NextNonce();
             byte[] inner;
             using (var ms = new MemoryStream())
@@ -118,16 +162,15 @@ namespace Multiplayer.Network.Sync
                 w.Write(nonce);
                 w.Write(ManufactureSync.OpSetItems);
                 w.Write(charId);
-                w.Write(proposed);
+                w.Write(body);
                 inner = ms.ToArray();
             }
             try
             {
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, inner);
                 engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][equip] CLIENT intent sent char=U#" + charId + " nonce=" + nonce +
-                          " bytes=" + inner.Length + " freeReload=" + freeReload + " suppressedSinceLast=" + _suppressed);
-                _suppressed = 0;
+                Debug.Log("[MP][equip] CLIENT gesture intent sent char=U#" + charId + " gesture=" + _gestureSource +
+                          " nonce=" + nonce + " bytes=" + inner.Length + " freeReload=" + freeReload);
             }
             catch (ArgumentOutOfRangeException ex)
             {
@@ -168,10 +211,9 @@ namespace Multiplayer.Network.Sync
         /// armour set, returns swapped-out parts to storage and charges Wallet.Take(ManufacturePrice),
         /// all local authoritative writes on a client. CLIENT: block the whole method, send OpAugment
         /// (defGuid + charId in the index slot); the host re-validates cost + fit and replays the native
-        /// sequence (<see cref="HandleAugmentIntent"/>). The preview SetItems from OnAugmentClicked is
-        /// already blocked by SetItemsCapturePatch and its stray intent host-rejected (augment def not in
-        /// storage) — the paperdoll preview simply doesn't render on a client; the confirmed install
-        /// arrives via the rail + open-UI repaint.</summary>
+        /// sequence (<see cref="HandleAugmentIntent"/>). The preview SetItems from OnAugmentClicked now
+        /// runs natively on the client (local optimistic paperdoll preview, no gesture mark → no intent);
+        /// the confirmed install arrives via the rail + open-UI repaint.</summary>
         [HarmonyPatch]
         internal static class AugmentApplyCapturePatch
         {
@@ -193,13 +235,6 @@ namespace Multiplayer.Network.Sync
                 Debug.Log("[MP][equip] CLIENT augment intent char=U#" + (int)character.Id + " def=" + __0.Guid);
                 return false;
             }
-        }
-
-        private static void Suppress()
-        {
-            _suppressed++;
-            if (_suppressed % 300 == 0)
-                Debug.Log("[MP][equip] CLIENT dedup suppressed=" + _suppressed + " SetItems flushes (storm guard alive)");
         }
 
         private static List<GeoItem> ListValue(GeoCharacter c, int i)
