@@ -194,10 +194,13 @@ namespace Multiplayer.Network.Sync
                         break;
                     }
                     case FieldClass.EntityList:
-                    case FieldClass.EntityCollection: // host walk-time fallback: unkeyable/duplicate elements ride as one list blob
                     {
-                        // EntityCollection descend itself never carries values — a valued entry here is
-                        // always an EntityList blob (whole list, order inside the payload, law 2).
+                        // EntityList ONLY. EntityCollection is element-addressed (path.Name#key) and its
+                        // descend entries never carry a value, so a blob arriving for one could only come
+                        // from a walk-time fallback — which DiffEngine no longer has, because rebuilding
+                        // keyed elements from a blob husks them (see the keyless branch there). Ship side
+                        // and apply side stay symmetric: what the host refuses to send, the client refuses
+                        // to reconstruct.
                         if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
                         RailMeta.ApplyList(entity, field, RailMeta.DecodeEntityList(value, field, geo));
                         break;

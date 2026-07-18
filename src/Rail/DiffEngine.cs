@@ -383,11 +383,23 @@ namespace Multiplayer.Network.Sync
                             keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
                         if (keyless)
                         {
-                            // Per-instance fallback: this list cannot be element-addressed right now →
-                            // ride it as ONE EntityList blob instead of aborting the field.
-                            if (IdentityResolver.IsRootEntityType(f.ElemType))
-                            { Incident(rt.Type, f.Name, "unkeyable ROOT-entity list — identity creation is structural (law 3)", path); break; }
-                            AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                            // NO whole-list blob fallback here. ApplyList would Clear() the live list and
+                            // re-add elements built by Activator.CreateInstance + table fields, so every
+                            // reference member the table does not carry lands NULL — the 7ef0a30
+                            // ResearchElement husk (ResearchDef null -> NOTEXT labels + Research.get_Progress
+                            // NRE), which is why 7ef0a30 was dropped in the first place.
+                            //
+                            // Classify-time EntityList is argued husk-by-husk in docs/rail-baseline.txt; a
+                            // RUNTIME fallback is invisible there (the baseline still prints EntityCollection),
+                            // so it can only ever smuggle a husk past review. Concretely: every
+                            // EntityCollection field in the current closure holds ResearchElement
+                            // (Research.AllResearchesArray/_researchQueue/_oldResearchQueue), so ONE KeyOf
+                            // returning null — FormatKeyValue nulls on empty string, negative int, or a key
+                            // containing '.'/'#' — or one duplicate at any single tick was enough to rebuild
+                            // every research as a husk. Keyless -> abort the field, visibly.
+                            Incident(rt.Type, f.Name, IdentityResolver.IsRootEntityType(f.ElemType)
+                                ? "unkeyable ROOT-entity list — identity creation is structural (law 3)"
+                                : "unkeyable/duplicate element keys — blob rebuild would husk the elements", path);
                             break;
                         }
                         foreach (var (key, e) in elems.OrderBy(e => e.key, StringComparer.Ordinal))
