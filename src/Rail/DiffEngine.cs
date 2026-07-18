@@ -61,14 +61,10 @@ namespace Multiplayer.Network.Sync
         private static float _nextTickAt;
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
-        private static int _reportedIncidents = -1;
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
         // Membership of every keyed EntityCollection, "<ownerPath>.<Field>" → sorted element keys joined.
         // Per-element descend carries element VALUES only; birth/death of an element lives here.
-        // "<ownerPath>.<Field>" of every collection whose rebuild blob FAILED to encode. Such a field can
-        // never be delivered, so it must never carry a membership statement (see the EntityCollection case).
-        private static readonly HashSet<string> _unshippable = new HashSet<string>(StringComparer.Ordinal);
         private static Dictionary<string, string> _collSig = new Dictionary<string, string>(StringComparer.Ordinal);
         private static Dictionary<string, string> _collSigNext = new Dictionary<string, string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loud = new HashSet<string>(StringComparer.Ordinal);
@@ -169,12 +165,7 @@ namespace Multiplayer.Network.Sync
             bool wasForceFull = _forceFull;
             _forceFull = false;
 
-            // The report is the stated instrument ("read the report, not the bug tracker") but it was written
-            // ONCE on the first walk — before any collection had been walked deep enough to raise an incident —
-            // so it always reported incidents=0 and the real frontier was only ever visible as scattered log
-            // warnings. Rewrite whenever the incident count actually moves: accurate numbers, no per-tick I/O.
-            if (!_reportWritten || _walkIncidents.Count != _reportedIncidents)
-            { WriteCoverageReport(ordered.Count); _reportWritten = true; _reportedIncidents = _walkIncidents.Count; }
+            if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
 
             if (!_baselined && !wasForceFull)
             {
@@ -297,11 +288,6 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.EntityList:
                         // Keyless-element list: the WHOLE list is one canonical value blob (order inside
                         // the payload — law 2 forbids element indices in the path, so no key is needed).
-                        // The blob is this field's ONLY carrier, so a container the client cannot rebuild
-                        // makes the whole field undeliverable — say so once instead of shipping bytes that
-                        // are guaranteed to throw on apply.
-                        if (!f.CanRebuildContainer())
-                        { Incident(rt.Type, f.Name, "read-only array — the client cannot rebuild it (no in-place length change)", path); break; }
                         AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
                         break;
                     case FieldClass.EntityCollection:
@@ -316,19 +302,8 @@ namespace Multiplayer.Network.Sync
                             if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
-                        // ORDER IS STATE when the container is ordered (List<T>/T[]): the game reads element
-                        // POSITION as meaning, but a keyed collection is addressed as a SET — so a pure
-                        // reorder changes no element value and no key set, and this walk would emit NOTHING.
-                        // That is the generic gap behind "inventory counts sync but slots don't": list order
-                        // IS the equip-screen slot placement (UIInventoryList.ItemChangedHandler:855 inserts
-                        // the item at Slots.IndexOf(slot); UpdateList:597 re-packs first-fit from list order),
-                        // and GeoItem became key-addressed the moment the unique-BaseDef key probe landed.
-                        // Capture the live sequence BEFORE the canonical sort and sign THAT, so the
-                        // birth/death gate below also fires on a reorder and ships the whole ordered blob.
-                        List<string> liveKeys = null;
                         if (!keyless)
                         {
-                            if (!f.Unordered) liveKeys = elems.Select(e => e.key).ToList();
                             elems.Sort((a, b) => string.CompareOrdinal(a.key, b.key)); // canonical (law 6)
                             for (int d = 1; d < elems.Count && !keyless; d++)
                                 if (string.Equals(elems[d - 1].key, elems[d].key, StringComparison.Ordinal))
@@ -340,8 +315,6 @@ namespace Multiplayer.Network.Sync
                             // ride it as ONE EntityList blob instead of aborting the field.
                             if (IdentityResolver.IsRootEntityType(f.ElemType))
                             { Incident(rt.Type, f.Name, "unkeyable ROOT-entity list — identity creation is structural (law 3)", path); break; }
-                            if (!f.CanRebuildContainer())
-                            { Incident(rt.Type, f.Name, "read-only array — the client cannot rebuild it (no in-place length change)", path); break; }
                             AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
                             break;
                         }
@@ -353,50 +326,28 @@ namespace Multiplayer.Network.Sync
                         // the collection wholesale. Steady state (set unchanged) emits nothing extra.
                         var sigKey = path + "." + f.Name;
                         // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
-                        var sig = string.Join("\u0002", liveKeys ?? elems.Select(e => e.key).ToList());
+                        var sig = string.Join("\u0002", elems.Select(e => e.key));
                         _collSigNext[sigKey] = sig;
-                        // Can this collection's whole-list REBUILD blob ever land on the client? Two shapes
-                        // where it cannot: ROOT entities (rebuilding is identity create/destroy = structural,
-                        // law 3) and a read-only ARRAY (length cannot change in place and the member cannot be
-                        // reassigned — GeoPhoenixFacility._components). Per-element descend below is unaffected
-                        // and keeps syncing every element's fields; only the wholesale rebuild is off.
-                        bool isRootColl = IdentityResolver.IsRootEntityType(f.ElemType);
-                        bool canRebuild = !isRootColl && f.CanRebuildContainer();
+                        // Same statement for keyed entity collections. _collSig below still decides when to
+                        // ship the whole-list REBUILD blob (a HOST-side birth/death); this states the key set
+                        // so the client can also spot a birth only IT has — which no host-side signal can see.
+                        AddMembership(rt, f, (ushort)i, kindId, path,
+                                      elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
                         if (_forceFull || (_collSig.TryGetValue(sigKey, out var prevSig) && prevSig != sig))
                         {
-                            if (isRootColl)
+                            if (IdentityResolver.IsRootEntityType(f.ElemType))
                                 LoudOnce(rt.Type.Name + "." + f.Name + ": keyed ROOT-entity membership changed at " +
                                          path + " — identity create/destroy belongs to the structural layer (law 3); " +
                                          "the value rail cannot carry it and the client will stay stale");
-                            else if (!canRebuild)
-                                LoudOnce(rt.Type.Name + "." + f.Name + " at " + path + ": membership changed but the " +
-                                         "container is a READ-ONLY ARRAY — the client cannot rebuild it, so element " +
-                                         "births/deaths of this collection cannot be carried (per-element field " +
-                                         "sync still works). Needs a structural applier if it ever changes in play.");
                             else
-                            {
                                 // ponytail: the client rebuilds the WHOLE collection from the blob, so surviving
                                 // elements become fresh instances — fine for plain data (storages, modules,
-                                // objectives), and it only fires on an actual birth/death/reorder. If a collection
-                                // whose elements carry live Unity views or backrefs (facilities, haven zones) ever
-                                // shows breakage here, that collection graduates to a hand-written structural
-                                // applier (law 3) — the blob codec already refuses Unity objects loudly.
-                                if (MpDiag.On && liveKeys != null) // TEMP [MP][inv] diag — strip once slot sync is confirmed
-                                    Debug.Log("[MP][inv] host SHIP ordered blob " + sigKey + " n=" + elems.Count +
-                                              " order=" + string.Join("|", liveKeys));
-                                if (!AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count))
-                                    _unshippable.Add(sigKey); // encode threw — this field's cure can never be delivered
-                            }
+                                // objectives), and it only fires on an actual birth/death. If a collection whose
+                                // elements carry live Unity views or backrefs (facilities, haven zones) ever shows
+                                // breakage here, that collection graduates to a hand-written structural applier
+                                // (law 3) — the blob codec already refuses Unity objects loudly.
+                                AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count);
                         }
-                        // NEVER STATE A SET YOU CANNOT DELIVER. The statement's only remedy is the whole-list
-                        // rebuild blob above: a client cannot delete a collection ELEMENT itself (law 3), it can
-                        // only ask for a resend. So when that blob can never ship — the encode throws, or the
-                        // elements are ROOT entities the value rail is forbidden to rebuild — the statement
-                        // asserts a state the client has no path to reach, and it drives an endless
-                        // resync→full-resend storm. Stay silent instead: an unstated field is simply not swept.
-                        if (canRebuild && !_unshippable.Contains(sigKey))
-                            AddMembership(rt, f, (ushort)i, kindId, path,
-                                          elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
                         foreach (var (key, e) in elems)
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
                         break;
@@ -431,16 +382,13 @@ namespace Multiplayer.Network.Sync
             });
         }
 
-        /// <summary>Returns false when the blob could NOT be encoded — the caller uses that to withhold the
-        /// field's membership statement, because a set the client is told to reach but can never be sent is
-        /// an endless resync request.</summary>
-        private static bool AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+        private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
                                                object val, List<Entry> ordered, Dictionary<string, int> index,
                                                int liveCount = -1)
         {
             byte[] enc;
             try { enc = RailMeta.EncodeEntityList(f, val); }
-            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return false; }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
             Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
             // Membership self-check (the birth/death gate): this blob is the ONLY carrier of a collection's
             // element set, so an element the codec drops is a key that silently never reaches the client —
@@ -453,7 +401,6 @@ namespace Multiplayer.Network.Sync
                              " of " + liveCount + " live elements — births/removals of this collection WILL desync");
             }
             SelfCheckEntityList(rt.Type, f, enc);
-            return true;
         }
 
         /// <summary>One-shot LOUD error: a change the rail detected but cannot carry. Never a warning —

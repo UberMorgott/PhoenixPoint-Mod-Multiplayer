@@ -29,12 +29,6 @@ namespace Multiplayer.Network.Sync
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly Dictionary<byte, RailType> _kinds = new Dictionary<byte, RailType>();
         private static readonly HashSet<byte> _brokenKinds = new HashSet<byte>();
-        // QUARANTINE (law 7 backstop): "<Type.FullName>.<Field>" of every field whose apply THREW. A resend
-        // of identical bytes cannot cure a failed apply, so such a field must never drive a resync — that is
-        // the storm loop (apply throws → the stale element survives → sweep asks for a full resend → the same
-        // bytes arrive → throws again). Keyed by field, not by kind: one unapplyable field must not disarm
-        // every other field of the same entity type.
-        private static readonly HashSet<string> _brokenFields = new HashSet<string>(StringComparer.Ordinal);
         private static Dictionary<string, object> _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loggedMisses = new HashSet<string>(StringComparer.Ordinal);
         private static uint _lastSeq;
@@ -57,10 +51,8 @@ namespace Multiplayer.Network.Sync
         private static Dictionary<string, float> _suspectSince = new Dictionary<string, float>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loud = new HashSet<string>(StringComparer.Ordinal);
         private static float _nextSweepAt;
-        private static int _deadResyncs;
         private const float SweepInterval = 1f;
         private const float GraceSeconds = 3f;
-        private const int MaxDeadResyncs = 3;
 
         public static void Reset()
         {
@@ -68,8 +60,6 @@ namespace Multiplayer.Network.Sync
             Seq.Reset();
             _kinds.Clear();
             _brokenKinds.Clear();
-            _brokenFields.Clear();
-            _deadResyncs = 0;
             _lastSeq = 0;
         }
 
@@ -243,13 +233,7 @@ namespace Multiplayer.Network.Sync
                         // EntityCollection descend itself never carries values — a valued entry here is
                         // always an EntityList blob (whole list, order inside the payload, law 2).
                         if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
-                        var blobItems = RailMeta.DecodeEntityList(value, field, geo);
-                        RailMeta.ApplyList(entity, field, blobItems);
-                        // TEMP [MP][inv] diag — strip once slot sync is confirmed. Ordered blob = the
-                        // carrier of element POSITION; this line is the client half of the host SHIP line.
-                        if (MpDiag.On && !field.Unordered)
-                            Debug.Log("[MP][inv] client APPLY ordered blob " + path + "." + field.Name +
-                                      " n=" + (blobItems == null ? -1 : blobItems.Count));
+                        RailMeta.ApplyList(entity, field, RailMeta.DecodeEntityList(value, field, geo));
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -279,21 +263,9 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                // QUARANTINE the field: this apply can never succeed for the bytes the host is sending, so
-                // asking for those bytes again is a guaranteed loop. Logged once per distinct message by
-                // LogMissOnce; the quarantine itself is a set, so it costs one entry no matter how many
-                // ticks re-attempt it.
-                if (_brokenFields.Add(QuarantineKey(rt, field)))
-                    Debug.LogError("[Multiplayer][rail] GenericApplier: QUARANTINED " + rt.Type.Name + "." +
-                                   field.Name + " — apply threw (" + ex.Message + "); this field can no longer " +
-                                   "request a resync (a resend of the same bytes cannot cure a failed apply)");
                 LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
         }
-
-        /// <summary>Stable identity of a (type, field) pair, computed identically by the applier and the
-        /// convergence sweep so a failure recorded by one is seen by the other.</summary>
-        private static string QuarantineKey(RailType rt, RailField field) => rt.Type.FullName + "." + field.Name;
 
         private static void LogMissOnce(string msg)
         {
@@ -358,17 +330,6 @@ namespace Multiplayer.Network.Sync
                         // value rail must not do it. Ask for a resync instead: the host's force-full re-emits
                         // this collection's whole-list blob, which the client applies wholesale — the local
                         // extra dies in the rebuild. Throttled to 5 s by RequestResync.
-                        //
-                        // …UNLESS this field's apply has already thrown. Then the rebuild blob is exactly the
-                        // payload that cannot land, so the resync is guaranteed dead and would re-ship the whole
-                        // snapshot forever. Report the divergence once and leave the field alone.
-                        if (_brokenFields.Contains(QuarantineKey(st.Rt, field)))
-                        {
-                            Loud("client-only element " + k + " in " + st.Path + "." + field.Name +
-                                 " — field is QUARANTINED (its apply throws), so no resync can fix it; " +
-                                 "this collection stays diverged until the field becomes applyable");
-                            break;
-                        }
                         Loud("client-only element " + k + " in " + st.Path + "." + field.Name +
                              " — absent from the host membership statement; requesting a structural rebuild");
                         wantResync = true;
@@ -415,24 +376,7 @@ namespace Multiplayer.Network.Sync
                 Debug.LogError("[Multiplayer][rail] GenericApplier CONVERGENCE: pruned " + removed +
                                " client-only key(s) across " + touched.Count + " entities");
             }
-            // SECOND LINE, mechanism-independent: the quarantine above only catches a divergence whose OWN
-            // field threw. A field that fails on the HOST (blob never encodes) or that diverges for a reason
-            // we have not modelled would still ask forever. A full resend either cures the divergence or it
-            // does not — and if it did not, the next identical one will not either. Give it a few rounds,
-            // then stop asking. The counter resets the moment a sweep comes back clean, so a genuinely
-            // transient divergence keeps its retries.
-            if (!wantResync) { _deadResyncs = 0; return; }
-            if (_deadResyncs >= MaxDeadResyncs)
-            {
-                if (_loud.Add("resync-cap"))
-                    Debug.LogError("[Multiplayer][rail] GenericApplier CONVERGENCE: " + MaxDeadResyncs +
-                                   " full resends did not cure the divergence — no longer requesting resyncs " +
-                                   "for it (a resend of identical state cannot converge). The mirror stays " +
-                                   "diverged on that field; see the QUARANTINED / Incident lines for which one.");
-                return;
-            }
-            _deadResyncs++;
-            RequestResync(engine, "client-only collection element");
+            if (wantResync) RequestResync(engine, "client-only collection element");
         }
 
         /// <summary>Seconds this (field, key) has looked unstated WITHOUT interruption. The grace window is
