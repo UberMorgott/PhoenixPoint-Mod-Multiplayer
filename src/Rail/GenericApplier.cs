@@ -34,6 +34,26 @@ namespace Multiplayer.Network.Sync
         private static uint _lastSeq;
         private static float _nextResyncReqAt;
 
+        // ─── Membership convergence (what makes the mirror a MIRROR) ───────
+        // Every other entry on the rail is derived from what the HOST HAS, so a key only the CLIENT has is
+        // invisible to the protocol and would live forever. The host's membership statement (DiffEngine
+        // AddMembership) is the missing assertion — "the set is EXACTLY this" — and it is the client that
+        // enforces it, locally and for free: no extra traffic, no round trip, no host-side detection of a
+        // divergence only the client can see.
+        private sealed class Statement
+        {
+            public RailType Rt; public ushort FieldIdx; public string Path; public HashSet<uint> Hashes;
+        }
+        private static Dictionary<string, Statement> _membership = new Dictionary<string, Statement>(StringComparer.Ordinal);
+        // (field, key) → realtime it FIRST looked unstated. The pending-intent / chunk-boundary grace:
+        // a key whose value entry landed in an earlier chunk than its statement, or whose intent is still
+        // in flight, is never deleted because the statement always arrives well inside GraceSeconds.
+        private static Dictionary<string, float> _suspectSince = new Dictionary<string, float>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _loud = new HashSet<string>(StringComparer.Ordinal);
+        private static float _nextSweepAt;
+        private const float SweepInterval = 1f;
+        private const float GraceSeconds = 3f;
+
         public static void Reset()
         {
             ResetForReloadBoundary();
@@ -47,6 +67,10 @@ namespace Multiplayer.Network.Sync
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
             _loggedMisses.Clear();
+            // Statements describe the PRE-reload graph; the host's own snapshot resets at the same boundary
+            // and re-baselines, which re-ships every statement. Holding stale ones would sweep live state.
+            _membership = new Dictionary<string, Statement>(StringComparer.Ordinal);
+            _suspectSince = new Dictionary<string, float>(StringComparer.Ordinal);
             // seq + kind registry persist (rca-3 contract: host counters keep increasing across reloads)
         }
 
@@ -86,7 +110,8 @@ namespace Multiplayer.Network.Sync
                 r.ReadByte(); // MsgDelta
                 uint seq = r.ReadUInt32();
                 if (!Seq.ShouldApply(SurfaceIds.GeoRail, seq)) return; // stale
-                if (_lastSeq != 0 && seq > _lastSeq + 1) RequestResync(engine, seq);
+                if (_lastSeq != 0 && seq > _lastSeq + 1)
+                    RequestResync(engine, "seq gap (" + _lastSeq + " -> " + seq + ")");
                 _lastSeq = seq;
                 Seq.Mark(SurfaceIds.GeoRail, seq);
 
@@ -146,6 +171,21 @@ namespace Multiplayer.Network.Sync
             if (fieldIdx >= rt.Fields.Count) return;
             var field = rt.Fields[fieldIdx];
             if (field.Class == FieldClass.Excluded) return;
+
+            // A membership statement is protocol metadata, not a value: record it and return. Enforcement is
+            // deferred to ConvergenceTick so an in-flight batch (values and statement can land in different
+            // chunks) is never mistaken for divergence.
+            if (subKey == RailMeta.MembershipSubKey)
+            {
+                var stKey = path + "\u0001" + fieldIdx;
+                // The field vanished on the host (dict went null / collection removed) → the tombstone loop
+                // tombstones the statement's own subKey. Withdraw it: state nothing rather than sweep blind.
+                if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { _membership.Remove(stKey); return; }
+                var set = RailMeta.DecodeMembership(value);
+                if (set == null) { LogMissOnce("malformed membership statement at " + path + "." + field.Name); return; }
+                _membership[stKey] = new Statement { Rt = rt, FieldIdx = fieldIdx, Path = path, Hashes = set };
+                return;
+            }
 
             var entity = IdentityResolver.Resolve(geo, path, _pathCache);
             if (entity == null)
@@ -232,11 +272,135 @@ namespace Multiplayer.Network.Sync
                 Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + msg);
         }
 
-        private static void RequestResync(NetworkEngine engine, uint seq)
+        // ─── THE CONVERGENCE SWEEP (client) ───────────────────────────────
+
+        /// <summary>Client half of the rail tick (driven from <see cref="DiffEngine.HostTick"/>, the shared
+        /// per-frame driver). Enforces every membership statement the host has made against this client's
+        /// OWN collections: a key the client holds that the authoritative statement does not list is
+        /// client-only garbage and is removed.
+        ///
+        /// Why this direction: a diff of the host graph can only ever express keys the HOST HAS, so the
+        /// host is structurally blind to a divergence that exists only on the client. The statement moves
+        /// the detection to the only peer that can see it, and costs the wire nothing — the client is
+        /// checking state it already has against a statement it already holds.
+        ///
+        /// A statement is always authoritative-COMPLETE, never incremental (the host emits the whole key
+        /// set or nothing at all, and "nothing" means "unchanged"), so acting on a retained one is safe.
+        /// No statement for a field (never sent, withdrawn, or the host excluded that instance) → that
+        /// field is simply not swept: we never guess.</summary>
+        public static void ConvergenceTick(NetworkEngine engine)
+        {
+            if (_membership.Count == 0 || Time.realtimeSinceStartup < _nextSweepAt) return;
+            _nextSweepAt = Time.realtimeSinceStartup + SweepInterval;
+            var geo = GeoLevel();
+            if (geo == null) return;
+            try { Sweep(engine, geo); }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier sweep failed: " + ex); }
+        }
+
+        private static void Sweep(NetworkEngine engine, GeoLevelController geo)
+        {
+            var cache = new Dictionary<string, object>(StringComparer.Ordinal);
+            var stillSuspect = new Dictionary<string, float>(StringComparer.Ordinal);
+            float now = Time.realtimeSinceStartup;
+            var touched = new HashSet<object>();
+            bool wantResync = false;
+            int removed = 0;
+
+            using (SyncApplyScope.Enter()) // law 8: a removal must never echo back as an intent
+            foreach (var st in _membership.Values)
+            {
+                var entity = IdentityResolver.Resolve(geo, st.Path, cache);
+                if (entity == null || !st.Rt.Type.IsInstanceOfType(entity)) continue; // not on this client — nothing to police
+                var field = st.Rt.Fields[st.FieldIdx];
+                object val;
+                try { val = field.GetValue(entity); } catch { continue; }
+                if (val == null) continue;
+
+                if (field.Class == FieldClass.EntityCollection)
+                {
+                    if (!(val is IEnumerable col)) continue;
+                    foreach (var e in col)
+                    {
+                        var k = e == null ? null : IdentityResolver.KeyOf(e);
+                        if (k == null || st.Hashes.Contains(RailMeta.KeyHash(k))) continue;
+                        if (Age(stillSuspect, now, st.Path, st.FieldIdx, k) < GraceSeconds) continue;
+                        // Deleting an ELEMENT is identity destruction = the structural layer (law 3); the
+                        // value rail must not do it. Ask for a resync instead: the host's force-full re-emits
+                        // this collection's whole-list blob, which the client applies wholesale — the local
+                        // extra dies in the rebuild. Throttled to 5 s by RequestResync.
+                        Loud("client-only element " + k + " in " + st.Path + "." + field.Name +
+                             " — absent from the host membership statement; requesting a structural rebuild");
+                        wantResync = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                if (!(val is IDictionary dict)) continue;
+                List<object> kill = null;
+                foreach (DictionaryEntry de in dict)
+                {
+                    if (de.Key == null) continue;
+                    string sub;
+                    try
+                    {
+                        sub = field.Class == FieldClass.GeoItemDict
+                            ? GeoItemCodec.SubKey(de.Key)
+                            : RailMeta.EncodeDictKey(de.Key);
+                    }
+                    catch { continue; }
+                    if (sub == null || st.Hashes.Contains(RailMeta.KeyHash(sub))) continue;
+                    if (Age(stillSuspect, now, st.Path, st.FieldIdx, sub) < GraceSeconds) continue;
+                    (kill ?? (kill = new List<object>())).Add(de.Key);
+                    // THE SELF-CHECK: on a correctly sealed client this line can never run — every write to
+                    // authoritative state is supposed to come from the host. Reaching it means some seam let
+                    // the client create state locally, so it is an ERROR, not an info line. Loud is one-shot
+                    // per distinct message, so a stuck field cannot drown the log.
+                    Loud("client-only key " + sub + " in " + st.Path + "." + field.Name +
+                         " — absent from the host membership statement; REMOVED. A seam is writing " +
+                         "authoritative state locally instead of sending an intent — find it.");
+                }
+                if (kill == null) continue;
+                foreach (var k in kill) dict.Remove(k); // deferred: never mutate mid-enumeration
+                removed += kill.Count;
+                touched.Add(entity);
+            }
+
+            _suspectSince = stillSuspect; // rebuilt each sweep — a key that stopped being suspect self-prunes
+            if (removed > 0)
+            {
+                UiEventMap.Fire(touched, geo);
+                OpenUiRepaint.MarkDirty(); // law 11: the open screen must show the corrected state at once
+                Debug.LogError("[Multiplayer][rail] GenericApplier CONVERGENCE: pruned " + removed +
+                               " client-only key(s) across " + touched.Count + " entities");
+            }
+            if (wantResync) RequestResync(engine, "client-only collection element");
+        }
+
+        /// <summary>Seconds this (field, key) has looked unstated WITHOUT interruption. The grace window is
+        /// the answer to both races: a value entry that landed in an earlier chunk than its statement, and a
+        /// client-side write that is legitimately pending its host echo. Both resolve in milliseconds; the
+        /// window is seconds. Returning 0 on first sighting is what makes the first sweep never delete.</summary>
+        private static float Age(Dictionary<string, float> stillSuspect, float now, string path, ushort fieldIdx, string sub)
+        {
+            var k = path + "\u0001" + fieldIdx + "\u0001" + sub;
+            float since = _suspectSince.TryGetValue(k, out var t) ? t : now;
+            stillSuspect[k] = since;
+            return now - since;
+        }
+
+        private static void Loud(string msg)
+        {
+            if (_loud.Count < 200 && _loud.Add(msg))
+                Debug.LogError("[Multiplayer][rail] GenericApplier CONVERGENCE: " + msg);
+        }
+
+        private static void RequestResync(NetworkEngine engine, string reason)
         {
             if (Time.realtimeSinceStartup < _nextResyncReqAt) return;
             _nextResyncReqAt = Time.realtimeSinceStartup + 5f;
-            Debug.LogWarning("[Multiplayer][rail] GenericApplier: seq gap (" + _lastSeq + "→" + seq + ") — requesting full resend");
+            Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting full resend");
             try
             {
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest,

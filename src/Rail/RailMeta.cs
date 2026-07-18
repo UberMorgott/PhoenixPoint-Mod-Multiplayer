@@ -5,10 +5,12 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using Base.Core;
 using Base.Defs;
 using Base.Serialization;
 using Base.Serialization.General;
+using Multiplayer.Util;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
 
@@ -484,6 +486,60 @@ namespace Multiplayer.Network.Sync
         /// (LeafKinds 0-13, list marker 14), so an explicit dict-key delete stays distinguishable on the
         /// wire from a genuine present-null value (LeafKind.Null = 0).</summary>
         public const byte DictTombstone = 0xFF;
+
+        // ─── MEMBERSHIP STATEMENT (the convergence primitive) ──────────────
+        // The diff rail can only ever express keys the HOST HAS; a key only the CLIENT has is invisible to
+        // it and survives forever (the mirror becomes host-state PLUS client garbage). A membership entry
+        // fixes that class of gap for EVERY keyed field at once: it is the host stating "this collection
+        // contains EXACTLY these keys, nothing else". It rides the ordinary Entry shape under a reserved
+        // subKey, so it is diffed, chunked, sequenced and tombstoned by the existing machinery — and, being
+        // diffed, it costs wire bytes ONLY on the ticks where the key set actually changed. A statement is
+        // therefore always authoritative-COMPLETE, never incremental: "no statement emitted" is itself the
+        // assertion "the set did not change", so the last statement the client holds is always current.
+        //
+        // Payload = the key set as sorted CRC-32s, not the key strings: 4 bytes/key instead of ~36 for a
+        // def GUID (an ItemStorage with 250 defs is 1 KB, not 9 KB — the 8 KB per-entry cap is real).
+        // The client only ever asks "is MY key in the host's set", so a hash collision can only make it
+        // KEEP a stale key, never delete a live one — collisions fail safe by construction.
+
+        /// <summary>Reserved subKey marking an Entry as a membership statement instead of a value.
+        /// Control char: real subKeys are def GUIDs, enum ints or IdentityResolver keys, none of which
+        /// may contain one (the same assumption the \u0001 / \u0002 separators already rely on).</summary>
+        public const string MembershipSubKey = "\u0003";
+
+        /// <summary>Stable across peers and processes (String.GetHashCode is randomized — never use it here).</summary>
+        internal static uint KeyHash(string key) => Crc32.Compute(Encoding.UTF8.GetBytes(key));
+
+        /// <summary>Sorted ascending = canonical (law 6): same key set ⇒ byte-identical statement.</summary>
+        internal static byte[] EncodeMembership(List<uint> hashes)
+        {
+            hashes.Sort();
+            var buf = new byte[2 + 4 * hashes.Count];
+            buf[0] = (byte)(hashes.Count & 0xFF);
+            buf[1] = (byte)(hashes.Count >> 8);
+            for (int i = 0; i < hashes.Count; i++)
+            {
+                uint h = hashes[i];
+                int o = 2 + 4 * i;
+                buf[o] = (byte)h; buf[o + 1] = (byte)(h >> 8); buf[o + 2] = (byte)(h >> 16); buf[o + 3] = (byte)(h >> 24);
+            }
+            return buf;
+        }
+
+        /// <summary>Null when the payload is not a well-formed statement (never sweep on a garbled one).</summary>
+        internal static HashSet<uint> DecodeMembership(byte[] v)
+        {
+            if (v == null || v.Length < 2) return null;
+            int n = v[0] | (v[1] << 8);
+            if (v.Length != 2 + 4 * n) return null;
+            var set = new HashSet<uint>();
+            for (int i = 0; i < n; i++)
+            {
+                int o = 2 + 4 * i;
+                set.Add((uint)(v[o] | (v[o + 1] << 8) | (v[o + 2] << 16) | (v[o + 3] << 24)));
+            }
+            return set;
+        }
 
         private static readonly HashSet<string> _loggedTruncations = new HashSet<string>(StringComparer.Ordinal);
 

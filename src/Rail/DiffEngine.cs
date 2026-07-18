@@ -108,7 +108,11 @@ namespace Multiplayer.Network.Sync
 
         public static void HostTick(NetworkEngine engine)
         {
-            if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
+            if (engine == null || !engine.IsActiveSession) return;
+            // The CLIENT half of the same rail tick: enforce the host's membership statements against the
+            // client's own collections (see GenericApplier.ConvergenceTick). Lives here because this is the
+            // per-frame driver both peers already share; it self-throttles.
+            if (!engine.IsHost) { GenericApplier.ConvergenceTick(engine); return; }
             if (Time.realtimeSinceStartup < _nextTickAt) return;
             _nextTickAt = Time.realtimeSinceStartup + TickInterval;
             var geo = GeoLevel();
@@ -166,8 +170,16 @@ namespace Multiplayer.Network.Sync
             if (!_baselined && !wasForceFull)
             {
                 _baselined = true;
+                // Baseline suppresses VALUES (the client got them from the native save transfer, law 1) but
+                // MUST ship the MEMBERSHIP statements: they are protocol metadata, not state, and without
+                // them a client that creates a local entry right after joining stays unpoliced until the
+                // host happens to change that same collection — which may be never. One burst, then silence.
+                var stmts = changed.Where(e => e.SubKey == RailMeta.MembershipSubKey).ToList();
+                int mp = 0, mb = 0;
+                if (stmts.Count > 0) Emit(engine, stmts, ref mp, ref mb);
                 Debug.Log("[Multiplayer][rail] DiffEngine BASELINE: entities=" + _entityCounts.Values.Sum() +
-                          " fields=" + ordered.Count + " walk=" + walkMs + "ms (no emit — clients share the save)");
+                          " fields=" + ordered.Count + " walk=" + walkMs + "ms (no value emit — clients share the save)" +
+                          " membership=" + stmts.Count + " stmts sent=" + mp + "pkt/" + mb + "B");
                 return;
             }
             _baselined = true;
@@ -231,13 +243,18 @@ namespace Multiplayer.Network.Sync
                         var keys = new List<(string sub, object v)>();
                         foreach (DictionaryEntry de in dict) keys.Add((RailMeta.EncodeDictKey(de.Key), de.Value));
                         keys.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
+                        var dictHashes = new List<uint>(keys.Count);
                         foreach (var (sub, v) in keys)
                         {
+                            // Hash BEFORE the encode: the host owns this key even if its value fails to
+                            // encode — leaving it out of the statement would make the client delete it.
+                            dictHashes.Add(RailMeta.KeyHash(sub));
                             byte[] enc;
                             try { enc = RailMeta.EncodeFieldValue(f, v); }
                             catch (Exception ex) { Incident(rt.Type, f.Name, "dict encode failed: " + ex.Message, path); continue; }
                             Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc });
                         }
+                        AddMembership(rt, f, (ushort)i, kindId, path, dictHashes, ordered, index);
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -251,13 +268,18 @@ namespace Multiplayer.Network.Sync
                         foreach (DictionaryEntry de in items)
                             if (de.Key != null && de.Value != null) entries.Add((GeoItemCodec.SubKey(de.Key), de.Value));
                         entries.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub)); // canonical (law 6)
+                        var itemHashes = new List<uint>(entries.Count);
                         foreach (var (sub, v) in entries)
                         {
+                            itemHashes.Add(RailMeta.KeyHash(sub));
                             byte[] enc;
                             try { enc = GeoItemCodec.Encode(v); }
                             catch (Exception ex) { Incident(rt.Type, f.Name, "GeoItem encode failed: " + ex.Message, path); continue; }
                             Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc });
                         }
+                        // THE storage fix: an item def the client owns and the host does not is otherwise
+                        // invisible to the protocol forever (equip-screen quick-produce, RCA 2026-07-18).
+                        AddMembership(rt, f, (ushort)i, kindId, path, itemHashes, ordered, index);
                         break;
                     }
                     case FieldClass.Descend:
@@ -306,6 +328,11 @@ namespace Multiplayer.Network.Sync
                         // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
                         var sig = string.Join("\u0002", elems.Select(e => e.key));
                         _collSigNext[sigKey] = sig;
+                        // Same statement for keyed entity collections. _collSig below still decides when to
+                        // ship the whole-list REBUILD blob (a HOST-side birth/death); this states the key set
+                        // so the client can also spot a birth only IT has — which no host-side signal can see.
+                        AddMembership(rt, f, (ushort)i, kindId, path,
+                                      elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
                         if (_forceFull || (_collSig.TryGetValue(sigKey, out var prevSig) && prevSig != sig))
                         {
                             if (IdentityResolver.IsRootEntityType(f.ElemType))
@@ -327,6 +354,32 @@ namespace Multiplayer.Network.Sync
                     }
                 }
             }
+        }
+
+        /// <summary>Emit this collection field's MEMBERSHIP STATEMENT: "the host's key set here is EXACTLY
+        /// this, nothing else". One extra snapshot entry per keyed collection field, carried under the
+        /// reserved <see cref="RailMeta.MembershipSubKey"/> so the existing diff/chunk/seq/tombstone
+        /// machinery handles it — which also means it costs wire bytes ONLY on a tick where the set changed,
+        /// and "no statement" is itself the assertion "unchanged" (so a retained statement is never stale).
+        ///
+        /// This is the one thing the walk cannot otherwise say. Everything else the rail emits is derived
+        /// from what the HOST HAS, so an entry only the CLIENT has is invisible to the protocol and lives
+        /// forever. Universal by construction: the caller is chosen by FieldClass alone (LeafDict /
+        /// GeoItemDict / keyed EntityCollection) — no subsystem knows this exists.</summary>
+        private static void AddMembership(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+                                          List<uint> hashes, List<Entry> ordered, Dictionary<string, int> index)
+        {
+            if (2 + 4 * hashes.Count > MaxValueBytes)
+            {
+                LoudOnce(rt.Type.Name + "." + f.Name + " at " + path + ": " + hashes.Count +
+                         " keys exceed the membership-statement cap — clients CANNOT prune stale keys of this field");
+                return;
+            }
+            Add(ordered, index, new Entry
+            {
+                KindId = kindId, Path = path, FieldIdx = fieldIdx,
+                SubKey = RailMeta.MembershipSubKey, Value = RailMeta.EncodeMembership(hashes)
+            });
         }
 
         private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
