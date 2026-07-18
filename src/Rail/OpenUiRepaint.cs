@@ -67,11 +67,15 @@ namespace Multiplayer.Network.Sync
             var current = view?.CurrentViewState;
             if (current == null) return;
             if (current is UIStateManufacturing) return; // opt-out: bare Exit+Enter drops its _filter
-            // opt-out: UIStateEditSoldier.ExitState COMMITS the open screen's stale UI model
-            // (UpdateStorage + UpdateSoldierEquipment→SetItems + CommitStatChanges). RCA 2026-07-18
-            // (host log 202.1s): a claim-triggered re-enter ran one frame after a remote equip intent
-            // applied — Exit wrote the pre-intent lists back over GeoCharacter, wiping the moved
-            // grenade and draining storage via repeated takes. This screen is UI-model-authoritative
+            // opt-out KEPT even with ClientSimGate.ClientEquipFlushGate restored: (a) the gate covers
+            // UpdateStorage/UpdateSoldierEquipment on the CLIENT only, but this repaint ALSO runs on
+            // the HOST (ClaimSync.RepaintOrDefer → MarkDirty on claim ops), where ExitState flushes
+            // natively — the original RCA 2026-07-18 (host log 202.1s) was exactly a host-side
+            // claim-triggered re-enter one frame after a remote equip intent applied: Exit wrote the
+            // pre-intent lists back over GeoCharacter and drained storage via repeated takes;
+            // (b) ExitState:232 also runs UIModuleCharacterProgression.CommitStatChanges (:369-386) —
+            // stale UI stat/skill-point/mutagen snapshots written into the live model, ungated on any
+            // peer (progression is not a migrated subsystem). This screen is UI-model-authoritative
             // while open; it must NEVER be re-entered as a repaint.
             if (current is UIStateEditSoldier) return;
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;

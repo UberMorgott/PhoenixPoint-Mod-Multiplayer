@@ -31,13 +31,14 @@ namespace Multiplayer.Network.Sync
     /// per-frame noise. Quarry: old mod's EquipGesturePatches used the same UI chokepoints.
     ///
     /// CLIENT now: the UI gesture seams below (AttemptSlotSwap / side-button / reload / loadout
-    /// load-unload / scrap-off-doll) MARK a pending gesture; the native flush that follows (SetItems runs
-    /// natively on the client again — local optimistic apply, cheap) fires the postfix which sends ONE
-    /// intent per gesture carrying the resulting three lists (RailMeta EntityList codec, no second DTO).
-    /// The host echo via the normal 0xAC rail is the source of truth and overwrites the optimistic
-    /// state; no client write-gate remains — the one stale-flush hazard (OpenUiRepaint re-entering
-    /// the commit-on-exit UIStateEditSoldier inside apply scope) is cut off at the source by that
-    /// screen's opt-out in OpenUiRepaint.RepaintOpenGeoscapeScreen.
+    /// load-unload / scrap-off-doll) MARK a pending gesture; the native flush that follows (allowed
+    /// through ClientSimGate.ClientEquipFlushGate's gesture carve-out — local optimistic apply, cheap)
+    /// fires the postfix which sends ONE intent per gesture carrying the resulting three lists
+    /// (RailMeta EntityList codec, no second DTO). The host echo via the normal 0xAC rail is the
+    /// source of truth. Every OTHER edit-screen flush (per-frame UpdateState / ExitState /
+    /// soldier-cycle) is blocked on the client by that gate — stale UI content stomped mirrored
+    /// deltas within a frame and the rail never resent (RCA 2026-07-18). The gate is bool checks
+    /// only, never a per-frame encode (the old model-level gate's freeze).
     ///
     /// HOST (unchanged): dedup (shared ManufactureSync.Intents) → resolve character by the rail's stable
     /// key (IdentityResolver "U#&lt;charId&gt;") → decode lists → validate that every item the loadout
@@ -53,6 +54,10 @@ namespace Multiplayer.Network.Sync
         // ─── CLIENT state: one pending flag, set per user gesture ──────────
         private static bool _gesturePending;
         private static string _gestureSource; // for the per-gesture [MP][equip] log line
+
+        /// <summary>Read by ClientSimGate.ClientEquipFlushGate: the one native flush that follows a
+        /// marked gesture passes the gate so <see cref="SetItemsGestureSendPatch"/> can send the intent.</summary>
+        internal static bool GesturePending => _gesturePending;
 
         public static void Reset() => ResetForReloadBoundary();
 
