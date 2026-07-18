@@ -21,6 +21,7 @@ namespace Multiplayer.Network.Sync
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || ClaimSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
@@ -40,6 +41,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.HostTick(_engine);
             ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
+            ClaimSync.Tick(_engine);   // ephemeral drag-claim TTL sweep (both sides)
             // Law 11 UNIVERSAL (client): flush one open-screen re-enter per frame if a mirror batch landed
             // this frame. Inert on the host (never marks dirty) and when no batch applied.
             OpenUiRepaint.FlushIfDirty();
@@ -50,6 +52,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.Reset();
             ManufactureSync.Reset();
             EquipSync.Reset();
+            ClaimSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
         }
@@ -59,6 +62,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.ResetForReloadBoundary();
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
+            ClaimSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
