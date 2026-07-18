@@ -37,7 +37,9 @@ namespace Multiplayer.Network.Sync
         LeafList = 3,        // collection of leaf-encodable elements → ONE canonical list value
         LeafDict = 4,        // dictionary with simple keys → per-subKey leaf entries
         Excluded = 5,        // not on the rail; reason in RailField.Exclude, surfaced by the report
-        GeoItemDict = 6      // Dictionary<BaseDef, GeoItem> (ItemStorage._storageItems) → per-def structural entry (GeoItemCodec)
+        GeoItemDict = 6,     // Dictionary<BaseDef, GeoItem> (ItemStorage._storageItems) → per-def structural entry (GeoItemCodec)
+        EntityList = 7       // list of KEYLESS entities → the WHOLE list is ONE canonical value blob; element
+                             // order rides INSIDE the payload, never in the path (law 2 forbids index addresses)
     }
 
     public enum LeafKind : byte
@@ -186,7 +188,15 @@ namespace Multiplayer.Network.Sync
                     return f;
                 }
                 if (elem.IsClass && RailMeta.HasPersistentMembers(elem))
-                { f.Class = FieldClass.EntityCollection; f.ElemType = elem; return f; }
+                {
+                    // Keyable element type → per-element descend at path.Name#key. Keyless (GeoItem,
+                    // AbilityTrack…) → the whole list is ONE canonical value blob (EntityList); the walk
+                    // additionally falls back per instance when a keyable-looking list turns out
+                    // unkeyable/duplicate at runtime (DiffEngine.EntityCollection case).
+                    f.ElemType = elem;
+                    f.Class = RailMeta.TypeKeyable(elem) ? FieldClass.EntityCollection : FieldClass.EntityList;
+                    return f;
+                }
                 f.Class = FieldClass.Excluded; f.Exclude = "collection of un-keyable/unsupported " + elem.Name;
                 return f;
             }
@@ -520,6 +530,380 @@ namespace Multiplayer.Network.Sync
             var l = long.Parse(s, CultureInfo.InvariantCulture);
             if (keyType.IsEnum) return Enum.ToObject(keyType, l);
             return Convert.ChangeType(l, keyType, CultureInfo.InvariantCulture);
+        }
+
+        // ─── EntityList: keyless-entity list codec ─────────────────────────
+        // The whole list travels as ONE canonical value blob; element order lives inside the payload
+        // (law 2: a path may never contain an element index). Elements are reconstructed the way the
+        // game's OWN serializer does it: the type's [SerializeCustomCreate] static method, whose
+        // parameters (after SerializedObjectData) are serialized members matched BY NAME — that is how
+        // WriteOnly "create param" members (GeoItem.ItemDef) travel: as constructor arguments
+        // (SerializationType.InitCustomCreate/CustomCreateObject). No custom create → the game uses
+        // Activator.CreateInstance(nonPublic) — so do we. Post-read callbacks are fired afterwards
+        // (AbilityTrack rebinds its slot back-refs there).
+
+        internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
+
+        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5;
+        private const int MaxBlobDepth = 8;
+
+        private struct Fixup { public object Target; public RailField Field; public int Idx; }
+
+        private sealed class CreateInfo { public MethodDelegate Method; public MemberInfo[] Params; }
+        private static readonly Dictionary<Type, CreateInfo> _createInfoCache = new Dictionary<Type, CreateInfo>();
+        private static readonly Dictionary<Type, bool> _blobContentCache = new Dictionary<Type, bool>();
+        private static readonly HashSet<string> _blobWarned = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly string[] IdProbesMirror = { "SiteId", "VehicleID", "ResearchID", "Id", "Def" };
+
+        /// <summary>Static mirror of IdentityResolver's keyability probe (id-member names + unique-BaseDef
+        /// fallback). IdentityResolver stays the runtime authority; drift here only coarsens granularity —
+        /// a keyable-looking type still falls back to EntityList per instance at walk time.</summary>
+        internal static bool TypeKeyable(Type t)
+        {
+            if (IdentityResolver.IsRootEntityType(t)) return true;
+            foreach (var p in IdProbesMirror)
+                if (HarmonyLib.AccessTools.Field(t, p) != null || HarmonyLib.AccessTools.Property(t, p) != null) return true;
+            var ser = GameSerializer;
+            if (ser == null) return true; // pre-init: keep today's (EntityCollection) behavior
+            int defs = 0;
+            foreach (var mi in SerializedMembers(ser, t))
+                if (typeof(BaseDef).IsAssignableFrom(MemberType(mi))) defs++;
+            return defs == 1; // unique-def key (GeoVehicleEquipment._equipmentDef)
+        }
+
+        private static void WarnOnce(string msg)
+        {
+            if (_blobWarned.Count < 200 && _blobWarned.Add(msg))
+                Debug.LogWarning("[Multiplayer][rail] " + msg);
+        }
+
+        /// <summary>Custom-create contract of a type per the game's serializer, or null when it has none.
+        /// A null slot in Params means a parameter name matched no serialized member → not reconstructible.</summary>
+        private static CreateInfo CreateInfoOf(Serializer ser, Type t)
+        {
+            if (_createInfoCache.TryGetValue(t, out var ci)) return ci;
+            var md = ser.GetTypeCustomCreateMethod(t, out _);
+            if (md?.Method != null)
+            {
+                var byName = new Dictionary<string, MemberInfo>(StringComparer.Ordinal);
+                foreach (var mwa in ser.GetSerializedMembers(t)) // ALL modes — WriteOnly create params included
+                    if (mwa.MemberInfo != null && !byName.ContainsKey(mwa.MemberInfo.Name))
+                        byName.Add(mwa.MemberInfo.Name, mwa.MemberInfo);
+                var ps = Serializer.CustomCreateParameterNames(md.Method)
+                                   .Select(n => byName.TryGetValue(n, out var mi) ? mi : null).ToArray();
+                ci = new CreateInfo { Method = md, Params = ps };
+            }
+            _createInfoCache[t] = ci;
+            return ci;
+        }
+
+        private static object GetMemberValue(MemberInfo mi, object o) =>
+            mi is FieldInfo fi ? fi.GetValue(o) : ((PropertyInfo)mi).GetValue(o, null);
+
+        /// <summary>True when a blob of this type would carry anything (covered fields, salvageable
+        /// read-only leaf fields, or create params). Contentless sub-objects (AmmoManager: only
+        /// interface-typed members) are dropped rather than reconstructed empty.</summary>
+        private static bool HasBlobContent(Serializer ser, Type t)
+        {
+            if (_blobContentCache.TryGetValue(t, out var v)) return v;
+            v = CreateInfoOf(ser, t) != null;
+            var rt = RailType.Get(t);
+            if (!v && rt != null)
+                foreach (var f in rt.Fields)
+                    if (f.Class == FieldClass.Leaf || f.Class == FieldClass.LeafList || f.Class == FieldClass.Descend ||
+                        f.Class == FieldClass.EntityCollection || f.Class == FieldClass.EntityList ||
+                        (f.Class == FieldClass.Excluded && f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _)))
+                    { v = true; break; }
+            _blobContentCache[t] = v;
+            return v;
+        }
+
+        public static byte[] EncodeEntityList(RailField f, object listVal)
+        {
+            var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8))
+            {
+                w.Write(EntityListMarker);
+                if (listVal == null) { w.Write(false); return ms.ToArray(); }
+                w.Write(true);
+                var items = new List<object>();
+                foreach (var e in (IEnumerable)listVal) items.Add(e);
+                if (items.Count > ushort.MaxValue) throw new InvalidOperationException("entity list too large (" + items.Count + ")");
+                w.Write((ushort)items.Count);
+                foreach (var e in items)
+                    EncodeValue(w, ser, f.ElemType, e, new List<object>(), 0); // locals scope = one element
+                return ms.ToArray();
+            }
+        }
+
+        private static void EncodeValue(BinaryWriter w, Serializer ser, Type declared, object v, List<object> locals, int depth)
+        {
+            if (v == null) { w.Write(TagNull); return; }
+            if (LeafKindOf(declared, 0, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
+            for (int i = 0; i < locals.Count; i++)
+                if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
+            var t = v.GetType();
+            if (t != declared) throw new NotSupportedException("polymorphic value " + t.Name + " as " + declared.Name);
+            if (depth >= MaxBlobDepth) throw new NotSupportedException("blob depth cap at " + t.Name);
+            if (typeof(UnityEngine.Object).IsAssignableFrom(t)) throw new NotSupportedException("Unity object " + t.Name);
+            if (!HasBlobContent(ser, t))
+            {
+                // Nothing expressible inside (e.g. AmmoManager: interface members only) — drop rather than
+                // reconstruct an EMPTY husk that would shadow saner defaults (Ammo=null → _charges fallback).
+                WarnOnce("blob: " + t.Name + " has no encodable content — dropped");
+                w.Write(TagNull);
+                return;
+            }
+            w.Write(TagBlob);
+            EncodeObjectBody(w, ser, t, v, locals, depth);
+        }
+
+        private static void EncodeObjectBody(BinaryWriter w, Serializer ser, Type t, object o, List<object> locals, int depth)
+        {
+            locals.Add(o); // registration order is the deterministic back-ref index space (mirrored on decode)
+
+            var ci = CreateInfoOf(ser, t);
+            if (ci != null)
+            {
+                foreach (var p in ci.Params)
+                    if (p == null) throw new NotSupportedException(t.Name + " create param unmatched");
+                w.Write((byte)ci.Params.Length);
+                foreach (var mi in ci.Params)
+                    EncodeValue(w, ser, MemberType(mi), GetMemberValue(mi, o), locals, depth + 1);
+            }
+            else w.Write((byte)0);
+
+            var rt = RailType.Get(t);
+            using (var fms = new MemoryStream())
+            using (var fw = new BinaryWriter(fms, System.Text.Encoding.UTF8))
+            {
+                int n = 0;
+                for (int i = 0; i < rt.Fields.Count; i++)
+                {
+                    var f = rt.Fields[i];
+                    if (!f.CanRead) continue;
+                    object v;
+                    try { v = f.GetValue(o); } catch { continue; }
+                    switch (f.Class)
+                    {
+                        case FieldClass.Leaf:
+                            fw.Write((ushort)i); fw.Write(TagLeaf); EncodeLeaf(fw, f.ValueType, v); n++;
+                            break;
+                        case FieldClass.LeafList:
+                            fw.Write((ushort)i); fw.Write(TagLeafList); EncodeList(fw, f, v); n++;
+                            break;
+                        case FieldClass.Descend:
+                            fw.Write((ushort)i); EncodeValue(fw, ser, f.ValueType, v, locals, depth + 1); n++;
+                            break;
+                        case FieldClass.EntityCollection:
+                        case FieldClass.EntityList:
+                        {
+                            if (IdentityResolver.IsRootEntityType(f.ElemType))
+                            { WarnOnce("blob: root-entity list " + t.Name + "." + f.Name + " not carried (identity creation is structural, law 3)"); break; }
+                            fw.Write((ushort)i);
+                            if (v == null) fw.Write(TagNull);
+                            else
+                            {
+                                var elems = new List<object>();
+                                foreach (var e in (IEnumerable)v) elems.Add(e);
+                                fw.Write(TagList); fw.Write((ushort)elems.Count);
+                                foreach (var e in elems) EncodeValue(fw, ser, f.ElemType, e, locals, depth + 1);
+                            }
+                            n++;
+                            break;
+                        }
+                        case FieldClass.Excluded:
+                        {
+                            // Two salvage cases the game's own serializer handles that flat classification
+                            // cannot: (a) read-only leaf FIELDS (readonly AbilityTrack.Source) — the game
+                            // sets those via FieldInfo.SetValue (SerializationMember.CanSetValue), so can
+                            // we; (b) interface/object refs pointing BACK at an object already inside this
+                            // blob (CommonItemData.OwnerItem → its GeoItem) — the game restores them as
+                            // graph references; within one element blob a local back-index is the same
+                            // thing. Anything else stays excluded (never null-stomped: absent ≠ null).
+                            if (f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _))
+                            { fw.Write((ushort)i); fw.Write(TagLeaf); EncodeLeaf(fw, f.ValueType, v); n++; break; }
+                            if (v != null && (f.ValueType.IsInterface || f.ValueType == typeof(object)))
+                                for (int b = 0; b < locals.Count; b++)
+                                    if (ReferenceEquals(locals[b], v))
+                                    { fw.Write((ushort)i); fw.Write(TagBackRef); fw.Write((ushort)b); n++; break; }
+                            break;
+                        }
+                        // LeafDict / GeoItemDict inside a blob: none exist on current element types.
+                        // ponytail: not carried (warned once); add sub-key encode here when one appears.
+                        case FieldClass.LeafDict:
+                        case FieldClass.GeoItemDict:
+                            WarnOnce("blob: dict field " + t.Name + "." + f.Name + " not carried");
+                            break;
+                    }
+                }
+                w.Write((byte)n);
+                w.Write(fms.ToArray());
+            }
+        }
+
+        public static List<object> DecodeEntityList(byte[] bytes, RailField f, GeoLevelController geo)
+        {
+            var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
+            using (var ms = new MemoryStream(bytes))
+            using (var r = new BinaryReader(ms, System.Text.Encoding.UTF8))
+            {
+                if (r.ReadByte() != EntityListMarker) throw new IOException("bad entity-list marker");
+                if (!r.ReadBoolean()) return null;
+                int n = r.ReadUInt16();
+                var list = new List<object>(n);
+                for (int i = 0; i < n; i++)
+                {
+                    var locals = new List<object>();
+                    var fixups = new List<Fixup>();
+                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0);
+                    foreach (var fx in fixups)
+                    {
+                        try { fx.Field.SetValue(fx.Target, locals[fx.Idx]); }
+                        catch (Exception ex) { WarnOnce("blob fixup failed on " + fx.Target.GetType().Name + "." + fx.Field.Name + ": " + ex.Message); }
+                    }
+                    foreach (var lo in locals) InvokePostReadSafe(ser, lo);
+                    list.Add(v);
+                }
+                return list;
+            }
+        }
+
+        private static void InvokePostReadSafe(Serializer ser, object o)
+        {
+            if (o == null) return;
+            try { ser.GetSerializationType(o.GetType())?.InvokePostRead(o, null); }
+            catch (Exception ex) { WarnOnce("blob post-read on " + o.GetType().Name + " threw " + ex.GetType().Name); }
+        }
+
+        private static object DecodeValue(BinaryReader r, Serializer ser, Type declared, GeoLevelController geo,
+                                          List<object> locals, List<Fixup> fixups, int depth)
+        {
+            byte tag = r.ReadByte();
+            switch (tag)
+            {
+                case TagNull: return null;
+                case TagLeaf: return DecodeLeaf(r, declared, geo);
+                case TagBackRef:
+                {
+                    int bi = r.ReadUInt16();
+                    var v = bi < locals.Count ? locals[bi] : null;
+                    if (v == null) WarnOnce("blob back-ref to unconstructed local #" + bi + " (" + declared.Name + ") — null substituted");
+                    return v;
+                }
+                case TagBlob: return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
+                default: throw new IOException("bad blob tag " + tag);
+            }
+        }
+
+        private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
+                                               List<object> locals, List<Fixup> fixups, int depth)
+        {
+            int myIdx = locals.Count;
+            locals.Add(null); // placeholder: mirrors encode registration order; backfilled after construction
+
+            int cpCount = r.ReadByte();
+            var ci = CreateInfoOf(ser, t);
+            object o;
+            if (ci != null && ci.Params.Length == cpCount)
+            {
+                var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
+                for (int i = 0; i < cpCount; i++)
+                    args[i + 1] = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1);
+                o = ci.Method.Invoke(args);
+                if (o == null) throw new IOException("custom create returned null for " + t.Name);
+            }
+            else
+            {
+                for (int i = 0; i < cpCount; i++) DecodeValue(r, ser, typeof(object), geo, locals, fixups, depth + 1); // drift: consume
+                o = Activator.CreateInstance(t, true);
+            }
+            locals[myIdx] = o;
+
+            var rt = RailType.Get(t);
+            int fCount = r.ReadByte();
+            for (int i = 0; i < fCount; i++)
+            {
+                int idx = r.ReadUInt16();
+                if (rt == null || idx >= rt.Fields.Count) throw new IOException("blob field idx " + idx + " out of range for " + t.Name);
+                var f = rt.Fields[idx];
+                byte tag = r.ReadByte();
+                switch (tag)
+                {
+                    case TagNull:
+                        if (!f.ValueType.IsValueType) f.SetValue(o, null);
+                        break;
+                    case TagLeaf:
+                        f.SetValue(o, DecodeLeaf(r, f.ValueType, geo));
+                        break;
+                    case TagBackRef:
+                        fixups.Add(new Fixup { Target = o, Field = f, Idx = r.ReadUInt16() });
+                        break;
+                    case TagBlob:
+                        f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1));
+                        break;
+                    case TagList:
+                    {
+                        if (f.ElemType == null) throw new IOException("blob list tag on non-list field " + t.Name + "." + f.Name);
+                        int en = r.ReadUInt16();
+                        var elems = new List<object>(en);
+                        for (int j = 0; j < en; j++)
+                            elems.Add(DecodeValue(r, ser, f.ElemType, geo, locals, fixups, depth + 1));
+                        ApplyList(o, f, elems);
+                        break;
+                    }
+                    case TagLeafList:
+                    {
+                        if (f.ElemType == null) throw new IOException("blob leaf-list tag on non-list field " + t.Name + "." + f.Name);
+                        ApplyList(o, f, DecodeList(r, f, geo));
+                        break;
+                    }
+                    default: throw new IOException("bad blob field tag " + tag);
+                }
+            }
+            return o;
+        }
+
+        /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.
+        /// Shared by the client applier (top-level LeafList/EntityList fields) and the blob codec
+        /// (nested lists on freshly constructed elements).</summary>
+        internal static void ApplyList(object entity, RailField field, List<object> items)
+        {
+            // Unresolved EntityRef/DefRef elements decode to null (referent not spawned / def unknown on the
+            // client). A null in a live game list can NRE native code that dereferences elements — drop the
+            // holes rather than inserting null (the structural layer / a later diff re-adds them once resolvable).
+            if (items != null && (IdentityResolver.IsRootEntityType(field.ElemType) ||
+                                  typeof(BaseDef).IsAssignableFrom(field.ElemType)))
+                items.RemoveAll(it => it == null);
+            var current = field.GetValue(entity);
+            if (current is IList list && !(current is Array))
+            {
+                list.Clear();
+                if (items != null) foreach (var it in items) list.Add(it);
+                return;
+            }
+            if (current != null && !(current is Array))
+            {
+                // ICollection<T> (HashSet, LinkedList…) via reflection Add/Clear.
+                var ct = current.GetType();
+                var clear = HarmonyLib.AccessTools.Method(ct, "Clear");
+                var add = HarmonyLib.AccessTools.Method(ct, "Add", new[] { field.ElemType });
+                if (clear != null && add != null)
+                {
+                    clear.Invoke(current, null);
+                    if (items != null) foreach (var it in items) add.Invoke(current, new[] { it });
+                    return;
+                }
+            }
+            if (field.IsWritable() && field.ValueType.IsArray)
+            {
+                var arr = Array.CreateInstance(field.ElemType, items?.Count ?? 0);
+                if (items != null) for (int i = 0; i < items.Count; i++) arr.SetValue(items[i], i);
+                field.SetValue(entity, arr);
+                return;
+            }
+            throw new InvalidOperationException("no list apply strategy for " + field.ValueType.Name);
         }
     }
 }

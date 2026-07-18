@@ -255,27 +255,72 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.Descend:
                         if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, index, depth + 1);
                         break;
+                    case FieldClass.EntityList:
+                        // Keyless-element list: the WHOLE list is one canonical value blob (order inside
+                        // the payload — law 2 forbids element indices in the path, so no key is needed).
+                        AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                        break;
                     case FieldClass.EntityCollection:
                     {
                         if (val == null) break;
                         var elems = new List<(string key, object o)>();
-                        bool bad = false;
+                        bool keyless = false;
                         foreach (var e in (IEnumerable)val)
                         {
                             if (e == null) continue;
                             var k = IdentityResolver.KeyOf(e);
-                            if (k == null) { Incident(rt.Type, f.Name, "element has no stable key (" + e.GetType().Name + ")", path); bad = true; break; }
+                            if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
-                        if (bad) break;
-                        if (elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
-                        { Incident(rt.Type, f.Name, "duplicate element keys", path); break; }
+                        if (!keyless && elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
+                            keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        if (keyless)
+                        {
+                            // Per-instance fallback: this list cannot be element-addressed right now →
+                            // ride it as ONE EntityList blob instead of aborting the field.
+                            if (IdentityResolver.IsRootEntityType(f.ElemType))
+                            { Incident(rt.Type, f.Name, "unkeyable ROOT-entity list — identity creation is structural (law 3)", path); break; }
+                            AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                            break;
+                        }
                         foreach (var (key, e) in elems.OrderBy(e => e.key, StringComparer.Ordinal))
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
                         break;
                     }
                 }
             }
+        }
+
+        private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+                                               object val, List<Entry> ordered, Dictionary<string, int> index)
+        {
+            byte[] enc;
+            try { enc = RailMeta.EncodeEntityList(f, val); }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
+            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
+            SelfCheckEntityList(rt.Type, f, enc);
+        }
+
+        /// <summary>One-shot (per type.field) encode→decode→re-encode round-trip check on the host's own
+        /// graph: byte-identical re-encode or a loud error. THE runnable gate for the blob codec —
+        /// triggers automatically on the first walk that covers each EntityList field.</summary>
+        private static readonly HashSet<string> _roundTripChecked = new HashSet<string>(StringComparer.Ordinal);
+        private static void SelfCheckEntityList(Type owner, RailField f, byte[] enc)
+        {
+            var key = owner.Name + "." + f.Name;
+            if (!_roundTripChecked.Add(key)) return;
+            try
+            {
+                var items = RailMeta.DecodeEntityList(enc, f, GeoLevel());
+                var enc2 = RailMeta.EncodeEntityList(f, items);
+                if (RailMeta.BytesEqual(enc, enc2))
+                    Debug.Log("[Multiplayer][rail] EntityList round-trip OK: " + key + " (" + enc.Length + "B)");
+                else
+                    Debug.LogError("[Multiplayer][rail] EntityList round-trip MISMATCH: " + key + " (" + enc.Length +
+                                   "B → " + enc2.Length + "B) — codec bug, this field will desync");
+            }
+            catch (Exception ex)
+            { Debug.LogError("[Multiplayer][rail] EntityList round-trip check threw for " + key + ": " + ex.Message); }
         }
 
         private static void Add(List<Entry> ordered, Dictionary<string, int> index, Entry e)

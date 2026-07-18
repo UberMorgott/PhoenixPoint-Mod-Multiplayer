@@ -184,7 +184,16 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.LeafList:
                     {
                         var items = RailMeta.DecodeFieldValue(value, field, geo, out var isNull) as List<object>;
-                        ApplyList(entity, field, isNull ? null : items);
+                        RailMeta.ApplyList(entity, field, isNull ? null : items);
+                        break;
+                    }
+                    case FieldClass.EntityList:
+                    case FieldClass.EntityCollection: // host walk-time fallback: unkeyable/duplicate elements ride as one list blob
+                    {
+                        // EntityCollection descend itself never carries values — a valued entry here is
+                        // always an EntityList blob (whole list, order inside the payload, law 2).
+                        if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
+                        RailMeta.ApplyList(entity, field, RailMeta.DecodeEntityList(value, field, geo));
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -207,7 +216,7 @@ namespace Multiplayer.Network.Sync
                         break;
                     }
                     default:
-                        return; // Descend/EntityCollection never carry values
+                        return; // Descend never carries values
                 }
                 touched.Add(entity);
             }
@@ -215,45 +224,6 @@ namespace Multiplayer.Network.Sync
             {
                 LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
-        }
-
-        /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.</summary>
-        private static void ApplyList(object entity, RailField field, List<object> items)
-        {
-            // Unresolved EntityRef/DefRef elements decode to null (referent not spawned / def unknown on the
-            // client). A null in a live game list can NRE native code that dereferences elements — drop the
-            // holes rather than inserting null (the structural layer / a later diff re-adds them once resolvable).
-            if (items != null && (IdentityResolver.IsRootEntityType(field.ElemType) ||
-                                  typeof(Base.Defs.BaseDef).IsAssignableFrom(field.ElemType)))
-                items.RemoveAll(it => it == null);
-            var current = field.GetValue(entity);
-            if (current is IList list && !(current is Array))
-            {
-                list.Clear();
-                if (items != null) foreach (var it in items) list.Add(it);
-                return;
-            }
-            if (current != null && !(current is Array))
-            {
-                // ICollection<T> (HashSet, LinkedList…) via reflection Add/Clear.
-                var ct = current.GetType();
-                var clear = AccessTools.Method(ct, "Clear");
-                var add = AccessTools.Method(ct, "Add", new[] { field.ElemType });
-                if (clear != null && add != null)
-                {
-                    clear.Invoke(current, null);
-                    if (items != null) foreach (var it in items) add.Invoke(current, new[] { it });
-                    return;
-                }
-            }
-            if (field.IsWritable() && field.ValueType.IsArray)
-            {
-                var arr = Array.CreateInstance(field.ElemType, items?.Count ?? 0);
-                if (items != null) for (int i = 0; i < items.Count; i++) arr.SetValue(items[i], i);
-                field.SetValue(entity, arr);
-                return;
-            }
-            throw new InvalidOperationException("no list apply strategy for " + field.ValueType.Name);
         }
 
         private static void LogMissOnce(string msg)
