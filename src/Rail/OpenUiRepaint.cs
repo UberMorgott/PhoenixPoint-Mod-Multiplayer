@@ -34,6 +34,11 @@ namespace Multiplayer.Network.Sync
     public static class OpenUiRepaint
     {
         private static bool _dirty;
+        private static int _deferredFrames;
+        private static bool _deferLogged;
+
+        /// <summary>Defer ceiling in frames (~5 s at 60 fps). See <see cref="FlushIfDirty"/>.</summary>
+        private const int MaxDeferFrames = 300;
 
         private static readonly FieldInfo StatesStackField =
             AccessTools.Field(typeof(GeoscapeView), "_statesStack");
@@ -49,18 +54,60 @@ namespace Multiplayer.Network.Sync
         public static void MarkDirty() => _dirty = true;
 
         /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
-        /// inherit a dirty flag from the dead one.</summary>
+        /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
         public static void Reset()
         {
             _dirty = false;
+            _deferredFrames = 0;
+            _deferLogged = false;
         }
 
-        /// <summary>Driven once per frame from SyncEngine.Tick. No-op on the host (never marks dirty).</summary>
+        /// <summary>
+        /// Driven once per frame from SyncEngine.Tick. No-op on the host (never marks dirty).
+        ///
+        /// N2 — a repaint DEFERS to uncommitted local input. Exit+Enter destroys and rebuilds every
+        /// widget on the screen, so running it while the user is mid-drag yanks the item out of their
+        /// hand. The defer happens BEFORE <c>_dirty</c> is cleared, so a deferred repaint is retried on
+        /// the next frame rather than dropped — which is the difference between "later" and "never", and
+        /// the reason this is not an opt-out. No screen is ever named here: the question asked is about
+        /// INPUT state, not about which screen is open.
+        /// </summary>
         public static void FlushIfDirty()
         {
             if (!_dirty) return;
+            if (LocalInputInFlight())
+            {
+                // ponytail: bounded defer, ceiling = MaxDeferFrames. A leaked gesture flag or a wedged
+                // drag can delay a repaint that long but can NEVER starve it forever — an unbounded
+                // version of exactly this wedge (a4f3b2b's drag claim) cost a whole test cycle. Upgrade
+                // path if this ever fires legitimately: make the stuck flag frame-scoped at its source,
+                // do not raise the cap.
+                if (++_deferredFrames < MaxDeferFrames) return; // _dirty stays set: retried next frame
+                if (!_deferLogged)
+                {
+                    _deferLogged = true;
+                    Debug.LogWarning("[Multiplayer][rail] open-UI repaint forced after " + MaxDeferFrames +
+                                     " deferred frames — a drag or gesture flag is stuck (please report)");
+                }
+            }
+            _deferredFrames = 0;
             _dirty = false;
             RepaintOpenGeoscapeScreen();
+        }
+
+        /// <summary>The local user has UNCOMMITTED input in flight. Asked of input state, not of screens:
+        /// a screen with no drag icon simply answers false, so this needs no per-screen table.</summary>
+        private static bool LocalInputInFlight()
+        {
+            var mods = GeoLevel()?.View?.GeoscapeModules;
+            if (mods == null) return false;
+            // ponytail: EquipSync.GesturePending is the OTHER half of this condition and joins in batch
+            // 5c, where EquipSync first exists. Until then a repaint can still land between the paired
+            // flushes of one gesture; the drag half already covers the case that yanks a held item.
+            var soldierDrag = mods.SoldierEquipModule == null ? null : mods.SoldierEquipModule.ItemDragIcon;
+            if (soldierDrag != null && soldierDrag.IsBeingDragged()) return true;
+            var vehicleDrag = mods.VehicleEquipModule == null ? null : mods.VehicleEquipModule.ItemDragIcon;
+            return vehicleDrag != null && vehicleDrag.IsBeingDragged();
         }
 
         /// <summary>Re-drive the open geoscape screen's native full-rebuild (Exit → Enter, same instance).

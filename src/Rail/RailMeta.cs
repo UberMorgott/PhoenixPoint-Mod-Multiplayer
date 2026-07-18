@@ -935,10 +935,22 @@ namespace Multiplayer.Network.Sync
                                   typeof(BaseDef).IsAssignableFrom(field.ElemType)))
                 items.RemoveAll(it => it == null);
             var current = field.GetValue(entity);
+            if (current == null && items == null) return; // both absent — nothing to reconcile
+            bool created = false;
+            if (current == null && !field.ValueType.IsArray && field.IsWritable())
+            {
+                // Container never constructed on this instance: blob elements are built via the
+                // parameterless ctor, so ctor-assigned containers arrive null (ManufacturableItem.
+                // ManufacturePrice/ScrapReward = ResourcePack). Construct one generically, fill it
+                // below through the normal strategies, then attach it to the field.
+                try { current = Activator.CreateInstance(field.ValueType, true); created = true; }
+                catch { /* no parameterless ctor — falls through to the strategy error below */ }
+            }
             if (current is IList list && !(current is Array))
             {
                 list.Clear();
                 if (items != null) foreach (var it in items) list.Add(it);
+                if (created) field.SetValue(entity, current);
                 return;
             }
             if (current != null && !(current is Array))
@@ -960,6 +972,7 @@ namespace Multiplayer.Network.Sync
                 {
                     clear.Invoke(current, null);
                     if (items != null) foreach (var it in items) add.Invoke(current, new[] { it });
+                    if (created) field.SetValue(entity, current);
                     return;
                 }
             }
