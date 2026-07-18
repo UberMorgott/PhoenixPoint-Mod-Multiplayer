@@ -156,6 +156,8 @@ namespace Multiplayer.Network.Sync
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo };
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
+            if (RailMeta.IsPresentation(valType))
+            { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
             var optOut = RailMeta.OptOutReason(live.DeclaringType, name);
             if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
 
@@ -182,6 +184,8 @@ namespace Multiplayer.Network.Sync
             var elem = RailMeta.ElemTypeOf(valType);
             if (elem != null)
             {
+                if (RailMeta.IsPresentation(elem))
+                { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
                 if (RailMeta.LeafKindOf(elem, 0, out _))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
@@ -253,6 +257,36 @@ namespace Multiplayer.Network.Sync
 
         internal static Type MemberType(MemberInfo mi) => (mi as FieldInfo)?.FieldType ?? ((PropertyInfo)mi).PropertyType;
 
+        // ─── Presentation refusal (same principle as the Unity-scene-object refusal) ───
+        // Rendering artifacts are never game state, so they never ride the rail — regardless of the fact
+        // that the save serializer happens to persist them. LocalizedTextBind is a CLASS with a writable
+        // public LocalizationKey (decompile Base.UI/LocalizedTextBind.cs:9-13), so it fails the IsValueType
+        // composite test and would otherwise classify as Descend (member) or EntityList/EntityCollection
+        // (element) — i.e. the client would WRITE localization keys. Live proof from the last full walk
+        // (rail-coverage.txt:26-28): 874 instances reached, LocalizationKey + _doNotLocalize as leaves,
+        // owned by GeoSiteInstaceData.Motto/.Name (428) and GeoPhoenixBase+InstanceData.LocationDescription
+        // (18). Nothing on a client can legitimately need a localization key shipped to it, and where an
+        // instance is shared with a def the write would land in shared def state.
+        //
+        // STOPGAP, WITH AN EXIT CRITERION — a type-name list is the shape this repo's mandate forbids, and
+        // it is here only because it is one line against an OBSERVED symptom ((d) NOTEXT haven/site names
+        // and mottos). The general law is reference identity: only that can tell a def-OWNED
+        // LocalizedTextBind (shared with the def, must never be written) from a per-instance one (harmless).
+        // DiffEngine's N7 falsifier measures whether def-aliased binds actually occur. Exit criterion,
+        // binding:
+        //   aliased == 0 on a fresh campaign  → this list stays as a permanent cheap stopgap, delete N7.
+        //   aliased >  0                      → build the reference-identity index over DefRepositoryDef
+        //                                       .AllDefs and DELETE this list; it is then strictly wrong,
+        //                                       because it also drops Name/Motto on the ~428 sites whose
+        //                                       binds are NOT def-owned (recorded as risk R10).
+        // Do not add a second type to this set. A second entry means the general law is overdue.
+        private static readonly HashSet<string> _presentationTypes = new HashSet<string>
+        {
+            "Base.UI.LocalizedTextBind",
+        };
+
+        internal static bool IsPresentation(Type t) => t != null && _presentationTypes.Contains(t.FullName);
+
         // ─── Explicit member opt-out ───────────────────────────────────────
         // Same principle as the presentation refusal above, one granularity down (PRIME DIRECTIVE: mirror
         // everything by default, then OPT OUT what we don't want). An entry earns its place only with a
@@ -265,14 +299,14 @@ namespace Multiplayer.Network.Sync
             // So mirroring the host's raw base on top of the client's own accrual double-counts: the two
             // clocks keep the same pace and never agree on the value.
             //
-            // THIS EXCLUSION IS LOAD-BEARING RIGHT NOW, not documentation: before TimeUnit became a leaf
-            // (this same commit) both members fell out as "no persistent members", so they never rode. The
-            // leaf change would ADMIT them, i.e. start mirroring the host's raw clock base — the exact
-            // double-count above. The opt-out keeps today's behavior and states the reason for it.
+            // THIS EXCLUSION IS LOAD-BEARING, not documentation: before TimeUnit became a leaf (a3177eb,
+            // batch 3) both members fell out as "no persistent members", so they never rode. The leaf
+            // change would ADMIT them, i.e. start mirroring the host's raw clock base — the exact
+            // double-count above. The opt-out keeps the old behaviour and states the reason for it.
             //
-            // The reason strings name the intended replacement, the TimeAnchor "TA" root, which is NOT in
-            // the tree yet — it lands in batch 7 (37af665). Until then the clock VALUE simply does not
-            // mirror; batch 1's N3 already closed the pause/speed LATENCY, which is a different thing.
+            // The reason strings name the intended replacement, the TimeAnchor "TA" root, which lands in
+            // batch 7 (37af665). Until then the clock VALUE simply does not mirror; batch 1's N3 closed the
+            // pause/speed LATENCY, which is a different thing.
             { "Base.Core.Timing.StartTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
             { "Base.Core.Timing.StartFixedTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
         };
