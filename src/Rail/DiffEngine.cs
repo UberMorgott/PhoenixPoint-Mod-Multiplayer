@@ -61,6 +61,7 @@ namespace Multiplayer.Network.Sync
         private static float _nextTickAt;
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
+        private static Timing _armedTiming;                                                 // N3, see ArmChangeDrivenFlush
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
 
@@ -82,6 +83,7 @@ namespace Multiplayer.Network.Sync
             _sentKinds.Clear();
             _baselined = false;
             _forceFull = false;
+            ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
         }
 
         /// <summary>Client lost the stream (seq gap): resend EVERYTHING covered — it is just a big delta.</summary>
@@ -100,6 +102,37 @@ namespace Multiplayer.Network.Sync
 
         // ─── Host tick: walk → diff → emit ─────────────────────────────────
 
+        /// <summary>Run the next host tick on the NEXT frame instead of waiting out the 0.5 s poll.
+        /// No guards needed: <see cref="HostTick"/> still returns on non-host / no session / no geoscape,
+        /// so this can be called from any seam that knows the host just changed something the client
+        /// must not wait for.</summary>
+        public static void FlushNow() => _nextTickAt = 0f;
+
+        /// <summary>
+        /// N3 — change-driven flush on the game's OWN event, not a new channel. <c>Timing</c> raises
+        /// <c>EffectiveScaleChangedEvent</c> (Base.Core/Timing.cs:186) from BOTH the <c>Scale</c> setter
+        /// (:95) and the <c>Paused</c> setter (:126), so ONE subscription covers speed and pause alike.
+        ///
+        /// Pause/speed keep riding as ordinary <c>Timing.Paused</c> / <c>Timing.Scale</c> leaves on root
+        /// "T" (IdentityResolver.cs:115) — no new packet, no surface id, no DTO. All this does is collapse
+        /// the 0..0.5 s poll latency to one frame.
+        ///
+        /// The covered class is "a host change that must not wait out the poll", NOT "the clock": every
+        /// later intent seam and structural applier reuses <see cref="FlushNow"/> the same way.
+        ///
+        /// Armed from <see cref="HostTick"/>, which has already returned for a non-host, so a client never
+        /// subscribes. The <c>Timing</c> instance is replaced across level loads, hence the identity check.
+        /// </summary>
+        private static void ArmChangeDrivenFlush(Timing timing)
+        {
+            if (ReferenceEquals(timing, _armedTiming)) return;
+            if (_armedTiming != null) _armedTiming.EffectiveScaleChangedEvent -= OnEffectiveScaleChanged;
+            _armedTiming = timing;
+            if (timing != null) timing.EffectiveScaleChangedEvent += OnEffectiveScaleChanged;
+        }
+
+        private static void OnEffectiveScaleChanged(Timing timing) => FlushNow();
+
         public static void HostTick(NetworkEngine engine)
         {
             if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
@@ -107,6 +140,7 @@ namespace Multiplayer.Network.Sync
             _nextTickAt = Time.realtimeSinceStartup + TickInterval;
             var geo = GeoLevel();
             if (geo == null) return;
+            ArmChangeDrivenFlush(geo.Timing);
 
             try { Tick(engine, geo); }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex); }
