@@ -301,26 +301,52 @@ namespace Multiplayer.Network.Sync
             SelfCheckEntityList(rt.Type, f, enc);
         }
 
-        /// <summary>One-shot (per type.field) encode→decode→re-encode round-trip check on the host's own
-        /// graph: byte-identical re-encode or a loud error. THE runnable gate for the blob codec —
-        /// triggers automatically on the first walk that covers each EntityList field.</summary>
+        /// <summary>Encode→decode→re-encode round-trip check on the host's own graph: byte-identical
+        /// re-encode + preserved element count, or a loud error. THE runnable gate for the blob codec.
+        /// One-shot per (type.field, empty|populated) — an empty first sighting can NOT retire the
+        /// check for the populated path (the 2026-07-18 lesson: 16/16 "OK" on a 4-byte empty
+        /// _inventoryItems while the populated path was never exercised). The populated pass
+        /// additionally round-trips a REORDERED copy (order rides inside the payload) and a
+        /// DUPLICATED copy (value-equal elements — GeoItem.Equals collapses identical grenades in any
+        /// set/Distinct — must NOT collapse in the codec).</summary>
         private static readonly HashSet<string> _roundTripChecked = new HashSet<string>(StringComparer.Ordinal);
         private static void SelfCheckEntityList(Type owner, RailField f, byte[] enc)
         {
-            var key = owner.Name + "." + f.Name;
+            // wire layout: [marker][hasList:bool][count:u16 LE]…
+            int wireCount = enc.Length >= 4 && enc[1] == 1 ? enc[2] | (enc[3] << 8) : 0;
+            var key = owner.Name + "." + f.Name + (wireCount > 0 ? " populated" : " empty");
             if (!_roundTripChecked.Add(key)) return;
             try
             {
-                var items = RailMeta.DecodeEntityList(enc, f, GeoLevel());
+                var geo = GeoLevel();
+                var items = RailMeta.DecodeEntityList(enc, f, geo);
                 var enc2 = RailMeta.EncodeEntityList(f, items);
-                if (RailMeta.BytesEqual(enc, enc2))
-                    Debug.Log("[Multiplayer][rail] EntityList round-trip OK: " + key + " (" + enc.Length + "B)");
+                string fail = null;
+                if (!RailMeta.BytesEqual(enc, enc2)) fail = "re-encode differs (" + enc.Length + "B → " + enc2.Length + "B)";
+                else if ((items?.Count ?? 0) != wireCount) fail = "count " + wireCount + " → " + (items?.Count ?? 0);
+                if (fail == null && wireCount > 0)
+                {
+                    var rev = new List<object>(items); rev.Reverse();
+                    var encR = RailMeta.EncodeEntityList(f, rev);
+                    var itemsR = RailMeta.DecodeEntityList(encR, f, geo);
+                    if (!RailMeta.BytesEqual(encR, RailMeta.EncodeEntityList(f, itemsR)) || (itemsR?.Count ?? 0) != wireCount)
+                        fail = "reordered copy did not survive round-trip";
+                    else
+                    {
+                        var dup = new List<object>(items); dup.AddRange(items);
+                        var itemsD = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(f, dup), f, geo);
+                        if ((itemsD?.Count ?? 0) != wireCount * 2)
+                            fail = "duplicated elements collapsed (" + wireCount * 2 + " → " + (itemsD?.Count ?? 0) + ")";
+                    }
+                }
+                if (fail == null)
+                    Debug.Log("[Multiplayer][rail] EntityList round-trip OK: " + key + " (" + enc.Length + "B, n=" + wireCount + ")");
                 else
-                    Debug.LogError("[Multiplayer][rail] EntityList round-trip MISMATCH: " + key + " (" + enc.Length +
-                                   "B → " + enc2.Length + "B) — codec bug, this field will desync");
+                    Debug.LogError("[Multiplayer][rail] EntityList round-trip MISMATCH: " + key + " — " + fail +
+                                   " — codec bug, this field will desync");
             }
             catch (Exception ex)
-            { Debug.LogError("[Multiplayer][rail] EntityList round-trip check threw for " + key + ": " + ex.Message); }
+            { Debug.LogError("[Multiplayer][rail] EntityList round-trip check FAILED for " + key + ": " + ex.Message); }
         }
 
         private static void Add(List<Entry> ordered, Dictionary<string, int> index, Entry e)

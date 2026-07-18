@@ -25,6 +25,9 @@ namespace Multiplayer.Network.Sync
     ///
     /// OPT-OUT: UIStateManufacturing.ExitState() nulls _filter + closes its module, so a bare Exit+Enter
     /// loses the active filter. It keeps its own ManufactureSync.DoFilter repaint; skipped here.
+    /// UIStateEditSoldier.ExitState() COMMITS its stale UI model (SetItems/UpdateStorage/
+    /// CommitStatChanges) — re-entering it destroys just-applied remote state; skipped here (decompile
+    /// survey 2026-07-18: the only commit-on-exit state among the 38).
     ///
     /// DEBOUNCE: one mirror tick can arrive as several chunked GeoRail packets processed in ONE frame
     /// (NetworkEngine.Update drains all inbound via Transport.Update BEFORE Sync.Tick). Re-entering a
@@ -64,6 +67,13 @@ namespace Multiplayer.Network.Sync
             var current = view?.CurrentViewState;
             if (current == null) return;
             if (current is UIStateManufacturing) return; // opt-out: bare Exit+Enter drops its _filter
+            // opt-out: UIStateEditSoldier.ExitState COMMITS the open screen's stale UI model
+            // (UpdateStorage + UpdateSoldierEquipment→SetItems + CommitStatChanges). RCA 2026-07-18
+            // (host log 202.1s): a claim-triggered re-enter ran one frame after a remote equip intent
+            // applied — Exit wrote the pre-intent lists back over GeoCharacter, wiping the moved
+            // grenade and draining storage via repeated takes. This screen is UI-model-authoritative
+            // while open; it must NEVER be re-entered as a repaint.
+            if (current is UIStateEditSoldier) return;
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
             try
             {
