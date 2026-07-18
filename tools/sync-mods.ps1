@@ -10,8 +10,20 @@ WHY THIS EXISTS
   Each instance now owns REAL copies. This script restores the auto-pickup the junctions gave.
 
 WHEN TO RUN
-  After installing or updating ANY workshop mod, or after adding a mod to the main install.
-  One command, all instances match. Idempotent — re-running with nothing changed copies nothing.
+  Automatically: launch-instance.bat runs it for its OWN instance before every launch, so a
+  test copy can never start with stale mods. Manually: after installing or updating ANY workshop
+  mod, run it with no args to bring every instance in line at once.
+  Idempotent — re-running with nothing changed copies nothing (~1s over an unchanged tree).
+
+PARAMS
+  -Instance <path[]>   Sync only these instance roots (launch-instance.bat passes its own).
+                       Omitted = every instance below. An explicitly named instance that does
+                       not exist is an ERROR (typo guard); an absent DEFAULT one is just skipped.
+
+EXIT CODE
+  0 = everything synced (or already current). 1 = at least one target could not be synced
+  (missing source, junctioned target, robocopy error). Callers MUST check it: launching an
+  instance whose sync failed means testing against stale mods.
 
 SOURCES   <game>\Mods\*  +  <workshop>\content\839770\*   (both are read-only here, never written)
 TARGETS   D:\PP-Instance2\Mods , D:\PP-Instance3\Mods
@@ -31,11 +43,15 @@ SAFETY
   Refuses to write into any target that is a junction/symlink, so it can never mirror back
   through a link into the Steam workshop or the main install.
 #>
+param([string[]]$Instance)
+
 $ErrorActionPreference = 'Stop'
 
 $game      = "D:\Steam\steamapps\common\Phoenix Point"
 $workshop  = "D:\Steam\steamapps\workshop\content\839770"
-$instances = @("D:\PP-Instance2", "D:\PP-Instance3")
+$explicit  = [bool]$Instance
+$instances = if ($explicit) { $Instance } else { @("D:\PP-Instance2", "D:\PP-Instance3") }
+$failed    = $false
 
 function Test-Link($p) {
     (Test-Path $p) -and (((Get-Item $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -43,15 +59,23 @@ function Test-Link($p) {
 
 $sources = @(Get-ChildItem "$game\Mods" -Directory -Force -ErrorAction SilentlyContinue) +
            @(Get-ChildItem $workshop    -Directory -Force -ErrorAction SilentlyContinue)
-if (-not $sources) { throw "no source mods found under '$game\Mods' or '$workshop'" }
-Write-Host "sync-mods: $($sources.Count) source mods -> $($instances.Count) instances"
+if (-not $sources) {
+    Write-Host "sync-mods: ERROR no source mods found under '$game\Mods' or '$workshop'"
+    exit 1
+}
+Write-Host "sync-mods: $($sources.Count) source mods -> $($instances.Count) instance(s)"
 
 foreach ($inst in $instances) {
-    if (-not (Test-Path $inst)) { Write-Host "  skip $inst (instance not present)"; continue }
+    if (-not (Test-Path $inst)) {
+        if ($explicit) { Write-Host "  ERROR $inst - instance not present"; $failed = $true }
+        else           { Write-Host "  skip $inst (instance not present)" }
+        continue
+    }
 
     $modsRoot = Join-Path $inst "Mods"
     if (Test-Link $modsRoot) {
         Write-Host "  REFUSING $modsRoot - it is a junction; remove it with: cmd /c rmdir `"$modsRoot`""
+        $failed = $true
         continue
     }
     New-Item -ItemType Directory -Force -Path $modsRoot | Out-Null
@@ -64,7 +88,11 @@ foreach ($inst in $instances) {
 
         robocopy $s.FullName $dst /MIR /XF *.log /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
         $rc = $LASTEXITCODE
-        if ($rc -ge 8) { throw "robocopy failed (exit $rc) for '$($s.FullName)' -> '$dst'" }
+        if ($rc -ge 8) {
+            Write-Host "  ERROR robocopy exit $rc : '$($s.FullName)' -> '$dst'"
+            $failed = $true
+            continue
+        }
         # bit 0 = files copied, bit 1 = extras purged by /MIR. 0 = already identical.
         if ($rc -band 3) { $changed += $s.Name }
     }
@@ -74,5 +102,8 @@ foreach ($inst in $instances) {
     if ($blocked) {
         Write-Host "  $inst : REFUSED $($blocked.Count) still-junctioned -> $($blocked -join ', ')"
         Write-Host "           remove each with: cmd /c rmdir `"<path>`"  (no /s - deletes only the link)"
+        $failed = $true
     }
 }
+
+if ($failed) { Write-Host "sync-mods: FAILED - see errors above"; exit 1 }
