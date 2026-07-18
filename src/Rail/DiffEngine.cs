@@ -66,6 +66,9 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
         // Membership of every keyed EntityCollection, "<ownerPath>.<Field>" → sorted element keys joined.
         // Per-element descend carries element VALUES only; birth/death of an element lives here.
+        // "<ownerPath>.<Field>" of every collection whose rebuild blob FAILED to encode. Such a field can
+        // never be delivered, so it must never carry a membership statement (see the EntityCollection case).
+        private static readonly HashSet<string> _unshippable = new HashSet<string>(StringComparer.Ordinal);
         private static Dictionary<string, string> _collSig = new Dictionary<string, string>(StringComparer.Ordinal);
         private static Dictionary<string, string> _collSigNext = new Dictionary<string, string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loud = new HashSet<string>(StringComparer.Ordinal);
@@ -345,14 +348,10 @@ namespace Multiplayer.Network.Sync
                         // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
                         var sig = string.Join("\u0002", liveKeys ?? elems.Select(e => e.key).ToList());
                         _collSigNext[sigKey] = sig;
-                        // Same statement for keyed entity collections. _collSig below still decides when to
-                        // ship the whole-list REBUILD blob (a HOST-side birth/death); this states the key set
-                        // so the client can also spot a birth only IT has — which no host-side signal can see.
-                        AddMembership(rt, f, (ushort)i, kindId, path,
-                                      elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
+                        bool isRootColl = IdentityResolver.IsRootEntityType(f.ElemType);
                         if (_forceFull || (_collSig.TryGetValue(sigKey, out var prevSig) && prevSig != sig))
                         {
-                            if (IdentityResolver.IsRootEntityType(f.ElemType))
+                            if (isRootColl)
                                 LoudOnce(rt.Type.Name + "." + f.Name + ": keyed ROOT-entity membership changed at " +
                                          path + " — identity create/destroy belongs to the structural layer (law 3); " +
                                          "the value rail cannot carry it and the client will stay stale");
@@ -367,9 +366,19 @@ namespace Multiplayer.Network.Sync
                                 if (liveKeys != null) // TEMP [MP][inv] diag — strip once slot sync is confirmed
                                     Debug.Log("[MP][inv] host SHIP ordered blob " + sigKey + " n=" + elems.Count +
                                               " order=" + string.Join("|", liveKeys));
-                                AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count);
+                                if (!AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count))
+                                    _unshippable.Add(sigKey); // encode threw — this field's cure can never be delivered
                             }
                         }
+                        // NEVER STATE A SET YOU CANNOT DELIVER. The statement's only remedy is the whole-list
+                        // rebuild blob above: a client cannot delete a collection ELEMENT itself (law 3), it can
+                        // only ask for a resend. So when that blob can never ship — the encode throws, or the
+                        // elements are ROOT entities the value rail is forbidden to rebuild — the statement
+                        // asserts a state the client has no path to reach, and it drives an endless
+                        // resync→full-resend storm. Stay silent instead: an unstated field is simply not swept.
+                        if (!isRootColl && !_unshippable.Contains(sigKey))
+                            AddMembership(rt, f, (ushort)i, kindId, path,
+                                          elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
                         foreach (var (key, e) in elems)
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
                         break;
@@ -404,13 +413,16 @@ namespace Multiplayer.Network.Sync
             });
         }
 
-        private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+        /// <summary>Returns false when the blob could NOT be encoded — the caller uses that to withhold the
+        /// field's membership statement, because a set the client is told to reach but can never be sent is
+        /// an endless resync request.</summary>
+        private static bool AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
                                                object val, List<Entry> ordered, Dictionary<string, int> index,
                                                int liveCount = -1)
         {
             byte[] enc;
             try { enc = RailMeta.EncodeEntityList(f, val); }
-            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return false; }
             Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
             // Membership self-check (the birth/death gate): this blob is the ONLY carrier of a collection's
             // element set, so an element the codec drops is a key that silently never reaches the client —
@@ -423,6 +435,7 @@ namespace Multiplayer.Network.Sync
                              " of " + liveCount + " live elements — births/removals of this collection WILL desync");
             }
             SelfCheckEntityList(rt.Type, f, enc);
+            return true;
         }
 
         /// <summary>One-shot LOUD error: a change the rail detected but cannot carry. Never a warning —
