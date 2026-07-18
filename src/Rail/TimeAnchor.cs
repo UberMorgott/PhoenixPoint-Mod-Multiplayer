@@ -131,6 +131,24 @@ namespace Multiplayer.Network.Sync
         internal static void ApplyIfTouched(GeoLevelController geo, HashSet<object> touched)
         {
             if (_clientDto == null || geo?.Timing == null || touched == null || !touched.Contains(_clientDto)) return;
+            // The anchor moves the clock BASE only — never the rate state. Paused/Scale already ride as
+            // ordinary leaves on root "T" (Base.Core.Timing), where they land through the PROPERTY setters,
+            // which call RescheduleUpdateables + fire EffectiveScaleChangedEvent/OnPausedEvent
+            // (decompile Base.Core/Timing.cs:88-131). ProcessInstanceData assigns the BACKING fields
+            // _paused/_scale directly (Timing.cs:222-232) — silent, no reschedule, no event. Letting the
+            // anchor carry them made "TA" a second, silent writer of state "T" owns: a client that paused
+            // locally got _paused=false written back on the next drift re-latch, so the clock resumed while
+            // the pause indicator stayed stuck (UIModuleTimeControl polls Now, but the paused state is
+            // flag-driven via _updatePausedState). Re-state the LIVE values so only the base moves.
+            //
+            // Read them through the game's own RecordInstanceData (Timing.cs:209-214), which snapshots the
+            // BACKING fields _paused/_scale — the exact counterpart of what ProcessInstanceData writes. The
+            // Paused PROPERTY is parent-aware (returns true whenever ParentTime.Paused, Timing.cs:100-106),
+            // so reading it here would latch a parent-induced pause into this clock's own flag and leave it
+            // paused after the parent resumed.
+            var live = geo.Timing.RecordInstanceData();
+            _clientDto.Paused = live.Paused;
+            _clientDto.Scale = live.Scale;
             geo.Timing.ProcessInstanceData(_clientDto);
         }
 
