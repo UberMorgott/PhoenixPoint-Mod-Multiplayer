@@ -136,6 +136,11 @@ namespace Multiplayer.Network.Sync
         {
             if (geo == null) yield break;
             if (geo.Timing != null) yield return new KeyValuePair<string, object>("T", geo.Timing);
+            // The clock VALUE cannot ride the live Timing (Now changes every walk, law 6). "TA" carries the
+            // host's latched anchor as the game's own TimingInstanceData; the client derives the rest. See
+            // TimeAnchor — including why Timing.StartTime is opted out of the "T" root.
+            var anchor = TimeAnchor.HostDto(geo.Timing);
+            if (anchor != null) yield return new KeyValuePair<string, object>("TA", anchor);
 
             foreach (var f in geo.Factions.Where(f => f?.Def != null).OrderBy(f => f.Def.Guid, StringComparer.Ordinal))
                 yield return new KeyValuePair<string, object>("F#" + f.Def.Guid, f);
@@ -211,6 +216,7 @@ namespace Multiplayer.Network.Sync
         private static object ResolveRoot(GeoLevelController geo, string root)
         {
             if (root == "T") return geo.Timing;
+            if (root == "TA") return TimeAnchor.ClientDto(geo.Timing); // scratch DTO; loaded in ApplyIfTouched
             int hash = root.IndexOf('#');
             if (hash < 0) return null;
             string kind = root.Substring(0, hash), id = root.Substring(hash + 1);

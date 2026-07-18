@@ -47,6 +47,9 @@ namespace Multiplayer.Network.Sync
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
             _loggedMisses.Clear();
+            // The transferred save just replaced this client's clock — re-seed the anchor scratch from it,
+            // or the next partial anchor would layer onto pre-reload values.
+            TimeAnchor.Reset();
             // seq + kind registry persist (rca-3 contract: host counters keep increasing across reloads)
         }
 
@@ -108,6 +111,9 @@ namespace Multiplayer.Network.Sync
                         ApplyEntry(geo, kindId, path, fieldIdx, subKey, value, touched);
                     }
                 }
+                // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
+                // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
+                TimeAnchor.ApplyIfTouched(geo, touched);
                 UiEventMap.Fire(touched, geo);
                 // Law 11 UNIVERSAL: after the batch, re-drive the open geoscape screen through its native
                 // full-rebuild so ALL screens repaint with no per-panel code. Dirty flag only — coalesced

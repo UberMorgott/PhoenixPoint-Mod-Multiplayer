@@ -84,6 +84,7 @@ namespace Multiplayer.Network.Sync
             _baselined = false;
             _forceFull = false;
             ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
+            TimeAnchor.Reset();         // post-load the clock jumped: re-latch rather than re-publish the old anchor
         }
 
         /// <summary>Client lost the stream (seq gap): resend EVERYTHING covered — it is just a big delta.</summary>
@@ -91,6 +92,9 @@ namespace Multiplayer.Network.Sync
         {
             _forceFull = true;
             _sentKinds.Clear();
+            // A resend re-emits the STORED anchor; re-latch first so the client is not rewound to whenever
+            // that anchor was taken (it stays current for as long as pause/speed do not change).
+            TimeAnchor.Reset();
             Debug.Log("[Multiplayer][rail] DiffEngine: full resend requested");
         }
 

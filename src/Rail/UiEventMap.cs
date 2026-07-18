@@ -50,7 +50,13 @@ namespace Multiplayer.Network.Sync
                             if (!researchDone) { researchDone = true; ResearchSync.RepaintResearchUi(); }
                             break;
                         case Timing _:
-                            break; // native setter events already fired during apply
+                        case TimingInstanceData _: // the TimeAnchor scratch DTO
+                            // No-op, GROUNDED (not assumed): Paused/Scale rode the native property setters
+                            // during apply, which already fire OnPausedEvent/EffectiveScaleChangedEvent; and
+                            // the clock readout genuinely POLLS — UIModuleTimeControl.Update():139 reads
+                            // _timing.Now.DateTime every frame and repaints only when it changed (:143-149).
+                            // So a latched anchor needs no event of its own to become visible.
+                            break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
