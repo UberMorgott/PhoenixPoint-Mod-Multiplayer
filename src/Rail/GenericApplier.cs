@@ -235,10 +235,19 @@ namespace Multiplayer.Network.Sync
             }
             if (current != null && !(current is Array))
             {
-                // ICollection<T> (HashSet, LinkedList…) via reflection Add/Clear.
+                // ICollection<T>-shaped (HashSet, LinkedList, ResourcePack…). Resolve Clear/Add through the
+                // INTERFACE whenever the container implements it: LinkedList<T> implements ICollection<T>.Add
+                // EXPLICITLY, so a name probe on the concrete type finds nothing at all (the explicit impl is
+                // a private method named "System.Collections.Generic.ICollection<T>.Add") and the field would
+                // throw on apply — the same failure class as the GeoFacilityComponent[] resync storm.
+                // Interface dispatch resolves explicit implementations at runtime, so this covers both shapes.
+                // The name probe stays as the fallback for containers that expose Clear/Add without
+                // implementing ICollection<T> (ResourcePack).
                 var ct = current.GetType();
-                var clear = AccessTools.Method(ct, "Clear");
-                var add = AccessTools.Method(ct, "Add", new[] { field.ElemType });
+                var icoll = typeof(ICollection<>).MakeGenericType(field.ElemType);
+                bool viaInterface = icoll.IsInstanceOfType(current);
+                var clear = viaInterface ? icoll.GetMethod("Clear") : AccessTools.Method(ct, "Clear");
+                var add = viaInterface ? icoll.GetMethod("Add") : AccessTools.Method(ct, "Add", new[] { field.ElemType });
                 if (clear != null && add != null)
                 {
                     clear.Invoke(current, null);
