@@ -607,6 +607,8 @@ namespace Multiplayer.Network.Sync
         internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
 
         private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5;
+        // Runtime type != declared type: the tag is followed by the runtime type's FullName.
+        private const byte TagTypedLeaf = 6, TagTypedBlob = 7;
         private const int MaxBlobDepth = 8;
 
         private struct Fixup { public object Target; public RailField Field; public int Idx; }
@@ -706,7 +708,17 @@ namespace Multiplayer.Network.Sync
             for (int i = 0; i < locals.Count; i++)
                 if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
             var t = v.GetType();
-            if (t != declared) throw new NotSupportedException("polymorphic value " + t.Name + " as " + declared.Name);
+            // POLYMORPHISM: the element's RUNTIME type is state too. Encoding against the DECLARED type only
+            // meant a single subclass element aborted the WHOLE field, so every polymorphic collection in the
+            // game was dead on the wire (GeoPhoenixFaction.Objectives holding ResearchGeoFactionObjective;
+            // FactionDiplomacy._factionsDiplomacyState holding PPFactionDef as IDiplomaticPartyKey). Carry the
+            // runtime type name; the decoder resolves it and REFUSES anything not assignable to `declared`, so
+            // the wire can only ever name a type this field could legitimately hold.
+            bool typed = t != declared;
+            // A declared interface/base can resolve at runtime to a LEAF (a def ref). Encode it as one rather
+            // than blobbing a def, which the Unity-object guard below would reject outright.
+            if (typed && LeafKindOf(t, 0, out _))
+            { w.Write(TagTypedLeaf); w.Write(t.FullName); EncodeLeaf(w, t, v); return; }
             if (depth >= MaxBlobDepth) throw new NotSupportedException("blob depth cap at " + t.Name);
             if (typeof(UnityEngine.Object).IsAssignableFrom(t)) throw new NotSupportedException("Unity object " + t.Name);
             if (!HasBlobContent(ser, t))
@@ -717,7 +729,10 @@ namespace Multiplayer.Network.Sync
                 w.Write(TagNull);
                 return;
             }
-            w.Write(TagBlob);
+            // ponytail: the runtime type rides as a FullName string, and only on values that are actually
+            // polymorphic. Intern it into the kind-id table if a hot polymorphic list ever shows up on the wire.
+            if (typed) { w.Write(TagTypedBlob); w.Write(t.FullName); }
+            else w.Write(TagBlob);
             EncodeObjectBody(w, ser, t, v, locals, depth);
         }
 
@@ -855,8 +870,22 @@ namespace Multiplayer.Network.Sync
                     return v;
                 }
                 case TagBlob: return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
+                case TagTypedLeaf: return DecodeLeaf(r, ResolveWireType(r.ReadString(), declared), geo);
+                case TagTypedBlob: return DecodeObjectBody(r, ser, ResolveWireType(r.ReadString(), declared), geo, locals, fixups, depth);
                 default: throw new IOException("bad blob tag " + tag);
             }
+        }
+
+        /// <summary>The runtime type named on the wire, constrained to the field's declared contract — the
+        /// wire can never name a type this field could not legitimately hold. Unresolvable is a real parity
+        /// break (law 10) AND leaves the body length unknown, so it aborts the blob instead of desyncing
+        /// the stream (the caller turns that into one Incident line, not a silent wrong value).</summary>
+        private static Type ResolveWireType(string name, Type declared)
+        {
+            var t = HarmonyLib.AccessTools.TypeByName(name);
+            if (t == null || !declared.IsAssignableFrom(t))
+                throw new IOException("polymorphic type '" + name + "' unresolvable or not a " + declared.Name);
+            return t;
         }
 
         private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
@@ -904,6 +933,12 @@ namespace Multiplayer.Network.Sync
                         break;
                     case TagBlob:
                         f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1));
+                        break;
+                    case TagTypedLeaf:
+                        f.SetValue(o, DecodeLeaf(r, ResolveWireType(r.ReadString(), f.ValueType), geo));
+                        break;
+                    case TagTypedBlob:
+                        f.SetValue(o, DecodeObjectBody(r, ser, ResolveWireType(r.ReadString(), f.ValueType), geo, locals, fixups, depth + 1));
                         break;
                     case TagList:
                     {

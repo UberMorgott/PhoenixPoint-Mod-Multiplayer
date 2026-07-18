@@ -61,6 +61,7 @@ namespace Multiplayer.Network.Sync
         private static float _nextTickAt;
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
+        private static int _reportedIncidents = -1;
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
         // Membership of every keyed EntityCollection, "<ownerPath>.<Field>" → sorted element keys joined.
@@ -165,7 +166,12 @@ namespace Multiplayer.Network.Sync
             bool wasForceFull = _forceFull;
             _forceFull = false;
 
-            if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
+            // The report is the stated instrument ("read the report, not the bug tracker") but it was written
+            // ONCE on the first walk — before any collection had been walked deep enough to raise an incident —
+            // so it always reported incidents=0 and the real frontier was only ever visible as scattered log
+            // warnings. Rewrite whenever the incident count actually moves: accurate numbers, no per-tick I/O.
+            if (!_reportWritten || _walkIncidents.Count != _reportedIncidents)
+            { WriteCoverageReport(ordered.Count); _reportWritten = true; _reportedIncidents = _walkIncidents.Count; }
 
             if (!_baselined && !wasForceFull)
             {
