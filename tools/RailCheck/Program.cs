@@ -162,26 +162,6 @@ namespace RailCheck
 
         // ─── Laws ───────────────────────────────────────────────────────────
 
-        /// <summary>Mirror of RailMeta.ApplyList's strategy ladder on the DECLARED type. Null = the
-        /// applier's final `throw new InvalidOperationException("no list apply strategy for ...")`.
-        /// A licensed field with no strategy is the 2026-07-18 resync storm by construction: the host
-        /// ships it, the client throws on every apply, and a failed apply drives RequestResync.</summary>
-        private static string ListStrategy(RailField f)
-        {
-            var vt = f.ValueType;
-            if (!vt.IsArray && typeof(IList).IsAssignableFrom(vt)) return "IList";
-            // Mirrors ApplyList's interface-first probe: an explicit ICollection<T>.Add (LinkedList<T>) is
-            // invisible to a name probe on the concrete type, so checking the interface is what keeps L1
-            // from reporting a strategy the applier does not actually have — or missing one it does.
-            if (!vt.IsArray && f.ElemType != null &&
-                typeof(ICollection<>).MakeGenericType(f.ElemType).IsAssignableFrom(vt)) return "ICollection<T>";
-            if (!vt.IsArray &&
-                HarmonyLib.AccessTools.Method(vt, "Clear") != null &&
-                HarmonyLib.AccessTools.Method(vt, "Add", new[] { f.ElemType }) != null) return "Clear+Add";
-            if (vt.IsArray && f.IsWritable()) return "array-assign";
-            return null;
-        }
-
         /// <summary>Reference-typed members of a blob-reconstructed type that the blob does NOT carry.
         /// The codec builds elements with Activator.CreateInstance(nonPublic) and fills only the table's
         /// fields, so each of these lands null on the client while the game's own load path would have
@@ -239,7 +219,10 @@ namespace RailCheck
                     var extra = "";
                     if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)
                     {
-                        var strat = ListStrategy(f);
+                        // THE strategy predicate, not a mirror of it: L1 and the classifier's own N4 guard
+                        // now ask RailMeta the same question, so the harness can no longer report a
+                        // capability the applier does not have (or miss one it does).
+                        var strat = RailMeta.ListApplyStrategy(f);
                         // Unordered is printed for EVERY list class, not just LeafList where it started
                         // life: 7ef0a30 reused it to decide which keyed collections ship a whole-list blob,
                         // i.e. it silently widened the set of types the codec reconstructs. Printing the raw

@@ -206,15 +206,23 @@ namespace Multiplayer.Network.Sync
                     if (IdentityResolver.TypeKeyable(elem)) { f.Class = FieldClass.EntityCollection; return f; }
 
                     // N4 — rebuildability is decided HERE, at classify time, not consulted at ship time.
-                    // EntityList is applied by ApplyList, whose only strategy for an ARRAY container is
-                    // "allocate a new array and assign it" — impossible on a read-only field, so it would
-                    // reach the final `throw new InvalidOperationException("no list apply strategy")` on
-                    // every single apply. Same shape as the LeafList guard six lines up. Deciding it here
-                    // means DiffEngine needs zero knowledge of it, and a field changing state shows up as
-                    // a reviewable diff in docs/rail-baseline.txt instead of as a silent runtime throw.
-                    // Concrete case: GeoPhoenixFacility._components (GeoPhoenixFacility.cs:48, readonly array).
-                    if (!f.IsWritable() && valType.IsArray)
-                    { f.Class = FieldClass.Excluded; f.Exclude = "read-only array container"; return f; }
+                    // EntityList is applied by ApplyList; a container none of its strategies can rebuild
+                    // would reach the final `throw new InvalidOperationException("no list apply strategy")`
+                    // on every single apply. Deciding it here means DiffEngine needs zero knowledge of it,
+                    // and a field changing state shows up as a reviewable diff in docs/rail-baseline.txt
+                    // instead of as a silent runtime throw.
+                    //
+                    // Ask the ONE strategy predicate rather than restating its ladder here: the original
+                    // guard tested `!IsWritable && IsArray`, which is only the array-assign rung, so any
+                    // OTHER unrebuildable container shape (no IList, no ICollection<T>, no Clear+Add) still
+                    // slipped through licensed. Concrete case it covers: GeoPhoenixFacility._components
+                    // (GeoPhoenixFacility.cs:48, readonly array) -> array-assign needs a writable field.
+                    //
+                    // Deliberately AFTER the keyable early-return: an EntityCollection is element-addressed
+                    // (per-element descend writes leaves into elements that already exist) and never rebuilds
+                    // its container, so rebuildability is not a question that applies to it.
+                    if (RailMeta.ListApplyStrategy(f) == null)
+                    { f.Class = FieldClass.Excluded; f.Exclude = "no list apply strategy (" + valType.Name + ")"; return f; }
 
                     f.Class = FieldClass.EntityList;
                     return f;
@@ -955,6 +963,37 @@ namespace Multiplayer.Network.Sync
                 }
             }
             return o;
+        }
+
+        /// <summary>Which <see cref="ApplyList"/> strategy can rebuild a container of this field's DECLARED
+        /// shape, or null when none can — i.e. every apply would reach ApplyList's final
+        /// <c>throw new InvalidOperationException("no list apply strategy")</c>. That throw is the
+        /// GeoFacilityComponent[] resync-storm shape: the host ships the field, the client throws on every
+        /// apply, and a failed apply drives RequestResync.
+        ///
+        /// ONE predicate, three callers: the classifier (a field with no strategy is Excluded, not
+        /// licensed), the harness's L1 law check, and the coverage report's <c>apply=</c> column. The ladder
+        /// used to be restated in each of those places — and two independently-written copies of the
+        /// keyability question is exactly how GeoItem ended up classified by a table that disagreed with
+        /// IdentityResolver (see IdentityResolver.TypeKeyable). Same question, asked once.
+        ///
+        /// Declared-type only, deliberately: classification has no instance. ApplyList itself dispatches on
+        /// the RUNTIME container (<c>current is IList</c>), which can only ever be MORE capable than the
+        /// declared type — so a null here is a real dead end, never a false alarm.</summary>
+        internal static string ListApplyStrategy(RailField f)
+        {
+            var vt = f.ValueType;
+            if (!vt.IsArray && typeof(IList).IsAssignableFrom(vt)) return "IList";
+            // Mirrors ApplyList's interface-first probe: an explicit ICollection<T>.Add (LinkedList<T>) is
+            // invisible to a name probe on the concrete type, so asking the INTERFACE is what keeps this
+            // from missing a strategy the applier actually has.
+            if (!vt.IsArray && f.ElemType != null &&
+                typeof(ICollection<>).MakeGenericType(f.ElemType).IsAssignableFrom(vt)) return "ICollection<T>";
+            if (!vt.IsArray && f.ElemType != null &&
+                HarmonyLib.AccessTools.Method(vt, "Clear") != null &&
+                HarmonyLib.AccessTools.Method(vt, "Add", new[] { f.ElemType }) != null) return "Clear+Add";
+            if (vt.IsArray && f.IsWritable()) return "array-assign";
+            return null;
         }
 
         /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.
