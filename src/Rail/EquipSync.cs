@@ -198,11 +198,96 @@ namespace Multiplayer.Network.Sync
                 if (engine == null || !engine.IsActiveSession) { _gesturePending = false; return; }
                 // HOST: leave the flag alone — the SAME flush still has its storage half to run
                 // (UpdateState :470 equip → :474 storage). The frame window in GesturePending expires it.
+                SelfCheckGestureCommit();
                 if (engine.IsHost) return;
                 _gesturePending = false;
                 try { SendLoadoutIntent(engine, __instance, freeReload); }
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT gesture send failed: " + ex.Message); }
             }
+        }
+
+        /// <summary>THE ROOT CAUSE of "move one of two identical items between slots and the other one
+        /// vanishes for everyone but the mover" (RCA 2026-07-18). GAME bug, not ours — we only made it
+        /// visible: <c>UIInventorySlot.SetItem</c> (:369-413) fires BOTH <c>OnItemChangingHandlers</c> and
+        /// <c>OnItemChangedHandlers</c> for the SAME transition, and <c>UIInventoryList</c> subscribes one
+        /// handler to each (:888-889) that BOTH run <c>UnfilteredItems.Remove(oldItem)</c> (:835 / :847).
+        /// <c>List&lt;T&gt;.Remove</c> matches through <c>EqualityComparer&lt;ICommonItem&gt;.Default</c> →
+        /// <c>GeoItem.Equals</c> (GeoItem.cs:124) = VALUE equality (def + count + charges), so with a
+        /// value-duplicate in the list — two identical magazines, the everyday case — the FIRST Remove
+        /// deletes the OTHER copy and the second deletes the dragged one, while only one is re-Inserted
+        /// (:853-864). The list loses an element; the SLOTS still hold both, so the screen looks right.
+        /// Solo hides it (nothing reads the model until the screen is re-entered). In co-op the very next
+        /// admitted flush writes that truncated list into <c>GeoCharacter.SetItems</c> and the rail
+        /// faithfully mirrors the loss: host screen right, host MODEL and every client wrong.
+        ///
+        /// The Changing half is pure duplication — same guard (<c>_isFiltering</c>), same argument, and
+        /// nothing between the two callbacks reads <c>UnfilteredItems</c>; <c>ItemChangedHandler</c> does
+        /// the authoritative remove, the <c>FilteredItems</c> upkeep and the re-insert. Skipping it makes
+        /// every slot transition remove exactly ONE element, which is what the Changed half already
+        /// assumes. Generic by construction: one patch on the shared list widget covers every list
+        /// (armour / ready / backpack / storage), both equip screens, every gesture (drag, click-move,
+        /// double-click, side-button, loadout preset, scrap) and every peer — no per-item special case.
+        /// Inert outside a session, so solo keeps vanilla behaviour.</summary>
+        [HarmonyPatch(typeof(UIInventoryList), "ItemChangingHandler")]
+        internal static class InventoryListDoubleRemovePatch
+        {
+            private static bool Prefix()
+            {
+                var engine = NetworkEngine.Instance;
+                return engine == null || !engine.IsActiveSession; // solo: run the original
+            }
+        }
+
+        /// <summary>THE GUARD for the bug above, at the seam the codec self-check cannot see.
+        /// <c>DiffEngine.SelfCheckEntityList</c> proves the BLOB survives reorder + value-duplicates; it
+        /// cannot prove the list handed to it still holds what the player is looking at. This does, on the
+        /// one flush that is authoritative — the gesture commit — by asserting the invariant the
+        /// double-Remove breaks: every item a slot DISPLAYS must still be present BY REFERENCE in that
+        /// list's <c>UnfilteredItems</c>, because <c>UpdateSoldierEquipment</c> (UIStateEditSoldier:548)
+        /// writes exactly that list into the model and <c>UpdateStorage</c> (:564) Except-diffs the
+        /// faction <c>ItemStorage</c> against it. A miss means the screen shows an item the model is about
+        /// to lose — silently, on the host too. Keyed one-shot per list AND per duplicate-state so an
+        /// early duplicate-free gesture can NOT retire the check for the case that actually breaks (the
+        /// 2026-07-18 "16/16 OK on an empty list" lesson); failures always shout. Cost: user-gesture
+        /// rate, one reference scan per list — never per tick, never per frame.</summary>
+        private static readonly HashSet<string> _slotCheckSeen = new HashSet<string>(StringComparer.Ordinal);
+
+        private static void SelfCheckGestureCommit()
+        {
+            var view = GeoLevel()?.View;
+            if (!(view?.CurrentViewState is UIStateEditSoldier)) return; // vehicle screen uses other lists
+            var equip = view.GeoscapeModules?.SoldierEquipModule;
+            if (equip == null) return;
+            CheckSlotsAgainstList("armour", equip.ArmorList);
+            CheckSlotsAgainstList("ready", equip.ReadyList);
+            CheckSlotsAgainstList("inventory", equip.InventoryList);
+            CheckSlotsAgainstList("storage", equip.StorageList);
+        }
+
+        private static void CheckSlotsAgainstList(string name, UIInventoryList list)
+        {
+            var items = list?.UnfilteredItems;
+            if (items == null || list.Slots == null) return;
+            int shown = 0, missing = 0;
+            foreach (var slot in list.Slots)
+            {
+                if (slot == null || slot.Empty) continue;
+                shown++;
+                bool found = false;
+                foreach (var item in items) if (ReferenceEquals(item, slot.Item)) { found = true; break; }
+                if (!found) missing++;
+            }
+            // GeoItem.Equals/GetHashCode are value-based, so Distinct() collapses exactly the duplicates
+            // that arm the double-Remove — this is the "was the dangerous case actually exercised?" key.
+            bool dup = items.Count != items.Distinct().Count();
+            string key = name + (dup ? " dup" : " nodup");
+            if (missing > 0)
+                Debug.LogError("[MP][equip] SELF-CHECK FAIL " + key + ": " + missing + " of " + shown +
+                               " displayed items are NOT in UnfilteredItems (list=" + items.Count + ") — the screen " +
+                               "shows them but GeoCharacter.SetItems/UpdateStorage is about to drop them. " +
+                               "UIInventoryList double-Remove vs GeoItem value equality is back.");
+            else if (_slotCheckSeen.Add(key))
+                Debug.Log("[MP][equip] self-check OK " + key + " shown=" + shown + " list=" + items.Count);
         }
 
         /// <summary>ONE intent per gesture: [nonce][OpSetItems][charId][flags+3 EntityList blobs] on the
