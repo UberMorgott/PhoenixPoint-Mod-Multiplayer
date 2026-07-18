@@ -221,7 +221,9 @@ namespace Multiplayer.Network.Sync
                         var giv = GeoItemCodec.Decode(value, def);
                         dict[def] = giv;
                         // [mfgdiag] boundary: mirrored client count per def (real-loss vs visual proof; remove after diag).
-                        Debug.Log("[Multiplayer][mfgdiag] CLIENT storage def=" + subKey + " -> clientMirrorCount=" + giv.CommonItemData.Count);
+                        // Per applied storage def, per batch — the ~1600-lines-per-client family MpDiag exists for.
+                        if (MpDiag.On)
+                            Debug.Log("[Multiplayer][mfgdiag] CLIENT storage def=" + subKey + " -> clientMirrorCount=" + giv.CommonItemData.Count);
                         break;
                     }
                     default:
