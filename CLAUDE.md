@@ -66,11 +66,20 @@ BEHAVIOR (per-subsystem mirroring).
 
 ## Verification — two stages, both mandatory (supersedes old "no test suites" mandate for THIS repo)
 
-- **Stage 1 — differential sim harness** (fast gate, every commit): host + client
-  (SimCluster/InMemoryTransport) run randomized command sequences; after EVERY applied step
-  CRC(host) == CRC(client) + trace (seed, step, intent, delta, entity, field). Mismatch → first
-  diverged step visible, reproducible by seed+step. Seconds, automatic, gates every night-agent
-  commit. Red harness → revert, do not proceed.
+- **Stage 1 — `cd tools/RailCheck && dotnet run -c Debug`** (fast gate, EVERY commit that touches
+  `src/Rail/`). Exit 0 = green, 1 = red. Seconds, headless, no game and no save needed.
+  Red harness → revert, do not proceed. "It compiles" is NOT the gate.
+  - Asserts the rail's own laws on the real game metadata: every list-classed field has an
+    `ApplyList` strategy (L1), no unmatched custom-create param (L2), no Unity object in the blob
+    codec (L3), codec round-trip (L4), no abstract element type riding unclassified (L5).
+  - `docs/rail-baseline.txt` is the committed classifier snapshot (table + per-type blob husk lists
+    + today's known violations). **Any drift in it is RED** — that is the whole point: a field moving
+    Excluded↔covered must be a reviewable diff, never a silent side effect. Change is intended →
+    `dotnet run -c Debug -- --update` and commit the baseline IN THE SAME COMMIT as the rail change,
+    so review sees the coverage delta next to the code that caused it.
+  - It is NOT the differential SIM harness the mandate originally described: no CRC(host)==CRC(client),
+    no seeded command sequences, no live `GeoLevelController`. Read `ARCHITECTURE.md` §Verification
+    for the full uncovered list before treating green as safe.
 - **Stage 2 — in-game gate** (slow gate, every subsystem): migrated subsystem verified in live
   2-instance game BEFORE the next one starts.
 - **"Done" for a subsystem** = harness green + in-game gate passed + legacy counterpart NOT ported

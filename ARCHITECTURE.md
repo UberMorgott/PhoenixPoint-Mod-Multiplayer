@@ -187,13 +187,39 @@ messages, sim gates (law 4b).
 
 ## Verification (mandate §4)
 
-- Stage 1 differential sim harness: SimCluster/InMemoryTransport host+client, randomized command
-  sequences (research/build/cancel/move/produce/trade/pause/resume/save...), after every applied
-  step CRC(host)==CRC(client) + trace (seed, step, intent, delta, entity, field). Gates every
-  commit. Feasibility note: check quarry `Multiplayer.GameTests`/test infra for reusable headless
-  bootstrap before building from scratch.
+- **Stage 1 = `tools/RailCheck` (BUILT 2026-07-18).** `cd tools/RailCheck && dotnet run -c Debug`
+  — exit 0 green, 1 red. Seconds, no game, no save.
+  - It runs headless because `Serializer.GetSerializedMembers` (Serializer.cs:296) is pure attribute
+    reflection: a bare `new Serializer(null)` gives byte-identical field discovery to the game's
+    configured instance. Only VALUE serialization needs the live game.
+  - It asserts the rail's own laws over the real `Assembly-CSharp` metadata: **L1** every list-classed
+    field has a `RailMeta.ApplyList` strategy (a licensed-but-unapplyable field is the 2026-07-18
+    resync storm by construction); **L2** no `[SerializeCustomCreate]` param is unmatched; **L3** no
+    Unity object reaches the blob codec; **L4** leaf/list/blob codec round-trip; **L5** if the codec
+    starts carrying runtime types, abstract element types' concretions must be classified.
+  - It probes the codec (`ProbePolymorphicCodec`) rather than assuming: declared-type-only vs
+    polymorphic decides the type closure, so "the ship side widened" is a detected event.
+  - `docs/rail-baseline.txt` is the committed snapshot — full classifier table, per-type blob **husk**
+    lists, and today's known violations. **Drift in that file IS the gate**, so a field moving
+    Excluded↔covered is a reviewable diff, never a silent side effect. Intended change → re-run with
+    `--update` and commit the baseline in the same commit.
+- **What stage 1 does NOT cover** (do not read green as "safe"):
+  - No simulation, no CRC(host)==CRC(client), no seeded command sequences — those need a live
+    `GeoLevelController`, so the mandate's original SimCluster shape is still unbuilt.
+  - `LeafKind.DefRef` / `EntityRef` round-trip (needs `DefRepository` / a live graph), `GeoItemDict`,
+    the diff/chunk/seq/tombstone layer, and `GenericApplier`'s resolve path are all untested.
+  - The closure is DECLARED types from the `IdentityResolver.Roots` kinds; runtime subtypes only
+    enter it when the codec is polymorphic. Fields the live walk reaches through a subtype are invisible.
+  - **It cannot catch a ship-side rule change that makes an already-classified type start riding as a
+    blob** (the `7ef0a30` `ResearchElement` husk → NOTEXT). It reports such a change only as baseline
+    drift, and only when the change touches the table. The husk lists exist so review catches it.
 - Stage 2 in-game 2-instance gate per subsystem.
 - Done = stage 1 green + stage 2 passed + legacy counterpart not ported.
+- Quarry `Multiplayer.GameTests`: **read, not reused — it has no headless bootstrap to reuse.** It is
+  an xunit project that only `Compile Include`s mod sources and references `0Harmony` +
+  `UnityEngine.CoreModule`; it never references `Assembly-CSharp`, and its own header says the linked
+  game-bound code is "never invoked in tests". RailCheck goes further (loads the game assembly and
+  drives the real `Serializer`) and needs no bootstrap at all.
 
 ## Top risks + cheapest early tests
 
