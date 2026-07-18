@@ -64,6 +64,22 @@ namespace Multiplayer.Network.Sync
                     return FormatKeyValue(v);
                 };
             }
+            // Last-resort generic fallback: a type whose serialized members (rail metadata — same table on
+            // both peers) contain EXACTLY ONE BaseDef-typed member is keyed by that def's GUID
+            // (GeoSiteFactionData._faction, GeoVehicleEquipment._equipmentDef). Zero or several def
+            // members → ambiguous → no key. Excluded-class fields still qualify: RailField keeps the
+            // resolved live member (e.g. read-only _faction) readable.
+            var defFields = RailType.Get(t)?.Fields.Where(rf => rf.CanRead && typeof(BaseDef).IsAssignableFrom(rf.ValueType)).ToList();
+            if (defFields != null && defFields.Count == 1)
+            {
+                var df = defFields[0];
+                return o =>
+                {
+                    object v;
+                    try { v = df.GetValue(o); } catch { return null; }
+                    return FormatKeyValue(v);
+                };
+            }
             return null;
         }
 
