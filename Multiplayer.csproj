@@ -15,6 +15,10 @@
     <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
   </PropertyGroup>
   <ItemGroup>
+    <!-- tools/ are their own projects (RailCheck); the SDK glob must not swallow them into the mod. -->
+    <Compile Remove="tools\**" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>

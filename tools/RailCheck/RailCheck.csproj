@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>RailCheck</AssemblyName>
+    <RootNamespace>RailCheck</RootNamespace>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
+    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The REAL shipped rail bits — the harness must test what the game loads, not a recompile. -->
+    <ProjectReference Include="..\..\Multiplayer.csproj" />
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
+      <Private>true</Private><!-- the game supplies it at runtime; a console host does not -->
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

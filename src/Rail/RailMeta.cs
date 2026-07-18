@@ -223,10 +223,17 @@ namespace Multiplayer.Network.Sync
     public static class RailMeta
     {
         // ─── Game serializer access (typed; the ONE configured instance) ───
+
+        /// <summary>Headless seam for tools/RailCheck ONLY — the game component does not exist outside the
+        /// game process, but the serializer's METADATA discovery (GetSerializedMembers) is pure attribute
+        /// reflection and works on a bare <c>new Serializer(null)</c>. Always null in game.</summary>
+        internal static Serializer SerializerOverride;
+
         public static Serializer GameSerializer
         {
             get
             {
+                if (SerializerOverride != null) return SerializerOverride;
                 try { return GameUtl.GameComponent<SerializationComponent>()?.Serializer; }
                 catch { return null; }
             }
