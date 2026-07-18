@@ -158,6 +158,8 @@ namespace Multiplayer.Network.Sync
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo };
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
+            if (RailMeta.IsPresentation(valType))
+            { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
 
             // Leaf?
             if (RailMeta.LeafKindOf(valType, 0, out var kind))
@@ -182,6 +184,8 @@ namespace Multiplayer.Network.Sync
             var elem = RailMeta.ElemTypeOf(valType);
             if (elem != null)
             {
+                if (RailMeta.IsPresentation(elem))
+                { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
                 if (RailMeta.LeafKindOf(elem, 0, out _))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
@@ -229,6 +233,23 @@ namespace Multiplayer.Network.Sync
         }
 
         internal static Type MemberType(MemberInfo mi) => (mi as FieldInfo)?.FieldType ?? ((PropertyInfo)mi).PropertyType;
+
+        // ─── Presentation refusal (same principle as the Unity-scene-object refusal) ───
+        // Rendering artifacts are never game state, so they never ride the rail — regardless of the fact
+        // that the save serializer happens to persist them. LocalizedTextBind is a CLASS with a writable
+        // public LocalizationKey (decompile Base.UI/LocalizedTextBind.cs:9-13), so it fails the IsValueType
+        // composite test and would otherwise classify as Descend (member) or EntityList/EntityCollection
+        // (element) — i.e. the client would WRITE localization keys. Live proof from the last full walk
+        // (rail-coverage.txt:26-28): 874 instances reached, LocalizationKey + _doNotLocalize as leaves,
+        // owned by GeoSiteInstaceData.Motto/.Name (428) and GeoPhoenixBase+InstanceData.LocationDescription
+        // (18). Nothing on a client can legitimately need a localization key shipped to it, and where an
+        // instance is shared with a def the write would land in shared def state.
+        private static readonly HashSet<string> _presentationTypes = new HashSet<string>
+        {
+            "Base.UI.LocalizedTextBind",
+        };
+
+        internal static bool IsPresentation(Type t) => t != null && _presentationTypes.Contains(t.FullName);
 
         /// <summary>Persistent members of a type per the game's own discovery (ReadWrite mode only).</summary>
         internal static List<MemberInfo> SerializedMembers(Serializer ser, Type t)
