@@ -651,6 +651,20 @@ namespace Multiplayer.Network.Sync
         // (SerializationType.InitCustomCreate/CustomCreateObject). No custom create → the game uses
         // Activator.CreateInstance(nonPublic) — so do we. Post-read callbacks are fired afterwards
         // (AbilityTrack rebinds its slot back-refs there).
+        //
+        // Post-read fires over the blob's own `locals` — EVERY object the decode CONSTRUCTED, at every
+        // nesting depth (DecodeObjectBody registers each one) — and never on the LIVE OWNER of the field
+        // being applied. That is the whole contract, and it is sufficient: AbilityTrack is itself a blob
+        // element (CharacterProgression._abilityTracks is an EntityList, so nothing ever descends INTO an
+        // AbilityTrack), so it is a local, so its OnDeserialized runs and its slots get SetAbilityTrack.
+        //
+        // Firing the live owner's post-read as well has been proposed and is REFUSED. Those callbacks are
+        // save-load migrations, not re-link hooks: GeoCharacter.InitAfterDeserialiaztion (decompile
+        // GeoCharacter.cs:1592) branches on serObj.SerializedVersion — which we have no honest value for —
+        // and can call Init() and SetItems(), i.e. real gameplay side-effects on the client's authoritative
+        // mirror, which law 3 forbids. Research.OnPostSerialize (Research.cs:1264) is the same shape.
+        // The only owner post-read in the closure that would even run is CharacterProgression.Init(), which
+        // just re-assigns a callback it already holds. Zero benefit, one law violated.
 
         internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
 

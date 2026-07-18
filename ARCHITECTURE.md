@@ -235,6 +235,30 @@ messages, sim gates (law 4b).
 4. **False-green** — CRC matches but runtime invariants broken. Spike B checklist is the probe;
    in-game gates stay mandatory regardless of harness green.
 
+## Named next steps (post-audit 2026-07-19, none blocking)
+
+- **Husk-gated blob licensing.** `a6fd0a5` removed the walk-time `EntityCollection`→blob fallback
+  outright, because every `EntityCollection` field in the closure holds `ResearchElement` (7-member
+  husk) — the fallback's only possible use was exactly the hazard it re-opened. The GENERAL law
+  behind it is still unstated in code: *a type may only be blob-reconstructed if its husk is
+  empty*, i.e. the blob carries everything the game's own load path would have re-`Init`'d.
+  Deliberately NOT implemented as a second runtime husk table — `HuskMembers` lives in
+  `tools/RailCheck/Program.cs` and duplicating it into `src/` is the two-tables-disagree shape that
+  produced the `GeoItem`/`TypeKeyable` bug. Right shape when it is needed: move `HuskMembers` into
+  `RailMeta` next to `ListApplyStrategy` and have BOTH classify and the report ask it. Today it is
+  argued per-type in review via the baseline's `husk=` column, which is why the defect was findable.
+- **`ApplyList` inserts nulls for contentless element types.** `RailMeta` writes `TagNull` when
+  `!HasBlobContent`, and `ApplyList` strips nulls only for root-entity/`BaseDef` element types, so
+  another element type could land nulls in a live list. Unproven reachable in the 40-type closure.
+  Do NOT "fix" it by stripping nulls unconditionally: `AbilityTrack.AbilitiesByLevel` is an
+  `AbilityTrackSlot[]` whose INDEX IS THE LEVEL, so dropping holes would shift every ability up a
+  level. The safe shape is a classify-time refusal (`EntityList` where `!HasBlobContent(elem)`),
+  which needs the serializer available at classify time — verify that before writing it.
+- **`GeoPhoenixFacility` is not in the harness closure**, so N4's exclusion is grounded
+  (`GeoPhoenixFacility.cs:48`, readonly array) but unexercised. Seeding it in
+  `tools/RailCheck/Program.cs` expands the closure and moves the baseline — a reviewable change
+  worth doing on its own, not folded into a fix.
+
 ## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
 1. Research (almost no identity) — end-to-end first.
