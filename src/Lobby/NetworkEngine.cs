@@ -118,6 +118,9 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
+            // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
+            // session ended and re-started without a level switch in between).
+            SessionEnd.Reset();
         }
 
         /// <summary>
@@ -151,6 +154,9 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
+            // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
+            // session ended and re-started without a level switch in between).
+            SessionEnd.Reset();
         }
 
         public void Shutdown()

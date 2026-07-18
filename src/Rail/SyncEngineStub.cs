@@ -52,6 +52,11 @@ namespace Multiplayer.Network.Sync
             EquipSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
+            // Rail statics that survive an engine teardown and had no home in this aggregate until the
+            // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset
+            // list, and TearDown (which SessionEnd drives) is what calls it.
+            OpenUiRepaint.Reset();
+            SyncApplyScope.Reset();
         }
 
         public void ResetForReloadBoundary()

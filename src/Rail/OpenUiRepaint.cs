@@ -56,6 +56,15 @@ namespace Multiplayer.Network.Sync
         /// by <see cref="FlushIfDirty"/> — cheaper than re-entering per chunk on a multi-packet resend.</summary>
         public static void MarkDirty() => _dirty = true;
 
+        /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
+        /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
+        public static void Reset()
+        {
+            _dirty = false;
+            _bindLogged = false;
+            _dragDeferLogged = false;
+        }
+
         /// <summary>Driven once per frame from SyncEngine.Tick. No-op on the host (never marks dirty).</summary>
         public static void FlushIfDirty()
         {

@@ -77,6 +77,12 @@ namespace Multiplayer.Network.Sync
         // diff the loadout in here (the deleted model-level gate did, per frame, and froze the game).
         private static bool Prefix(MethodBase __originalMethod)
         {
+            // MUST be the first check, before the engine is consulted: PhoenixGame.FinishLevel is async,
+            // so by the time the level tears down NetworkEngine.Instance is already null and
+            // IsActiveSession already false — this gate would swing OPEN for the first time all session
+            // exactly when SessionEnd is quiescing the open equip screen. That is how the client came to
+            // commit a stale UI→model flush inside CleanupView and NRE the level-switch coroutine.
+            if (SessionEnd.InProgress) return false;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true; // solo: native
             bool storage = __originalMethod.Name == "UpdateStorage";
