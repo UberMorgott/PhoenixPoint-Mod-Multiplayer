@@ -138,6 +138,19 @@ value field, law 2), Timing.OwnNow (read-only — client clock ticks locally; Pa
 vehicle SurfacePos/HitPoints (no live name match; travel mirror is a later migration), per-subsystem
 `*InstanceData`-only scalars (NextUpdate schedule bookkeeping — host-only sim, client gated anyway).
 
+**NEXT STEP — a real repaint primitive (not a lifecycle transition).** `OpenUiRepaint` repaints an open
+screen with `current.Exit(stack); current.Enter(stack);`. That is a state-machine TRANSITION, not a
+repaint, and it is not idempotent: `Exit` tears down real resources (`UIStateVehicleSelected.cs:237-258`
+runs `_sectionBarModule.Deinit()`, `_resourcesModule.Done()`, destroys `_selectionMarker`, unsubscribes 6
+events) and `Enter` re-runs a full `EnterState` that can legitimately fail on a mirrored model. The
+growing opt-out table (`UIStateManufacturing`, `UIStateEditSoldier`) is that broken invariant leaking one
+screen at a time — each entry is a screen whose `ExitState` does something a repaint must never do, and
+the list only grows as more screens are exercised. Failure now rolls forward to `UIStateNothingSelected`
+(recovery, not a fix). The real answer is a repaint primitive that re-reads the model into the LIVE
+widgets with no transition at all — `ReseedEditSoldier` already demonstrates the shape (read-direction
+only, native `OnDataChanged`/`UpdateData`/`RefreshStorage` calls, never UI→model). Generalizing that
+retires the opt-out table and the recovery path together.
+
 **What stays manual (by design):** structural creates/destroys (law 3 identity boundary), intents
 (law 4a seams), the UiEventMap table (presentation knowledge), ResearchSync start-blob/complete/queue
 messages, sim gates (law 4b).

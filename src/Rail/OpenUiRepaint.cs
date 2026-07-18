@@ -101,7 +101,26 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][rail] open-UI re-enter failed for " + current.GetType().Name + ": " + ex.Message);
+                // Exit() ALREADY ran (module Deinit/Done, marker destroyed, 6 events unsubscribed —
+                // UIStateVehicleSelected.cs:237-258), so a swallowed throw strands the screen half-entered:
+                // dead widgets, wrong icons, and it re-fails on every later rail batch. Roll FORWARD to a
+                // known-good state instead of leaving the stack where it broke. UIStateNothingSelected is
+                // the game's own recovery for an unenterable geoscape screen (UIStateVehicleSelected
+                // .EnterState:134-137 does exactly this when it cannot resolve a vehicle), and its
+                // EnterState:84 re-establishes SetActiveState/SetInputState, so input is live again.
+                // Generic: one recovery for all ~31 screens, no per-screen knowledge.
+                // Log the FULL exception — ex.Message alone hid the stack and left the NRE unidentified.
+                Debug.LogWarning("[Multiplayer][rail] open-UI re-enter failed for " + current.GetType().Name +
+                                 " — recovering to UIStateNothingSelected: " + ex);
+                try
+                {
+                    using (SyncApplyScope.Enter())
+                        stack.SwitchToState(new UIStateNothingSelected(), StateStackAction.ClearStackAndPush);
+                }
+                catch (Exception recoverEx)
+                {
+                    Debug.LogError("[Multiplayer][rail] recovery to UIStateNothingSelected FAILED: " + recoverEx);
+                }
             }
         }
 
