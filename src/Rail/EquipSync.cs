@@ -2,13 +2,18 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
+using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
+using PhoenixPoint.Geoscape.View.ViewControllers.AugmentationScreen;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -130,6 +135,66 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Equip/edit-screen scrap chokepoint: <c>UIStateEditSoldier.ItemScrappedHandler</c> (:632)
+        /// and <c>UIStateEditVehicle.ItemScrappedHandler</c> (:183) call <c>GeoFaction.ScrapItem</c> directly —
+        /// on a client that is an ungated wallet+storage write. CLIENT: block, forward to the EXISTING
+        /// OpScrap intent (index slot = count); the host validates storage count and executes natively
+        /// (ManufactureSync.HandleIntent), result rides wallet 0xA0 + storage 0xAC. UIModuleManufacturing's
+        /// own ScrapItem call never reaches here on a client (ScrapAllItems is blocked earlier).
+        /// ponytail: scrap is def-addressed — an item scrapped straight off an EQUIPPED slot is matched
+        /// against host STORAGE (same-def storage copy scrapped if present, else host-reject no-op);
+        /// carry a charId in the payload if per-instance equipped-slot scrap ever matters.</summary>
+        [HarmonyPatch(typeof(GeoFaction), nameof(GeoFaction.ScrapItem))]
+        internal static class ScrapItemCapturePatch
+        {
+            private static bool Prefix(GeoFaction __instance, GeoItem geoItem, int amount)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
+                if (SyncApplyScope.Active) return false; // law 8: applying never echoes an intent
+                var def = geoItem?.ItemDef;
+                // Non-viewer faction (unreachable from UI) → block the local write, no intent.
+                if (def != null && ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction))
+                {
+                    ManufactureSync.SendIntent(ManufactureSync.OpScrap, def.Guid, amount);
+                    Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
+                }
+                return false;
+            }
+        }
+
+        /// <summary>Augment-install commit seam: <c>UIModuleMutate.OnAugmentApplied</c> /
+        /// <c>UIModuleBionics.OnAugmentApplied</c> is the CONFIRM gesture — native writes the soldier's
+        /// armour set, returns swapped-out parts to storage and charges Wallet.Take(ManufacturePrice),
+        /// all local authoritative writes on a client. CLIENT: block the whole method, send OpAugment
+        /// (defGuid + charId in the index slot); the host re-validates cost + fit and replays the native
+        /// sequence (<see cref="HandleAugmentIntent"/>). The preview SetItems from OnAugmentClicked is
+        /// already blocked by SetItemsCapturePatch and its stray intent host-rejected (augment def not in
+        /// storage) — the paperdoll preview simply doesn't render on a client; the confirmed install
+        /// arrives via the rail + open-UI repaint.</summary>
+        [HarmonyPatch]
+        internal static class AugmentApplyCapturePatch
+        {
+            private static IEnumerable<MethodBase> TargetMethods()
+            {
+                yield return AccessTools.Method(typeof(UIModuleMutate), nameof(UIModuleMutate.OnAugmentApplied));
+                yield return AccessTools.Method(typeof(UIModuleBionics), nameof(UIModuleBionics.OnAugmentApplied));
+            }
+
+            // __0 = the augment ItemDef (positional: the two targets name the parameter differently).
+            private static bool Prefix(object __instance, ItemDef __0)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
+                if (SyncApplyScope.Active) return false; // law 8
+                var character = (__instance as IAugmentationUIModule)?.CurrentCharacter;
+                if (character == null || __0 == null) return false; // never write locally
+                ManufactureSync.SendIntent(ManufactureSync.OpAugment, __0.Guid, (int)character.Id);
+                Debug.Log("[MP][equip] CLIENT augment intent char=U#" + (int)character.Id + " def=" + __0.Guid);
+                return false;
+            }
+        }
+
         private static void Suppress()
         {
             _suppressed++;
@@ -248,6 +313,60 @@ namespace Multiplayer.Network.Sync
             {
                 Debug.LogWarning("[MP][equip] HOST intent REJECT (throw): " + ex);
             }
+        }
+
+        /// <summary>HOST replay of the native augment-install commit (OnAugmentClicked's list-building +
+        /// OnAugmentApplied, model level): the augment is BOUGHT (Wallet.Take(ManufacturePrice)), not taken
+        /// from storage — exactly why OpSetItems' "gained def must be in storage" validation would reject
+        /// it. Validate cost + structural fit BEFORE mutating, then: swap the armour set natively, return
+        /// non-permanent swapped-out parts to storage, drop 2-handed gear on a hand-losing augment, charge
+        /// the wallet. Result rides GeoCharacter lists + storage GeoItemDict (0xAC) + wallet (0xA0).
+        /// ponytail: the UI-side gates (2-augment cap, UnlockedAugmentations listing) are not re-checked —
+        /// the client screen only offers slots built from host-mirrored state; add them if drift ever shows.</summary>
+        internal static bool HandleAugmentIntent(ulong senderPeerId, uint nonce, string defGuid, int charId)
+        {
+            var geo = GeoLevel();
+            if (geo == null) { Reject(senderPeerId, charId, "augment: no geoscape"); return false; }
+            var def = Base.Core.GameUtl.GameComponent<Base.Defs.DefRepository>()?.GetDef(defGuid) as ItemDef;
+            if (def == null) { Reject(senderPeerId, charId, "augment: unknown def " + defGuid); return false; }
+            var tags = Base.Core.GameUtl.GameComponent<SharedData>().SharedGameTags;
+            if (def.Tags == null || !(def.Tags.Contains(tags.AnuMutationTag) || def.Tags.Contains(tags.BionicalTag)))
+            { Reject(senderPeerId, charId, "not an augment: " + def.name); return false; }
+            if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
+            { Reject(senderPeerId, charId, "augment: unresolved character"); return false; }
+            var faction = character.Faction;
+            if (faction?.Wallet == null || !faction.Wallet.HasResources(def.ManufacturePrice))
+            { Reject(senderPeerId, charId, "augment: cannot afford " + def.name); return false; }
+
+            var originals = character.ArmourItems.ToList();
+            var removedDefs = CommonCharacterUtils.CanSwapItem(
+                character.TemplateDef.GetAddonsMangerDef(), def,
+                originals.Select(i => i.ItemDef).ToList(), null, character);
+            if (removedDefs == null)
+            { Reject(senderPeerId, charId, "augment does not fit: " + def.name); return false; }
+
+            var current = originals.Where(i => !removedDefs.Contains(i.ItemDef)).ToList();
+            current.Add(new GeoItem(def));
+            var storage = ResolveStorage(character);
+            character.SetItems(current);
+            foreach (var item in originals.Except(current))
+                if (storage != null && !item.ItemDef.IsPermanentAugment) storage.AddItem(item);
+            if (CommonCharacterUtils.LoseHandOnEquip(def))
+            {
+                var oneHand = new List<GeoItem>();
+                var twoHand = new List<GeoItem>();
+                foreach (var eq in character.EquipmentItems)
+                    (eq.ItemDef.HandsToUse > 1 ? twoHand : oneHand).Add(eq);
+                character.SetItems(current, oneHand);
+                foreach (var eq in twoHand)
+                    if (storage != null && !(eq.ItemDef.Tags?.Contains(tags.AnuMutationTag) ?? false)) storage.AddItem(eq);
+            }
+            faction.Wallet.Take(def.ManufacturePrice, OperationReason.Purchase);
+            try { (faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
+            catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
+            Debug.Log("[MP][equip] HOST augment APPLIED char=U#" + charId + " def=" + defGuid +
+                      " nonce=" + nonce + " peer=" + senderPeerId);
+            return true;
         }
 
         private static void Bump(Dictionary<ItemDef, int> map, GeoItem g, int sign)

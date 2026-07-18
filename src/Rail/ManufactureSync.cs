@@ -66,11 +66,18 @@ namespace Multiplayer.Network.Sync
         private const byte OpUp = 4;      // PutUpInQueue(element)
         private const byte OpDown = 5;    // PutDownInQueue(element)
         // Instant scrap (UIModuleManufacturing.ScrapAllItems, no queue). index slot is reused as the item COUNT.
-        private const byte OpScrap = 6;        // GeoFaction.ScrapItem(item, count)   — item-storage scrap
+        // internal: EquipSync's GeoFaction.ScrapItem capture (equip-screen scrap dialog) reuses this op.
+        internal const byte OpScrap = 6;       // GeoFaction.ScrapItem(item, count)   — item-storage scrap
         private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
         // Soldier-loadout intent (GeoCharacter.SetItems chokepoint) — rides THIS surface (0xAE) but its
         // payload after [nonce][op] is EquipSync's own ([charId][flags][blobs]); HandleIntent branches early.
         internal const byte OpSetItems = 8;
+        // Augment install (UIModuleMutate/UIModuleBionics.OnAugmentApplied confirm). The augment def is
+        // BOUGHT on the spot (Wallet.Take(ManufacturePrice)), never taken from storage, so it cannot ride
+        // OpSetItems' storage validation. defGuid slot = augment def, index slot = charId. EquipSync owns
+        // validation + native replay. ponytail: id 9 deliberately left free — a concurrent seam may be
+        // claiming it; never reuse ids.
+        internal const byte OpAugment = 10;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly IntentDedup Intents = new IntentDedup();
@@ -327,6 +334,12 @@ namespace Multiplayer.Network.Sync
                                           defGuid + ") peer=" + senderPeerId);
                     Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
                 }
+                else if (op == OpAugment)
+                {
+                    // Augment install: index slot = charId. Bought with resources, not storage — EquipSync
+                    // owns the cost/fit validation + the native replay.
+                    ok = EquipSync.HandleAugmentIntent(senderPeerId, nonce, defGuid, index);
+                }
                 else
                 {
                     var queue = manufacture.Queue;
@@ -439,7 +452,7 @@ namespace Multiplayer.Network.Sync
             return !ReferenceEquals(instance, PhoenixManufacture());      // NPC/foreign manufacture stays native (un-synced)
         }
 
-        private static void SendIntent(byte op, string defGuid, int index)
+        internal static void SendIntent(byte op, string defGuid, int index)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null) return;
