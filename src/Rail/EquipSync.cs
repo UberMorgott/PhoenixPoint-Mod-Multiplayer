@@ -30,15 +30,20 @@ namespace Multiplayer.Network.Sync
     /// field; UIInventoryList packs first-fit from list order), so that seam cannot tell a gesture from
     /// per-frame noise. Quarry: old mod's EquipGesturePatches used the same UI chokepoints.
     ///
-    /// CLIENT now: the UI gesture seams below (AttemptSlotSwap / side-button / reload / loadout
-    /// load-unload / scrap-off-doll) MARK a pending gesture; the native flush that follows (allowed
-    /// through ClientSimGate.ClientEquipFlushGate's gesture carve-out — local optimistic apply, cheap)
-    /// fires the postfix which sends ONE intent per gesture carrying the resulting three lists
-    /// (RailMeta EntityList codec, no second DTO). The host echo via the normal 0xAC rail is the
-    /// source of truth. Every OTHER edit-screen flush (per-frame UpdateState / ExitState /
-    /// soldier-cycle) is blocked on the client by that gate — stale UI content stomped mirrored
-    /// deltas within a frame and the rail never resent (RCA 2026-07-18). The gate is bool checks
-    /// only, never a per-frame encode (the old model-level gate's freeze).
+    /// EVERY PEER: the UI gesture seams below (AttemptSlotSwap / side-button / reload / loadout
+    /// load-unload / scrap-off-doll) MARK a pending LOCAL gesture, and <c>ClientSimGate.EquipFlushGate</c>
+    /// lets ONLY the flush that follows a mark reach the model — on host and client alike. Every OTHER
+    /// edit-screen flush (idle UpdateState / ExitState / soldier-cycle) is blocked: stale widget content
+    /// stomped mirrored deltas on the client within a frame, and on the host it REVERTED an applied
+    /// remote intent one frame later, before the 0.5 s diff tick could see it, so the change never
+    /// reached any peer (RCA 2026-07-18). The gate is bool checks only, never a per-frame encode (the
+    /// old model-level gate's freeze).
+    /// CLIENT additionally: the admitted flush fires the SetItems postfix, which sends ONE intent per
+    /// gesture carrying the resulting three lists (RailMeta EntityList codec, no second DTO) — a local
+    /// optimistic apply whose host echo via the normal 0xAC rail is the source of truth.
+    /// HOST additionally: nothing is sent — the admitted flush IS the authoritative write and rides the
+    /// normal diff. UpdateStorage is admitted on the HOST only (the host's own drag must move storage);
+    /// on the client storage stays blocked even during a gesture — the host derives it from the intent.
     ///
     /// HOST (unchanged): dedup (shared ManufactureSync.Intents) → resolve character by the rail's stable
     /// key (IdentityResolver "U#&lt;charId&gt;") → decode lists → validate that every item the loadout
@@ -51,23 +56,50 @@ namespace Multiplayer.Network.Sync
     {
         private static readonly string[] ListFieldNames = { "_armourItems", "_equipmentItems", "_inventoryItems" };
 
-        // ─── CLIENT state: one pending flag, set per user gesture ──────────
+        // ─── EVERY PEER: one pending flag, set per LOCAL user gesture ──────
         private static bool _gesturePending;
+        private static int _flushFrame = -1;  // first frame EquipFlushGate admitted a flush for this gesture
         private static string _gestureSource; // for the per-gesture [MP][equip] log line
 
         // ─── HOST state: last committed loadout per character (the revert guard, see CheckLastApplyStuck) ─
         private static readonly Dictionary<int, byte[]> _appliedBefore = new Dictionary<int, byte[]>();
         private static readonly Dictionary<int, byte[]> _appliedAfter = new Dictionary<int, byte[]>();
 
-        /// <summary>Read by ClientSimGate.ClientEquipFlushGate: the one native flush that follows a
-        /// marked gesture passes the gate so <see cref="SetItemsGestureSendPatch"/> can send the intent.</summary>
-        internal static bool GesturePending => _gesturePending;
+        /// <summary>Read by <c>ClientSimGate.EquipFlushGate</c>: the native flush GROUP that follows a
+        /// marked gesture passes the gate. The window is FRAME-scoped, not per-method, because the native
+        /// flush always comes in a pair inside ONE frame and the order differs per call site —
+        /// UpdateState :470 equip → :474 storage, but ExitState :225 storage → :226 equip, and
+        /// ItemScrappedHandler :640 equip → :644 storage. Consuming on either method would starve the
+        /// other half of the same gesture (on the HOST that means a silently lost item move). So: the
+        /// flag stays pending — however many frames it takes the screen to flush — until the END of the
+        /// first frame in which the gate actually admitted something.
+        /// The CLIENT additionally consumes it earlier, in <see cref="SetItemsGestureSendPatch"/>, so a
+        /// gesture yields exactly ONE intent.
+        /// ponytail: a gesture that never produces a flush at all (screen torn down first) leaves the
+        /// flag set, so ONE later flush group is admitted; bounded and self-expiring — add an explicit
+        /// screen-exit clear only if that ever shows up in a log.</summary>
+        internal static bool GesturePending
+        {
+            get
+            {
+                if (!_gesturePending) return false;
+                if (_flushFrame >= 0 && Time.frameCount != _flushFrame) { _gesturePending = false; return false; }
+                return true;
+            }
+        }
+
+        /// <summary>Called by the gate when it admits a flush — starts the one-frame group window.</summary>
+        internal static void NoteFlushAdmitted()
+        {
+            if (_flushFrame < 0) _flushFrame = Time.frameCount;
+        }
 
         public static void Reset() => ResetForReloadBoundary();
 
         public static void ResetForReloadBoundary()
         {
             _gesturePending = false;
+            _flushFrame = -1;
             _gestureSource = null;
             _appliedBefore.Clear();
             _appliedAfter.Clear();
@@ -84,18 +116,23 @@ namespace Multiplayer.Network.Sync
 
         // ─── CLIENT: gesture seams (law 4a) — mark, then send on the next native flush ─
 
-        /// <summary>A user equip gesture completed on this client. The next native GeoCharacter.SetItems
-        /// flush (per-frame on the open equip screens, so within a frame) carries the committed result and
-        /// <see cref="SetItemsGestureSendPatch"/> turns it into ONE intent. Marking instead of sending here
-        /// keeps one mechanism for BOTH equip screens (UIStateEditVehicle maps its lists into SetItems
-        /// differently) and reads the exact model-committed lists, not a hand-rebuilt copy.</summary>
+        /// <summary>A user equip gesture completed on THIS peer — host or client. The native flush that
+        /// follows (per-frame on the open equip screens, so within a frame) is the gesture's commit, and
+        /// is the ONLY flush <c>ClientSimGate.EquipFlushGate</c> lets through on either peer.
+        /// CLIENT: that flush also carries the committed result into <see cref="SetItemsGestureSendPatch"/>,
+        /// which turns it into ONE intent. Marking instead of sending here keeps one mechanism for BOTH
+        /// equip screens (UIStateEditVehicle maps its lists into SetItems differently) and reads the exact
+        /// model-committed lists, not a hand-rebuilt copy.
+        /// HOST: nothing is sent — the flush IS the authoritative write, and the result rides the normal
+        /// 0xAC diff. The mark exists purely so the gate can tell that commit from an idle stale flush.</summary>
         internal static void MarkGesture(string source)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+            if (engine == null || !engine.IsActiveSession) return; // solo: gate is inert, nothing to mark
             if (SyncApplyScope.Active) return; // apply-driven UI churn is not a user gesture (law 8)
             if (GeoLevel() == null) return;    // tactical UIStateInventory shares these widgets — geoscape only
             _gesturePending = true;
+            _flushFrame = -1;
             _gestureSource = source;
         }
 
@@ -125,7 +162,14 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Loadout-preset load (both button routes call LoadLoadout(GeoCharacter)), unequip-all
         /// (UnloadLoadout() button entry), and scrap-off-the-doll (ItemScrappedHandler removes the item from
-        /// the soldier/vehicle lists; its wallet+storage half already rides OpScrap via ScrapItemCapturePatch).</summary>
+        /// the soldier/vehicle lists; its wallet+storage half already rides OpScrap via ScrapItemCapturePatch).
+        /// PREFIX, not postfix: these four run their OWN flushes INLINE (UIStateEditSoldier:640 equip /:644
+        /// storage, UIStateEditVehicle:191/:196), so a mark placed after the body arrives too late and the
+        /// gate would block the gesture's own commit. UIStateEditVehicle.ItemScrappedHandler is the case
+        /// that bites: scrapping a STORAGE item never sets _uiRefreshNeeded (:193 is inside the equip-slot
+        /// branch), so its inline UpdateStorage(:196) is the ONLY thing that ever commits the magazines
+        /// unloaded into the widget list at :180. Marking first also matches the other seams' semantics —
+        /// the flush belongs to the gesture whether it runs inline or one frame later.</summary>
         [HarmonyPatch]
         internal static class LoadoutButtonsGesturePatch
         {
@@ -137,7 +181,7 @@ namespace Multiplayer.Network.Sync
                 yield return AccessTools.Method(typeof(UIStateEditVehicle), "ItemScrappedHandler");
             }
 
-            private static void Postfix() => MarkGesture("loadout-button");
+            private static void Prefix() => MarkGesture("loadout-button");
         }
 
         /// <summary>The send point: first native SetItems flush after a marked gesture (the equip screens
@@ -151,7 +195,10 @@ namespace Multiplayer.Network.Sync
             {
                 if (!_gesturePending || SyncApplyScope.Active) return;
                 var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost) { _gesturePending = false; return; }
+                if (engine == null || !engine.IsActiveSession) { _gesturePending = false; return; }
+                // HOST: leave the flag alone — the SAME flush still has its storage half to run
+                // (UpdateState :470 equip → :474 storage). The frame window in GesturePending expires it.
+                if (engine.IsHost) return;
                 _gesturePending = false;
                 try { SendLoadoutIntent(engine, __instance, freeReload); }
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT gesture send failed: " + ex.Message); }
@@ -427,17 +474,19 @@ namespace Multiplayer.Network.Sync
         /// a remote intent mutates the model behind the back of THIS peer's open equip screen, whose widget
         /// lists still hold the PRE-intent loadout. <c>UIStateEditSoldier.UpdateState</c> re-flushes those
         /// stale lists into the model on the NEXT FRAME (<c>UpdateSoldierEquipment</c> → SetItems,
-        /// <c>UpdateStorage</c> → storage) — gated on the client by ClientEquipFlushGate, UNGATED on the
-        /// host. The revert landed ~16 ms after the apply, i.e. long before the rail's 0.5 s tick, so the
+        /// <c>UpdateStorage</c> → storage) — at the time gated by EquipFlushGate on the client only,
+        /// UNGATED on the host. The revert landed ~16 ms after the apply, i.e. long before the rail's 0.5 s tick, so the
         /// DiffEngine correctly saw NO net change (changed=0, no 0xAC packet) and the removal never left
         /// the host. Reseeding model→UI synchronously here — same call as the mutation, before any
         /// UpdateState can run — makes that next native flush write the NEW content instead of the old.
         /// Reuses the EXISTING universal repaint seam (OpenUiRepaint, already host-safe: it routes
         /// UIStateEditSoldier to the read-direction reseed and defers on a local drag); this adds the
         /// missing CALLER (host intent-apply), not a second equip-specific repaint path.
-        /// ponytail: the permanent generic home is the host arm of ClientEquipFlushGate (block every
-        /// stale view→model flush on every peer, not just the client) or one shared post-apply hook in
-        /// ManufactureSync.HandleIntent covering scrap/manufacture too — both outside this change's scope.</summary>
+        /// KEPT as belt-and-braces: EquipFlushGate now blocks the stale host flush outright, which makes
+        /// this reseed redundant for CORRECTNESS but not for FRESHNESS — the gate stops the screen
+        /// writing back, it does not make the screen show the new loadout. The reseed is what repaints
+        /// it (law 11). ponytail: the remaining generalization is one shared post-apply reseed hook in
+        /// ManufactureSync.HandleIntent so scrap/manufacture intents repaint too — out of scope here.</summary>
         private static void ReseedLocalScreenAfterRemoteMutation()
         {
             try { OpenUiRepaint.RepaintOpenGeoscapeScreen(); }
