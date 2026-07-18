@@ -63,6 +63,11 @@ namespace Multiplayer.Network.Sync
         private static bool _reportWritten;
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
+        // Membership of every keyed EntityCollection, "<ownerPath>.<Field>" → sorted element keys joined.
+        // Per-element descend carries element VALUES only; birth/death of an element lives here.
+        private static Dictionary<string, string> _collSig = new Dictionary<string, string>(StringComparer.Ordinal);
+        private static Dictionary<string, string> _collSigNext = new Dictionary<string, string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _loud = new HashSet<string>(StringComparer.Ordinal);
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
@@ -79,6 +84,7 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
+            _collSig = new Dictionary<string, string>(StringComparer.Ordinal);
             _sentKinds.Clear();
             _baselined = false;
             _forceFull = false;
@@ -116,6 +122,7 @@ namespace Multiplayer.Network.Sync
         {
             var sw = Stopwatch.StartNew();
             _entityCounts.Clear();
+            _collSigNext = new Dictionary<string, string>(_collSig.Count + 16, StringComparer.Ordinal);
             var ordered = new List<Entry>(_snapshot.Count + 64);
             var index = new Dictionary<string, int>(_snapshot.Count + 64, StringComparer.Ordinal);
             var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
@@ -123,6 +130,7 @@ namespace Multiplayer.Network.Sync
             foreach (var root in IdentityResolver.Roots(geo))
                 VisitEntity(root.Key, root.Value, visited, ordered, index, 0);
             long walkMs = sw.ElapsedMilliseconds;
+            _collSig = _collSigNext; // rebuilt every walk — vanished owner paths prune themselves
 
             // Diff: changed/new pairs in walk order (canonical), then subKey deletions.
             var changed = new List<Entry>();
@@ -272,8 +280,13 @@ namespace Multiplayer.Network.Sync
                             if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
-                        if (!keyless && elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
-                            keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        if (!keyless)
+                        {
+                            elems.Sort((a, b) => string.CompareOrdinal(a.key, b.key)); // canonical (law 6)
+                            for (int d = 1; d < elems.Count && !keyless; d++)
+                                if (string.Equals(elems[d - 1].key, elems[d].key, StringComparison.Ordinal))
+                                    keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        }
                         if (keyless)
                         {
                             // Per-instance fallback: this list cannot be element-addressed right now →
@@ -283,7 +296,32 @@ namespace Multiplayer.Network.Sync
                             AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
                             break;
                         }
-                        foreach (var (key, e) in elems.OrderBy(e => e.key, StringComparer.Ordinal))
+                        // MEMBERSHIP (the generic gap per-element descend cannot express): a newly born element's
+                        // entries land on a path the client cannot resolve (a value apply never creates identity)
+                        // and a vanished one leaves no tombstone — both silently lost. Compare the element-key set
+                        // against the previous walk; on any birth/death ride the WHOLE list as one blob for that
+                        // tick — the same mechanism the keyless branch above already uses — so the client rebuilds
+                        // the collection wholesale. Steady state (set unchanged) emits nothing extra.
+                        var sigKey = path + "." + f.Name;
+                        // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
+                        var sig = string.Join("\u0002", elems.Select(e => e.key));
+                        _collSigNext[sigKey] = sig;
+                        if (_forceFull || (_collSig.TryGetValue(sigKey, out var prevSig) && prevSig != sig))
+                        {
+                            if (IdentityResolver.IsRootEntityType(f.ElemType))
+                                LoudOnce(rt.Type.Name + "." + f.Name + ": keyed ROOT-entity membership changed at " +
+                                         path + " — identity create/destroy belongs to the structural layer (law 3); " +
+                                         "the value rail cannot carry it and the client will stay stale");
+                            else
+                                // ponytail: the client rebuilds the WHOLE collection from the blob, so surviving
+                                // elements become fresh instances — fine for plain data (storages, modules,
+                                // objectives), and it only fires on an actual birth/death. If a collection whose
+                                // elements carry live Unity views or backrefs (facilities, haven zones) ever shows
+                                // breakage here, that collection graduates to a hand-written structural applier
+                                // (law 3) — the blob codec already refuses Unity objects loudly.
+                                AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count);
+                        }
+                        foreach (var (key, e) in elems)
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
                         break;
                     }
@@ -292,13 +330,32 @@ namespace Multiplayer.Network.Sync
         }
 
         private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
-                                               object val, List<Entry> ordered, Dictionary<string, int> index)
+                                               object val, List<Entry> ordered, Dictionary<string, int> index,
+                                               int liveCount = -1)
         {
             byte[] enc;
             try { enc = RailMeta.EncodeEntityList(f, val); }
             catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
             Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
+            // Membership self-check (the birth/death gate): this blob is the ONLY carrier of a collection's
+            // element set, so an element the codec drops is a key that silently never reaches the client —
+            // exactly the class of bug this path exists to fix. Two bytes off the wire, no decode needed.
+            if (liveCount >= 0)
+            {
+                int wireCount = enc.Length >= 4 && enc[1] == 1 ? enc[2] | (enc[3] << 8) : 0;
+                if (wireCount != liveCount)
+                    LoudOnce(rt.Type.Name + "." + f.Name + " at " + path + ": membership blob carries " + wireCount +
+                             " of " + liveCount + " live elements — births/removals of this collection WILL desync");
+            }
             SelfCheckEntityList(rt.Type, f, enc);
+        }
+
+        /// <summary>One-shot LOUD error: a change the rail detected but cannot carry. Never a warning —
+        /// this class of gap has already cost several silent test cycles.</summary>
+        private static void LoudOnce(string msg)
+        {
+            if (_loud.Count < 200 && _loud.Add(msg))
+                Debug.LogError("[Multiplayer][rail] DiffEngine: " + msg);
         }
 
         /// <summary>Encode→decode→re-encode round-trip check on the host's own graph: byte-identical
