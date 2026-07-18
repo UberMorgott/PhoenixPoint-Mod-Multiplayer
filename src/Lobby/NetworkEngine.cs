@@ -454,7 +454,9 @@ namespace Multiplayer.Network
                 case TransportType.DirectIP:
                     hint = "Check the address and that the HOST forwarded TCP 14242 to their PC "
                          + "(you, the client, need no port-forwarding). ConnectionRefused = wrong port / host "
-                         + "not hosting; TimedOut = firewall or port not forwarded.";
+                         + "not hosting; TimedOut = firewall or port not forwarded. If the host cannot forward "
+                         + "the port at all (carrier-grade NAT), no direct link is possible — use a LAN/VPN "
+                         + "tunnel (e.g. Radmin, ZeroTier) or the Steam version.";
                     break;
                 case TransportType.SteamP2P:
                     hint = "The Steam P2P link to the host could not be established. Make sure both players "
