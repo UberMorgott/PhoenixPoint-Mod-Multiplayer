@@ -55,6 +55,10 @@ namespace Multiplayer.Network.Sync
         private static bool _gesturePending;
         private static string _gestureSource; // for the per-gesture [MP][equip] log line
 
+        // ─── HOST state: last committed loadout per character (the revert guard, see CheckLastApplyStuck) ─
+        private static readonly Dictionary<int, byte[]> _appliedBefore = new Dictionary<int, byte[]>();
+        private static readonly Dictionary<int, byte[]> _appliedAfter = new Dictionary<int, byte[]>();
+
         /// <summary>Read by ClientSimGate.ClientEquipFlushGate: the one native flush that follows a
         /// marked gesture passes the gate so <see cref="SetItemsGestureSendPatch"/> can send the intent.</summary>
         internal static bool GesturePending => _gesturePending;
@@ -65,6 +69,8 @@ namespace Multiplayer.Network.Sync
         {
             _gesturePending = false;
             _gestureSource = null;
+            _appliedBefore.Clear();
+            _appliedAfter.Clear();
         }
 
         private static GeoLevelController GeoLevel()
@@ -323,7 +329,10 @@ namespace Multiplayer.Network.Sync
                     { Reject(senderPeerId, charId, "storage lacks " + kv.Key.name + " need=" + kv.Value + " have=" + have); return; }
                 }
 
+                CheckLastApplyStuck(character, charId);
+
                 // Apply natively; then the DERIVED storage side-effects.
+                _appliedBefore[charId] = EncodeBody(false, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
                 character.SetItems(newLists[0], newLists[1], newLists[2], freeReload);
                 int took = 0, returned = 0;
                 foreach (var kv in delta)
@@ -348,6 +357,8 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
                 Debug.Log("[MP][equip] HOST intent APPLIED char=U#" + charId + " nonce=" + nonce +
                           " peer=" + senderPeerId + " took=" + took + " returned=" + returned + " freeReload=" + freeReload);
+                _appliedAfter[charId] = EncodeBody(false, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
+                ReseedLocalScreenAfterRemoteMutation();
                 // No push needed: GeoCharacter EntityList fields + storage GeoItemDict ride DiffEngine 0xAC.
             }
             catch (Exception ex)
@@ -407,7 +418,51 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
             Debug.Log("[MP][equip] HOST augment APPLIED char=U#" + charId + " def=" + defGuid +
                       " nonce=" + nonce + " peer=" + senderPeerId);
+            _appliedAfter[charId] = EncodeBody(false, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
+            ReseedLocalScreenAfterRemoteMutation(); // same stale-flush hazard as OpSetItems
             return true;
+        }
+
+        /// <summary>THE FIX (RCA 2026-07-18, host Player.log frames 12189→12190 / 12242→12243 / 12295→12296):
+        /// a remote intent mutates the model behind the back of THIS peer's open equip screen, whose widget
+        /// lists still hold the PRE-intent loadout. <c>UIStateEditSoldier.UpdateState</c> re-flushes those
+        /// stale lists into the model on the NEXT FRAME (<c>UpdateSoldierEquipment</c> → SetItems,
+        /// <c>UpdateStorage</c> → storage) — gated on the client by ClientEquipFlushGate, UNGATED on the
+        /// host. The revert landed ~16 ms after the apply, i.e. long before the rail's 0.5 s tick, so the
+        /// DiffEngine correctly saw NO net change (changed=0, no 0xAC packet) and the removal never left
+        /// the host. Reseeding model→UI synchronously here — same call as the mutation, before any
+        /// UpdateState can run — makes that next native flush write the NEW content instead of the old.
+        /// Reuses the EXISTING universal repaint seam (OpenUiRepaint, already host-safe: it routes
+        /// UIStateEditSoldier to the read-direction reseed and defers on a local drag); this adds the
+        /// missing CALLER (host intent-apply), not a second equip-specific repaint path.
+        /// ponytail: the permanent generic home is the host arm of ClientEquipFlushGate (block every
+        /// stale view→model flush on every peer, not just the client) or one shared post-apply hook in
+        /// ManufactureSync.HandleIntent covering scrap/manufacture too — both outside this change's scope.</summary>
+        private static void ReseedLocalScreenAfterRemoteMutation()
+        {
+            try { OpenUiRepaint.RepaintOpenGeoscapeScreen(); }
+            catch (Exception ex) { Debug.LogWarning("[MP][equip] HOST post-apply reseed failed: " + ex.Message); }
+        }
+
+        /// <summary>THE GUARD for the bug above — a silent revert is what cost a whole test cycle (the only
+        /// symptom was `returned` creeping 5→6→7 while the rail reported changed=0). Before applying the
+        /// next intent for a character, re-encode its live loadout and compare against what this host
+        /// committed last time. Only the UNAMBIGUOUS signature screams: the live loadout is byte-identical
+        /// to the PRE-intent content, i.e. the apply was REVERTED wholesale by a stale view→model flush.
+        /// A merely different loadout is NOT flagged — a host-local edit between two remote intents is
+        /// legitimate co-op traffic, and a guard that cries wolf gets ignored.
+        /// Cost: one canonical encode per intent (user-gesture rate) — never per tick, never per frame.</summary>
+        private static void CheckLastApplyStuck(GeoCharacter character, int charId)
+        {
+            if (!_appliedAfter.TryGetValue(charId, out var after) || after == null) return;
+            if (!_appliedBefore.TryGetValue(charId, out var before) || before == null) return;
+            if (RailMeta.BytesEqual(before, after)) return; // that intent was a no-op — nothing to revert
+            var now = EncodeBody(false, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
+            if (now == null || !RailMeta.BytesEqual(now, before)) return;
+            Debug.LogError("[MP][equip] HOST previous apply was REVERTED for char=U#" + charId +
+                           " — the live loadout is back to its PRE-intent content, so a stale view→model flush " +
+                           "(open-screen UpdateState) undid it. The rail can only emit what the host still holds: " +
+                           "removals will silently never reach any peer.");
         }
 
         private static void Bump(Dictionary<ItemDef, int> map, GeoItem g, int sign)
