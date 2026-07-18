@@ -81,6 +81,14 @@ namespace Multiplayer.Network.Sync
             if (Fi != null) return !Fi.IsInitOnly;
             return Pi != null && Pi.GetSetMethod(true) != null;
         }
+
+        /// <summary>Can <see cref="RailMeta.ApplyList"/> legally REBUILD this container on the client?
+        /// An array is the one shape whose length cannot change in place, so rebuilding it means assigning
+        /// a fresh instance — impossible on a read-only member, and the exact case that made ApplyList
+        /// throw "no list apply strategy" (GeoPhoenixFacility._components is a readonly array). Every other
+        /// shape is rebuilt in place through IList / ICollection&lt;T&gt;, which a get-only member exposes
+        /// perfectly well. Mirrors the array branch's own condition in ApplyList.</summary>
+        internal bool CanRebuildContainer() => !ValueType.IsArray || IsWritable();
     }
 
     public sealed class RailType

@@ -297,6 +297,11 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.EntityList:
                         // Keyless-element list: the WHOLE list is one canonical value blob (order inside
                         // the payload — law 2 forbids element indices in the path, so no key is needed).
+                        // The blob is this field's ONLY carrier, so a container the client cannot rebuild
+                        // makes the whole field undeliverable — say so once instead of shipping bytes that
+                        // are guaranteed to throw on apply.
+                        if (!f.CanRebuildContainer())
+                        { Incident(rt.Type, f.Name, "read-only array — the client cannot rebuild it (no in-place length change)", path); break; }
                         AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
                         break;
                     case FieldClass.EntityCollection:
@@ -335,6 +340,8 @@ namespace Multiplayer.Network.Sync
                             // ride it as ONE EntityList blob instead of aborting the field.
                             if (IdentityResolver.IsRootEntityType(f.ElemType))
                             { Incident(rt.Type, f.Name, "unkeyable ROOT-entity list — identity creation is structural (law 3)", path); break; }
+                            if (!f.CanRebuildContainer())
+                            { Incident(rt.Type, f.Name, "read-only array — the client cannot rebuild it (no in-place length change)", path); break; }
                             AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
                             break;
                         }
@@ -348,13 +355,24 @@ namespace Multiplayer.Network.Sync
                         // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
                         var sig = string.Join("\u0002", liveKeys ?? elems.Select(e => e.key).ToList());
                         _collSigNext[sigKey] = sig;
+                        // Can this collection's whole-list REBUILD blob ever land on the client? Two shapes
+                        // where it cannot: ROOT entities (rebuilding is identity create/destroy = structural,
+                        // law 3) and a read-only ARRAY (length cannot change in place and the member cannot be
+                        // reassigned — GeoPhoenixFacility._components). Per-element descend below is unaffected
+                        // and keeps syncing every element's fields; only the wholesale rebuild is off.
                         bool isRootColl = IdentityResolver.IsRootEntityType(f.ElemType);
+                        bool canRebuild = !isRootColl && f.CanRebuildContainer();
                         if (_forceFull || (_collSig.TryGetValue(sigKey, out var prevSig) && prevSig != sig))
                         {
                             if (isRootColl)
                                 LoudOnce(rt.Type.Name + "." + f.Name + ": keyed ROOT-entity membership changed at " +
                                          path + " — identity create/destroy belongs to the structural layer (law 3); " +
                                          "the value rail cannot carry it and the client will stay stale");
+                            else if (!canRebuild)
+                                LoudOnce(rt.Type.Name + "." + f.Name + " at " + path + ": membership changed but the " +
+                                         "container is a READ-ONLY ARRAY — the client cannot rebuild it, so element " +
+                                         "births/deaths of this collection cannot be carried (per-element field " +
+                                         "sync still works). Needs a structural applier if it ever changes in play.");
                             else
                             {
                                 // ponytail: the client rebuilds the WHOLE collection from the blob, so surviving
@@ -376,7 +394,7 @@ namespace Multiplayer.Network.Sync
                         // elements are ROOT entities the value rail is forbidden to rebuild — the statement
                         // asserts a state the client has no path to reach, and it drives an endless
                         // resync→full-resend storm. Stay silent instead: an unstated field is simply not swept.
-                        if (!isRootColl && !_unshippable.Contains(sigKey))
+                        if (canRebuild && !_unshippable.Contains(sigKey))
                             AddMembership(rt, f, (ushort)i, kindId, path,
                                           elems.Select(e => RailMeta.KeyHash(e.key)).ToList(), ordered, index);
                         foreach (var (key, e) in elems)
