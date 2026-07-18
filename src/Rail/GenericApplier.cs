@@ -247,7 +247,7 @@ namespace Multiplayer.Network.Sync
                         RailMeta.ApplyList(entity, field, blobItems);
                         // TEMP [MP][inv] diag — strip once slot sync is confirmed. Ordered blob = the
                         // carrier of element POSITION; this line is the client half of the host SHIP line.
-                        if (!field.Unordered)
+                        if (MpDiag.On && !field.Unordered)
                             Debug.Log("[MP][inv] client APPLY ordered blob " + path + "." + field.Name +
                                       " n=" + (blobItems == null ? -1 : blobItems.Count));
                         break;
@@ -268,7 +268,8 @@ namespace Multiplayer.Network.Sync
                         var giv = GeoItemCodec.Decode(value, def);
                         dict[def] = giv;
                         // [mfgdiag] boundary: mirrored client count per def (real-loss vs visual proof; remove after diag).
-                        Debug.Log("[Multiplayer][mfgdiag] CLIENT storage def=" + subKey + " -> clientMirrorCount=" + giv.CommonItemData.Count);
+                        if (MpDiag.On)
+                            Debug.Log("[Multiplayer][mfgdiag] CLIENT storage def=" + subKey + " -> clientMirrorCount=" + giv.CommonItemData.Count);
                         break;
                     }
                     default:

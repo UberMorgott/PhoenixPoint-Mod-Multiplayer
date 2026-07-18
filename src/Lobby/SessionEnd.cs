@@ -82,8 +82,9 @@ namespace Multiplayer.Network
         public static void Begin(string notice)
         {
             _endedOn = GameUtl.CurrentLevel();
-            Debug.Log("[MP][sessionend] begin — " + (notice ?? "caller already notified") +
-                      " (level=" + (_endedOn == null ? "none" : _endedOn.name) + ")");
+            if (MpDiag.On)
+                Debug.Log("[MP][sessionend] begin — " + (notice ?? "caller already notified") +
+                          " (level=" + (_endedOn == null ? "none" : _endedOn.name) + ")");
 
             QuiesceOpenUi();
             ShowNotice(notice);
@@ -120,14 +121,14 @@ namespace Multiplayer.Network
                 var view = level == null ? null : level.GetComponent<GameView>();
                 if (view == null)
                 {
-                    Debug.Log("[MP][sessionend] quiesce: no GameView on the current level — nothing open");
+                    if (MpDiag.On) Debug.Log("[MP][sessionend] quiesce: no GameView on the current level — nothing open");
                     return;
                 }
 
                 var stack = AccessTools.Field(view.GetType(), "_statesStack")?.GetValue(view);
                 if (stack == null)
                 {
-                    Debug.Log("[MP][sessionend] quiesce: " + view.GetType().Name + " has no live state stack");
+                    if (MpDiag.On) Debug.Log("[MP][sessionend] quiesce: " + view.GetType().Name + " has no live state stack");
                     return;
                 }
 
@@ -141,7 +142,7 @@ namespace Multiplayer.Network
                 // law 8: the native Exit/Pop this fires must not echo an intent back to the departing host.
                 using (SyncApplyScope.Enter())
                     clear.Invoke(stack, null);
-                Debug.Log("[MP][sessionend] quiesced " + view.GetType().Name + " state stack");
+                if (MpDiag.On) Debug.Log("[MP][sessionend] quiesced " + view.GetType().Name + " state stack");
             }
             catch (Exception e) { Debug.LogError("[MP][sessionend] quiesce failed: " + e); }
         }

@@ -381,7 +381,7 @@ namespace Multiplayer.Network.Sync
                                 // whose elements carry live Unity views or backrefs (facilities, haven zones) ever
                                 // shows breakage here, that collection graduates to a hand-written structural
                                 // applier (law 3) — the blob codec already refuses Unity objects loudly.
-                                if (liveKeys != null) // TEMP [MP][inv] diag — strip once slot sync is confirmed
+                                if (MpDiag.On && liveKeys != null) // TEMP [MP][inv] diag — strip once slot sync is confirmed
                                     Debug.Log("[MP][inv] host SHIP ordered blob " + sigKey + " n=" + elems.Count +
                                               " order=" + string.Join("|", liveKeys));
                                 if (!AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count))

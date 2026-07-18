@@ -305,10 +305,14 @@ namespace Multiplayer.Network.Sync
                     {
                         manufacture.ManufactureItem(item);
                         // [mfgdiag] boundary: resulting host storage count for this def (real-loss vs visual proof; remove after diag).
-                        var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
-                        int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
-                            ? gi.CommonItemData.Count : -1;
-                        Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
+                        // The whole block is behind the flag — the count is a storage lookup done ONLY for this line.
+                        if (MpDiag.On)
+                        {
+                            var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                            int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
+                                ? gi.CommonItemData.Count : -1;
+                            Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
+                        }
                     }
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (cannot manufacture " + defGuid + ") peer=" + senderPeerId);
                 }
@@ -327,7 +331,7 @@ namespace Multiplayer.Network.Sync
                     }
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrap REJECT (missing/insufficient " +
                                           defGuid + " need=" + index + ") peer=" + senderPeerId);
-                    Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
+                    if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
                 }
                 else if (op == OpScrapVehicle)
                 {
@@ -340,7 +344,7 @@ namespace Multiplayer.Network.Sync
                     }
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrapVehicle REJECT (missing " +
                                           defGuid + ") peer=" + senderPeerId);
-                    Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
+                    if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
                 }
                 else if (op == OpQuickProduce)
                 {
@@ -580,7 +584,7 @@ namespace Multiplayer.Network.Sync
                     int count = kv.Value?.CommonItemData?.Count ?? 0;
                     if (kv.Key == null || count <= 0) continue;
                     SendIntent(OpScrap, kv.Key.Guid, count);
-                    Debug.Log("[MP][scrap] sent Op=" + OpScrap + " def=" + kv.Key.Guid + " count=" + count);
+                    if (MpDiag.On) Debug.Log("[MP][scrap] sent Op=" + OpScrap + " def=" + kv.Key.Guid + " count=" + count);
                 }
                 var vehCart = VehicleScrapItemsField(__instance);
                 foreach (var ve in vehCart.Items)
@@ -588,7 +592,7 @@ namespace Multiplayer.Network.Sync
                     var def = ve?.EquipmentDef;
                     if (def == null) continue;
                     SendIntent(OpScrapVehicle, def.Guid, 0);
-                    Debug.Log("[MP][scrap] sent Op=" + OpScrapVehicle + " def=" + def.Guid + " count=1");
+                    if (MpDiag.On) Debug.Log("[MP][scrap] sent Op=" + OpScrapVehicle + " def=" + def.Guid + " count=1");
                 }
 
                 // Optimistic UI: empty the carts + disable the button + rebuild the scrap panel (mirrors native's

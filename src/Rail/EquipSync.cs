@@ -430,7 +430,7 @@ namespace Multiplayer.Network.Sync
                 if (def != null && ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction))
                 {
                     ManufactureSync.SendIntent(ManufactureSync.OpScrap, def.Guid, amount);
-                    Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
+                    if (MpDiag.On) Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
                 }
                 return false;
             }

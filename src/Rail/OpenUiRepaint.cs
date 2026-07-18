@@ -97,7 +97,7 @@ namespace Multiplayer.Network.Sync
                     current.Exit(stack);
                     current.Enter(stack);
                 }
-                Debug.Log("[MP][uirepaint] re-entered " + current.GetType().Name); // TEMP diag (remove with mfgdiag)
+                if (MpDiag.On) Debug.Log("[MP][uirepaint] re-entered " + current.GetType().Name); // TEMP diag (remove with mfgdiag)
             }
             catch (Exception ex)
             {
