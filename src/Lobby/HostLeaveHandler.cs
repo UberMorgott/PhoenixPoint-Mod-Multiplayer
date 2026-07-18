@@ -1,7 +1,3 @@
-using System;
-using Base.Core;
-using Base.UI.MessageBox;
-using PhoenixPoint.Common.Game;
 using UnityEngine;
 
 namespace Multiplayer.Network
@@ -101,69 +97,22 @@ namespace Multiplayer.Network
         }
 
         /// <summary>
-        /// Campaign-end DEGRADE teardown (notice shown first — CampaignEndFlow.ClientSteps ordering): the
-        /// native outro replay failed, so return to the Main Menu via the SAME native quit-to-menu
-        /// chokepoint <see cref="HandleHostLeft"/> uses. The existing FinishLevelAndGoToLobbyTearDownPatch
-        /// postfix auto-runs NetworkEngine.TearDown(); the defensive TearDown belt mirrors HandleHostLeft.
+        /// Campaign-end DEGRADE teardown: the native outro replay failed, so return to the Main Menu
+        /// through the same <see cref="SessionEnd"/> seam every other session end uses. No notice —
+        /// CampaignEndFlow.ClientSteps already showed one before degrading here.
         /// </summary>
-        public static void ReturnToMainMenuForCampaignEnd()
-        {
-            try
-            {
-                var game = GameUtl.GameComponent<PhoenixGame>();
-                game?.FinishLevelAndGoToLobby();
-            }
-            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end return-to-menu failed: " + e.Message); }
-            try { NetworkEngine.Instance?.TearDown(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end TearDown failed: " + e.Message); }
-            // Same Fix #5 remainder as HandleHostLeft: reset the UI lobby FSM + clear the chosen save so
-            // the next host/join never inherits a stale ClientLobby state. Null-safe.
-            try { Multiplayer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] campaign-end UI teardown failed: " + e.Message); }
-        }
+        public static void ReturnToMainMenuForCampaignEnd() => SessionEnd.Begin(null);
 
         // ONE handler for both triggers. Idempotent (one-shot latch): a graceful HostDisconnected packet
         // followed by the transport drop of the same host must return to the menu only once.
+        // FIX-2 (half-open): callers may pass a specific never-silent reason (e.g. heartbeat-ack timeout
+        // = dead send channel); the default is the generic host-ended-session notice.
         private static void HandleHostLeft(string reason = null)
         {
             if (!_latch.TryHandle()) return; // already handled this session
-            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu. " +
-                             (reason ?? SessionLifecycle.HostEndedSession));
-
-            // Session-fatal: a modal prompt is acceptable here (works tactical + geoscape + home).
-            // FIX-2 (half-open): callers may pass a specific never-silent reason (e.g. heartbeat-ack
-            // timeout = dead send channel); default is the generic host-ended-session notice.
-            try
-            {
-                var box = GameUtl.GetMessageBox();
-                box?.ShowSimplePrompt(
-                    reason ?? SessionLifecycle.HostEndedSession,
-                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
-                    null, null);
-            }
-            catch (Exception e) { Debug.LogError("[Multiplayer] F3 prompt failed: " + e.Message); }
-
-            // Force the client back to the Main Menu via the native quit-to-menu chokepoint. The
-            // existing FinishLevelAndGoToLobbyTearDownPatch postfix auto-runs NetworkEngine.TearDown().
-            try
-            {
-                var game = GameUtl.GameComponent<PhoenixGame>();
-                game?.FinishLevelAndGoToLobby();
-            }
-            catch (Exception e) { Debug.LogError("[Multiplayer] F3 return-to-menu failed: " + e.Message); }
-
-            // Defense-in-depth: ensure the network session is torn down even if the native return path
-            // did not (e.g. called outside a level). TearDown is idempotent + safe to call twice.
-            try { NetworkEngine.Instance?.TearDown(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] F3 TearDown failed: " + e.Message); }
-
-            // Fix #5 (host-left remainder): the network TearDown above does NOT reset the UI lobby FSM
-            // or clear the chosen save, so without this the next host/join would inherit a stale
-            // ClientLobby/Starting state + a phantom _pendingChosenSave (the same bug LEAVE/cancel/
-            // OnConnectionFailed already guard via TeardownLobbyState). Route the host-left trigger
-            // through the same single hook. Null-safe (no MultiplayerUI in a headless/edge teardown).
-            try { Multiplayer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] F3 UI teardown failed: " + e.Message); }
+            var notice = reason ?? SessionLifecycle.HostEndedSession;
+            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu. " + notice);
+            SessionEnd.Begin(notice);
         }
     }
 }
