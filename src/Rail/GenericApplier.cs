@@ -233,7 +233,13 @@ namespace Multiplayer.Network.Sync
                         // EntityCollection descend itself never carries values — a valued entry here is
                         // always an EntityList blob (whole list, order inside the payload, law 2).
                         if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
-                        RailMeta.ApplyList(entity, field, RailMeta.DecodeEntityList(value, field, geo));
+                        var blobItems = RailMeta.DecodeEntityList(value, field, geo);
+                        RailMeta.ApplyList(entity, field, blobItems);
+                        // TEMP [MP][inv] diag — strip once slot sync is confirmed. Ordered blob = the
+                        // carrier of element POSITION; this line is the client half of the host SHIP line.
+                        if (!field.Unordered)
+                            Debug.Log("[MP][inv] client APPLY ordered blob " + path + "." + field.Name +
+                                      " n=" + (blobItems == null ? -1 : blobItems.Count));
                         break;
                     }
                     case FieldClass.GeoItemDict:

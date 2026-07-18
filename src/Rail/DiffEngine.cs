@@ -302,8 +302,19 @@ namespace Multiplayer.Network.Sync
                             if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
+                        // ORDER IS STATE when the container is ordered (List<T>/T[]): the game reads element
+                        // POSITION as meaning, but a keyed collection is addressed as a SET — so a pure
+                        // reorder changes no element value and no key set, and this walk would emit NOTHING.
+                        // That is the generic gap behind "inventory counts sync but slots don't": list order
+                        // IS the equip-screen slot placement (UIInventoryList.ItemChangedHandler:855 inserts
+                        // the item at Slots.IndexOf(slot); UpdateList:597 re-packs first-fit from list order),
+                        // and GeoItem became key-addressed the moment the unique-BaseDef key probe landed.
+                        // Capture the live sequence BEFORE the canonical sort and sign THAT, so the
+                        // birth/death gate below also fires on a reorder and ships the whole ordered blob.
+                        List<string> liveKeys = null;
                         if (!keyless)
                         {
+                            if (!f.Unordered) liveKeys = elems.Select(e => e.key).ToList();
                             elems.Sort((a, b) => string.CompareOrdinal(a.key, b.key)); // canonical (law 6)
                             for (int d = 1; d < elems.Count && !keyless; d++)
                                 if (string.Equals(elems[d - 1].key, elems[d].key, StringComparison.Ordinal))
@@ -326,7 +337,7 @@ namespace Multiplayer.Network.Sync
                         // the collection wholesale. Steady state (set unchanged) emits nothing extra.
                         var sigKey = path + "." + f.Name;
                         // "\u0002" separator: keys never contain control chars, so "ab"+"c" cannot alias "a"+"bc".
-                        var sig = string.Join("\u0002", elems.Select(e => e.key));
+                        var sig = string.Join("\u0002", liveKeys ?? elems.Select(e => e.key).ToList());
                         _collSigNext[sigKey] = sig;
                         // Same statement for keyed entity collections. _collSig below still decides when to
                         // ship the whole-list REBUILD blob (a HOST-side birth/death); this states the key set
@@ -340,13 +351,18 @@ namespace Multiplayer.Network.Sync
                                          path + " — identity create/destroy belongs to the structural layer (law 3); " +
                                          "the value rail cannot carry it and the client will stay stale");
                             else
+                            {
                                 // ponytail: the client rebuilds the WHOLE collection from the blob, so surviving
                                 // elements become fresh instances — fine for plain data (storages, modules,
-                                // objectives), and it only fires on an actual birth/death. If a collection whose
-                                // elements carry live Unity views or backrefs (facilities, haven zones) ever shows
-                                // breakage here, that collection graduates to a hand-written structural applier
-                                // (law 3) — the blob codec already refuses Unity objects loudly.
+                                // objectives), and it only fires on an actual birth/death/reorder. If a collection
+                                // whose elements carry live Unity views or backrefs (facilities, haven zones) ever
+                                // shows breakage here, that collection graduates to a hand-written structural
+                                // applier (law 3) — the blob codec already refuses Unity objects loudly.
+                                if (liveKeys != null) // TEMP [MP][inv] diag — strip once slot sync is confirmed
+                                    Debug.Log("[MP][inv] host SHIP ordered blob " + sigKey + " n=" + elems.Count +
+                                              " order=" + string.Join("|", liveKeys));
                                 AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index, elems.Count);
+                            }
                         }
                         foreach (var (key, e) in elems)
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);

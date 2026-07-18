@@ -191,12 +191,18 @@ namespace Multiplayer.Network.Sync
                 }
                 if (elem.IsClass && RailMeta.HasPersistentMembers(elem))
                 {
-                    // Keyable element type → per-element descend at path.Name#key. Keyless (GeoItem,
-                    // AbilityTrack…) → the whole list is ONE canonical value blob (EntityList); the walk
-                    // additionally falls back per instance when a keyable-looking list turns out
-                    // unkeyable/duplicate at runtime (DiffEngine.EntityCollection case).
+                    // Keyable element type → per-element descend at path.Name#key. Keyless (AbilityTrack…)
+                    // → the whole list is ONE canonical value blob (EntityList); the walk additionally
+                    // falls back per instance when a keyable-looking list turns out unkeyable/duplicate at
+                    // runtime (DiffEngine.EntityCollection case).
                     f.ElemType = elem;
                     f.Class = RailMeta.TypeKeyable(elem) ? FieldClass.EntityCollection : FieldClass.EntityList;
+                    // ORDERED container → element POSITION is state that the keyed (set-addressed) descend
+                    // cannot express; DiffEngine signs the LIVE sequence so a pure reorder still ships the
+                    // whole ordered blob. Only List<T>/T[] qualify — any other container's iteration order
+                    // may be nondeterministic, which would churn the blob every walk and break law 6.
+                    f.Unordered = !(valType.IsArray ||
+                                    (valType.IsGenericType && valType.GetGenericTypeDefinition() == typeof(List<>)));
                     return f;
                 }
                 f.Class = FieldClass.Excluded; f.Exclude = "collection of un-keyable/unsupported " + elem.Name;
