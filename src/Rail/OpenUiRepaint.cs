@@ -73,10 +73,10 @@ namespace Multiplayer.Network.Sync
             if (current == null) return;
             if (current is UIStateManufacturing) return; // opt-out: bare Exit+Enter drops its _filter
             // Exit+Enter is FORBIDDEN here on EVERY peer, not just the client: this repaint also runs on
-            // the HOST (ClaimSync.RepaintOrDefer → MarkDirty on claim ops), where ExitState flushes
-            // natively — the original RCA 2026-07-18 (host log 202.1s) was exactly a host-side
-            // claim-triggered re-enter one frame after a remote equip intent applied: Exit wrote the
-            // pre-intent lists back over GeoCharacter and drained storage via repeated takes.
+            // the HOST (EquipSync.ReseedLocalScreenAfterRemoteMutation :577, straight after a remote equip
+            // intent applies), where ExitState flushes natively — the original RCA 2026-07-18 (host log
+            // 202.1s) was exactly such a host-side re-enter one frame after a remote equip intent applied:
+            // Exit wrote the pre-intent lists back over GeoCharacter and drained storage via repeated takes.
             // Reseed reads the model into the UI instead; it never writes UI→model.
             if (current is UIStateEditSoldier editSoldier) { ReseedEditSoldier(editSoldier, view); return; }
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
