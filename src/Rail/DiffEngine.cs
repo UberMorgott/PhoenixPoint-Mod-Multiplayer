@@ -289,27 +289,54 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.Descend:
                         if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, index, depth + 1);
                         break;
+                    case FieldClass.EntityList:
+                        // Keyless-element list: the WHOLE list is one canonical value blob (order inside
+                        // the payload — law 2 forbids element indices in the path, so no key is needed).
+                        AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                        break;
                     case FieldClass.EntityCollection:
                     {
                         if (val == null) break;
                         var elems = new List<(string key, object o)>();
-                        bool bad = false;
+                        bool keyless = false;
                         foreach (var e in (IEnumerable)val)
                         {
                             if (e == null) continue;
                             var k = IdentityResolver.KeyOf(e);
-                            if (k == null) { Incident(rt.Type, f.Name, "element has no stable key (" + e.GetType().Name + ")", path); bad = true; break; }
+                            if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
-                        if (bad) break;
-                        if (elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
-                        { Incident(rt.Type, f.Name, "duplicate element keys", path); break; }
+                        if (!keyless && elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
+                            keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        if (keyless)
+                        {
+                            // Per-instance fallback: this list cannot be element-addressed right now →
+                            // ride it as ONE EntityList blob instead of aborting the field.
+                            if (IdentityResolver.IsRootEntityType(f.ElemType))
+                            { Incident(rt.Type, f.Name, "unkeyable ROOT-entity list — identity creation is structural (law 3)", path); break; }
+                            AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                            break;
+                        }
                         foreach (var (key, e) in elems.OrderBy(e => e.key, StringComparer.Ordinal))
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
                         break;
                     }
                 }
             }
+        }
+
+        private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+                                               object val, List<Entry> ordered, Dictionary<string, int> index)
+        {
+            byte[] enc;
+            try { enc = RailMeta.EncodeEntityList(f, val); }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
+            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
+            // 68cd934's SelfCheckEntityList USED to round-trip the blob here. Deliberately not re-landed:
+            // it ran the FULL decode on the HOST, constructing real game objects and firing InvokePostRead
+            // on every one of them — a live side-effect channel pointed straight into the host's own walk,
+            // to verify a codec. The same round-trip is asserted OFFLINE by the stage-1 harness
+            // (tools/RailCheck/Program.cs, L4), where a constructed object can hurt nothing.
         }
 
         private static void Add(List<Entry> ordered, Dictionary<string, int> index, Entry e)

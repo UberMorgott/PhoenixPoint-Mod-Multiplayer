@@ -47,6 +47,29 @@ namespace Multiplayer.Network.Sync
             return f?.Invoke(o);
         }
 
+        /// <summary>
+        /// Type-level counterpart of <see cref="KeyOf"/>: can elements of this type be addressed by a
+        /// stable key AT ALL? Asked once per field by the classifier — a keyable element type rides as
+        /// <c>EntityCollection</c> (per-element descend at <c>path.Name#key</c>), a keyless one as
+        /// <c>EntityList</c> (the whole list as one canonical blob).
+        ///
+        /// Deliberately the SAME probe table and the SAME cache as KeyOf, not a mirror of it. 68cd934
+        /// shipped a second, independently-written keyability predicate in RailMeta; the two tables then
+        /// disagreed about <c>GeoItem</c>, and inventory only worked BECAUSE they disagreed. One table,
+        /// asked two ways: "which thing is this" (KeyOf) and "can this kind of thing be named" (here).
+        /// </summary>
+        public static bool TypeKeyable(Type t)
+        {
+            if (t == null) return false;
+            if (IsRootEntityType(t)) return true;
+            if (!_keyOfCache.TryGetValue(t, out var f))
+            {
+                f = BuildKeyOf(t);
+                _keyOfCache[t] = f;
+            }
+            return f != null;
+        }
+
         private static Func<object, string> BuildKeyOf(Type t)
         {
             foreach (var probe in IdProbes)
