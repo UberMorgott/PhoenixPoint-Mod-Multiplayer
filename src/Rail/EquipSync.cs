@@ -7,6 +7,7 @@ using System.Text;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Core;
+using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
@@ -227,15 +228,100 @@ namespace Multiplayer.Network.Sync
         /// assumes. Generic by construction: one patch on the shared list widget covers every list
         /// (armour / ready / backpack / storage), both equip screens, every gesture (drag, click-move,
         /// double-click, side-button, loadout preset, scrap) and every peer — no per-item special case.
-        /// Inert outside a session, so solo keeps vanilla behaviour.</summary>
+        /// Inert outside a session, so solo keeps vanilla behaviour.
+        ///
+        /// HALF THE BUG ONLY (RCA 2026-07-18 round 2). This patch bound and worked — it killed the net
+        /// element LOSS — but the self-check kept firing 15× on the host afterwards, and its own counts say
+        /// why: every failure reads "1 of N ... (list=N)", i.e. the list is the RIGHT LENGTH and exactly one
+        /// DISPLAYED item is missing BY REFERENCE. Nothing was truncated; the surviving
+        /// <c>Remove(oldItem)</c> at :847 is value-based too, so it deletes the FIRST value-equal instance
+        /// instead of <c>oldItem</c> — the moved instance then sits in the list TWICE and the sibling a slot
+        /// still shows is gone from it. See <see cref="InventoryListIdentityRemovePatch"/> for the other
+        /// half; both are needed (skipping one Remove is not enough, the remaining one must hit the right
+        /// object).</summary>
         [HarmonyPatch(typeof(UIInventoryList), "ItemChangingHandler")]
         internal static class InventoryListDoubleRemovePatch
         {
+            private static bool Prepare() => RequireInventoryListMethod("ItemChangingHandler");
+
             private static bool Prefix()
             {
                 var engine = NetworkEngine.Instance;
                 return engine == null || !engine.IsActiveSession; // solo: run the original
             }
+        }
+
+        /// <summary>THE OTHER HALF: make the surviving remove IDENTITY-based. <c>ItemChangedHandler</c>
+        /// (:839-880) removes <c>oldItem</c> from <c>UnfilteredItems</c> (:847) and <c>FilteredItems</c>
+        /// (:848-851) with <c>List&lt;T&gt;.Remove</c>/<c>Contains</c>, which match through
+        /// <c>GeoItem.Equals</c> (GeoItem.cs:124 — def+count+charges), NOT reference. With a value-duplicate
+        /// present that deletes the WRONG instance: the list keeps the moved item twice and drops the twin
+        /// that a slot is still displaying, so the next <c>GeoCharacter.SetItems</c> flush hands the model
+        /// one GeoItem object bound to two slots and loses the other one.
+        ///
+        /// Fix without reimplementing the handler: before it runs, SWAP the first value-equal element with
+        /// the actual <c>oldItem</c> instance, so the very same value-based <c>Remove</c> now lands on the
+        /// identity match. The two swapped elements are by definition value-equal, so list CONTENT (what the
+        /// model and the canonical diff see) is untouched — only which reference survives changes, which is
+        /// the whole point. Everything else in the native handler (FilteredItems upkeep, the
+        /// <c>Math.Min(Slots.IndexOf(slot), UnfilteredItems.Count)</c> re-insert at :855-859, the
+        /// filter-reject path) runs unmodified.
+        ///
+        /// Generic by construction, same as its sibling: one patch on the shared widget covers all four
+        /// lists (armour / ready / backpack / storage), both equip screens and every gesture. Inert outside
+        /// a session and while the list is mid-<c>ApplyFilter</c> (the handler early-returns then anyway).
+        /// ponytail: only this handler is realigned. UIInventoryList removes items value-based elsewhere too
+        /// (RemoveItem :341/:356-370, StackItems' distinct-collapsing Except :583) — untouched because no
+        /// live failure points there; if a self-check FAIL ever reports list &lt; shown, that is where to look.</summary>
+        [HarmonyPatch(typeof(UIInventoryList), "ItemChangedHandler")]
+        internal static class InventoryListIdentityRemovePatch
+        {
+            private static bool Prepare() => RequireInventoryListMethod("ItemChangedHandler");
+
+            private static void Prefix(UIInventoryList __instance, ICommonItem oldItem)
+            {
+                if (oldItem == null || __instance == null || __instance.IsFiltering) return;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return; // solo: vanilla
+                AlignFirstValueMatchToReference(__instance.UnfilteredItems, oldItem);
+                AlignFirstValueMatchToReference(__instance.FilteredItems, oldItem);
+            }
+        }
+
+        /// <summary>Make <c>list.IndexOf(target)</c> — what Remove/Contains use — resolve to the actual
+        /// <paramref name="target"/> INSTANCE, by swapping it with whatever value-equal element currently
+        /// sits at that index. No-op when the first match already IS the instance (the normal case) or when
+        /// the instance is not in this list at all.</summary>
+        private static void AlignFirstValueMatchToReference(List<ICommonItem> list, ICommonItem target)
+        {
+            if (list == null) return;
+            int byValue = list.IndexOf(target);
+            if (byValue < 0 || ReferenceEquals(list[byValue], target)) return;
+            // Anything before byValue is not value-equal to target, so the instance can only be after it.
+            for (int i = byValue + 1; i < list.Count; i++)
+            {
+                if (!ReferenceEquals(list[i], target)) continue;
+                list[i] = list[byValue];
+                list[byValue] = target;
+                return;
+            }
+        }
+
+        /// <summary>Loud bind check for the two <see cref="UIInventoryList"/> handler patches. A rename or a
+        /// signature drift makes AccessTools return null SILENTLY, and attribute-based PatchAll then aborts
+        /// with one generic message that takes every remaining patch down with it. Returning false here
+        /// instead keeps the rest of the mod patched and says exactly what broke; the success line proves
+        /// the bind on every run.</summary>
+        private static bool RequireInventoryListMethod(string name)
+        {
+            if (AccessTools.DeclaredMethod(typeof(UIInventoryList), name) == null)
+            {
+                Debug.LogError("[MP][equip] PATCH BIND FAILED: UIInventoryList." + name + " did not resolve —" +
+                               " value-equal inventory items WILL be corrupted on every equip gesture. Patch skipped.");
+                return false;
+            }
+            Debug.Log("[MP][equip] patch bound: UIInventoryList." + name);
+            return true;
         }
 
         /// <summary>THE GUARD for the bug above, at the seam the codec self-check cannot see.
