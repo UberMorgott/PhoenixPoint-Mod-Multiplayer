@@ -50,7 +50,8 @@ namespace Multiplayer.Network.Sync
                             if (!researchDone) { researchDone = true; ResearchSync.RepaintResearchUi(); }
                             break;
                         case Timing _:
-                            break; // native setter events already fired during apply
+                        case TimingInstanceData _: // the TimeAnchor scratch DTO
+                            break; // native setter events already fired during apply; the clock widget polls
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
