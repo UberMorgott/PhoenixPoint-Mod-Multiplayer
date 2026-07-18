@@ -4,19 +4,19 @@ polymorphic-codec: no
 types: 40
 
 Base.Core.Timing  [bridge:TimingInstanceData]  covered=2/6
-  - EXCLUDED OwnFixedNow (TimeUnit): no persistent members (TimeUnit)
-  - EXCLUDED OwnNow (TimeUnit): no persistent members (TimeUnit)
+  - EXCLUDED OwnFixedNow (TimeUnit): read-only
+  - EXCLUDED OwnNow (TimeUnit): read-only
   + Leaf Paused (Boolean)
   + Leaf Scale (Single)
-  - EXCLUDED StartFixedTime (TimeUnit): no persistent members (TimeUnit)
-  - EXCLUDED StartTime (TimeUnit): no persistent members (TimeUnit)
-Base.Core.TimingInstanceData  [direct]  covered=2/6
-  - EXCLUDED OwnFixedNow (TimeUnit): no persistent members (TimeUnit)
-  - EXCLUDED OwnNow (TimeUnit): no persistent members (TimeUnit)
+  - EXCLUDED StartFixedTime (TimeUnit): clock base — rides as the TimeAnchor "TA" root (a raw mirror double-counts local accrual)
+  - EXCLUDED StartTime (TimeUnit): clock base — rides as the TimeAnchor "TA" root (a raw mirror double-counts local accrual)
+Base.Core.TimingInstanceData  [direct]  covered=6/6
+  + Leaf OwnFixedNow (TimeUnit)
+  + Leaf OwnNow (TimeUnit)
   + Leaf Paused (Boolean)
   + Leaf Scale (Single)
-  - EXCLUDED StartFixedTime (TimeUnit): no persistent members (TimeUnit)
-  - EXCLUDED StartTime (TimeUnit): no persistent members (TimeUnit)
+  + Leaf StartFixedTime (TimeUnit)
+  + Leaf StartTime (TimeUnit)
 Base.Entities.ActorInstanceData  [direct]  covered=2/4
   + Leaf OverrideTransform (Boolean)
   - EXCLUDED Source (Object): untyped/interface member
@@ -276,7 +276,7 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none
   PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective ABSTRACT — every element aborts at encode
 
-summary: covered=153 excluded=65 blobbable=12
+summary: covered=157 excluded=61 blobbable=12
 
 known law violations (1) — each one is a rail bug, not a harness limit:
   ! L1 no-list-apply-strategy: PhoenixPoint.Geoscape.Entities.Research.Research._oldResearchQueue (LinkedList`1) rides as EntityCollection but ApplyList would throw

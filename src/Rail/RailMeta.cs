@@ -160,6 +160,8 @@ namespace Multiplayer.Network.Sync
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
             if (RailMeta.IsPresentation(valType))
             { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
+            var optOut = RailMeta.OptOutReason(live.DeclaringType, name);
+            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
 
             // Leaf?
             if (RailMeta.LeafKindOf(valType, 0, out var kind))
@@ -257,6 +259,33 @@ namespace Multiplayer.Network.Sync
         };
 
         internal static bool IsPresentation(Type t) => t != null && _presentationTypes.Contains(t.FullName);
+
+        // ─── Explicit member opt-out ───────────────────────────────────────
+        // Same principle as the presentation refusal above, one granularity down (PRIME DIRECTIVE: mirror
+        // everything by default, then OPT OUT what we don't want). An entry earns its place only with a
+        // reason about the VALUE's own nature — never a subsystem's convenience — and it is visible in the
+        // coverage report and the RailCheck baseline like any other exclusion.
+        private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
+            // LOCAL realtime on every peer — the client's sim is deliberately unfrozen (see ClientSimGate).
+            // So mirroring the host's raw base on top of the client's own accrual double-counts: the two
+            // clocks keep the same pace and never agree on the value. The clock rides as an ANCHOR instead
+            // (TimeAnchor, rail root "TA"): the host's whole clock state, loaded through the game's own
+            // Timing.ProcessInstanceData seam, which OVERWRITES the accrual rather than adding to it.
+            // Both members were already excluded before TimeUnit became a leaf ("no persistent members"),
+            // so this keeps today's behavior — it just states the reason instead of relying on an accident.
+            { "Base.Core.Timing.StartTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
+            { "Base.Core.Timing.StartFixedTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
+        };
+
+        /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.</summary>
+        internal static string OptOutReason(Type owner, string name)
+        {
+            if (owner == null) return null;
+            _optOutMembers.TryGetValue(owner.FullName + "." + name, out var why);
+            return why;
+        }
 
         /// <summary>Persistent members of a type per the game's own discovery (ReadWrite mode only).</summary>
         internal static List<MemberInfo> SerializedMembers(Serializer ser, Type t)
@@ -359,7 +388,12 @@ namespace Multiplayer.Network.Sync
             if (t == typeof(double)) { kind = LeafKind.Double; return true; }
             if (t == typeof(string)) { kind = LeafKind.String; return true; }
             if (t.IsEnum) { kind = LeafKind.Enum; return true; }
-            if (t == typeof(TimeSpan)) { kind = LeafKind.TimeSpanTicks; return true; }
+            // TimeUnit rides BESIDE TimeSpan rather than as its own kind: it is a struct wrapping ONE
+            // readonly TimeSpan (decompile Base.Core/TimeUnit.cs:16-17), so BuildField excludes that member
+            // as read-only, the Composite gate below then fails (no Leaf field left) and every TimeUnit in
+            // the game fell out as "no persistent members" — research/travel/manufacture ETAs, site timers.
+            // Ticks are the entire value, so the existing TimeSpanTicks codec already expresses it exactly.
+            if (t == typeof(TimeSpan) || t == typeof(TimeUnit)) { kind = LeafKind.TimeSpanTicks; return true; }
             if (t == typeof(Vector3)) { kind = LeafKind.Vector3; return true; }
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
@@ -407,7 +441,7 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Double: w.Write((double)v); break;
                 case LeafKind.String: w.Write((string)v); break;
                 case LeafKind.Enum: w.Write(Convert.ToInt64(v, CultureInfo.InvariantCulture)); break;
-                case LeafKind.TimeSpanTicks: w.Write(((TimeSpan)v).Ticks); break;
+                case LeafKind.TimeSpanTicks: w.Write((v is TimeUnit tu ? tu.TimeSpan : (TimeSpan)v).Ticks); break;
                 case LeafKind.Vector3: { var x = (Vector3)v; w.Write(x.x); w.Write(x.y); w.Write(x.z); break; }
                 case LeafKind.Quaternion: { var q = (Quaternion)v; w.Write(q.x); w.Write(q.y); w.Write(q.z); w.Write(q.w); break; }
                 case LeafKind.DefRef: w.Write(((BaseDef)v).Guid ?? ""); break;
@@ -473,7 +507,13 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Double: return Coerce(r.ReadDouble(), declared);
                 case LeafKind.String: return r.ReadString();
                 case LeafKind.Enum: return Enum.ToObject(declared, r.ReadInt64());
-                case LeafKind.TimeSpanTicks: return new TimeSpan(r.ReadInt64());
+                case LeafKind.TimeSpanTicks:
+                {
+                    // Keyed on the DECLARED type (both peers derive it from the same table), because the
+                    // wire form is identical for TimeSpan and TimeUnit — ticks.
+                    var ts = new TimeSpan(r.ReadInt64());
+                    return declared == typeof(TimeUnit) ? (object)TimeUnit.FromTimeSpan(ts) : ts;
+                }
                 case LeafKind.Vector3: return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.Quaternion: return new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.DefRef:
