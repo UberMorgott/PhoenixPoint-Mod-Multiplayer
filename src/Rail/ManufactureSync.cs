@@ -68,10 +68,18 @@ namespace Multiplayer.Network.Sync
         // Instant scrap (UIModuleManufacturing.ScrapAllItems, no queue). index slot is reused as the item COUNT.
         private const byte OpScrap = 6;        // GeoFaction.ScrapItem(item, count)   — item-storage scrap
         private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
+        // Soldier-loadout intent (GeoCharacter.SetItems chokepoint) — rides THIS surface (0xAE) but its
+        // payload after [nonce][op] is EquipSync's own ([charId][flags][blobs]); HandleIntent branches early.
+        internal const byte OpSetItems = 8;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly IntentDedup Intents = new IntentDedup();
         private static uint _nextIntentNonce;
+
+        /// <summary>Shared client nonce allocator for EVERY intent on the 0xAE surface (EquipSync included):
+        /// the host dedup is keyed (peer, surface, nonce), so two senders with independent counters on one
+        /// surface would collide and silently eat each other's intents.</summary>
+        internal static uint NextNonce() => ++_nextIntentNonce;
 
         // ─── Host observe state ────────────────────────────────────────────
         private static ItemManufacturing _hooked;   // faction Manufacture we subscribed to (unhook on level change)
@@ -253,6 +261,13 @@ namespace Multiplayer.Network.Sync
                 {
                     nonce = r.ReadUInt32();
                     op = r.ReadByte();
+                    if (op == OpSetItems)
+                    {
+                        // Loadout intent: shared surface + dedup, EquipSync-owned payload from here on.
+                        if (Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce))
+                            EquipSync.HandleIntent(engine, senderPeerId, nonce, r);
+                        return true;
+                    }
                     defGuid = r.ReadString();
                     index = r.ReadInt32();
                 }

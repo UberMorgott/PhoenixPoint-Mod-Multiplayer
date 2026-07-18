@@ -1,6 +1,9 @@
+using System.Collections.Generic;
+using System.Reflection;
 using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View.ViewStates;
 
 namespace Multiplayer.Network.Sync
 {
@@ -27,6 +30,33 @@ namespace Multiplayer.Network.Sync
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             __result = NextUpdate.After(TimeUtils.GetNextHour(timing));
             return false; // client: hourly sim is host-only; state arrives via the rail
+        }
+    }
+
+    /// <summary>
+    /// Sim gating (law 4b), second narrow seam: the equip screens' private <c>UpdateStorage()</c>
+    /// (UIStateEditSoldier:564 / UIStateEditVehicle:384) rewrites the LIVE faction/site
+    /// <c>ItemStorage</c> from the screen's own view-model list (Except-diff both ways) — on a client
+    /// that stomps the mirrored storage with stale UI content on every UpdateState/ExitState,
+    /// INCLUDING the OpenUiRepaint Exit→Enter (which runs inside SyncApplyScope — hence blocked
+    /// unconditionally, not scope-gated). Storage changes are host-derived from the loadout intent
+    /// (<see cref="EquipSync"/>) and mirror back via the GeoItemDict rail; the client never writes
+    /// storage. The paired soldier-model write (<c>GeoCharacter.SetItems</c>) is gated in
+    /// EquipSync.SetItemsCapturePatch, which also turns it into the intent.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class ClientEquipStorageGate
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(UIStateEditSoldier), "UpdateStorage");
+            yield return AccessTools.Method(typeof(UIStateEditVehicle), "UpdateStorage");
+        }
+
+        private static bool Prefix()
+        {
+            var engine = NetworkEngine.Instance;
+            return engine == null || !engine.IsActiveSession || engine.IsHost; // client: storage is host-derived
         }
     }
 }
