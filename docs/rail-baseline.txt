@@ -279,19 +279,19 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   + Descend Wallet (Wallet)
 
 blob-reconstructed element types (Activator.CreateInstance + table fields):
-  Base.Entities.Statuses.BaseStat keyable=no customCreate=no husk=Owner:StatHolder,StatsRepo:StatsRepo
-  Base.Entities.Statuses.StatResult keyable=no customCreate=no husk=none
-  PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none
-  PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot keyable=no customCreate=no husk=AbilityTrack:AbilityTrack
-  PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none
-  PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=_def:ItemDef
-  PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment keyable=no customCreate=no husk=none
-  PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData keyable=no customCreate=no husk=none
-  PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer
-  PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none
-  PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none
+  Base.Entities.Statuses.BaseStat keyable=no customCreate=no husk=Owner:StatHolder,StatsRepo:StatsRepo roundtrip=ok(2)
+  Base.Entities.Statuses.StatResult keyable=no customCreate=no husk=none roundtrip=ok(4)
+  PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(0)
+  PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot keyable=no customCreate=no husk=AbilityTrack:AbilityTrack roundtrip=ok(1)
+  PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none roundtrip=ok(1)
+  PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=_def:ItemDef roundtrip=unconstructible:MissingMethodException
+  PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment keyable=no customCreate=no husk=none roundtrip=ok(2)
+  PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData keyable=no customCreate=no husk=none roundtrip=ok(2)
+  PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer roundtrip=ok(3)
+  PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(0)
+  PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective ABSTRACT — every element aborts at encode
 
-summary: covered=166 excluded=66 blobbable=12
+summary: covered=166 excluded=66 blobbable=12 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:

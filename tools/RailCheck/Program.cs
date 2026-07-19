@@ -223,7 +223,7 @@ namespace RailCheck
             sb.Append("polymorphic-codec: " + (polymorphicCodec ? "yes" : "no") + "\n");
             sb.Append("types: " + types.Count + "\n\n");
 
-            int cov = 0, exc = 0;
+            int cov = 0, exc = 0, geoItemDicts = 0;
             var blobbable = new SortedDictionary<string, Type>(StringComparer.Ordinal);
             foreach (var t in types)
             {
@@ -235,6 +235,7 @@ namespace RailCheck
                     if (f.Class == FieldClass.Excluded)
                     { sb.Append("  - EXCLUDED " + f.Name + " (" + f.ValueType.Name + "): " + f.Exclude + "\n"); exc++; continue; }
                     cov++;
+                    if (f.Class == FieldClass.GeoItemDict) geoItemDicts++;
                     var extra = "";
                     if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)
                     {
@@ -290,11 +291,108 @@ namespace RailCheck
                 var husk = HuskMembers(ser, t);
                 sb.Append("  " + kv.Key + " keyable=" + (IdentityResolver.TypeKeyable(t) ? "yes" : "no") +
                           " customCreate=" + (HasCustomCreate(ser, t) ? "yes" : "no") +
-                          " husk=" + (husk.Count == 0 ? "none" : string.Join(",", husk)) + "\n");
+                          " husk=" + (husk.Count == 0 ? "none" : string.Join(",", husk)) +
+                          " roundtrip=" + EntityListRoundTrip(t, laws) + "\n");
             }
 
-            sb.Append("\nsummary: covered=" + cov + " excluded=" + exc + " blobbable=" + blobbable.Count + "\n");
+            // L9 — GeoItemDict is a re-INCLUSION: the generic classifier excludes a BaseDef-keyed dict, and
+            // FieldClass.GeoItemDict is what puts faction/site inventory back on the rail. So the count going
+            // to zero is silent, total loss of inventory sync, and it can happen without touching rail code
+            // (ItemStorage._storageItems renamed, or its value type no longer GeoItem). The codec's own
+            // encode/decode cannot be exercised here — GeoItem needs an ItemDef, and CommonItemData.SetOwnerItem
+            // dereferences it immediately, while BaseDef is a ScriptableObject — so reachability is the part
+            // that is honestly checkable offline.
+            if (geoItemDicts == 0)
+                laws.Add("L9 geoitemdict-vacuous: no field in the closure classifies as GeoItemDict — " +
+                         "GeoItemCodec ships nothing and faction/site inventory is not mirrored");
+
+            sb.Append("\nsummary: covered=" + cov + " excluded=" + exc + " blobbable=" + blobbable.Count +
+                      " geoItemDicts=" + geoItemDicts + "\n");
             return sb.ToString();
+        }
+
+        /// <summary>L6 — the OFFLINE round-trip that DiffEngine.cs:420 already claims exists. 68cd934's
+        /// SelfCheckEntityList ran this ON THE HOST (constructing real game objects and firing InvokePostRead
+        /// inside the host's own walk); a6fd0a5 removed it and delegated the proof "to the stage-1 harness
+        /// (L4)" — but L4 only ever round-tripped a synthetic local class, so no REAL element type was
+        /// covered and the comment was false. This drives the actual codec over every blob-reconstructed
+        /// element type in the closure, where a constructed object can hurt nothing.
+        ///
+        /// Values are planted generically from the metadata table (no per-type knowledge): every writable
+        /// Leaf field whose kind has a headless sample. DefRef/EntityRef/Composite are left at default —
+        /// a BaseDef is a ScriptableObject and an entity ref needs a live graph, so neither can be built
+        /// outside the player; the count in `roundtrip=ok(n)` is how many fields actually carried a value,
+        /// which is what keeps an empty pass from reading as a real one.</summary>
+        private static string EntityListRoundTrip(Type t, List<string> laws)
+        {
+            object src;
+            // The codec itself builds elements with Activator.CreateInstance(nonPublic) — same call here.
+            // A type it cannot construct is a HARNESS limit (recorded, reviewable), not a rail law breach.
+            try { src = Activator.CreateInstance(t, nonPublic: true); }
+            catch (Exception ex) { return "unconstructible:" + ex.GetType().Name; }
+
+            var rt = RailType.Get(t);
+            var planted = new List<RailField>();
+            if (rt != null)
+                foreach (var f in rt.Fields)
+                {
+                    if (f.Class != FieldClass.Leaf) continue;
+                    var v = SampleLeaf(f.Leaf, f.ValueType);
+                    if (v == null) continue;
+                    try { f.SetValue(src, v); planted.Add(f); } catch { }
+                }
+
+            var lf = new RailField { Name = "rt", Class = FieldClass.EntityList, ElemType = t, ValueType = typeof(List<>).MakeGenericType(t) };
+            var one = (IList)Activator.CreateInstance(lf.ValueType);
+            one.Add(src);
+
+            List<object> back;
+            try { back = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(lf, one), lf, null); }
+            catch (Exception ex)
+            {
+                laws.Add("L6 entitylist-round-trip-threw: " + t.FullName + " -> " + ex.GetType().Name + ": " + ex.Message);
+                return "THREW";
+            }
+            if (back == null || back.Count != 1 || back[0] == null || back[0].GetType() != t)
+            {
+                laws.Add("L6 entitylist-round-trip-shape: " + t.FullName + " did not come back as exactly one " + t.Name);
+                return "BADSHAPE";
+            }
+            foreach (var f in planted)
+            {
+                object a = f.GetValue(src), b = f.GetValue(back[0]);
+                if (Equals(a, b)) continue;
+                laws.Add("L6 entitylist-round-trip-value: " + t.FullName + "." + f.Name + " " + (a ?? "null") + " -> " + (b ?? "null"));
+                return "MISMATCH:" + f.Name;
+            }
+            return "ok(" + planted.Count + ")";
+        }
+
+        /// <summary>A deterministic non-default value for a leaf kind, or null when none can exist headless.</summary>
+        private static object SampleLeaf(LeafKind kind, Type t)
+        {
+            switch (kind)
+            {
+                case LeafKind.Bool: return true;
+                case LeafKind.Int64:
+                case LeafKind.UInt64:
+                    return t == typeof(char) ? (object)'r' : Convert.ChangeType(7, t, System.Globalization.CultureInfo.InvariantCulture);
+                case LeafKind.Single: return 1.5f;
+                case LeafKind.Double: return -2.25;
+                case LeafKind.String: return "rt";
+                case LeafKind.Enum:
+                {
+                    var vals = Enum.GetValues(t);
+                    return vals.Length == 0 ? null : vals.GetValue(vals.Length - 1); // last ⇒ non-default where possible
+                }
+                case LeafKind.TimeSpanTicks:
+                    return t == typeof(Base.Core.TimeUnit)
+                        ? (object)Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(1234567))
+                        : TimeSpan.FromTicks(1234567);
+                case LeafKind.Vector3: return new Vector3(1f, -2f, 3.5f);
+                case LeafKind.Quaternion: return new Quaternion(0f, .5f, 0f, .5f);
+                default: return null; // DefRef (ScriptableObject) / EntityRef (live graph) / Composite
+            }
         }
 
         private static bool HasCustomCreate(Serializer ser, Type t)
@@ -399,6 +497,33 @@ namespace RailCheck
             // EXPLICITLY, so a name probe on the concrete type finds no Add at all and the applier threw —
             // the same failure class as the GeoFacilityComponent[] resync storm. HashSet rides along to
             // prove the interface-first probe did not regress the containers that already worked.
+            // L7 — the dict-key TOMBSTONE must stay undecodable as a value. DiffEngine ships a removal as the
+            // single byte RailMeta.DictTombstone and GenericApplier discriminates on it BEFORE decoding
+            // (GenericApplier.cs:186 LeafDict, :220 GeoItemDict). The only thing separating a delete from a
+            // present-null (LeafKind.Null, also one byte) is that 0xFF is not a LeafKind — and LeafKinds are
+            // assigned sequentially, so this is a real drift surface, not a constant.
+            foreach (LeafKind k in Enum.GetValues(typeof(LeafKind)))
+                if ((byte)k == RailMeta.DictTombstone)
+                    yield return "L7 tombstone-collision: LeafKind." + k + " encodes to the delete sentinel byte";
+            var tf = new RailField { Name = "t", Class = FieldClass.LeafDict, ValueType = typeof(int), KeyType = typeof(string), DictValType = typeof(int) };
+            bool tombDecoded;
+            try { RailMeta.DecodeFieldValue(new[] { RailMeta.DictTombstone }, tf, null, out _); tombDecoded = true; }
+            catch { tombDecoded = false; }
+            if (tombDecoded)
+                yield return "L7 tombstone-decodable: the dict-delete sentinel decodes as a value — a delete could apply as one";
+
+            // L8 — delivery contract (law 7) on the shared SurfaceSeq: per-surface monotonic source, and a
+            // client guard that is idempotent under redelivery and safe under reordering. Pure class, so the
+            // real thing runs here; nothing else in this repo exercises it.
+            var seq = new SurfaceSeq();
+            if (seq.Next(1) != 1 || seq.Next(1) != 2 || seq.Next(2) != 1)
+                yield return "L8 seq-not-monotonic-per-surface: Next must count 1,2,… independently per surface";
+            seq.Mark(1, 5);
+            if (seq.ShouldApply(1, 5)) yield return "L8 seq-replay: a redelivered seq would apply twice (law 7 idempotence)";
+            if (seq.ShouldApply(1, 4)) yield return "L8 seq-out-of-order: a late seq would overwrite a newer one (law 7)";
+            if (!seq.ShouldApply(1, 6)) yield return "L8 seq-stuck: the next seq after a mark would never apply";
+            if (!seq.ShouldApply(2, 1)) yield return "L8 seq-cross-surface: one surface's seq suppressed another's";
+
             var holder = new ListHolder();
             foreach (var fname in new[] { "Linked", "Set" })
             {
