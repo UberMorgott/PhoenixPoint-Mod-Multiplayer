@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -49,10 +50,17 @@ namespace Multiplayer.Network.Sync
             public ushort FieldIdx;
             public string SubKey;
             public byte[] Value;
+            public string Key;   // SnapKey(Path, FieldIdx, SubKey), built once at Add time — local only, never on the wire
         }
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static Dictionary<string, Entry> _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        // The tick's working set is DOUBLE-BUFFERED rather than reallocated: at ~22k fields, a fresh
+        // dictionary + list + visited-set every 0.5 s was megabytes of garbage per tick for no benefit.
+        // All three are refilled from scratch each tick, so nothing carries over.
+        private static Dictionary<string, Entry> _snapshotBack = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        private static readonly List<Entry> _ordered = new List<Entry>();
+        private static readonly HashSet<object> _visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
         private static readonly Dictionary<Type, byte> _kindIds = new Dictionary<Type, byte>();
         private static readonly List<Type> _kinds = new List<Type>();
         private static readonly HashSet<byte> _sentKinds = new HashSet<byte>();
@@ -223,29 +231,35 @@ namespace Multiplayer.Network.Sync
         {
             var sw = Stopwatch.StartNew();
             _entityCounts.Clear();
-            var ordered = new List<Entry>(_snapshot.Count + 64);
-            var index = new Dictionary<string, int>(_snapshot.Count + 64, StringComparer.Ordinal);
-            var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+            var ordered = _ordered; ordered.Clear();
+            var visited = _visited; visited.Clear();
+            // The walk fills the NEW snapshot directly — it already had to dedup by SnapKey, and a second
+            // 22k-entry index holding the same keys bought nothing.
+            var newSnap = _snapshotBack; newSnap.Clear();
 
             foreach (var root in IdentityResolver.Roots(geo))
-                VisitEntity(root.Key, root.Value, visited, ordered, index, 0);
+                VisitEntity(root.Key, root.Value, visited, ordered, newSnap, 0);
             long walkMs = sw.ElapsedMilliseconds;
 
-            // Diff: changed/new pairs in walk order (canonical), then subKey deletions.
+            // Diff: changed/new pairs in walk order (canonical), then subKey deletions. An unchanged field
+            // kept the previous tick's array (RailMeta.EncodeFieldValue with prev), so BytesEqual's
+            // ReferenceEquals fast path settles it without a byte compare.
             var changed = new List<Entry>();
-            var newSnap = new Dictionary<string, Entry>(ordered.Count, StringComparer.Ordinal);
             foreach (var e in ordered)
-            {
-                var key = SnapKey(e);
-                newSnap[key] = e;
-                if (_forceFull || !_snapshot.TryGetValue(key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value))
+                if (_forceFull || !_snapshot.TryGetValue(e.Key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value))
                     changed.Add(e);
-            }
-            var livePaths = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var e in ordered) livePaths.Add(e.Path);
+
+            // Built only if a stale subKey actually survives both guards below — normally nothing does, and
+            // 22k inserts for a set nobody reads is pure tick cost.
+            HashSet<string> livePaths = null;
             foreach (var kv in _snapshot)
             {
                 if (kv.Value.SubKey.Length == 0 || newSnap.ContainsKey(kv.Key)) continue;
+                if (livePaths == null)
+                {
+                    livePaths = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var e in ordered) livePaths.Add(e.Path);
+                }
                 // Suppress the tombstone when the whole entity path is gone (moved/vanished) — that is a
                 // structural change, not a dict-key delete; emitting one would false-delete on the client
                 // (and could hit a different entity that took over the old path). ponytail: an entity whose
@@ -253,9 +267,10 @@ namespace Multiplayer.Network.Sync
                 if (!livePaths.Contains(kv.Value.Path)) continue;
                 // dictionary key removed on host while the entity persists → explicit tombstone (distinct
                 // sentinel so the client never confuses it with a genuine present-null value).
-                changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone } });
+                changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone }, Key = kv.Key });
             }
             long diffMs = sw.ElapsedMilliseconds - walkMs;
+            _snapshotBack = _snapshot;   // this tick's snapshot becomes next tick's scratch, and vice versa
             _snapshot = newSnap;
             bool wasForceFull = _forceFull;
             _forceFull = false;
@@ -286,12 +301,14 @@ namespace Multiplayer.Network.Sync
         }
 
         // "\u0001" separators: paths/subKeys never contain control chars, so keys cannot collide.
-        private static string SnapKey(Entry e) => e.Path + "\u0001" + e.FieldIdx + "\u0001" + e.SubKey;
+        // Built ONCE per entry (stored in Entry.Key); it used to be rebuilt for every entry in the diff loop.
+        private static string SnapKey(string path, ushort fieldIdx, string subKey) =>
+            path + "\u0001" + fieldIdx.ToString(CultureInfo.InvariantCulture) + "\u0001" + subKey;
 
         // ─── The universal walker (NO subsystem knowledge) ─────────────────
 
         private static void VisitEntity(string path, object obj, HashSet<object> visited, List<Entry> ordered,
-                                        Dictionary<string, int> index, int depth)
+                                        Dictionary<string, Entry> snap, int depth)
         {
             if (obj == null || !visited.Add(obj)) return;
             if (depth > MaxDepth) { Incident(obj.GetType(), "(depth)", "max depth exceeded", path); return; }
@@ -316,13 +333,8 @@ namespace Multiplayer.Network.Sync
                 {
                     case FieldClass.Leaf:
                     case FieldClass.LeafList:
-                    {
-                        byte[] enc;
-                        try { enc = RailMeta.EncodeFieldValue(f, val); }
-                        catch (Exception ex) { Incident(rt.Type, f.Name, "encode failed: " + ex.Message, path); continue; }
-                        Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = "", Value = enc });
+                        AddEncoded(ordered, snap, rt, f, (ushort)i, kindId, path, "", val, "encode failed: ");
                         break;
-                    }
                     case FieldClass.LeafDict:
                     {
                         if (val == null) break;
@@ -331,12 +343,7 @@ namespace Multiplayer.Network.Sync
                         foreach (DictionaryEntry de in dict) keys.Add((RailMeta.EncodeDictKey(de.Key), de.Value));
                         keys.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
                         foreach (var (sub, v) in keys)
-                        {
-                            byte[] enc;
-                            try { enc = RailMeta.EncodeFieldValue(f, v); }
-                            catch (Exception ex) { Incident(rt.Type, f.Name, "dict encode failed: " + ex.Message, path); continue; }
-                            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc });
-                        }
+                            AddEncoded(ordered, snap, rt, f, (ushort)i, kindId, path, sub, v, "dict encode failed: ");
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -355,17 +362,17 @@ namespace Multiplayer.Network.Sync
                             byte[] enc;
                             try { enc = GeoItemCodec.Encode(v); }
                             catch (Exception ex) { Incident(rt.Type, f.Name, "GeoItem encode failed: " + ex.Message, path); continue; }
-                            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc });
+                            Add(ordered, snap, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc, Key = SnapKey(path, (ushort)i, sub) });
                         }
                         break;
                     }
                     case FieldClass.Descend:
-                        if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, index, depth + 1);
+                        if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, snap, depth + 1);
                         break;
                     case FieldClass.EntityList:
                         // Keyless-element list: the WHOLE list is one canonical value blob (order inside
                         // the payload — law 2 forbids element indices in the path, so no key is needed).
-                        AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, index);
+                        AddEntityListEntry(rt, f, (ushort)i, kindId, path, val, ordered, snap);
                         break;
                     case FieldClass.EntityCollection:
                     {
@@ -379,8 +386,17 @@ namespace Multiplayer.Network.Sync
                             if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
-                        if (!keyless && elems.Select(e => e.key).Distinct(StringComparer.Ordinal).Count() != elems.Count)
-                            keyless = true; // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        if (!keyless)
+                        {
+                            // Sort FIRST (the canonical visit order), then duplicates are adjacent — same
+                            // answer as the old Select/Distinct/Count, without the per-field LINQ chain. The
+                            // sort is unstable but every key here is unique (a duplicate aborts the field),
+                            // so the resulting order is exactly what OrderBy produced.
+                            elems.Sort((a, b) => string.CompareOrdinal(a.key, b.key));
+                            for (int j = 1; j < elems.Count; j++)
+                                if (string.CompareOrdinal(elems[j - 1].key, elems[j].key) == 0)
+                                { keyless = true; break; } // duplicate keys = keyless duplicates (e.g. two identical vehicle modules)
+                        }
                         if (keyless)
                         {
                             // NO whole-list blob fallback here. ApplyList would Clear() the live list and
@@ -402,8 +418,8 @@ namespace Multiplayer.Network.Sync
                                 : "unkeyable/duplicate element keys — blob rebuild would husk the elements", path);
                             break;
                         }
-                        foreach (var (key, e) in elems.OrderBy(e => e.key, StringComparer.Ordinal))
-                            VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, index, depth + 1);
+                        foreach (var (key, e) in elems) // already sorted ordinal above
+                            VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, snap, depth + 1);
                         break;
                     }
                 }
@@ -411,12 +427,12 @@ namespace Multiplayer.Network.Sync
         }
 
         private static void AddEntityListEntry(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
-                                               object val, List<Entry> ordered, Dictionary<string, int> index)
+                                               object val, List<Entry> ordered, Dictionary<string, Entry> snap)
         {
             byte[] enc;
             try { enc = RailMeta.EncodeEntityList(f, val); }
             catch (Exception ex) { Incident(rt.Type, f.Name, "entity-list encode failed: " + ex.Message, path); return; }
-            Add(ordered, index, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc });
+            Add(ordered, snap, new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc, Key = SnapKey(path, fieldIdx, "") });
             // 68cd934's SelfCheckEntityList USED to round-trip the blob here. Deliberately not re-landed:
             // it ran the FULL decode on the HOST, constructing real game objects and firing InvokePostRead
             // on every one of them — a live side-effect channel pointed straight into the host's own walk,
@@ -424,11 +440,27 @@ namespace Multiplayer.Network.Sync
             // (tools/RailCheck/Program.cs, L4), where a constructed object can hurt nothing.
         }
 
-        private static void Add(List<Entry> ordered, Dictionary<string, int> index, Entry e)
+        private static void Add(List<Entry> ordered, Dictionary<string, Entry> snap, Entry e)
         {
-            var key = SnapKey(e);
-            if (index.ContainsKey(key)) return; // first deterministic path wins
-            index[key] = ordered.Count;
+            if (snap.ContainsKey(e.Key)) return; // first deterministic path wins
+            snap[e.Key] = e;
+            ordered.Add(e);
+        }
+
+        /// <summary>Encode a leaf/leaf-list/dict-value and record it. The encode goes through RailMeta's
+        /// reusable writer and hands it the PREVIOUS tick's bytes for this key: unchanged values (i.e. almost
+        /// all of them on an idle tick) come back as that same array, so the field costs no allocation and
+        /// the diff settles it by reference. The bytes are identical either way.</summary>
+        private static void AddEncoded(List<Entry> ordered, Dictionary<string, Entry> snap, RailType rt, RailField f,
+                                       ushort fieldIdx, byte kindId, string path, string subKey, object val, string failedWhat)
+        {
+            var key = SnapKey(path, fieldIdx, subKey);
+            if (snap.ContainsKey(key)) return; // first deterministic path wins
+            byte[] enc;
+            try { enc = RailMeta.EncodeFieldValue(f, val, _snapshot.TryGetValue(key, out var prev) ? prev.Value : null); }
+            catch (Exception ex) { Incident(rt.Type, f.Name, failedWhat + ex.Message, path); return; }
+            var e = new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = enc, Key = key };
+            snap[key] = e;
             ordered.Add(e);
         }
 

@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using Base.Core;
 using Base.Defs;
 using Base.Serialization;
@@ -63,10 +64,14 @@ namespace Multiplayer.Network.Sync
 
         internal FieldInfo Fi;
         internal PropertyInfo Pi;
+        private Func<object, object> _get;   // compiled once per member — see RailMeta.BuildGetter
 
         public bool CanRead => Fi != null || (Pi != null && Pi.CanRead);
 
-        public object GetValue(object o) => Fi != null ? Fi.GetValue(o) : Pi.GetValue(o, null);
+        /// <summary>The host walk reads ~22k members every tick, so this goes through a compiled accessor
+        /// cached beside the (already cached) RailType metadata instead of raw reflection. Same member,
+        /// same value — cost only.</summary>
+        public object GetValue(object o) => (_get ?? (_get = RailMeta.BuildGetter(this)))(o);
 
         public void SetValue(object o, object v)
         {
@@ -312,6 +317,43 @@ namespace Multiplayer.Network.Sync
 
         internal static Type MemberType(MemberInfo mi) => (mi as FieldInfo)?.FieldType ?? ((PropertyInfo)mi).PropertyType;
 
+        // ─── Cached member accessor (see RailField.GetValue) ───────────────
+        // A DynamicMethod owned by the member's own module with skipVisibility, the same move Harmony makes
+        // for its field refs: nearly every serialized game member is private, so an anonymously hosted
+        // delegate could not reach it. Reflection stays as the fallback if codegen is ever unavailable.
+        internal static Func<object, object> BuildGetter(RailField f)
+        {
+            var m = (MemberInfo)f.Fi ?? f.Pi;
+            var owner = m.DeclaringType;
+            try
+            {
+                var dm = new DynamicMethod("railget_" + owner.Name + "_" + m.Name, typeof(object),
+                                           new[] { typeof(object) }, owner.Module, true);
+                var il = dm.GetILGenerator();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(owner.IsValueType ? OpCodes.Unbox : OpCodes.Castclass, owner);
+                Type vt;
+                if (f.Fi != null) { il.Emit(OpCodes.Ldfld, f.Fi); vt = f.Fi.FieldType; }
+                else
+                {
+                    var g = f.Pi.GetGetMethod(true);
+                    if (g == null) throw new InvalidOperationException("property has no getter");
+                    il.Emit(g.IsVirtual && !owner.IsValueType ? OpCodes.Callvirt : OpCodes.Call, g);
+                    vt = f.Pi.PropertyType;
+                }
+                if (vt.IsValueType) il.Emit(OpCodes.Box, vt);
+                il.Emit(OpCodes.Ret);
+                return (Func<object, object>)dm.CreateDelegate(typeof(Func<object, object>));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer][rail] accessor codegen failed for " + owner.Name + "." + m.Name +
+                                 " (" + ex.Message + ") — falling back to reflection");
+                var fi = f.Fi; var pi = f.Pi;
+                return fi != null ? (Func<object, object>)(o => fi.GetValue(o)) : o => pi.GetValue(o, null);
+            }
+        }
+
         // ─── Presentation refusal (same principle as the Unity-scene-object refusal) ───
         // Rendering artifacts are never game state, so they never ride the rail — regardless of the fact
         // that the save serializer happens to persist them. LocalizedTextBind is a CLASS with a writable
@@ -511,15 +553,56 @@ namespace Multiplayer.Network.Sync
 
         // ─── Canonical leaf codec ───────────────────────────────────────────
 
+        // ONE writer per thread instead of a MemoryStream + BinaryWriter + ToArray PER FIELD: the host walk
+        // encodes ~22k fields every 0.5 s and that per-field allocation was the bulk of the tick's garbage.
+        // Nothing re-enters an encode in flight — EncodeLeaf recurses on the SAME writer, and the blob codec
+        // (EncodeEntityList/EncodeObjectBody) runs on its own streams — so one scratch is enough.
+        [ThreadStatic] private static MemoryStream _scratchMs;
+        [ThreadStatic] private static BinaryWriter _scratchW;
+
+        private static BinaryWriter Scratch()
+        {
+            if (_scratchW == null)
+            {
+                _scratchMs = new MemoryStream(256);
+                _scratchW = new BinaryWriter(_scratchMs, System.Text.Encoding.UTF8);
+            }
+            _scratchMs.SetLength(0);
+            _scratchMs.Position = 0;
+            return _scratchW;
+        }
+
+        private static void EncodeFieldInto(BinaryWriter w, RailField f, object v)
+        {
+            if (f.Class == FieldClass.LeafList) EncodeList(w, f, v);
+            else EncodeLeaf(w, f.Class == FieldClass.LeafDict ? f.DictValType : f.ValueType, v);
+        }
+
         public static byte[] EncodeFieldValue(RailField f, object v)
         {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8))
+            EncodeFieldInto(Scratch(), f, v);
+            return _scratchMs.ToArray();
+        }
+
+        /// <summary>Same bytes as <see cref="EncodeFieldValue(RailField,object)"/>, but returns
+        /// <paramref name="prev"/> ITSELF when the encoding is byte-identical to it — the idle-tick case,
+        /// where every field re-encodes to exactly what it already was. Costs no array and lets the diff
+        /// short-circuit on reference equality. Encoded arrays are never mutated afterwards, so the old and
+        /// new snapshot sharing one is safe.</summary>
+        internal static byte[] EncodeFieldValue(RailField f, object v, byte[] prev)
+        {
+            EncodeFieldInto(Scratch(), f, v);
+            var buf = _scratchMs.GetBuffer();
+            int len = (int)_scratchMs.Length;
+            if (prev != null && prev.Length == len)
             {
-                if (f.Class == FieldClass.LeafList) EncodeList(w, f, v);
-                else EncodeLeaf(w, f.Class == FieldClass.LeafDict ? f.DictValType : f.ValueType, v);
-                return ms.ToArray();
+                int i = 0;
+                while (i < len && prev[i] == buf[i]) i++;
+                if (i == len) return prev;
             }
+            var bytes = new byte[len];
+            Buffer.BlockCopy(buf, 0, bytes, 0, len);
+            return bytes;
         }
 
         public static void EncodeLeaf(BinaryWriter w, Type declared, object v)
@@ -565,6 +648,16 @@ namespace Multiplayer.Network.Sync
         {
             if (v == null) { w.Write((byte)LeafKind.Null); return; }
             w.Write(ListMarker); // distinct from every LeafKind
+            // Ordered list of known length: count + element bytes go straight into the writer, in exactly the
+            // order the buffered path below would have produced them — byte-identical, minus a MemoryStream +
+            // BinaryWriter + array PER ELEMENT. The buffered path stays for HashSets (the canonical sort needs
+            // the encoded elements materialised) and for the u16 truncation case.
+            if (!f.Unordered && v is ICollection col && col.Count <= ushort.MaxValue)
+            {
+                w.Write((ushort)col.Count);
+                foreach (var e in (IEnumerable)v) EncodeLeaf(w, f.ElemType, e);
+                return;
+            }
             var items = new List<byte[]>();
             foreach (var e in (IEnumerable)v)
             {
