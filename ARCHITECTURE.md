@@ -190,13 +190,24 @@ messages, sim gates (law 4b).
 - **Stage 1 = `tools/RailCheck` (BUILT 2026-07-18).** `cd tools/RailCheck && dotnet run -c Debug`
   — exit 0 green, 1 red. Seconds, no game, no save.
   - It runs headless because `Serializer.GetSerializedMembers` (Serializer.cs:296) is pure attribute
-    reflection: a bare `new Serializer(null)` gives byte-identical field discovery to the game's
-    configured instance. Only VALUE serialization needs the live game.
+    reflection. But `new Serializer(null)` alone is NOT the game's discovery: members are filtered by
+    `IsSerializeableType` (Serializer.cs:308), which for a struct resolves through
+    `GetTypeSerializeAttribute` → `GetCustomDataForType` (Serializer.cs:160) = REGISTERED custom type
+    data. The game registers it in two steps (`SerializationComponent.Initialize:81-83`), so the
+    harness makes the same second call — public static `SerializationComponent.InitCustomTypes(ser)`,
+    no Unity state. Without it every Vector2/Vector2Int/Vector3/Vector3Int/Bounds-typed member is
+    invisible while the live rail classifies it (that hid `ActorInstanceData.Pos`/`.Rot` — the position
+    of every site and vehicle — until 2026-07-19). Only VALUE serialization needs the live game.
   - It asserts the rail's own laws over the real `Assembly-CSharp` metadata: **L1** every list-classed
     field has a `RailMeta.ApplyList` strategy (a licensed-but-unapplyable field is the 2026-07-18
     resync storm by construction); **L2** no `[SerializeCustomCreate]` param is unmatched; **L3** no
     Unity object reaches the blob codec; **L4** leaf/list/blob codec round-trip; **L5** if the codec
-    starts carrying runtime types, abstract element types' concretions must be classified.
+    starts carrying runtime types, abstract element types' concretions must be classified; **L6** every
+    blob-reconstructed element type in the closure survives a real encode→decode (the offline
+    SelfCheckEntityList `DiffEngine.cs:420` delegates here — L4 alone only drove a synthetic class);
+    **L7** the dict-delete tombstone stays undecodable as a value; **L8** `SurfaceSeq` is monotonic
+    per surface, idempotent under redelivery, safe under reordering (law 7); **L9** `GeoItemDict`
+    coverage is non-vacuous (it is a re-inclusion — reaching zero silently kills inventory sync).
   - It probes the codec (`ProbePolymorphicCodec`) rather than assuming: declared-type-only vs
     polymorphic decides the type closure, so "the ship side widened" is a detected event.
   - `docs/rail-baseline.txt` is the committed snapshot — full classifier table, per-type blob **husk**
@@ -206,8 +217,16 @@ messages, sim gates (law 4b).
 - **What stage 1 does NOT cover** (do not read green as "safe"):
   - No simulation, no CRC(host)==CRC(client), no seeded command sequences — those need a live
     `GeoLevelController`, so the mandate's original SimCluster shape is still unbuilt.
-  - `LeafKind.DefRef` / `EntityRef` round-trip (needs `DefRepository` / a live graph), `GeoItemDict`,
-    the diff/chunk/seq/tombstone layer, and `GenericApplier`'s resolve path are all untested.
+  - `LeafKind.DefRef` / `EntityRef` round-trip stays UNTESTABLE offline and is deliberately not faked:
+    decode is `GameUtl.GameComponent<DefRepository>()` and the values are `BaseDef : ScriptableObject`,
+    neither constructible outside the player; the classify side is the one-liner
+    `typeof(BaseDef).IsAssignableFrom(t)`, so asserting it would be a tautology. Same for the
+    `GeoItem` codec body (needs an `ItemDef`; `CommonItemData.SetOwnerItem` dereferences it at once) —
+    L9 checks the dict's REACHABILITY, not its payload, and `GeoItem` is recorded in the baseline as
+    `roundtrip=unconstructible`.
+  - The diff layer proper and `GenericApplier`'s resolve path are still untested: `DiffEngine.Tick`'s
+    snapshot/compare/emit is inline in a method needing a live `GeoLevelController`. Of that layer only
+    the separable halves are covered — tombstone (L7) and seq (L8).
   - The closure is DECLARED types from the `IdentityResolver.Roots` kinds; runtime subtypes only
     enter it when the codec is polymorphic. Fields the live walk reaches through a subtype are invisible.
   - **It cannot catch a ship-side rule change that makes an already-classified type start riding as a
@@ -254,10 +273,15 @@ messages, sim gates (law 4b).
   `AbilityTrackSlot[]` whose INDEX IS THE LEVEL, so dropping holes would shift every ability up a
   level. The safe shape is a classify-time refusal (`EntityList` where `!HasBlobContent(elem)`),
   which needs the serializer available at classify time — verify that before writing it.
-- **`GeoPhoenixFacility` is not in the harness closure**, so N4's exclusion is grounded
-  (`GeoPhoenixFacility.cs:48`, readonly array) but unexercised. Seeding it in
-  `tools/RailCheck/Program.cs` expands the closure and moves the baseline — a reviewable change
-  worth doing on its own, not folded into a fix.
+- ~~**`GeoPhoenixFacility` is not in the harness closure**~~ DONE 2026-07-19 (`5ca3687`): seeded,
+  types 40→41, N4's refusal of the readonly `_components` array now EXECUTED rather than argued.
+  7 covered / 4 excluded (`_def`/`_position`/`_rotation` read-only), no new violations. It was
+  outside only because the closure is built from DECLARED types while the live walk types every hop
+  by `obj.GetType()` — `GeoSite.SerializationData` is declared `ActorInstanceData` but IS a
+  `GeoSiteInstaceData`, so the walk does reach `PhoenixBaseData → Layout → Facilities`.
+  **The general hole remains:** any other type reachable only through a runtime subtype is still
+  invisible to the harness, and each one needs its own seed line until the closure follows runtime
+  types the way the walk does.
 
 ## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
