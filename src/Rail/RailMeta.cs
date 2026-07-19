@@ -224,6 +224,25 @@ namespace Multiplayer.Network.Sync
                     if (RailMeta.ListApplyStrategy(f) == null)
                     { f.Class = FieldClass.Excluded; f.Exclude = "no list apply strategy (" + valType.Name + ")"; return f; }
 
+                    // Husk-gated blob licensing. An EntityList is REBUILT from a blob (Activator.CreateInstance
+                    // + table fields), so every reference member the blob does not carry lands NULL on the
+                    // client where the game's own load path would have re-Init'd it. Licensing such a type
+                    // ships silent corruption, not a missing value — BaseStat.Owner/.StatsRepo null is the
+                    // wrong-numbers roster card, ResearchElement.ResearchDef null was 7ef0a30's NOTEXT.
+                    //
+                    // The refusal has to happen HERE and not at ship/apply time: the damage is per-ELEMENT, and
+                    // the only after-the-fact remedy would be dropping bad elements — which is unsafe by
+                    // construction, because AbilityTrack.AbilitiesByLevel is an AbilityTrackSlot[] whose INDEX
+                    // IS THE LEVEL (dropping holes shifts every ability up a level). Classify-time also makes
+                    // the loss a reviewable docs/rail-baseline.txt diff instead of a runtime surprise.
+                    //
+                    // EntityCollection is deliberately NOT gated: it is element-ADDRESSED (per-element descend
+                    // writes leaves into elements that already exist on the client) and never reconstructs an
+                    // element, so a husk member is simply left alone rather than nulled.
+                    var husk = RailMeta.HuskMembers(elem);
+                    if (husk.Count > 0)
+                    { f.Class = FieldClass.Excluded; f.Exclude = "blob husk on " + elem.Name + " (" + string.Join(",", husk) + ")"; return f; }
+
                     f.Class = FieldClass.EntityList;
                     return f;
                 }
@@ -977,6 +996,67 @@ namespace Multiplayer.Network.Sync
                 }
             }
             return o;
+        }
+
+        /// <summary>Reference-typed members of a type that a BLOB of it would NOT carry. The codec builds
+        /// elements with <c>Activator.CreateInstance(nonPublic)</c> and fills only the table's fields, so each
+        /// of these lands NULL on the client while the game's own load path would have re-<c>Init</c>'d it —
+        /// the 7ef0a30 `ResearchElement` husk (ResearchDef null → NOTEXT), and the BaseStat.Owner/.StatsRepo
+        /// nulls behind the wrong-numbers roster cards.
+        ///
+        /// ONE table, two callers: the classifier's EntityList refusal in <see cref="RailType"/> and the
+        /// RailCheck baseline's <c>husk=</c> column. It lived in tools/RailCheck/Program.cs while it was only a
+        /// REPORT; the moment it also decides classification, a second copy is the GeoItem/TypeKeyable
+        /// two-tables-disagree bug by construction (ARCHITECTURE.md "Husk-gated blob licensing").</summary>
+        internal static List<string> HuskMembers(Type t)
+        {
+            var husk = new List<string>();
+            var ser = GameSerializer;
+            if (ser == null) return husk; // pre-init: no metadata yet, and nothing is classified either
+
+            var carried = new HashSet<string>(StringComparer.Ordinal);
+            var rt = RailType.Get(t);
+            if (rt != null)
+                foreach (var f in rt.Fields)
+                    if (f.Class != FieldClass.Excluded || (f.Fi != null && f.Fi.IsInitOnly)) carried.Add(f.Name);
+            // ALL modes on purpose (not SerializedMembers, which keeps ReadWrite only): a WriteOnly member is
+            // a custom-create PARAMETER, and the blob does carry those — GeoItem's ItemDef rides as a ctor arg.
+            try
+            {
+                foreach (var mwa in ser.GetSerializedMembers(t))
+                    if (mwa.MemberInfo != null) carried.Add(mwa.MemberInfo.Name);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] HuskMembers(" + t.Name + ") failed: " + ex.Message); }
+
+            // …but a create param is matched to its FIELD by name nowhere: the create method assigns it, and
+            // the field it fills is routinely named differently (GeoItem.cs:14,20,31 — create param `ItemDef`
+            // fills `private readonly ItemDef _def`). Name-matching alone therefore reports `_def` as an
+            // uncarried husk when the blob demonstrably carries it as a ctor argument, and gating on that
+            // would drop all six GeoCharacter item lists. Which field a param fills is not knowable, but its
+            // TYPE is — so a field whose type is a create param's type counts as carried. Scoped to create
+            // params ONLY: same-type matching in general would erase real husks (BaseStat.Owner).
+            var createParamTypes = new HashSet<Type>();
+            var ci = CreateInfoOf(ser, t);
+            if (ci != null)
+                foreach (var p in ci.Params)
+                    if (p != null) createParamTypes.Add(MemberType(p));
+
+            const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
+                foreach (var fi in cur.GetFields(F))
+                {
+                    if (fi.FieldType.IsValueType || fi.FieldType == typeof(string)) continue;
+                    if (typeof(Delegate).IsAssignableFrom(fi.FieldType)) continue; // events are never state
+                    if (createParamTypes.Contains(fi.FieldType)) continue;         // filled by the custom create
+                    // An auto-property's backing field is named "<Prop>k__BackingField"; the serializer
+                    // discovers the PROPERTY, so match on that name (ResearchElement.ResearchDef — the
+                    // 7ef0a30 NOTEXT husk — is exactly this shape and was invisible without it).
+                    var name = fi.Name[0] == '<' ? fi.Name.Substring(1, fi.Name.IndexOf('>') - 1) : fi.Name;
+                    if (carried.Contains(name)) continue;
+                    husk.Add(name + ":" + fi.FieldType.Name);
+                }
+            husk.Sort(StringComparer.Ordinal);
+            return husk;
         }
 
         /// <summary>Which <see cref="ApplyList"/> strategy can rebuild a container of this field's DECLARED

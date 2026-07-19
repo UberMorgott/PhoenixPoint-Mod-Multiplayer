@@ -180,36 +180,10 @@ namespace RailCheck
 
         // ─── Laws ───────────────────────────────────────────────────────────
 
-        /// <summary>Reference-typed members of a blob-reconstructed type that the blob does NOT carry.
-        /// The codec builds elements with Activator.CreateInstance(nonPublic) and fills only the table's
-        /// fields, so each of these lands null on the client while the game's own load path would have
-        /// re-Init'd them — the 7ef0a30 `ResearchElement` husk (ResearchDef null -> NOTEXT).</summary>
-        private static List<string> HuskMembers(Serializer ser, Type t)
-        {
-            var carried = new HashSet<string>(StringComparer.Ordinal);
-            var rt = RailType.Get(t);
-            if (rt != null)
-                foreach (var f in rt.Fields)
-                    if (f.Class != FieldClass.Excluded || (f.Fi != null && f.Fi.IsInitOnly)) carried.Add(f.Name);
-            foreach (var mwa in ser.GetSerializedMembers(t)) if (mwa.MemberInfo != null) carried.Add(mwa.MemberInfo.Name);
-
-            var husk = new List<string>();
-            const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
-                foreach (var fi in cur.GetFields(F))
-                {
-                    if (fi.FieldType.IsValueType || fi.FieldType == typeof(string)) continue;
-                    if (typeof(Delegate).IsAssignableFrom(fi.FieldType)) continue; // events are never state
-                    // An auto-property's backing field is named "<Prop>k__BackingField"; the serializer
-                    // discovers the PROPERTY, so match on that name (ResearchElement.ResearchDef — the
-                    // 7ef0a30 NOTEXT husk — is exactly this shape and was invisible without it).
-                    var name = fi.Name[0] == '<' ? fi.Name.Substring(1, fi.Name.IndexOf('>') - 1) : fi.Name;
-                    if (carried.Contains(name)) continue;
-                    husk.Add(name + ":" + fi.FieldType.Name);
-                }
-            husk.Sort(StringComparer.Ordinal);
-            return husk;
-        }
+        // HuskMembers now lives in RailMeta (ARCHITECTURE.md "Husk-gated blob licensing"): the classifier
+        // REFUSES an EntityList whose element type has a non-empty husk, so the table decides coverage and
+        // this report merely displays it. A private copy here would be two tables free to disagree — the
+        // exact shape of the GeoItem/TypeKeyable bug.
 
         // ─── Snapshot (the reviewable artifact) ─────────────────────────────
 
@@ -288,7 +262,7 @@ namespace RailCheck
                 if (typeof(UnityEngine.Object).IsAssignableFrom(t))
                     laws.Add("L3 unity-object-blobbed: " + kv.Key + " reaches the blob codec, which refuses it");
 
-                var husk = HuskMembers(ser, t);
+                var husk = RailMeta.HuskMembers(t);
                 sb.Append("  " + kv.Key + " keyable=" + (IdentityResolver.TypeKeyable(t) ? "yes" : "no") +
                           " customCreate=" + (HasCustomCreate(ser, t) ? "yes" : "no") +
                           " husk=" + (husk.Count == 0 ? "none" : string.Join(",", husk)) +
