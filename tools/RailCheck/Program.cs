@@ -52,7 +52,18 @@ namespace RailCheck
             // SecurityException, so the rail's own warnings would abort the walk. Swap in a sink.
             Debug.unityLogger.logHandler = new Sink();
 
+            // The game builds its serializer in TWO steps (SerializationComponent.Initialize:81-83):
+            // `new Serializer(this)` registers the built-in custom type data, then the PUBLIC STATIC
+            // InitCustomTypes adds Bounds/Vector2/Vector2Int/Vector3/Vector3Int/Quaternion/Defineable/
+            // ScriptableObject. Only the first step was reproduced here, and the second is NOT cosmetic:
+            // GetSerializedMembers yields a member only `if (IsSerializeableType(memberType))`
+            // (Serializer.cs:308), and for a struct that reduces to IsComplexTypeSerializeable ->
+            // GetTypeSerializeAttribute -> GetCustomDataForType (Serializer.cs:160). So without this call
+            // every Vector2Int/Vector2/Vector3Int/Bounds-typed member is invisible to the harness while the
+            // live rail classifies it — silent UNDER-reporting of coverage, i.e. exactly the "forgot the
+            // field" hazard the baseline exists to make reviewable. Nothing in it touches Unity state.
             RailMeta.SerializerOverride = new Serializer(null);
+            Base.Serialization.SerializationComponent.InitCustomTypes(RailMeta.SerializerOverride);
             var game = typeof(Base.Core.Timing).Assembly;
 
             bool polymorphicCodec = ProbePolymorphicCodec();

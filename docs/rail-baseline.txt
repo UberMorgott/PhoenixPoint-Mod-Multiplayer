@@ -17,8 +17,10 @@ Base.Core.TimingInstanceData  [direct]  covered=6/6
   + Leaf Scale (Single)
   + Leaf StartFixedTime (TimeUnit)
   + Leaf StartTime (TimeUnit)
-Base.Entities.ActorInstanceData  [direct]  covered=2/4
+Base.Entities.ActorInstanceData  [direct]  covered=4/6
   + Leaf OverrideTransform (Boolean)
+  + Leaf Pos (Vector3)
+  + Leaf Rot (Quaternion)
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   + Descend TimingData (TimingInstanceData)
@@ -175,7 +177,8 @@ PhoenixPoint.Geoscape.Entities.VehicleEquipmentStorage  [direct]  covered=1/1
   + EntityList _storageItems (List`1) unordered=no apply=IList
 PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  [direct]  covered=1/1
   + Descend SerializationData (ActorInstanceData)
-PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData  [direct]  covered=0/1
+PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData  [direct]  covered=0/2
+  - EXCLUDED Position (Vector3): read-only
   - EXCLUDED Range (EarthUnits): read-only
 PhoenixPoint.Geoscape.Levels.Factions.FactionAggressionRequest  [direct]  covered=6/8
   + Leaf Accepted (Boolean)
@@ -276,6 +279,6 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none
   PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective ABSTRACT — every element aborts at encode
 
-summary: covered=157 excluded=61 blobbable=12
+summary: covered=159 excluded=62 blobbable=12
 
 known law violations (0) — each one is a rail bug, not a harness limit:
