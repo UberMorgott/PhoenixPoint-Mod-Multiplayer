@@ -145,8 +145,11 @@ runs `_sectionBarModule.Deinit()`, `_resourcesModule.Done()`, destroys `_selecti
 events) and `Enter` re-runs a full `EnterState` that can legitimately fail on a mirrored model. The
 growing opt-out table (`UIStateManufacturing`, `UIStateEditSoldier`) is that broken invariant leaking one
 screen at a time — each entry is a screen whose `ExitState` does something a repaint must never do, and
-the list only grows as more screens are exercised. Failure now rolls forward to `UIStateNothingSelected`
-(recovery, not a fix). The real answer is a repaint primitive that re-reads the model into the LIVE
+the list only grows as more screens are exercised. A throwing `Enter` is now SWALLOWED and the screen kept
+(log once per state type) — `Enter` re-registers the input handler before `EnterState` runs
+(`GeoscapeViewState.cs:88-94`), so a partial repaint stays usable; the old roll-forward to
+`UIStateNothingSelected` ejected the player from the screen once per rail batch. The real answer is still a
+repaint primitive that re-reads the model into the LIVE
 widgets with no transition at all — `ReseedEditSoldier` already demonstrates the shape (read-direction
 only, native `OnDataChanged`/`UpdateData`/`RefreshStorage` calls, never UI→model). Generalizing that
 retires the opt-out table and the recovery path together.

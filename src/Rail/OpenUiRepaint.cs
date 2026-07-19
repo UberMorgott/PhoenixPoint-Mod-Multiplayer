@@ -36,6 +36,8 @@ namespace Multiplayer.Network.Sync
         private static bool _dirty;
         private static int _deferredFrames;
         private static bool _deferLogged;
+        private static readonly System.Collections.Generic.HashSet<string> _loggedFailures =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>Defer ceiling in frames (~5 s at 60 fps). See <see cref="FlushIfDirty"/>.</summary>
         private const int MaxDeferFrames = 300;
@@ -60,6 +62,7 @@ namespace Multiplayer.Network.Sync
             _dirty = false;
             _deferredFrames = 0;
             _deferLogged = false;
+            _loggedFailures.Clear();
         }
 
         /// <summary>
@@ -132,26 +135,25 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                // Exit() ALREADY ran (module Deinit/Done, marker destroyed, 6 events unsubscribed —
-                // UIStateVehicleSelected.cs:237-258), so a swallowed throw strands the screen half-entered:
-                // dead widgets, wrong icons, and it re-fails on every later rail batch. Roll FORWARD to a
-                // known-good state instead of leaving the stack where it broke. UIStateNothingSelected is
-                // the game's own recovery for an unenterable geoscape screen (UIStateVehicleSelected
-                // .EnterState:134-137 does exactly this when it cannot resolve a vehicle), and its
-                // EnterState:84 re-establishes SetActiveState/SetInputState, so input is live again.
-                // Generic: one recovery for all ~31 screens, no per-screen knowledge.
-                // Log the FULL exception — ex.Message alone hid the stack and left the NRE unidentified.
-                Debug.LogWarning("[Multiplayer][rail] open-UI re-enter failed for " + current.GetType().Name +
-                                 " — recovering to UIStateNothingSelected: " + ex);
-                try
-                {
-                    using (SyncApplyScope.Enter())
-                        stack.SwitchToState(new UIStateNothingSelected(), StateStackAction.ClearStackAndPush);
-                }
-                catch (Exception recoverEx)
-                {
-                    Debug.LogError("[Multiplayer][rail] recovery to UIStateNothingSelected FAILED: " + recoverEx);
-                }
+                // NON-DESTRUCTIVE: stay on the screen the user is looking at. A throw inside EnterState is a
+                // PARTIAL repaint, not a lost screen — and a partial repaint beats ejecting the player.
+                //
+                // The previous behaviour rolled the stack forward to UIStateNothingSelected, which reads to
+                // the user as "the game kicked me out of the roster", once per rail batch. Grounded reason it
+                // is not needed: GeoscapeViewState.Enter (decompile GeoscapeViewState.cs:88-94) re-registers
+                // the input handler at :91 BEFORE calling EnterState(), and a geoscape state sets its own
+                // MainUILayer/input state in the opening statements of EnterState (UIStateEditSoldier.cs:99-100)
+                // — so a throw further in leaves the screen live and closable. The observed failure throws at
+                // the LAST statement of UIStateEditSoldier.EnterState (:177 SelectCharacterProgression), i.e.
+                // everything except the progression panel had already been rebuilt.
+                //
+                // We keep repainting this screen on later batches ON PURPOSE: the repaint mostly works, and
+                // law 11 (reactivity) outranks log tidiness. Once per state TYPE the full exception is logged,
+                // then it goes quiet — a per-frame stack dump was its own kind of freeze.
+                if (_loggedFailures.Add(current.GetType().Name))
+                    Debug.LogWarning("[Multiplayer][rail] open-UI re-enter for " + current.GetType().Name +
+                                     " threw — screen kept, that panel may be partially painted until the " +
+                                     "underlying subtree is complete (logged once per screen): " + ex);
             }
         }
     }
