@@ -182,7 +182,10 @@ namespace Multiplayer.Network.Sync
             }
 
             var segments = path.Split('.');
-            object cur = ResolveRoot(geo, segments[0]);
+            // The root segment is itself a cache key (a root ref has no '.'), so the 50 distinct paths that
+            // hang off one site share ONE AllSites/Vehicles scan instead of 50. Same dictionary ⇒ same
+            // batch-local lifetime ⇒ no new staleness class, just fewer linear scans.
+            object cur = ResolveCachedRoot(geo, segments[0], cache);
             for (int i = 1; cur != null && i < segments.Length; i++)
             {
                 var seg = segments[i];
@@ -211,6 +214,15 @@ namespace Multiplayer.Network.Sync
             if (cur is UnityEngine.Object fresh && fresh == null) return null;
             if (cur != null && cache != null) cache[path] = cur;
             return cur;
+        }
+
+        private static object ResolveCachedRoot(GeoLevelController geo, string root, Dictionary<string, object> cache)
+        {
+            if (cache == null) return ResolveRoot(geo, root);
+            if (cache.TryGetValue(root, out var hit) && (!(hit is UnityEngine.Object uo) || uo != null)) return hit;
+            var resolved = ResolveRoot(geo, root);
+            if (resolved != null) cache[root] = resolved;
+            return resolved;
         }
 
         private static object ResolveRoot(GeoLevelController geo, string root)

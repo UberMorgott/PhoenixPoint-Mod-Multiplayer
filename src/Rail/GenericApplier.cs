@@ -117,8 +117,10 @@ namespace Multiplayer.Network.Sync
                 UiEventMap.Fire(touched, geo);
                 // Law 11 UNIVERSAL: after the batch, re-drive the open geoscape screen through its native
                 // full-rebuild so ALL screens repaint with no per-panel code. Dirty flag only — coalesced
-                // to one re-enter per frame by OpenUiRepaint.FlushIfDirty (SyncEngine.Tick). Skip a no-op
-                // batch (every entry missed → nothing changed on this client).
+                // to one re-enter per frame by OpenUiRepaint.FlushIfDirty (SyncEngine.Tick). `touched` is
+                // now REAL-CHANGE gated (see Unchanged): an entry whose value already matched is not in it,
+                // so a batch that changes nothing here — redelivery, resync resend, a value the client's own
+                // sim already computed — repaints ZERO times instead of rebuilding the whole screen.
                 if (touched.Count > 0) OpenUiRepaint.MarkDirty();
             }
         }
@@ -162,6 +164,7 @@ namespace Multiplayer.Network.Sync
             }
             if (entity == null) { LogMissOnce("entity not found: " + path); return; }
             if (!rt.Type.IsInstanceOfType(entity)) { LogMissOnce("type mismatch at " + path + ": " + entity.GetType().Name + " vs " + rt.Type.Name); return; }
+            if (Unchanged(entity, field, subKey, value)) return; // no-op entry: not applied, not touched, no repaint
 
             try
             {
@@ -235,6 +238,64 @@ namespace Multiplayer.Network.Sync
             {
                 LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// UNIVERSAL no-op test — the gate between "a delta arrived" and "something on this client changed".
+        /// Encodes what the client ALREADY holds with the SAME canonical codec the host used to produce the
+        /// wire value, then compares bytes. Identical ⇒ the entry is dropped: not written, not added to
+        /// <c>touched</c>, so it drives neither <see cref="UiEventMap"/> nor <see cref="OpenUiRepaint"/>.
+        /// That is what makes law 11 fire on real CHANGE instead of on traffic — a redelivered packet or a
+        /// resync full-resend (host re-emits every covered pair, all of them already equal here) used to
+        /// force a full Exit→Enter screen rebuild per batch.
+        ///
+        /// Symmetric by construction, not by a table: the host's own "changed?" question is byte inequality
+        /// of these same encoders (DiffEngine snapshot), so no field/kind can be classified here that the
+        /// host classifies differently, and no per-kind allowlist exists to drift.
+        ///
+        /// Encoder throws, or a shape this codec cannot restate ⇒ CHANGED. Applying a value that was already
+        /// equal is idempotent (law 7) and costs one repaint; wrongly skipping one strands a stale screen,
+        /// which law 11 forbids. The asymmetry is deliberate — the fallback is always "repaint".
+        /// </summary>
+        private static bool Unchanged(object entity, RailField field, string subKey, byte[] value)
+        {
+            try
+            {
+                switch (field.Class)
+                {
+                    case FieldClass.Leaf:
+                    case FieldClass.LeafList:
+                        return SameBytes(value, RailMeta.EncodeFieldValue(field, field.GetValue(entity)));
+                    case FieldClass.EntityList:
+                        return SameBytes(value, RailMeta.EncodeEntityList(field, field.GetValue(entity)));
+                    case FieldClass.LeafDict:
+                    {
+                        if (!(field.GetValue(entity) is IDictionary dict)) return false;
+                        var key = RailMeta.DecodeDictKey(subKey, field.KeyType);
+                        bool tomb = value.Length == 1 && value[0] == RailMeta.DictTombstone;
+                        if (key == null || !dict.Contains(key)) return tomb; // absent: a delete is the no-op
+                        return !tomb && SameBytes(value, RailMeta.EncodeFieldValue(field, dict[key]));
+                    }
+                    case FieldClass.GeoItemDict:
+                    {
+                        if (!(field.GetValue(entity) is IDictionary dict)) return false;
+                        var def = GeoItemCodec.ResolveDef(subKey);
+                        bool tomb = value.Length == 1 && value[0] == RailMeta.DictTombstone;
+                        if (def == null || !dict.Contains(def)) return tomb;
+                        return !tomb && SameBytes(value, GeoItemCodec.Encode(dict[def]));
+                    }
+                    default:
+                        return false;
+                }
+            }
+            catch { return false; }
+        }
+
+        private static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
 
         private static void LogMissOnce(string msg)
