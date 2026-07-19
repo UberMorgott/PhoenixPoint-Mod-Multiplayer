@@ -21,6 +21,7 @@ namespace Multiplayer.Network.Sync
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || PersonnelSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
@@ -50,6 +51,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.Reset();
             ManufactureSync.Reset();
             EquipSync.Reset();
+            PersonnelSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
@@ -64,6 +66,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.ResetForReloadBoundary();
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
+            PersonnelSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
@@ -71,6 +74,7 @@ namespace Multiplayer.Network.Sync
         {
             ResearchSync.ResetIntentDedupForPeer(peerId);
             ManufactureSync.ResetIntentDedupForPeer(peerId);
+            PersonnelSync.ResetIntentDedupForPeer(peerId);
         }
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }
