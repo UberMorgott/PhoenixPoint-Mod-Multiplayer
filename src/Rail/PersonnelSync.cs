@@ -72,6 +72,13 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo FCurStrength = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentStrengthStat");
         private static readonly FieldInfo FCurWill = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentWillStat");
         private static readonly FieldInfo FCurSpeed = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentSpeedStat");
+        // …and the pre-edit snapshot it is diffed against. BOTH halves are DERIVED display values
+        // (RefreshStats:515-518 seeds them from GetProgressionBaseStats() + the Bonus* stats, i.e.
+        // GetBaseStat(x) + Σ bodyPart aspect + augment bonus), so only their DIFFERENCE is meaningful
+        // at model level — which is exactly what native CommitStatChanges:369-373 feeds ModifyBaseStat.
+        private static readonly FieldInfo FStartStrength = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingStrengthStat");
+        private static readonly FieldInfo FStartWill = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingWillStat");
+        private static readonly FieldInfo FStartSpeed = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingSpeedStat");
         private static readonly FieldInfo FBoughtSlot = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySlot");
         private static readonly FieldInfo FBoughtAbility = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbility");
         private static readonly FieldInfo FBoughtSource = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySource");
@@ -87,13 +94,14 @@ namespace Multiplayer.Network.Sync
             {
                 _bindChecked = true;
                 if (FCharacter == null || FCurStrength == null || FCurWill == null || FCurSpeed == null ||
+                    FStartStrength == null || FStartWill == null || FStartSpeed == null ||
                     FBoughtSlot == null || FBoughtAbility == null || FBoughtSource == null || FBoughtLevel == null)
                     Debug.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
                                    "stat/ability intents CANNOT be captured; client edits will not sync.");
                 else
                     Debug.Log("[MP][personnel] view-model fields bound");
             }
-            return FCharacter != null && FBoughtSlot != null;
+            return FCharacter != null && FBoughtSlot != null && FStartStrength != null;
         }
 
         public static void Reset()
@@ -166,15 +174,20 @@ namespace Multiplayer.Network.Sync
                     var progression = character?.Progression;
                     if (progression == null) return false;
 
-                    // Diff against the LIVE model, not the module's _starting* snapshot: a rail delta may
-                    // have moved the model since the screen opened, and the host re-derives from its own
-                    // numbers anyway. Equal on all three = nothing to ask for.
-                    int str = (int)FCurStrength.GetValue(__instance);
-                    int will = (int)FCurWill.GetValue(__instance);
-                    int speed = (int)FCurSpeed.GetValue(__instance);
-                    if (str == progression.GetBaseStat(CharacterBaseAttribute.Strength) &&
-                        will == progression.GetBaseStat(CharacterBaseAttribute.Will) &&
-                        speed == progression.GetBaseStat(CharacterBaseAttribute.Speed)) return false;
+                    // Native's OWN no-op test (IsCharacterChanged:358) — the same one UIStateEditSoldier:361
+                    // gates its commit with, so a screen exit that changed nothing asks for nothing.
+                    if (!__instance.IsCharacterChanged()) return false;
+
+                    // Ship the DELTA, never the absolute: _current*/_starting* are derived DISPLAY values
+                    // (base stat + Σ bodypart aspect + augment bonus, RefreshStats:515-518), so an absolute
+                    // is on a different scale than progression.GetBaseStat and the host would reject it as
+                    // out of range. Their difference is exactly what native feeds ModifyBaseStat (:369-373)
+                    // and it is offset-free. ponytail: a client whose view is stale by an unseen host spend
+                    // can still ask for one increment too many — the host's own Charge()/CanModifyBaseStat
+                    // is the authority that refuses it, which is the same guard native relies on.
+                    int dStr = (int)FCurStrength.GetValue(__instance) - (int)FStartStrength.GetValue(__instance);
+                    int dWill = (int)FCurWill.GetValue(__instance) - (int)FStartWill.GetValue(__instance);
+                    int dSpeed = (int)FCurSpeed.GetValue(__instance) - (int)FStartSpeed.GetValue(__instance);
 
                     using (var ms = new MemoryStream())
                     using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -182,10 +195,10 @@ namespace Multiplayer.Network.Sync
                         w.Write(++_nextIntentNonce);
                         w.Write(OpSpendStats);
                         w.Write((int)character.Id);
-                        w.Write(str);
-                        w.Write(will);
-                        w.Write(speed);
-                        Send(ms.ToArray(), "stats U#" + (int)character.Id + " str=" + str + " will=" + will + " speed=" + speed);
+                        w.Write(dStr);
+                        w.Write(dWill);
+                        w.Write(dSpeed);
+                        Send(ms.ToArray(), "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
                     }
                 }
                 catch (Exception ex) { Debug.LogError("[MP][personnel] stat capture failed: " + ex); }
@@ -340,21 +353,23 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        /// <summary>Replay of <c>CommitStatChanges</c>:369-375 at model level. The wire carries ABSOLUTE
-        /// target values, so a stale client view degrades to a smaller (or zero) delta instead of
-        /// double-spending; a DECREASE is never accepted (the native UI cannot commit one either — it
-        /// clamps at the starting value, UIModuleCharacterProgression.cs:907).</summary>
-        private static bool ApplyStats(ulong peer, GeoCharacter character, int wantStr, int wantWill, int wantSpeed)
+        /// <summary>Replay of <c>CommitStatChanges</c>:369-375 at model level. The wire carries the same
+        /// INCREMENTS native feeds <c>ModifyBaseStat</c> (see the capture patch for why an absolute cannot
+        /// travel: the module's numbers are bonus-inflated display values). The host re-anchors them on its
+        /// OWN current base stat, so a stale client can only be wrong by what it has not seen yet, and the
+        /// range/afford checks below refuse that. A DECREASE is never accepted (the native UI cannot commit
+        /// one either — it clamps at the starting value, UIModuleCharacterProgression.cs:907).</summary>
+        private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed)
         {
             var progression = character.Progression;
             var stats = new[] { CharacterBaseAttribute.Strength, CharacterBaseAttribute.Will, CharacterBaseAttribute.Speed };
-            var want = new[] { wantStr, wantWill, wantSpeed };
-            var delta = new int[3];
+            var delta = new[] { addStr, addWill, addSpeed };
+            var want = new int[3];
             int total = 0;
             for (int i = 0; i < 3; i++)
             {
                 int cur = progression.GetBaseStat(stats[i]);
-                delta[i] = want[i] - cur;
+                want[i] = cur + delta[i];
                 if (delta[i] < 0) { Reject(peer, (int)character.Id, "stat decrease " + stats[i]); return false; }
                 // Bounds the cost loop below as well: CanModifyBaseStat rejects anything above the sheet
                 // maximum, so a hostile want=int.MaxValue cannot spin here.
