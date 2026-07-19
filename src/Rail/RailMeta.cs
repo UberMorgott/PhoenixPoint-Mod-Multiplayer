@@ -137,6 +137,34 @@ namespace Multiplayer.Network.Sync
                 {
                     var valType = RailMeta.MemberType(dtoMi);
                     var live = RailMeta.ResolveLive(t, dtoMi.Name, valType, out var alias);
+
+                    // A DTO slot declared `object` is POLYMORPHIC: the game fills it at record time with a
+                    // type the LIVE type itself declares (GeoFactionInstanceData.ExtendedInstanceData:48 is
+                    // filled by GeoPhoenixFaction.RecordExtendedInstanceData:2046 with its own nested
+                    // ExtendedInstanceData:51). Nothing can resolve `object` onto a live member, so the slot
+                    // was excluded "bridge-unresolved" and everything persisted ONLY through it — the shared
+                    // Skillpoints pool, AncientSiteProbes, every faction's extended block — never rode.
+                    //
+                    // Descend it by that runtime type, discovered STATICALLY as the same-named nested type
+                    // so both peers derive an identical table without an instance (law 6 canonical order).
+                    // Its members are flattened onto the live type through the SAME ResolveLive as every
+                    // other bridge member: no per-faction code, no new FieldClass, and each member that does
+                    // not resolve stays a visible exclusion rather than a silent drop.
+                    var nested = live == null && valType == typeof(object) ? RailMeta.FindNestedDto(t, dtoMi.Name) : null;
+                    if (nested != null)
+                    {
+                        foreach (var nMi in RailMeta.SerializedMembers(ser, nested))
+                        {
+                            var nType = RailMeta.MemberType(nMi);
+                            var nLive = RailMeta.ResolveLive(t, nMi.Name, nType, out var nAlias);
+                            raw.Add((nMi.Name, nType, nLive, nAlias, nLive == null ? "bridge-unresolved" : null));
+                        }
+                        // The slot itself is not a field (there is no live member to read); keep the line so
+                        // the baseline shows WHERE the flattened members came from.
+                        raw.Add((dtoMi.Name, valType, null, null, "flattened onto live type (" + nested.FullName + ")"));
+                        continue;
+                    }
+
                     raw.Add((dtoMi.Name, valType, live, alias, live == null ? "bridge-unresolved" : null));
                 }
             }
@@ -383,6 +411,20 @@ namespace Multiplayer.Network.Sync
                 var dto = cur.Assembly.GetType(cur.FullName + "InstanceData")
                           ?? cur.Assembly.GetType(cur.FullName + "InstaceData"); // game typo: GeoSiteInstaceData
                 if (dto != null && dto != t) return dto;
+            }
+            return null;
+        }
+
+        /// <summary>The type a polymorphic <c>object</c> DTO slot actually carries: the same-named nested type
+        /// declared by the live type or one of its bases. Same generic move as <see cref="FindBridge"/> — a
+        /// name pattern over the game's own metadata, never a type list — and resolved from the TYPE, not from
+        /// an instance, so host and client build identical tables (law 6).</summary>
+        internal static Type FindNestedDto(Type live, string name)
+        {
+            for (var cur = live; cur != null && cur != typeof(object); cur = cur.BaseType)
+            {
+                var nested = cur.GetNestedType(name, BindingFlags.Public | BindingFlags.NonPublic);
+                if (nested != null && nested != live) return nested;
             }
             return null;
         }
