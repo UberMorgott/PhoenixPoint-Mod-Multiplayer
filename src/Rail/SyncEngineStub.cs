@@ -49,6 +49,7 @@ namespace Multiplayer.Network.Sync
         {
             ResearchSync.Reset();
             ManufactureSync.Reset();
+            EquipSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
@@ -62,6 +63,7 @@ namespace Multiplayer.Network.Sync
         {
             ResearchSync.ResetForReloadBoundary();
             ManufactureSync.ResetForReloadBoundary();
+            EquipSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }

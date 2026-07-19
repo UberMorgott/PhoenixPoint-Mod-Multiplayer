@@ -101,9 +101,10 @@ namespace Multiplayer.Network.Sync
         {
             var mods = GeoLevel()?.View?.GeoscapeModules;
             if (mods == null) return false;
-            // ponytail: EquipSync.GesturePending is the OTHER half of this condition and joins in batch
-            // 5c, where EquipSync first exists. Until then a repaint can still land between the paired
-            // flushes of one gesture; the drag half already covers the case that yanks a held item.
+            // ponytail: EquipSync's gesture flag is deliberately NOT consulted here — it is consumed by the
+            // very next SetItems flush (same frame on an open equip screen), so it can never be "in flight"
+            // long enough for a repaint to interleave, and a leaked one would defer repaints for nothing.
+            // The drag half below already covers the case that yanks a held item.
             var soldierDrag = mods.SoldierEquipModule == null ? null : mods.SoldierEquipModule.ItemDragIcon;
             if (soldierDrag != null && soldierDrag.IsBeingDragged()) return true;
             var vehicleDrag = mods.VehicleEquipModule == null ? null : mods.VehicleEquipModule.ItemDragIcon;

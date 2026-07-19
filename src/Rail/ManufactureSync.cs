@@ -68,8 +68,18 @@ namespace Multiplayer.Network.Sync
         private const byte OpUp = 4;      // PutUpInQueue(element)
         private const byte OpDown = 5;    // PutDownInQueue(element)
         // Instant scrap (UIModuleManufacturing.ScrapAllItems, no queue). index slot is reused as the item COUNT.
-        private const byte OpScrap = 6;        // GeoFaction.ScrapItem(item, count)   — item-storage scrap
+        // internal: EquipSync's GeoFaction.ScrapItem capture (equip-screen scrap dialog) reuses this op.
+        internal const byte OpScrap = 6;       // GeoFaction.ScrapItem(item, count)   — item-storage scrap
         private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
+        // Soldier-loadout intent (per-GESTURE, sent by EquipSync's UI seams) — rides THIS surface (0xAE) but
+        // its payload after [nonce][op] is EquipSync's own ([charId][flags][slot triples]); HandleIntent
+        // branches early, before the fixed [defGuid][index] header the other ops share.
+        internal const byte OpSetItems = 8;
+        // Augment install (UIModuleMutate/UIModuleBionics.OnAugmentApplied confirm). The augment def is
+        // BOUGHT on the spot (Wallet.Take(ManufacturePrice)), never taken from storage, so it cannot ride
+        // OpSetItems' storage validation. defGuid slot = augment def, index slot = charId. EquipSync owns
+        // validation + native replay. ponytail: id 9 deliberately left free — never reuse ids.
+        internal const byte OpAugment = 10;
         // Equip-screen QUICK PRODUCE (the side button on an empty slot): the native handler
         // UIStateEditSoldier.ItemManufactureHandler:615 / UIStateEditVehicle:166 does Wallet.Take +
         // `new GeoItem(def)` INLINE and never touches ItemManufacturing — so none of the intent seams above
@@ -80,6 +90,11 @@ namespace Multiplayer.Network.Sync
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly IntentDedup Intents = new IntentDedup();
         private static uint _nextIntentNonce;
+
+        /// <summary>Shared client nonce allocator for EVERY intent on the 0xAE surface (EquipSync included):
+        /// the host dedup is keyed (peer, surface, nonce), so two senders with independent counters on one
+        /// surface would collide and silently eat each other's intents.</summary>
+        internal static uint NextNonce() => ++_nextIntentNonce;
 
         // ─── Host observe state ────────────────────────────────────────────
         private static ItemManufacturing _hooked;   // faction Manufacture we subscribed to (unhook on level change)
@@ -261,6 +276,13 @@ namespace Multiplayer.Network.Sync
                 {
                     nonce = r.ReadUInt32();
                     op = r.ReadByte();
+                    if (op == OpSetItems)
+                    {
+                        // Loadout intent: shared surface + dedup, EquipSync-owned payload from here on.
+                        if (Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce))
+                            EquipSync.HandleIntent(engine, senderPeerId, nonce, r);
+                        return true;
+                    }
                     defGuid = r.ReadString();
                     index = r.ReadInt32();
                 }
@@ -323,6 +345,12 @@ namespace Multiplayer.Network.Sync
                     else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrapVehicle REJECT (missing " +
                                           defGuid + ") peer=" + senderPeerId);
                     if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
+                }
+                else if (op == OpAugment)
+                {
+                    // Augment install: index slot = charId. Bought with resources, not storage — EquipSync
+                    // owns the cost/fit validation + the native replay.
+                    ok = EquipSync.HandleAugmentIntent(senderPeerId, nonce, defGuid, index);
                 }
                 else if (op == OpQuickProduce)
                 {
@@ -460,7 +488,7 @@ namespace Multiplayer.Network.Sync
             return !ReferenceEquals(instance, PhoenixManufacture());      // NPC/foreign manufacture stays native (un-synced)
         }
 
-        private static void SendIntent(byte op, string defGuid, int index)
+        internal static void SendIntent(byte op, string defGuid, int index)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null) return;
