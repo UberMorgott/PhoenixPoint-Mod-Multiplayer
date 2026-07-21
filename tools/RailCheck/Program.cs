@@ -486,6 +486,23 @@ namespace RailCheck
             if (tombDecoded)
                 yield return "L7 tombstone-decodable: the dict-delete sentinel decodes as a value — a delete could apply as one";
 
+            // L7 (census) — DELIBERATE harness extension for the resync-only wire addition: the dict CENSUS
+            // (present-key list, DiffEngine.AddCensus) rides forced re-emits so the client can prune EXTRA
+            // local keys whose deletion tick it missed — the one divergence values + tombstones cannot reach.
+            // Same discipline as the tombstone: the marker must collide with no LeafKind, must never decode
+            // as a value, and the key list must round-trip.
+            foreach (LeafKind k in Enum.GetValues(typeof(LeafKind)))
+                if ((byte)k == RailMeta.DictCensusMarker)
+                    yield return "L7 census-collision: LeafKind." + k + " encodes to the census marker byte";
+            bool censusDecoded;
+            try { RailMeta.DecodeFieldValue(RailMeta.EncodeDictCensus(new List<string> { "a" }), tf, null, out _); censusDecoded = true; }
+            catch { censusDecoded = false; }
+            if (censusDecoded)
+                yield return "L7 census-decodable: the census decodes as a value — a prune could apply as one";
+            var backC = RailMeta.DecodeDictCensus(RailMeta.EncodeDictCensus(new List<string> { "k1", "k2", "" }));
+            if (backC.Length != 3 || backC[0] != "k1" || backC[1] != "k2" || backC[2] != "")
+                yield return "L7 census-round-trip: key list mismatch";
+
             // L8 — delivery contract (law 7) on the shared SurfaceSeq: per-surface monotonic source, and a
             // client guard that is idempotent under redelivery and safe under reordering. Pure class, so the
             // real thing runs here; nothing else in this repo exercises it.

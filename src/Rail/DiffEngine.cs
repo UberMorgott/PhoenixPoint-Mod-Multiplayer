@@ -71,6 +71,7 @@ namespace Multiplayer.Network.Sync
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
         private static Timing _armedTiming;                                                 // N3, see ArmChangeDrivenFlush
+        private static readonly List<Entry> _censusEntries = new List<Entry>(); // forced-tick dict censuses, see AddCensus
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
 
@@ -114,9 +115,9 @@ namespace Multiplayer.Network.Sync
         /// client half mutates the local mirror natively BEFORE host confirmation (equip gestures): a host
         /// reject changes no host state, so the normal diff emits nothing and that client stays diverged —
         /// re-emitting the host truth for the touched subtree converges it. Prefix matches whole path
-        /// segments ("U#3" never matches "U#30"). No new wire concept: the client sees an ordinary delta.
-        /// ponytail: VALUES only — a client-side EXTRA dict key has no host-side change to tombstone it
-        /// and survives until the next real change of that dict; per-key CRC reconcile if it ever matters.</summary>
+        /// segments ("U#3" never matches "U#30"). No new wire concept for VALUES: the client sees an
+        /// ordinary delta. Dicts under the prefix additionally ship their CENSUS (present-key list), so a
+        /// client-side EXTRA key — which no host-side change will ever tombstone — is pruned too.</summary>
         public static void ForceReemit(string pathPrefix)
         {
             if (string.IsNullOrEmpty(pathPrefix)) return;
@@ -261,6 +262,7 @@ namespace Multiplayer.Network.Sync
         {
             var sw = Stopwatch.StartNew();
             _entityCounts.Clear();
+            _censusEntries.Clear();
             var ordered = _ordered; ordered.Clear();
             var visited = _visited; visited.Clear();
             // The walk fills the NEW snapshot directly — it already had to dedup by SnapKey, and a second
@@ -301,6 +303,9 @@ namespace Multiplayer.Network.Sync
                 // sentinel so the client never confuses it with a genuine present-null value).
                 changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone }, Key = kv.Key });
             }
+            // Forced-tick dict censuses (never in the snapshot — normal ticks stay wire-identical). AFTER
+            // the value entries, so within one tick the client prunes against the same key set it received.
+            if (_censusEntries.Count > 0) changed.AddRange(_censusEntries);
             long diffMs = sw.ElapsedMilliseconds - walkMs;
             _snapshotBack = _snapshot;   // this tick's snapshot becomes next tick's scratch, and vice versa
             _snapshot = newSnap;
@@ -377,6 +382,7 @@ namespace Multiplayer.Network.Sync
                         keys.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
                         foreach (var (sub, v) in keys)
                             AddEncoded(ordered, snap, rt, f, (ushort)i, kindId, path, sub, v, "dict encode failed: ");
+                        if (ForcedNow(path)) AddCensus(rt, f, (ushort)i, kindId, path, keys);
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -397,6 +403,7 @@ namespace Multiplayer.Network.Sync
                             catch (Exception ex) { Incident(rt.Type, f.Name, "GeoItem encode failed: " + ex.Message, path); continue; }
                             Add(ordered, snap, new Entry { KindId = kindId, Path = path, FieldIdx = (ushort)i, SubKey = sub, Value = enc, Key = SnapKey(path, (ushort)i, sub) });
                         }
+                        if (ForcedNow(path)) AddCensus(rt, f, (ushort)i, kindId, path, entries);
                         break;
                     }
                     case FieldClass.Descend:
@@ -492,6 +499,27 @@ namespace Multiplayer.Network.Sync
             if (snap.ContainsKey(e.Key)) return; // first deterministic path wins
             snap[e.Key] = e;
             ordered.Add(e);
+        }
+
+        /// <summary>True when this walk position is inside a forced re-emit scope (full resend, or a
+        /// <see cref="ForceReemit"/> prefix) — the only ticks that ship dict censuses.</summary>
+        private static bool ForcedNow(string path) =>
+            _forceFull || (_forcePrefixes.Count > 0 && MatchesForcePrefix(path));
+
+        /// <summary>Resync-only dict CENSUS: the field's full present-key set, appended to this tick's
+        /// emit but NEVER to the snapshot (normal ticks stay wire-identical). Closes the delete half of
+        /// forced re-emits: a client-side EXTRA key has no host-side change to tombstone it, so values
+        /// alone can never remove it — the census lets the client prune everything not listed. Rides
+        /// SubKey "" (a real dict entry always carries its key), discriminated by DictCensusMarker.</summary>
+        private static void AddCensus(RailType rt, RailField f, ushort fieldIdx, byte kindId, string path,
+                                      List<(string sub, object v)> entries)
+        {
+            var subs = new List<string>(entries.Count);
+            foreach (var (sub, _) in entries) subs.Add(sub);
+            byte[] enc;
+            try { enc = RailMeta.EncodeDictCensus(subs); }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "census encode failed: " + ex.Message, path); return; }
+            _censusEntries.Add(new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc, Key = "" });
         }
 
         /// <summary>Encode a leaf/leaf-list/dict-value and record it. The encode goes through RailMeta's

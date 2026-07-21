@@ -197,6 +197,17 @@ namespace Multiplayer.Network.Sync
                 { LogMissOnce("dto-twin gap: " + rt.Type.Name + "." + bf.Name + " has no live counterpart on " + entity.GetType().Name + " (" + bf.Exclude + ") — not mirrored"); return; }
                 field = bf;
             }
+            // Resync-only dict CENSUS (SubKey "" + marker — a real dict entry always carries its key, and
+            // no leaf/GeoItem value starts with the marker in that slot): prune local keys the host does not
+            // list. The delete half of a forced re-emit — a client-side EXTRA key has no host-side change to
+            // tombstone it, so values alone would leave it phantom forever.
+            if (subKey.Length == 0 && value.Length > 0 && value[0] == RailMeta.DictCensusMarker &&
+                (field.Class == FieldClass.LeafDict || field.Class == FieldClass.GeoItemDict))
+            {
+                try { ApplyDictCensus(entity, field, path, value, touched); }
+                catch (Exception ex) { LogMissOnce("census failed " + path + "." + field.Name + ": " + ex.Message); }
+                return;
+            }
             if (Unchanged(entity, field, subKey, value)) return; // no-op entry: not applied, not touched, no repaint
 
             try
@@ -338,6 +349,28 @@ namespace Multiplayer.Network.Sync
                 }
             }
             catch { return false; }
+        }
+
+        /// <summary>Prune local dict keys absent from the host census. Removes EXTRAS only — keys the host
+        /// holds arrive as ordinary value entries in the same forced batch, so applying a census twice is a
+        /// no-op (law 7). Direct dict.Remove, same as the tombstone path (never RemoveItem — side effects).</summary>
+        private static void ApplyDictCensus(object entity, RailField field, string path, byte[] value, HashSet<object> touched)
+        {
+            if (!(field.GetValue(entity) is IDictionary dict)) return;
+            var present = new HashSet<string>(RailMeta.DecodeDictCensus(value), StringComparer.Ordinal);
+            List<object> extras = null;
+            foreach (var k in dict.Keys)
+            {
+                var sub = field.Class == FieldClass.GeoItemDict ? GeoItemCodec.SubKey(k) : RailMeta.EncodeDictKey(k);
+                if (present.Contains(sub)) continue;
+                if (extras == null) extras = new List<object>();
+                extras.Add(k);
+            }
+            if (extras == null) return;
+            foreach (var k in extras) dict.Remove(k);
+            touched.Add(entity);
+            Debug.Log("[Multiplayer][rail] GenericApplier: census pruned " + extras.Count + " phantom dict key(s) at " +
+                      path + "." + field.Name);
         }
 
         private static bool SameBytes(byte[] a, byte[] b)

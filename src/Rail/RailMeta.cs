@@ -992,6 +992,45 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        // ─── Dict census: resync-only present-key list ──────────────────────
+        // Tombstones ride only the disappearance TICK; a client that missed that tick (load window)
+        // keeps the phantom key through every resend, because a full resend re-emits PRESENT pairs
+        // only. The census is the delete-side closure of forced re-emits: the host's full key set for
+        // one dict field, shipped ONLY on the forced paths (full resend / ForceReemit), applied as
+        // "prune everything I don't list". Normal ticks stay wire-identical.
+
+        /// <summary>Census value marker — distinct from LeafKinds 0-13, ListMarker 14, EntityListMarker 15,
+        /// OrderVectorMarker 16 and DictTombstone 0xFF, so a census can never decode as a value or a delete.
+        /// A census entry additionally rides with SubKey "" (a real dict entry always carries its key).</summary>
+        internal const byte DictCensusMarker = 17;
+
+        /// <summary>[marker][count:u16][subKey:string]* — the host dict's present-key set at walk time.
+        /// ponytail: plain strings — ~240 def-guid keys hit DiffEngine's 8 KB per-entry cap and the census
+        /// is dropped with a visible incident; pack guids as 16 raw bytes if a storage that big matters.</summary>
+        internal static byte[] EncodeDictCensus(List<string> subKeys)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8))
+            {
+                w.Write(DictCensusMarker);
+                w.Write((ushort)Math.Min(subKeys.Count, ushort.MaxValue));
+                for (int i = 0; i < subKeys.Count && i < ushort.MaxValue; i++) w.Write(subKeys[i]);
+                return ms.ToArray();
+            }
+        }
+
+        internal static string[] DecodeDictCensus(byte[] bytes)
+        {
+            using (var ms = new MemoryStream(bytes))
+            using (var r = new BinaryReader(ms, System.Text.Encoding.UTF8))
+            {
+                if (r.ReadByte() != DictCensusMarker) throw new IOException("bad census marker");
+                var keys = new string[r.ReadUInt16()];
+                for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
+                return keys;
+            }
+        }
+
         /// <summary>Rearrange a LIVE keyed list to the host's key sequence — index writes on the existing
         /// container, never a rebuild (elements are live entities; destroying them is the husk bug).
         /// Unknown keys are skipped (element not spawned here yet), local elements missing from the vector
