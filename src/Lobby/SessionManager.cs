@@ -16,8 +16,9 @@ namespace Multiplayer.Network
         // SECURITY: first-seen binding of a persistent PlayerGuid to the authenticated transport
         // identity (SteamId) that claimed it. PlayerGuid is public (broadcast in PEER_LIST), so this
         // binding is what stops a peer from JOINing under another player's guid to inherit their slot /
-        // permissions / owned soldiers (identity takeover). Never pruned — a guid belongs to its owner
-        // for the whole session, even across a disconnect/reconnect.
+        // permissions / owned soldiers (identity takeover). Released in RemoveClient (peer-detach
+        // chokepoint) — it only ever covers a CURRENTLY CONNECTED peer; see the takeover check in
+        // HandleConnectionRequest for why it must not survive a disconnect.
         private readonly Dictionary<Guid, ulong> _guidOwners = new Dictionary<Guid, ulong>();
 
         // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
@@ -390,12 +391,22 @@ namespace Multiplayer.Network
             // needs a stable per-peer key the transport can vouch for; a counter cannot provide one.
             if (_guidOwners.TryGetValue(join.PlayerGuid, out var boundSteamId) && boundSteamId != clientId)
             {
-                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
-                               $"already bound to connected peer {boundSteamId} — identity-takeover attempt.");
-                var reject = new NetworkMessage(PacketType.ConnectionRejected,
-                    NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
-                _engine.SendToClient(clientId, reject);
-                return;
+                // Takeover defense only applies to a LIVE binding. A crash / half-open drop inside the
+                // 20 s heartbeat window leaves the guid bound to a dead peer id the transport never
+                // reported down; the returning player arrives under a NEW per-connection counter id and
+                // would hit this reject against its OWN stale binding — the exact rejoin the stale-prune
+                // below exists to allow. A silent binding falls through to that prune instead.
+                if (IsPeerLive(boundSteamId))
+                {
+                    Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
+                                   $"already bound to connected peer {boundSteamId} — identity-takeover attempt.");
+                    var reject = new NetworkMessage(PacketType.ConnectionRejected,
+                        NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
+                    _engine.SendToClient(clientId, reject);
+                    return;
+                }
+                Debug.Log($"[Multiplayer] playerGUID {join.PlayerGuid} is bound to SILENT peer {boundSteamId} — " +
+                          $"treating JOIN from {clientId} as a returning-player rejoin, not a takeover.");
             }
 
             // Inc5 part 2 — returning-peer reconnect: a JOIN whose persistent identity is ALREADY bound
@@ -420,6 +431,24 @@ namespace Multiplayer.Network
                 _engine.Sync?.ResetIntentDedupForPeer(staleId);
                 RemoveClient(staleId);
                 _engine.SaveTransfer?.ForgetPeer(staleId);
+            }
+
+            // A JOIN landing while a save transfer is in flight (lobby-start / F2 reload window —
+            // sessionStarted may still be false, so the mid-session boundary below does not cover it)
+            // must NOT be onboarded: the transport connect already put the peer in _clients
+            // (OnPeerConnected → AddClient) and the LOADED barrier counts the LIVE roster
+            // (TryReleaseBarrier), so the newcomer would stall phase 1 for EVERYONE until the
+            // straggler timeout kicks it anyway. Reject politely and drop it from roster + transport;
+            // it can rejoin once the transfer settles.
+            if (_engine.SaveTransfer?.TransferActive == true)
+            {
+                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: save transfer in flight.");
+                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ConnectionRejected,
+                    NetworkMessage.BuildStringPayload(
+                        "The session is starting (save transfer in progress). Try again in a moment.")));
+                RemoveClient(clientId);
+                try { _engine.Transport?.DisconnectPeer(clientId); } catch { }
+                return;
             }
 
             // P1 mid-session join boundary: a peer that connects AFTER the session started can only be
@@ -583,12 +612,32 @@ namespace Multiplayer.Network
                 _lastHeartbeat[peerId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
         }
 
+        /// <summary>
+        /// "Live" = we heard ANY packet from the peer within the last two heartbeat intervals. A healthy
+        /// peer's row is refreshed on every packet (<see cref="RefreshLiveness"/>) and at worst every
+        /// <see cref="HeartbeatIntervalMs"/>, so 2× interval is a generous bar a crashed / half-open peer
+        /// only AGES past. Deliberately NOT <see cref="HeartbeatTimeoutMs"/> — that is the reaper's kick
+        /// bar; using it for the identity-takeover check would refuse a crash-rejoin for the whole 20 s
+        /// window (the exact case the stale-rejoin prune exists to allow).
+        /// </summary>
+        private bool IsPeerLive(ulong peerId)
+        {
+            if (!_lastHeartbeat.TryGetValue(peerId, out var last)) return false;
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            return now - last <= 2 * HeartbeatIntervalMs;
+        }
+
         public void HandleHeartbeat(NetworkMessage msg)
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
 
             if (_engine.IsHost)
             {
+                // Only refresh (and ack) peers actually ON the roster — same rule as RefreshLiveness:
+                // never CREATE a liveness row for an untracked sender. A kicked/rejected peer whose
+                // socket is still up would otherwise re-create _lastHeartbeat rows forever, and the ack
+                // would keep its half-dead session believing it is connected.
+                if (!_clients.ContainsKey(msg.SenderSteamId)) return;
                 _lastHeartbeat[msg.SenderSteamId] = now;
                 // Respond with ack
                 var ack = new NetworkMessage(PacketType.HeartbeatAck,
@@ -621,6 +670,15 @@ namespace Multiplayer.Network
         {
             if (_engine.IsHost)
             {
+                // A ready vote only counts for a peer actually ON the roster: a kicked/rejected peer's
+                // late ClientReady must not enter _readyClients — the all-ready bar below compares
+                // _readyClients.Count against _clients.Count, so one ghost vote could open the start
+                // gate while a real client is still un-ready.
+                if (!_clients.ContainsKey(steamId))
+                {
+                    Debug.LogWarning($"[Multiplayer] Ignoring READY/UNREADY from {steamId}: not on the roster.");
+                    return;
+                }
                 // Parity soft-gate (host-authoritative — never trust the client's locked button): a
                 // client whose roster row carries parity diffs may NOT ready up. Single chokepoint:
                 // HandleReadyState (the ClientReady packet) routes through here too.
