@@ -207,14 +207,28 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.EntityList:
                     {
-                        // EntityList ONLY. EntityCollection is element-addressed (path.Name#key) and its
-                        // descend entries never carry a value, so a blob arriving for one could only come
-                        // from a walk-time fallback — which DiffEngine no longer has, because rebuilding
-                        // keyed elements from a blob husks them (see the keyless branch there). Ship side
-                        // and apply side stay symmetric: what the host refuses to send, the client refuses
-                        // to reconstruct.
+                        // EntityList ONLY. EntityCollection is element-addressed (path.Name#key); the one
+                        // field-level entry it ships is the order vector (own case below) — never a blob,
+                        // because rebuilding keyed elements from a blob husks them (see DiffEngine's keyless
+                        // branch). Ship side and apply side stay symmetric: what the host refuses to send,
+                        // the client refuses to reconstruct.
                         if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
-                        RailMeta.ApplyList(entity, field, RailMeta.DecodeEntityList(value, field, geo));
+                        var items = RailMeta.DecodeEntityList(value, field, geo);
+                        // Keep LIVE instances wherever the blob element is value-identical: a pure reorder
+                        // then MOVES the client's existing objects (order rides inside the blob), and state
+                        // the blob cannot carry (AmmoManager) survives on every unchanged element.
+                        RailMeta.ReuseLiveElements(field, field.GetValue(entity), items);
+                        RailMeta.ApplyList(entity, field, items);
+                        break;
+                    }
+                    case FieldClass.EntityCollection:
+                    {
+                        // The keyed-collection ORDER channel: the only field-level entry an EntityCollection
+                        // ever ships is the host's live key sequence of an ordered container (DiffEngine.
+                        // AddKeyOrder). Reorder the live list IN PLACE by key — elements are live entities,
+                        // never rebuilt here; unknown keys wait for their structural create.
+                        if (value.Length == 0 || value[0] != RailMeta.OrderVectorMarker) return;
+                        if (!RailMeta.ReorderByKeys(field.GetValue(entity), RailMeta.DecodeKeyOrder(value))) return;
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -272,6 +286,13 @@ namespace Multiplayer.Network.Sync
                         return SameBytes(value, RailMeta.EncodeFieldValue(field, field.GetValue(entity)));
                     case FieldClass.EntityList:
                         return SameBytes(value, RailMeta.EncodeEntityList(field, field.GetValue(entity)));
+                    case FieldClass.EntityCollection:
+                    {
+                        // Order vector: restate the local live key sequence with the host's own encoder.
+                        // Unkeyable local element → null → "changed" (ReorderByKeys copes per element).
+                        var mine = RailMeta.EncodeKeyOrderOf(field.GetValue(entity));
+                        return mine != null && SameBytes(value, mine);
+                    }
                     case FieldClass.LeafDict:
                     {
                         if (!(field.GetValue(entity) is IDictionary dict)) return false;

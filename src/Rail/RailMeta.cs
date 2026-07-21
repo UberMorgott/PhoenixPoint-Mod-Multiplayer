@@ -34,7 +34,9 @@ namespace Multiplayer.Network.Sync
     {
         Leaf = 0,            // plain value → snapshot leaf
         Descend = 1,         // keyless object → child entity at path.Name
-        EntityCollection = 2,// collection of keyable entities → descend per element at path.Name#key
+        EntityCollection = 2,// collection of keyable entities → descend per element at path.Name#key;
+                             // an ORDERED container (List<T>/T[]) additionally ships its live key
+                             // sequence as ONE field-level order-vector entry (keys, never indices)
         LeafList = 3,        // collection of leaf-encodable elements → ONE canonical list value
         LeafDict = 4,        // dictionary with simple keys → per-subKey leaf entries
         Excluded = 5,        // not on the rail; reason in RailField.Exclude, surfaced by the report
@@ -272,6 +274,12 @@ namespace Multiplayer.Network.Sync
                     // Keyability is asked of IdentityResolver — THE identity table — never of a second
                     // predicate living here (see IdentityResolver.TypeKeyable for why that mattered).
                     f.ElemType = elem;
+                    // ORDER IS STATE only where the container itself is ordered. List<T>/T[] iterate their
+                    // element sequence deterministically; any other container may not, and signing its
+                    // iteration order would churn the wire every walk (law 6). Read by DiffEngine to decide
+                    // whether a keyed collection ships the order-vector entry.
+                    f.Unordered = !(valType.IsArray ||
+                                    (valType.IsGenericType && valType.GetGenericTypeDefinition() == typeof(List<>)));
                     if (IdentityResolver.TypeKeyable(elem)) { f.Class = FieldClass.EntityCollection; return f; }
 
                     // N4 — rebuildability is decided HERE, at classify time, not consulted at ship time.
@@ -923,6 +931,136 @@ namespace Multiplayer.Network.Sync
                     { v = true; break; }
             _blobContentCache[t] = v;
             return v;
+        }
+
+        // ─── Keyed-collection ORDER channel ─────────────────────────────────
+        //
+        // An EntityCollection is addressed as a SET (path.Name#key), so a pure reorder changes no element
+        // value and no key set — without this entry the walk emits NOTHING for it, and the client's list
+        // keeps whatever order it happened to have ("moved an item, everyone else sees it auto-sorted").
+        // The vector is the live KEY sequence (law 2: keys, never indices); it rides as an ordinary
+        // snapshot entry, so it ships exactly when membership or order changed and is silent on idle ticks.
+
+        internal const byte OrderVectorMarker = 16; // distinct from LeafKinds 0-13, ListMarker 14, EntityListMarker 15
+
+        /// <summary>Canonical bytes of a live key sequence; returns <paramref name="prev"/> ITSELF when
+        /// byte-identical (idle-tick zero-alloc, same contract as <see cref="EncodeFieldValue(RailField,object,byte[])"/>).</summary>
+        internal static byte[] EncodeKeyOrder(List<string> keys, byte[] prev)
+        {
+            var w = Scratch();
+            w.Write(OrderVectorMarker);
+            w.Write((ushort)Math.Min(keys.Count, ushort.MaxValue));
+            for (int i = 0; i < keys.Count && i < ushort.MaxValue; i++) w.Write(keys[i]);
+            var buf = _scratchMs.GetBuffer();
+            int len = (int)_scratchMs.Length;
+            if (prev != null && prev.Length == len)
+            {
+                int i = 0;
+                while (i < len && prev[i] == buf[i]) i++;
+                if (i == len) return prev;
+            }
+            var bytes = new byte[len];
+            Buffer.BlockCopy(buf, 0, bytes, 0, len);
+            return bytes;
+        }
+
+        /// <summary>The client's own live key sequence in wire form, or null when any element is unkeyable
+        /// (caller then treats the entry as changed — the apply side copes element-by-element).</summary>
+        internal static byte[] EncodeKeyOrderOf(object container)
+        {
+            if (!(container is IEnumerable src)) return null;
+            var keys = new List<string>();
+            foreach (var e in src)
+            {
+                if (e == null) continue;
+                var k = IdentityResolver.KeyOf(e);
+                if (k == null) return null;
+                keys.Add(k);
+            }
+            return EncodeKeyOrder(keys, null);
+        }
+
+        internal static string[] DecodeKeyOrder(byte[] bytes)
+        {
+            using (var ms = new MemoryStream(bytes))
+            using (var r = new BinaryReader(ms, System.Text.Encoding.UTF8))
+            {
+                if (r.ReadByte() != OrderVectorMarker) throw new IOException("bad order-vector marker");
+                var keys = new string[r.ReadUInt16()];
+                for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
+                return keys;
+            }
+        }
+
+        /// <summary>Rearrange a LIVE keyed list to the host's key sequence — index writes on the existing
+        /// container, never a rebuild (elements are live entities; destroying them is the husk bug).
+        /// Unknown keys are skipped (element not spawned here yet), local elements missing from the vector
+        /// keep their relative order at the tail. Returns true when any position actually moved.</summary>
+        internal static bool ReorderByKeys(object container, string[] keys)
+        {
+            if (!(container is IList list) || list.Count < 2) return false;
+            int n = list.Count;
+            var localKeys = new string[n];
+            for (int j = 0; j < n; j++) localKeys[j] = IdentityResolver.KeyOf(list[j]);
+            var target = new List<object>(n);
+            var used = new bool[n];
+            // ponytail: O(n·m) scan — keyed collections here are tens of elements; index map if one ever isn't.
+            foreach (var k in keys)
+                for (int j = 0; j < n; j++)
+                {
+                    if (used[j] || !string.Equals(localKeys[j], k, StringComparison.Ordinal)) continue;
+                    target.Add(list[j]);
+                    used[j] = true;
+                    break;
+                }
+            for (int j = 0; j < n; j++) if (!used[j]) target.Add(list[j]);
+            bool changed = false;
+            for (int i = 0; i < n; i++)
+                if (!ReferenceEquals(list[i], target[i])) { list[i] = target[i]; changed = true; }
+            return changed;
+        }
+
+        /// <summary>Substitute value-identical LIVE elements for freshly decoded ones before
+        /// <see cref="ApplyList"/>: a pure reorder then MOVES the client's existing objects instead of
+        /// replacing them, and state the blob does not carry (a loaded weapon's AmmoManager rides as
+        /// TagNull) survives on every unchanged element. Match = canonical element-encoding byte equality —
+        /// the exact "changed?" question the host itself asked, so no second equality table can drift.
+        /// A value-duplicate pool maps 1:1 (each live instance claimed once).</summary>
+        internal static void ReuseLiveElements(RailField f, object current, List<object> items)
+        {
+            if (items == null || items.Count == 0 || !(current is IEnumerable src)) return;
+            var pool = new List<object>();
+            foreach (var e in src) if (e != null) pool.Add(e);
+            if (pool.Count == 0) return;
+            var poolEnc = new byte[pool.Count][];
+            for (int j = 0; j < pool.Count; j++)
+                try { poolEnc[j] = EncodeElement(f, pool[j]); } catch { poolEnc[j] = null; }
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i] == null) continue;
+                byte[] enc;
+                try { enc = EncodeElement(f, items[i]); } catch { continue; }
+                for (int j = 0; j < pool.Count; j++)
+                {
+                    if (poolEnc[j] == null || !BytesEqual(poolEnc[j], enc)) continue;
+                    items[i] = pool[j];
+                    poolEnc[j] = null; // claimed
+                    break;
+                }
+            }
+        }
+
+        /// <summary>One element through the same per-element codec <see cref="EncodeEntityList"/> uses
+        /// (own locals scope), so two value-equal objects always yield identical bytes.</summary>
+        internal static byte[] EncodeElement(RailField f, object e)
+        {
+            var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8))
+            {
+                EncodeValue(w, ser, f.ElemType, e, new List<object>(), 0);
+                return ms.ToArray();
+            }
         }
 
         public static byte[] EncodeEntityList(RailField f, object listVal)

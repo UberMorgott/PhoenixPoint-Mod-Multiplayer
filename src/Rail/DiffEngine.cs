@@ -386,8 +386,20 @@ namespace Multiplayer.Network.Sync
                             if (k == null) { keyless = true; break; }
                             elems.Add((k, e));
                         }
+                        List<string> liveKeys = null;
                         if (!keyless)
                         {
+                            // ORDER IS STATE when the container is ordered (List<T>/T[]): a keyed collection
+                            // is addressed as a SET, so a pure reorder changes no element value and no key
+                            // set — without a carrier the walk emits NOTHING for it. Capture the LIVE
+                            // sequence BEFORE the canonical sort; AddKeyOrder below rides it through the
+                            // normal snapshot diff, so it ships exactly when membership/order changed and
+                            // stays silent on idle ticks. Singletons cannot reorder — no entry.
+                            if (!f.Unordered && elems.Count > 1)
+                            {
+                                liveKeys = new List<string>(elems.Count);
+                                foreach (var (k, _) in elems) liveKeys.Add(k);
+                            }
                             // Sort FIRST (the canonical visit order), then duplicates are adjacent — same
                             // answer as the old Select/Distinct/Count, without the per-field LINQ chain. The
                             // sort is unstable but every key here is unique (a duplicate aborts the field),
@@ -418,6 +430,8 @@ namespace Multiplayer.Network.Sync
                                 : "unkeyable/duplicate element keys — blob rebuild would husk the elements", path);
                             break;
                         }
+                        if (liveKeys != null)
+                            AddKeyOrder(ordered, snap, rt, f, (ushort)i, kindId, path, liveKeys);
                         foreach (var (key, e) in elems) // already sorted ordinal above
                             VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, snap, depth + 1);
                         break;
@@ -460,6 +474,23 @@ namespace Multiplayer.Network.Sync
             try { enc = RailMeta.EncodeFieldValue(f, val, _snapshot.TryGetValue(key, out var prev) ? prev.Value : null); }
             catch (Exception ex) { Incident(rt.Type, f.Name, failedWhat + ex.Message, path); return; }
             var e = new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = enc, Key = key };
+            snap[key] = e;
+            ordered.Add(e);
+        }
+
+        /// <summary>The keyed-collection ORDER entry (SubKey "" on an EntityCollection field — a slot no
+        /// other entry uses: element descends live under their own paths). Same prev-reuse contract as
+        /// <see cref="AddEncoded"/>: an unchanged sequence returns the previous tick's array and the diff
+        /// settles it by reference.</summary>
+        private static void AddKeyOrder(List<Entry> ordered, Dictionary<string, Entry> snap, RailType rt, RailField f,
+                                        ushort fieldIdx, byte kindId, string path, List<string> liveKeys)
+        {
+            var key = SnapKey(path, fieldIdx, "");
+            if (snap.ContainsKey(key)) return; // first deterministic path wins
+            byte[] enc;
+            try { enc = RailMeta.EncodeKeyOrder(liveKeys, _snapshot.TryGetValue(key, out var prev) ? prev.Value : null); }
+            catch (Exception ex) { Incident(rt.Type, f.Name, "key-order encode failed: " + ex.Message, path); return; }
+            var e = new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = "", Value = enc, Key = key };
             snap[key] = e;
             ordered.Add(e);
         }

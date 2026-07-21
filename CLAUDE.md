@@ -74,7 +74,8 @@ BEHAVIOR (per-subsystem mirroring).
     codec (L3), codec round-trip (L4), no abstract element type riding unclassified (L5), every real
     blob-reconstructed element type survives encode→decode (L6), the dict tombstone stays undecodable
     as a value (L7), `SurfaceSeq` honours the law-7 delivery contract (L8), `GeoItemDict` coverage is
-    non-vacuous (L9).
+    non-vacuous (L9), element ORDER survives the wire — blob order round-trip, live-instance reuse,
+    key-order in-place reorder (L10).
   - `docs/rail-baseline.txt` is the committed classifier snapshot (table + per-type blob husk lists
     + today's known violations). **Any drift in it is RED** — that is the whole point: a field moving
     Excluded↔covered must be a reviewable diff, never a silent side effect. Change is intended →

@@ -152,8 +152,7 @@ dict entries), ResearchElement `_state`/`ResearchProgress`/`IsInProgress` + requ
 Research `Paused`, Timing `Paused`/`Scale`, GeoCharacter values (+ identity/progression/fatigue/health
 sub-objects), GeoVehicle scalar subset (Travelling/CanRedirect/CurrentSite/VehicleID…), GeoSite scalar
 subset (State/Weather/ExpiringTimerAt…), faction GameTags/UnlockedAugmentations. Known excluded-by-design:
-manufacture queue items (no stable element key — duplicates legal), research queue ORDER (list order ≠
-value field, law 2), Timing.OwnNow (read-only — client clock ticks locally; Paused/Scale mirror),
+manufacture queue items (no stable element key — duplicates legal), Timing.OwnNow (read-only — client clock ticks locally; Paused/Scale mirror),
 vehicle SurfacePos/HitPoints (no live name match; travel mirror is a later migration), per-subsystem
 `*InstanceData`-only scalars (NextUpdate schedule bookkeeping — host-only sim, client gated anyway).
 
@@ -184,8 +183,11 @@ messages, sim gates (law 4b).
   catch-all for cancel/reorder/queue-add: `Research.Cancel` of a non-current element fires NO native
   event), complete (OnResearchCompleted → id delta). RETIRED 2026-07-17 onto the generic rail:
   MsgProgress + the 2 Hz progress poll (`ResearchProgress` is a plain value field → DiffEngine 0xAC).
-  MsgQueue KEPT: a List's ORDER cannot be expressed as value fields — the rail addresses collection
-  elements by stable key, never by index (law 2).
+  MsgQueue KEPT (transitional): since 2026-07-22 the rail itself mirrors keyed-collection ORDER
+  generically — an ordered container (List/array) of keyed elements ships its live KEY sequence as one
+  order-vector entry when membership/order changes (keys, never indices — law 2 holds), and the client
+  reorders in place by key (DiffEngine.AddKeyOrder / RailMeta.ReorderByKeys). MsgQueue retires after the
+  in-game gate confirms the generic channel alone keeps queue order.
 - **Client→host intents (GeoResearchIntent 0xAB):** intent-capture prefixes on
   `Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/InsertAtPosition`
   (all UIModuleResearch entry points route there). Client: native call BLOCKED, intent sent. Host:
@@ -229,7 +231,10 @@ messages, sim gates (law 4b).
     SelfCheckEntityList `DiffEngine.cs:420` delegates here — L4 alone only drove a synthetic class);
     **L7** the dict-delete tombstone stays undecodable as a value; **L8** `SurfaceSeq` is monotonic
     per surface, idempotent under redelivery, safe under reordering (law 7); **L9** `GeoItemDict`
-    coverage is non-vacuous (it is a re-inclusion — reaching zero silently kills inventory sync).
+    coverage is non-vacuous (it is a re-inclusion — reaching zero silently kills inventory sync);
+    **L10** element ORDER survives the wire: an EntityList blob decodes in live order,
+    `ReuseLiveElements` maps value-equal elements 1:1 back onto live instances (a reorder moves
+    objects, never husks them), `ReorderByKeys` rearranges keyed collections in place by key.
   - It probes the codec (`ProbePolymorphicCodec`) rather than assuming: declared-type-only vs
     polymorphic decides the type closure, so "the ship side widened" is a detected event.
   - `docs/rail-baseline.txt` is the committed snapshot — full classifier table, per-type blob **husk**

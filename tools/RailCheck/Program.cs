@@ -498,6 +498,53 @@ namespace RailCheck
             if (!seq.ShouldApply(1, 6)) yield return "L8 seq-stuck: the next seq after a mark would never apply";
             if (!seq.ShouldApply(2, 1)) yield return "L8 seq-cross-surface: one surface's seq suppressed another's";
 
+            // L10 — ORDER is state (the "moved an item, peers see it auto-sorted" law; the deleted
+            // SelfCheckEntityList's reorder pass, re-landed offline where a constructed object hurts nothing).
+            // (a) an EntityList blob must round-trip element ORDER, not just membership;
+            // (b) ReuseLiveElements must map value-equal decoded elements 1:1 onto LIVE instances, so a
+            //     pure reorder moves existing objects instead of husking them (duplicates claim distinct
+            //     instances);
+            // (c) ReorderByKeys reorders in place by key: same instances, idempotent, unknown keys skipped,
+            //     elements missing from the vector keep relative order at the tail;
+            // (d) the order-vector codec round-trips and its marker collides with no LeafKind.
+            var of = new RailField { Name = "o", Class = FieldClass.EntityList, ValueType = typeof(List<Elem>), ElemType = typeof(Elem) };
+            var fwd = new List<Elem> { new Elem { N = 1 }, new Elem { N = 2 }, new Elem { N = 3 } };
+            var backO = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(of, new List<Elem> { fwd[2], fwd[0], fwd[1] }), of, null);
+            if (backO == null || backO.Count != 3 ||
+                ((Elem)backO[0]).N != 3 || ((Elem)backO[1]).N != 1 || ((Elem)backO[2]).N != 2)
+                yield return "L10 entitylist-order: a reordered list did not decode in its live order";
+
+            var live = new List<Elem> { new Elem { N = 1, S = "a" }, new Elem { N = 2, S = "b" }, new Elem { N = 2, S = "b" } };
+            var incoming = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(of, new List<Elem> { live[2], live[0], live[1] }), of, null);
+            RailMeta.ReuseLiveElements(of, live, incoming);
+            if (incoming == null || incoming.Count != 3 ||
+                !ReferenceEquals(incoming[1], live[0]) ||
+                !(ReferenceEquals(incoming[0], live[1]) || ReferenceEquals(incoming[0], live[2])) ||
+                !(ReferenceEquals(incoming[2], live[1]) || ReferenceEquals(incoming[2], live[2])) ||
+                ReferenceEquals(incoming[0], incoming[2]))
+                yield return "L10 reuse-live: value-equal elements did not map 1:1 onto live instances";
+
+            var k1 = new KeyedElem { Id = 1 };
+            var k2 = new KeyedElem { Id = 2 };
+            var k3 = new KeyedElem { Id = 3 };
+            var klist = new List<KeyedElem> { k1, k2, k3 };
+            if (!RailMeta.ReorderByKeys(klist, new[] { "3", "9", "1", "2" }) ||
+                !ReferenceEquals(klist[0], k3) || !ReferenceEquals(klist[1], k1) || !ReferenceEquals(klist[2], k2))
+                yield return "L10 reorder-by-keys: [3,9,1,2] over {1,2,3} must yield 3,1,2 (unknown key skipped)";
+            if (RailMeta.ReorderByKeys(klist, new[] { "3", "1", "2" }))
+                yield return "L10 reorder-idempotent: reapplying the same order must report no change";
+            if (!RailMeta.ReorderByKeys(klist, new[] { "2" }) ||
+                !ReferenceEquals(klist[0], k2) || !ReferenceEquals(klist[1], k3) || !ReferenceEquals(klist[2], k1))
+                yield return "L10 reorder-tail: elements missing from the vector keep their relative order at the tail";
+
+            var vecBytes = RailMeta.EncodeKeyOrder(new List<string> { "a", "b", "c" }, null);
+            var vecBack = RailMeta.DecodeKeyOrder(vecBytes);
+            if (vecBack == null || !vecBack.SequenceEqual(new[] { "a", "b", "c" }))
+                yield return "L10 order-vector-codec: encode→decode did not round-trip the key sequence";
+            foreach (LeafKind k in Enum.GetValues(typeof(LeafKind)))
+                if ((byte)k == RailMeta.OrderVectorMarker)
+                    yield return "L10 order-marker-collision: LeafKind." + k + " encodes to the order-vector marker";
+
             var holder = new ListHolder();
             foreach (var fname in new[] { "Linked", "Set" })
             {
@@ -516,6 +563,13 @@ namespace RailCheck
         {
             public LinkedList<int> Linked = new LinkedList<int>();
             public HashSet<int> Set = new HashSet<int>();
+        }
+
+        // "Id" is on IdentityResolver's probe table, so KeyOf/ReorderByKeys see this exactly as they see a
+        // keyed game element — no serializer attributes needed (the order channel never encodes elements).
+        private sealed class KeyedElem
+        {
+            public int Id;
         }
 
         // ─── Plumbing ───────────────────────────────────────────────────────
