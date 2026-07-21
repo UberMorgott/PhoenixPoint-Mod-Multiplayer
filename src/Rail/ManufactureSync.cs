@@ -86,6 +86,10 @@ namespace Multiplayer.Network.Sync
         // ever saw it, and a client bought items that existed only on that client, forever (RCA 2026-07-18).
         // defGuid slot = the item def; index unused.
         private const byte OpQuickProduce = 11;
+        // Equip-screen scrap of an EQUIPPED item — per-INSTANCE, unlike def-addressed OpScrap. Payload
+        // after [nonce][op] is EquipSync's own ([charId][list][slot triple][amount]); HandleIntent branches
+        // early like OpSetItems. EquipSync owns capture, validation and the native replay.
+        internal const byte OpScrapEquipped = 12;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
         private static readonly IntentDedup Intents = new IntentDedup();
@@ -283,6 +287,12 @@ namespace Multiplayer.Network.Sync
                             EquipSync.HandleIntent(engine, senderPeerId, nonce, r);
                         return true;
                     }
+                    if (op == OpScrapEquipped)
+                    {
+                        if (Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce))
+                            EquipSync.HandleScrapEquippedIntent(senderPeerId, nonce, r);
+                        return true;
+                    }
                     defGuid = r.ReadString();
                     index = r.ReadInt32();
                 }
@@ -447,6 +457,10 @@ namespace Multiplayer.Network.Sync
                             Debug.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
                             continue;
                         }
+                        // ponytail: def-rebuilt costs ignore live SetCostMultiplier tweaks (ManufacturableItem
+                        // .cs:50-74) so the queue % / price display can drift on such items — display-only on a
+                        // projector client (intents are def-addressed, the host recosts natively); ship costs
+                        // in the snapshot entries if it ever matters.
                         item = new ManufacturableItem(def);
                     }
                     queue.Add(new ItemManufacturing.ManufactureQueueItem(item) { AccumulatedPoints = e.Value });

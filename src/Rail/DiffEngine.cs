@@ -66,6 +66,7 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<byte> _sentKinds = new HashSet<byte>();
         private static bool _baselined;
         private static bool _forceFull;
+        private static readonly List<string> _forcePrefixes = new List<string>(); // scoped forced re-emit, see ForceReemit
         private static float _nextTickAt;
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
@@ -91,6 +92,7 @@ namespace Multiplayer.Network.Sync
             _sentKinds.Clear();
             _baselined = false;
             _forceFull = false;
+            _forcePrefixes.Clear();
             ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
             TimeAnchor.Reset();         // post-load the clock jumped: re-latch rather than re-publish the old anchor
         }
@@ -104,6 +106,34 @@ namespace Multiplayer.Network.Sync
             // that anchor was taken (it stays current for as long as pause/speed do not change).
             TimeAnchor.Reset();
             Debug.Log("[Multiplayer][rail] DiffEngine: full resend requested");
+        }
+
+        /// <summary>Scoped forced re-emit — the targeted sibling of <see cref="RequestFullResend"/>: on the
+        /// next tick every covered pair whose path sits under <paramref name="pathPrefix"/> is re-emitted
+        /// with its CURRENT host value even though the snapshot says unchanged. For the intent seams whose
+        /// client half mutates the local mirror natively BEFORE host confirmation (equip gestures): a host
+        /// reject changes no host state, so the normal diff emits nothing and that client stays diverged —
+        /// re-emitting the host truth for the touched subtree converges it. Prefix matches whole path
+        /// segments ("U#3" never matches "U#30"). No new wire concept: the client sees an ordinary delta.
+        /// ponytail: VALUES only — a client-side EXTRA dict key has no host-side change to tombstone it
+        /// and survives until the next real change of that dict; per-key CRC reconcile if it ever matters.</summary>
+        public static void ForceReemit(string pathPrefix)
+        {
+            if (string.IsNullOrEmpty(pathPrefix)) return;
+            if (!_forcePrefixes.Contains(pathPrefix)) _forcePrefixes.Add(pathPrefix);
+            FlushNow();
+        }
+
+        private static bool MatchesForcePrefix(string path)
+        {
+            for (int i = 0; i < _forcePrefixes.Count; i++)
+            {
+                var p = _forcePrefixes[i];
+                if (path.Length >= p.Length && string.CompareOrdinal(path, 0, p, 0, p.Length) == 0 &&
+                    (path.Length == p.Length || path[p.Length] == '.'))
+                    return true;
+            }
+            return false;
         }
 
         private static GeoLevelController GeoLevel()
@@ -245,8 +275,10 @@ namespace Multiplayer.Network.Sync
             // kept the previous tick's array (RailMeta.EncodeFieldValue with prev), so BytesEqual's
             // ReferenceEquals fast path settles it without a byte compare.
             var changed = new List<Entry>();
+            bool anyForced = _forcePrefixes.Count > 0;
             foreach (var e in ordered)
-                if (_forceFull || !_snapshot.TryGetValue(e.Key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value))
+                if (_forceFull || !_snapshot.TryGetValue(e.Key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value) ||
+                    (anyForced && MatchesForcePrefix(e.Path)))
                     changed.Add(e);
 
             // Built only if a stale subKey actually survives both guards below — normally nothing does, and
@@ -274,6 +306,7 @@ namespace Multiplayer.Network.Sync
             _snapshot = newSnap;
             bool wasForceFull = _forceFull;
             _forceFull = false;
+            _forcePrefixes.Clear();
 
             if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
 

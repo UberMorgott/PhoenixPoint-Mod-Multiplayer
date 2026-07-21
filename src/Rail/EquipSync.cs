@@ -44,6 +44,7 @@ namespace Multiplayer.Network.Sync
         // ─── EVERY PEER: one pending flag, set per LOCAL user gesture ──────
         private static bool _gesturePending;
         private static string _gestureSource; // for the per-gesture [MP][equip] log line
+        private static int _gestureCharId = -1; // char the gesture belongs to (-1 = unknown → any flush)
 
         // ─── HOST state: last committed loadout per character (the revert guard, see CheckLastApplyStuck) ─
         private static readonly Dictionary<int, byte[]> _appliedBefore = new Dictionary<int, byte[]>();
@@ -59,6 +60,7 @@ namespace Multiplayer.Network.Sync
         {
             _gesturePending = false;
             _gestureSource = null;
+            _gestureCharId = -1;
             _appliedBefore.Clear();
             _appliedAfter.Clear();
         }
@@ -83,7 +85,15 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return; // solo: nothing to mark
             if (SyncApplyScope.Active) return; // apply-driven UI churn is not a user gesture (law 8)
-            if (GeoLevel() == null) return;    // tactical UIStateInventory shares these widgets — geoscape only
+            var geo = GeoLevel();
+            if (geo == null) return;           // tactical UIStateInventory shares these widgets — geoscape only
+            // Bind the mark to the soldier being edited: SetItems flushes for EVERY character pass the
+            // send patch, and an unbound mark was consumed by the NEXT flush of ANY of them — a fast
+            // soldier-switch handed the intent to the wrong one. Both edit screens drive the same
+            // ActorCycle module (UIStateEditSoldier/-Vehicle → _geoscapeModules.ActorCycleModule), so
+            // its CurrentCharacter IS the gesture's soldier.
+            var cur = geo.View?.GeoscapeModules?.ActorCycleModule?.CurrentCharacter;
+            _gestureCharId = cur == null ? -1 : (int)cur.Id;
             _gesturePending = true;
             _gestureSource = source;
         }
@@ -144,6 +154,7 @@ namespace Multiplayer.Network.Sync
             private static void Postfix(GeoCharacter __instance, bool freeReload)
             {
                 if (!_gesturePending || SyncApplyScope.Active) return;
+                if (_gestureCharId >= 0 && (int)__instance.Id != _gestureCharId) return; // another char's per-frame flush must not consume the mark
                 _gesturePending = false;
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return;
@@ -330,15 +341,17 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Equip/edit-screen scrap chokepoint: <c>UIStateEditSoldier.ItemScrappedHandler</c> (:632)
-        /// and <c>UIStateEditVehicle.ItemScrappedHandler</c> (:183) call <c>GeoFaction.ScrapItem</c> directly —
-        /// on a client that is an ungated wallet+storage write. CLIENT: block, forward to the EXISTING
-        /// OpScrap intent (index slot = count); the host validates storage count and executes natively
-        /// (ManufactureSync.HandleIntent), result rides wallet 0xA0 + storage 0xAC. UIModuleManufacturing's
-        /// own ScrapItem call never reaches here on a client (ScrapAllItems is blocked earlier).
-        /// ponytail: scrap is def-addressed — an item scrapped straight off an EQUIPPED slot is matched
-        /// against host STORAGE (same-def storage copy scrapped if present, else host-reject no-op);
-        /// carry a charId in the payload if per-instance equipped-slot scrap ever matters.</summary>
+        /// <summary>Equip/edit-screen scrap chokepoint: <c>UIStateEditSoldier.ItemScrappedHandler</c> (:622)
+        /// and <c>UIStateEditVehicle.ItemScrappedHandler</c> (:173) call <c>GeoFaction.ScrapItem</c> directly —
+        /// on a client that is an ungated wallet+storage write. CLIENT: block the local write and forward.
+        /// The scrapped instance is addressed two ways:
+        ///   • found (by REFERENCE) in a soldier's armour/equipment/inventory list → OpScrapEquipped
+        ///     (charId + list + slot triple): the host must subtract THAT instance and drop it off the doll.
+        ///     The def-addressed OpScrap would instead destroy an unrelated same-def STORAGE copy while every
+        ///     peer keeps the item equipped (the doll item never empties, UIStateEditSoldier:633-636).
+        ///   • otherwise it IS a storage instance → the EXISTING def-addressed OpScrap (index slot = count).
+        /// UIModuleManufacturing's own ScrapItem call never reaches here on a client (ScrapAllItems is
+        /// blocked earlier).</summary>
         [HarmonyPatch(typeof(GeoFaction), nameof(GeoFaction.ScrapItem))]
         internal static class ScrapItemCapturePatch
         {
@@ -349,12 +362,72 @@ namespace Multiplayer.Network.Sync
                 if (SyncApplyScope.Active) return false; // law 8: applying never echoes an intent
                 var def = geoItem?.ItemDef;
                 // Non-viewer faction (unreachable from UI) → block the local write, no intent.
-                if (def != null && ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction))
+                if (def == null || !ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction)) return false;
+                if (FindEquippedInstance(__instance, geoItem, out int charId, out byte listIdx))
+                {
+                    SendScrapEquippedIntent(charId, listIdx, geoItem, amount);
+                    // This gesture also armed the loadout mark (LoadoutButtonsGesturePatch prefixes
+                    // ItemScrappedHandler). The local model stays untouched, so the follow-up SetItems
+                    // flush would ship the PRE-scrap lists and ask the host to re-equip the item it just
+                    // destroyed — drop the mark; the rail + open-UI repaint deliver the post-scrap truth.
+                    _gesturePending = false;
+                }
+                else
                 {
                     ManufactureSync.SendIntent(ManufactureSync.OpScrap, def.Guid, amount);
                     Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
                 }
                 return false;
+            }
+        }
+
+        /// <summary>Which Phoenix soldier's loadout holds this exact GeoItem INSTANCE (reference scan —
+        /// the equip widgets hold the live model items). False = not equipped, i.e. a storage instance.</summary>
+        private static bool FindEquippedInstance(GeoFaction faction, GeoItem item, out int charId, out byte listIdx)
+        {
+            foreach (var c in faction.Characters)
+            {
+                if (c == null) continue;
+                for (byte i = 0; i < 3; i++)
+                {
+                    IReadOnlyList<GeoItem> list = i == 0 ? c.ArmourItems : i == 1 ? c.EquipmentItems : c.InventoryItems;
+                    if (list == null) continue;
+                    for (int k = 0; k < list.Count; k++)
+                        if (ReferenceEquals(list[k], item)) { charId = (int)c.Id; listIdx = i; return true; }
+                }
+            }
+            charId = -1; listIdx = 0;
+            return false;
+        }
+
+        /// <summary>[nonce][OpScrapEquipped][charId][list][defGuid][count][charges][amount] on the shared
+        /// 0xAE surface — decoded host-side by <see cref="HandleScrapEquippedIntent"/>. The (def, count,
+        /// charges) triple is the same slot ADDRESS OpSetItems uses: count/charges only disambiguate
+        /// same-def siblings, the host answers with its OWN live instance.</summary>
+        private static void SendScrapEquippedIntent(int charId, byte listIdx, GeoItem item, int amount)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null) return;
+            uint nonce = ManufactureSync.NextNonce();
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(nonce);
+                w.Write(ManufactureSync.OpScrapEquipped);
+                w.Write(charId);
+                w.Write(listIdx);
+                w.Write(item.ItemDef.Guid);
+                w.Write(item.CommonItemData.Count);
+                w.Write(item.CommonItemData.CurrentCharges);
+                w.Write(amount);
+                try
+                {
+                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, ms.ToArray());
+                    engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
+                    Debug.Log("[MP][scrap] CLIENT equipped-scrap intent char=U#" + charId + " list=" + listIdx +
+                              " def=" + item.ItemDef.Guid + " amount=" + amount + " nonce=" + nonce);
+                }
+                catch (ArgumentOutOfRangeException ex) { Debug.LogError("[MP][scrap] intent exceeds envelope u16 — " + ex.Message); }
             }
         }
 
@@ -506,7 +579,8 @@ namespace Multiplayer.Network.Sync
                 }
 
                 // Validate BEFORE mutating: every gain must be takeable from storage (stale client view →
-                // reject the WHOLE intent; the rail's next delta re-syncs that client).
+                // reject the WHOLE intent; Reject's forced re-emit re-syncs that client — with nothing
+                // changed host-side the rail would otherwise emit no delta at all).
                 foreach (var kv in need)
                 {
                     int have = storage.Items.TryGetValue(kv.Key, out var st) ? st.CommonItemData.Count : 0;
@@ -552,6 +626,66 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 Debug.LogWarning("[MP][equip] HOST intent REJECT (throw) char=U#" + charId + ": " + ex);
+                ForceResyncAfterReject(charId);
+            }
+        }
+
+        /// <summary>HOST replay of the edit-screen scrap of an EQUIPPED item at model level
+        /// (UIStateEditSoldier.ItemScrappedHandler:622-646 / UIStateEditVehicle:173-198): unload the item's
+        /// magazines into storage, <c>GeoFaction.ScrapItem</c> (wallet refund + per-unit subtract,
+        /// GeoFaction.cs:1217-1230) on THAT instance, and when the stack empties drop it from the soldier's
+        /// list — native's widget RemoveItem + the follow-up UpdateSoldierEquipment flush collapse into one
+        /// <c>SetItems</c> here (untouched lists ride null, GeoCharacter.cs:831). Result reaches every peer
+        /// through the normal rail: character lists (EntityList) + storage (GeoItemDict) + wallet.</summary>
+        internal static void HandleScrapEquippedIntent(ulong senderPeerId, uint nonce, BinaryReader r)
+        {
+            int charId = -1;
+            try
+            {
+                charId = r.ReadInt32();
+                byte listIdx = r.ReadByte();
+                string guid = r.ReadString();
+                int count = r.ReadInt32();
+                int charges = r.ReadInt32();
+                int amount = r.ReadInt32();
+
+                var geo = GeoLevel();
+                if (geo == null) { Reject(senderPeerId, charId, "scrap: no geoscape"); return; }
+                if (listIdx > 2) { Reject(senderPeerId, charId, "scrap: bad list " + listIdx); return; }
+                if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
+                { Reject(senderPeerId, charId, "scrap: unresolved character"); return; }
+                // The refund lands on the character's faction — never let a client intent scrap an
+                // NPC-faction soldier's gear (law 3).
+                if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
+                { Reject(senderPeerId, charId, "scrap: not a Phoenix soldier"); return; }
+                var def = GeoItemCodec.ResolveDef(guid);
+                if (def == null) { Reject(senderPeerId, charId, "scrap: unknown def " + guid); return; }
+
+                var pool = ListValue(character, listIdx);
+                var live = TakeBestFit(pool, def, count, charges); // pool is now the list WITHOUT live
+                if (live == null) { Reject(senderPeerId, charId, "scrap: not equipped " + def.name); return; }
+                if (amount < 1 || live.CommonItemData.Count < amount)
+                { Reject(senderPeerId, charId, "scrap: amount " + amount + " > held " + live.CommonItemData.Count); return; }
+
+                var storage = ResolveStorage(character);
+                if (live.CommonItemData.Ammo != null && storage != null)
+                    foreach (var mag in live.CommonItemData.Ammo.UnloadMagazines())
+                        if (mag is GeoItem geoMag) storage.AddItem(geoMag); // native :627-630 via the storage widget
+                character.Faction.ScrapItem(live, amount);
+                if (live.CommonItemData.IsEmpty())
+                    character.SetItems(listIdx == 0 ? pool : null, listIdx == 1 ? pool : null, listIdx == 2 ? pool : null);
+
+                try { (character.Faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
+                catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
+                _appliedAfter[charId] = EncodeBody(false, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
+                ReseedLocalScreenAfterRemoteMutation();
+                Debug.Log("[MP][scrap] HOST equipped-scrap APPLIED char=U#" + charId + " def=" + guid +
+                          " x" + amount + " nonce=" + nonce + " peer=" + senderPeerId);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[MP][scrap] HOST equipped-scrap REJECT (throw) char=U#" + charId + ": " + ex);
+                ForceResyncAfterReject(charId);
             }
         }
 
@@ -685,8 +819,25 @@ namespace Multiplayer.Network.Sync
                            "removals will silently never reach any peer.");
         }
 
-        private static void Reject(ulong peer, int charId, string why) =>
+        private static void Reject(ulong peer, int charId, string why)
+        {
             Debug.LogWarning("[MP][equip] HOST intent REJECT char=U#" + charId + " peer=" + peer + " — " + why);
+            ForceResyncAfterReject(charId);
+        }
+
+        /// <summary>Law-7 convergence for a REFUSED equip intent. Unlike every other intent seam, equip
+        /// gestures mutate the CLIENT's local mirror natively before the host answers (SetItems +
+        /// UpdateStorage are real model writes — the seam ships the RESULT; the augment preview writes the
+        /// armour set too). On reject the host state did not change, so the diff rail emits nothing and
+        /// that client would stay diverged forever. Force the next tick to re-emit current host values for
+        /// everything the gesture could have touched — the character subtree + the faction storage
+        /// subtree — and the client's ordinary Apply converges it (no new wire concept).</summary>
+        private static void ForceResyncAfterReject(int charId)
+        {
+            if (charId >= 0) DiffEngine.ForceReemit("U#" + charId);
+            var phoenix = GeoLevel()?.PhoenixFaction;
+            if (phoenix?.Def != null) DiffEngine.ForceReemit("F#" + phoenix.Def.Guid + ".ItemStorage");
+        }
 
         /// <summary>The storage the equip screens trade against (UIStateEditSoldier.StorageItems()).
         /// ponytail: non-global storage (def-flag flip by a mod) = linear scan for the soldier's site;
