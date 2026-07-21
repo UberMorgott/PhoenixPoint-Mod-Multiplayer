@@ -356,27 +356,38 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Replay of <c>CommitStatChanges</c>:369-375 at model level. The wire carries the same
         /// INCREMENTS native feeds <c>ModifyBaseStat</c> (see the capture patch for why an absolute cannot
-        /// travel: the module's numbers are bonus-inflated display values). The host re-anchors them on its
-        /// OWN current base stat, so a stale client can only be wrong by what it has not seen yet, and the
-        /// range/afford checks below refuse that. A DECREASE is never accepted (the native UI cannot commit
-        /// one either — it clamps at the starting value, UIModuleCharacterProgression.cs:907).</summary>
+        /// travel: the module's numbers are bonus-inflated display values). Cost and cap are checked on the
+        /// DISPLAY scale, exactly like the native per-click gate (ChangeCharacterStat:879-881/:909 —
+        /// CanModifyBaseStat(display+1) + GetBaseStatCost(display+1)), where display =
+        /// GetProgressionBaseStats() + Bonus* (RefreshStats:515-518) = base stat + Σ bodypart aspect +
+        /// augment bonus. Charging on the BASE scale undercharged (cost is value-dependent:
+        /// CharacterProgression.cs:274-294, Strength=value/2, Will/Speed=value) and let the display value
+        /// pass the sheet cap. The increments still land on the base stat — one click is +1 on both scales.
+        /// A DECREASE is never accepted (the native UI cannot commit one either — it clamps at the starting
+        /// value, UIModuleCharacterProgression.cs:907).</summary>
         private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed)
         {
             var progression = character.Progression;
             var stats = new[] { CharacterBaseAttribute.Strength, CharacterBaseAttribute.Will, CharacterBaseAttribute.Speed };
             var delta = new[] { addStr, addWill, addSpeed };
-            var want = new int[3];
+            var baseStats = character.GetProgressionBaseStats(); // Endurance slot = strength (GeoCharacter.cs:1167-1181)
+            var display = new[]
+            {
+                (int)(baseStats.Endurance + character.BonusStrength),
+                (int)(baseStats.Willpower + character.BonusWillpower),
+                (int)(baseStats.Speed + character.BonusSpeed),
+            };
             int total = 0;
             for (int i = 0; i < 3; i++)
             {
-                int cur = progression.GetBaseStat(stats[i]);
-                want[i] = cur + delta[i];
+                int want = display[i] + delta[i];
                 if (delta[i] < 0) { Reject(peer, (int)character.Id, "stat decrease " + stats[i]); return false; }
                 // Bounds the cost loop below as well: CanModifyBaseStat rejects anything above the sheet
-                // maximum, so a hostile want=int.MaxValue cannot spin here.
-                if (delta[i] > 0 && !progression.CanModifyBaseStat(stats[i], want[i]))
-                { Reject(peer, (int)character.Id, "stat out of range " + stats[i] + "=" + want[i]); return false; }
-                for (int v = cur + 1; v <= want[i]; v++) total += progression.GetBaseStatCost(stats[i], v);
+                // maximum (and a display+delta overflow wraps negative → also rejected), so a hostile
+                // delta=int.MaxValue cannot spin here.
+                if (delta[i] > 0 && !progression.CanModifyBaseStat(stats[i], want))
+                { Reject(peer, (int)character.Id, "stat out of range " + stats[i] + "=" + want); return false; }
+                for (int v = display[i] + 1; v <= want; v++) total += progression.GetBaseStatCost(stats[i], v);
             }
             if (total == 0) return false; // no-op intent (client view was already behind)
             if (!Charge(character, total)) { Reject(peer, (int)character.Id, "cannot afford " + total + " SP"); return false; }
@@ -395,12 +406,16 @@ namespace Multiplayer.Network.Sync
             var slot = track == null ? null : track.GetAbilitySlotForLevel(slotLevel);
             if (slot == null) { Reject(peer, charId, "no slot at " + source + " lvl " + slotLevel); return false; }
 
+            bool mutoid = character.IsMutoid;
             var wanted = ResolveDef(abilityGuid) as TacticalAbilityDef;
+            // Native :393-395 stamps an EMPTY slot only in the mutoid flow (a human track is pre-filled),
+            // and only on the clicker's own screen where the offer was locally legal. For a human the
+            // client-sent GUID is arbitrary wire input — never write it into the track (law 3).
+            if (slot.Ability == null && !mutoid) { Reject(peer, charId, "empty slot on non-mutoid"); return false; }
             if (slot.Ability == null) slot.Ability = wanted;      // native :393-395 (mutoid empty slot)
             if (slot.Ability == null) { Reject(peer, charId, "unknown ability " + abilityGuid); return false; }
             if (progression.Abilities.Contains(slot.Ability)) { Reject(peer, charId, "already learned " + slot.Ability.name); return false; }
 
-            bool mutoid = character.IsMutoid;
             if (mutoid)
             {
                 if (progression.LevelProgression.Level < buttonLevel)
