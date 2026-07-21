@@ -108,6 +108,25 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   accessor; LeafList applied in-place (game exposes lists by reference). Unknown entity/path → log once
   + skip (identity creation = structural layer, law 3). Seq gap → resync request (throttled), host
   resends ALL covered pairs — just a big delta (law 7).
+- **DTO twin resolution (2026-07-21).** `ActorComponent.SerializationData` is a RECORD-on-read seam: its
+  getter mints/re-records a DTO on every access (ActorComponent.cs:56-66) and the game applies one back
+  only at level-enter (DoEnterPlay:114-124 → ProcessInstanceData) — so client writes into the resolved
+  DTO were VOID and the entire GeoSite/GeoVehicle subtree (State/Weather/timers/ItemStorage/Travelling/
+  CurrentSite/haven data…) never mirrored. `IdentityResolver.Resolve` now maps `SerializationData` path
+  segments onto the LIVE owner via `RailType.GetBridged` (DTO member names resolved by the same
+  `ResolveLive` as the GeoFaction bridge; fieldIdx parity by identical member source + ordinal sort);
+  nested component InstanceData (GeoHaven/GeoPhoenixBase/VehicleFactionController…) dispatches via
+  `GetComponent`, mirroring GeoSite.RecordInstanceData's own dispatch (GeoSite.cs:1501-1525). Members
+  with no live counterpart (HitPoints→Stats transform, SurfacePos→Surface, Weapons/Modules type
+  ambiguity, TacUnits `IList` vs `List`) are one-time "dto-twin gap" logs, never silent drops. Calling
+  the owner's `ProcessInstanceData` wholesale as a batch-end apply seam was audited and REFUSED for the
+  live mirror: GeoSite's appends without clearing (`_addons`/`_tacUnits` doubling; GeoHaven `_zones` +
+  `StockedResources`, the latter self-appending through a live-ref alias), re-registers/reschedules the
+  active mission, and GeoVehicle's runs the `InstanceDataVersion < 3` HitPoints migration
+  (GeoVehicle.cs:1112-1119) — save-load semantics on a virgin actor, not repeat-apply semantics.
+  Per-actor `ActorInstanceData.TimingData` is opted out ship-side: `TimingInstanceData.OwnNow/OwnFixedNow`
+  accrue on every actor every walk (~880 of the measured ~890 changed fields per 0.5 s during geo-time —
+  the churn), client actor clocks tick locally, and the level clock rides the "TA" anchor.
 - `UiEventMap.cs` (law 11) — per entity kind the native repaint: Wallet → raise its own
   `ResourcesChanged` (GeoscapeView relays → info bar/manufacturing/replenish repaint natively);
   Research/ResearchElement → ResearchSync repaint path (open-screen SetupQueue rebuild, else

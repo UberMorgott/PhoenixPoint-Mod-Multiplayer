@@ -103,8 +103,9 @@ namespace Multiplayer.Network.Sync
         public int CoveredCount => Fields.Count(f => f.Class != FieldClass.Excluded);
 
         private static readonly Dictionary<Type, RailType> Cache = new Dictionary<Type, RailType>();
+        private static readonly Dictionary<string, RailType> BridgedCache = new Dictionary<string, RailType>(StringComparer.Ordinal);
 
-        public static void ClearCache() => Cache.Clear();
+        public static void ClearCache() { Cache.Clear(); BridgedCache.Clear(); }
 
         public static RailType Get(Type t)
         {
@@ -114,6 +115,41 @@ namespace Multiplayer.Network.Sync
             if (ser == null) return null; // not in game yet — do NOT cache the miss
             rt = Build(t, ser);
             Cache[t] = rt;
+            return rt;
+        }
+
+        /// <summary>Field table for applying a recorded <c>*InstanceData</c> DTO's wire entries onto its
+        /// LIVE owner (the DTO twin). The DTO's own direct table and this one draw from the SAME member
+        /// source (<see cref="RailMeta.SerializedMembers"/> of the DTO) with the SAME ordinal sort, so a
+        /// wire fieldIdx addresses the same member in both — but here each member is resolved onto the
+        /// live type through the same <see cref="RailMeta.ResolveLive"/> the GeoFaction bridge uses.
+        /// Members with no live counterpart stay Excluded ("dto-twin unresolved") and are logged once at
+        /// apply time, never silently dropped. The polymorphic-object flatten of <see cref="Build"/> is
+        /// deliberately absent: it would add rows the DTO's direct table does not have and break the
+        /// fieldIdx parity this table exists for.</summary>
+        public static RailType GetBridged(Type live, Type dto)
+        {
+            if (live == null || dto == null || live == dto) return null;
+            var key = live.FullName + "|" + dto.FullName;
+            if (BridgedCache.TryGetValue(key, out var rt)) return rt;
+            var ser = RailMeta.GameSerializer;
+            if (ser == null) return null; // pre-init — do NOT cache the miss
+            rt = new RailType { Type = live, Source = "twin:" + dto.Name, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail)>();
+            foreach (var dtoMi in RailMeta.SerializedMembers(ser, dto))
+            {
+                var valType = RailMeta.MemberType(dtoMi);
+                var liveMi = RailMeta.ResolveLive(live, dtoMi.Name, valType, out var alias);
+                raw.Add((dtoMi.Name, valType, liveMi, alias, liveMi == null ? "dto-twin unresolved" : null));
+            }
+            foreach (var e in raw.OrderBy(e => e.name, StringComparer.Ordinal))
+            {
+                if (rt._byName.ContainsKey(e.name)) continue; // hierarchy duplicate — first wins
+                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail);
+                rt.Fields.Add(f);
+                rt._byName[e.name] = f;
+            }
+            BridgedCache[key] = rt;
             return rt;
         }
 
@@ -1042,6 +1078,16 @@ namespace Multiplayer.Network.Sync
         {
             if (o == null) return;
             try { ser.GetSerializationType(o.GetType())?.InvokePostRead(o, null); }
+            catch (NullReferenceException)
+            {
+                // The callback dereferenced its SerializedObjectData parameter — save-load-only context the
+                // rail cannot supply (its ctor needs a live ReadStream section, SerializedObjectData.cs:22-30).
+                // GeoVehicleInstanceData.OnDeserialized:66-70 (InstanceDataVersion = serObj.SerializedVersion)
+                // is the known shape. Skipping by signature instead is NOT safe: AbilityTrack.OnDeserialized
+                // takes the same parameter and never touches it, and its slot rebind must keep running.
+                // Loud by design — a type of this shape riding a blob is a classification bug, not noise.
+                WarnOnce("blob post-read on " + o.GetType().Name + " dereferences SerializedObjectData (unavailable in rail decode) — callback aborted mid-run, its rebind/migration did NOT apply");
+            }
             catch (Exception ex) { WarnOnce("blob post-read on " + o.GetType().Name + " threw " + ex.GetType().Name); }
         }
 

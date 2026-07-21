@@ -186,6 +186,12 @@ namespace Multiplayer.Network.Sync
             // hang off one site share ONE AllSites/Vehicles scan instead of 50. Same dictionary ⇒ same
             // batch-local lifetime ⇒ no new staleness class, just fewer linear scans.
             object cur = ResolveCachedRoot(geo, segments[0], cache);
+            // Non-null while cur is the LIVE TWIN of a recorded *InstanceData DTO of this type. The game's
+            // ActorComponent.SerializationData getter RE-RECORDS a throwaway DTO on every access
+            // (ActorComponent.cs:56-66) and applies one back only at level-enter (DoEnterPlay:114-124), so
+            // a write into the getter's value is void — these segments resolve onto the live owner instead,
+            // through the DTO-name→live-member table (RailType.GetBridged).
+            Type twinDto = null;
             for (int i = 1; cur != null && i < segments.Length; i++)
             {
                 var seg = segments[i];
@@ -193,9 +199,39 @@ namespace Multiplayer.Network.Sync
                 int hash = seg.IndexOf('#');
                 if (hash >= 0) { key = seg.Substring(hash + 1); seg = seg.Substring(0, hash); }
 
-                var rt = RailType.Get(cur.GetType());
-                var field = rt?.FieldByName(seg);
-                if (field == null) return null;
+                RailField field;
+                if (twinDto != null)
+                {
+                    field = RailType.GetBridged(cur.GetType(), twinDto)?.FieldByName(seg);
+                    if (field == null) return null;
+                    if (field.Fi == null && field.Pi == null)
+                    {
+                        // No live member of this name/type. A nested component InstanceData twins to the
+                        // COMPONENT that records it — GeoSite.RecordInstanceData dispatches HavenData/
+                        // PhoenixBaseData/… per GetComponent (GeoSite.cs:1501-1525), so the resolver does too.
+                        var decl = field.ValueType?.DeclaringType;
+                        if (key == null && decl != null && typeof(UnityEngine.Component).IsAssignableFrom(decl) &&
+                            cur is UnityEngine.Component comp)
+                        {
+                            cur = comp.GetComponent(decl);
+                            twinDto = field.ValueType;
+                            continue;
+                        }
+                        return null;
+                    }
+                    twinDto = null; // resolved onto a live member — normal walk from here down
+                }
+                else
+                {
+                    field = RailType.Get(cur.GetType())?.FieldByName(seg);
+                    if (field == null) return null;
+                    if (typeof(IInstanceData).IsAssignableFrom(field.ValueType))
+                    {
+                        if (key != null) return null;
+                        twinDto = RailMeta.FindBridge(cur.GetType()) ?? field.ValueType;
+                        continue; // cur STAYS the live actor — never touch the DTO-minting getter
+                    }
+                }
                 object val;
                 try { val = field.GetValue(cur); } catch { return null; }
                 if (key == null) { cur = val; continue; }

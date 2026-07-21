@@ -160,7 +160,19 @@ namespace Multiplayer.Network.Sync
                 entity = IdentityResolver.Resolve(geo, path, _pathCache);
             }
             if (entity == null) { LogMissOnce("entity not found: " + path); return; }
-            if (!rt.Type.IsInstanceOfType(entity)) { LogMissOnce("type mismatch at " + path + ": " + entity.GetType().Name + " vs " + rt.Type.Name); return; }
+            if (!rt.Type.IsInstanceOfType(entity))
+            {
+                // The resolver returned the LIVE TWIN of a recorded *InstanceData DTO (writes into the
+                // getter-minted DTO are void — see IdentityResolver). Same member source + ordinal sort ⇒
+                // the wire fieldIdx addresses the same-named member in the bridged table.
+                var bt = RailType.GetBridged(entity.GetType(), rt.Type);
+                var bf = bt != null && bt.Fields.Count == rt.Fields.Count ? bt.Fields[fieldIdx] : null;
+                if (bf == null || !string.Equals(bf.Name, field.Name, StringComparison.Ordinal))
+                { LogMissOnce("type mismatch at " + path + ": " + entity.GetType().Name + " vs " + rt.Type.Name); return; }
+                if (bf.Class == FieldClass.Excluded)
+                { LogMissOnce("dto-twin gap: " + rt.Type.Name + "." + bf.Name + " has no live counterpart on " + entity.GetType().Name + " (" + bf.Exclude + ") — not mirrored"); return; }
+                field = bf;
+            }
             if (Unchanged(entity, field, subKey, value)) return; // no-op entry: not applied, not touched, no repaint
 
             try
