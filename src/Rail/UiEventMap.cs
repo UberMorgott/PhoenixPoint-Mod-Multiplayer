@@ -37,15 +37,14 @@ namespace Multiplayer.Network.Sync
             if (touched == null || touched.Count == 0) return;
             bool researchDone = false;
             bool mfgDone = false;
-            var walletsDone = new HashSet<object>();
             foreach (var entity in touched)
             {
                 try
                 {
                     switch (entity)
                     {
-                        case Wallet w:
-                            if (walletsDone.Add(w)) RaiseResourcesChanged(w);
+                        case Wallet w: // touched is a HashSet — each wallet fires at most once
+                            RaiseResourcesChanged(w);
                             break;
                         case Research _:
                         case ResearchElement _:

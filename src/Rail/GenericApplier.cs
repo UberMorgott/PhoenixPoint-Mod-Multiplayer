@@ -218,12 +218,7 @@ namespace Multiplayer.Network.Sync
                         // DIRECT dict write / remove — NOT AddItem/RemoveItem (those fire StorageChanged/ItemAdded
                         // events + faction ammo-unload = gameplay side-effects a projector client must not run).
                         if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { dict.Remove(def); break; }
-                        var giv = GeoItemCodec.Decode(value, def);
-                        dict[def] = giv;
-                        // [mfgdiag] boundary: mirrored client count per def (real-loss vs visual proof; remove after diag).
-                        // Per applied storage def, per batch — the ~1600-lines-per-client family MpDiag exists for.
-                        if (MpDiag.On)
-                            Debug.Log("[Multiplayer][mfgdiag] CLIENT storage def=" + subKey + " -> clientMirrorCount=" + giv.CommonItemData.Count);
+                        dict[def] = GeoItemCodec.Decode(value, def);
                         break;
                     }
                     default:

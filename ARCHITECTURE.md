@@ -143,9 +143,9 @@ screen with `current.Exit(stack); current.Enter(stack);`. That is a state-machin
 repaint, and it is not idempotent: `Exit` tears down real resources (`UIStateVehicleSelected.cs:237-258`
 runs `_sectionBarModule.Deinit()`, `_resourcesModule.Done()`, destroys `_selectionMarker`, unsubscribes 6
 events) and `Enter` re-runs a full `EnterState` that can legitimately fail on a mirrored model. The
-growing opt-out table (`UIStateManufacturing`, `UIStateEditSoldier`) is that broken invariant leaking one
+opt-out table (currently only `UIStateManufacturing`) is that broken invariant leaking one
 screen at a time — each entry is a screen whose `ExitState` does something a repaint must never do, and
-the list only grows as more screens are exercised. A throwing `Enter` is now SWALLOWED and the screen kept
+the list grows as more screens are exercised. A throwing `Enter` is now SWALLOWED and the screen kept
 (log once per state type) — `Enter` re-registers the input handler before `EnterState` runs
 (`GeoscapeViewState.cs:88-94`), so a partial repaint stays usable; the old roll-forward to
 `UIStateNothingSelected` ejected the player from the screen once per rail batch. The real answer is still a
