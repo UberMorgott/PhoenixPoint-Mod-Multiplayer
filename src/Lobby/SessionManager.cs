@@ -590,11 +590,6 @@ namespace Multiplayer.Network
             _engine.ReportConnectionRejected(reason);
         }
 
-        public void HandleClientDisconnected(NetworkMessage msg)
-        {
-            RemoveClient(msg.SenderSteamId);
-        }
-
         // ─── Heartbeat ────────────────────────────────────────────────────
 
         /// <summary>

@@ -580,8 +580,8 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Intent capture for INSTANT scrap (UIModuleManufacturing.ScrapAllItems). On the client:
         /// send one scrap intent per staged cart entry, optimistically empty the local carts, BLOCK the native
-        /// call (no local storage/wallet mutation → no revert-flicker). Host result rides the storage (0xAC) +
-        /// wallet (0xA0) value rails; the universal open-UI repaint refreshes every client screen.</summary>
+        /// call (no local storage/wallet mutation → no revert-flicker). Host result rides the storage +
+        /// wallet 0xAC value rail; the universal open-UI repaint refreshes every client screen.</summary>
         [HarmonyPatch(typeof(UIModuleManufacturing), nameof(UIModuleManufacturing.ScrapAllItems))]
         internal static class ScrapCapturePatch
         {

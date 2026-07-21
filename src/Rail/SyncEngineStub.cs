@@ -7,7 +7,7 @@ namespace Multiplayer.Network.Sync
     /// channels/codecs). Keeps the NetworkEngine.Sync seam alive and owns the ONE inbound 0x67-envelope
     /// chokepoint (<see cref="SurfaceRouter"/>); the new rail arms Router hooks per surface.
     /// </summary>
-    public sealed class SyncEngine : ISyncSink
+    public sealed class SyncEngine
     {
         private readonly NetworkEngine _engine;
         public readonly SurfaceRouter Router = new SurfaceRouter();
@@ -25,12 +25,8 @@ namespace Multiplayer.Network.Sync
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
-        public bool IsHost => _engine != null && _engine.IsHost;
-        public Guid ResolveActor(ulong peerId) => Guid.Empty; // ponytail: rail wires the real peer→player map when intents land
-        public void RefreshUi() { }
-
         /// <summary>Unified 0x67 envelope inbound (routed by NetworkEngine.RouteMessage).</summary>
-        public void OnSyncEnvelope(ulong senderPeerId, byte[] payload) => Router.OnInbound(senderPeerId, payload, this);
+        public void OnSyncEnvelope(ulong senderPeerId, byte[] payload) => Router.OnInbound(senderPeerId, payload);
 
         // Lifecycle seams NetworkEngine / SessionManager / SaveTransferCoordinator drive.
         // DetachAllChannels = full session teardown (seq streams reset); ResetForReloadBoundary =
@@ -76,6 +72,9 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.ResetIntentDedupForPeer(peerId);
             PersonnelSync.ResetIntentDedupForPeer(peerId);
         }
+        // Deliberate no-ops: the legacy push-reseed seam. SessionManager (JoinReady) and
+        // SaveTransferCoordinator still drive it on the join paths, but on the rail a joiner is
+        // seeded by the save transfer + resync-on-gap (law 7) — nothing to broadcast here.
         public void BroadcastFullWallet() { }
         public void BroadcastAllChannels() { }
     }

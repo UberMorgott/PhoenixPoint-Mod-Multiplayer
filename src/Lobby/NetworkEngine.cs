@@ -589,10 +589,6 @@ namespace Multiplayer.Network
                     Session.HandleConnectionRejected(msg);
                     break;
 
-                case PacketType.ClientDisconnected:
-                    Session.HandleClientDisconnected(msg);
-                    break;
-
                 case PacketType.HostDisconnected:
                     Session.HandleHostDisconnected(msg);
                     break;

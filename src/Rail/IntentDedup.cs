@@ -11,8 +11,8 @@ namespace Multiplayer.Network.Sync
     /// flat over a long session. PURE (no engine types) → unit-tested.
     ///
     /// Lifted verbatim from the tactical-only TacticalIntentDedup (capacity floor 16); TacticalIntentDedup now
-    /// derives from this. The geoscape action-intent surface (GeoIntent 0xA2) also uses this shared dedup after
-    /// the envelope cutover retired the legacy (peerId, nonce)-keyed RequestDedup it previously used.
+    /// derives from this. The geoscape intent surfaces (research 0xAB / manufacture 0xAE / personnel 0xAF)
+    /// use this same shared dedup, keyed per-peer.
     /// </summary>
     public class IntentDedup
     {

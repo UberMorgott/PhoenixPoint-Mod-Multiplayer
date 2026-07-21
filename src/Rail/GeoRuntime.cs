@@ -6,14 +6,11 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Centralized reflection surface for live geoscape state + bound action methods.
-    /// All game types are resolved by name (the mod has NO compile-time game references).
-    /// Mirrors <c>TimeSyncManager.EnsureReflection()/GetGeoLevel()</c>: bind once, cache.
-    /// Action <c>Apply</c>/<c>Validate</c> code and interceptors share this one binding surface.
-    /// Verified against the decompile (2026-06-15):
-    ///   Base.Core.GameUtl.CurrentLevel() -> Level (a Component);
-    ///   PhoenixPoint.Geoscape.Levels.GeoLevelController.PhoenixFaction { get; } -> GeoPhoenixFaction;
-    ///   GeoFaction.Wallet { get; } -> Wallet.
+    /// Reflection-bound "is the geoscape live?" probe (bind once, cache — mirrors
+    /// <c>TimeSyncManager.EnsureReflection()</c>). Verified against the decompile (2026-06-15):
+    ///   Base.Core.GameUtl.CurrentLevel() -> Level (a Component).
+    /// The old wallet-sync helpers (CurrentLevel/PhoenixFaction/Wallet) were deleted 2026-07-22 —
+    /// zero callers after the generic value rail took over; history in git.
     /// </summary>
     public sealed class GeoRuntime
     {
@@ -23,7 +20,6 @@ namespace Multiplayer.Network.Sync
         private Type _geoLevelType;
         private Type _gameUtlType;
         private MethodInfo _currentLevel;
-        private PropertyInfo _phoenixFactionProp;
         private bool _ready;
 
         private GeoRuntime() => EnsureReflection();
@@ -34,19 +30,7 @@ namespace Multiplayer.Network.Sync
             _geoLevelType = AccessTools.TypeByName("PhoenixPoint.Geoscape.Levels.GeoLevelController");
             _gameUtlType = AccessTools.TypeByName("Base.Core.GameUtl") ?? AccessTools.TypeByName("GameUtl");
             _currentLevel = _gameUtlType != null ? AccessTools.Method(_gameUtlType, "CurrentLevel") : null;
-            if (_geoLevelType != null)
-                _phoenixFactionProp = AccessTools.Property(_geoLevelType, "PhoenixFaction");
             _ready = _geoLevelType != null && _currentLevel != null;
-        }
-
-        /// <summary>The current <c>Level</c> (a Component) from <c>GameUtl.CurrentLevel()</c>, or null.
-        /// Untyped — callers GetComponent the level-controller type they want (geoscape vs tactical).</summary>
-        public object CurrentLevel()
-        {
-            EnsureReflection();
-            if (_currentLevel == null) return null;
-            try { return _currentLevel.Invoke(null, null); }
-            catch { return null; }
         }
 
         /// <summary>The live <c>GeoLevelController</c>, or null if not in geoscape / mid-load.</summary>
@@ -62,24 +46,6 @@ namespace Multiplayer.Network.Sync
                     return comp.GetComponent(_geoLevelType); // null if current level isn't geoscape
                 return null;
             }
-            catch { return null; }
-        }
-
-        /// <summary>The player faction (<c>GeoPhoenixFaction</c>), or null.</summary>
-        public object PhoenixFaction()
-        {
-            var geo = GeoLevel();
-            if (geo == null) return null;
-            try { return _phoenixFactionProp?.GetValue(geo, null); }
-            catch { return null; }
-        }
-
-        /// <summary>The player faction <c>Wallet</c>, or null.</summary>
-        public object Wallet()
-        {
-            var fac = PhoenixFaction();
-            if (fac == null) return null;
-            try { return AccessTools.Property(fac.GetType(), "Wallet")?.GetValue(fac, null); }
             catch { return null; }
         }
 

@@ -333,7 +333,8 @@ namespace Multiplayer.Network.Sync
                         if (!(field.GetValue(entity) is IDictionary dict)) return false;
                         var key = RailMeta.DecodeDictKey(subKey, field.KeyType);
                         bool tomb = value.Length == 1 && value[0] == RailMeta.DictTombstone;
-                        if (key == null || !dict.Contains(key)) return tomb; // absent: a delete is the no-op
+                        // No null-key arm: DecodeDictKey throws on a malformed key, it never returns null.
+                        if (!dict.Contains(key)) return tomb; // absent: a delete is the no-op
                         return !tomb && SameBytes(value, RailMeta.EncodeFieldValue(field, dict[key]));
                     }
                     case FieldClass.GeoItemDict:

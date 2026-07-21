@@ -510,10 +510,11 @@ namespace Multiplayer.UI
             var sle = LE(scrollHost); sle.flexibleHeight = 1; sle.minHeight = 80;
 
             // Chat content = a plain from-code top-anchored rect, identical to the proven RosterContent
-            // construction (BuildRosterZone). The native CloneScroller was the ONLY structural
-            // difference between the working roster list and the chat list; under the cloned native
-            // ScrollRect's viewport mask the from-code chat rows did not render ("nothing shows" even
-            // though the data pipeline appended them). Mirroring the known-good roster rect — top
+            // construction (BuildRosterZone). A cloned native scroller (CloneScroller, since deleted)
+            // was the ONLY structural difference between the working roster list and the chat list;
+            // under the cloned native ScrollRect's viewport mask the from-code chat rows did not render
+            // ("nothing shows" even though the data pipeline appended them). Mirroring the known-good
+            // roster rect — top
             // anchors, VLG + ContentSizeFitter via ConfigureScrollContent, parent is scrollHost (not a
             // layout group → fitter conflict-free, §E-1) — makes the rows visible deterministically.
             var contentGo = new GameObject("ChatContent");

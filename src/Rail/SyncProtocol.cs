@@ -5,103 +5,15 @@ using System.Text;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Wire codecs for the unified sync envelope + the geoscape action relay. The header is handled by
-    /// <c>NetworkMessage</c>; these encode/decode only the payload bytes, in the <c>MessageSerializer</c>
-    /// BinaryWriter/Reader idiom. Legacy per-channel codecs (WalletSync / StateSync / EventDismiss /
-    /// ReportModalHide / GeoLogNotice) were deleted 2026-07-16 — zero callers in this repo; rail surfaces
+    /// Wire codec for the unified sync envelope. The header is handled by <c>NetworkMessage</c>;
+    /// this encodes/decodes only the payload bytes, in the <c>MessageSerializer</c> BinaryWriter/Reader
+    /// idiom. Legacy per-channel codecs (WalletSync / StateSync / EventDismiss / ReportModalHide /
+    /// GeoLogNotice) were deleted 2026-07-16, and the action-relay codecs (EncodeActionRequest/Apply/
+    /// Reject + decoders, for the reserved 0xA2-0xA4 surfaces) 2026-07-22 — zero callers; rail surfaces
     /// carry their own inner payloads (see the SurfaceIds 0xA0-0xBF comments). History in git.
     /// </summary>
     public static class SyncProtocol
     {
-        public static byte[] EncodeActionRequest(ushort actionId, uint nonce, byte[] payload)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(actionId);
-                w.Write(nonce);
-                w.Write((ushort)payload.Length);
-                w.Write(payload);
-                return ms.ToArray();
-            }
-        }
-
-        public static bool TryDecodeActionRequest(byte[] data, out ushort actionId, out uint nonce, out byte[] payload)
-        {
-            actionId = 0; nonce = 0; payload = null;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    actionId = r.ReadUInt16();
-                    nonce = r.ReadUInt32();
-                    payload = r.ReadBytes(r.ReadUInt16());
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
-        public static byte[] EncodeActionApply(ushort actionId, ulong sequence, byte[] payload)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(actionId);
-                w.Write(sequence);
-                w.Write((ushort)payload.Length);
-                w.Write(payload);
-                return ms.ToArray();
-            }
-        }
-
-        public static bool TryDecodeActionApply(byte[] data, out ushort actionId, out ulong sequence, out byte[] payload)
-        {
-            actionId = 0; sequence = 0; payload = null;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    actionId = r.ReadUInt16();
-                    sequence = r.ReadUInt64();
-                    payload = r.ReadBytes(r.ReadUInt16());
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
-        public static byte[] EncodeActionReject(uint nonce, byte reasonCode, string reason)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(nonce);
-                w.Write(reasonCode);
-                w.Write(reason ?? "");
-                return ms.ToArray();
-            }
-        }
-
-        public static bool TryDecodeActionReject(byte[] data, out uint nonce, out byte reasonCode, out string reason)
-        {
-            nonce = 0; reasonCode = 0; reason = null;
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    nonce = r.ReadUInt32();
-                    reasonCode = r.ReadByte();
-                    reason = r.ReadString();
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
         // ─── Unified surface envelope (SurfaceRouter chokepoint) ───────────
         // Wire: [surfaceId:u8][kind:u8][len:u16][payload:N]. surfaceId selects a registered surface;
         // kind (SyncKind) selects request/apply/snapshot/delta. The inner payload is the surface's

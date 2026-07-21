@@ -737,7 +737,7 @@ namespace Multiplayer.Network.Sync
         /// from storage — exactly why OpSetItems' "gained def must be in storage" validation would reject it.
         /// Validate cost + structural fit BEFORE mutating, then: swap the armour set natively, return
         /// non-permanent swapped-out parts to storage, drop 2-handed gear on a hand-losing augment, charge the
-        /// wallet. Result rides GeoCharacter lists + storage GeoItemDict (0xAC) + wallet (0xA0).
+        /// wallet. Result rides GeoCharacter lists + storage GeoItemDict + wallet (all 0xAC value rail).
         /// ponytail: the UI-side gates (2-augment cap, UnlockedAugmentations listing) are not re-checked —
         /// the client screen only offers slots built from host-mirrored state; add them if drift ever shows.</summary>
         internal static bool HandleAugmentIntent(ulong senderPeerId, uint nonce, string defGuid, int charId)

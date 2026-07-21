@@ -107,8 +107,6 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<Type, RailType> Cache = new Dictionary<Type, RailType>();
         private static readonly Dictionary<string, RailType> BridgedCache = new Dictionary<string, RailType>(StringComparer.Ordinal);
 
-        public static void ClearCache() { Cache.Clear(); BridgedCache.Clear(); }
-
         public static RailType Get(Type t)
         {
             if (t == null) return null;
@@ -233,7 +231,7 @@ namespace Multiplayer.Network.Sync
             if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
 
             // Leaf?
-            if (RailMeta.LeafKindOf(valType, 0, out var kind))
+            if (RailMeta.LeafKindOf(valType, out var kind))
             {
                 if (!f.IsWritable()) { f.Class = FieldClass.Excluded; f.Exclude = "read-only"; return f; }
                 f.Class = FieldClass.Leaf; f.Leaf = kind; return f;
@@ -243,7 +241,7 @@ namespace Multiplayer.Network.Sync
             var dictArgs = RailMeta.GenericInterfaceArgs(valType, typeof(IDictionary<,>));
             if (dictArgs != null)
             {
-                if (RailMeta.IsSimpleKey(dictArgs[0]) && RailMeta.LeafKindOf(dictArgs[1], 0, out _))
+                if (RailMeta.IsSimpleKey(dictArgs[0]) && RailMeta.LeafKindOf(dictArgs[1], out _))
                 { f.Class = FieldClass.LeafDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
                 if (GeoItemCodec.Handles(dictArgs[0], dictArgs[1]))
                 { f.Class = FieldClass.GeoItemDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
@@ -257,7 +255,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (RailMeta.IsPresentation(elem))
                 { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
-                if (RailMeta.LeafKindOf(elem, 0, out _))
+                if (RailMeta.LeafKindOf(elem, out _))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
                     f.Unordered = valType.IsGenericType && valType.GetGenericTypeDefinition() == typeof(HashSet<>);
@@ -573,8 +571,9 @@ namespace Multiplayer.Network.Sync
         internal static bool IsSimpleKey(Type t) =>
             t.IsEnum || t == typeof(int) || t == typeof(long) || t == typeof(string);
 
-        /// <summary>Leaf-encodable check + kind. Depth caps composite recursion (structs of structs).</summary>
-        internal static bool LeafKindOf(Type t, int depth, out LeafKind kind)
+        /// <summary>Leaf-encodable check + kind. Composite recursion (structs of structs) terminates by
+        /// construction — a struct cannot contain itself (CS0523) — so no depth cap is needed.</summary>
+        internal static bool LeafKindOf(Type t, out LeafKind kind)
         {
             kind = LeafKind.Null;
             if (t == typeof(bool)) { kind = LeafKind.Bool; return true; }
@@ -595,7 +594,7 @@ namespace Multiplayer.Network.Sync
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
             if (IdentityResolver.IsRootEntityType(t)) { kind = LeafKind.EntityRef; return true; }
-            if (t.IsValueType && !t.IsPrimitive && depth < 3)
+            if (t.IsValueType && !t.IsPrimitive)
             {
                 var rt = RailType.Get(t);
                 if (rt != null && rt.Fields.Count > 0 &&
@@ -662,7 +661,7 @@ namespace Multiplayer.Network.Sync
         public static void EncodeLeaf(BinaryWriter w, Type declared, object v)
         {
             if (v == null) { w.Write((byte)LeafKind.Null); return; }
-            LeafKindOf(declared, 0, out var kind);
+            LeafKindOf(declared, out var kind);
             if (kind == LeafKind.EntityRef)
             {
                 var key = IdentityResolver.RootRef(v);
@@ -928,7 +927,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var f in rt.Fields)
                     if (f.Class == FieldClass.Leaf || f.Class == FieldClass.LeafList || f.Class == FieldClass.Descend ||
                         f.Class == FieldClass.EntityCollection || f.Class == FieldClass.EntityList ||
-                        (f.Class == FieldClass.Excluded && f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _)))
+                        (f.Class == FieldClass.Excluded && f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, out _)))
                     { v = true; break; }
             _blobContentCache[t] = v;
             return v;
@@ -1125,7 +1124,7 @@ namespace Multiplayer.Network.Sync
         private static void EncodeValue(BinaryWriter w, Serializer ser, Type declared, object v, List<object> locals, int depth)
         {
             if (v == null) { w.Write(TagNull); return; }
-            if (LeafKindOf(declared, 0, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
+            if (LeafKindOf(declared, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
             for (int i = 0; i < locals.Count; i++)
                 if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
             var t = v.GetType();
@@ -1384,7 +1383,7 @@ namespace Multiplayer.Network.Sync
         /// the in-blob back-ref, is instance-dependent and deliberately NOT counted: the gate stays
         /// conservative — absent from the gate ⇒ reported as husk.)</summary>
         private static bool SalvagesInitOnlyLeaf(RailField f) =>
-            f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _);
+            f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, out _);
 
         internal static List<string> HuskMembers(Type t)
         {

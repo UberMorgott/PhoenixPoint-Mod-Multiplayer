@@ -10,9 +10,10 @@ namespace Multiplayer.Network
     /// </summary>
     public static class SteamConnect
     {
-        // Lobby-data keys advertising the host's connect info (read by a joiner after entering the lobby).
+        // Lobby-data key advertising the host's connect info (read by a joiner after entering the lobby).
+        // (The "mp_ip" DirectIP-fallback key was deleted 2026-07-22: HostPublish never wrote it, and the
+        // parity gate means both peers always run the same DLL — no cross-version joiner to serve.)
         public const string HostKey = "mp_host"; // host SteamID64 (decimal string) → Steam-P2P join
-        public const string IpKey = "mp_ip";     // optional "ip:port" → DirectIP fallback if set
 
         /// <summary>Rich-presence "connect" value Steam relaunches the joiner with (cold start → command line "+connect_lobby &lt;id&gt;").</summary>
         public static string ConnectString(ulong lobbyId) => "+connect_lobby " + lobbyId;
@@ -76,16 +77,10 @@ namespace Multiplayer.Network
         }
 
         /// <summary>
-        /// Fallback selection: prefer Steam-P2P (the host's SteamID64) when present, else the DirectIP
-        /// "ip:port" carried in lobby data. Returns the string to hand to the EXISTING join flow
-        /// (SmartJoinParser classifies a 15+ digit number as Steam and an ip:port as DirectIP), or null
-        /// when neither is usable.
+        /// The string to hand to the EXISTING join flow (SmartJoinParser classifies a 15+ digit number
+        /// as Steam-P2P), or null when the lobby carried no usable host id.
         /// </summary>
-        public static string ResolveJoinString(ulong hostSteamId, string ipPort)
-        {
-            if (hostSteamId != 0) return hostSteamId.ToString();
-            if (!string.IsNullOrWhiteSpace(ipPort)) return ipPort.Trim();
-            return null;
-        }
+        public static string ResolveJoinString(ulong hostSteamId)
+            => hostSteamId != 0 ? hostSteamId.ToString() : null;
     }
 }

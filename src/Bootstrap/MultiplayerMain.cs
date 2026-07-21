@@ -69,9 +69,7 @@ namespace Multiplayer
             MultiplayerLog.Shutdown();
         }
 
-        private void Update()
-        {
-            NetworkEngine.Instance?.Update();
-        }
+        // No Update() here: ModMain is a plain abstract class (not a MonoBehaviour), so Unity never
+        // pumps it. The engine is pumped by MultiplayerUI.Update (the component added above).
     }
 }

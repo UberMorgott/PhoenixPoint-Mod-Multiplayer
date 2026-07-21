@@ -6,7 +6,8 @@ namespace Multiplayer.Network.MessageLayer
         ConnectionRequest = 0x01,
         ConnectionAccepted = 0x02,
         ConnectionRejected = 0x03,
-        ClientDisconnected = 0x04,
+        // 0x04 (ClientDisconnected) removed 2026-07-22: zero senders ever — graceful quit rides
+        //   ClientLeave 0x08, hard drops surface via the transport disconnect callback. Do NOT reuse.
         HostDisconnected = 0x05,
         Heartbeat = 0x06,
         HeartbeatAck = 0x07,
@@ -103,8 +104,10 @@ namespace Multiplayer.Network.MessageLayer
         //   0x40, 0x41       — PermissionUpdate/SoldierAssignment (reserved: future host management UI; no sender ever wired, handlers/serializers removed)
         //   0x60, 0x61, 0x62 — ActionRequest/ActionApply/ActionReject → action relay rides 0x67 SyncEnvelope
         //                      GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4
-        //   0x63             — WalletSync → wallet rides 0x67 SyncEnvelope GeoWallet 0xA0 surface
-        //   0x64             — StateSync → per-channel state rides 0x67 SyncEnvelope GeoState 0xA1 surface
+        //   0x63             — WalletSync → wallet rides the 0x67 SyncEnvelope generic value rail (0xAC;
+        //                      its first envelope home, GeoWallet 0xA0, is itself retired)
+        //   0x64             — StateSync → per-channel state rides the same 0xAC generic value rail
+        //                      (its first envelope home, GeoState 0xA1, is itself retired)
         //   0x68             — ChoiceClaim → event-choice resolution rides AnswerEventAction (occId on the action wire)
     }
 }

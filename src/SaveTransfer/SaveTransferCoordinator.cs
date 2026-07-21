@@ -131,9 +131,6 @@ namespace Multiplayer.Network
         private long _lastSnapshotMs = -1;
         private const long SnapshotIntervalMs = 50; // ≈20 Hz — re-broadcast the smooth real fillAmount frequently
         private bool _loadCompleteSent;
-        // Entry settle-hide: OnReachedPlaying deferred its SendLoadComplete because a tac-entry deploy
-        // hydrate is still pending — released by NotifyHydrateSettled (ClientHydrateNow tail).
-        private bool _loadCompleteAwaitsHydrate;
         // Phase-2 native-load driver state (moved here from LoadOverlayController): last percent this
         // peer reported, so the session-scoped pump throttles to whole-percent steps and detects the
         // load finishing (LoadingProgress→null) independently of overlay visibility. -1 = not reporting.
@@ -597,6 +594,12 @@ namespace Multiplayer.Network
         /// the host does NOT re-enter from the blob (it is already in this live tactical level). Returns
         /// true iff the write+send coroutine launched.
         /// </summary>
+        // ── DEAD until the tactical arc (rail migration step 7) ──────────────────────────────
+        // The whole tac-entry/return-barrier machinery (this method + HostTacticalEntryTransferCrt +
+        // AbortTacticalEntryTransfer/OnEntryTransferAbort + OpenTacticalEntryBarrier/OpenReturnBarrier +
+        // _hostEntryHold) has ZERO live callers in this repo and is self-gated below (go=false). Kept,
+        // not deleted: it is interwoven with the live barrier/reveal state (Begin's _hostEntryHold gate,
+        // the 0x47 route + codec), so severing it would touch live paths for no in-game gain.
         public bool HostBeginTacticalEntryTransfer()
         {
             PhoenixGame game;
@@ -1007,7 +1010,6 @@ namespace Multiplayer.Network
             _tracker.Reset(); // fresh session: drop stale progress/done so 2nd co-op run starts clean
             _lastSnapshotMs = -1;
             _loadCompleteSent = false;
-            _loadCompleteAwaitsHydrate = false;
             _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
             _loadingLevel = null;      // fresh session: no level captured yet
             _liveProgressBar = null;   // fresh session: live native bar not captured yet
@@ -1034,6 +1036,7 @@ namespace Multiplayer.Network
         /// curtain hold engages and mid-tactical F2 keeps working; Begin() still fires via the _hostEntryHold
         /// relaxation. Gated by <see cref="Sync.Tactical.TacticalEntryBarrierGate"/> at the call site.
         /// </summary>
+        // DEAD until the tactical arc — no caller; see the fence note at HostBeginTacticalEntryTransfer.
         public void OpenTacticalEntryBarrier()
         {
             _hostEntryHold = true;
@@ -1054,6 +1057,8 @@ namespace Multiplayer.Network
         /// overlay + per-slot progress pump also work for free. Failure belts are the existing ones:
         /// roster shrink on peer-left, 180 s host forced-reveal + per-peer self-reveal.
         /// </summary>
+        // DEAD until the tactical arc — no caller (the TacticalLevelEndPatch that drove it stayed in
+        // the quarry); see the fence note at HostBeginTacticalEntryTransfer.
         public void OpenReturnBarrier()
         {
             if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
@@ -1062,7 +1067,6 @@ namespace Multiplayer.Network
             _reachedPlaying = false;
             _revealHoldStartedMs = 0;
             _loadCompleteSent = false;
-            _loadCompleteAwaitsHydrate = false;
             _lastReportedLoadPct = -1;
             _loadingLevel = null;
             _liveProgressBar = null;
@@ -1122,7 +1126,6 @@ namespace Multiplayer.Network
                 // new save — otherwise the client would download + prepare it but never enter the level.
                 _begun = false;
                 _loadCompleteSent = false;
-                _loadCompleteAwaitsHydrate = false;
                 _reachedPlaying = false;
                 _revealed = false;
                 _revealAllSent = false;
@@ -1449,6 +1452,8 @@ namespace Multiplayer.Network
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
             if (_engine.IsHost) { TryReleaseBarrier(); return; }
+            // _rxTransferId is usually Guid.Empty by now (ResetRx ran at load-prepare) — harmless:
+            // OnLoadComplete discards the transferId and keys done-tracking on the slot alone.
             var payload = MessageSerializer.SerializeLoadComplete(slot, _rxTransferId);
             _engine.SendToHost(new NetworkMessage(PacketType.LoadComplete, payload));
         }
@@ -1486,22 +1491,9 @@ namespace Multiplayer.Network
             // This peer is done but HELD (curtain gate parks every native lift until Revealed).
             // Label the held native loading screen so the wait reads as intentional.
             Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
-            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable) —
-            // EXCEPT a client whose tac-entry deploy hydrate is still pending: defer the report until the
-            // hydrate settles (NotifyHydrateSettled from the ClientHydrateNow tail), so the reveal covers
-            // the AP/turn-HUD/vision/placement settle instead of flashing it right after the lift. A
-            // hydrate that never runs is bounded by the existing 180 s forced/self-reveal belts.
-            SendLoadComplete();
-        }
-
-        /// <summary>CLIENT tac-entry settle-hide: the deploy hydrate finished (called from the
-        /// ClientHydrateNow tail, finally-guarded) → send the LoadComplete that OnReachedPlaying
-        /// deferred. No-op unless a deferral is armed.</summary>
-        public void NotifyHydrateSettled()
-        {
-            if (!_loadCompleteAwaitsHydrate) return;
-            _loadCompleteAwaitsHydrate = false;
-            Debug.Log("[Multiplayer] hydrate settled → deferred SendLoadComplete");
+            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable).
+            // (The tac-entry "defer until deploy hydrate settles" pair — _loadCompleteAwaitsHydrate +
+            // NotifyHydrateSettled — stayed in the quarry; re-quarry it with the tactical arc.)
             SendLoadComplete();
         }
 

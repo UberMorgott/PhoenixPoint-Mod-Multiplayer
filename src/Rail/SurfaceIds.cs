@@ -1,87 +1,38 @@
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Stable wire ids for every synced SURFACE (action or state channel) on the unified
-    /// <see cref="SurfaceRouter"/>. Never reuse a retired id. Action surface ids mirror
-    /// <see cref="SyncedActionIds"/> exactly so the migration is byte-for-byte stable; state-channel
-    /// surface ids reuse the channel's existing <c>ChannelId</c> (registered in a later phase).
+    /// Stable wire ids for every synced SURFACE on the unified <see cref="SurfaceRouter"/> — the
+    /// surfaceId byte of the 0x67 envelope. Geoscape partition = 0xA0-0xBF (tactical rides 0x80-0x9F).
+    /// Never reuse a retired id: a new sender on one would silently mis-route on an old peer.
     /// </summary>
     /// <remarks>
-    /// Id spaces are scoped PER KIND, not globally. There are three kinds, told apart by the naming
-    /// convention (which the comment sections below mirror):
-    ///   • Action surfaces        — plain names (mirror <see cref="SyncedActionIds"/>); ids 1-30 / 60-79.
-    ///   • State-channel surfaces  — names suffixed <c>Channel</c>; ids 1-10.
-    ///   • Geoscape envelope surfaces — names prefixed <c>Geo</c> (and NOT suffixed <c>Channel</c>); ids 0xA0-0xBF.
-    /// A value may repeat ACROSS kinds (e.g. <see cref="StartResearch"/>=1 and <see cref="InventoryChannel"/>=1):
-    /// the surface KIND disambiguates on the wire, so that is fine and expected. A value repeated WITHIN a
-    /// single kind is a BUG — it would silently mis-route sync. Note the precedence: <c>GeoSiteChannel</c> /
-    /// <c>GeoVehicleChannel</c> are prefixed <c>Geo</c> yet are STATE CHANNELS, so the <c>Channel</c> suffix
-    /// wins over the <c>Geo</c> prefix. <c>SurfaceIdsUniquenessTests</c> enforces per-kind uniqueness by
-    /// reflection off these naming conventions — keep the suffix/prefix so a new id lands in the right kind.
+    /// ─── RETIRED / RESERVED ids — permanent tombstones, do NOT reuse ─────────────────
+    ///   • ids 1-30 / 60-79 (action surfaces) + 1-10 (state channels) — the old repo's per-kind
+    ///     migration catalog (mirrored its SyncedActionIds/ChannelIds). Never emitted by this repo;
+    ///     constants deleted 2026-07-22. The live partition starts at 0xA0.
+    ///   • 0xA0 GeoWallet / 0xA1 GeoState — retired: wallet + per-channel state ride the generic
+    ///     value rail 0xAC (GeoRail); no sender remains.
     /// </remarks>
     public static class SurfaceIds
     {
-        // Action surfaces (mirror SyncedActionIds) ─────────────────────────
-        public const byte StartResearch = 1;
-        public const byte ResearchCompleted = 2;
-        public const byte CancelResearch = 3;
-        public const byte ReorderResearch = 4;
-        public const byte QueueManufacture = 10;
-        public const byte ManufactureCompleted = 11;
-        public const byte ConstructFacility = 20;
-        public const byte RepairFacility = 21;
-        public const byte FacilityCompleted = 22;
-        public const byte RemoveFacility = 23;   // demolition + cancel-construction (mirrors SyncedActionIds.RemoveFacility)
-        public const byte AnswerEvent = 30;
-        // Personnel client-edit intents 60-79 (mirror SyncedActionIds — PS4 client→host relay)
-        public const byte EquipSoldier = 60;
-        public const byte AugmentSoldier = 61;
-        public const byte HireRecruit = 62;
-        public const byte TransferSoldier = 63;
-        public const byte DismissSoldier = 64;
-        public const byte RenameSoldier = 65;
-        public const byte KillCapturedUnit = 66;   // containment captive kill (mirrors SyncedActionIds.KillCapturedUnit)
-        public const byte HarvestCapturedUnit = 67; // containment captive harvest → food/mutagen (mirrors SyncedActionIds.HarvestCapturedUnit)
-        public const byte LevelUpAbility = 68;      // SP ability buy on a progression track (mirrors SyncedActionIds.LevelUpAbility)
-        public const byte SpendStatPoints = 69;     // SP base-stat increase (mirrors SyncedActionIds.SpendStatPoints)
-
-        // State-channel surfaces (Phase 2 — claimed, not yet registered) ────
-        public const byte InventoryChannel = 1;   // distinct id-space from actions (kind disambiguates)
-        public const byte ResearchChannel = 2;
-        public const byte UnlockChannel = 3;       // research-unlock availability (facilities/manufacture/augmentations)
-        public const byte DiplomacyChannel = 4;    // faction diplomacy / reputation (value-only mirror)
-        public const byte GeoSiteChannel = 5;       // GeoSite identity mirror (Owner/Type/State/name/EncounterID) — Case A
-        public const byte GeoVehicleChannel = 6;    // mid-session vehicle-creation mirror (spawn inert mirror of a host-acquired craft; ongoing 0xA5/0xA6/0xA7 then drive it)
-        public const byte ObjectivesChannel = 7;    // P7 faction objectives + GeoscapeEventSystem variables (TFTV quest lines / DLC5 / critical path) — value records + native AddObjective/RemoveObjective reconcile
-        public const byte MistChannel = 8;          // WA-1 mist field mirror (chunked RecordInstanceData echo → native ProcessInstanceData redraw on the frozen client)
-        public const byte PersonnelChannel = 9;     // PS1 Phoenix roster COMPOSITION mirror (per-site ordered GeoUnitIds, value-only _tacUnits reconcile; PS2 adds the per-soldier live-state tail). Vehicle CREW rides the #6 crew tail (one writer per field).
-        public const byte RecruitPoolChannel = 10;  // PS3 off-roster recruit pools (haven AvailableRecruit per-SiteId diff + naked/captured FULL-SET GeoUnitDescriptor blobs; hash-skip, value-only client stamps)
-
-        // ─── Geoscape envelope surfaces (unified backbone spec §2.1 partition 0xA0-0xBF) — Inc1 rail unify ───
-        // Migrated geoscape host→all messages ride the SAME 0x67 SurfaceRouter chokepoint as tactical, on ids
-        // in the geoscape partition (non-overlapping with tactical 0x80-0x9F and the legacy action/channel
-        // ids 1-30 above). Emitted UNCONDITIONALLY as the SOLE geoscape wallet/state rail; the legacy raw
-        // packets (0x63 WalletSync / 0x64 StateSync) were retired a4781ae.
-        public const byte GeoWallet = 0xA0;   // host→all versioned full-wallet snapshot (mirrors legacy WalletSync 0x63)
-        public const byte GeoState = 0xA1;    // host→all per-channel versioned state echo (mirrors legacy StateSync 0x64; inner = EncodeStateSync(channelId,version,payload))
-        // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) ───
-        // The discrete-command action relay (client intent → host outcome → originator reject) rides these three
-        // enveloped surfaces on the 0x67 rail — the SOLE action rail after the cutover deleted the legacy raw
-        // 0x60/0x61/0x62 packets (the inner action bytes are byte-for-byte what those packets carried; only the
-        // outer packet header changed). Guard: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
-        public const byte GeoIntent = 0xA2;   // client→host action REQUEST (inner = EncodeActionRequest(actionId,nonce,payload))
-        public const byte GeoOutcome = 0xA3;  // host→all authoritative APPLY (inner = EncodeActionApply(actionId,seq,payload); seq = SurfaceSeq.Next(0xA3))
-        public const byte GeoReject = 0xA4;   // host→originator REJECT (inner = EncodeActionReject(nonce,code,reason); nonce-correlated, idempotent)
+        // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) — RESERVED, not wired ───
+        // Claimed for the future generic intent framework (client intent → host outcome → originator
+        // reject). No handler exists yet; the codecs were deleted with the never-wired action router
+        // (SyncProtocol, 2026-07-22 — wire format was [actionId:u16][nonce:u32]/[seq:u64][len:u16][payload]).
+        // Guard when wired: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
+        public const byte GeoIntent = 0xA2;   // client→host action REQUEST
+        public const byte GeoOutcome = 0xA3;  // host→all authoritative APPLY
+        public const byte GeoReject = 0xA4;   // host→originator REJECT (nonce-correlated, idempotent)
         public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
         public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
         public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)
-        public const byte GeoHarvestFloat = 0xA8;  // host→all resource-harvest FLOAT mirror (Batch-2 P6: occId/siteId/resourceType/value; inner = HarvestFloatCodec.Encode) — display-only, client replays its own native GeoSite.ShowResourceHarvested; the wallet 0xA0 stays the one silent balance writer
+        public const byte GeoHarvestFloat = 0xA8;  // host→all resource-harvest FLOAT mirror (Batch-2 P6: occId/siteId/resourceType/value; inner = HarvestFloatCodec.Encode) — display-only, client replays its own native GeoSite.ShowResourceHarvested; the wallet values on the generic rail 0xAC stay the one silent balance writer
         public const byte GeoCrcProbe = 0xA9;  // host→all rolling CRC divergence probe (Inc5 part 1: once per in-game hour, CRC32 per deterministic state SUBSET; inner = CrcProbeCodec.Encode(round, entries), round rides SurfaceSeq) — detection only: client recomputes+compares (DivergenceMonitor), loud log + toast on divergence, NEVER auto-resyncs
         public const byte GeoResearch = 0xAA;  // Research rail (migration #1) host→all deltas: start (native-serializer blob, value-only fallback) / ≤2 Hz progress value / queue-order snapshot / complete; inner = ResearchSync codec ([msg:u8][seq:u32][factionGuid]…), seq rides SurfaceSeq
         public const byte GeoResearchIntent = 0xAB;  // Research rail client→host INTENT ([nonce:u32][op:u8][factionGuid][researchId][pos:i32], op = start/cancel/front/up/down/insertAt); nonce rides the peer-aware IntentDedup; host validates + executes NATIVELY, outcome returns via 0xAA
         public const byte GeoRail = 0xAC;  // THE generic value rail (laws 5/6): host→all canonical metadata-guided diff deltas (inner = DiffEngine [MsgDelta:u8][seq:u32][kindDefs][entries], seq rides SurfaceSeq); client→host full-resend request on seq gap (inner = [MsgResyncRequest:u8], law 7 resync-on-gap)
         public const byte GeoManufacture = 0xAD;  // Manufacturing queue rail (migration #3) host→all ORDER snapshot: [seq:u32][count:u16][(itemDefGuid, accumulatedPoints:float)×N]; the un-keyable _queue (dup defs → excluded from the generic rail) is carried by explicit order, seq rides SurfaceSeq
-        public const byte GeoManufactureIntent = 0xAE;  // Manufacturing rail client→host INTENT ([nonce:u32][op:u8][itemDefGuid][index:i32], op = queue/cancel/front/up/down/scrap/scrapVehicle; for scrap the index slot carries the item COUNT); nonce rides IntentDedup; host validates (def-at-index still matches, or storage has count) + executes NATIVELY, queue outcome returns via 0xAD and scrap outcome via the storage 0xAC + wallet 0xA0 value rails
+        public const byte GeoManufactureIntent = 0xAE;  // Manufacturing rail client→host INTENT ([nonce:u32][op:u8][itemDefGuid][index:i32], op = queue/cancel/front/up/down/scrap/scrapVehicle; for scrap the index slot carries the item COUNT); nonce rides IntentDedup; host validates (def-at-index still matches, or storage has count) + executes NATIVELY, queue outcome returns via 0xAD and scrap outcome via the storage + wallet 0xAC value rail
         public const byte GeoPersonnelIntent = 0xAF;  // Personnel progression rail client→host INTENT ([nonce:u32][op:u8][charId:i32][body], op = spendStats(str,will,speed INCREMENTS — the module's own numbers are bonus-inflated display values, only their delta is model-level) / buyAbility(trackSource,slotLevel,buttonLevel,abilityGuid) / secondSpec(specGuid)); nonce rides IntentDedup; host validates + re-derives the SP/mutagen cost from its OWN numbers + executes NATIVELY (ModifyBaseStat / LearnAbility / AddAbility / AddSecondaryClass), outcome returns via the generic value rail 0xAC. Intent-only surface — there is no host→all personnel message.
     }
 }

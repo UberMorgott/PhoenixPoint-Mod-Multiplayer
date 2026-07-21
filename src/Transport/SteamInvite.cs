@@ -250,7 +250,7 @@ namespace Multiplayer.Transport
                 ulong hostId = lobby.Owner.Id.Value;
                 if (ulong.TryParse(lobby.GetData(SteamConnect.HostKey), out var hid) && hid != 0) hostId = hid;
 
-                var joinStr = SteamConnect.ResolveJoinString(hostId, lobby.GetData(SteamConnect.IpKey));
+                var joinStr = SteamConnect.ResolveJoinString(hostId);
                 if (string.IsNullOrEmpty(joinStr)) { Stage("resolved no host connect info from the lobby", true); return; }
 
                 Stage("resolved host " + joinStr + " — starting join");
