@@ -89,31 +89,47 @@ namespace Multiplayer.Network.Sync
                 r.ReadByte(); // MsgDelta
                 uint seq = r.ReadUInt32();
                 if (!Seq.ShouldApply(SurfaceIds.GeoRail, seq)) return; // stale
-                if (_lastSeq != 0 && seq > _lastSeq + 1) RequestResync(engine, seq);
+                if (_lastSeq != 0 && seq > _lastSeq + 1)
+                    RequestResync(engine, "seq gap (" + _lastSeq + "→" + seq + ")");
+
+                var touched = new HashSet<object>();
+                try
+                {
+                    int defCount = r.ReadByte();
+                    for (int i = 0; i < defCount; i++) RegisterKind(r.ReadByte(), r.ReadString(), r.ReadUInt16());
+
+                    int n = r.ReadUInt16();
+                    _pathCache.Clear(); // batch-local: a new instance under the same key (re-queued research) must re-resolve
+                    using (SyncApplyScope.Enter())
+                    {
+                        for (int i = 0; i < n; i++)
+                        {
+                            byte kindId = r.ReadByte();
+                            string path = r.ReadString();
+                            ushort fieldIdx = r.ReadUInt16();
+                            string subKey = r.ReadString();
+                            var value = r.ReadBytes(r.ReadUInt16());
+                            ApplyEntry(engine, geo, kindId, path, fieldIdx, subKey, value, touched);
+                        }
+                    }
+                    // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
+                    // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
+                    TimeAnchor.ApplyIfTouched(geo, touched);
+                }
+                catch (Exception ex)
+                {
+                    // Reader-level failure mid-batch: leave the seq UNMARKED (SurfaceSeq contract — a failed
+                    // apply must not consume the seq) and recover the lost entries via the throttled resync.
+                    // Per-entry failures never land here (ApplyEntry catches its own); this is a torn packet.
+                    Debug.LogError("[Multiplayer][rail] GenericApplier: batch failed at seq " + seq + ": " + ex);
+                    RequestResync(engine, "batch failed at seq " + seq);
+                    return;
+                }
+                // Mark ONLY after the whole batch applied (SurfaceSeq.cs contract). Native events raised
+                // during the apply run synchronously inside SyncApplyScope and never pump the network, so
+                // nothing re-enters the seq logic while it is still unmarked.
                 _lastSeq = seq;
                 Seq.Mark(SurfaceIds.GeoRail, seq);
-
-                int defCount = r.ReadByte();
-                for (int i = 0; i < defCount; i++) RegisterKind(r.ReadByte(), r.ReadString(), r.ReadUInt16());
-
-                int n = r.ReadUInt16();
-                _pathCache.Clear(); // batch-local: a new instance under the same key (re-queued research) must re-resolve
-                var touched = new HashSet<object>();
-                using (SyncApplyScope.Enter())
-                {
-                    for (int i = 0; i < n; i++)
-                    {
-                        byte kindId = r.ReadByte();
-                        string path = r.ReadString();
-                        ushort fieldIdx = r.ReadUInt16();
-                        string subKey = r.ReadString();
-                        var value = r.ReadBytes(r.ReadUInt16());
-                        ApplyEntry(geo, kindId, path, fieldIdx, subKey, value, touched);
-                    }
-                }
-                // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
-                // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
-                TimeAnchor.ApplyIfTouched(geo, touched);
                 // Law 11 lives ENTIRELY in UiEventMap.Fire: mapped kinds repaint through their own native
                 // events, unmapped kinds + ItemStorage mark the open screen dirty there. No unconditional
                 // MarkDirty here — a batch of only mapped kinds (host clock ticking Timing/Wallet/Research
@@ -138,14 +154,22 @@ namespace Multiplayer.Network.Sync
             _kinds[kindId] = rt;
         }
 
-        private static void ApplyEntry(GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
+        private static void ApplyEntry(NetworkEngine engine, GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
                                        string subKey, byte[] value, HashSet<object> touched)
         {
             if (!_kinds.TryGetValue(kindId, out var rt))
             {
-                // Broken kind already logged at register; a kindId never registered at all (def packet
-                // lost before its first referencing entry) would otherwise drop silently — log it once.
-                if (!_brokenKinds.Contains(kindId)) LogMissOnce("unknown kindId " + kindId + " (def not received — resync?)");
+                // Broken kind already logged at register. A kindId never registered at all = this client
+                // missed the def packet — the mid-session joiner shape: host sends each kind def ONCE per
+                // client set, the joiner dropped the in-load packets pre-seq, and _lastSeq==0 skipped the
+                // gap check, so without this every pre-join kind stays dead FOREVER. The full resend clears
+                // the host's _sentKinds, so defs re-ship with it. Throttled (one request per window), and
+                // the values missed during the load window ride the same resend.
+                if (!_brokenKinds.Contains(kindId))
+                {
+                    LogMissOnce("unknown kindId " + kindId + " (def not received)");
+                    RequestResync(engine, "unknown kindId " + kindId);
+                }
                 return;
             }
             if (fieldIdx >= rt.Fields.Count) return;
@@ -329,11 +353,14 @@ namespace Multiplayer.Network.Sync
                 Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + msg);
         }
 
-        private static void RequestResync(NetworkEngine engine, uint seq)
+        /// <summary>ONE throttled gate onto the law-7 resync path, whatever noticed the divergence (seq gap,
+        /// unknown kind def, torn batch). The throttle is global on purpose: a systematic miss hits every
+        /// entry of every packet, and one full resend answers all of them.</summary>
+        private static void RequestResync(NetworkEngine engine, string reason)
         {
-            if (Time.realtimeSinceStartup < _nextResyncReqAt) return;
+            if (engine == null || Time.realtimeSinceStartup < _nextResyncReqAt) return;
             _nextResyncReqAt = Time.realtimeSinceStartup + 5f;
-            Debug.LogWarning("[Multiplayer][rail] GenericApplier: seq gap (" + _lastSeq + "→" + seq + ") — requesting full resend");
+            Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting full resend");
             try
             {
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest,
