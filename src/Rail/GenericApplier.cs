@@ -114,14 +114,11 @@ namespace Multiplayer.Network.Sync
                 // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
                 // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
                 TimeAnchor.ApplyIfTouched(geo, touched);
+                // Law 11 lives ENTIRELY in UiEventMap.Fire: mapped kinds repaint through their own native
+                // events, unmapped kinds + ItemStorage mark the open screen dirty there. No unconditional
+                // MarkDirty here — a batch of only mapped kinds (host clock ticking Timing/Wallet/Research
+                // every geo hour) must NOT Exit+Enter the client's open screen.
                 UiEventMap.Fire(touched, geo);
-                // Law 11 UNIVERSAL: after the batch, re-drive the open geoscape screen through its native
-                // full-rebuild so ALL screens repaint with no per-panel code. Dirty flag only — coalesced
-                // to one re-enter per frame by OpenUiRepaint.FlushIfDirty (SyncEngine.Tick). `touched` is
-                // now REAL-CHANGE gated (see Unchanged): an entry whose value already matched is not in it,
-                // so a batch that changes nothing here — redelivery, resync resend, a value the client's own
-                // sim already computed — repaints ZERO times instead of rebuilding the whole screen.
-                if (touched.Count > 0) OpenUiRepaint.MarkDirty();
             }
         }
 

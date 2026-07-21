@@ -340,8 +340,9 @@ namespace Multiplayer.Network.Sync
                         // Law 11 (host side): we ran the native model methods DIRECTLY, not through the
                         // host's own progression module, so its open screen still shows pre-intent numbers.
                         // Repaint through the EXISTING universal seam — no personnel-specific repaint path.
-                        // (Clients get theirs from the 0xAC batch, which marks OpenUiRepaint dirty already.)
-                        OpenUiRepaint.RepaintOpenGeoscapeScreen();
+                        // Dirty-mark only: the flush owns drag/typing defer + per-frame coalescing.
+                        // (Clients get theirs from the 0xAC batch via UiEventMap.)
+                        OpenUiRepaint.MarkDirty();
                     }
                 }
             }

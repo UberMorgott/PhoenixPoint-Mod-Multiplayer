@@ -24,7 +24,8 @@ namespace Multiplayer.Network.Sync
     ///     directly, bypassing AddItem/RemoveItem = no native notify) → free-space info bar +
     ///     inventory views (which subscribe to it) repaint. Manufacturing is PULL-model (no
     ///     StorageChanged subscription) → also nudge ManufactureSync.RepaintManufacturingUi (SetupQueue
-    ///     rebuild, no-op unless open). Covers GeoFaction + GeoSite.
+    ///     rebuild, no-op unless open); equip screens are pull-model too → also mark the open screen
+    ///     dirty (universal re-enter). Covers GeoFaction + GeoSite.
     ///   • Unknown kind → logged ONCE — the to-do list for the next event-map entry.
     /// </summary>
     public static class UiEventMap
@@ -35,6 +36,7 @@ namespace Multiplayer.Network.Sync
         {
             if (touched == null || touched.Count == 0) return;
             bool researchDone = false;
+            bool mfgDone = false;
             var walletsDone = new HashSet<object>();
             foreach (var entity in touched)
             {
@@ -62,8 +64,15 @@ namespace Multiplayer.Network.Sync
                             // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
                             // so the item list + owned-count won't repaint from the event above. Nudge it
                             // the same way the queue path does (SetupQueue rebuild); self-guards to a no-op
-                            // unless UIStateManufacturing is the open screen.
-                            ManufactureSync.RepaintManufacturingUi();
+                            // unless UIStateManufacturing is the open screen. Once per batch — a resend
+                            // touching N storages must not rebuild the queue N times.
+                            if (!mfgDone) { mfgDone = true; ManufactureSync.RepaintManufacturingUi(); }
+                            // Equip screens are PULL-model too: NO StorageChanged subscription anywhere in
+                            // them (decompile: only GeoPhoenixFaction.cs:308 + UIModuleInfoBar.cs:158
+                            // subscribe; UIStateEditSoldier re-reads storage only via EnterState →
+                            // RefreshStorage, _refreshStorage set at :101) — so the open screen must also
+                            // go through the universal re-enter, or its storage list goes stale.
+                            OpenUiRepaint.MarkDirty();
                             break;
                         default:
                             // Law 11 universal cover, guaranteed HERE: any kind without a per-kind
@@ -83,11 +92,15 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Reflection.FieldInfo ResourcesChangedField =
             AccessTools.Field(typeof(Wallet), "ResourcesChanged");
 
-        /// <summary>Raise the wallet's own native event (empty diff pack — subscribers re-read totals).</summary>
+        /// <summary>Raise the wallet's own native event (empty diff pack — subscribers re-read totals).
+        /// Guarded by SyncApplyScope like <see cref="RaiseStorageChanged"/> — a subscriber (TFTV) reacting
+        /// by spending/moving resources must not echo an intent back to the host (law 8).</summary>
         private static void RaiseResourcesChanged(Wallet wallet)
         {
             var del = ResourcesChangedField?.GetValue(wallet) as Delegate;
-            del?.DynamicInvoke(wallet, new ResourcePack(), OperationReason.None);
+            if (del == null) return;
+            using (SyncApplyScope.Enter())
+                del.DynamicInvoke(wallet, new ResourcePack(), OperationReason.None);
         }
 
         /// <summary>Raise the storage's own native change notification (public Action field — pure notify,

@@ -661,12 +661,9 @@ namespace Multiplayer.Network.Sync
         /// the removal never left the host. <c>EquipFlushGate</c> now blocks that stale flush outright, which
         /// makes this reseed redundant for CORRECTNESS but not for FRESHNESS — the gate stops the screen
         /// writing back, it does not make the screen show the new loadout. The reseed is what repaints it
-        /// (law 11), through the EXISTING universal seam (OpenUiRepaint), not a second equip-specific path.</summary>
-        private static void ReseedLocalScreenAfterRemoteMutation()
-        {
-            try { OpenUiRepaint.RepaintOpenGeoscapeScreen(); }
-            catch (Exception ex) { Debug.LogWarning("[MP][equip] HOST post-apply reseed failed: " + ex.Message); }
-        }
+        /// (law 11), through the EXISTING universal seam (OpenUiRepaint), not a second equip-specific path.
+        /// Dirty-mark only — the flush (SyncEngine.Tick, host too) owns drag/typing defer + coalescing.</summary>
+        private static void ReseedLocalScreenAfterRemoteMutation() => OpenUiRepaint.MarkDirty();
 
         /// <summary>THE GUARD for the bug above — a silent revert is what cost a whole test cycle (the only
         /// symptom was `returned` creeping 5→6→7 while the rail reported changed=0). Before applying the next

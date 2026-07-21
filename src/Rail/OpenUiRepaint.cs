@@ -29,13 +29,16 @@ namespace Multiplayer.Network.Sync
     /// DEBOUNCE: one mirror tick can arrive as several chunked GeoRail packets processed in ONE frame
     /// (NetworkEngine.Update drains all inbound via Transport.Update BEFORE Sync.Tick). Re-entering a
     /// screen is not free, so the batch boundary only sets a dirty flag; SyncEngine.Tick flushes exactly
-    /// ONE re-enter per frame. Host never marks dirty (it never applies a delta), so the flush is inert there.
+    /// ONE re-enter per frame. The HOST marks dirty too (post-intent reseeds in EquipSync/PersonnelSync)
+    /// — every repaint, both sides, rides the same defer + coalescing.
     /// </summary>
     public static class OpenUiRepaint
     {
         private static bool _dirty;
         private static int _deferredFrames;
         private static bool _deferLogged;
+        private static int _marksSinceFlush;
+        private static float _nextDiagAt;
         private static readonly System.Collections.Generic.HashSet<string> _loggedFailures =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
 
@@ -51,9 +54,10 @@ namespace Multiplayer.Network.Sync
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
-        /// <summary>Close of a remote mirror-apply batch (client). Coalesced to one re-enter per frame
-        /// by <see cref="FlushIfDirty"/> — cheaper than re-entering per chunk on a multi-packet resend.</summary>
-        public static void MarkDirty() => _dirty = true;
+        /// <summary>Close of a remote mirror-apply batch (client) or a host-side post-intent reseed.
+        /// Coalesced to one re-enter per frame by <see cref="FlushIfDirty"/> — cheaper than re-entering
+        /// per chunk on a multi-packet resend.</summary>
+        public static void MarkDirty() { _dirty = true; _marksSinceFlush++; }
 
         /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
         /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
@@ -62,11 +66,12 @@ namespace Multiplayer.Network.Sync
             _dirty = false;
             _deferredFrames = 0;
             _deferLogged = false;
+            _marksSinceFlush = 0;
             _loggedFailures.Clear();
         }
 
         /// <summary>
-        /// Driven once per frame from SyncEngine.Tick. No-op on the host (never marks dirty).
+        /// Driven once per frame from SyncEngine.Tick, both sides.
         ///
         /// N2 — a repaint DEFERS to uncommitted local input. Exit+Enter destroys and rebuilds every
         /// widget on the screen, so running it while the user is mid-drag yanks the item out of their
@@ -102,6 +107,15 @@ namespace Multiplayer.Network.Sync
         /// a screen with no drag icon simply answers false, so this needs no per-screen table.</summary>
         private static bool LocalInputInFlight()
         {
+            // Typing guard: Exit+Enter rebuilds every widget, wiping an active text entry mid-word
+            // (soldier rename = UnityEngine.UI.InputField, UIModuleActorCycle.SoldierNameEditField:71;
+            // the game's UI ships NO TMP input fields — TMPro appears only in I2.Loc label targets).
+            var selected = UnityEngine.EventSystems.EventSystem.current?.currentSelectedGameObject;
+            if (selected != null)
+            {
+                var field = selected.GetComponent<UnityEngine.UI.InputField>();
+                if (field != null && field.isFocused) return true;
+            }
             var mods = GeoLevel()?.View?.GeoscapeModules;
             if (mods == null) return false;
             // ponytail: EquipSync's gesture flag is deliberately NOT consulted here — it is consumed by the
@@ -115,9 +129,13 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>Re-drive the open geoscape screen's native full-rebuild (Exit → Enter, same instance).
-        /// Guarded per-state so one of the ~31 un-audited screens misbehaving can't crash the apply loop.</summary>
-        public static void RepaintOpenGeoscapeScreen()
+        /// Guarded per-state so one of the ~31 un-audited screens misbehaving can't crash the apply loop.
+        /// Private: every caller goes through <see cref="MarkDirty"/> so no repaint can bypass the
+        /// drag/typing defer + per-frame coalescing in <see cref="FlushIfDirty"/>.</summary>
+        private static void RepaintOpenGeoscapeScreen()
         {
+            int marks = _marksSinceFlush;
+            _marksSinceFlush = 0;
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
@@ -128,10 +146,25 @@ namespace Multiplayer.Network.Sync
                 // law 8: a re-enter that fires native events must not echo an intent back to the host.
                 using (SyncApplyScope.Enter())
                 {
-                    current.Exit(stack);
+                    try { current.Exit(stack); }
+                    catch (Exception exitEx)
+                    {
+                        // GeoscapeViewState.Exit removes the input handler BEFORE ExitState (decompile
+                        // GeoscapeViewState.cs:98) — bailing out after a thrown ExitState would leave the
+                        // screen DEAF. Always fall through to Enter: AddUnique re-subscribes idempotently.
+                        if (_loggedFailures.Add(current.GetType().Name + ":Exit"))
+                            Debug.LogWarning("[Multiplayer][rail] open-UI Exit for " + current.GetType().Name +
+                                             " threw — attempting Enter anyway (logged once per screen): " + exitEx);
+                    }
                     current.Enter(stack);
                 }
-                if (MpDiag.On) Debug.Log("[MP][uirepaint] re-entered " + current.GetType().Name); // TEMP diag (remove with mfgdiag)
+                // The ONE place a repaint actually executes — throttled diag so a re-enter storm is
+                // visible in the log without flooding it (family switch: MULTIPLAYER_DIAG, see MpDiag).
+                if (MpDiag.On && Time.realtimeSinceStartup >= _nextDiagAt)
+                {
+                    _nextDiagAt = Time.realtimeSinceStartup + 1f;
+                    Debug.Log("[MP][uirepaint] re-entered " + current.GetType().Name + " marks=" + marks);
+                }
             }
             catch (Exception ex)
             {
