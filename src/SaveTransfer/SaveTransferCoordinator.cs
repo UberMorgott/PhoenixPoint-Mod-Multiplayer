@@ -442,17 +442,28 @@ namespace Multiplayer.Network
             }
 
             // A mid-session re-transfer reuses the SAME barrier/reveal state machine — clear the prior
-            // run's terminal flags so the second transfer's OpenBarrier/Begin/reveal run clean.
+            // run's terminal flags so the second transfer's OpenBarrier/Begin/reveal run clean. But
+            // LaunchTransfer can still fail (no game / no timing): restore the flags on that path, or a
+            // mid-game host is stranded with SessionStarted==false while still IN the live co-op level
+            // (curtain patches inert, host-load guards closed).
+            bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
             _begun = false;
             _loadCompleteSent = false;
             _revealAllSent = false;
             bool launched = LaunchTransfer(chosen);
-            // rca-4: arm the post-reload full re-seed for THIS reload only when the transfer is actually in
-            // flight; it is consumed once at the RevealAll moment (HostReseedAfterReveal). Channels converge
-            // only lazily on the next dirty-mark after a reload, so any host state the save-load itself did
+            if (!launched)
+            {
+                _begun = wasBegun;
+                _loadCompleteSent = wasLoadComplete;
+                _revealAllSent = wasRevealAll;
+                return false;
+            }
+            // rca-4: arm the post-reload full re-seed for THIS reload (the transfer is now in flight); it
+            // is consumed once at the RevealAll moment (HostReseedAfterReveal). Channels converge only
+            // lazily on the next dirty-mark after a reload, so any host state the save-load itself did
             // not carry perfectly would otherwise stay stale on clients until then.
-            if (launched) _reseedGate.Arm();
-            return launched;
+            _reseedGate.Arm();
+            return true;
         }
 
         // Shared launch tail for both the lobby start and the mid-session load: warn on the best-effort
@@ -967,12 +978,18 @@ namespace Multiplayer.Network
 
             // Same terminal-flag reset as HostStartSessionInGame: a mid-session second fresh campaign
             // re-runs the SAME barrier/reveal state machine; on a lobby first start these are already
-            // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier.
+            // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier. Same
+            // restore-on-failure too: a failed launch must not strand a mid-session host with
+            // SessionStarted==false inside a live co-op level.
+            bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
             _begun = false;
             _loadCompleteSent = false;
             _revealAllSent = false;
             if (!LaunchTransfer(meta))
             {
+                _begun = wasBegun;
+                _loadCompleteSent = wasLoadComplete;
+                _revealAllSent = wasRevealAll;
                 Debug.LogError("[Multiplayer] New-campaign bootstrap: transfer launch failed (see prior log).");
                 yield break;
             }
@@ -1866,6 +1883,10 @@ namespace Multiplayer.Network
                 _engine.SendToClient(clientId, new NetworkMessage(PacketType.ConnectionRejected,
                     NetworkMessage.BuildStringPayload("Load timed out — you were dropped from the session.")));
                 _engine.Session.RemoveClient(clientId);
+                // Sever the transport link too: without this the kicked peer stays connected and its
+                // traffic keeps arriving (roster removal alone does not close the socket/session). The
+                // heartbeat-membership gate is the second line; this is the real disconnect.
+                try { _engine.Transport?.DisconnectPeer(clientId); } catch { }
             }
 
             // The host's own loaded-state is tracked by _hostLoaded (never keyed in _loadedPeers), so it
