@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using Base.Serialization;
@@ -364,9 +365,22 @@ namespace Multiplayer.Harmony
     [HarmonyPatch(typeof(PhoenixSaveManager), "LoadGame")]
     public static class LoadGameConvergenceGatePatch
     {
-        [HarmonyPrefix]
-        public static bool Prefix(PPSavegameMetaData metaData)
+        // LoadGame is an ITERATOR method (IEnumerator<NextUpdate>, decompiled PhoenixSaveManager.cs:596).
+        // Skipping the original with __result left null hands null to every caller's coroutine start —
+        // Timing.Start(null) / Call(null) (UIModuleMainMenuButtons.cs:237, UIModuleSaveGame.cs:167,
+        // QuickLoad PhoenixSaveManager.cs:592) → Coroutine.MoveNext NRE (TimingScheduler.cs:203) blowing
+        // up the click handler on EVERY gated CONTINUE/Quickload. Skip paths must return an EMPTY routine.
+        private static IEnumerator<NextUpdate> SkippedLoad()
         {
+            yield break;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(PPSavegameMetaData metaData, ref IEnumerator<NextUpdate> __result)
+        {
+            // Safe default for every skip path below; when we return true the original's own
+            // enumerator overwrites this.
+            __result = SkippedLoad();
             try
             {
                 var engine = NetworkEngine.Instance;
