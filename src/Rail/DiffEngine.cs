@@ -301,6 +301,10 @@ namespace Multiplayer.Network.Sync
             {
                 Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
                 AbandonCycle();
+                // _forceFull self-retries monolithically (checked at the top of the try), but a leftover
+                // prefix would ride the NEXT sliced cycle with censuses — forced walks are monolithic,
+                // so drop the scope instead.
+                _forcePrefixes.Clear();
             }
         }
 

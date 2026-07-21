@@ -344,7 +344,7 @@ Lobby (LobbyController, SessionLifecycle, SlotAllocator, SteamConnect, ParityMan
 to BLOCKING per law 10, SessionManager, NetworkEngine, ClientIdentity, HostLeaveHandler,
 SessionNotifier, LobbyPanel, LobbyTheme, MultiplayerUI, UiToolkit, NativeWidgetFactory,
 LoadOverlayController, LoadOverlayVisibility, ChatLog, MainMenuPatches); Sync primitives
-(SurfaceSeq, IntentDedup, SurfaceIds, SyncKind, SyncProtocol, SurfaceRouter, ISyncSink);
+(SurfaceSeq, IntentDedup, SurfaceIds, SyncKind, SyncProtocol, SurfaceRouter);
 Bootstrap (MultiplayerMain, meta.json, Multiplayer.csproj, deploy.ps1, MultiplayerLog,
 TftvLateBinder, Crc32); SaveTransferCoordinator + SaveTransferMath; connect-code utils
 (ConnectCode, InviteCode, UnifiedCode, SmartJoinParser, JoinPlan, LanIpResolver, UpnpPortMapper).
