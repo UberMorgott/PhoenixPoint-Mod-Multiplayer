@@ -18,13 +18,13 @@ Base.Core.TimingInstanceData  [direct]  covered=6/6
   + Leaf Scale (Single)
   + Leaf StartFixedTime (TimeUnit)
   + Leaf StartTime (TimeUnit)
-Base.Entities.ActorInstanceData  [direct]  covered=4/6
+Base.Entities.ActorInstanceData  [direct]  covered=3/6
   + Leaf OverrideTransform (Boolean)
   + Leaf Pos (Vector3)
   + Leaf Rot (Quaternion)
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
-  + Descend TimingData (TimingInstanceData)
+  - EXCLUDED TimingData (TimingInstanceData): per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor "TA" root)
 Base.Entities.Statuses.ModifiableValue  [direct]  covered=3/3
   + Leaf BaseValue (Single)
   + Leaf EndValue (Single)
@@ -343,6 +343,6 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(0)
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
 
-summary: covered=187 excluded=95 blobbable=9 geoItemDicts=1
+summary: covered=186 excluded=96 blobbable=9 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:

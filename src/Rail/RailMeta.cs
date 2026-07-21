@@ -442,6 +442,16 @@ namespace Multiplayer.Network.Sync
             // pause/speed LATENCY, which is a different thing.
             { "Base.Core.Timing.StartTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
             { "Base.Core.Timing.StartFixedTime", "clock base — rides as the TimeAnchor \"TA\" root (a raw mirror double-counts local accrual)" },
+
+            // Per-actor clock accrual. Every ActorComponent's SerializationData getter re-records its
+            // Timing on each host walk (ActorComponent.RecordInstanceData:379-386 → Timing.
+            // RecordInstanceData:209-220), and TimingInstanceData.OwnNow/OwnFixedNow advance with scaled
+            // real time — so with geo time running EVERY site/vehicle changed 2 fields per 0.5 s tick
+            // (~880 of the measured ~890-changed churn behind the geo-time freeze/jerk). The values are
+            // also the wrong thing to mirror: client actor clocks tick locally under the level clock, and
+            // the level clock rides the TimeAnchor "TA" root. Excluding the Descend member kills the
+            // churn without touching TimingInstanceData's OWN table — the "TA" anchor kind stays 6/6.
+            { "Base.Entities.ActorInstanceData.TimingData", "per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor \"TA\" root)" },
         };
 
         /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.</summary>
