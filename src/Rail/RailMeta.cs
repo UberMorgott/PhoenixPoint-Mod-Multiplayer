@@ -768,14 +768,15 @@ namespace Multiplayer.Network.Sync
                 {
                     var guid = r.ReadString();
                     var def = GameUtl.GameComponent<DefRepository>()?.GetDef(guid);
-                    if (def == null) Debug.LogWarning("[Multiplayer][rail] DecodeLeaf: unknown def guid " + guid);
+                    // WarnOnce, not raw: a systematic miss (mod parity gap) repeats per entry per tick.
+                    if (def == null) WarnOnce("DecodeLeaf: unknown def guid " + guid);
                     return def;
                 }
                 case LeafKind.EntityRef:
                 {
                     var key = r.ReadString();
                     var e = IdentityResolver.Resolve(geo, key, null);
-                    if (e == null) Debug.LogWarning("[Multiplayer][rail] DecodeLeaf: unresolved entity ref " + key);
+                    if (e == null) WarnOnce("DecodeLeaf: unresolved entity ref " + key);
                     return e;
                 }
                 case LeafKind.Composite:
@@ -1213,7 +1214,7 @@ namespace Multiplayer.Network.Sync
                             // blob (CommonItemData.OwnerItem → its GeoItem) — the game restores them as
                             // graph references; within one element blob a local back-index is the same
                             // thing. Anything else stays excluded (never null-stomped: absent ≠ null).
-                            if (f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _))
+                            if (SalvagesInitOnlyLeaf(f))
                             { fw.Write((ushort)i); fw.Write(TagLeaf); EncodeLeaf(fw, f.ValueType, v); n++; break; }
                             if (v != null && (f.ValueType.IsInterface || f.ValueType == typeof(object)))
                                 for (int b = 0; b < locals.Count; b++)
@@ -1376,6 +1377,15 @@ namespace Multiplayer.Network.Sync
         /// RailCheck baseline's <c>husk=</c> column. It lived in tools/RailCheck/Program.cs while it was only a
         /// REPORT; the moment it also decides classification, a second copy is the GeoItem/TypeKeyable
         /// two-tables-disagree bug by construction (ARCHITECTURE.md "Husk-gated blob licensing").</summary>
+        /// <summary>The ONE predicate for "does the blob salvage carry this EXCLUDED field": initonly LEAF
+        /// fields only (<see cref="EncodeObjectBody"/>'s Excluded case (a)). <see cref="HuskMembers"/> must
+        /// ask the exact same question — it used to count ANY initonly field as carried, so an initonly
+        /// NON-leaf ref member would slip the husk gate and still land null on the client. (Salvage case (b),
+        /// the in-blob back-ref, is instance-dependent and deliberately NOT counted: the gate stays
+        /// conservative — absent from the gate ⇒ reported as husk.)</summary>
+        private static bool SalvagesInitOnlyLeaf(RailField f) =>
+            f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, 0, out _);
+
         internal static List<string> HuskMembers(Type t)
         {
             var husk = new List<string>();
@@ -1386,7 +1396,7 @@ namespace Multiplayer.Network.Sync
             var rt = RailType.Get(t);
             if (rt != null)
                 foreach (var f in rt.Fields)
-                    if (f.Class != FieldClass.Excluded || (f.Fi != null && f.Fi.IsInitOnly)) carried.Add(f.Name);
+                    if (f.Class != FieldClass.Excluded || SalvagesInitOnlyLeaf(f)) carried.Add(f.Name);
             // ALL modes on purpose (not SerializedMembers, which keeps ReadWrite only): a WriteOnly member is
             // a custom-create PARAMETER, and the blob does carry those — GeoItem's ItemDef rides as a ctor arg.
             try
