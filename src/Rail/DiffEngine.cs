@@ -17,7 +17,8 @@ namespace Multiplayer.Network.Sync
     /// <summary>
     /// THE RAIL, host side (laws 5+6): a UNIVERSAL recursive walk of the live geoscape value layer,
     /// guided ONLY by serializer type metadata (<see cref="RailMeta"/>) — the walker knows NO subsystem.
-    /// Every ~0.5 s: walk → flat canonical snapshot (path, fieldIdx, subKey) → boxed-encoded value →
+    /// Every ~0.5 s a CYCLE (periodic walk TIME-SLICED at ~3 ms/frame; forced walks single-shot):
+    /// walk → flat canonical snapshot (path, fieldIdx, subKey) → boxed-encoded value →
     /// compare against the previous snapshot → emit ONLY changed pairs on surface
     /// <see cref="SurfaceIds.GeoRail"/>. Canonical (law 6): roots and collection children sorted by
     /// stable key, fields in the fixed metadata order, dictionary subkeys sorted — same state ⇒
@@ -42,6 +43,7 @@ namespace Multiplayer.Network.Sync
         private const int MaxValueBytes = 8192;    // per-entry cap: 45000 + 8192 stays under the u16 envelope
         private const int MaxEntities = 50000;     // graph-chase brake
         private const int MaxDepth = 12;
+        private const double SliceBudgetMs = 3.0;  // per-frame walk budget of the sliced periodic cycle
 
         internal struct Entry
         {
@@ -75,6 +77,17 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<string> _walkIncidents = new HashSet<string>(); // "(Type.Field): reason [path]" dedup
         private static readonly Dictionary<Type, int> _entityCounts = new Dictionary<Type, int>();
 
+        // Sliced periodic cycle (non-null = cycle in progress). The PERIODIC walk is spread over frames
+        // at ~SliceBudgetMs of work per frame so it can never spike a frame; roots are SNAPSHOTTED here
+        // at cycle start (never an enumerator over a live game collection held across frames). Forced
+        // walks (FlushNow / ForceReemit / full resend) stay single-shot — see HostTick.
+        private static List<KeyValuePair<string, object>> _cycleRoots;
+        private static int _cycleNext;
+        private static int _cycleFrames;
+        private static double _cycleWalkMs;
+        private static double _maxSliceMs;
+        private static bool _flushPending;
+
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
         public static void Reset()
@@ -89,6 +102,8 @@ namespace Multiplayer.Network.Sync
         /// save transfer); seq streams PERSIST (rca-3 contract) so later deltas keep applying.</summary>
         public static void ResetForReloadBoundary()
         {
+            AbandonCycle();
+            _flushPending = false;
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
             _baselined = false;
@@ -145,11 +160,16 @@ namespace Multiplayer.Network.Sync
 
         // ─── Host tick: walk → diff → emit ─────────────────────────────────
 
-        /// <summary>Run the next host tick on the NEXT frame instead of waiting out the 0.5 s poll.
+        /// <summary>Ship host state NOW instead of waiting out the 0.5 s poll: the next HostTick call
+        /// (same frame when the seam fires before NetworkEngine.Update, else next frame) runs one
+        /// SINGLE-SHOT monolithic tick — never sliced, so the whole graph is read and shipped in that one
+        /// frame (and a ForceReemit scope gets its census from root 0). An in-progress sliced cycle is
+        /// abandoned first: it has shipped nothing (shipping happens only at cycle completion), so nothing
+        /// is lost and nothing double-ships.
         /// No guards needed: <see cref="HostTick"/> still returns on non-host / no session / no geoscape,
         /// so this can be called from any seam that knows the host just changed something the client
         /// must not wait for.</summary>
-        public static void FlushNow() => _nextTickAt = 0f;
+        public static void FlushNow() { _nextTickAt = 0f; _flushPending = true; }
 
         /// <summary>
         /// N3 — change-driven flush on the game's OWN event, not a new channel. <c>Timing</c> raises
@@ -247,31 +267,127 @@ namespace Multiplayer.Network.Sync
         public static void HostTick(NetworkEngine engine)
         {
             if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
-            if (Time.realtimeSinceStartup < _nextTickAt) return;
-            _nextTickAt = Time.realtimeSinceStartup + TickInterval;
+            float now = Time.realtimeSinceStartup;
+            // A forced walk (FlushNow / ForceReemit / full resend) must see its scope from root 0: a
+            // half-walked cycle can no longer census or force-re-emit roots it already passed. Nothing
+            // has shipped (shipping happens only at cycle completion), so dropping the partial walk
+            // loses nothing and cannot double-ship.
+            if ((_flushPending || _forceFull) && _cycleRoots != null) AbandonCycle();
+            if (_cycleRoots == null && now < _nextTickAt) return;
             var geo = GeoLevel();
-            if (geo == null) return;
+            if (geo == null) { AbandonCycle(); _nextTickAt = now + TickInterval; return; }
             ArmChangeDrivenFlush(geo.Timing);
             ProbeDefAliasedBinds(geo);
 
-            try { Tick(engine, geo); }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex); }
+            try
+            {
+                if (_cycleRoots != null) { RunSlice(engine); return; }
+                _nextTickAt = now + TickInterval;
+                if (_flushPending || _forceFull)
+                {
+                    // Forced walks stay SINGLE-SHOT (the pre-slicing path, semantics byte-identical):
+                    // rare and event-driven (pause/speed click, intent seam, resync) — one hitch, never
+                    // rhythmic.
+                    _flushPending = false;
+                    Tick(engine, geo);
+                }
+                else
+                {
+                    BeginCycle(geo);
+                    RunSlice(engine);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
+                AbandonCycle();
+            }
         }
 
+        // ─── Sliced periodic cycle (walk spread over frames; ONE batch at completion) ───
+
+        /// <summary>Reset the walk working set (shared by the sliced cycle and the monolithic tick).
+        /// The walk fills the NEW snapshot directly — it already had to dedup by SnapKey, and a second
+        /// 22k-entry index holding the same keys bought nothing.</summary>
+        private static void BeginWalkState()
+        {
+            _entityCounts.Clear();
+            _censusEntries.Clear();
+            _ordered.Clear();
+            _visited.Clear();
+            _snapshotBack.Clear();
+        }
+
+        /// <summary>Cycle start: SNAPSHOT the root list — the only live-graph enumeration that would
+        /// otherwise span frames. Every deeper enumeration happens inside one slice (VisitEntity finishes
+        /// its whole root synchronously), so no enumerator over live game state survives a frame.</summary>
+        private static void BeginCycle(GeoLevelController geo)
+        {
+            BeginWalkState();
+            _cycleRoots = new List<KeyValuePair<string, object>>();
+            foreach (var r in IdentityResolver.Roots(geo)) _cycleRoots.Add(r);
+            _cycleNext = 0; _cycleFrames = 0; _cycleWalkMs = 0; _maxSliceMs = 0;
+        }
+
+        /// <summary>One frame's worth of walk: whole roots until the ~<see cref="SliceBudgetMs"/> budget
+        /// is spent (always ≥1 root, so a cycle terminates even if a single root overruns the budget).
+        /// Fields read on different frames landing in one batch = ACCEPTED tearing (ARCHITECTURE.md) —
+        /// same consistency class as the old monolithic mid-mutation read, coarser grain; the next cycle
+        /// converges. A root destroyed since cycle start is skipped by the Unity fake-null guard (the
+        /// same guard IdentityResolver.Resolve uses client-side); death deeper in the graph rides the
+        /// existing getter-throw → Incident path in VisitEntity.</summary>
+        private static void RunSlice(NetworkEngine engine)
+        {
+            var sw = Stopwatch.StartNew();
+            while (_cycleNext < _cycleRoots.Count)
+            {
+                var root = _cycleRoots[_cycleNext++];
+                if (!(root.Value is UnityEngine.Object uo) || uo != null)
+                    VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
+                if (sw.Elapsed.TotalMilliseconds >= SliceBudgetMs) break;
+            }
+            _cycleFrames++;
+            double ms = sw.Elapsed.TotalMilliseconds;
+            _cycleWalkMs += ms;
+            if (ms > _maxSliceMs) _maxSliceMs = ms;
+            if (_cycleNext < _cycleRoots.Count) return;
+            int roots = _cycleRoots.Count;
+            _cycleRoots = null;
+            DiffAndEmit(engine, (long)Math.Round(_cycleWalkMs), _maxSliceMs, _cycleFrames, roots);
+        }
+
+        /// <summary>Drop an unfinished cycle (forced walk, reload boundary, level gone, tick exception).
+        /// Nothing shipped and _snapshot untouched, so this is free; the walk scratch is cleared so it
+        /// does not pin dead level objects until the next cycle.</summary>
+        private static void AbandonCycle()
+        {
+            if (_cycleRoots == null) return;
+            _cycleRoots = null;
+            BeginWalkState();
+        }
+
+        /// <summary>Single-shot walk+diff+emit — the pre-slicing shape, kept for the forced paths
+        /// (FlushNow same-frame contract, ForceReemit census scope, full resend). Rare, one hitch
+        /// accepted.</summary>
         private static void Tick(NetworkEngine engine, GeoLevelController geo)
         {
             var sw = Stopwatch.StartNew();
-            _entityCounts.Clear();
-            _censusEntries.Clear();
-            var ordered = _ordered; ordered.Clear();
-            var visited = _visited; visited.Clear();
-            // The walk fills the NEW snapshot directly — it already had to dedup by SnapKey, and a second
-            // 22k-entry index holding the same keys bought nothing.
-            var newSnap = _snapshotBack; newSnap.Clear();
-
+            BeginWalkState();
+            int roots = 0;
             foreach (var root in IdentityResolver.Roots(geo))
-                VisitEntity(root.Key, root.Value, visited, ordered, newSnap, 0);
+            {
+                roots++;
+                VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
+            }
             long walkMs = sw.ElapsedMilliseconds;
+            DiffAndEmit(engine, walkMs, walkMs, 1, roots);
+        }
+
+        private static void DiffAndEmit(NetworkEngine engine, long walkMs, double maxSliceMs, int frames, int roots)
+        {
+            var sw = Stopwatch.StartNew();
+            var ordered = _ordered;
+            var newSnap = _snapshotBack;
 
             // Diff: changed/new pairs in walk order (canonical), then subKey deletions. An unchanged field
             // kept the previous tick's array (RailMeta.EncodeFieldValue with prev), so BytesEqual's
@@ -306,7 +422,7 @@ namespace Multiplayer.Network.Sync
             // Forced-tick dict censuses (never in the snapshot — normal ticks stay wire-identical). AFTER
             // the value entries, so within one tick the client prunes against the same key set it received.
             if (_censusEntries.Count > 0) changed.AddRange(_censusEntries);
-            long diffMs = sw.ElapsedMilliseconds - walkMs;
+            long diffMs = sw.ElapsedMilliseconds;
             _snapshotBack = _snapshot;   // this tick's snapshot becomes next tick's scratch, and vice versa
             _snapshot = newSnap;
             bool wasForceFull = _forceFull;
@@ -314,6 +430,12 @@ namespace Multiplayer.Network.Sync
             _forcePrefixes.Clear();
 
             if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
+
+            // The line the stutter hunt reads: did the periodic walk stay inside its per-frame budget.
+            if (MpDiag.On)
+                Debug.Log("[MP][rail] cycle: frames=" + frames + " walk=" + walkMs + "ms maxSlice=" +
+                          maxSliceMs.ToString("F1", CultureInfo.InvariantCulture) + "ms roots=" + roots +
+                          " changed=" + changed.Count);
 
             if (!_baselined && !wasForceFull)
             {

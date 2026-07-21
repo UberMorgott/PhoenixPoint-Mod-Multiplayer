@@ -101,8 +101,22 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   snapshot (path, fieldIdx, subKey)→encoded bytes, diff vs previous, emit only changed pairs. Canonical
   (law 6): sorted roots/children/subkeys, fixed metadata field order. First walk per boundary = BASELINE,
   no emit (join state comes from the native save transfer, law 1). Dict-key removals → null tombstones.
-  Perf logged every tick with traffic (walk/diff ms, entity/field/changed counts) + 10 s heartbeat;
-  amortize across frames ONLY if measurements demand it.
+  Perf logged every tick with traffic (walk/diff ms, entity/field/changed counts) + 10 s heartbeat.
+  **Time-sliced periodic walk (2026-07-22).** Measurements demanded it (walk=49-138 ms per 0.5 s tick
+  on the main thread, 2026-07-19 build = rhythmic stutter): the PERIODIC walk now runs as a CYCLE —
+  root list SNAPSHOTTED at cycle start, ~3 ms of whole roots walked per frame, diff+emit as ONE batch
+  at cycle completion (receiver cannot tell sliced from monolithic; wire unchanged). Cadence gates
+  cycle START (0.5 s); an overrunning cycle just starts the next one immediately — no overlap, no
+  carryover. No enumerator over live game state survives a frame (roots materialized once; each root
+  finishes inside its slice); a root destroyed mid-cycle is skipped by the Unity fake-null guard,
+  deeper mid-walk death rides the existing getter-throw Incident path, a vanished entity's stale dict
+  keys stay tombstone-suppressed as before. TEARING ACCEPTED: fields read on different frames land in
+  one batch — same consistency class as the old monolithic tick (which also read mid-mutation state),
+  coarser grain; the repaint gate + next cycle converge. Forced walks stay SINGLE-SHOT monolithic
+  (FlushNow / ForceReemit / full resend — rare, event-driven, one hitch accepted): a forced flush
+  ABANDONS any in-progress cycle first (nothing ships before completion → no loss, no double-ship) so
+  the forced walk sees its census/re-emit scope from root 0. MpDiag per-cycle line: frames used /
+  total walk ms / max slice ms / roots / changed count.
 - `GenericApplier.cs` (client) — whole batch in `SyncApplyScope` (law 8); entity located via
   IdentityResolver (path cache, invalidated on miss + reload boundary); set through cached metadata
   accessor; LeafList applied in-place (game exposes lists by reference). Unknown entity/path → log once
