@@ -372,7 +372,9 @@ namespace Multiplayer.Network.Sync
                         if (ok) research.PutInFromOfQueue(live);
                         break;
                     case OpUp:
-                        ok = research.ResearchQueue.IndexOf(live) > 1; // 0 = current, 1 → up would displace it
+                        // Native guard is only element != Current (Research.cs:424-433): an up-click at
+                        // index 1 legally displaces the current head. IndexOf > 0 matches it (-1 = absent).
+                        ok = research.ResearchQueue.IndexOf(live) > 0;
                         if (ok) research.PutUpInQueue(live);
                         break;
                     case OpDown:
