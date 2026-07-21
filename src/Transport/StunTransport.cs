@@ -610,14 +610,22 @@ namespace Multiplayer.Transport
                     {
                         if (IsHost)
                         {
-                            var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
-                            // Marshal the connect onto the main thread (drained in Update before
-                            // packets) so the Unity-touching OnPeerConnected handler never runs on
-                            // this background receive thread — mirroring DirectTransport.ListenLoop.
+                            // Punches are resent every 200 ms up to 15× while the client waits for the
+                            // ACK (WaitForHolePunchAck) — a KNOWN endpoint must not mint a new peer id,
+                            // or every resend spawns a ghost roster row and N× duplicate broadcasts to
+                            // the same endpoint. Mint only for unknown endpoints; always re-ACK (the
+                            // client may have missed earlier ACKs).
                             lock (_lock)
                             {
-                                _peers[peerId] = from;
-                                _peerEventQueue.Enqueue((true, peerId, $"STUN({from})"));
+                                if (FindPeerByEndpointLocked(from) == 0)
+                                {
+                                    var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
+                                    // Marshal the connect onto the main thread (drained in Update before
+                                    // packets) so the Unity-touching OnPeerConnected handler never runs on
+                                    // this background receive thread — mirroring DirectTransport.ListenLoop.
+                                    _peers[peerId] = from;
+                                    _peerEventQueue.Enqueue((true, peerId, $"STUN({from})"));
+                                }
                             }
                             SendRaw(from, Encoding.UTF8.GetBytes("HOLE_PUNCH_ACK"));
                         }
@@ -639,19 +647,8 @@ namespace Multiplayer.Transport
                         continue;
                     }
 
-                    ulong foundPeerId = 0;
-                    lock (_lock)
-                    {
-                        foreach (var kvp in _peers)
-                        {
-                            if (kvp.Value.Address.Equals(from.Address)
-                                && kvp.Value.Port == from.Port)
-                            {
-                                foundPeerId = kvp.Key;
-                                break;
-                            }
-                        }
-                    }
+                    ulong foundPeerId;
+                    lock (_lock) { foundPeerId = FindPeerByEndpointLocked(from); }
 
                     if (foundPeerId != 0)
                     {
@@ -660,6 +657,16 @@ namespace Multiplayer.Transport
                 }
                 catch { /* malformed datagram — drop and keep serving */ }
             }
+        }
+
+        // Caller must hold _lock. Returns the peer id mapped to this endpoint, or 0 for unknown
+        // (peer ids start at 1 — see _nextPeerId).
+        private ulong FindPeerByEndpointLocked(IPEndPoint from)
+        {
+            foreach (var kvp in _peers)
+                if (kvp.Value.Address.Equals(from.Address) && kvp.Value.Port == from.Port)
+                    return kvp.Key;
+            return 0;
         }
 
         private void SendRaw(IPEndPoint target, byte[] data)

@@ -310,6 +310,9 @@ namespace Multiplayer.Transport
             return true;
         }
 
+        // ponytail: Send/Broadcast do BLOCKING TCP writes under _lock on the caller's (main) thread —
+        // one stalled client's full send buffer can freeze the host frame loop during save fan-out,
+        // and the lock also stalls the read loops. Upgrade path: per-peer send queue + writer thread.
         public void Send(ulong peerId, byte[] data, bool reliable = true)
         {
             lock (_lock)

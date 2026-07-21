@@ -33,6 +33,17 @@ namespace Multiplayer.Transport
         // silently dropping every packet forever.
         private readonly Dictionary<ulong, int> _consecutiveSendFailures = new Dictionary<ulong, int>();
         private const int SendFailureThreshold = 5;
+        // The SteamId this CLIENT dialed in Connect(). The only inbound P2P session a client may
+        // accept — OnSessionRequest fires for ANY peer that knows our SteamId (it is broadcast in
+        // PEER_LIST), and blindly accepting one used to let NetworkEngine's client OnPeerConnected
+        // re-point the host link to the stranger (SetHostPeer + JOIN). 0 on the host / before dialing.
+        private ulong _dialedHost;
+        // RegisterSendFailure's host branch drops a dead peer from inside SendPacket — which Broadcast
+        // may be mid-iterating. The peer leaves _connectedPeers immediately (stops further sends), but
+        // the OnPeerDisconnected raise is DEFERRED here and drained in Update(), so session logic
+        // (RemoveClient → BroadcastPeerList → nested Broadcast) never re-enters from inside a send loop.
+        // Mirrors Direct/Stun's _peerEventQueue marshaling.
+        private readonly List<ulong> _pendingSendFailureDrops = new List<ulong>();
 
         // ─── Facepunch.Steamworks reflection handles (runtime-resolved) ───────────────────
         // GROUNDING (verified 2026-06-20 against the SHIPPED Facepunch.Steamworks.Win64.dll that PP
@@ -343,6 +354,7 @@ namespace Multiplayer.Transport
             {
                 State = ConnectionState.Connecting;
                 OnStateChanged?.Invoke(State);
+                _dialedHost = targetId;
                 AcceptSession(targetId);
                 _connectedPeers.Add(targetId);
                 State = ConnectionState.Connected;
@@ -382,7 +394,10 @@ namespace Multiplayer.Transport
 
         public void Broadcast(byte[] data, bool reliable = true)
         {
-            foreach (var peer in _connectedPeers)
+            // Snapshot: SendPacket → RegisterSendFailure removes a dead peer from _connectedPeers
+            // mid-loop, which threw InvalidOperationException and aborted the REST of the broadcast
+            // (CompositeTransport swallows it → silent chunk loss for the remaining peers).
+            foreach (var peer in _connectedPeers.ToArray())
             {
                 SendPacket(peer, data, reliable);
             }
@@ -390,6 +405,15 @@ namespace Multiplayer.Transport
 
         public void Update()
         {
+            // Drain send-failure drops FIRST (deferred out of the send loops — see the field note).
+            if (_pendingSendFailureDrops.Count > 0)
+            {
+                var drops = _pendingSendFailureDrops.ToArray();
+                _pendingSendFailureDrops.Clear();
+                foreach (var peer in drops)
+                    OnPeerDisconnected?.Invoke(peer, $"Steam({peer})");
+            }
+
             while (IsP2PPacketAvailable())
             {
                 var packet = ReadP2PPacket();
@@ -473,8 +497,12 @@ namespace Multiplayer.Transport
             {
                 UnityEngine.Debug.LogError($"[Multiplayer] SteamTransport(host): send to client {peerId} failed " +
                                            $"{SendFailureThreshold}x ({reason}) — treating the client as disconnected.");
-                _connectedPeers.Remove(peerId);
-                OnPeerDisconnected?.Invoke(peerId, $"Steam({peerId})");
+                // Remove NOW (stops further sends to the dead id) but raise the disconnect from
+                // Update(): this runs inside SendPacket, possibly mid-Broadcast — raising inline
+                // re-entered session logic (RemoveClient → BroadcastPeerList → nested Broadcast)
+                // from inside the send loop.
+                if (_connectedPeers.Remove(peerId))
+                    _pendingSendFailureDrops.Add(peerId);
             }
             else
             {
@@ -535,9 +563,23 @@ namespace Multiplayer.Transport
         // ulong. Accepts the session and surfaces the new peer.
         private void OnSessionRequest(ulong remoteSteamId)
         {
+            // CLIENT: the only legitimate inbound session is the host we DIALED (a fresh NAT path
+            // after ResetPeer, or the host's reply leg). Any other SteamId — knowable to every peer
+            // via the PEER_LIST broadcast — must not be accepted: NetworkEngine's client
+            // OnPeerConnected would re-point the host link to it (SetHostPeer + JOIN).
+            if (!IsHost && remoteSteamId != _dialedHost)
+            {
+                UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport(client): ignoring inbound P2P " +
+                                             $"session from {remoteSteamId} — not the dialed host ({_dialedHost}).");
+                CloseSession(remoteSteamId);
+                return;
+            }
             AcceptSession(remoteSteamId);
-            _connectedPeers.Add(remoteSteamId);
-            OnPeerConnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");
+            // Raise only for a NEW peer: a re-request from a known peer (fresh session after a NAT
+            // path loss) must not re-fire OnPeerConnected — on a client that meant a duplicate
+            // SetHostPeer + JOIN.
+            if (_connectedPeers.Add(remoteSteamId))
+                OnPeerConnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");
         }
 
         private struct P2PPacket

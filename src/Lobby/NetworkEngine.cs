@@ -26,6 +26,32 @@ namespace Multiplayer.Network
         /// </summary>
         public bool IsActiveSession => IsActive && (IsHost || (Session != null && Session.HostPeerId.HasValue));
 
+        // Armed when THIS peer dials a host (JoinGame) and consumed by the client branch of
+        // OnPeerConnected: only a dialed connect may (re)point the host link. Without it, any peer
+        // that opens a transport link to a client (e.g. a Steam P2P session — every peer knows our
+        // SteamId from PEER_LIST) hijacked the host link via the unconditional SetHostPeer + JOIN.
+        // Stays armed until a peer is accepted, so Direct/STUN's async connect surfacing still lands.
+        private bool _expectingHostLink;
+
+        // FIX (StunTransport "reliable" = send twice): bounded receive-side dedup by MessageId
+        // (a fresh Guid per NetworkMessage, serialized on the wire — a transport-level duplicate
+        // datagram carries the SAME id). FIFO window, not per-peer: duplicates arrive back-to-back,
+        // so 4096 recent ids is orders of magnitude more than needed. Harmless for TCP/Steam (no
+        // duplication → never hits). Never reset: GUIDs do not repeat across sessions.
+        private const int DedupWindowSize = 4096;
+        private readonly HashSet<(ulong, Guid)> _seenMessages = new HashSet<(ulong, Guid)>();
+        private readonly Queue<(ulong, Guid)> _seenMessageOrder = new Queue<(ulong, Guid)>();
+
+        private bool IsDuplicateMessage(ulong senderId, Guid messageId)
+        {
+            var key = (senderId, messageId);
+            if (!_seenMessages.Add(key)) return true;
+            _seenMessageOrder.Enqueue(key);
+            if (_seenMessageOrder.Count > DedupWindowSize)
+                _seenMessages.Remove(_seenMessageOrder.Dequeue());
+            return false;
+        }
+
         // Set true at the START of every intentional teardown (Disconnect/Shutdown). Tearing a
         // CompositeTransport down disconnects its children one-by-one; once the hosting child goes
         // Disconnected the aggregate State can read Failed (e.g. a Steam child that never came up),
@@ -280,6 +306,9 @@ namespace Multiplayer.Network
             if (!IsActive || Transport == null) return;
 
             IsHost = false;
+            // We are DIALING: the next accepted peer is the host we chose (covers the in-place
+            // rejoin, where a stale HostPeerId from the dead connection must not block re-pointing).
+            _expectingHostLink = true;
             // Inc5 part 2 — returning-peer rejoin, CLIENT leg: when this engine PERSISTED across a
             // connection drop (in-place reconnect — Initialize() early-returns on an active engine, so
             // Session/SaveTransfer/Sync were NOT recreated), every in-flight sync-state holder still
@@ -484,6 +513,18 @@ namespace Multiplayer.Network
             {
                 // Client connected to host: record the host peer and send JOIN carrying our
                 // persistent identity (reshaped ConnectionRequest payload, §2 JOIN).
+                // Host-link hijack guard: only a connect we DIALED (JoinGame armed the flag), or the
+                // current host itself, may (re)point the host link. An unsolicited inbound peer —
+                // e.g. a P2P session opened by a stranger who learned our id from PEER_LIST — must
+                // never become "the host" via this unconditional SetHostPeer + JOIN.
+                bool isCurrentHost = Session.HostPeerId.HasValue && Session.HostPeerId.Value == peerId;
+                if (!_expectingHostLink && !isCurrentHost)
+                {
+                    Debug.LogWarning($"[Multiplayer] Ignoring unsolicited peer connect {peerId} on client — " +
+                                     "not the dialed host; host link unchanged.");
+                    return;
+                }
+                _expectingHostLink = false;
                 Session.SetHostPeer(peerId);
                 SendJoinToHost();
             }
@@ -520,6 +561,10 @@ namespace Multiplayer.Network
                 // RosterProgress (routed straight to SaveTransfer, bypassing the Heartbeat handler),
                 // SaveChunks, chat, etc. — all count toward the peer's liveness, not just Heartbeat.
                 Session?.RefreshLiveness(senderSteamId);
+                // Receive-side dedup (after liveness — a duplicate still proves the sender is alive):
+                // StunTransport sends every "reliable" packet twice with no receive filter, so without
+                // this every STUN chat/JOIN/chunk could be processed twice. No-op on TCP/Steam.
+                if (IsDuplicateMessage(senderSteamId, msg.MessageId)) return;
                 RouteMessage(msg);
             }
             catch (Exception ex)
