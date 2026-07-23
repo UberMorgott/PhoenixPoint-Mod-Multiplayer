@@ -375,6 +375,11 @@ namespace Multiplayer.Network.Sync
             // and only on the clicker's own screen where the offer was locally legal. For a human the
             // client-sent GUID is arbitrary wire input — never write it into the track (law 3).
             if (slot.Ability == null && !mutoid) { Reject(peer, charId, "empty slot on non-mutoid"); return false; }
+            // Law 3: in the mutoid flow `wanted` (raw wire GUID) gets STAMPED into the track (empty-slot
+            // stamp below + the second-slot stamp at the end) — accept it only if the host's own offer
+            // grid would have shown it on that button (see IsPandoranOffer for the native derivation).
+            if (mutoid && !IsPandoranOffer(character, wanted, buttonLevel))
+            { Reject(peer, charId, "not a mutoid offer " + abilityGuid); return false; }
             if (slot.Ability == null) slot.Ability = wanted;      // native :393-395 (mutoid empty slot)
             if (slot.Ability == null) { Reject(peer, charId, "unknown ability " + abilityGuid); return false; }
             if (progression.Abilities.Contains(slot.Ability)) { Reject(peer, charId, "already learned " + slot.Ability.name); return false; }
@@ -403,6 +408,25 @@ namespace Multiplayer.Network.Sync
             var stamp = track.GetAbilitySlotForLevel(buttonLevel < specLevel ? buttonLevel : buttonLevel + 1);
             if (stamp != null && wanted != null) stamp.Ability = wanted;
             return true;
+        }
+
+        /// <summary>Host-side rebuild of the native mutoid offer grid, so a wire GUID is only ever a
+        /// button native itself would have offered. Grounded (SpecializedAbilityTrackPopupElement.Init):
+        /// specs = <c>PhoenixFaction.AvailablePandoranSpecialzations</c> minus the vehicle-class-tag one
+        /// (:85-93); per spec the offers are its <c>AbilityTrack.AbilitiesByLevel</c> compacted to
+        /// non-null slots (:122); the button at row N carries ability index N-1 and
+        /// <c>AbilityLevel = N</c> (:129/:160) — the same value our capture ships as buttonLevel.</summary>
+        private static bool IsPandoranOffer(GeoCharacter character, TacticalAbilityDef wanted, int buttonLevel)
+        {
+            if (wanted == null || buttonLevel < 1) return false;
+            var vehicleTag = GameUtl.GameComponent<SharedData>().SharedGameTags.VehicleClassTag;
+            foreach (var spec in character.Faction.GeoLevel.PhoenixFaction.AvailablePandoranSpecialzations)
+            {
+                if (spec == null || spec.ClassTag == vehicleTag) continue;
+                var offers = spec.AbilityTrack.AbilitiesByLevel.Where(a => a.Ability != null).ToArray();
+                if (buttonLevel <= offers.Length && offers[buttonLevel - 1].Ability == wanted) return true;
+            }
+            return false;
         }
 
         /// <summary>Replay of <c>ChoseSecondSpecialization</c>:816-821. Validated BEFORE mutating (native

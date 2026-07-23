@@ -347,19 +347,18 @@ namespace Multiplayer.Network.Sync
                 // Non-viewer faction (unreachable from UI) → block the local write, no intent.
                 if (def == null || !ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction)) return false;
                 if (FindEquippedInstance(__instance, geoItem, out int charId, out byte listIdx))
-                {
                     SendScrapEquippedIntent(charId, listIdx, geoItem, amount);
-                    // This gesture also armed the loadout mark (LoadoutButtonsGesturePatch prefixes
-                    // ItemScrappedHandler). The local model stays untouched, so the follow-up SetItems
-                    // flush would ship the PRE-scrap lists and ask the host to re-equip the item it just
-                    // destroyed — drop the mark; the rail + open-UI repaint deliver the post-scrap truth.
-                    _gesturePending = false;
-                }
                 else
                 {
                     ManufactureSync.SendIntent(ManufactureSync.OpScrap, def.Guid, amount);
                     Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
                 }
+                // EITHER branch: this gesture also armed the loadout mark (LoadoutButtonsGesturePatch
+                // prefixes ItemScrappedHandler) and the local model stays untouched, so the follow-up
+                // SetItems flush would ship the PRE-scrap lists (equipped: asks the host to re-equip the
+                // item it just destroyed; storage: a pointless loadout echo). Drop the mark; the rail +
+                // open-UI repaint deliver the post-scrap truth.
+                _gesturePending = false;
                 return false;
             }
         }

@@ -330,11 +330,12 @@ namespace Multiplayer.Network.Sync
             }
             else if (op == OpScrap)
             {
-                // index carries the scrap COUNT. GeoFaction.ScrapItem refunds+subtracts in place but does NOT
-                // remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems removes it) — so we do.
+                // index carries the scrap COUNT — < 1 rejected (GeoFaction.ScrapItem's loop would silently
+                // no-op, :1219, and the handler must not report ok on it). ScrapItem refunds+subtracts in
+                // place but does NOT remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems does) — so we do.
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
                 var storage = GeoLevel()?.PhoenixFaction?.ItemStorage;
-                if (def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
+                if (index >= 1 && def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
                     gi.CommonItemData.Count >= index)
                 {
                     GeoLevel().PhoenixFaction.ScrapItem(gi, index);

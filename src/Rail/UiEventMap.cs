@@ -52,6 +52,14 @@ namespace Multiplayer.Network.Sync
                     {
                         case Wallet w: // touched is a HashSet — each wallet fires at most once
                             RaiseResourcesChanged(w);
+                            // FactionResourcesChanged reaches only its three native subscribers
+                            // (decompile: UIStateManufacturing.cs:58, UIStateReplenish.cs:34,
+                            // UIModuleInfoBar.cs:148); every other open screen reads the wallet
+                            // PULL-model (equip-screen quick-produce affordability, base build
+                            // menu, research cost gating) → also the universal repaint seam.
+                            // Safe from inside SyncApplyScope: MarkDirty only sets a flag, the
+                            // flush stays in SyncEngine.Tick with its own scope + defer/coalescing.
+                            OpenUiRepaint.MarkDirty();
                             break;
                         case Research _:
                         case ResearchElement _:
