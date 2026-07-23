@@ -1911,7 +1911,11 @@ namespace Multiplayer.Network
             // Uses the generous phase-1 load timeout so a slow-but-healthy download/prepare is not kicked
             // (fix #3).
             if (!_barrierOpen) return;
-            if (NowMs() - _barrierOpenedAtMs <= Phase1LoadTimeoutMs) return;
+            // Deadline re-arms on transfer progress (LastProgressMs advances on every client
+            // download-percent report and LOADED ack): async sends put wire time inside this window,
+            // so a slow-but-moving WAN download (64 MB at <~370 KB/s) must NOT be straggler-kicked.
+            // Kick only after the timeout passes with NO progress from anyone.
+            if (NowMs() - Math.Max(_barrierOpenedAtMs, LastProgressMs) <= Phase1LoadTimeoutMs) return;
 
             // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
             var stragglers = new List<ulong>();

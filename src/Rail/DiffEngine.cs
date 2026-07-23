@@ -39,6 +39,7 @@ namespace Multiplayer.Network.Sync
         public const byte MsgResyncRequest = 2;
 
         private const float TickInterval = 0.5f;   // ≤2 Hz
+        private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
         private const int MaxPacketBytes = 45000;  // chunk flush threshold
         private const int MaxValueBytes = 8192;    // per-entry cap: 45000 + 8192 stays under the u16 envelope
         private const int MaxEntities = 50000;     // graph-chase brake
@@ -305,7 +306,12 @@ namespace Multiplayer.Network.Sync
                 // _forceFull self-retries monolithically (checked at the top of the try); a pending
                 // ForceReemit scope retries the same way — dropping the prefixes here would silently lose
                 // the client's convergence re-emit (nothing shipped this tick).
-                if (_forcePrefixes.Count > 0) FlushNow();
+                if (_forcePrefixes.Count > 0) _flushPending = true;
+                // Backoff, never latch-off: FlushNow here (_nextTickAt=0) retried monolithically —
+                // and re-logged the exception — EVERY FRAME while the failure persisted. Hold the
+                // still-armed retry ≥1 s; a fresh external FlushNow (intent seam, pause/speed click)
+                // resets _nextTickAt to 0 and still fires immediately.
+                _nextTickAt = now + ExceptionRetryBackoff;
             }
         }
 

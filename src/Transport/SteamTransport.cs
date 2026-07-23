@@ -52,6 +52,10 @@ namespace Multiplayer.Transport
         // Update never runs — closes from a one-shot background thread after the same grace.
         private const int SessionCloseGraceMs = 1000;
         private readonly List<(ulong peerId, int dueTick)> _deferredCloses = new List<(ulong, int)>();
+        // Latest initialized transport — the Shutdown grace thread outlives THIS instance, so its
+        // reconnect guard must consult whichever transport is live NOW (a rejoin within the grace
+        // creates a NEW instance holding a fresh session with the same SteamId).
+        private static volatile SteamTransport s_latest;
 
         // ─── Facepunch.Steamworks reflection handles (runtime-resolved) ───────────────────
         // GROUNDING (verified 2026-06-20 against the SHIPPED Facepunch.Steamworks.Win64.dll that PP
@@ -232,6 +236,7 @@ namespace Multiplayer.Transport
                 var sessionHandler = BuildSessionRequestDelegate();
                 _installedSessionHandler = sessionHandler;   // remember OUR handler for a guarded Shutdown clear
                 _onP2PSessionRequestField.SetValue(null, sessionHandler);
+                s_latest = this;   // for the Shutdown grace thread's cross-instance reconnect guard
 
                 // Wire Steam's session-failed callback the same way. Never-silent: log whether it armed —
                 // a signature miss must be visible in the Player.log, not a silent detection downgrade.
@@ -355,7 +360,17 @@ namespace Multiplayer.Transport
                 new System.Threading.Thread(() =>
                 {
                     System.Threading.Thread.Sleep(SessionCloseGraceMs);
-                    foreach (var peer in toClose) CloseSession(peer);
+                    foreach (var peer in toClose)
+                    {
+                        // Mirror the Update-drain reconnect guard: if the live transport (possibly a
+                        // NEWER instance — rejoin/re-host inside the grace) holds a fresh session with
+                        // this SteamId, closing it here would kill that rejoin. Unsynchronized cross-
+                        // thread read of _connectedPeers is best-effort by design (try/catch below).
+                        bool reconnected = false;
+                        try { var live = s_latest; reconnected = live != null && live._connectedPeers.Contains(peer); }
+                        catch { }
+                        if (!reconnected) CloseSession(peer);
+                    }
                 }) { IsBackground = true }.Start();
             }
             State = ConnectionState.Disconnected;

@@ -66,7 +66,6 @@ namespace Multiplayer.Transport
             = new Queue<(bool, ulong, string)>();
         private readonly object _lock = new object();
         private long _nextPeerId = 1;
-        private ulong _hostPeerId;
         private Thread _listenThread;
         private volatile bool _running;
 
@@ -287,7 +286,6 @@ namespace Multiplayer.Transport
 
             if (succeeded && client != null)
             {
-                _hostPeerId = peerId;
                 LocalEndpoint = $"DirectIP(client:{client.Client.LocalEndPoint})";
                 var peer = new Peer(peerId, client);
                 lock (_lock) { _clients[peerId] = peer; }
