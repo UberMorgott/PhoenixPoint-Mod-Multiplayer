@@ -170,21 +170,28 @@ manufacture queue items (no stable element key — duplicates legal), Timing.Own
 vehicle SurfacePos/HitPoints (no live name match; travel mirror is a later migration), per-subsystem
 `*InstanceData`-only scalars (NextUpdate schedule bookkeeping — host-only sim, client gated anyway).
 
-**NEXT STEP — a real repaint primitive (not a lifecycle transition).** `OpenUiRepaint` repaints an open
-screen with `current.Exit(stack); current.Enter(stack);`. That is a state-machine TRANSITION, not a
-repaint, and it is not idempotent: `Exit` tears down real resources (`UIStateVehicleSelected.cs:237-258`
-runs `_sectionBarModule.Deinit()`, `_resourcesModule.Done()`, destroys `_selectionMarker`, unsubscribes 6
-events) and `Enter` re-runs a full `EnterState` that can legitimately fail on a mirrored model. The
-opt-out table (currently only `UIStateManufacturing`) is that broken invariant leaking one
-screen at a time — each entry is a screen whose `ExitState` does something a repaint must never do, and
-the list grows as more screens are exercised. A throwing `Enter` is now SWALLOWED and the screen kept
-(log once per state type) — `Enter` re-registers the input handler before `EnterState` runs
-(`GeoscapeViewState.cs:88-94`), so a partial repaint stays usable; the old roll-forward to
-`UIStateNothingSelected` ejected the player from the screen once per rail batch. The real answer is still a
-repaint primitive that re-reads the model into the LIVE
-widgets with no transition at all — `ReseedEditSoldier` already demonstrates the shape (read-direction
-only, native `OnDataChanged`/`UpdateData`/`RefreshStorage` calls, never UI→model). Generalizing that
-retires the opt-out table and the recovery path together.
+**Repaint primitive (2026-07-23) — native rebuild table, re-enter demoted to fallback.**
+`UiNativeRepaint` (lives with UiEventMap — the presentation-knowledge location) maps screen type →
+the game's OWN read-direction refresh methods (model → live widgets, no lifecycle transition; every
+method decompile-grounded, never guessed). `OpenUiRepaint` flush tries the table first (inside
+`SyncApplyScope`, law 8); a registered screen that throws keeps the screen + logs once (partial
+repaint beats ejection); an entry may DECLINE (return false: empty roster / missing module after a
+game update) → that one flush falls back. Wired: `UIStateManufacturing` (→
+`ManufactureSync.RepaintManufacturingUi`, ex-opt-out branch), `UIStateResearch` (→
+`ResearchSync.RepaintResearchUi`), `UIStateEditSoldier` (`_refreshStorage=true` + `OnDataChanged` +
+`DisplaySoldier` + `RefreshStorage` + `SelectCharacterProgression` = `CharacterChangedHandler:358-365`
+minus the UI→model write-back; selection preserved by reseeding the CURRENT character),
+`UIStateEditVehicle` (same shape, progression via module `SetCharacterProgression`),
+`UIStateGeoRoster` (`OnActorStatChanged:364` = module re-`Init` + unit-stats refresh, then
+`SetSelectSlot(cur)`), `UIStateVehicleSelected` (`UpdateVehiclesTabs` + `UpdateVehicleActions`
+(idempotent, clears via `UnsubscribeVehicleActions:1427`) + `UpdateReachableSitesMarkers` +
+`OnFactionObjectivesChanged`), `UIStateNothingSelected` (`OnFactionObjectivesChanged:519`),
+`UIStatePhoenixBaseLayout` (module `SetLeftSideInfo` + `SetupBaseLayout` — deliberately NOT
+`UIModuleBaseLayout.Init`, which closes an open build menu :291-292). Unregistered screens still ride
+Exit+Enter (same instance, throwing `Enter` swallowed + screen kept, `GeoscapeViewState.cs:88-94`
+re-registers input first) — now flagged `[MP][uirepaint] fallback re-enter: <UIState>` once per type,
+the to-do list for the next table entry. Drag/typing defer + one-flush-per-frame coalescing sit in
+front of BOTH paths.
 
 **What stays manual (by design):** structural creates/destroys (law 3 identity boundary), intents
 (law 4a seams), the UiEventMap table (presentation knowledge), ResearchSync start-blob/complete/queue

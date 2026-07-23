@@ -11,21 +11,20 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Law 11, UNIVERSAL path. After a remote mirror batch lands on the CLIENT, re-drive the OPEN
-    /// geoscape screen through its own native full-rebuild (Exit → Enter on the SAME view-state
-    /// instance) so it repaints exactly as it does when the user opens it — one generic mechanism for
-    /// all 38 <see cref="GeoscapeViewState"/> screens, no per-panel repaint code.
+    /// Law 11, UNIVERSAL path. After a remote mirror batch lands on the CLIENT, repaint the OPEN
+    /// geoscape screen. DEFAULT = the transition-free repaint primitive: <see cref="UiNativeRepaint"/>
+    /// dispatches to the screen's own native read-direction refresh methods (model → live widgets, no
+    /// lifecycle transition — scroll, selection and open sub-menus survive). LAST RESORT for screens
+    /// not yet in that table = re-drive the native full-rebuild (Exit → Enter on the SAME view-state
+    /// instance), flagged once per screen type in the log so the remaining unwired screens are visible.
     ///
     /// GROUNDED (decompile): GeoscapeViewState.Exit(stack) removes the input handler + runs ExitState();
-    /// Enter(stack) re-adds it (AddUnique = no double-sub) + runs EnterState() = the screen's ONLY full
-    /// rebuild path (there is no native Refresh/Invalidate; the engine never repaints an open screen from
-    /// model changes). Same instance preserves the ctor fields (_site/_base/_vehicle…); Context/_stateStack
-    /// were set in Push and survive. Enter/Exit take the StateStack&lt;GeoscapeViewContext&gt; — the
-    /// GeoscapeView._statesStack private field.
-    ///
-    /// OPT-OUT: UIStateManufacturing.ExitState() nulls _filter + closes its module, so a bare Exit+Enter
-    /// loses the active filter. Its flush routes to ManufactureSync.RepaintManufacturingUi instead —
-    /// opted out of the MECHANISM (re-enter), never out of repainting.
+    /// Enter(stack) re-adds it (AddUnique = no double-sub) + runs EnterState() = the screen's only
+    /// generic rebuild path (there is no native Refresh/Invalidate common to all screens). Same instance
+    /// preserves the ctor fields (_site/_base/_vehicle…); Context/_stateStack were set in Push and
+    /// survive. Enter/Exit take the StateStack&lt;GeoscapeViewContext&gt; — the GeoscapeView._statesStack
+    /// private field. But Exit is a TRANSITION, not a repaint — it tears down real resources and resets
+    /// in-progress UI, which is why the table is the default and this is the fallback.
     ///
     /// DEBOUNCE: one mirror tick can arrive as several chunked GeoRail packets processed in ONE frame
     /// (NetworkEngine.Update drains all inbound via Transport.Update BEFORE Sync.Tick). Re-entering a
@@ -41,6 +40,8 @@ namespace Multiplayer.Network.Sync
         private static int _marksSinceFlush;
         private static float _nextDiagAt;
         private static readonly System.Collections.Generic.HashSet<string> _loggedFailures =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _loggedFallback =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>Defer ceiling in frames (~5 s at 60 fps). See <see cref="FlushIfDirty"/>.</summary>
@@ -69,6 +70,7 @@ namespace Multiplayer.Network.Sync
             _deferLogged = false;
             _marksSinceFlush = 0;
             _loggedFailures.Clear();
+            _loggedFallback.Clear();
         }
 
         /// <summary>
@@ -129,8 +131,9 @@ namespace Multiplayer.Network.Sync
             return vehicleDrag != null && vehicleDrag.IsBeingDragged();
         }
 
-        /// <summary>Re-drive the open geoscape screen's native full-rebuild (Exit → Enter, same instance).
-        /// Guarded per-state so one of the ~31 un-audited screens misbehaving can't crash the apply loop.
+        /// <summary>Repaint the open geoscape screen: native rebuild table first (the primitive),
+        /// Exit+Enter re-enter only for screens the table doesn't know.
+        /// Guarded per-state so an un-audited screen misbehaving can't crash the apply loop.
         /// Private: every caller goes through <see cref="MarkDirty"/> so no repaint can bypass the
         /// drag/typing defer + per-frame coalescing in <see cref="FlushIfDirty"/>.</summary>
         private static void RepaintOpenGeoscapeScreen()
@@ -140,15 +143,36 @@ namespace Multiplayer.Network.Sync
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
-            if (current is UIStateManufacturing)
+            try
             {
-                // Opt-out of Exit+Enter (bare re-enter drops its _filter) — but NOT of repainting: route
-                // to the screen's dedicated per-panel rebuild instead, so a MarkDirty from ANY source
-                // (EquipSync host reseeds, unmapped-kind default) still repaints it (law 11). Self-guards +
-                // own try/catch; scrap mode re-snapshots its storage copies inside.
-                ManufactureSync.RepaintManufacturingUi();
+                // law 8: a native refresh can fire UI events an intent-capture seam listens to.
+                using (SyncApplyScope.Enter())
+                {
+                    if (UiNativeRepaint.TryRepaint(current, view))
+                    {
+                        if (MpDiag.On && Time.realtimeSinceStartup >= _nextDiagAt)
+                        {
+                            _nextDiagAt = Time.realtimeSinceStartup + 1f;
+                            Debug.Log("[MP][uirepaint] native rebuild " + current.GetType().Name + " marks=" + marks);
+                        }
+                        return;
+                    }
+                }
+            }
+            catch (Exception rebuildEx)
+            {
+                // A throwing native rebuild = PARTIAL repaint on a mirrored model — keep the screen and
+                // keep using the table on later batches (law 11 outranks log tidiness). Never demote to
+                // Exit+Enter: that transition is exactly what the table exists to avoid.
+                if (_loggedFailures.Add(current.GetType().Name + ":NativeRebuild"))
+                    Debug.LogWarning("[Multiplayer][rail] native rebuild for " + current.GetType().Name +
+                                     " threw — screen kept (logged once per screen): " + rebuildEx);
                 return;
             }
+            // LAST RESORT: lifecycle re-enter for screens with no native-rebuild registration yet.
+            // One-time inventory line per screen type = the to-do list for the next table entry.
+            if (_loggedFallback.Add(current.GetType().Name))
+                Debug.Log("[MP][uirepaint] fallback re-enter: " + current.GetType().Name);
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
             try
             {
