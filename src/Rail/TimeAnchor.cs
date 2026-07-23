@@ -57,6 +57,7 @@ namespace Multiplayer.Network.Sync
         private static TimingInstanceData _hostDto;
         private static float _latchedAt;        // local realtime of the latch — the host-side prediction base
         private static TimingInstanceData _clientDto;
+        private static float _appliedAt;        // local realtime of the last apply — the client-side prediction base
         private static float _nextChurnLogAt;
         private static int _latchesSinceLog;
 
@@ -146,10 +147,56 @@ namespace Multiplayer.Network.Sync
             // Paused PROPERTY is parent-aware (returns true whenever ParentTime.Paused, Timing.cs:100-106),
             // so reading it here would latch a parent-induced pause into this clock's own flag and leave it
             // paused after the parent resumed.
+            //
+            // The live values ride a SCRATCH copy: _clientDto itself keeps the HOST's Paused/Scale as
+            // received on the wire (seeded from the client's own clock, equal to the host's post save
+            // transfer) — that retained rate is the prediction EnforceDrift checks the local clock against.
             var live = geo.Timing.RecordInstanceData();
-            _clientDto.Paused = live.Paused;
-            _clientDto.Scale = live.Scale;
-            geo.Timing.ProcessInstanceData(_clientDto);
+            geo.Timing.ProcessInstanceData(new TimingInstanceData
+            {
+                Paused = live.Paused,
+                Scale = live.Scale,
+                StartTime = _clientDto.StartTime,
+                StartFixedTime = _clientDto.StartFixedTime,
+                OwnNow = TimeUnit.Zero,
+                OwnFixedNow = TimeUnit.Zero,
+            });
+            _appliedAt = Time.realtimeSinceStartup;
+        }
+
+        /// <summary>Client-side counterpart of <see cref="Drifted"/> — the free-run backstop. The rail
+        /// diffs HOST state, so a client clock mutated locally (a writer the TimeSync seams do not
+        /// capture: quick-save coroutine, another mod, a missed native path) is never corrected by the
+        /// wire while the host anchor stays unchanged — it free-runs forever. This re-asserts the last
+        /// applied anchor once the local clock leaves the anchor's own derivation (same threshold
+        /// formula as the host side). Rate is re-stated through the PROPERTY setters — both early-out
+        /// on an equal value (Timing.cs:87/112), and on a real flip they fire the native events, so the
+        /// pause indicator and scheduler follow instead of silently disagreeing (the exact failure the
+        /// ApplyIfTouched comment records for backing-field writes). Idempotent: ProcessInstanceData is
+        /// an overwrite, and the prediction base is NOT advanced here — corrections converge on the
+        /// anchor, never chase their own writes. Driven at ~1 Hz by TimeSync.ClientTick.</summary>
+        internal static void EnforceDrift(GeoLevelController geo)
+        {
+            if (_clientDto == null || _appliedAt <= 0f || geo == null || geo.Timing == null) return;
+            var t = geo.Timing;
+            double rate = _clientDto.Paused ? 0.0 : _clientDto.Scale;
+            double derived = _clientDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _appliedAt);
+            if (Math.Abs(t.Now.TimeSpan.TotalSeconds - derived) <= Math.Max(5.0, rate * 0.5)) return;
+            Debug.LogWarning("[Multiplayer][rail] TimeAnchor: client clock drifted from anchor derivation (now=" +
+                             t.Now.TimeSpan.TotalSeconds.ToString("F0") + "s derived=" + derived.ToString("F0") +
+                             "s) — re-asserting");
+            t.Paused = _clientDto.Paused;
+            t.Scale = _clientDto.Scale;
+            var when = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(derived));
+            t.ProcessInstanceData(new TimingInstanceData
+            {
+                Paused = _clientDto.Paused,
+                Scale = _clientDto.Scale,
+                StartTime = when,
+                StartFixedTime = when,
+                OwnNow = TimeUnit.Zero,
+                OwnFixedNow = TimeUnit.Zero,
+            });
         }
 
         /// <summary>Drop both halves. The host MUST re-latch across a reload or a full resend, because a
@@ -159,6 +206,7 @@ namespace Multiplayer.Network.Sync
         {
             _hostDto = null;
             _clientDto = null;
+            _appliedAt = 0f;
         }
     }
 }

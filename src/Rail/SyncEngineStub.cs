@@ -22,6 +22,7 @@ namespace Multiplayer.Network.Sync
                 ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || PersonnelSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || TimeSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
@@ -37,6 +38,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.HostTick(_engine);
             ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
+            TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
             // Law 11 UNIVERSAL: flush one open-screen re-enter per frame if anything marked dirty —
             // client mirror batches AND host post-intent reseeds (EquipSync/PersonnelSync) both land here.
             OpenUiRepaint.FlushIfDirty();
@@ -48,6 +50,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.Reset();
             EquipSync.Reset();
             PersonnelSync.Reset();
+            TimeSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
@@ -63,6 +66,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
             PersonnelSync.ResetForReloadBoundary();
+            TimeSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
@@ -71,6 +75,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.ResetIntentDedupForPeer(peerId);
             ManufactureSync.ResetIntentDedupForPeer(peerId);
             PersonnelSync.ResetIntentDedupForPeer(peerId);
+            TimeSync.ResetIntentDedupForPeer(peerId);
         }
         // Deliberate no-ops: the legacy push-reseed seam. SessionManager (JoinReady) and
         // SaveTransferCoordinator still drive it on the join paths, but on the rail a joiner is
