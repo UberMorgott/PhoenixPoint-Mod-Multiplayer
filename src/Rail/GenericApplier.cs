@@ -50,6 +50,7 @@ namespace Multiplayer.Network.Sync
             // The transferred save just replaced this client's clock — re-seed the anchor scratch from it,
             // or the next partial anchor would layer onto pre-reload values.
             TimeAnchor.Reset();
+            DefOwnership.Invalidate(); // the loaded save can mint runtime defs — rebuild the ownership set
             // seq + kind registry persist (rca-3 contract: host counters keep increasing across reloads)
         }
 
@@ -196,6 +197,21 @@ namespace Multiplayer.Network.Sync
                 if (bf.Class == FieldClass.Excluded)
                 { LogMissOnce("dto-twin gap: " + rt.Type.Name + "." + bf.Name + " has no live counterpart on " + entity.GetType().Name + " (" + bf.Exclude + ") — not mirrored"); return; }
                 field = bf;
+            }
+            // Walk-time ownership law BACKSTOP (belt = host's DiffEngine refusal; this guards version
+            // skew and per-peer def-graph differences): never write into an instance the def graph
+            // owns, and never mutate a def-owned container reached through a live entity's field —
+            // that write lands in shared def state. Leaves are exempt below by construction: a leaf
+            // apply REPLACES the entity's reference, it never mutates the shared instance (and the
+            // entity itself was just checked).
+            if (DefOwnership.IsDefOwned(entity))
+            { LogMissOnce("def-owned instance at " + path + " — write refused (ownership law)"); return; }
+            if (field.Class != FieldClass.Leaf && field.CanRead)
+            {
+                object cur;
+                try { cur = field.GetValue(entity); } catch { cur = null; }
+                if (cur != null && DefOwnership.IsDefOwned(cur))
+                { LogMissOnce("def-owned container at " + path + "." + field.Name + " — write refused (ownership law)"); return; }
             }
             // Resync-only dict CENSUS (SubKey "" + marker — a real dict entry always carries its key, and
             // no leaf/GeoItem value starts with the marker in that slot): prune local keys the host does not

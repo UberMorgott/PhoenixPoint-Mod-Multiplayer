@@ -195,6 +195,10 @@ namespace RailCheck
             sb.Append("roots: Timing | TimingInstanceData (\"TA\" clock anchor) | GeoFaction | GeoSite | GeoCharacter | GeoVehicle (IdentityResolver.Roots kinds)\n");
             sb.Append("seeded (not roots — types the live walk reaches only through a runtime subtype): GeoPhoenixFacility\n");
             sb.Append("polymorphic-codec: " + (polymorphicCodec ? "yes" : "no") + "\n");
+            sb.Append("def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs a live DefRepository,\n");
+            sb.Append("  so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is\n");
+            sb.Append("  INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element\n");
+            sb.Append("  rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).\n");
             sb.Append("types: " + types.Count + "\n\n");
 
             int cov = 0, exc = 0, geoItemDicts = 0;
@@ -209,6 +213,18 @@ namespace RailCheck
                     if (f.Class == FieldClass.Excluded)
                     { sb.Append("  - EXCLUDED " + f.Name + " (" + f.ValueType.Name + "): " + f.Exclude + "\n"); exc++; continue; }
                     cov++;
+                    // L11 — the static belt of the RUNTIME ownership law (src/Rail/DefOwnership.cs):
+                    // LocalizedTextBind instances are routinely def-OWNED (ItemDef.GetDisplayName returns
+                    // ViewElementDef.DisplayName1/2 by reference, decompile ItemDef.cs:165-173), so a
+                    // covered bind field is a def-state write vector on the client. The real law is
+                    // reference identity over a live DefRepository — untestable headless (see header);
+                    // this asserts that the classify-time refusal (RailMeta.IsPresentation) stays intact.
+                    // If that belt is ever replaced by the runtime law alone (N7 exit criterion), revise
+                    // L11 in the same commit — the baseline diff makes that reviewable.
+                    if (f.ValueType.FullName == "Base.UI.LocalizedTextBind" ||
+                        (f.ElemType != null && f.ElemType.FullName == "Base.UI.LocalizedTextBind"))
+                        laws.Add("L11 def-laundering-vector-rides: " + t.FullName + "." + f.Name +
+                                 " carries LocalizedTextBind as " + f.Class + " — def-owned binds would be written on clients");
                     if (f.Class == FieldClass.GeoItemDict) geoItemDicts++;
                     var extra = "";
                     if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)

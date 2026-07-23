@@ -111,6 +111,7 @@ namespace Multiplayer.Network.Sync
             _forcePrefixes.Clear();
             ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
             TimeAnchor.Reset();         // post-load the clock jumped: re-latch rather than re-publish the old anchor
+            DefOwnership.Invalidate();  // a loaded save can mint runtime defs — rebuild the ownership set
         }
 
         /// <summary>Client lost the stream (seq gap): resend EVERYTHING covered — it is just a big delta.</summary>
@@ -477,6 +478,11 @@ namespace Multiplayer.Network.Sync
             if (obj == null || !visited.Add(obj)) return;
             if (depth > MaxDepth) { Incident(obj.GetType(), "(depth)", "max depth exceeded", path); return; }
             if (visited.Count > MaxEntities) { Incident(obj.GetType(), "(brake)", "entity cap " + MaxEntities + " exceeded — graph tail not walked", path); return; }
+            // Walk-time ownership law (DefOwnership): an instance the def graph also reaches is
+            // DEF-OWNED — the rail writes in place, so descending it would ship shared def state as
+            // writable entity state and the client apply would clobber its defs. Never walked. One
+            // O(1) reference-hash lookup per visited entity; the set builds once (defs immutable).
+            if (DefOwnership.IsDefOwned(obj)) { Incident(obj.GetType(), "(def-owned)", "instance aliased into the def graph — not walked (ownership law)", path); return; }
 
             var rt = RailType.Get(obj.GetType());
             if (rt == null) return;
@@ -492,6 +498,15 @@ namespace Multiplayer.Network.Sync
                 object val;
                 try { val = f.GetValue(obj); }
                 catch (Exception ex) { Incident(rt.Type, f.Name, "getter threw " + ex.GetType().Name, path); continue; }
+
+                // Ownership law, container/descend arm: a def-owned CONTAINER (shared list/dict) or
+                // sub-object must not ship either — the client applies these by MUTATING its own
+                // aliased instance in place (ApplyList Clear+Add, dict writes, ReorderByKeys).
+                // Leaves are exempt by construction: they ship by value and apply by replacing the
+                // ENTITY's reference, never by writing into the shared instance — and exempting them
+                // keeps the check off the ~22k-leaf hot path.
+                if (val != null && f.Class != FieldClass.Leaf && DefOwnership.IsDefOwned(val))
+                { Incident(rt.Type, f.Name, "def-owned instance — not shipped (ownership law)", path); continue; }
 
                 switch (f.Class)
                 {
