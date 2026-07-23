@@ -52,9 +52,11 @@ namespace Multiplayer.Network.Sync
     /// PutUpInQueue / PutDownInQueue — all reachable from UIModuleManufacturing) are intent-capture Harmony
     /// prefixes (law 4a): on the client they BLOCK the native call and send an intent addressed by def guid
     /// (add) or by queue INDEX + a def-at-index guard (cancel/reorder — the un-keyable list is addressed by
-    /// position); on the host (and inside SyncApplyScope) native code runs untouched. Host: IntentDedup →
-    /// validate (def-at-index still matches, else the client's view was stale → reject) → execute the SAME
-    /// native method → the observe seams broadcast the outcome. Invalid intents rejected silently (logged).
+    /// position); on the host (and inside SyncApplyScope) native code runs untouched. Transport + nonce +
+    /// dedup + dispatch + reject discipline ride <see cref="IntentRail"/> (surface 0xAE registered in
+    /// RegisterIntents); the op handlers here validate against HOST state (def-at-index still matches,
+    /// else the client's view was stale → reject) → execute the SAME native method → the observe seams
+    /// broadcast the outcome. Invalid intents reject through IntentRail (log + forced queue resend).
     ///
     /// SIM GATING (law 4b): NOT added here — ItemManufacturing.Update() is driven only by
     /// GeoLevelController.LevelHourlyUpdateCrt, which <see cref="ClientSimGate"/> already freezes on clients.
@@ -92,13 +94,6 @@ namespace Multiplayer.Network.Sync
         internal const byte OpScrapEquipped = 12;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
-        private static readonly IntentDedup Intents = new IntentDedup();
-        private static uint _nextIntentNonce;
-
-        /// <summary>Shared client nonce allocator for EVERY intent on the 0xAE surface (EquipSync included):
-        /// the host dedup is keyed (peer, surface, nonce), so two senders with independent counters on one
-        /// surface would collide and silently eat each other's intents.</summary>
-        internal static uint NextNonce() => ++_nextIntentNonce;
 
         // ─── Host observe state ────────────────────────────────────────────
         private static ItemManufacturing _hooked;   // faction Manufacture we subscribed to (unhook on level change)
@@ -136,7 +131,29 @@ namespace Multiplayer.Network.Sync
         {
             ResetForReloadBoundary();
             Seq.Reset();
-            Intents.Reset();
+        }
+
+        /// <summary>Arm the 0xAE surface on the generic intent engine. Ops with the shared [defGuid][index]
+        /// body ride <see cref="HandleDefIndexIntent"/>; the EquipSync-owned payloads (loadout / equipped-
+        /// scrap) get their own table entries — the old hand-rolled early-branching inside one switch is
+        /// now just registration. Reconverge on reject = forced queue-order resend (the un-keyable queue
+        /// rides the 0xAD order channel, out of ForceReemit's reach; content-identical resends are an
+        /// in-place rebuild + repaint on clients, harmless at reject rate).</summary>
+        internal static void RegisterIntents()
+        {
+            var ops = new Dictionary<byte, IntentRail.OpHandler>();
+            foreach (byte op in new[] { OpQueue, OpCancel, OpFront, OpUp, OpDown,
+                                        OpScrap, OpScrapVehicle, OpAugment, OpQuickProduce })
+                ops[op] = HandleDefIndexIntent;
+            ops[OpSetItems] = (engine, peer, nonce, op, r) => EquipSync.HandleIntent(engine, peer, nonce, r);
+            ops[OpScrapEquipped] = (engine, peer, nonce, op, r) => EquipSync.HandleScrapEquippedIntent(peer, nonce, r);
+            IntentRail.Register(SurfaceIds.GeoManufactureIntent, "manufacture", ops, ForceQueueResend);
+        }
+
+        private static void ForceQueueResend()
+        {
+            _lastSentQueue = null;
+            PushQueueSnapshot(NetworkEngine.Instance); // self-guards non-host / no session / no geoscape
         }
 
         /// <summary>Mid-session reload boundary (rca-3 contract): drop the dying-geoscape hook + the last-sent
@@ -146,8 +163,6 @@ namespace Multiplayer.Network.Sync
             Unhook();
             _lastSentQueue = null;
         }
-
-        public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
 
         private static GeoLevelController GeoLevel()
         {
@@ -248,10 +263,10 @@ namespace Multiplayer.Network.Sync
 
         // ─── Inbound (armed as part of SurfaceRouter.GeoscapeInbound) ──────
 
-        /// <summary>Returns true when the surface was consumed (GeoManufacture / GeoManufactureIntent).</summary>
+        /// <summary>Returns true when the surface was consumed (GeoManufacture; the 0xAE intent surface
+        /// rides <see cref="IntentRail.HandleInbound"/>).</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
-            if (surfaceId == SurfaceIds.GeoManufactureIntent) return HandleIntent(engine, senderPeerId, payload);
             if (surfaceId != SurfaceIds.GeoManufacture) return false;
             if (engine == null || engine.IsHost) return true; // host never applies its own surface
             try
@@ -276,166 +291,136 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        // ─── HOST: intent apply (dedup → validate → execute NATIVELY) ──────
+        // ─── HOST: intent apply (validate → execute NATIVELY; dedup/decode/reject = IntentRail) ──────
 
-        private static bool HandleIntent(NetworkEngine engine, ulong senderPeerId, byte[] payload)
+        /// <summary>Every 0xAE op with the shared [defGuid][index] body (the EquipSync-owned payloads
+        /// have their own table entries — see <see cref="RegisterIntents"/>).</summary>
+        private static void HandleDefIndexIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
-            try
+            string defGuid = r.ReadString();
+            int index = r.ReadInt32();
+
+            var manufacture = PhoenixManufacture();
+            if (manufacture == null)
             {
-                uint nonce; byte op; string defGuid; int index;
-                using (var ms = new MemoryStream(payload))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    nonce = r.ReadUInt32();
-                    op = r.ReadByte();
-                    if (op == OpSetItems)
-                    {
-                        // Loadout intent: shared surface + dedup, EquipSync-owned payload from here on.
-                        if (Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce))
-                            EquipSync.HandleIntent(engine, senderPeerId, nonce, r);
-                        return true;
-                    }
-                    if (op == OpScrapEquipped)
-                    {
-                        if (Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce))
-                            EquipSync.HandleScrapEquippedIntent(senderPeerId, nonce, r);
-                        return true;
-                    }
-                    defGuid = r.ReadString();
-                    index = r.ReadInt32();
-                }
-                if (!Intents.IsNew(senderPeerId, SurfaceIds.GeoManufactureIntent, nonce)) return true; // double-send
+                IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "no manufacture op=" + op);
+                return;
+            }
 
-                var manufacture = PhoenixManufacture();
-                if (manufacture == null)
-                {
-                    Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (no manufacture) op=" + op + " peer=" + senderPeerId);
-                    return true;
-                }
-
-                bool ok = false;
-                if (op == OpQueue)
-                {
-                    var item = manufacture.ManufacturableItems.FirstOrDefault(
-                        i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == defGuid);
-                    ok = item != null && manufacture.CanManufacture(item) == ItemManufacturing.ManufactureFailureReason.None;
-                    if (ok)
-                    {
-                        manufacture.ManufactureItem(item);
-                        // [mfgdiag] boundary: resulting host storage count for this def (real-loss vs visual proof; remove after diag).
-                        // The storage LOOKUP sits inside the guard too — it is diag-only work, not just a log.
-                        if (MpDiag.On)
-                        {
-                            var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
-                            int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
-                                ? gi.CommonItemData.Count : -1;
-                            Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
-                        }
-                    }
-                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (cannot manufacture " + defGuid + ") peer=" + senderPeerId);
-                }
-                else if (op == OpScrap)
-                {
-                    // index carries the scrap COUNT. GeoFaction.ScrapItem refunds+subtracts in place but does NOT
-                    // remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems removes it) — so we do.
-                    var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
-                    var storage = GeoLevel()?.PhoenixFaction?.ItemStorage;
-                    if (def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
-                        gi.CommonItemData.Count >= index)
-                    {
-                        GeoLevel().PhoenixFaction.ScrapItem(gi, index);
-                        if (gi.CommonItemData.IsEmpty()) storage.RemoveItem(gi);
-                        ok = true;
-                    }
-                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrap REJECT (missing/insufficient " +
-                                          defGuid + " need=" + index + ") peer=" + senderPeerId);
-                    if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
-                }
-                else if (op == OpScrapVehicle)
-                {
-                    var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as GeoVehicleEquipmentDef;
-                    var air = GeoLevel()?.PhoenixFaction?.AircraftItemStorage;
-                    if (def != null && air != null && air.HasItem(def))
-                    {
-                        var veh = air.PopItem(def);   // removes from storage
-                        if (veh != null) { GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
-                    }
-                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST scrapVehicle REJECT (missing " +
-                                          defGuid + ") peer=" + senderPeerId);
-                    if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
-                }
-                else if (op == OpAugment)
-                {
-                    // Augment install: index slot = charId. Bought with resources, not storage — EquipSync
-                    // owns the cost/fit validation + the native replay.
-                    ok = EquipSync.HandleAugmentIntent(senderPeerId, nonce, defGuid, index);
-                }
-                else if (op == OpQuickProduce)
-                {
-                    // Host replay of the equip-screen buy, with the affordability check the native handler
-                    // never does: Wallet.Take(ResourcePack) calls HasResources and DISCARDS the result
-                    // (Wallet.cs:63-65), so without this gate a stale client could overdraw the wallet.
-                    // The item lands in the shared faction storage — the one place whose contents already
-                    // mirror to every peer (GeoItemDict on 0xAC); the buyer then equips it with a normal
-                    // loadout gesture. We do NOT try to reproduce which UI slot the click targeted:
-                    // that is view state, and guessing identity placement is exactly what law 3 forbids.
-                    var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
-                    var faction = GeoLevel()?.PhoenixFaction;
-                    if (def != null && faction?.Wallet != null && faction.ItemStorage != null &&
-                        manufacture.ManufacturableItems.Any(i => i.RelatedItemDef == def) &&
-                        faction.Wallet.HasResources(def.ManufacturePrice))
-                    {
-                        faction.Wallet.Take(def.ManufacturePrice, OperationReason.Purchase);
-                        faction.ItemStorage.AddItem(new GeoItem(def));
-                        ok = true;
-                    }
-                    else Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST quick-produce REJECT (" +
-                                          (def == null ? "unknown def" : "not manufacturable or unaffordable") +
-                                          " " + defGuid + ") peer=" + senderPeerId);
-                    if (MpDiag.On) Debug.Log("[MP][quickproduce] HOST bought " + defGuid + " ok=" + ok);
-                }
-                else
-                {
-                    var queue = manufacture.Queue;
-                    // Address the un-keyable list by position, but guard against an index race: the def at that
-                    // index must still be the one the client acted on (else its view was stale → reject; the
-                    // next snapshot re-syncs it).
-                    if (index < 0 || index >= queue.Count ||
-                        queue[index]?.ManufacturableItem?.RelatedItemDef?.Guid != defGuid)
-                    {
-                        Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (stale index " + index +
-                                         " def=" + defGuid + ") op=" + op + " peer=" + senderPeerId);
-                        return true;
-                    }
-                    var element = queue[index];
-                    switch (op)
-                    {
-                        case OpCancel: manufacture.Cancel(index); ok = true; break;
-                        case OpFront: manufacture.PutInFromOfQueue(element); ok = true; break;   // native self-guards element!=Current
-                        case OpUp: manufacture.PutUpInQueue(element); ok = true; break;          // native self-guards element!=Current
-                        case OpDown: manufacture.PutDownInQueue(element); ok = true; break;      // native self-guards element!=Last
-                    }
-                }
-
+            bool ok = false;
+            if (op == OpQueue)
+            {
+                var item = manufacture.ManufacturableItems.FirstOrDefault(
+                    i => i.RelatedItemDef != null && i.RelatedItemDef.Guid == defGuid);
+                ok = item != null && manufacture.CanManufacture(item) == ItemManufacturing.ManufactureFailureReason.None;
                 if (ok)
                 {
-                    // The native call fires the observe events (→ HostPush → snapshot) already; the explicit
-                    // push is the belt (coalesced by _lastSentQueue). The host executed the native method
-                    // DIRECTLY (not via a UIModuleManufacturing button), so its own open screen is pull-model
-                    // stale — repaint it like the client-apply path does.
-                    RepaintManufacturingUi();
-                    PushQueueSnapshot(engine);
-                    Debug.Log("[Multiplayer][rail] ManufactureSync HOST intent APPLIED op=" + op + " def=" + defGuid +
-                              " idx=" + index + " peer=" + senderPeerId);
+                    manufacture.ManufactureItem(item);
+                    // [mfgdiag] boundary: resulting host storage count for this def (real-loss vs visual proof; remove after diag).
+                    // The storage LOOKUP sits inside the guard too — it is diag-only work, not just a log.
+                    if (MpDiag.On)
+                    {
+                        var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                        int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
+                            ? gi.CommonItemData.Count : -1;
+                        Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
+                    }
+                }
+                else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "cannot manufacture " + defGuid);
+            }
+            else if (op == OpScrap)
+            {
+                // index carries the scrap COUNT. GeoFaction.ScrapItem refunds+subtracts in place but does NOT
+                // remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems removes it) — so we do.
+                var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
+                var storage = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                if (def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
+                    gi.CommonItemData.Count >= index)
+                {
+                    GeoLevel().PhoenixFaction.ScrapItem(gi, index);
+                    if (gi.CommonItemData.IsEmpty()) storage.RemoveItem(gi);
+                    ok = true;
+                }
+                else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId,
+                                       "scrap missing/insufficient " + defGuid + " need=" + index);
+                if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
+            }
+            else if (op == OpScrapVehicle)
+            {
+                var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as GeoVehicleEquipmentDef;
+                var air = GeoLevel()?.PhoenixFaction?.AircraftItemStorage;
+                if (def != null && air != null && air.HasItem(def))
+                {
+                    var veh = air.PopItem(def);   // removes from storage
+                    if (veh != null) { GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
+                }
+                else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "scrapVehicle missing " + defGuid);
+                if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
+            }
+            else if (op == OpAugment)
+            {
+                // Augment install: index slot = charId. Bought with resources, not storage — EquipSync
+                // owns the cost/fit validation + the native replay (and its own scoped rejects).
+                ok = EquipSync.HandleAugmentIntent(senderPeerId, nonce, defGuid, index);
+            }
+            else if (op == OpQuickProduce)
+            {
+                // Host replay of the equip-screen buy, with the affordability check the native handler
+                // never does: Wallet.Take(ResourcePack) calls HasResources and DISCARDS the result
+                // (Wallet.cs:63-65), so without this gate a stale client could overdraw the wallet.
+                // The item lands in the shared faction storage — the one place whose contents already
+                // mirror to every peer (GeoItemDict on 0xAC); the buyer then equips it with a normal
+                // loadout gesture. We do NOT try to reproduce which UI slot the click targeted:
+                // that is view state, and guessing identity placement is exactly what law 3 forbids.
+                var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
+                var faction = GeoLevel()?.PhoenixFaction;
+                if (def != null && faction?.Wallet != null && faction.ItemStorage != null &&
+                    manufacture.ManufacturableItems.Any(i => i.RelatedItemDef == def) &&
+                    faction.Wallet.HasResources(def.ManufacturePrice))
+                {
+                    faction.Wallet.Take(def.ManufacturePrice, OperationReason.Purchase);
+                    faction.ItemStorage.AddItem(new GeoItem(def));
+                    ok = true;
+                }
+                else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId,
+                                       "quick-produce " + (def == null ? "unknown def" : "not manufacturable or unaffordable") +
+                                       " " + defGuid);
+                if (MpDiag.On) Debug.Log("[MP][quickproduce] HOST bought " + defGuid + " ok=" + ok);
+            }
+            else
+            {
+                var queue = manufacture.Queue;
+                // Address the un-keyable list by position, but guard against an index race: the def at that
+                // index must still be the one the client acted on (else its view was stale → reject; the
+                // next snapshot re-syncs it).
+                if (index < 0 || index >= queue.Count ||
+                    queue[index]?.ManufacturableItem?.RelatedItemDef?.Guid != defGuid)
+                {
+                    IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId,
+                                      "stale index " + index + " def=" + defGuid + " op=" + op);
+                    return;
+                }
+                var element = queue[index];
+                switch (op)
+                {
+                    case OpCancel: manufacture.Cancel(index); ok = true; break;
+                    case OpFront: manufacture.PutInFromOfQueue(element); ok = true; break;   // native self-guards element!=Current
+                    case OpUp: manufacture.PutUpInQueue(element); ok = true; break;          // native self-guards element!=Current
+                    case OpDown: manufacture.PutDownInQueue(element); ok = true; break;      // native self-guards element!=Last
                 }
             }
-            catch (Exception ex)
+
+            if (ok)
             {
-                // Native validation throws double as the reject path — silent + logged.
-                Debug.LogWarning("[Multiplayer][rail] ManufactureSync HOST intent REJECT (native throw): " + ex.Message);
+                // The native call fires the observe events (→ HostPush → snapshot) already; the explicit
+                // push is the belt (coalesced by _lastSentQueue). The host executed the native method
+                // DIRECTLY (not via a UIModuleManufacturing button), so its own open screen is pull-model
+                // stale — repaint it like the client-apply path does.
+                RepaintManufacturingUi();
+                PushQueueSnapshot(engine);
+                Debug.Log("[Multiplayer][rail] ManufactureSync HOST intent APPLIED op=" + op + " def=" + defGuid +
+                          " idx=" + index + " peer=" + senderPeerId);
             }
-            return true;
         }
 
         // ─── CLIENT: snapshot apply (inside SyncApplyScope, law 8) ─────────
@@ -553,20 +538,11 @@ namespace Multiplayer.Network.Sync
             return !ReferenceEquals(instance, PhoenixManufacture());      // NPC/foreign manufacture stays native (un-synced)
         }
 
+        /// <summary>The shared [defGuid][index] intent body on 0xAE (EquipSync's scrap/augment captures
+        /// reuse it too). Nonce + envelope + send ride <see cref="IntentRail.Send"/>.</summary>
         internal static void SendIntent(byte op, string defGuid, int index)
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null) return;
-            try
-            {
-                var inner = EncodeIntent(++_nextIntentNonce, op, defGuid, index);
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, inner);
-                engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[Multiplayer][rail] ManufactureSync CLIENT intent op=" + op + " def=" + defGuid +
-                          " idx=" + index + " nonce=" + _nextIntentNonce);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ManufactureSync: intent send failed: " + ex); }
-        }
+            => IntentRail.Send(SurfaceIds.GeoManufactureIntent, op, "op=" + op + " def=" + defGuid + " idx=" + index,
+                               w => { w.Write(defGuid ?? ""); w.Write(index); });
 
         private static bool CaptureAdd(ItemManufacturing instance, ManufacturableItem item)
         {
@@ -731,17 +707,5 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        private static byte[] EncodeIntent(uint nonce, byte op, string defGuid, int index)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(nonce);
-                w.Write(op);
-                w.Write(defGuid ?? "");
-                w.Write(index);
-                return ms.ToArray();
-            }
-        }
     }
 }

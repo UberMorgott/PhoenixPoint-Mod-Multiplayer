@@ -1,7 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
-using System.Text;
 using Base.Core;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
@@ -60,8 +60,6 @@ namespace Multiplayer.Network.Sync
         private const byte OpPause = 1;  // val = 0 resume / 1 pause      → SetGamePauseState
         private const byte OpSpeed = 2;  // val = preset index            → SelectTimePreset
 
-        private static readonly IntentDedup Intents = new IntentDedup();
-        private static uint _nextIntentNonce;
         private static float _nextEnforceAt;
 
         // The module's clock binding (private) — read only to tell the LEVEL clock from the
@@ -86,17 +84,26 @@ namespace Multiplayer.Network.Sync
             return FTiming != null;
         }
 
-        public static void Reset()
-        {
-            ResetForReloadBoundary();
-            Intents.Reset();
-        }
+        public static void Reset() => ResetForReloadBoundary();
 
         /// <summary>Stateless per intent (same rca-3 contract as <see cref="PersonnelSync"/>):
-        /// nothing geoscape-bound cached, nonce stream persists symmetrically.</summary>
+        /// nothing geoscape-bound cached; dedup/nonce live in <see cref="IntentRail"/>.</summary>
         public static void ResetForReloadBoundary() { }
 
-        public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
+        /// <summary>Arm the 0xB0 surface on the generic intent engine. No family reconverge and no
+        /// reject prefixes: the client BLOCKED its local clock write, so a dropped intent leaves both
+        /// clocks still equal, and residual drift from any writer is continuously corrected by
+        /// <see cref="TimeAnchor.EnforceDrift"/> (~1 Hz) — the standing corrector IS this family's
+        /// convergence mechanism.</summary>
+        internal static void RegisterIntents()
+        {
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpPause] = HandleIntentOp,
+                [OpSpeed] = HandleIntentOp,
+            };
+            IntentRail.Register(SurfaceIds.GeoTimeIntent, "time", ops);
+        }
 
         private static GeoLevelController GeoLevel()
         {
@@ -122,24 +129,7 @@ namespace Multiplayer.Network.Sync
         }
 
         private static void Send(byte op, byte value, string what)
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null) return;
-            try
-            {
-                using (var ms = new MemoryStream())
-                using (var w = new BinaryWriter(ms, Encoding.UTF8))
-                {
-                    w.Write(++_nextIntentNonce);
-                    w.Write(op);
-                    w.Write(value);
-                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoTimeIntent, SyncKind.ActionRequest, ms.ToArray());
-                    engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                }
-                Debug.Log("[MP][time] CLIENT intent " + what + " nonce=" + _nextIntentNonce);
-            }
-            catch (Exception ex) { Debug.LogError("[MP][time] intent send failed: " + ex); }
-        }
+            => IntentRail.Send(SurfaceIds.GeoTimeIntent, op, what, w => w.Write(value));
 
         // ─── Harmony seams (law 4a, intent-capture only) ───────────────────
 
@@ -209,54 +199,35 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        // ─── HOST: dedup → apply through the SAME native funnels ───────────
+        // ─── HOST: apply through the SAME native funnels (dedup/decode/reject = IntentRail) ───────────
 
-        /// <summary>Returns true when the surface was consumed (GeoTimeIntent).</summary>
-        public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            if (surfaceId != SurfaceIds.GeoTimeIntent) return false;
-            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
-            try
+            byte val = r.ReadByte();
+
+            var geo = GeoLevel();
+            if (geo == null)
+            { IntentRail.Reject(SurfaceIds.GeoTimeIntent, senderPeerId, "no geoscape op=" + op); return; }
+
+            if (op == OpPause)
             {
-                using (var ms = new MemoryStream(payload))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    uint nonce = r.ReadUInt32();
-                    byte op = r.ReadByte();
-                    byte val = r.ReadByte();
-                    if (!Intents.IsNew(senderPeerId, SurfaceIds.GeoTimeIntent, nonce)) return true; // double-send
-
-                    var geo = GeoLevel();
-                    if (geo == null)
-                    { Debug.LogWarning("[MP][time] HOST intent dropped — no geoscape (peer=" + senderPeerId + ")"); return true; }
-
-                    switch (op)
-                    {
-                        case OpPause:
-                            // Native funnel: keeps the TimeLimit guard; the Paused property setter it
-                            // reaches raises the events that latch TimeAnchor + FlushNow the delta out.
-                            if (geo.View != null) geo.View.SetGamePauseState(val != 0);
-                            else geo.Timing.Paused = val != 0; // view mid-init: same write, same events
-                            break;
-                        case OpSpeed:
-                            var module = geo.View == null || geo.View.GeoscapeModules == null
-                                ? null : geo.View.GeoscapeModules.TimeControlModule;
-                            if (module == null)
-                            { Debug.LogWarning("[MP][time] HOST speed intent dropped — no time module"); return true; }
-                            // Native funnel: clamps the index, writes Timing.Scale through the property
-                            // setter (events → anchor latch + flush) and keeps the host's label honest.
-                            module.SelectTimePreset(val);
-                            break;
-                        default:
-                            Debug.LogWarning("[MP][time] HOST intent unknown op " + op);
-                            return true;
-                    }
-                    Debug.Log("[MP][time] HOST intent APPLIED op=" + op + " val=" + val +
-                              " nonce=" + nonce + " peer=" + senderPeerId);
-                }
+                // Native funnel: keeps the TimeLimit guard; the Paused property setter it
+                // reaches raises the events that latch TimeAnchor + FlushNow the delta out.
+                if (geo.View != null) geo.View.SetGamePauseState(val != 0);
+                else geo.Timing.Paused = val != 0; // view mid-init: same write, same events
             }
-            catch (Exception ex) { Debug.LogError("[MP][time] HOST intent failed: " + ex); }
-            return true;
+            else // OpSpeed (the op set is table-gated upstream)
+            {
+                var module = geo.View == null || geo.View.GeoscapeModules == null
+                    ? null : geo.View.GeoscapeModules.TimeControlModule;
+                if (module == null)
+                { IntentRail.Reject(SurfaceIds.GeoTimeIntent, senderPeerId, "speed: no time module"); return; }
+                // Native funnel: clamps the index, writes Timing.Scale through the property
+                // setter (events → anchor latch + flush) and keeps the host's label honest.
+                module.SelectTimePreset(val);
+            }
+            Debug.Log("[MP][time] HOST intent APPLIED op=" + op + " val=" + val +
+                      " nonce=" + nonce + " peer=" + senderPeerId);
         }
 
         // ─── CLIENT: anchor enforcement cadence ────────────────────────────

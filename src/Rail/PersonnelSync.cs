@@ -1,8 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using Base.Core;
 using Base.Defs;
 using HarmonyLib;
@@ -62,9 +62,6 @@ namespace Multiplayer.Network.Sync
         private const byte OpBuyAbility = 2;  // BuyAbility                  → LearnAbility / AddAbility
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
 
-        private static readonly IntentDedup Intents = new IntentDedup();
-        private static uint _nextIntentNonce;
-
         // ─── Reflection: UIModuleCharacterProgression's staged view-model (all private) ──
         // The module stages the player's pending edit in _current*; _character is the soldier it is bound
         // to. We read them to build the intent and never write any of them.
@@ -104,18 +101,27 @@ namespace Multiplayer.Network.Sync
             return FCharacter != null && FBoughtSlot != null && FStartStrength != null;
         }
 
-        public static void Reset()
-        {
-            ResetForReloadBoundary();
-            Intents.Reset();
-        }
+        public static void Reset() => ResetForReloadBoundary();
 
         /// <summary>Mid-session reload boundary: nothing geoscape-bound is cached here (the seam is
-        /// stateless per intent), and the nonce stream persists symmetrically — same rca-3 contract as
+        /// stateless per intent; dedup/nonce live in <see cref="IntentRail"/>) — same rca-3 contract as
         /// <see cref="ResearchSync.ResetForReloadBoundary"/>.</summary>
         public static void ResetForReloadBoundary() { }
 
-        public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
+        /// <summary>Arm the 0xAF surface on the generic intent engine: transport + dedup + reject
+        /// discipline in <see cref="IntentRail"/>, ALL personnel validation/native replay stays below.
+        /// No family reconverge: rejects pass the touched character subtree ("U#&lt;charId&gt;") per
+        /// call site — every personnel outcome rides the value rail, so a scoped re-emit reaches it.</summary>
+        internal static void RegisterIntents()
+        {
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpSpendStats] = HandleIntentOp,
+                [OpBuyAbility] = HandleIntentOp,
+                [OpSecondSpec] = HandleIntentOp,
+            };
+            IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
+        }
 
         private static GeoLevelController GeoLevel()
         {
@@ -133,19 +139,6 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             return SyncApplyScope.Active; // law 8: applying a delta never echoes an intent
-        }
-
-        private static void Send(byte[] inner, string what)
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null) return;
-            try
-            {
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoPersonnelIntent, SyncKind.ActionRequest, inner);
-                engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][personnel] CLIENT intent " + what + " nonce=" + _nextIntentNonce);
-            }
-            catch (Exception ex) { Debug.LogError("[MP][personnel] intent send failed: " + ex); }
         }
 
         // ─── Harmony seams (law 4a, intent-capture only — this file owns no other patch) ──
@@ -189,17 +182,9 @@ namespace Multiplayer.Network.Sync
                     int dWill = (int)FCurWill.GetValue(__instance) - (int)FStartWill.GetValue(__instance);
                     int dSpeed = (int)FCurSpeed.GetValue(__instance) - (int)FStartSpeed.GetValue(__instance);
 
-                    using (var ms = new MemoryStream())
-                    using (var w = new BinaryWriter(ms, Encoding.UTF8))
-                    {
-                        w.Write(++_nextIntentNonce);
-                        w.Write(OpSpendStats);
-                        w.Write((int)character.Id);
-                        w.Write(dStr);
-                        w.Write(dWill);
-                        w.Write(dSpeed);
-                        Send(ms.ToArray(), "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed);
-                    }
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
+                        "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
+                        w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
                 }
                 catch (Exception ex) { Debug.LogError("[MP][personnel] stat capture failed: " + ex); }
                 return false;
@@ -236,18 +221,16 @@ namespace Multiplayer.Network.Sync
                         return false;
                     }
 
-                    using (var ms = new MemoryStream())
-                    using (var w = new BinaryWriter(ms, Encoding.UTF8))
-                    {
-                        w.Write(++_nextIntentNonce);
-                        w.Write(OpBuyAbility);
-                        w.Write((int)character.Id);
-                        w.Write((int)source);
-                        w.Write(slotLevel);
-                        w.Write(buttonLevel);
-                        w.Write(ability == null ? "" : ability.Guid);
-                        Send(ms.ToArray(), "ability U#" + (int)character.Id + " track=" + source + " lvl=" + slotLevel);
-                    }
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpBuyAbility,
+                        "ability U#" + (int)character.Id + " track=" + source + " lvl=" + slotLevel,
+                        w =>
+                        {
+                            w.Write((int)character.Id);
+                            w.Write((int)source);
+                            w.Write(slotLevel);
+                            w.Write(buttonLevel);
+                            w.Write(ability == null ? "" : ability.Guid);
+                        });
                     // Mirror the native tail (:418) so the confirm button releases and no stale slot can be
                     // re-bought. Public, view-only — it nulls _boughtAbilitySlot and refreshes the widgets.
                     __instance.ClearBoughtAbility();
@@ -272,86 +255,66 @@ namespace Multiplayer.Network.Sync
                     var character = FCharacter.GetValue(__instance) as GeoCharacter;
                     if (character == null || specialization == null) return false;
 
-                    using (var ms = new MemoryStream())
-                    using (var w = new BinaryWriter(ms, Encoding.UTF8))
-                    {
-                        w.Write(++_nextIntentNonce);
-                        w.Write(OpSecondSpec);
-                        w.Write((int)character.Id);
-                        w.Write(specialization.Guid);
-                        Send(ms.ToArray(), "secondSpec U#" + (int)character.Id + " spec=" + specialization.Guid);
-                    }
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSecondSpec,
+                        "secondSpec U#" + (int)character.Id + " spec=" + specialization.Guid,
+                        w => { w.Write((int)character.Id); w.Write(specialization.Guid); });
                 }
                 catch (Exception ex) { Debug.LogError("[MP][personnel] second-spec capture failed: " + ex); }
                 return false;
             }
         }
 
-        // ─── HOST: dedup → resolve → validate → execute the SAME native methods ──
+        // ─── HOST: resolve → validate → execute the SAME native methods (dedup/decode/reject = IntentRail) ──
 
-        /// <summary>Returns true when the surface was consumed (GeoPersonnelIntent).</summary>
-        public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            if (surfaceId != SurfaceIds.GeoPersonnelIntent) return false;
-            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
             int charId = -1;
             try
             {
-                using (var ms = new MemoryStream(payload))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                charId = r.ReadInt32();
+
+                var geo = GeoLevel();
+                if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
+                if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character) ||
+                    character.Progression == null)
+                { Reject(senderPeerId, charId, "unresolved character"); return; }
+                // Ownership: the rail resolves ANY character — never let a client intent drive an
+                // NPC-faction soldier's progression.
+                if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
+                { Reject(senderPeerId, charId, "not a Phoenix soldier"); return; }
+
+                bool ok;
+                switch (op)
                 {
-                    uint nonce = r.ReadUInt32();
-                    byte op = r.ReadByte();
-                    charId = r.ReadInt32();
-                    if (!Intents.IsNew(senderPeerId, SurfaceIds.GeoPersonnelIntent, nonce)) return true; // double-send
-
-                    var geo = GeoLevel();
-                    if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return true; }
-                    if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character) ||
-                        character.Progression == null)
-                    { Reject(senderPeerId, charId, "unresolved character"); return true; }
-                    // Ownership: the rail resolves ANY character — never let a client intent drive an
-                    // NPC-faction soldier's progression.
-                    if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
-                    { Reject(senderPeerId, charId, "not a Phoenix soldier"); return true; }
-
-                    bool ok;
-                    switch (op)
-                    {
-                        case OpSpendStats:
-                            ok = ApplyStats(senderPeerId, character, r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
-                            break;
-                        case OpBuyAbility:
-                            ok = ApplyBuyAbility(senderPeerId, character, (AbilityTrackSource)r.ReadInt32(),
-                                                 r.ReadInt32(), r.ReadInt32(), r.ReadString());
-                            break;
-                        case OpSecondSpec:
-                            ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
-                            break;
-                        default:
-                            ok = false;
-                            Reject(senderPeerId, charId, "unknown op " + op);
-                            break;
-                    }
-                    if (ok)
-                    {
-                        Debug.Log("[MP][personnel] HOST intent APPLIED op=" + op + " char=U#" + charId +
-                                  " nonce=" + nonce + " peer=" + senderPeerId);
-                        // Law 11 (host side): we ran the native model methods DIRECTLY, not through the
-                        // host's own progression module, so its open screen still shows pre-intent numbers.
-                        // Repaint through the EXISTING universal seam — no personnel-specific repaint path.
-                        // Dirty-mark only: the flush owns drag/typing defer + per-frame coalescing.
-                        // (Clients get theirs from the 0xAC batch via UiEventMap.)
-                        OpenUiRepaint.MarkDirty();
-                    }
+                    case OpSpendStats:
+                        ok = ApplyStats(senderPeerId, character, r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
+                        break;
+                    case OpBuyAbility:
+                        ok = ApplyBuyAbility(senderPeerId, character, (AbilityTrackSource)r.ReadInt32(),
+                                             r.ReadInt32(), r.ReadInt32(), r.ReadString());
+                        break;
+                    default: // OpSecondSpec (the op set is table-gated upstream)
+                        ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
+                        break;
+                }
+                if (ok)
+                {
+                    Debug.Log("[MP][personnel] HOST intent APPLIED op=" + op + " char=U#" + charId +
+                              " nonce=" + nonce + " peer=" + senderPeerId);
+                    // Law 11 (host side): we ran the native model methods DIRECTLY, not through the
+                    // host's own progression module, so its open screen still shows pre-intent numbers.
+                    // Repaint through the EXISTING universal seam — no personnel-specific repaint path.
+                    // Dirty-mark only: the flush owns drag/typing defer + per-frame coalescing.
+                    // (Clients get theirs from the 0xAC batch via UiEventMap.)
+                    OpenUiRepaint.MarkDirty();
                 }
             }
             catch (Exception ex)
             {
-                // Native validation throws (AddSecondaryClass) double as the reject path — silent + logged.
-                Debug.LogWarning("[MP][personnel] HOST intent REJECT (throw) char=U#" + charId + ": " + ex.Message);
+                // Native validation throws (AddSecondaryClass) double as the reject path — caught HERE,
+                // not in IntentRail's dispatch, so the reject still carries the character subtree.
+                Reject(senderPeerId, charId, "(throw) " + ex.Message);
             }
-            return true;
         }
 
         /// <summary>Replay of <c>CommitStatChanges</c>:369-375 at model level. The wire carries the same
@@ -493,7 +456,12 @@ namespace Multiplayer.Network.Sync
         private static BaseDef ResolveDef(string guid) =>
             string.IsNullOrEmpty(guid) ? null : GameUtl.GameComponent<DefRepository>()?.GetDef(guid);
 
+        /// <summary>Reject with the touched character subtree: the gesturing client blocked its local
+        /// write (nothing to un-do model-side), but its progression screen still shows the STAGED edit —
+        /// re-emitting "U#&lt;charId&gt;" pushes current host values, and the client's ordinary apply +
+        /// UiEventMap repaint re-seed that screen (law-7 convergence; never log-only).</summary>
         private static void Reject(ulong peer, int charId, string why) =>
-            Debug.LogWarning("[MP][personnel] HOST intent REJECT char=U#" + charId + " peer=" + peer + " — " + why);
+            IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "char=U#" + charId + " — " + why,
+                              charId >= 0 ? "U#" + charId : null);
     }
 }

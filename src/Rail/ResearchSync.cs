@@ -41,10 +41,10 @@ namespace Multiplayer.Network.Sync
     /// CLIENT → HOST (surface GeoResearchIntent 0xAB): the research screen's entry points
     /// (Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/
     /// InsertAtPosition — UIModuleResearch.cs:414-480 all route here) are intent-capture Harmony
-    /// prefixes (law 4a): on the client they BLOCK the native call and send an intent; on the host
-    /// (and inside SyncApplyScope) the native code runs untouched. Host: IntentDedup → validate →
-    /// execute the SAME native method → the observe seams above broadcast the outcome. Invalid
-    /// intents are rejected silently (logged).
+    /// prefixes (law 4a): on the client they BLOCK the native call and send an intent via
+    /// <see cref="IntentRail"/> (which owns nonce/dedup/dispatch/reject discipline); the host op
+    /// handlers here validate → execute the SAME native method → the observe seams above broadcast
+    /// the outcome. Invalid intents reject through IntentRail (log + forced queue resend).
     ///
     /// SIM GATING (law 4b): Research.Update is skipped on the client (its clock is not frozen — the
     /// local hourly tick would double-apply progress and locally complete research). Host deltas are
@@ -70,8 +70,6 @@ namespace Multiplayer.Network.Sync
         private const int MaxStartBlob = ushort.MaxValue - 512;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
-        private static readonly IntentDedup Intents = new IntentDedup();
-        private static uint _nextIntentNonce;
 
         // ─── Host observe state ────────────────────────────────────────────
         private static Research _hooked;                 // faction Research we subscribed to (unhook on level change)
@@ -105,12 +103,31 @@ namespace Multiplayer.Network.Sync
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
-        /// <summary>Full session teardown: everything resets, including the seq streams.</summary>
+        /// <summary>Full session teardown: everything resets, including the seq streams.
+        /// (The intent dedup/nonce moved to <see cref="IntentRail"/>, reset there.)</summary>
         public static void Reset()
         {
             ResetForReloadBoundary();
             Seq.Reset();
-            Intents.Reset();
+        }
+
+        /// <summary>Arm the intent surface (0xAB) on the generic engine: transport + dedup + reject
+        /// discipline live in <see cref="IntentRail"/>; the ops table below keeps ALL research
+        /// validation/native execution here. Reconverge on reject = forced queue-order resend — the
+        /// queue rides the 0xAD-style order channel (0xAA MsgQueue), not the value rail, so a scoped
+        /// ForceReemit cannot reach it; resending the snapshot re-syncs the gesturing client's stale
+        /// queue view (content-identical for everyone else → in-place rebuild + repaint, harmless).</summary>
+        internal static void RegisterIntents()
+        {
+            var ops = new Dictionary<byte, IntentRail.OpHandler>();
+            for (byte op = OpStart; op <= OpInsertAt; op++) ops[op] = HandleIntentOp;
+            IntentRail.Register(SurfaceIds.GeoResearchIntent, "research", ops, ForceQueueResend);
+        }
+
+        private static void ForceQueueResend()
+        {
+            _lastSentQueue = null;
+            PushQueueSnapshot(NetworkEngine.Instance); // self-guards non-host / no session / no geoscape
         }
 
         /// <summary>
@@ -124,9 +141,6 @@ namespace Multiplayer.Network.Sync
             Unhook();
             _lastSentQueue = null;
         }
-
-        /// <summary>Rejoin (rca-3 audit b): the returning peer's fresh engine restarts its nonce at 1.</summary>
-        public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
 
         private static void Unhook()
         {
@@ -264,24 +278,18 @@ namespace Multiplayer.Network.Sync
             if (research?.Faction == null || element == null) return false; // law 3: client never runs native logic — block, nothing to send
             if (!research.Faction.IsViewerFaction) return true;  // NPC sim paths stay native (and un-synced)
 
-            try
-            {
-                var inner = EncodeIntent(++_nextIntentNonce, op, research.Faction.Def.Guid, element.ResearchID, pos);
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoResearchIntent, SyncKind.ActionRequest, inner);
-                engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT intent op=" + op + " research=" +
-                          element.ResearchID + " nonce=" + _nextIntentNonce);
-            }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ResearchSync: intent send failed: " + ex); }
+            string factionGuid = research.Faction.Def.Guid, researchId = element.ResearchID;
+            IntentRail.Send(SurfaceIds.GeoResearchIntent, op, "op=" + op + " research=" + researchId,
+                w => { w.Write(factionGuid ?? ""); w.Write(researchId ?? ""); w.Write(pos); });
             return false; // client is a projector: local execution blocked, outcome arrives as host deltas
         }
 
         // ─── Inbound (armed as SurfaceRouter.GeoscapeInbound) ──────────────
 
-        /// <summary>Returns true when the surface was consumed (GeoResearch / GeoResearchIntent).</summary>
+        /// <summary>Returns true when the surface was consumed (GeoResearch; the 0xAB intent surface
+        /// rides <see cref="IntentRail.HandleInbound"/>).</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
-            if (surfaceId == SurfaceIds.GeoResearchIntent) return HandleIntent(engine, senderPeerId, payload);
             if (surfaceId != SurfaceIds.GeoResearch) return false;
             if (engine == null || engine.IsHost) return true; // host never applies its own surface
             try
@@ -319,101 +327,80 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        // ─── HOST: intent apply (dedup → validate → execute NATIVELY) ──────
+        // ─── HOST: intent apply (validate → execute NATIVELY; dedup/decode/reject = IntentRail) ──────
 
-        private static bool HandleIntent(NetworkEngine engine, ulong senderPeerId, byte[] payload)
+        private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
-            try
-            {
-                uint nonce; byte op; string factionGuid, researchId; int pos;
-                using (var ms = new MemoryStream(payload))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    nonce = r.ReadUInt32();
-                    op = r.ReadByte();
-                    factionGuid = r.ReadString();
-                    researchId = r.ReadString();
-                    pos = r.ReadInt32();
-                }
-                if (!Intents.IsNew(senderPeerId, SurfaceIds.GeoResearchIntent, nonce)) return true; // double-send
+            string factionGuid = r.ReadString();
+            string researchId = r.ReadString();
+            int pos = r.ReadInt32();
 
-                var live = LocateLive(factionGuid, researchId, out var research);
-                if (live == null || research == null)
-                {
-                    Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (unknown research " +
-                                     researchId + ") op=" + op + " peer=" + senderPeerId);
-                    return true;
-                }
-                // Ownership check: LocateLive resolves ANY factionGuid — never let a client intent drive
-                // NPC-faction (Anu/NJ/Synedrion/alien) research.
-                if (!research.Faction.IsViewerFaction)
-                {
-                    Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (non-player faction " +
-                                     factionGuid + ") op=" + op + " peer=" + senderPeerId);
-                    return true;
-                }
-
-                // Validate, then execute the SAME native code the host UI would run — the observe seams
-                // (OnResearchStarted / OnResearchCompleted / the queue poll) broadcast the outcome.
-                bool ok;
-                switch (op)
-                {
-                    case OpStart:
-                        ok = live.State == ResearchState.Unlocked && research.CanAddToQueue(live);
-                        if (ok) research.AddResearchToQueue(live);
-                        break;
-                    case OpCancel:
-                        ok = research.ResearchQueue.Contains(live);
-                        if (ok) research.Cancel(live);
-                        break;
-                    case OpFront:
-                        ok = research.ResearchQueue.Contains(live);
-                        if (ok) research.PutInFromOfQueue(live);
-                        break;
-                    case OpUp:
-                        // Native guard is only element != Current (Research.cs:424-433): an up-click at
-                        // index 1 legally displaces the current head. IndexOf > 0 matches it (-1 = absent).
-                        ok = research.ResearchQueue.IndexOf(live) > 0;
-                        if (ok) research.PutUpInQueue(live);
-                        break;
-                    case OpDown:
-                        ok = research.ResearchQueue.Contains(live) && live != research.Last;
-                        if (ok) research.PutDownInQueue(live);
-                        break;
-                    case OpInsertAt:
-                        ok = research.ResearchQueue.Contains(live) && pos > 0; // never displace the current
-                        if (ok) research.InsertAtPosition(live, pos);
-                        break;
-                    default:
-                        ok = false;
-                        break;
-                }
-                if (ok)
-                {
-                    // Law 11 (host side): the host's own UIModuleResearch is PULL-MODEL. We executed the
-                    // native method DIRECTLY here — not through a UIModuleResearch button handler — so none
-                    // of the native SetupQueue()/ShowAvailable() rebuilds ran, and the host's open research
-                    // screen stays stale (this is why a client's research action shows on every OTHER peer —
-                    // they mirror it through their own client-apply repaint — but NOT on the host itself).
-                    // Repaint the host's screen exactly like the client-apply paths do.
-                    RepaintResearchUi();
-                    // Immediate push (localhost lag fix): the queue changed by this intent reaches every
-                    // OTHER peer NOW instead of at the next <=2 Hz poll tick. Guarded/coalesced by _lastSentQueue.
-                    PushQueueSnapshot(engine);
-                    Debug.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
-                              researchId + " peer=" + senderPeerId);
-                }
-                else
-                    Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (invalid state) op=" +
-                                     op + " research=" + researchId + " peer=" + senderPeerId);
-            }
-            catch (Exception ex)
+            var live = LocateLive(factionGuid, researchId, out var research);
+            if (live == null || research == null)
             {
-                // Native validation throws (AddResearchToQueue) double as the reject path — silent + logged.
-                Debug.LogWarning("[Multiplayer][rail] ResearchSync HOST intent REJECT (native throw): " + ex.Message);
+                IntentRail.Reject(SurfaceIds.GeoResearchIntent, senderPeerId,
+                    "unknown research " + researchId + " op=" + op);
+                return;
             }
-            return true;
+            // Ownership check: LocateLive resolves ANY factionGuid — never let a client intent drive
+            // NPC-faction (Anu/NJ/Synedrion/alien) research.
+            if (!research.Faction.IsViewerFaction)
+            {
+                IntentRail.Reject(SurfaceIds.GeoResearchIntent, senderPeerId,
+                    "non-player faction " + factionGuid + " op=" + op);
+                return;
+            }
+
+            // Validate, then execute the SAME native code the host UI would run — the observe seams
+            // (OnResearchStarted / OnResearchCompleted / the queue poll) broadcast the outcome.
+            bool ok;
+            switch (op)
+            {
+                case OpStart:
+                    ok = live.State == ResearchState.Unlocked && research.CanAddToQueue(live);
+                    if (ok) research.AddResearchToQueue(live);
+                    break;
+                case OpCancel:
+                    ok = research.ResearchQueue.Contains(live);
+                    if (ok) research.Cancel(live);
+                    break;
+                case OpFront:
+                    ok = research.ResearchQueue.Contains(live);
+                    if (ok) research.PutInFromOfQueue(live);
+                    break;
+                case OpUp:
+                    // Native guard is only element != Current (Research.cs:424-433): an up-click at
+                    // index 1 legally displaces the current head. IndexOf > 0 matches it (-1 = absent).
+                    ok = research.ResearchQueue.IndexOf(live) > 0;
+                    if (ok) research.PutUpInQueue(live);
+                    break;
+                case OpDown:
+                    ok = research.ResearchQueue.Contains(live) && live != research.Last;
+                    if (ok) research.PutDownInQueue(live);
+                    break;
+                default: // OpInsertAt (the op set is table-gated upstream)
+                    ok = research.ResearchQueue.Contains(live) && pos > 0; // never displace the current
+                    if (ok) research.InsertAtPosition(live, pos);
+                    break;
+            }
+            if (ok)
+            {
+                // Law 11 (host side): the host's own UIModuleResearch is PULL-MODEL. We executed the
+                // native method DIRECTLY here — not through a UIModuleResearch button handler — so none
+                // of the native SetupQueue()/ShowAvailable() rebuilds ran, and the host's open research
+                // screen stays stale (this is why a client's research action shows on every OTHER peer —
+                // they mirror it through their own client-apply repaint — but NOT on the host itself).
+                // Repaint the host's screen exactly like the client-apply paths do.
+                RepaintResearchUi();
+                // Immediate push (localhost lag fix): the queue changed by this intent reaches every
+                // OTHER peer NOW instead of at the next <=2 Hz poll tick. Guarded/coalesced by _lastSentQueue.
+                PushQueueSnapshot(engine);
+                Debug.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
+                          researchId + " peer=" + senderPeerId);
+            }
+            else
+                IntentRail.Reject(SurfaceIds.GeoResearchIntent, senderPeerId,
+                    "invalid state op=" + op + " research=" + researchId);
         }
 
         // ─── CLIENT: delta appliers (all inside SyncApplyScope, law 8) ─────
@@ -646,20 +633,6 @@ namespace Multiplayer.Network.Sync
                 w.Write(seq);
                 w.Write(factionGuid ?? "");
                 w.Write(researchId ?? "");
-                return ms.ToArray();
-            }
-        }
-
-        private static byte[] EncodeIntent(uint nonce, byte op, string factionGuid, string researchId, int pos)
-        {
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(nonce);
-                w.Write(op);
-                w.Write(factionGuid ?? "");
-                w.Write(researchId ?? "");
-                w.Write(pos);
                 return ms.ToArray();
             }
         }

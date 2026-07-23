@@ -15,14 +15,21 @@ namespace Multiplayer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
+            // Every client-intent surface (0xAB research / 0xAE manufacture+equip / 0xAF personnel /
+            // 0xB0 time) rides the ONE generic intent engine — families register their op tables, the
+            // engine owns nonce/dedup/dispatch/reject (idempotent re-registration).
+            ResearchSync.RegisterIntents();
+            ManufactureSync.RegisterIntents();
+            PersonnelSync.RegisterIntents();
+            TimeSync.RegisterIntents();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
-            // ResearchSync (0xAA/0xAB structural-ish research messages + intents) and the generic value
-            // rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side dedups.
+            // host→all order channels (0xAA research / 0xAD manufacture), the intent engine, and the
+            // generic value rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the
+            // host-side intent dedup.
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || PersonnelSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || TimeSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
 
@@ -46,6 +53,7 @@ namespace Multiplayer.Network.Sync
 
         public void DetachAllChannels()
         {
+            IntentRail.Reset();
             ResearchSync.Reset();
             ManufactureSync.Reset();
             EquipSync.Reset();
@@ -70,13 +78,7 @@ namespace Multiplayer.Network.Sync
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
-        public void ResetIntentDedupForPeer(ulong peerId)
-        {
-            ResearchSync.ResetIntentDedupForPeer(peerId);
-            ManufactureSync.ResetIntentDedupForPeer(peerId);
-            PersonnelSync.ResetIntentDedupForPeer(peerId);
-            TimeSync.ResetIntentDedupForPeer(peerId);
-        }
+        public void ResetIntentDedupForPeer(ulong peerId) => IntentRail.ResetIntentDedupForPeer(peerId);
         // Deliberate no-ops: the legacy push-reseed seam. SessionManager (JoinReady) and
         // SaveTransferCoordinator still drive it on the join paths, but on the rail a joiner is
         // seeded by the save transfer + resync-on-gap (law 7) — nothing to broadcast here.

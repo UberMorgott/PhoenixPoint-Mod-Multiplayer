@@ -33,7 +33,7 @@ namespace Multiplayer.Network.Sync
     /// scrap-off-doll) and the next native SetItems flush turns one mark into exactly ONE intent. The mark is
     /// a bool; nothing is ever encoded per frame.
     ///
-    /// HOST: dedup (shared ManufactureSync.Intents) → resolve the character by the rail's stable key
+    /// HOST: dedup (IntentRail, shared 0xAE surface) → resolve the character by the rail's stable key
     /// (IdentityResolver "U#&lt;charId&gt;") → match every wire slot against the character's OWN live GeoItems
     /// → PopItem from storage only for genuine GAINS, AddItem back whatever the client dropped → native
     /// GeoCharacter.SetItems. The result reaches every peer through the normal rail (GeoCharacter EntityList
@@ -160,7 +160,7 @@ namespace Multiplayer.Network.Sync
                 if (engine == null || !engine.IsActiveSession) return;
                 SelfCheckGestureCommit();
                 if (engine.IsHost) return; // the flush IS the authoritative write; it rides the 0xAC diff
-                try { SendLoadoutIntent(engine, __instance, freeReload); }
+                try { SendLoadoutIntent(__instance, freeReload); }
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT gesture send failed: " + ex.Message); }
             }
         }
@@ -312,33 +312,16 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>ONE intent per gesture: [nonce][OpSetItems][charId][body] on the shared 0xAE surface —
-        /// decoded host-side by <see cref="HandleIntent"/>.</summary>
-        private static void SendLoadoutIntent(NetworkEngine engine, GeoCharacter character, bool freeReload)
+        /// decoded host-side by <see cref="HandleIntent"/>. Nonce/envelope/send ride <see cref="IntentRail"/>
+        /// (its shared allocator replaced the old borrowed ManufactureSync.NextNonce counter).</summary>
+        private static void SendLoadoutIntent(GeoCharacter character, bool freeReload)
         {
             int charId = (int)character.Id;
             var body = EncodeBody(freeReload, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
-            uint nonce = ManufactureSync.NextNonce();
-            byte[] inner;
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(nonce);
-                w.Write(ManufactureSync.OpSetItems);
-                w.Write(charId);
-                w.Write(body);
-                inner = ms.ToArray();
-            }
-            try
-            {
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, inner);
-                engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][equip] CLIENT gesture intent sent char=U#" + charId + " gesture=" + _gestureSource +
-                          " nonce=" + nonce + " bytes=" + inner.Length + " freeReload=" + freeReload);
-            }
-            catch (ArgumentOutOfRangeException ex)
-            {
-                Debug.LogError("[MP][equip] intent exceeds envelope u16 — " + ex.Message);
-            }
+            IntentRail.Send(SurfaceIds.GeoManufactureIntent, ManufactureSync.OpSetItems,
+                "loadout char=U#" + charId + " gesture=" + _gestureSource + " bytes=" + body.Length +
+                " freeReload=" + freeReload,
+                w => { w.Write(charId); w.Write(body); });
         }
 
         /// <summary>Equip/edit-screen scrap chokepoint: <c>UIStateEditSoldier.ItemScrappedHandler</c> (:622)
@@ -405,31 +388,18 @@ namespace Multiplayer.Network.Sync
         /// charges) triple is the same slot ADDRESS OpSetItems uses: count/charges only disambiguate
         /// same-def siblings, the host answers with its OWN live instance.</summary>
         private static void SendScrapEquippedIntent(int charId, byte listIdx, GeoItem item, int amount)
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null) return;
-            uint nonce = ManufactureSync.NextNonce();
-            using (var ms = new MemoryStream())
-            using (var w = new BinaryWriter(ms, Encoding.UTF8))
-            {
-                w.Write(nonce);
-                w.Write(ManufactureSync.OpScrapEquipped);
-                w.Write(charId);
-                w.Write(listIdx);
-                w.Write(item.ItemDef.Guid);
-                w.Write(item.CommonItemData.Count);
-                w.Write(item.CommonItemData.CurrentCharges);
-                w.Write(amount);
-                try
+            => IntentRail.Send(SurfaceIds.GeoManufactureIntent, ManufactureSync.OpScrapEquipped,
+                "equipped-scrap char=U#" + charId + " list=" + listIdx + " def=" + item.ItemDef.Guid +
+                " amount=" + amount,
+                w =>
                 {
-                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoManufactureIntent, SyncKind.ActionRequest, ms.ToArray());
-                    engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                    Debug.Log("[MP][scrap] CLIENT equipped-scrap intent char=U#" + charId + " list=" + listIdx +
-                              " def=" + item.ItemDef.Guid + " amount=" + amount + " nonce=" + nonce);
-                }
-                catch (ArgumentOutOfRangeException ex) { Debug.LogError("[MP][scrap] intent exceeds envelope u16 — " + ex.Message); }
-            }
-        }
+                    w.Write(charId);
+                    w.Write(listIdx);
+                    w.Write(item.ItemDef.Guid);
+                    w.Write(item.CommonItemData.Count);
+                    w.Write(item.CommonItemData.CurrentCharges);
+                    w.Write(amount);
+                });
 
         /// <summary>Augment-install commit seam: <c>UIModuleMutate.OnAugmentApplied</c> /
         /// <c>UIModuleBionics.OnAugmentApplied</c> is the CONFIRM gesture — native writes the soldier's
@@ -535,7 +505,7 @@ namespace Multiplayer.Network.Sync
             return lists;
         }
 
-        // ─── HOST: intent apply (dedup already done by ManufactureSync.HandleIntent) ─
+        // ─── HOST: intent apply (dedup already done by IntentRail's dispatch) ─
 
         internal static void HandleIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, BinaryReader r)
         {
@@ -625,8 +595,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[MP][equip] HOST intent REJECT (throw) char=U#" + charId + ": " + ex);
-                ForceResyncAfterReject(charId);
+                Reject(senderPeerId, charId, "(throw) " + ex);
             }
         }
 
@@ -684,8 +653,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[MP][scrap] HOST equipped-scrap REJECT (throw) char=U#" + charId + ": " + ex);
-                ForceResyncAfterReject(charId);
+                Reject(senderPeerId, charId, "scrap (throw) " + ex);
             }
         }
 
@@ -819,24 +787,20 @@ namespace Multiplayer.Network.Sync
                            "removals will silently never reach any peer.");
         }
 
+        /// <summary>Law-7 convergence for a REFUSED equip intent — the origin of the IntentRail reject
+        /// pattern. Unlike the block-first intent seams, equip gestures mutate the CLIENT's local mirror
+        /// natively before the host answers (SetItems + UpdateStorage are real model writes — the seam
+        /// ships the RESULT; the augment preview writes the armour set too). On reject the host state did
+        /// not change, so the diff rail emits nothing and that client would stay diverged forever.
+        /// <see cref="IntentRail.Reject"/> re-emits current host values for everything the gesture could
+        /// have touched — the character subtree + the faction storage subtree — and the client's ordinary
+        /// Apply converges it (no new wire concept).</summary>
         private static void Reject(ulong peer, int charId, string why)
         {
-            Debug.LogWarning("[MP][equip] HOST intent REJECT char=U#" + charId + " peer=" + peer + " — " + why);
-            ForceResyncAfterReject(charId);
-        }
-
-        /// <summary>Law-7 convergence for a REFUSED equip intent. Unlike every other intent seam, equip
-        /// gestures mutate the CLIENT's local mirror natively before the host answers (SetItems +
-        /// UpdateStorage are real model writes — the seam ships the RESULT; the augment preview writes the
-        /// armour set too). On reject the host state did not change, so the diff rail emits nothing and
-        /// that client would stay diverged forever. Force the next tick to re-emit current host values for
-        /// everything the gesture could have touched — the character subtree + the faction storage
-        /// subtree — and the client's ordinary Apply converges it (no new wire concept).</summary>
-        private static void ForceResyncAfterReject(int charId)
-        {
-            if (charId >= 0) DiffEngine.ForceReemit("U#" + charId);
             var phoenix = GeoLevel()?.PhoenixFaction;
-            if (phoenix?.Def != null) DiffEngine.ForceReemit("F#" + phoenix.Def.Guid + ".ItemStorage");
+            IntentRail.Reject(SurfaceIds.GeoManufactureIntent, peer, "equip char=U#" + charId + " — " + why,
+                charId >= 0 ? "U#" + charId : null,
+                phoenix?.Def != null ? "F#" + phoenix.Def.Guid + ".ItemStorage" : null);
         }
 
         /// <summary>The storage the equip screens trade against (UIStateEditSoldier.StorageItems()).

@@ -15,14 +15,17 @@ namespace Multiplayer.Network.Sync
     /// </remarks>
     public static class SurfaceIds
     {
-        // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) — RESERVED, not wired ───
-        // Claimed for the future generic intent framework (client intent → host outcome → originator
-        // reject). No handler exists yet; the codecs were deleted with the never-wired action router
-        // (SyncProtocol, 2026-07-22 — wire format was [actionId:u16][nonce:u32]/[seq:u64][len:u16][payload]).
-        // Guard when wired: outcome (0xA3) rides SurfaceSeq; intent (0xA2) rides the peer-aware IntentDedup.
-        public const byte GeoIntent = 0xA2;   // client→host action REQUEST
-        public const byte GeoOutcome = 0xA3;  // host→all authoritative APPLY
-        public const byte GeoReject = 0xA4;   // host→originator REJECT (nonce-correlated, idempotent)
+        // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) — RETIRED tombstones ───
+        // Were reserved for a single-surface generic intent framework (client intent → host outcome →
+        // originator reject). The real framework landed 2026-07-23 as the IntentRail ENGINE instead:
+        // families keep their own surface ids below (the surface byte IS the family discriminator —
+        // SurfaceRouter already routes on it) and register op tables into IntentRail, which owns
+        // nonce/dedup/dispatch. GeoOutcome/GeoReject never materialized on the wire: outcomes ride the
+        // normal rail diff (0xAC) / order channels (0xAA/0xAD), rejects ride scoped DiffEngine
+        // re-emits (IntentRail.Reject). Do not reuse these three ids.
+        public const byte GeoIntent = 0xA2;   // retired: never emitted
+        public const byte GeoOutcome = 0xA3;  // retired: never emitted
+        public const byte GeoReject = 0xA4;   // retired: never emitted
         public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
         public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
         public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)

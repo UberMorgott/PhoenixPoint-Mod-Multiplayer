@@ -190,6 +190,24 @@ retires the opt-out table and the recovery path together.
 (law 4a seams), the UiEventMap table (presentation knowledge), ResearchSync start-blob/complete/queue
 messages, sim gates (law 4b).
 
+## Generic client-intent engine (src/Rail/IntentRail.cs, 2026-07-23)
+
+- ONE engine for every client→host intent surface (0xAB research / 0xAE manufacture+equip /
+  0xAF personnel / 0xB0 time). Families register op tables (`RegisterIntents()` in the SyncEngine
+  ctor: op → handler + optional reject-reconverge action); domain validators/appliers stay in the
+  family files. The surface byte IS the family discriminator — no single shared surface; 0xA2-0xA4
+  (GeoIntent/GeoOutcome/GeoReject) stay retired tombstones.
+- Engine owns: envelope `[nonce:u32][op:u8][family body]` (`IntentRail.Send`, one client emit), ONE
+  shared nonce allocator (dedup key is (peer, surface, nonce) — no cross-surface collision, no
+  two-senders-one-surface counter drift), ONE host-side IntentDedup (idempotence, law 7: a reliable
+  double-send must not double-apply a non-idempotent native op like a stat spend), the host dispatch
+  (host gate → decode → dedup → table; unknown op / handler throw → uniform reject).
+- Reject discipline (law 7 convergence, generalized from EquipSync): `IntentRail.Reject` = log +
+  scoped `DiffEngine.ForceReemit` of caller-passed path prefixes + the family's registered
+  reconverge (research/manufacture: forced queue-order resend — their queues ride order channels,
+  out of ForceReemit's reach). Never log-only. Time registers neither: the client blocked its local
+  write and `TimeAnchor.EnforceDrift` is the standing corrector.
+
 ## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16)
 
 - **Host→all (GeoResearch 0xAA, observe = native event subs + ≤2 Hz poll, zero Harmony):** start
@@ -205,8 +223,9 @@ messages, sim gates (law 4b).
 - **Client→host intents (GeoResearchIntent 0xAB):** intent-capture prefixes on
   `Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/InsertAtPosition`
   (all UIModuleResearch entry points route there). Client: native call BLOCKED, intent sent. Host:
-  IntentDedup → validate → run the SAME native method; observe seams broadcast the outcome; invalid
-  intent = silent reject (logged). Echo loop closed by `SyncApplyScope` (src/Rail/SyncApplyScope.cs):
+  validate → run the SAME native method; observe seams broadcast the outcome. Transport/nonce/dedup/
+  dispatch/reject discipline ride the generic intent engine since 2026-07-23 (see IntentRail above).
+  Echo loop closed by `SyncApplyScope` (src/Rail/SyncApplyScope.cs):
   every client apply wraps itself in it; the capture seam passes native through inside it.
 - **Sim gating (law 4b):** `Research.Update` prefix-skipped on the client (clock not frozen — the
   local hourly tick would double-progress and locally complete research).

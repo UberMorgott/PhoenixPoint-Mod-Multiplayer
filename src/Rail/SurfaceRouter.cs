@@ -6,10 +6,10 @@ namespace Multiplayer.Network.Sync
     /// The ONE inbound chokepoint for the unified 0x67 <see cref="SyncProtocol"/> envelope. Decodes the
     /// envelope and dispatches to the LIVE tactical replication fast-path (<see cref="TacticalInbound"/>),
     /// then the geoscape hook (<see cref="GeoscapeInbound"/>, armed by <c>SyncEngine</c>: ResearchSync /
-    /// ManufactureSync / PersonnelSync / GenericApplier); any envelope neither hook consumes is dropped
+    /// ManufactureSync / IntentRail / GenericApplier); any envelope neither hook consumes is dropped
     /// (forward-compat). PURE: references no transport / Unity / HarmonyLib type, so it is unit-tested in
-    /// isolation like every other sync primitive. The generic action-relay surfaces GeoIntent/GeoOutcome/
-    /// GeoReject (0xA2-0xA4) are reserved but not wired — no handler exists yet.
+    /// isolation like every other sync primitive. The action-relay surfaces GeoIntent/GeoOutcome/GeoReject
+    /// (0xA2-0xA4) are retired tombstones — client intents ride each family's own surface via IntentRail.
     /// Both peers run the same DLL, so there is exactly ONE rail — no double-apply.
     /// </summary>
     public sealed class SurfaceRouter
