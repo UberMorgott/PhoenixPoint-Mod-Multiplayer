@@ -121,6 +121,15 @@ namespace Multiplayer.Network.Sync
         private static readonly AccessTools.FieldRef<UIModuleManufacturing, VehicleEquipmentStorage> VehicleScrapItemsField =
             AccessTools.FieldRefAccess<UIModuleManufacturing, VehicleEquipmentStorage>("_vehicleEquipmentScrapItems");
 
+        // Scrap-mode AVAILABLE-list feeds: SNAPSHOT copies of faction storage taken once on mode entry
+        // (UIModuleManufacturing.Init:363-371) — see ResyncScrapSnapshot.
+        private static readonly AccessTools.FieldRef<UIModuleManufacturing, ItemStorage> ScrapStorageField =
+            AccessTools.FieldRefAccess<UIModuleManufacturing, ItemStorage>("_scrapStorage");
+        private static readonly AccessTools.FieldRef<UIModuleManufacturing, VehicleEquipmentStorage> VehicleScrapStorageField =
+            AccessTools.FieldRefAccess<UIModuleManufacturing, VehicleEquipmentStorage>("_vehicleEquipmentScrapStorage");
+        private static readonly MethodInfo StripPartialMagsMethod =
+            AccessTools.Method(typeof(UIModuleManufacturing), "StripPartialMagsFromScrapStorage");
+
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
         public static void Reset()
@@ -484,10 +493,52 @@ namespace Multiplayer.Network.Sync
                 if (view == null || !(view.CurrentViewState is UIStateManufacturing)) return;
                 var module = view.GeoscapeModules?.ManufacturingModule;
                 if (module == null) return;
+                if (module.Mode == UIModuleManufacturing.UIMode.Scrap) ResyncScrapSnapshot(module);
                 SetupQueueMethod?.Invoke(module, null);
                 DoFilterMethod?.Invoke(module, new object[] { null, null });
             }
             catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ManufactureSync: screen rebuild failed: " + ex.Message); }
+        }
+
+        /// <summary>Scrap mode feeds its available-item list from SNAPSHOT copies of faction storage taken
+        /// once on mode entry (UIModuleManufacturing.Init:363-371 — Clear + AddItems + StripPartialMags),
+        /// never re-read: natively safe because the screen pauses the game so storage cannot move, but in
+        /// co-op stale the instant a remote delta lands — SetupQueue/DoFilter alone rebuild FROM the stale
+        /// snapshot, which is why the open scrap screen never changed. Replay the native snapshot block
+        /// against live storage, preserving the user's staged cart (native re-snapshot dumps it — that is
+        /// mid-gesture state, same category as the _filter this screen's Exit+Enter opt-out protects):
+        /// clamp each staged count to what live storage still holds (a remote peer may have scrapped the
+        /// same items; also keeps the host's native ScrapAllItems from dereferencing a vanished def at
+        /// UIModuleManufacturing.cs:858-859), then subtract the cart so staged items don't double-show.</summary>
+        private static void ResyncScrapSnapshot(UIModuleManufacturing module)
+        {
+            var faction = GeoLevel()?.PhoenixFaction;
+            if (faction?.ItemStorage == null || faction.AircraftItemStorage == null) return;
+
+            var cart = ScrapItemsField(module);
+            foreach (var kv in cart.Items.ToList())
+            {
+                int live = faction.ItemStorage.Items.TryGetValue(kv.Key, out var gi) ? gi.CommonItemData.Count : 0;
+                int extra = kv.Value.CommonItemData.Count - live;
+                // Same GeoItem shape the native cart-return path uses (RemoveFromScrapQueue :846).
+                if (extra > 0) cart.RemoveItem(new GeoItem(kv.Key, extra, kv.Key.ChargesMax));
+            }
+            var vehCart = VehicleScrapItemsField(module);
+            foreach (var def in vehCart.Items.Select(v => v.EquipmentDef).Distinct().ToList())
+            {
+                int extra = vehCart.CountItem(def) - faction.AircraftItemStorage.CountItem(def);
+                for (int i = 0; i < extra; i++) vehCart.RemoveItem(def);
+            }
+
+            var snapshot = ScrapStorageField(module);
+            snapshot.Clear();
+            snapshot.AddItems(faction.ItemStorage);
+            StripPartialMagsMethod?.Invoke(module, null);
+            snapshot.RemoveItems(cart);
+            var vehSnapshot = VehicleScrapStorageField(module);
+            vehSnapshot.Clear();
+            vehSnapshot.AddItems(faction.AircraftItemStorage);
+            vehSnapshot.RemoveItems(vehCart);
         }
 
         // ─── CLIENT: intent capture (fed by the Harmony prefixes below) ────

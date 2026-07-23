@@ -22,10 +22,10 @@ namespace Multiplayer.Network.Sync
     ///     fire OnPausedEvent/EffectiveScaleChangedEvent; the clock readout polls Timing.Now per frame.
     ///   • ItemStorage → raise its own <c>StorageChanged</c> (GeoItemDict apply wrote _storageItems
     ///     directly, bypassing AddItem/RemoveItem = no native notify) → free-space info bar +
-    ///     inventory views (which subscribe to it) repaint. Manufacturing is PULL-model (no
-    ///     StorageChanged subscription) → also nudge ManufactureSync.RepaintManufacturingUi (SetupQueue
-    ///     rebuild, no-op unless open); equip screens are pull-model too → also mark the open screen
-    ///     dirty (universal re-enter). Covers GeoFaction + GeoSite.
+    ///     inventory views (which subscribe to it) repaint. Manufacturing + equip screens are
+    ///     PULL-model (no StorageChanged subscription) → also mark the open screen dirty; the flush
+    ///     re-enters it, or for UIStateManufacturing routes to its dedicated per-panel rebuild.
+    ///     Covers GeoFaction + GeoSite.
     ///   • Unknown kind → logged ONCE — the to-do list for the next event-map entry.
     /// </summary>
     public static class UiEventMap
@@ -36,7 +36,6 @@ namespace Multiplayer.Network.Sync
         {
             if (touched == null || touched.Count == 0) return;
             bool researchDone = false;
-            bool mfgDone = false;
             foreach (var entity in touched)
             {
                 try
@@ -60,17 +59,13 @@ namespace Multiplayer.Network.Sync
                             break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
-                            // Manufacturing panel is PULL-model: it does NOT subscribe to StorageChanged,
-                            // so the item list + owned-count won't repaint from the event above. Nudge it
-                            // the same way the queue path does (SetupQueue rebuild); self-guards to a no-op
-                            // unless UIStateManufacturing is the open screen. Once per batch — a resend
-                            // touching N storages must not rebuild the queue N times.
-                            if (!mfgDone) { mfgDone = true; ManufactureSync.RepaintManufacturingUi(); }
-                            // Equip screens are PULL-model too: NO StorageChanged subscription anywhere in
-                            // them (decompile: only GeoPhoenixFaction.cs:308 + UIModuleInfoBar.cs:158
-                            // subscribe; UIStateEditSoldier re-reads storage only via EnterState →
+                            // Manufacturing + equip screens are PULL-model: NO StorageChanged subscription
+                            // anywhere in them (decompile: only GeoPhoenixFaction.cs:308 + UIModuleInfoBar
+                            // .cs:158 subscribe; UIStateEditSoldier re-reads storage only via EnterState →
                             // RefreshStorage, _refreshStorage set at :101) — so the open screen must also
-                            // go through the universal re-enter, or its storage list goes stale.
+                            // go through the universal repaint seam. For UIStateManufacturing the flush
+                            // routes to its dedicated per-panel rebuild (OpenUiRepaint opt-out branch),
+                            // which also re-snapshots the scrap-mode storage copies.
                             OpenUiRepaint.MarkDirty();
                             break;
                         default:

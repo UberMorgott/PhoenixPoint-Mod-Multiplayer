@@ -24,7 +24,8 @@ namespace Multiplayer.Network.Sync
     /// GeoscapeView._statesStack private field.
     ///
     /// OPT-OUT: UIStateManufacturing.ExitState() nulls _filter + closes its module, so a bare Exit+Enter
-    /// loses the active filter. It keeps its own ManufactureSync.DoFilter repaint; skipped here.
+    /// loses the active filter. Its flush routes to ManufactureSync.RepaintManufacturingUi instead —
+    /// opted out of the MECHANISM (re-enter), never out of repainting.
     ///
     /// DEBOUNCE: one mirror tick can arrive as several chunked GeoRail packets processed in ONE frame
     /// (NetworkEngine.Update drains all inbound via Transport.Update BEFORE Sync.Tick). Re-entering a
@@ -139,7 +140,15 @@ namespace Multiplayer.Network.Sync
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
-            if (current is UIStateManufacturing) return; // opt-out: bare Exit+Enter drops its _filter
+            if (current is UIStateManufacturing)
+            {
+                // Opt-out of Exit+Enter (bare re-enter drops its _filter) — but NOT of repainting: route
+                // to the screen's dedicated per-panel rebuild instead, so a MarkDirty from ANY source
+                // (EquipSync host reseeds, unmapped-kind default) still repaints it (law 11). Self-guards +
+                // own try/catch; scrap mode re-snapshots its storage copies inside.
+                ManufactureSync.RepaintManufacturingUi();
+                return;
+            }
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
             try
             {
