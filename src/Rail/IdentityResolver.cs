@@ -131,7 +131,8 @@ namespace Multiplayer.Network.Sync
 
         private static readonly FieldInfo TacUnitsField = AccessTools.Field(typeof(GeoLevelController), "_tacUnits");
 
-        /// <summary>Deterministic (key, object) root pairs: level clock + factions + sites + tac units + vehicles.</summary>
+        /// <summary>Deterministic (key, object) root pairs: level clock + factions + sites + tac units +
+        /// vehicles + the level-scope singleton components (event system / mission generator / marketplace).</summary>
         public static IEnumerable<KeyValuePair<string, object>> Roots(GeoLevelController geo)
         {
             if (geo == null) yield break;
@@ -165,6 +166,22 @@ namespace Multiplayer.Network.Sync
                 foreach (var v in map.Vehicles.Where(v => v != null).OrderBy(v => v.VehicleID))
                     yield return new KeyValuePair<string, object>("V#" + v.VehicleID, v);
             }
+
+            // Level-scope singleton components (decompile GeoLevelController.cs:105/132/144) — walked so
+            // the opt-out guarantee NAMES them in rail-coverage.txt instead of skipping them invisibly:
+            //   ES GeoscapeEventSystem — persists via NESTED EventSystemInstanceData, which FindBridge's
+            //      assembly-level name probe cannot reach (and every live container is a Dictionary vs the
+            //      DTO's List<KVP>, so ResolveLive would resolve nothing anyway) → classifies [none],
+            //      visible "no persistent members" incident. Riding its state = a deliberate future
+            //      nested-DTO bridge, not a side effect here.
+            //   MG GeoMissionGenerator — genuinely stateless (def-derived caches rebuilt in Start(); the
+            //      save carries no generator data) → visible "no persistent members" incident.
+            //   MK GeoMarketplace — rides via the existing FindBridge (GeoMarketplaceInstanceData is a
+            //      top-level type matching the name pattern): MissionID + IsMissionInProgress mirror; the
+            //      rest are visible bridge-unresolved exclusions.
+            if (geo.EventSystem != null) yield return new KeyValuePair<string, object>("ES", geo.EventSystem);
+            if (geo.MissionGenerator != null) yield return new KeyValuePair<string, object>("MG", geo.MissionGenerator);
+            if (geo.Marketplace != null) yield return new KeyValuePair<string, object>("MK", geo.Marketplace);
         }
 
         // ─── Client-side path resolution (symmetric to the host walk) ──────
@@ -265,6 +282,9 @@ namespace Multiplayer.Network.Sync
         {
             if (root == "T") return geo.Timing;
             if (root == "TA") return TimeAnchor.ClientDto(geo.Timing); // scratch DTO; loaded in ApplyIfTouched
+            if (root == "ES") return geo.EventSystem;
+            if (root == "MG") return geo.MissionGenerator;
+            if (root == "MK") return geo.Marketplace;
             int hash = root.IndexOf('#');
             if (hash < 0) return null;
             string kind = root.Substring(0, hash), id = root.Substring(hash + 1);

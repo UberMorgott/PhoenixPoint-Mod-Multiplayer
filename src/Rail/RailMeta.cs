@@ -107,13 +107,24 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<Type, RailType> Cache = new Dictionary<Type, RailType>();
         private static readonly Dictionary<string, RailType> BridgedCache = new Dictionary<string, RailType>(StringComparer.Ordinal);
 
+        // Classify-time reentrancy guard: Build → BuildField → RailMeta.HuskMembers(elem) → Get(elem)
+        // can re-enter Get for a type whose Build is still on the stack (mutually-recursive keyless
+        // element types) — without this that is a StackOverflow at classify time.
+        private static readonly HashSet<Type> _building = new HashSet<Type>();
+
         public static RailType Get(Type t)
         {
             if (t == null) return null;
             if (Cache.TryGetValue(t, out var rt)) return rt;
             var ser = RailMeta.GameSerializer;
             if (ser == null) return null; // not in game yet — do NOT cache the miss
-            rt = Build(t, ser);
+            // Cycle: answer null to the in-progress caller, never a half-built table. HuskMembers then
+            // reports from serializer metadata alone — for direct-source types the same carried set (its
+            // rt-table names are a subset of GetSerializedMembers), so the licensing decision stays
+            // deterministic across peers and the cycle surfaces as a visible husk/none exclusion.
+            if (!_building.Add(t)) return null;
+            try { rt = Build(t, ser); }
+            finally { _building.Remove(t); }
             Cache[t] = rt;
             return rt;
         }
@@ -768,14 +779,17 @@ namespace Multiplayer.Network.Sync
                     var guid = r.ReadString();
                     var def = GameUtl.GameComponent<DefRepository>()?.GetDef(guid);
                     // WarnOnce, not raw: a systematic miss (mod parity gap) repeats per entry per tick.
-                    if (def == null) WarnOnce("DecodeLeaf: unknown def guid " + guid);
+                    // Unresolved ≠ null: the host wrote a REAL ref (a genuine null is LeafKind.Null), so
+                    // returning null here would let the applier clobber a valid live ref — and the host
+                    // snapshot is unchanged, so it would never re-ship the correction.
+                    if (def == null) { WarnOnce("DecodeLeaf: unknown def guid " + guid); return Unresolved; }
                     return def;
                 }
                 case LeafKind.EntityRef:
                 {
                     var key = r.ReadString();
                     var e = IdentityResolver.Resolve(geo, key, null);
-                    if (e == null) WarnOnce("DecodeLeaf: unresolved entity ref " + key);
+                    if (e == null) { WarnOnce("DecodeLeaf: unresolved entity ref " + key); return Unresolved; }
                     return e;
                 }
                 case LeafKind.Composite:
@@ -783,14 +797,18 @@ namespace Multiplayer.Network.Sync
                     var rt = RailType.Get(declared);
                     var box = Activator.CreateInstance(declared);
                     int n = r.ReadByte();
+                    bool miss = false;
                     for (int i = 0; i < n; i++)
                     {
                         int idx = r.ReadUInt16();
                         var field = idx < rt.Fields.Count ? rt.Fields[idx] : null;
                         var v = DecodeLeaf(r, field?.ValueType ?? typeof(object), geo);
+                        // Keep reading (stream integrity), but a partially-defaulted composite would
+                        // clobber the live value — an unresolved member skips the WHOLE composite write.
+                        if (ReferenceEquals(v, Unresolved)) { miss = true; continue; }
                         field?.SetValue(box, v);
                     }
-                    return box;
+                    return miss ? Unresolved : box;
                 }
                 default: throw new IOException("bad leaf kind " + kind);
             }
@@ -802,6 +820,13 @@ namespace Multiplayer.Network.Sync
         /// (LeafKinds 0-13, list marker 14), so an explicit dict-key delete stays distinguishable on the
         /// wire from a genuine present-null value (LeafKind.Null = 0).</summary>
         public const byte DictTombstone = 0xFF;
+
+        /// <summary>Decode-side sentinel (never on the wire): a NON-null EntityRef/DefRef whose referent
+        /// this client cannot resolve yet (not spawned / mod parity gap). Distinct from a genuine wire
+        /// null (LeafKind.Null, decodes to null): every applier SKIPS the write instead of clobbering a
+        /// valid live ref — the host snapshot is unchanged, so a null written here would never be
+        /// re-shipped and the divergence would be silent and permanent.</summary>
+        public static readonly object Unresolved = new object();
 
         private static readonly HashSet<string> _loggedTruncations = new HashSet<string>(StringComparer.Ordinal);
 
@@ -1311,7 +1336,12 @@ namespace Multiplayer.Network.Sync
             {
                 var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
                 for (int i = 0; i < cpCount; i++)
-                    args[i + 1] = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1);
+                {
+                    var a = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1);
+                    // Unresolved ref as a create arg: pass null (fresh construction, nothing clobbered) —
+                    // the sentinel itself would throw a type mismatch inside the create method.
+                    args[i + 1] = ReferenceEquals(a, Unresolved) ? null : a;
+                }
                 o = ci.Method.Invoke(args);
                 if (o == null) throw new IOException("custom create returned null for " + t.Name);
             }
@@ -1336,8 +1366,13 @@ namespace Multiplayer.Network.Sync
                         if (!f.ValueType.IsValueType) f.SetValue(o, null);
                         break;
                     case TagLeaf:
-                        f.SetValue(o, DecodeLeaf(r, f.ValueType, geo));
+                    {
+                        var lv = DecodeLeaf(r, f.ValueType, geo);
+                        // Unresolved ref member: leave the freshly-constructed default (same as the old
+                        // load-path gap, nothing clobbered) rather than writing the sentinel.
+                        if (!ReferenceEquals(lv, Unresolved)) f.SetValue(o, lv);
                         break;
+                    }
                     case TagBackRef:
                         fixups.Add(new Fixup { Target = o, Field = f, Idx = r.ReadUInt16() });
                         break;
@@ -1472,12 +1507,17 @@ namespace Multiplayer.Network.Sync
         /// (nested lists on freshly constructed elements).</summary>
         internal static void ApplyList(object entity, RailField field, List<object> items)
         {
-            // Unresolved EntityRef/DefRef elements decode to null (referent not spawned / def unknown on the
-            // client). A null in a live game list can NRE native code that dereferences elements — drop the
-            // holes rather than inserting null (the structural layer / a later diff re-adds them once resolvable).
-            if (items != null && (IdentityResolver.IsRootEntityType(field.ElemType) ||
-                                  typeof(BaseDef).IsAssignableFrom(field.ElemType)))
-                items.RemoveAll(it => it == null);
+            // Unresolved EntityRef/DefRef elements decode to the Unresolved sentinel (referent not spawned /
+            // def unknown on the client) — it can never be added to a typed live list, and a genuine null
+            // element in an entity/def list can NRE native code that dereferences elements. Drop both kinds
+            // of hole rather than inserting them (the structural layer / a later diff re-adds them once
+            // resolvable).
+            if (items != null)
+            {
+                items.RemoveAll(it => ReferenceEquals(it, Unresolved));
+                if (IdentityResolver.IsRootEntityType(field.ElemType) || typeof(BaseDef).IsAssignableFrom(field.ElemType))
+                    items.RemoveAll(it => it == null);
+            }
             var current = field.GetValue(entity);
             if (current == null && items == null) return; // both absent — nothing to reconcile
             bool created = false;

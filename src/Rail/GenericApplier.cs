@@ -135,7 +135,14 @@ namespace Multiplayer.Network.Sync
                 // events, unmapped kinds + ItemStorage mark the open screen dirty there. No unconditional
                 // MarkDirty here — a batch of only mapped kinds (host clock ticking Timing/Wallet/Research
                 // every geo hour) must NOT Exit+Enter the client's open screen.
-                UiEventMap.Fire(touched, geo);
+                // Fire runs INSIDE SyncApplyScope (law 8): its native repaints (SetupQueue rebuild,
+                // ResourcesChanged/StorageChanged subscribers) reach the intent-capture seams and
+                // EquipFlushGate, which all key on Active — an apply-driven repaint must stay suppressed
+                // exactly like the apply itself. The same rebuild reached from ResearchSync's own appliers
+                // already runs inside their scopes; the Wallet/Storage raisers keep their inner scopes
+                // (harmless nesting).
+                using (SyncApplyScope.Enter())
+                    UiEventMap.Fire(touched, geo);
             }
         }
 
@@ -233,6 +240,10 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.Leaf:
                     {
                         var v = RailMeta.DecodeFieldValue(value, field, geo, out _);
+                        // Unresolved referent (RailMeta.Unresolved, already warned once at decode): keep the
+                        // client's live value — writing null over a valid ref would never be re-shipped
+                        // (the host snapshot is unchanged) and the divergence would be silent.
+                        if (ReferenceEquals(v, RailMeta.Unresolved)) return;
                         field.SetValue(entity, v);
                         break;
                     }
@@ -247,7 +258,9 @@ namespace Multiplayer.Network.Sync
                         var key = RailMeta.DecodeDictKey(subKey, field.KeyType);
                         // Explicit delete carries the tombstone sentinel; LeafKind.Null is a genuine present-null value.
                         if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { dict.Remove(key); break; }
-                        dict[key] = RailMeta.DecodeFieldValue(value, field, geo, out _);
+                        var dv = RailMeta.DecodeFieldValue(value, field, geo, out _);
+                        if (ReferenceEquals(dv, RailMeta.Unresolved)) return; // unresolved referent — keep the local entry
+                        dict[key] = dv;
                         break;
                     }
                     case FieldClass.LeafList:

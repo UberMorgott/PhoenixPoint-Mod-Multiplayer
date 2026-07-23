@@ -302,10 +302,10 @@ namespace Multiplayer.Network.Sync
             {
                 Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
                 AbandonCycle();
-                // _forceFull self-retries monolithically (checked at the top of the try), but a leftover
-                // prefix would ride the NEXT sliced cycle with censuses — forced walks are monolithic,
-                // so drop the scope instead.
-                _forcePrefixes.Clear();
+                // _forceFull self-retries monolithically (checked at the top of the try); a pending
+                // ForceReemit scope retries the same way — dropping the prefixes here would silently lose
+                // the client's convergence re-emit (nothing shipped this tick).
+                if (_forcePrefixes.Count > 0) FlushNow();
             }
         }
 
@@ -432,7 +432,6 @@ namespace Multiplayer.Network.Sync
             _snapshot = newSnap;
             bool wasForceFull = _forceFull;
             _forceFull = false;
-            _forcePrefixes.Clear();
 
             if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
 
@@ -447,9 +446,13 @@ namespace Multiplayer.Network.Sync
                 _baselined = true;
                 Debug.Log("[Multiplayer][rail] DiffEngine BASELINE: entities=" + _entityCounts.Values.Sum() +
                           " fields=" + ordered.Count + " walk=" + walkMs + "ms (no emit — clients share the save)");
+                // A ForceReemit that raced the baseline shipped NOTHING — keep its prefixes armed and
+                // re-run forced, instead of silently dropping the convergence re-emit.
+                if (_forcePrefixes.Count > 0) FlushNow();
                 return;
             }
             _baselined = true;
+            _forcePrefixes.Clear(); // consumed: the emit below carries the forced scope (censuses + values)
 
             int packets = 0, bytes = 0;
             if (changed.Count > 0)
@@ -467,6 +470,11 @@ namespace Multiplayer.Network.Sync
 
         // "\u0001" separators: paths/subKeys never contain control chars, so keys cannot collide.
         // Built ONCE per entry (stored in Entry.Key); it used to be rebuilt for every entry in the diff loop.
+        // ponytail: ~22k SnapKey + child-path concats per walk cycle (here + the Descend/EntityCollection
+        // appends in VisitEntity). A per-entity path/key cache would need object-keyed invalidation —
+        // non-root entities MOVE (element rekeyed / reparented ⇒ path changes), so a stale hit is silent
+        // wire divergence, not a perf bug. Upgrade path if the GC ever cares: cache keyed on
+        // (parent Entry.Key, fieldIdx, subKey) validated per cycle against the walk's own visit order.
         private static string SnapKey(string path, ushort fieldIdx, string subKey) =>
             path + "\u0001" + fieldIdx.ToString(CultureInfo.InvariantCulture) + "\u0001" + subKey;
 
@@ -785,7 +793,7 @@ namespace Multiplayer.Network.Sync
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("RAIL COVERAGE REPORT " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId>");
+                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId> | ES (event system) | MG (mission generator) | MK (marketplace)");
                 sb.AppendLine("total snapshot fields: " + totalFields);
                 sb.AppendLine();
                 int cov = 0, exc = 0;
