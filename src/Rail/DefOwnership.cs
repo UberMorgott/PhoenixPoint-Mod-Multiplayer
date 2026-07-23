@@ -36,17 +36,33 @@ namespace Multiplayer.Network.Sync
     public static class DefOwnership
     {
         private static HashSet<object> _set; // null until built; rebuilt after Invalidate()
+        private static float _retryAt;       // >0 = last build THREW; no rebuild before this realtime
 
         public static bool IsDefOwned(object o)
         {
             if (o == null) return false;
-            if (_set == null) _set = Build(); // stays null pre-init/headless — never cache the miss
+            // A cheap null Build (pre-init/headless: no DefRepository) stays uncached — never cache the
+            // miss. A THROWN build instead latches a cooldown (below): the full-graph walk repeating on
+            // EVERY query would freeze the game. Between retries the law fails OPEN (not-owned).
+            if (_set == null && !CoolingDown()) _set = Build();
             return _set != null && _set.Contains(o);
+        }
+
+        /// <summary>Idempotent pre-build, called from the save-transfer load seam (SendLoadComplete —
+        /// every peer passes it once per load, curtain/overlay still up) so the one-off full-graph walk
+        /// never lands lazily inside a mid-play walk/apply slice the 3 ms slicer cannot mask.</summary>
+        public static void Warm()
+        {
+            if (_set == null && !CoolingDown()) _set = Build();
         }
 
         /// <summary>Reload boundary: a loaded save can create runtime defs whose members alias live
         /// objects — drop the set, the next query rebuilds it over the post-load repository.</summary>
-        public static void Invalidate() => _set = null;
+        public static void Invalidate() { _set = null; _retryAt = 0f; }
+
+        // _retryAt > 0f short-circuit keeps UnityEngine.Time untouched headless (RailCheck), where a
+        // failed build never latches — it returns null at the repo lookup, before the walk.
+        private static bool CoolingDown() => _retryAt > 0f && Time.realtimeSinceStartup < _retryAt;
 
         // ─── One-time reference walk of the def graph ───────────────────────
 
@@ -89,8 +105,9 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][rail] DefOwnership build failed: " + ex);
-                return null; // retry next query — a half-built set would silently license clobbers
+                _retryAt = Time.realtimeSinceStartup + 30f; // one retry per cooldown — also rate-limits this log
+                Debug.LogError("[Multiplayer][rail] DefOwnership build failed (retry in 30s, law fails OPEN meanwhile): " + ex);
+                return null; // a half-built set would silently license clobbers
             }
             Debug.Log("[Multiplayer][rail] DefOwnership: identity set built — defs=" + defs +
                       " ownedObjects=" + set.Count + " in " + sw.ElapsedMilliseconds + "ms");

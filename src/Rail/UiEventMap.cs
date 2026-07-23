@@ -11,6 +11,7 @@ using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewControllers.PhoenixBase;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -162,6 +163,7 @@ namespace Multiplayer.Network.Sync
         // UIModuleBaseLayout.Init — Init closes an open build menu / facility info (:291-292).
         private static readonly MethodInfo BlLeftInfo = AccessTools.Method(typeof(UIModuleBaseLayout), "SetLeftSideInfo");
         private static readonly MethodInfo BlLayout = AccessTools.Method(typeof(UIModuleBaseLayout), "SetupBaseLayout");
+        private static readonly FieldInfo BlSlots = AccessTools.Field(typeof(UIModuleBaseLayout), "_slots");
 
         private static readonly Dictionary<Type, Func<GeoscapeViewState, GeoscapeView, bool>> Table =
             new Dictionary<Type, Func<GeoscapeViewState, GeoscapeView, bool>>
@@ -171,7 +173,8 @@ namespace Multiplayer.Network.Sync
                 [typeof(UIStateManufacturing)] = (s, v) => { ManufactureSync.RepaintManufacturingUi(); return true; },
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
-                    ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)
+                    EsSelectProgression != null // resolve-all-first: decline BEFORE the reseed mutates anything
+                    && ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)
                     && Call(EsSelectProgression, s, v.GeoscapeModules.ActorCycleModule.CurrentCharacter),
                 [typeof(UIStateEditVehicle)] = (s, v) =>
                 {
@@ -192,14 +195,24 @@ namespace Multiplayer.Network.Sync
                 },
                 [typeof(UIStateVehicleSelected)] = (s, v) =>
                 {
-                    if (VsSelected == null || VsSelected.GetValue(s, null) == null) return false;
+                    // resolve-all-first: a null MethodInfo mid-&&-chain would run the earlier refreshes,
+                    // then decline → the fallback re-enter stacked on a partial repaint. Decline up front.
+                    if (VsSelected == null || VsTabs == null || VsActions == null || VsReachable == null || VsObjectives == null) return false;
+                    if (VsSelected.GetValue(s, null) == null) return false;
                     return Call(VsTabs, s) && Call(VsActions, s) && Call(VsReachable, s) && Call(VsObjectives, s, Viewer());
                 },
                 [typeof(UIStateNothingSelected)] = (s, v) => Call(NsObjectives, s, Viewer()),
                 [typeof(UIStatePhoenixBaseLayout)] = (s, v) =>
                 {
                     var m = v.GeoscapeModules.BaseLayoutModule;
-                    if (m == null || m.PxBase == null) return false;
+                    if (m == null || m.PxBase == null || BlLeftInfo == null || BlLayout == null) return false;
+                    // SetupBaseLayout re-Instantiates a prefab per facility, but AttachFacilityPrefab only
+                    // ASSIGNS (PhoenixFacilityController.cs:349-352) — the old prefab is destroyed only by
+                    // DetachPrefab, which natively runs only from Uninit (UIModuleBaseLayout.cs:557; the
+                    // game never re-calls SetupBaseLayout while open). Mirror Uninit's slot loop first, or
+                    // every repaint stacks one duplicate prefab per facility.
+                    if (!(BlSlots?.GetValue(m) is PhoenixFacilityController[] slots)) return false;
+                    foreach (var slot in slots) { slot.VisualsContainer.SetActive(true); slot.DetachPrefab(); }
                     return Call(BlLeftInfo, m) && Call(BlLayout, m);
                 },
             };
@@ -216,7 +229,9 @@ namespace Multiplayer.Network.Sync
             FieldInfo refreshFlag, MethodInfo getData, MethodInfo display, MethodInfo refreshStorage)
         {
             var cur = mods.ActorCycleModule == null ? null : mods.ActorCycleModule.CurrentCharacter;
-            if (cur == null || refreshFlag == null || getData == null) return false;
+            // resolve-all-first: every MethodInfo checked BEFORE the first invocation, so a renamed
+            // member declines cleanly instead of running half the reseed and then falling back.
+            if (cur == null || refreshFlag == null || getData == null || display == null || refreshStorage == null) return false;
             refreshFlag.SetValue(state, true); // next RefreshStorage re-reads the model, not the stale UI list
             mods.SoldierEquipModule.OnDataChanged((UIModuleSoldierEquipData)getData.Invoke(state, null));
             // reseeds the CURRENT character = selection preserved by construction

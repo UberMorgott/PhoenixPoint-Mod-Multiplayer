@@ -1448,6 +1448,11 @@ namespace Multiplayer.Network
         {
             if (_loadCompleteSent) return;
             _loadCompleteSent = true;
+            // Warm the walk-time ownership set HERE: every peer passes this exactly once per load
+            // boundary (loading peers via OnReachedPlaying, the tac-entry host directly), world fully
+            // loaded (runtime defs minted) and the curtain/overlay still up — so the ~0.3-1.5 s
+            // full-def-graph walk never fires lazily inside a mid-play walk/apply slice.
+            Sync.DefOwnership.Warm();
             Debug.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex);
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done

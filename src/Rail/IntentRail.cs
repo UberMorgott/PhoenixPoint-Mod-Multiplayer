@@ -97,7 +97,14 @@ namespace Multiplayer.Network.Sync
                 engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
                 Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " " + what + " nonce=" + _nextNonce);
             }
-            catch (Exception ex) { Debug.LogError("[MP][intent] " + Tag(surfaceId) + " send failed: " + ex); }
+            catch (Exception ex)
+            {
+                // A block-first gesture whose intent never reached the host: host state is unchanged, so
+                // no delta will ever repaint what the client staged — reconverge like the reject path
+                // does (repaint the open screen from the un-mutated local model). Never silent.
+                Debug.LogError("[MP][intent] " + Tag(surfaceId) + " send failed (" + what + ") — reconverging local UI: " + ex);
+                OpenUiRepaint.MarkDirty();
+            }
         }
 
         // ─── HOST: the one dispatch ────────────────────────────────────────
@@ -107,7 +114,18 @@ namespace Multiplayer.Network.Sync
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
             if (!_families.TryGetValue(surfaceId, out var family)) return false;
-            if (engine == null || !engine.IsHost) return true; // intents are host-only inbound
+            if (engine == null) return true;
+            if (!engine.IsHost)
+            {
+                // The only host→client traffic on an intent surface is the Reject nudge (below): the
+                // reconverge re-emit usually arrives byte-equal → applies as Unchanged → no touched → no
+                // repaint, so the gesturing client's STAGED widgets stay stale. Its model is already
+                // correct (law 3: the native op never ran locally) — repainting from it un-stages the
+                // open screen. Payload is deliberately empty; nothing to decode.
+                Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI");
+                OpenUiRepaint.MarkDirty();
+                return true;
+            }
             try
             {
                 using (var ms = new MemoryStream(payload))
@@ -139,6 +157,18 @@ namespace Multiplayer.Network.Sync
             if (reemitPrefixes != null)
                 foreach (var p in reemitPrefixes) DiffEngine.ForceReemit(p);
             if (_families.TryGetValue(surfaceId, out var f)) f.Reconverge?.Invoke();
+            // The re-emit reconverges the client's MODEL, but a reject means host state did not change —
+            // re-emitted values arrive byte-equal, apply as Unchanged and repaint nothing, leaving the
+            // gesturing client's staged UI stale until reopen. Nudge that ONE client: an empty envelope
+            // back on the family's own surface, handled as MarkDirty in HandleInbound's client branch.
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine != null && engine.IsHost && peer != 0)
+                    engine.SendToClient(peer, new NetworkMessage(PacketType.SyncEnvelope,
+                        SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest, null)));
+            }
+            catch (Exception ex) { Debug.LogError("[MP][intent] reject nudge send failed: " + ex.Message); }
         }
 
         private static string Tag(byte surfaceId)

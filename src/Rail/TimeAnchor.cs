@@ -179,7 +179,15 @@ namespace Multiplayer.Network.Sync
         {
             if (_clientDto == null || _appliedAt <= 0f || geo == null || geo.Timing == null) return;
             var t = geo.Timing;
-            double rate = _clientDto.Paused ? 0.0 : _clientDto.Scale;
+            // Same EffectiveScale form as the host derivation (Drifted): Paused ? 0 : Scale × parent
+            // cumulative (decompile Base.Core/Timing.cs:65-75 — Paused is parent-aware :100-109,
+            // CumulativeScale = ParentCumulativeScale × Scale, no-parent fallback Time.timeScale :184).
+            // The anchor carries only the host's OWN Paused/Scale; the parent factor is local clock
+            // machinery, read live — a bare _clientDto.Scale mispriced the derivation (spurious
+            // re-asserts / missed drift) whenever the parent ran ≠1× or was paused.
+            bool paused = _clientDto.Paused || (t.ParentTime != null && t.ParentTime.Paused);
+            double parentScale = t.ParentTime != null ? t.ParentTime.CumulativeScale : Time.timeScale;
+            double rate = paused ? 0.0 : _clientDto.Scale * parentScale;
             double derived = _clientDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _appliedAt);
             if (Math.Abs(t.Now.TimeSpan.TotalSeconds - derived) <= Math.Max(5.0, rate * 0.5)) return;
             Debug.LogWarning("[Multiplayer][rail] TimeAnchor: client clock drifted from anchor derivation (now=" +
