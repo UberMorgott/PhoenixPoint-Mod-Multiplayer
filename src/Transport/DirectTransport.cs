@@ -20,8 +20,42 @@ namespace Multiplayer.Transport
         public event Action<ulong, string> OnPeerConnected;
         public event Action<ulong, string> OnPeerDisconnected;
 
+        // ─── Per-peer connection: socket + bounded send queue + ONE writer thread ─────────
+        // Send/Broadcast only ENQUEUE — the main thread never blocks on a peer's TCP window (a
+        // non-reading peer used to freeze the host frame loop during save fan-out). The single
+        // writer per peer preserves per-peer frame ORDER (save chunks + deltas + intents share
+        // the stream and rely on it). Lock discipline: the Peer object itself guards its queue
+        // (Monitor.Wait/Pulse); _lock guards the registry — never nested one inside the other.
+        private class Peer
+        {
+            public readonly ulong Id;
+            public readonly TcpClient Client;
+            public readonly Queue<byte[]> Frames = new Queue<byte[]>();
+            public long QueuedBytes;
+            public Thread Writer;
+            public bool CloseRequested; // no new frames; writer drains the queue, then closes (flush-then-close)
+            public bool Dead;           // hard drop: writer exits without draining
+            public Peer(ulong id, TcpClient client) { Id = id; Client = client; }
+        }
+
+        // Send-queue ceiling per peer. Must exceed the save-transfer blob ceiling (64 MB —
+        // SaveTransferCoordinator.MaxTransferBytes, not referenced: this file stays game-free) so a
+        // whole save fan-out to a slow peer fits. Overflow = the peer stopped reading long ago ⇒ drop.
+        private const long MaxQueuedBytesPerPeer = 96L * 1024 * 1024;
+        // A single blocking Write may not stall longer than this. A HEALTHY peer's background read
+        // loop drains the socket even while its main thread sits in a native load, so a full send
+        // buffer for this long means the peer process is dead/frozen ⇒ IOException ⇒ peer drop.
+        private const int SendStallTimeoutMs = 30000;
+        // Flush-then-close grace on teardown: how long Shutdown waits for writers to drain a
+        // just-queued terminal notice (HostDisconnected / ClientLeave) before force-closing sockets.
+        private const int FlushCloseGraceMs = 1000;
+        // Upper bound on a framed message length read off the wire. The length prefix is
+        // attacker-controlled on an internet-facing listen port (scanners send garbage), and an
+        // unchecked value allocated up to 2 GB per connection. Mirrors the save-transfer ceiling.
+        private const int MaxFrameBytes = 64 * 1024 * 1024;
+
         private TcpListener _listener;
-        private readonly Dictionary<ulong, TcpClient> _clients = new Dictionary<ulong, TcpClient>();
+        private readonly Dictionary<ulong, Peer> _clients = new Dictionary<ulong, Peer>();
         private readonly Queue<(ulong, byte[])> _incomingQueue = new Queue<(ulong, byte[])>();
         // Peer connect/disconnect raised on background socket threads (TCP accept thread / per-peer
         // read thread) are marshalled here and surfaced on the main thread in Update() — mirroring the
@@ -67,12 +101,10 @@ namespace Multiplayer.Transport
             // Abort any in-flight client connect: the worker checks this flag after the connect
             // wait and disposes its socket instead of queueing a (now-stale) outcome.
             _connectAborted = true;
+            List<Peer> peers;
             lock (_lock)
             {
-                foreach (var kvp in _clients)
-                {
-                    try { kvp.Value.Close(); } catch { }
-                }
+                peers = new List<Peer>(_clients.Values);
                 _clients.Clear();
                 // Drop any connect outcome that hasn't been surfaced yet, and dispose a socket that
                 // succeeded between the last Update and this Shutdown so it doesn't leak.
@@ -82,6 +114,17 @@ namespace Multiplayer.Transport
                 }
                 _pendingConnectResult = false;
                 _pendingClient = null;
+            }
+            // Flush-then-close: let each writer drain a just-queued terminal notice (HostDisconnected)
+            // before its socket dies, bounded by ONE shared grace budget; then force-close — Close
+            // aborts a stalled Write/Read, so no thread outlives the grace by more than its current call.
+            foreach (var peer in peers) RequestFlushClose(peer);
+            var deadline = Environment.TickCount + FlushCloseGraceMs;
+            foreach (var peer in peers)
+            {
+                var left = deadline - Environment.TickCount;
+                if (left > 0) peer.Writer?.Join(left);
+                try { peer.Client.Close(); } catch { }
             }
             _listener?.Stop();
             _listenThread?.Join(1000);
@@ -246,11 +289,12 @@ namespace Multiplayer.Transport
             {
                 _hostPeerId = peerId;
                 LocalEndpoint = $"DirectIP(client:{client.Client.LocalEndPoint})";
-                lock (_lock) { _clients[peerId] = client; }
+                var peer = new Peer(peerId, client);
+                lock (_lock) { _clients[peerId] = peer; }
                 State = ConnectionState.Connected;
                 OnStateChanged?.Invoke(State);
                 OnPeerConnected?.Invoke(peerId, endpoint);
-                StartReadLoop(peerId, client);
+                StartPeerThreads(peer);
             }
             else
             {
@@ -266,23 +310,24 @@ namespace Multiplayer.Transport
         public void Disconnect()
         {
             _running = false;
-            // Collect (peerId, label) under the lock — reading RemoteEndPoint BEFORE Close() (a disposed
-            // socket throws ObjectDisposedException on RemoteEndPoint) — then raise OnPeerDisconnected
-            // OUTSIDE the lock. Raising under the lock risked a reentrancy deadlock if a handler calls
-            // back into Send/Broadcast, and the post-Close read used to throw on the UI thread and abort
-            // the whole leave. Mirrors the Update() peer-event drain.
+            // Collect (peerId, label) BEFORE the sockets go down, then raise OnPeerDisconnected
+            // OUTSIDE the lock (a handler that calls back into Send/Broadcast must not deadlock).
+            // Sockets close via flush-then-close: the writer drains a just-queued ClientLeave notice
+            // first, then closes — the peer actually receives the graceful leave.
             var dropped = new List<(ulong peerId, string label)>();
+            List<Peer> peers;
             lock (_lock)
             {
-                foreach (var kvp in _clients)
-                {
-                    string label;
-                    try { label = kvp.Value.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
-                    catch { label = "unknown"; }   // socket already torn down → never throw here
-                    try { kvp.Value.Close(); } catch { }
-                    dropped.Add((kvp.Key, label));
-                }
+                peers = new List<Peer>(_clients.Values);
                 _clients.Clear();
+            }
+            foreach (var peer in peers)
+            {
+                string label;
+                try { label = peer.Client.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
+                catch { label = "unknown"; }   // socket already torn down → never throw here
+                dropped.Add((peer.Id, label));
+                RequestFlushClose(peer);
             }
             foreach (var (peerId, label) in dropped)
                 OnPeerDisconnected?.Invoke(peerId, label);
@@ -291,61 +336,101 @@ namespace Multiplayer.Transport
             OnStateChanged?.Invoke(State);
         }
 
-        // Per-peer kick (heartbeat timeout): close ONE client socket and forget it so Broadcast stops
-        // writing to the dead peer. The disconnect event marshals through _peerEventQueue (drained in
-        // Update) like every other peer event; the read loop's own catch — which fires when the kicked
-        // socket's blocking Read aborts — is deduped by its conditional enqueue (peer already gone).
+        // Per-peer kick (heartbeat timeout / graceful leave / reject): forget the peer so Broadcast
+        // stops queueing to the dead id, queue the disconnect event (drained in Update like every
+        // other peer event), and flush-then-close — a terminal notice queued just before the kick
+        // (ConnectionRejected) still reaches the peer before the writer closes the socket, which in
+        // turn aborts the read loop. The read loop's own DropPeer is deduped (peer already gone).
         public bool DisconnectPeer(ulong peerId)
         {
+            Peer peer;
             lock (_lock)
             {
-                if (!_clients.TryGetValue(peerId, out var client)) return false;
+                if (!_clients.TryGetValue(peerId, out peer)) return false;
                 _clients.Remove(peerId);
                 string label;
-                try { label = client.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
+                try { label = peer.Client.Client.RemoteEndPoint?.ToString() ?? "unknown"; }
                 catch { label = "unknown"; }
-                try { client.Close(); } catch { }
                 _peerEventQueue.Enqueue((false, peerId, label));
             }
+            RequestFlushClose(peer);
             return true;
         }
 
-        // ponytail: Send/Broadcast do BLOCKING TCP writes under _lock on the caller's (main) thread —
-        // one stalled client's full send buffer can freeze the host frame loop during save fan-out,
-        // and the lock also stalls the read loops. Upgrade path: per-peer send queue + writer thread.
         public void Send(ulong peerId, byte[] data, bool reliable = true)
         {
-            lock (_lock)
-            {
-                if (_clients.TryGetValue(peerId, out var client))
-                {
-                    try
-                    {
-                        var stream = client.GetStream();
-                        var lenBytes = BitConverter.GetBytes(data.Length);
-                        stream.Write(lenBytes, 0, 4);
-                        stream.Write(data, 0, data.Length);
-                    }
-                    catch { }
-                }
-            }
+            Peer peer;
+            lock (_lock) { _clients.TryGetValue(peerId, out peer); }
+            if (peer != null) EnqueueFrame(peer, data);
         }
 
         public void Broadcast(byte[] data, bool reliable = true)
         {
+            List<Peer> peers;
+            lock (_lock) { peers = new List<Peer>(_clients.Values); }
+            foreach (var peer in peers) EnqueueFrame(peer, data);
+        }
+
+        // Frame = 4-byte little-endian length prefix + payload, queued for the peer's writer thread.
+        // Never blocks the caller: queue overflow (the peer stopped reading for far too long — the
+        // bound comfortably fits a whole save-blob fan-out) drops the peer instead.
+        private void EnqueueFrame(Peer peer, byte[] data)
+        {
+            var frame = new byte[4 + data.Length];
+            var lenBytes = BitConverter.GetBytes(data.Length);
+            Buffer.BlockCopy(lenBytes, 0, frame, 0, 4);
+            Buffer.BlockCopy(data, 0, frame, 4, data.Length);
+            bool overflow = false;
+            lock (peer)
+            {
+                if (peer.Dead || peer.CloseRequested) return;
+                if (peer.QueuedBytes + frame.Length > MaxQueuedBytesPerPeer)
+                    overflow = true;
+                else
+                {
+                    peer.Frames.Enqueue(frame);
+                    peer.QueuedBytes += frame.Length;
+                    Monitor.Pulse(peer);
+                }
+            }
+            if (overflow)
+            {
+                LogError($"[Multiplayer] DirectTransport: send queue to peer {peer.Id} overflowed " +
+                         $"({MaxQueuedBytesPerPeer} bytes) — dropping peer.");
+                DropPeer(peer, "send queue overflow");
+            }
+        }
+
+        // Graceful close: no new frames accepted; the writer drains what is queued, then closes the
+        // socket and exits. Used by every teardown path that may have just queued a terminal notice.
+        private static void RequestFlushClose(Peer peer)
+        {
+            lock (peer)
+            {
+                peer.CloseRequested = true;
+                Monitor.Pulse(peer);
+            }
+        }
+
+        // Hard-drop chokepoint (read failure, write failure/stall, queue overflow): kill the peer's
+        // queue + threads, close the socket (aborts a blocked Read/Write on the other loop), and
+        // surface the drop — but ONLY if the peer was still registered. A DisconnectPeer kick or a
+        // teardown already removed it AND queued its own event, so this never double-fires.
+        private void DropPeer(Peer peer, string reason)
+        {
+            lock (peer)
+            {
+                peer.Dead = true;
+                peer.CloseRequested = true;
+                peer.Frames.Clear();
+                peer.QueuedBytes = 0;
+                Monitor.Pulse(peer);
+            }
+            try { peer.Client.Close(); } catch { }
             lock (_lock)
             {
-                foreach (var kvp in _clients)
-                {
-                    try
-                    {
-                        var stream = kvp.Value.GetStream();
-                        var lenBytes = BitConverter.GetBytes(data.Length);
-                        stream.Write(lenBytes, 0, 4);
-                        stream.Write(data, 0, data.Length);
-                    }
-                    catch { }
-                }
+                if (_clients.Remove(peer.Id))
+                    _peerEventQueue.Enqueue((false, peer.Id, reason));
             }
         }
 
@@ -374,14 +459,20 @@ namespace Multiplayer.Transport
                 else OnPeerDisconnected?.Invoke(peerId, endpoint);
             }
 
+            // Same pattern for packets: dequeue under the lock, dispatch outside it — handler code
+            // (message routing, session logic) must never run while holding transport state.
+            List<(ulong, byte[])> packets = null;
             lock (_lock)
             {
-                while (_incomingQueue.Count > 0)
+                if (_incomingQueue.Count > 0)
                 {
-                    var (peerId, data) = _incomingQueue.Dequeue();
-                    OnPacketReceived?.Invoke(peerId, data);
+                    packets = new List<(ulong, byte[])>(_incomingQueue.Count);
+                    while (_incomingQueue.Count > 0) packets.Add(_incomingQueue.Dequeue());
                 }
             }
+            if (packets != null)
+                foreach (var (peerId, data) in packets)
+                    OnPacketReceived?.Invoke(peerId, data);
         }
 
         private void ListenLoop()
@@ -396,62 +487,108 @@ namespace Multiplayer.Transport
                     // Marshal the connect onto the main thread (drained in Update before packets) so the
                     // Unity-touching OnPeerConnected handler never runs on this accept thread. The read
                     // loop only starts here, so no packet can be enqueued before this connect event.
+                    var peer = new Peer(peerId, client);
                     lock (_lock)
                     {
-                        _clients[peerId] = client;
+                        // Accept completed while Shutdown is tearing down (it flips _running BEFORE
+                        // clearing the registry under this same lock): registering now would leak a
+                        // peer nobody flush-closes — its writer would park forever. Close + bail.
+                        if (!_running)
+                        {
+                            try { client.Close(); } catch { }
+                            break;
+                        }
+                        _clients[peerId] = peer;
                         _peerEventQueue.Enqueue((true, peerId, endpoint));
                     }
-                    StartReadLoop(peerId, client);
+                    StartPeerThreads(peer);
                 }
                 catch { break; }
             }
         }
 
-        private void StartReadLoop(ulong peerId, TcpClient client)
+        private void StartPeerThreads(Peer peer)
         {
-            var thread = new Thread(() =>
+            peer.Writer = new Thread(() => WriteLoop(peer)) { IsBackground = true };
+            peer.Writer.Start();
+            new Thread(() => ReadLoop(peer)) { IsBackground = true }.Start();
+        }
+
+        // ONE writer per peer: drains the bounded queue in FIFO order (per-peer send order is part
+        // of the wire contract). Exits on flush-close (drain, then close), hard drop, or a write
+        // failure/stall — and ALWAYS closes the socket on the way out, which also unblocks the
+        // peer's read loop, so no thread leaks across sessions.
+        private void WriteLoop(Peer peer)
+        {
+            bool failed = false;
+            try
             {
-                try
+                var stream = peer.Client.GetStream();
+                stream.WriteTimeout = SendStallTimeoutMs;
+                while (true)
                 {
-                    var stream = client.GetStream();
-                    var lenBuf = new byte[4];
-                    while (_running && client.Connected)
+                    byte[] frame = null;
+                    lock (peer)
                     {
-                        var read = 0;
-                        while (read < 4)
+                        while (peer.Frames.Count == 0 && !peer.CloseRequested && !peer.Dead)
+                            Monitor.Wait(peer);
+                        if (peer.Dead) break;
+                        if (peer.Frames.Count > 0)
                         {
-                            var n = stream.Read(lenBuf, read, 4 - read);
-                            if (n <= 0) throw new EndOfStreamException();
-                            read += n;
+                            frame = peer.Frames.Dequeue();
+                            peer.QueuedBytes -= frame.Length;
                         }
-                        var msgLen = BitConverter.ToInt32(lenBuf, 0);
-                        var msgBuf = new byte[msgLen];
-                        read = 0;
-                        while (read < msgLen)
-                        {
-                            var n = stream.Read(msgBuf, read, msgLen - read);
-                            if (n <= 0) throw new EndOfStreamException();
-                            read += n;
-                        }
-                        lock (_lock) { _incomingQueue.Enqueue((peerId, msgBuf)); }
+                        else break; // CloseRequested + queue drained → flushed
                     }
+                    stream.Write(frame, 0, frame.Length);
                 }
-                catch
+            }
+            catch { failed = true; } // write error, or the SendStallTimeoutMs stall bound fired
+            try { peer.Client.Close(); } catch { }
+            if (failed) DropPeer(peer, "connection lost (send failed/stalled)");
+        }
+
+        private void ReadLoop(Peer peer)
+        {
+            try
+            {
+                var stream = peer.Client.GetStream();
+                var lenBuf = new byte[4];
+                while (_running && peer.Client.Connected)
                 {
-                    // Marshal the disconnect onto the main thread (drained in Update) so the
-                    // OnPeerDisconnected handler — which rewrites shared time-sync clock state via
-                    // TimeSync.ResetClientState — never runs on this background receive thread.
-                    lock (_lock)
+                    var read = 0;
+                    while (read < 4)
                     {
-                        // Only surface the drop if the peer was still registered — a DisconnectPeer kick
-                        // already removed it AND queued the event, so an unconditional enqueue here
-                        // (this catch fires when the kicked socket's Read aborts) would double-fire.
-                        if (_clients.Remove(peerId))
-                            _peerEventQueue.Enqueue((false, peerId, "connection lost"));
+                        var n = stream.Read(lenBuf, read, 4 - read);
+                        if (n <= 0) throw new EndOfStreamException();
+                        read += n;
                     }
+                    var msgLen = BitConverter.ToInt32(lenBuf, 0);
+                    if (msgLen <= 0 || msgLen > MaxFrameBytes)
+                    {
+                        // Attacker-controlled length (internet-facing port): never size an alloc
+                        // from it unchecked. Oversize/nonpositive ⇒ log + drop the connection.
+                        LogError($"[Multiplayer] DirectTransport: dropping peer {peer.Id} — framed " +
+                                 $"length {msgLen} out of bounds (0, {MaxFrameBytes}].");
+                        throw new InvalidDataException("framed length out of bounds");
+                    }
+                    var msgBuf = new byte[msgLen];
+                    read = 0;
+                    while (read < msgLen)
+                    {
+                        var n = stream.Read(msgBuf, read, msgLen - read);
+                        if (n <= 0) throw new EndOfStreamException();
+                        read += n;
+                    }
+                    lock (_lock) { _incomingQueue.Enqueue((peer.Id, msgBuf)); }
                 }
-            }) { IsBackground = true };
-            thread.Start();
+            }
+            catch { }
+            // Any exit = this peer's link is done (socket error, malformed frame, remote close, kick,
+            // teardown). DropPeer marshals the disconnect onto the main thread — event only if the
+            // peer was still registered (a kick/teardown already queued its own) — and wakes/kills
+            // the writer so it exits too, never leaking a parked thread.
+            DropPeer(peer, "connection lost");
         }
     }
 }
