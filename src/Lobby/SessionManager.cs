@@ -70,6 +70,13 @@ namespace Multiplayer.Network
 
         private const int HeartbeatIntervalMs = 5000;
         private const int HeartbeatTimeoutMs = 20000;
+        // FIX-1 deadline: the transfer/load liveness suspension below is honoured only while the
+        // transfer shows PROGRESS (SaveTransferCoordinator.LastProgressMs keeps moving). A silently
+        // dead host (STUN, missing Steam fail callback, TCP half-open) leaves the transfer flags
+        // latched — without this deadline the client parked at "Waiting for players…" forever with
+        // every host-loss detector off.
+        private const long TransferStallMs = 60_000;
+        private bool _transferStallLogged;
         private long _lastHeartbeatSend;
         // FIX-2: client-side outbound-liveness clock — the last time the host ACKed one of our
         // heartbeats. Distinct from _lastHeartbeat[host] (inbound liveness): it detects a HALF-OPEN
@@ -128,6 +135,23 @@ namespace Multiplayer.Network
             // nothing false-fires the instant the load ends.
             var st = _engine.SaveTransfer;
             bool loadInFlight = st != null && (st.TransferActive || st.InPhase2 || st.LoadPhaseStarted);
+
+            // Suspension deadline: suspend only while the transfer shows PROGRESS. LastProgressMs is
+            // bumped on every chunk / roster snapshot / barrier flag edge / phase-2 percent
+            // (SaveTransferCoordinator.NoteProgress); a dead peer stops all of those, so after
+            // TransferStallMs the normal detectors below resume and fire the standard host-loss /
+            // client-reaper teardown. Engine-level — no per-scenario branches.
+            if (loadInFlight && now - st.LastProgressMs > TransferStallMs)
+            {
+                if (!_transferStallLogged)
+                {
+                    _transferStallLogged = true;
+                    Debug.LogWarning($"[Multiplayer] transfer/load shows no progress for " +
+                                     $"{TransferStallMs / 1000}s — re-arming liveness detectors.");
+                }
+                loadInFlight = false;
+            }
+            else if (loadInFlight) _transferStallLogged = false;
 
             if (loadInFlight)
             {
@@ -1011,10 +1035,11 @@ namespace Multiplayer.Network
             {
                 // Validate + stamp the authoritative sender (mirror HandleRename keying).
                 if (chat.IsSystem) return; // clients may not inject system lines
-                var nick = "Player";
-                if (_clients.TryGetValue(msg.SenderSteamId, out var c))
-                    nick = c.PlayerName;
-                BroadcastChat(msg.SenderSteamId, nick, chat.Text, false);
+                // Membership gate: only a peer actually ON the roster may inject chat — a rejected/
+                // unjoined sender's socket can still be up, and the old "Player" fallback happily
+                // broadcast its text to the whole lobby.
+                if (!_clients.TryGetValue(msg.SenderSteamId, out var c)) return;
+                BroadcastChat(msg.SenderSteamId, c.PlayerName, chat.Text, false);
             }
             else
             {

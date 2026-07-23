@@ -540,7 +540,9 @@ namespace Multiplayer.Network
             var wasKnown = Session != null && Session.TryGetClientName(peerId, out droppedName);
             if (!wasKnown) droppedName = null;
 
-            Session.RemoveClient(peerId);
+            // Teardown window: a transport drop surfacing after Shutdown/TearDown nulled Session
+            // (the null-check above only resolved the name) must not NRE the whole event drain.
+            Session?.RemoveClient(peerId);
             OnClientDisconnected?.Invoke(peerId);
             OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown);
 

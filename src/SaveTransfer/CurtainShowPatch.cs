@@ -115,6 +115,15 @@ namespace Multiplayer.Harmony
     {
         private static MethodBase _target;
 
+        // Parked-lift beacon: refreshed every frame a gated lift sits parked. PerformDeferredLift
+        // consults it to SKIP its direct LiftCurtain when opening the gate resumes a parked NATIVE
+        // lift — two competing lifts had LiftCurtain's _currentFadingRoutine.Stop() kill one tail,
+        // losing the OnCurtainLifted input-unlock (the standing RepairRevealInputLock crutch).
+        // Frame-stamped (not a counter) so a routine killed without Dispose can never leak a stale
+        // "parked" state past the next frame.
+        private static int _lastParkedFrame = -1000;
+        public static bool ParkedLiftLive => UnityEngine.Time.frameCount - _lastParkedFrame <= 1;
+
         public static bool Prepare()
         {
             var t = AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
@@ -135,7 +144,11 @@ namespace Multiplayer.Harmony
             if (Hold())
             {
                 Debug.Log("[Multiplayer] curtain lift PARKED — holding for all-players reveal");
-                while (Hold()) yield return NextUpdate.NextFrame;
+                while (Hold())
+                {
+                    _lastParkedFrame = UnityEngine.Time.frameCount;
+                    yield return NextUpdate.NextFrame;
+                }
                 Debug.Log("[Multiplayer] curtain lift RELEASED — reveal/teardown opened the gate");
             }
             while (original.MoveNext()) yield return original.Current;

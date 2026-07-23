@@ -199,6 +199,16 @@ namespace Multiplayer.Network
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
 
+        /// <summary>
+        /// Transfer-progress clock for the liveness-suspension deadline (SessionManager.TransferStallMs):
+        /// bumped on every observable transfer/load progress event — chunk received, roster snapshot,
+        /// barrier/phase flag edge, phase-2 percent step. SessionManager suspends its host/client-loss
+        /// detectors ONLY while this keeps moving; a silently dead peer stops it, and after the stall
+        /// window the detectors re-arm and fire the normal host-loss teardown.
+        /// </summary>
+        public long LastProgressMs { get; private set; } = NowMs();
+        private void NoteProgress() => LastProgressMs = NowMs();
+
         public SaveTransferCoordinator(NetworkEngine engine)
         {
             _engine = engine;
@@ -292,6 +302,7 @@ namespace Multiplayer.Network
         /// </summary>
         public void SetLoadingLevel(object level)
         {
+            NoteProgress(); // flag edge (native load started / finished)
             _loadingLevel = level as Base.Levels.Level;
             // Capture the LIVE native bar when phase-2 begins (Loading), clear it on Playing/Loaded.
             // Done ONCE here (not per-frame) so the pump never FindObjectOfType's every tick.
@@ -1001,6 +1012,7 @@ namespace Multiplayer.Network
 
         private void OpenBarrier()
         {
+            NoteProgress(); // flag edge (host barrier opens)
             _barrierOpen = true;
             _barrierOpenedAtMs = NowMs();
             _loadedPeers.Clear();
@@ -1100,6 +1112,8 @@ namespace Multiplayer.Network
                 return;
             }
 
+            NoteProgress(); // every arriving chunk = live transfer (liveness-suspension deadline)
+
             // First chunk of a transfer (re)initialises the reassembly buffer.
             if (_rxBuffer == null || _rxTransferId != chunk.TransferId)
             {
@@ -1188,6 +1202,7 @@ namespace Multiplayer.Network
         public void OnSaveDone(NetworkMessage msg)
         {
             if (_engine.IsHost) return;
+            NoteProgress(); // transfer completing = progress
             var (transferId, totalBytes, ext, crc32, onDemandJoin) = MessageSerializer.DeserializeSaveDone(msg.Payload);
 
             Debug.Log($"[Multiplayer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
@@ -1383,6 +1398,7 @@ namespace Multiplayer.Network
         public void OnClientLoaded(NetworkMessage msg)
         {
             if (!_engine.IsHost) return;
+            NoteProgress(); // a client acked LOADED = live transfer (host-side clock)
             var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
 
             Debug.Log($"[Multiplayer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
@@ -1447,6 +1463,7 @@ namespace Multiplayer.Network
         public void SendLoadComplete()
         {
             if (_loadCompleteSent) return;
+            NoteProgress(); // flag edge (this peer's phase-2 load finished)
             _loadCompleteSent = true;
             // Warm the walk-time ownership set HERE: every peer passes this exactly once per load
             // boundary (loading peers via OnReachedPlaying, the tac-entry host directly), world fully
@@ -1515,6 +1532,7 @@ namespace Multiplayer.Network
         {
             if (_revealed) return;
             _revealed = true;
+            _revealedAtMs = NowMs();
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
             Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
@@ -1523,16 +1541,29 @@ namespace Multiplayer.Network
             catch (Exception e) { Debug.LogError("[Multiplayer] RestoreCurtainLabel failed: " + e.Message); }
             // Lift the native curtain we suppressed (animated alpha→0, unpauses rendering, fires
             // OnCurtainLifted → GeoscapeView unlocks input + enables sound). Reflection: mod can't ref the type.
+            // ROOT FIX (input-lock latch): when CurtainLiftGatePatch holds a PARKED native lift, opening
+            // the gate above already resumes it with its FULL tail (OnCurtainLifted → input unlock) — a
+            // second direct LiftCurtain here made the two compete, and LiftCurtain's own
+            // _currentFadingRoutine.Stop() killed one tail, latching the loading-screen input override.
+            // Single tail: skip the direct call and let the parked lift finish the reveal.
             try
             {
-                var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
-                if (t != null)
+                if (Multiplayer.Harmony.CurtainLiftGatePatch.ParkedLiftLive)
                 {
-                    var ctrl = UnityEngine.Object.FindObjectOfType(t);
-                    if (ctrl != null)
+                    Debug.Log("[Multiplayer] PerformDeferredLift: parked native lift resuming — " +
+                              "skipping direct LiftCurtain (single tail).");
+                }
+                else
+                {
+                    var t = HarmonyLib.AccessTools.TypeByName("Base.Utils.LevelSwitchCurtainController");
+                    if (t != null)
                     {
-                        var m = HarmonyLib.AccessTools.Method(t, "LiftCurtain", new System.Type[0]);
-                        m?.Invoke(ctrl, null);
+                        var ctrl = UnityEngine.Object.FindObjectOfType(t);
+                        if (ctrl != null)
+                        {
+                            var m = HarmonyLib.AccessTools.Method(t, "LiftCurtain", new System.Type[0]);
+                            m?.Invoke(ctrl, null);
+                        }
                     }
                 }
             }
@@ -1559,6 +1590,10 @@ namespace Multiplayer.Network
         private static readonly System.Reflection.FieldInfo OverrideSetsField =
             AccessTools.Field(typeof(InputController), "_overrideInputSets");
 
+        // When the last reveal happened — lets the repair belt below distinguish the harmless
+        // early-clear during the normal ~0.5 s lift fade from a genuinely LOST lift tail (metric).
+        private long _revealedAtMs;
+
         private void RepairRevealInputLock()
         {
             if (!_revealed) return;
@@ -1576,8 +1611,18 @@ namespace Multiplayer.Network
                 if (!(OverrideSetsField?.GetValue(input) is InputSetDef[] active)) return;
                 if (Array.IndexOf(active, view.LoadingScreenInputSet) < 0) return;
                 input.ClearOverrideInputSet();
-                Debug.Log("[Multiplayer] reveal input-lock repair: cleared latched LoadingScreenInputSet " +
-                          "(curtain lift never reached OnCurtainLifted)");
+                // METRIC: firing LATE (past any plausible lift fade) means a lift tail was lost DESPITE
+                // the parked-lift root fix in PerformDeferredLift — loud, so a regression is unmissable.
+                // An early clear within the fade window stays quiet (it is exactly what the fade's own
+                // tail is about to do a frame later).
+                var sinceRevealMs = NowMs() - _revealedAtMs;
+                if (sinceRevealMs > 2000)
+                    Debug.LogWarning($"[Multiplayer] reveal input-lock repair fired {sinceRevealMs}ms after " +
+                                     "reveal — curtain lift tail LOST (should be rare→never after the " +
+                                     "parked-lift root fix); investigate.");
+                else
+                    Debug.Log("[Multiplayer] reveal input-lock repair: cleared LoadingScreenInputSet " +
+                              "(early clear during lift fade — benign)");
             }
             catch (Exception e) { Debug.LogError("[Multiplayer] RepairRevealInputLock failed: " + e.Message); }
         }
@@ -1594,6 +1639,10 @@ namespace Multiplayer.Network
         /// <summary>All peers: merge a host RosterProgress snapshot into the shared tracker for the overlay.</summary>
         public void OnRosterProgress(NetworkMessage msg)
         {
+            // A roster snapshot proves the HOST is alive through the whole barrier + phase-2 window
+            // (it broadcasts ≤20 Hz while _barrierOpen/_loadPhaseActive) — the key progress signal
+            // for a client parked at IsBarrierPending waiting for BEGIN/RevealAll.
+            NoteProgress();
             var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
             var recvDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
             Debug.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
@@ -1642,6 +1691,7 @@ namespace Multiplayer.Network
                 return;
             }
 
+            NoteProgress(); // flag edge (BEGIN released this peer into the level)
             _begun = true;
             PhoenixGame game;
             PhoenixSaveManager sm;
@@ -1706,6 +1756,7 @@ namespace Multiplayer.Network
             // co-op overlay snapshot monotonic-max per (slot, phase). The lobby download display still
             // keys phase-0 by SenderSteamId via _peerDownloadPct (read by LobbyPanel).
             if (!_engine.IsHost) return;
+            NoteProgress(); // a client reported progress = live transfer (host-side clock)
 
             var (_, phase, percent) = MessageSerializer.DeserializeLoadProgress(msg.Payload);
 
@@ -1779,6 +1830,7 @@ namespace Multiplayer.Network
                     if (pct != _lastReportedLoadPct)
                     {
                         _lastReportedLoadPct = pct;
+                        NoteProgress(); // own phase-2 load advancing = progress
                         Debug.Log($"[Multiplayer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
                                   $"pct={pct} (src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})");
                         ReportLoadProgress(pct);

@@ -44,6 +44,14 @@ namespace Multiplayer.Transport
         // (RemoveClient → BroadcastPeerList → nested Broadcast) never re-enters from inside a send loop.
         // Mirrors Direct/Stun's _peerEventQueue marshaling.
         private readonly List<ulong> _pendingSendFailureDrops = new List<ulong>();
+        // Grace before CloseP2PSessionWithUser after a terminal send: Steam DISCARDS queued
+        // not-yet-sent reliable packets on session close, so an immediate close right after a
+        // SendHostDisconnected / ConnectionRejected silently ate the notice and the peer only found
+        // out via its 20 s heartbeat timeout. Kicks (DisconnectPeer/Disconnect) defer the close here
+        // and drain it in Update (skipped if the peer reconnected meanwhile); Shutdown — after which
+        // Update never runs — closes from a one-shot background thread after the same grace.
+        private const int SessionCloseGraceMs = 1000;
+        private readonly List<(ulong peerId, int dueTick)> _deferredCloses = new List<(ulong, int)>();
 
         // ─── Facepunch.Steamworks reflection handles (runtime-resolved) ───────────────────
         // GROUNDING (verified 2026-06-20 against the SHIPPED Facepunch.Steamworks.Win64.dll that PP
@@ -334,11 +342,22 @@ namespace Multiplayer.Transport
                 catch { }
             }
             _installedConnectFailHandler = null;
-            foreach (var peer in _connectedPeers)
-            {
-                CloseSession(peer);
-            }
+            // Grace-close on a one-shot background thread: Update stops after Shutdown, and closing
+            // NOW would drop a just-queued terminal notice (HostDisconnected — see SessionCloseGraceMs).
+            // Include any kicks still waiting out their deferred grace. Steamworks' flat API is
+            // thread-safe for session close; IsBackground so the thread can never hold the process.
+            var toClose = new List<ulong>(_connectedPeers);
+            foreach (var d in _deferredCloses) toClose.Add(d.peerId);
+            _deferredCloses.Clear();
             _connectedPeers.Clear();
+            if (toClose.Count > 0)
+            {
+                new System.Threading.Thread(() =>
+                {
+                    System.Threading.Thread.Sleep(SessionCloseGraceMs);
+                    foreach (var peer in toClose) CloseSession(peer);
+                }) { IsBackground = true }.Start();
+            }
             State = ConnectionState.Disconnected;
             OnStateChanged?.Invoke(State);
         }
@@ -367,7 +386,9 @@ namespace Multiplayer.Transport
         {
             foreach (var peer in _connectedPeers)
             {
-                CloseSession(peer);
+                // Deferred (not immediate) close so a just-queued graceful-leave notice still flushes
+                // out of Steam's send queue — see SessionCloseGraceMs. Drained in Update.
+                _deferredCloses.Add((peer, Environment.TickCount + SessionCloseGraceMs));
                 OnPeerDisconnected?.Invoke(peer, $"Steam({peer})");
             }
             _connectedPeers.Clear();
@@ -375,13 +396,16 @@ namespace Multiplayer.Transport
             OnStateChanged?.Invoke(State);
         }
 
-        // Per-peer kick (heartbeat timeout / graceful leave): close the P2P session AND forget the peer
-        // so Broadcast stops sending to the dead SteamId forever. Raises OnPeerDisconnected inline —
-        // same-main-thread precedent as RegisterSendFailure's host branch.
+        // Per-peer kick (heartbeat timeout / graceful leave / reject): forget the peer so Broadcast
+        // stops sending to the dead SteamId forever, but close the P2P session on the DEFERRED grace
+        // (see SessionCloseGraceMs) so a terminal notice queued just before the kick — the
+        // ConnectionRejected the straggler/transfer/JOIN reject paths send — is not discarded with
+        // the session. Raises OnPeerDisconnected inline — same-main-thread precedent as
+        // RegisterSendFailure's host branch.
         public bool DisconnectPeer(ulong peerId)
         {
             if (!_connectedPeers.Remove(peerId)) return false;
-            CloseSession(peerId);
+            _deferredCloses.Add((peerId, Environment.TickCount + SessionCloseGraceMs));
             _consecutiveSendFailures.Remove(peerId);
             OnPeerDisconnected?.Invoke(peerId, $"Steam({peerId})");
             return true;
@@ -405,6 +429,16 @@ namespace Multiplayer.Transport
 
         public void Update()
         {
+            // Deferred session closes that reached their grace: close unless the peer reconnected
+            // in the window (a fresh session with the same SteamId must not be killed by a stale kick).
+            for (int i = _deferredCloses.Count - 1; i >= 0; i--)
+            {
+                if (Environment.TickCount - _deferredCloses[i].dueTick < 0) continue;
+                var id = _deferredCloses[i].peerId;
+                _deferredCloses.RemoveAt(i);
+                if (!_connectedPeers.Contains(id)) CloseSession(id);
+            }
+
             // Drain send-failure drops FIRST (deferred out of the send loops — see the field note).
             if (_pendingSendFailureDrops.Count > 0)
             {

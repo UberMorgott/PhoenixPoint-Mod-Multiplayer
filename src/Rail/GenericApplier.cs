@@ -69,7 +69,12 @@ namespace Multiplayer.Network.Sync
             {
                 if (payload[0] == DiffEngine.MsgResyncRequest)
                 {
-                    if (engine != null && engine.IsHost) DiffEngine.RequestFullResend();
+                    // Membership gate: a full resend is host-side work fanned out to ALL peers, so
+                    // only a peer actually on the roster may trigger it — a rejected/unjoined
+                    // sender's socket can still be up and would otherwise drive it unthrottled.
+                    if (engine != null && engine.IsHost && engine.Session != null
+                        && engine.Session.Clients.ContainsKey(senderPeerId))
+                        DiffEngine.RequestFullResend();
                     return true;
                 }
                 if (engine == null || engine.IsHost) return true; // host never applies its own surface
