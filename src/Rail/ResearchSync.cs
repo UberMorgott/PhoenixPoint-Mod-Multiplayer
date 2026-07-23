@@ -22,11 +22,14 @@ namespace Multiplayer.Network.Sync
     /// ≤2 Hz poll in <see cref="HostTick"/>, zero Harmony):
     ///   • MsgStart    — Research.OnResearchStarted → native-serializer ResearchElement blob
     ///                   (value-only fallback when the blob exceeds the u16 envelope).
-    ///   • MsgQueue    — poll: full queue ORDER (ResearchIDs) changed → snapshot delta. KEPT off the
-    ///                   generic rail because a List's ORDER cannot be expressed as value fields (the
-    ///                   rail addresses collection elements by stable key, never by index — law 2);
-    ///                   also the one catch-all for cancel/reorder/queue-add (no native event covers a
-    ///                   non-current cancel) and the convergence belt for a start lost to the seq guard.
+    ///   • MsgQueue    — poll: full queue ORDER (ResearchIDs) changed → snapshot delta. TRANSITIONAL:
+    ///                   since 2026-07-22 the generic rail ships keyed-collection ORDER itself (an
+    ///                   order-vector of live KEYS, never indices — law 2 holds; DiffEngine.AddKeyOrder
+    ///                   → RailMeta.ReorderByKeys in-place on the client), so queue order CAN ride 0xAC.
+    ///                   MsgQueue retires once the in-game gate confirms the order-vector alone keeps
+    ///                   queue order. Until then it stays as the catch-all for cancel/reorder/queue-add
+    ///                   (no native event covers a non-current cancel) and the convergence belt for a
+    ///                   start lost to the seq guard.
     ///   • MsgComplete — Research.OnResearchCompleted → id delta.
     /// RETIRED (2026-07-17): MsgProgress + the 2 Hz progress poll — ResearchElement.ResearchProgress is
     /// a plain [SerializeMember] value field, so it now rides the generic value rail (DiffEngine 0xAC).

@@ -75,7 +75,10 @@ BEHAVIOR (per-subsystem mirroring).
     blob-reconstructed element type survives encode→decode (L6), the dict tombstone stays undecodable
     as a value (L7), `SurfaceSeq` honours the law-7 delivery contract (L8), `GeoItemDict` coverage is
     non-vacuous (L9), element ORDER survives the wire — blob order round-trip, live-instance reuse,
-    key-order in-place reorder (L10).
+    key-order in-place reorder (L10), no `LocalizedTextBind` field/element rides covered — static
+    belt for the runtime DefOwnership law, which itself needs a live `DefRepository` and is
+    harness-invisible (L11). Honest gap: `IntentRail`/`IntentDedup` have NO harness law — intent
+    nonce/dedup/reject discipline is exercised only by the in-game gate.
   - `docs/rail-baseline.txt` is the committed classifier snapshot (table + per-type blob husk lists
     + today's known violations). **Any drift in it is RED** — that is the whole point: a field moving
     Excluded↔covered must be a reviewable diff, never a silent side effect. Change is intended →

@@ -26,11 +26,19 @@ namespace Multiplayer.Network.Sync
         public const byte GeoIntent = 0xA2;   // retired: never emitted
         public const byte GeoOutcome = 0xA3;  // retired: never emitted
         public const byte GeoReject = 0xA4;   // retired: never emitted
-        public const byte GeoVehiclePos = 0xA5;  // host→all moving-vehicle world placement (Inc4 S2 travel mirror; inner = GeoVehicleSnapshot.Encode(seq, records))
-        public const byte GeoVehicleTravel = 0xA6;  // host→all vehicle TRAVEL METADATA (Inc4 S2 route-line mirror: travelling/currentSite/destinationSites; inner = GeoVehicleTravelSnapshot.Encode(seq, records)) — feeds the native yellow route line on the frozen client
-        public const byte GeoVehicleExplore = 0xA7;  // host→all vehicle SITE-EXPLORATION PROGRESS (exploring/siteId/progress 0..1; inner = GeoVehicleExploreSnapshot.Encode(seq, records)) — feeds the native site exploration progress bar on the frozen client (whose exploration timer never ticks)
-        public const byte GeoHarvestFloat = 0xA8;  // host→all resource-harvest FLOAT mirror (Batch-2 P6: occId/siteId/resourceType/value; inner = HarvestFloatCodec.Encode) — display-only, client replays its own native GeoSite.ShowResourceHarvested; the wallet values on the generic rail 0xAC stay the one silent balance writer
-        public const byte GeoCrcProbe = 0xA9;  // host→all rolling CRC divergence probe (Inc5 part 1: once per in-game hour, CRC32 per deterministic state SUBSET; inner = CrcProbeCodec.Encode(round, entries), round rides SurfaceSeq) — detection only: client recomputes+compares (DivergenceMonitor), loud log + toast on divergence, NEVER auto-resyncs
+        // ─── Old-repo per-kind geoscape mirrors — RETIRED tombstones ───
+        // Ids reserved by the OLD repo's hand-sync codecs (GeoVehicleSnapshot / GeoVehicleTravelSnapshot /
+        // GeoVehicleExploreSnapshot / HarvestFloatCodec / CrcProbeCodec). Never emitted by this repo — the
+        // codecs were never quarried in. Their jobs ride the generic value rail 0xAC (vehicle placement /
+        // travel metadata / exploration progress = covered value+order fields; harvest floats = client-side
+        // presentation off its own native events). The old comments' "frozen client" premise is FALSE in
+        // this repo: the client sim RUNS (clock ticks, law-4b gates skip the mutators). The CRC divergence
+        // probe's job = the law-7 CRC-per-subtree backstop, still unbuilt here. Do not reuse these five ids.
+        public const byte GeoVehiclePos = 0xA5;      // retired: never emitted
+        public const byte GeoVehicleTravel = 0xA6;   // retired: never emitted
+        public const byte GeoVehicleExplore = 0xA7;  // retired: never emitted
+        public const byte GeoHarvestFloat = 0xA8;    // retired: never emitted
+        public const byte GeoCrcProbe = 0xA9;        // retired: never emitted
         public const byte GeoResearch = 0xAA;  // Research rail (migration #1) host→all deltas: start (native-serializer blob, value-only fallback) / ≤2 Hz progress value / queue-order snapshot / complete; inner = ResearchSync codec ([msg:u8][seq:u32][factionGuid]…), seq rides SurfaceSeq
         public const byte GeoResearchIntent = 0xAB;  // Research rail client→host INTENT ([nonce:u32][op:u8][factionGuid][researchId][pos:i32], op = start/cancel/front/up/down/insertAt); nonce rides the peer-aware IntentDedup; host validates + executes NATIVELY, outcome returns via 0xAA
         public const byte GeoRail = 0xAC;  // THE generic value rail (laws 5/6): host→all canonical metadata-guided diff deltas (inner = DiffEngine [MsgDelta:u8][seq:u32][kindDefs][entries], seq rides SurfaceSeq); client→host full-resend request on seq gap (inner = [MsgResyncRequest:u8], law 7 resync-on-gap)

@@ -35,7 +35,8 @@ attach → fire native added-event).
 `Wallet._resources` + `ResourcesChanged`; `ResearchElement` progress + `_researchQueue` order;
 `FactionDiplomacy` values; `GeoSite` state/owner/production + `StateChanged`/`OwnerChanged`;
 `GeoVehicle` pos (`GeoNavComponent`)/HP/name; ALL of `GeoCharacter` (plain class, no scene
-binding — cleanest); `ItemManufacturing` progress; `Timing.Now`; mist/event vars.
+binding — cleanest); `ItemManufacturing` progress; `Timing` Paused/Scale + the "TA" clock anchor
+(never raw `Now`/`StartTime` — a raw clock mirror double-counts local accrual); mist/event vars.
 
 **Structural appliers (hand-written, explicit list — the ONLY bespoke sync code allowed;
 identity boundary per law 3):** site spawn/destroy (GO lifecycle + `GeoMap.SiteAdded/Removed`);
@@ -54,7 +55,8 @@ The load-bearing assumption: save serializer usable as live-graph mechanism AND 
 preserves runtime invariants (caches, subscribers, scheduler, Unity views, backrefs are NOT
 serialized — the false-green scenario "CRC matches, game corrupted" is the top danger).
 
-**Spike A (in flight, first in-game gate): host starts research → client bar moves, no reload.**
+**Spike A (DONE — first in-game gate passed; grew into ResearchSync): host starts research →
+client bar moves, no reload.**
 - Host, on research start: `blob = SerializeGraph(new[]{ researchElement }, quiet:true)`
   (configured serializer + `Timing.RunUntilComplete`, `TimeSlice(3600f)`, `ByRef<byte[]>` via
   `new object[]{null}`). Send `(factionDefGuid, researchDefGuid, blob)`.
@@ -93,10 +95,16 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   string/enum/TimeSpan/Vector3/Quaternion/DefRef(GUID)/EntityRef(root key)/Composite(struct via its own
   metadata, e.g. TimeUnit/ResourceUnit)).
 - `IdentityResolver.cs` — the ONLY place that names things (law 2). ID-probe table
-  SiteId/VehicleID/ResearchID/Id/Def-GUID; root registry `T | F#<defGuid> | S#<siteId> | U#<tacUnitId> |
-  V#<vehicleId>` (level clock + the level's actor registries — the entire hand-written table); path
-  grammar `root.Member.Member#elemKey…`; resolution symmetric on the client (same keys over its own graph).
+  SiteId/VehicleID/ResearchID/Id/Def-GUID; root registry `T | TA | F#<defGuid> | S#<siteId> |
+  U#<tacUnitId> | V#<vehicleId> | MK | ES | MG` (level clock + "TA" anchor + the level's actor
+  registries + level singletons — the entire hand-written table); path grammar
+  `root.Member.Member#elemKey…`; resolution symmetric on the client (same keys over its own graph).
   No stable key derivable → subtree EXCLUDED from the value rail (never index-addressed) + reported.
+  **Root-visibility rule (2026-07-23):** every level singleton is a ROOT even when little or nothing
+  rides yet — `GeoMarketplace` "MK" rides via its existing InstanceData bridge
+  (MissionID+IsMissionInProgress); `GeoscapeEventSystem` "ES" / `GeoMissionGenerator` "MG" surface as
+  VISIBLE no-persistent-members incidents. A singleton off the root list is a silent coverage hole;
+  an incident is a to-do line.
 - `DiffEngine.cs` (host) — universal walk (visited-set cycle-safe, depth 12 / 50k-entity brakes), flat
   snapshot (path, fieldIdx, subKey)→encoded bytes, diff vs previous, emit only changed pairs. Canonical
   (law 6): sorted roots/children/subkeys, fixed metadata field order. First walk per boundary = BASELINE,
@@ -121,7 +129,10 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   IdentityResolver (path cache, invalidated on miss + reload boundary); set through cached metadata
   accessor; LeafList applied in-place (game exposes lists by reference). Unknown entity/path → log once
   + skip (identity creation = structural layer, law 3). Seq gap → resync request (throttled), host
-  resends ALL covered pairs — just a big delta (law 7).
+  resends ALL covered pairs — just a big delta (law 7). **Unresolved sentinel (2026-07-23):** a ref
+  that decodes but cannot resolve (unknown def GUID / unspawned entity / partial Composite) returns
+  `RailMeta.Unresolved`, NEVER null — every applier arm (leaf/dict/blob/list/create-arg) SKIPS the
+  write instead of clobbering a valid live ref the host would never re-ship (`docs/boundary-law.md` L-C).
 - **DTO twin resolution (2026-07-21).** `ActorComponent.SerializationData` is a RECORD-on-read seam: its
   getter mints/re-records a DTO on every access (ActorComponent.cs:56-66) and the game applies one back
   only at level-enter (DoEnterPlay:114-124 → ProcessInstanceData) — so client writes into the resolved
@@ -142,10 +153,14 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   accrue on every actor every walk (~880 of the measured ~890 changed fields per 0.5 s during geo-time —
   the churn), client actor clocks tick locally, and the level clock rides the "TA" anchor.
 - `UiEventMap.cs` (law 11) — per entity kind the native repaint: Wallet → raise its own
-  `ResourcesChanged` (GeoscapeView relays → info bar/manufacturing/replenish repaint natively);
+  `ResourcesChanged` (GeoscapeView relays → info bar/manufacturing/replenish repaint natively) AND
+  mark the open screen dirty (`FactionResourcesChanged` has only 3 native subscribers — equip
+  quick-produce / base build menu / research cost gating read the wallet pull-model and stayed stale);
   Research/ResearchElement → ResearchSync repaint path (open-screen SetupQueue rebuild, else
   agenda-tracker `_needsRefresh` nudge); Timing → none needed (Paused/Scale applied through native
   property setters which fire OnPausedEvent/EffectiveScaleChangedEvent); unknown kind → logged once.
+  `Fire` runs inside `SyncApplyScope` — apply-driven repaints stay suppressed at intent seams +
+  EquipFlushGate.
 - `ClientSimGate.cs` (law 4b) — client sim not frozen (clock ticks); gated local mutators:
   `GeoLevelController.LevelHourlyUpdateCrt` (ONE chokepoint: faction `ResourceIncome.Apply(Wallet)`,
   UpdateHavens, UpdateBasesHourly, UpdateResearch wallet drain, `Manufacture.Update`, GenerateRecruits,
@@ -176,8 +191,14 @@ the game's OWN read-direction refresh methods (model → live widgets, no lifecy
 method decompile-grounded, never guessed). `OpenUiRepaint` flush tries the table first (inside
 `SyncApplyScope`, law 8); a registered screen that throws keeps the screen + logs once (partial
 repaint beats ejection); an entry may DECLINE (return false: empty roster / missing module after a
-game update) → that one flush falls back. Wired: `UIStateManufacturing` (→
-`ManufactureSync.RepaintManufacturingUi`, ex-opt-out branch), `UIStateResearch` (→
+game update) → that one flush falls back. Every reflection chain resolves ALL its MethodInfos before
+invoking anything — no partial repaint before a decline. Wired: `UIStateManufacturing` (→
+`ManufactureSync.RepaintManufacturingUi`, ex-opt-out branch; in Scrap mode it resyncs the screen's
+STALE storage snapshot — scrap mode feeds from copies taken once on mode entry
+(`UIModuleManufacturing.Init:363-371`), natively safe (screen pauses the game) but stale the instant
+a remote delta lands, so the repaint replays the native snapshot block (Clear+AddItems+
+StripPartialMagsFromScrapStorage) against live storage, preserving the staged cart clamped to live
+counts, then subtracts the cart so staged items do not double-show), `UIStateResearch` (→
 `ResearchSync.RepaintResearchUi`), `UIStateEditSoldier` (`_refreshStorage=true` + `OnDataChanged` +
 `DisplaySoldier` + `RefreshStorage` + `SelectCharacterProgression` = `CharacterChangedHandler:358-365`
 minus the UI→model write-back; selection preserved by reseeding the CURRENT character),
@@ -187,7 +208,10 @@ minus the UI→model write-back; selection preserved by reseeding the CURRENT ch
 (idempotent, clears via `UnsubscribeVehicleActions:1427`) + `UpdateReachableSitesMarkers` +
 `OnFactionObjectivesChanged`), `UIStateNothingSelected` (`OnFactionObjectivesChanged:519`),
 `UIStatePhoenixBaseLayout` (module `SetLeftSideInfo` + `SetupBaseLayout` — deliberately NOT
-`UIModuleBaseLayout.Init`, which closes an open build menu :291-292). Unregistered screens still ride
+`UIModuleBaseLayout.Init`, which closes an open build menu :291-292; before rebuild it mirrors
+Uninit's slot loop (VisualsContainer on + `DetachPrefab`) because `AttachFacilityPrefab` only
+assigns (`PhoenixFacilityController.cs:349-352`) — without it repaint duplicated facility prefabs).
+Unregistered screens still ride
 Exit+Enter (same instance, throwing `Enter` swallowed + screen kept, `GeoscapeViewState.cs:88-94`
 re-registers input first) — now flagged `[MP][uirepaint] fallback re-enter: <UIState>` once per type,
 the to-do list for the next table entry. Drag/typing defer + one-flush-per-frame coalescing sit in
@@ -214,6 +238,55 @@ messages, sim gates (law 4b).
   reconverge (research/manufacture: forced queue-order resend — their queues ride order channels,
   out of ForceReemit's reach). Never log-only. Time registers neither: the client blocked its local
   write and `TimeAnchor.EnforceDrift` is the standing corrector.
+- Reject also NUDGES the gesturing client (empty envelope, same surface) → `MarkDirty` in the
+  HandleInbound client branch: a byte-equal reconverge (state never changed on the host) would
+  otherwise produce no delta, leaving the client's optimistically-staged UI stale — the nudge
+  repaints it from the un-mutated model.
+- `IntentRail.Send` failure reconverges the same way (`MarkDirty`) instead of log-only: a lost
+  block-first gesture repaints from the un-mutated local model rather than showing a phantom apply.
+
+## Walk-time ownership law — DefOwnership (src/Rail/DefOwnership.cs, 2026-07-23)
+
+Full ride/refuse law incl. this one: `docs/boundary-law.md`. The rail writes IN PLACE into the live
+graph (the game's own read path builds fresh graphs), so an instance reachable from BOTH a mirrored
+entity AND the def graph (`ItemDef.GetDisplayName` returns `ViewElementDef.DisplayName1/2` BY
+REFERENCE; `GeoSiteInstaceData.Name`/`.Motto` alias `HavenSettingDbDef` binds) was one classify
+change away from clobbering client def state. No static signal carries the law (`IsWritable` and
+`IsComplexTypeSerializeable` both falsified; `{ get; } = new X()` is the STRONGEST ownership claim) —
+so it is reference identity at walk time:
+- ONE lazily-built reference-equality HashSet of every non-def/non-Unity-asset instance reachable
+  from `DefRepository.GetAllDefs` (asset + runtime defs, struct fields + collection elements); O(1)
+  lookup, zero per-tick allocation; invalidated at reload boundary (a loaded save can mint runtime defs).
+- Hooks: DiffEngine refuses at `VisitEntity` entry (DiffEngine.cs:493) AND at the field arm for
+  non-Leaf classes (:516 — def-owned containers/descends); `GenericApplier` backstop (:219/:225,
+  version skew / per-peer def graphs); `DefOwnership.Warm()` at SendLoadComplete
+  (SaveTransferCoordinator.cs:1472) — every peer, once per load boundary, curtain still up, so the
+  first build never spikes a walk slice.
+- Build-failure latch: a thrown build cools down 30 s (also rate-limits the log); law fails OPEN
+  between retries — no rebuild storm. Leaves exempt by construction (ship by value, apply by
+  ref-replacement). `IsPresentation` refusal kept (belt + suspenders); RailCheck L11 = static belt
+  (no `LocalizedTextBind` rides covered); the runtime law itself is harness-INVISIBLE (needs a live
+  `DefRepository`) — documented in the baseline header.
+
+## Time sync — block-first intents + anchor (src/Rail/TimeSync.cs + TimeAnchor.cs, 2026-07-23)
+
+- **Anchor-not-Now law:** `Timing.StartTime`/`StartFixedTime` (clock base) never ride as raw values —
+  a raw clock mirror double-counts local accrual. They ride as the dedicated "TA" `TimeAnchor` root;
+  `Paused`/`Scale` ride as normal "T" leaves through the native property setters (which fire
+  OnPausedEvent/EffectiveScaleChangedEvent → change-driven flush, so anchor + leaves reach every
+  peer same-frame).
+- **Block-first intent seams (law 4a):** client pause/speed wrote only the LOCAL clock
+  (`UIModuleTimeControl.OnPauseTime`/`UpdateSelectedTime` + `GeoscapeView.SetGamePauseState`) and the
+  rail diffs HOST state — the fork was never corrected. The seams now BLOCK the native write on the
+  client and send `GeoTimeIntent` 0xB0 (pause 0/1 | speed preset index); the host applies through the
+  SAME native funnels (`SetGamePauseState` / `SelectTimePreset`).
+- **`TimeAnchor.EnforceDrift`** (~1 Hz, TimeSync.ClientTick): retains the host rate in `_clientDto`
+  and re-asserts the last APPLIED anchor when the local clock leaves its derivation — the free-run
+  backstop for writers the seams do not capture. The enforcement rate uses the host's
+  `EffectiveScale` form: parent-aware Paused + `Scale × ParentTime.CumulativeScale` (Timing.cs:65-75).
+  Time registers no reject-reconverge: the drift corrector is the standing one.
+- Interception's private clock stays native. Per-actor `TimingInstanceData.OwnNow/OwnFixedNow` stay
+  opted out ship-side (the churn — see DTO twin resolution above); client actor clocks tick locally.
 
 ## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16)
 
@@ -249,6 +322,28 @@ messages, sim gates (law 4b).
   reward RESOURCES and start-affordability now correct — the client wallet mirrors the host wallet
   (`Wallet._resources` rides DiffEngine 0xAC, repaint via native ResourcesChanged).
 
+## Net layer hardening (src/Transport + src/SaveTransfer, 2026-07-24)
+
+- **Non-blocking DirectTransport sends:** Send/Broadcast only ENQUEUE into a bounded per-peer queue
+  (96 MB — fits a whole save-blob fan-out); ONE writer thread per peer preserves frame order. A
+  non-reading peer can no longer freeze the host main thread mid-fan-out: queue overflow or a >30 s
+  write stall drops the peer through the existing peer-lost chokepoint. Teardown = flush-then-close
+  (1 s grace) so terminal notices (HostDisconnected/ClientLeave/rejects) still reach the peer;
+  writers always close their socket on exit. Wire-supplied frame length capped at 64 MB (uncapped
+  alloc from port scanners); packet drain dispatches handlers outside the lock. SteamTransport: 1 s
+  grace before `CloseP2PSession` after terminal sends — queued terminal notices are not discarded
+  with the session.
+- **Transfer-stall deadline (client wedge):** host-loss detectors are suspended only while the save
+  transfer shows PROGRESS (`SaveTransferCoordinator.LastProgressMs` — bumped on chunks/snapshots/
+  flag edges/phase-2 percent); 60 s with no progress re-arms them, so a silently dead host fires the
+  normal teardown instead of parking the client at "Waiting for players..." forever.
+- **Curtain parked-lift root fix:** `CurtainLiftGatePatch` frame-stamps parked lifts;
+  `PerformDeferredLift` skips its direct `LiftCurtain` when a parked native lift resumes (single
+  tail — no competing `_currentFadingRoutine.Stop()`). `RepairRevealInputLock` stays as belt; firing
+  >2 s after reveal logs LOUD.
+- **Membership gates:** chat + rail resync-requests from senders not on the roster are dropped (no
+  "Player" injection, no unthrottled full resends).
+
 ## Verification (mandate §4)
 
 - **Stage 1 = `tools/RailCheck` (BUILT 2026-07-18).** `cd tools/RailCheck && dotnet run -c Debug`
@@ -274,7 +369,10 @@ messages, sim gates (law 4b).
     coverage is non-vacuous (it is a re-inclusion — reaching zero silently kills inventory sync);
     **L10** element ORDER survives the wire: an EntityList blob decodes in live order,
     `ReuseLiveElements` maps value-equal elements 1:1 back onto live instances (a reorder moves
-    objects, never husks them), `ReorderByKeys` rearranges keyed collections in place by key.
+    objects, never husks them), `ReorderByKeys` rearranges keyed collections in place by key;
+    **L11** no `LocalizedTextBind` field/element rides covered — the STATIC belt for the runtime
+    DefOwnership law (the known def-laundering vector; the runtime reference-identity law itself
+    needs a live `DefRepository` and is harness-invisible — see the baseline header note).
   - It probes the codec (`ProbePolymorphicCodec`) rather than assuming: declared-type-only vs
     polymorphic decides the type closure, so "the ship side widened" is a detected event.
   - `docs/rail-baseline.txt` is the committed snapshot — full classifier table, per-type blob **husk**
@@ -294,6 +392,8 @@ messages, sim gates (law 4b).
   - The diff layer proper and `GenericApplier`'s resolve path are still untested: `DiffEngine.Tick`'s
     snapshot/compare/emit is inline in a method needing a live `GeoLevelController`. Of that layer only
     the separable halves are covered — tombstone (L7) and seq (L8).
+  - `IntentRail` and `IntentDedup` have NO harness law (honest gap): nonce allocation, dedup
+    idempotence, dispatch and reject-reconverge discipline are exercised only by the in-game gate.
   - The closure is DECLARED types from the `IdentityResolver.Roots` kinds; runtime subtypes only
     enter it when the codec is polymorphic. Fields the live walk reaches through a subtype are invisible.
   - **It cannot catch a ship-side rule change that makes an already-classified type start riding as a
@@ -352,14 +452,20 @@ messages, sim gates (law 4b).
 
 ## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
-1. Research (almost no identity) — end-to-end first.
-2. Wallet/Resources (pure value) + sim-gating seam + risk-2 test.
-3. Manufacturing (queue, minimal identity).
-4. Diplomacy (mostly values).
-5. Personnel (structural begins: soldiers, inventory, refs).
-6. Aircraft.
-7. GeoSites (spawn/despawn, fog, Unity views).
+1. Research — **DONE pending in-game gate** (0xAA/0xAB + generic rail; MsgQueue transitional until
+   the order-vector gate).
+2. Wallet/Resources — **DONE pending in-game gate** (rides the generic rail 0xAC + `ClientSimGate`;
+   repaint via native ResourcesChanged + open-screen dirty-mark).
+3. Manufacturing — **DONE pending in-game gate** (0xAD order snapshot + 0xAE intents + scrap-mode
+   snapshot resync).
+4. Diplomacy (mostly values) — not started.
+5. Personnel — intent+value layer **DONE pending in-game gate** (0xAF spendStats/buyAbility/
+   secondSpec; hire/death structural still open).
+6. Aircraft — not started (scalar subset already rides the generic rail).
+7. GeoSites (spawn/despawn, fog, Unity views) — not started.
 8. Mission generation — last.
+Time (unnumbered, rode along 2026-07-23): **DONE pending in-game gate** — 0xB0 intents + "TA"
+anchor + EnforceDrift (see Time sync section).
 Tactical: quarantined port from quarry, mostly as-is, `src/Tactical/` — separate track.
 
 ## Quarry transfer list (verbatim, ~45 files — landed by skeleton stage)
