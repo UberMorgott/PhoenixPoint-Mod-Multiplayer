@@ -232,15 +232,24 @@ namespace Multiplayer.Network.Sync
                 [typeof(UIStateManufacturing)] = (s, v) => { ManufactureSync.RepaintManufacturingUi(); return true; },
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
-                    EsSelectProgression != null // resolve-all-first: decline BEFORE the reseed mutates anything
-                    && ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)
-                    && Call(EsSelectProgression, s, v.GeoscapeModules.ActorCycleModule.CurrentCharacter),
+                {
+                    if (EsSelectProgression == null) return false; // resolve-all-first: decline BEFORE the reseed mutates anything
+                    if (!ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)) return false;
+                    var cur = v.GeoscapeModules.ActorCycleModule.CurrentCharacter;
+                    // Own-gesture echo: the progression stage already shows the post-delta model — a reseed
+                    // would repaint zero difference and only wipe the staged decrement floor (the minus
+                    // button's undo affordance). Foreign changes always mismatch → full native reseed.
+                    return PersonnelSync.ProgressionPanelInSync(v.GeoscapeModules.CharacterProgressionModule, cur)
+                           || Call(EsSelectProgression, s, cur);
+                },
                 [typeof(UIStateEditVehicle)] = (s, v) =>
                 {
                     var mods = v.GeoscapeModules;
                     if (!ReseedEquipScreen(s, mods, EvRefreshFlag, EvGetData, EvDisplay, EvRefreshStorage)) return false;
-                    // progression panel: EnterState calls the module directly (UIStateEditVehicle.cs:162)
-                    mods.CharacterProgressionModule.SetCharacterProgression(Viewer(), mods.ActorCycleModule.CurrentCharacter);
+                    // progression panel: EnterState calls the module directly (UIStateEditVehicle.cs:162);
+                    // same own-echo reseed skip as the edit-soldier entry (crew stat clicks stage here too)
+                    if (!PersonnelSync.ProgressionPanelInSync(mods.CharacterProgressionModule, mods.ActorCycleModule.CurrentCharacter))
+                        mods.CharacterProgressionModule.SetCharacterProgression(Viewer(), mods.ActorCycleModule.CurrentCharacter);
                     return true;
                 },
                 [typeof(UIStateGeoRoster)] = (s, v) =>

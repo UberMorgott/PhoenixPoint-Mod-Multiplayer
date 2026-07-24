@@ -41,17 +41,35 @@ namespace Multiplayer.Network.Sync
     ///
     /// The UI methods below ARE the family's chokepoints, not "one button" — every geoscape entry
     /// point funnels through them (verified by call-site sweep over the decompile):
-    ///   • <c>CommitStatChanges</c> (:367) — the ONE write of base stats + personal SP + faction pool +
-    ///     mutagen. Reached from UIStateEditSoldier:232 (leave screen), :363 (switch soldier), :715
-    ///     (after a buy), and from the two module methods below.
+    ///   • <c>ChangeCharacterStat</c> (:875) — the ONE stat up/down CLICK funnel (all six buttons route
+    ///     through ChangeStrengthStat/ChangeWillStat/ChangeSpeedStat :848/:857/:866); returns ±1 on a
+    ///     staged gesture, 0 on a refused one. Law 11: each accepted click is its own op=1 intent
+    ///     (client) / immediate model apply (host) — reactivity per GESTURE, never deferred to the
+    ///     screen-exit commit (the pre-2026-07-25 lazy path the user reported as the stat-spend bug).
+    ///   • <c>CommitStatChanges</c> (:367) — natively the ONE stage→model flush (base stats + ABSOLUTE
+    ///     SP pools, :375/:378; reached from UIStateEditSoldier:232/:363/:715 and the two methods
+    ///     below). In a session it is a pure SKIP on every peer: per-click seams already put everything
+    ///     in the model, and the absolute pool write is exactly what reverted foreign SP spends when a
+    ///     peer sat on a stale stage (review risk 2026-07-25). Skip = no double apply, by construction.
+    ///   • <c>ConsumeAbilityCost</c> (:428) — the staged SP debit of a perk/second-class buy; with the
+    ///     commit skipped the HOST applies its stage delta to the model right here (mutoid branch :432
+    ///     already hits the wallet natively). Client never reaches it — both callers are blocked below.
     ///   • <c>BuyAbility</c> (:389) — ability/perk purchase (human LearnAbility + mutoid AddAbility).
     ///   • <c>ChoseSecondSpecialization</c> (:813) — the second-class purchase (AddSecondaryClass).
     ///   • <c>UIStateGeoRoster.OnActionSlotTransferInitiated</c> (:292) — the ONE roster base⇄vehicle
     ///     transfer seam (drag and action-menu both funnel through it).
     ///
-    /// HOST replay runs the identical native model calls those three make: <c>ModifyBaseStat</c> (:369-373),
+    /// HOST replay runs the identical native model calls those seams make: <c>ModifyBaseStat</c> (:369-373),
     /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820) — with the SP
     /// economy re-derived from the HOST's own numbers (<see cref="Charge"/>), never from the wire.
+    ///
+    /// UNDO ("туда-сюда") — native staging stays ALIVE on both peers: ChangeCharacterStat's own gates
+    /// (floor at the screen-entry value :907, affordability :892-903, minus-button interactability
+    /// :795-808) keep gating clicks, so each minus gesture is a legal −1 the host applies as the
+    /// symmetric refund (cost of stepping down from v == cost of stepping up to v, GetBaseStatCost).
+    /// +1 then −1 nets to zero on every peer; leaving an untouched screen sends nothing. The staged
+    /// floor survives the gesture's own echo because <see cref="ProgressionPanelInSync"/> lets the
+    /// repaint skip the reseed when the stage already shows the post-delta model.
     ///
     /// WHAT THE WIRE DELIBERATELY DOES NOT CARRY: any balance. Both halves of the SP economy are
     /// rail-covered Leafs (rail-baseline.txt: <c>CharacterProgression.SkillPoints</c> :95,
@@ -62,7 +80,7 @@ namespace Multiplayer.Network.Sync
     public static class PersonnelSync
     {
         // Intent ops (GeoPersonnelIntent inner payload) — each maps onto the native commit it replaces.
-        private const byte OpSpendStats = 1;  // CommitStatChanges           → ModifyBaseStat ×3 + SP debit
+        private const byte OpSpendStats = 1;  // one stat click (±1)         → ModifyBaseStat + SP debit/refund
         private const byte OpBuyAbility = 2;  // BuyAbility                  → LearnAbility / AddAbility
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
         private const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
@@ -74,13 +92,13 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo FCurStrength = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentStrengthStat");
         private static readonly FieldInfo FCurWill = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentWillStat");
         private static readonly FieldInfo FCurSpeed = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentSpeedStat");
-        // …and the pre-edit snapshot it is diffed against. BOTH halves are DERIVED display values
-        // (RefreshStats:515-518 seeds them from GetProgressionBaseStats() + the Bonus* stats, i.e.
-        // GetBaseStat(x) + Σ bodyPart aspect + augment bonus), so only their DIFFERENCE is meaningful
-        // at model level — which is exactly what native CommitStatChanges:369-373 feeds ModifyBaseStat.
-        private static readonly FieldInfo FStartStrength = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingStrengthStat");
-        private static readonly FieldInfo FStartWill = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingWillStat");
-        private static readonly FieldInfo FStartSpeed = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingSpeedStat");
+        // The _current* stats are DERIVED display values (RefreshStats:515-518 seeds them from
+        // GetProgressionBaseStats() + the Bonus* stats, i.e. GetBaseStat(x) + Σ bodyPart aspect +
+        // augment bonus) — same scale ApplyStats validates on. The staged pool copies are read to
+        // (a) diff a click's pool cost on the host and (b) detect stage==model for the reseed skip.
+        private static readonly FieldInfo FCurSkillPoints = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentSkillPoints");
+        private static readonly FieldInfo FCurFactionPoints = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentFactionPoints");
+        private static readonly FieldInfo FCurMutagens = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentMutagens");
         private static readonly FieldInfo FBoughtSlot = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySlot");
         private static readonly FieldInfo FBoughtAbility = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbility");
         private static readonly FieldInfo FBoughtSource = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySource");
@@ -96,14 +114,14 @@ namespace Multiplayer.Network.Sync
             {
                 _bindChecked = true;
                 if (FCharacter == null || FCurStrength == null || FCurWill == null || FCurSpeed == null ||
-                    FStartStrength == null || FStartWill == null || FStartSpeed == null ||
+                    FCurSkillPoints == null || FCurFactionPoints == null || FCurMutagens == null ||
                     FBoughtSlot == null || FBoughtAbility == null || FBoughtSource == null || FBoughtLevel == null)
                     Debug.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
                                    "stat/ability intents CANNOT be captured; client edits will not sync.");
                 else
                     Debug.Log("[MP][personnel] view-model fields bound");
             }
-            return FCharacter != null && FBoughtSlot != null && FStartStrength != null;
+            return FCharacter != null && FBoughtSlot != null && FCurSkillPoints != null;
         }
 
         public static void Reset() => ResetForReloadBoundary();
@@ -150,51 +168,170 @@ namespace Multiplayer.Network.Sync
         // ─── Harmony seams (law 4a, intent-capture only — this file owns no other patch) ──
 
         /// <summary>
-        /// Intent capture for the STAT/SP commit. On a client the native body NEVER runs during a session,
-        /// even when nothing changed: it would still write <c>SkillPoints</c> and the faction pool from the
-        /// module's staged copy, which is exactly the stale view→model flush that reverted applied intents
-        /// on the equip screen (see <see cref="EquipFlushGate"/>). Blocking leaves the staged edit visible
-        /// until the rail's universal repaint re-enters the screen and re-seeds it from the mirrored model.
-        ///
-        /// Composes with <see cref="EquipFlushGate"/>, which already prefixes this method: Harmony skips
-        /// later prefixes once one returns false, and both orders are correct here (that gate blocks
-        /// exactly when we must not emit either — inside an apply, or during session teardown).
+        /// Per-CLICK seam (law 11): every stat up/down gesture the native stage ACCEPTED (__result ±1;
+        /// 0 = native's own floor/affordability gates :892-931 refused it — zero traffic) becomes model
+        /// truth immediately. The native body always runs first — it is pure VIEW staging (updates
+        /// _current* copies, no model write), and keeping it alive keeps the whole native UX: instant
+        /// numbers, minus-button floor at screen entry (:795-808), affordability greying.
+        ///   • CLIENT: ship the gesture as op=1 with a single-stat ±1 delta (existing wire shape). The
+        ///     model stays untouched until the host's delta mirrors back (law 3) — the stage is only a
+        ///     local preview, and <see cref="ProgressionPanelInSync"/> keeps the echo from wiping it.
+        ///   • HOST: apply the exact staged delta to the model here — ModifyBaseStat(±1) plus the pool
+        ///     delta the native body just staged (prefix snapshot diff; mutoid clicks stage mutagens
+        ///     → wallet). The rail's diff tick then carries it to every client: host spends are as
+        ///     reactive as client ones.
+        /// No double apply: <see cref="CommitStatsNeutralizePatch"/> skips the native stage→model flush
+        /// for the whole session, so a click is applied exactly once — here (host) or via the intent
+        /// replay (client) — and never again at screen exit / soldier switch / post-buy.
         /// </summary>
-        [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.CommitStatChanges))]
-        internal static class CommitStatsCapturePatch
+        [HarmonyPatch(typeof(UIModuleCharacterProgression), "ChangeCharacterStat")]
+        internal static class StatClickPatch
         {
-            private static bool Prefix(UIModuleCharacterProgression __instance)
+            private static void Prefix(UIModuleCharacterProgression __instance, out int[] __state)
             {
-                if (ShouldRunNative()) return true;
-                if (!BindOk()) return false; // never write locally, even when we cannot read the gesture
+                __state = SnapshotPools(__instance);
+            }
+
+            private static void Postfix(UIModuleCharacterProgression __instance, CharacterBaseAttribute baseStat,
+                                        int[] __state, int __result)
+            {
+                if (__result == 0 || __state == null) return;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return; // solo: fully native
+                if (SyncApplyScope.Active) return;                     // law 8: never echo an apply
+                if (!BindOk()) return;
                 try
                 {
                     var character = FCharacter.GetValue(__instance) as GeoCharacter;
-                    var progression = character?.Progression;
-                    if (progression == null) return false;
+                    if (character?.Progression == null) return;
 
-                    // Native's OWN no-op test (IsCharacterChanged:358) — the same one UIStateEditSoldier:361
-                    // gates its commit with, so a screen exit that changed nothing asks for nothing.
-                    if (!__instance.IsCharacterChanged()) return false;
+                    if (!engine.IsHost)
+                    {
+                        int dStr = baseStat == CharacterBaseAttribute.Strength ? __result : 0;
+                        int dWill = baseStat == CharacterBaseAttribute.Will ? __result : 0;
+                        int dSpeed = baseStat == CharacterBaseAttribute.Speed ? __result : 0;
+                        IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
+                            "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
+                            w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
+                        return;
+                    }
 
-                    // Ship the DELTA, never the absolute: _current*/_starting* are derived DISPLAY values
-                    // (base stat + Σ bodypart aspect + augment bonus, RefreshStats:515-518), so an absolute
-                    // is on a different scale than progression.GetBaseStat and the host would reject it as
-                    // out of range. Their difference is exactly what native feeds ModifyBaseStat (:369-373)
-                    // and it is offset-free. ponytail: a client whose view is stale by an unseen host spend
-                    // can still ask for one increment too many — the host's own Charge()/CanModifyBaseStat
-                    // is the authority that refuses it, which is the same guard native relies on.
-                    int dStr = (int)FCurStrength.GetValue(__instance) - (int)FStartStrength.GetValue(__instance);
-                    int dWill = (int)FCurWill.GetValue(__instance) - (int)FStartWill.GetValue(__instance);
-                    int dSpeed = (int)FCurSpeed.GetValue(__instance) - (int)FStartSpeed.GetValue(__instance);
-
-                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
-                        "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
-                        w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
+                    character.Progression.ModifyBaseStat(baseStat, __result); // fires the native derived-stat recompute
+                    ApplyStagedPoolDelta(__instance, character, __state);
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] stat capture failed: " + ex); }
-                return false;
+                catch (Exception ex) { Debug.LogError("[MP][personnel] stat click seam failed: " + ex); }
             }
+        }
+
+        /// <summary>
+        /// HOST model apply for the staged SP debit of a perk / second-class buy (ConsumeAbilityCost:435-441
+        /// — human branch stages _currentSkillPoints/_currentFactionPoints; the mutoid branch :432 already
+        /// hits the wallet natively, its stage diff is zero here). Needed because the commit that natively
+        /// flushed this stage is skipped for the session. Client never runs the native callers (BuyAbility /
+        /// ChoseSecondSpecialization are blocked below), so this is host-only by construction — the IsHost
+        /// gate is the belt.
+        /// </summary>
+        [HarmonyPatch(typeof(UIModuleCharacterProgression), "ConsumeAbilityCost")]
+        internal static class ConsumeCostApplyPatch
+        {
+            private static void Prefix(UIModuleCharacterProgression __instance, out int[] __state)
+            {
+                __state = SnapshotPools(__instance);
+            }
+
+            private static void Postfix(UIModuleCharacterProgression __instance, int[] __state)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                if (SyncApplyScope.Active || __state == null || !BindOk()) return;
+                try
+                {
+                    var character = FCharacter.GetValue(__instance) as GeoCharacter;
+                    if (character?.Progression == null) return;
+                    ApplyStagedPoolDelta(__instance, character, __state);
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] consume-cost seam failed: " + ex); }
+            }
+        }
+
+        /// <summary>[SP, factionSP, mutagens] staged copies — null when the fields did not bind.</summary>
+        private static int[] SnapshotPools(UIModuleCharacterProgression module)
+        {
+            if (!BindOk() || FCurFactionPoints == null || FCurMutagens == null) return null;
+            return new[]
+            {
+                (int)FCurSkillPoints.GetValue(module),
+                (int)FCurFactionPoints.GetValue(module),
+                (int)FCurMutagens.GetValue(module),
+            };
+        }
+
+        /// <summary>Move what the native body just STAGED into the model, relatively (never absolutes —
+        /// the absolute flush is the stale-stage revert this family kills). Wallet mutagens mirror the
+        /// native commit's own delta form (:380-382).</summary>
+        private static void ApplyStagedPoolDelta(UIModuleCharacterProgression module, GeoCharacter character, int[] before)
+        {
+            int dSp = (int)FCurSkillPoints.GetValue(module) - before[0];
+            int dFp = (int)FCurFactionPoints.GetValue(module) - before[1];
+            int dMut = (int)FCurMutagens.GetValue(module) - before[2];
+            if (dSp != 0) character.Progression.SkillPoints += dSp;
+            if (dFp != 0 && character.Faction is GeoPhoenixFaction phoenix) phoenix.Skillpoints += dFp;
+            if (dMut < 0) character.Faction.Wallet.Take(new ResourceUnit(ResourceType.Mutagen, -dMut), OperationReason.Purchase);
+            else if (dMut > 0) character.Faction.Wallet.Give(new ResourceUnit(ResourceType.Mutagen, dMut), OperationReason.Refund);
+        }
+
+        /// <summary>
+        /// Session-wide neutralization of the native stage→model flush, BOTH peers. Everything the flush
+        /// would transfer already reached the model at gesture time (host: <see cref="StatClickPatch"/> +
+        /// <see cref="ConsumeCostApplyPatch"/>; client: the op=1 replay), so letting it run could only
+        /// (a) double-apply the staged diff or (b) write the ABSOLUTE SP pools (:375/:378) from a stage
+        /// that went stale while a foreign spend landed — the host-side revert found in review. An exit
+        /// with no gestures was already zero traffic and stays so (nothing staged, nothing sent).
+        ///
+        /// Composes with <see cref="EquipFlushGate"/>, which also prefixes this method (it blocks inside
+        /// an apply and during session teardown; Harmony skips later prefixes once one returns false).
+        /// </summary>
+        [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.CommitStatChanges))]
+        internal static class CommitStatsNeutralizePatch
+        {
+            private static bool Prefix()
+            {
+                var engine = NetworkEngine.Instance;
+                return engine == null || !engine.IsActiveSession; // solo native; in-session: skip on host AND client
+            }
+        }
+
+        /// <summary>
+        /// Reseed skip for the repaint seam (UiNativeRepaint's edit-soldier / edit-vehicle entries): TRUE
+        /// when the progression panel's staged copies already equal the model for the bound character —
+        /// i.e. the arriving delta is the echo of this machine's own gesture and a reseed would repaint
+        /// ZERO difference while destroying the only thing it holds: the staged floor (_starting*) that
+        /// keeps the minus button lit (:795-808) and the decrement gate open (:907). Any foreign change
+        /// (someone else's spend, a perk landing, an augment shifting Bonus*) mismatches ≥1 value and the
+        /// full native reseed runs, floor reset included — the same reset native itself does after a buy
+        /// (UIStateEditSoldier:716). ponytail: a ZERO-cost ability buy moves no compared number and would
+        /// be skipped — no vanilla ability is SP-free; drop the skip for abilities-count too if a mod ships one.
+        /// </summary>
+        internal static bool ProgressionPanelInSync(UIModuleCharacterProgression module, GeoCharacter current)
+        {
+            try
+            {
+                if (module == null || current == null || !BindOk()) return false;
+                if (!ReferenceEquals(FCharacter.GetValue(module), current)) return false;
+                if (current.TemplateDef == null || !current.TemplateDef.IsHuman) return false; // vehicle panel never stages
+                var progression = current.Progression;
+                if (progression == null || current.Faction == null) return false;
+                var baseStats = current.GetProgressionBaseStats();
+                if ((int)FCurStrength.GetValue(module) != (int)(baseStats.Endurance + current.BonusStrength)) return false;
+                if ((int)FCurWill.GetValue(module) != (int)(baseStats.Willpower + current.BonusWillpower)) return false;
+                if ((int)FCurSpeed.GetValue(module) != (int)(baseStats.Speed + current.BonusSpeed)) return false;
+                if ((int)FCurSkillPoints.GetValue(module) != progression.SkillPoints) return false;
+                var phoenix = current.Faction as GeoPhoenixFaction;
+                if ((int)FCurFactionPoints.GetValue(module) != (phoenix == null ? 0 : phoenix.Skillpoints)) return false;
+                if ((int)FCurMutagens.GetValue(module) != current.Faction.Wallet[ResourceType.Mutagen].RoundedValue) return false;
+                return true;
+            }
+            catch { return false; } // any doubt → full reseed, never a stale panel
         }
 
         /// <summary>Intent capture for an ability/perk purchase. The bought slot is addressed by its TRACK
@@ -355,17 +492,23 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Replay of <c>CommitStatChanges</c>:369-375 at model level. The wire carries the same
-        /// INCREMENTS native feeds <c>ModifyBaseStat</c> (see the capture patch for why an absolute cannot
-        /// travel: the module's numbers are bonus-inflated display values). Cost and cap are checked on the
-        /// DISPLAY scale, exactly like the native per-click gate (ChangeCharacterStat:879-881/:909 —
-        /// CanModifyBaseStat(display+1) + GetBaseStatCost(display+1)), where display =
-        /// GetProgressionBaseStats() + Bonus* (RefreshStats:515-518) = base stat + Σ bodypart aspect +
-        /// augment bonus. Charging on the BASE scale undercharged (cost is value-dependent:
-        /// CharacterProgression.cs:274-294, Strength=value/2, Will/Speed=value) and let the display value
-        /// pass the sheet cap. The increments still land on the base stat — one click is +1 on both scales.
-        /// A DECREASE is never accepted (the native UI cannot commit one either — it clamps at the starting
-        /// value, UIModuleCharacterProgression.cs:907).</summary>
+        /// <summary>Replay of one stat GESTURE (per-click ±1 since 2026-07-25; the shape still takes the
+        /// three-delta wire body unchanged). Cost and cap are checked on the DISPLAY scale, exactly like
+        /// the native per-click gate (ChangeCharacterStat:879-881/:909 — CanModifyBaseStat(display±1) +
+        /// GetBaseStatCost), where display = GetProgressionBaseStats() + Bonus* (RefreshStats:515-518) =
+        /// base stat + Σ bodypart aspect + augment bonus. Charging on the BASE scale undercharged (cost is
+        /// value-dependent: CharacterProgression.cs:274-294, Strength=value/2, Will/Speed=value) and let
+        /// the display value pass the sheet cap. The increments still land on the base stat — one click
+        /// is ±1 on both scales.
+        ///
+        /// A DECREASE is the undo half of "туда-сюда": refund per step = GetBaseStatCost of the value
+        /// being stepped down FROM — the native decrement's own math (:909), the exact mirror of the
+        /// increment's cost, so +1 then −1 is SP-neutral to the last point. The gesturing peer's native
+        /// stage already floors decrements at its screen-entry value (:907); host-side the floor is the
+        /// model's own (display ≥ 0, base ≥ 0 so the ModifyBaseStat clamp can never out-run the refund).
+        /// ponytail: refunds land in personal SkillPoints (and a faction-pool-funded +1 undone moves that
+        /// SP personal) — the exchange rate is identical both ways so nothing is minted; track a per-visit
+        /// pool split if it ever matters.</summary>
         private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed)
         {
             var progression = character.Progression;
@@ -378,23 +521,45 @@ namespace Multiplayer.Network.Sync
                 (int)(baseStats.Willpower + character.BonusWillpower),
                 (int)(baseStats.Speed + character.BonusSpeed),
             };
-            int total = 0;
+            int total = 0; // net SP (mutagen for mutoids): >0 charge, <0 refund
+            bool any = false;
             for (int i = 0; i < 3; i++)
             {
+                if (delta[i] == 0) continue;
+                any = true;
                 int want = display[i] + delta[i];
-                if (delta[i] < 0) { Reject(peer, (int)character.Id, "stat decrease " + stats[i]); return false; }
-                // Bounds the cost loop below as well: CanModifyBaseStat rejects anything above the sheet
-                // maximum (and a display+delta overflow wraps negative → also rejected), so a hostile
-                // delta=int.MaxValue cannot spin here.
-                if (delta[i] > 0 && !progression.CanModifyBaseStat(stats[i], want))
+                // Bounds both cost loops below as well: CanModifyBaseStat rejects anything outside
+                // [0, sheet max] (and a display+delta overflow wraps → also rejected), so a hostile
+                // delta=±int.MaxValue cannot spin here.
+                if (!progression.CanModifyBaseStat(stats[i], want))
                 { Reject(peer, (int)character.Id, "stat out of range " + stats[i] + "=" + want); return false; }
+                // The refund walks DISPLAY steps but ModifyBaseStat moves the BASE stat, clamped at 0 —
+                // never refund steps the clamp would swallow (display > base by the bonus offset).
+                if (delta[i] < 0 && progression.GetBaseStat(stats[i]) + delta[i] < 0)
+                { Reject(peer, (int)character.Id, "stat below base floor " + stats[i]); return false; }
                 for (int v = display[i] + 1; v <= want; v++) total += progression.GetBaseStatCost(stats[i], v);
+                for (int v = display[i]; v > want; v--) total -= progression.GetBaseStatCost(stats[i], v);
             }
-            if (total == 0) return false; // no-op intent (client view was already behind)
-            if (!Charge(character, total)) { Reject(peer, (int)character.Id, "cannot afford " + total + " SP"); return false; }
+            if (!any) return false; // no-op intent (client view was already behind)
+            if (total > 0 && !Charge(character, total))
+            { Reject(peer, (int)character.Id, "cannot afford " + total + " SP"); return false; }
+            if (total < 0) Refund(character, -total);
             for (int i = 0; i < 3; i++)
                 if (delta[i] != 0) progression.ModifyBaseStat(stats[i], delta[i]);
             return true;
+        }
+
+        /// <summary>Inverse of <see cref="Charge"/> for the undo gesture — mutoids get mutagens back in
+        /// the wallet, humans get personal SkillPoints (see the ApplyStats ponytail note on the split).</summary>
+        private static void Refund(GeoCharacter character, int amount)
+        {
+            if (amount <= 0) return;
+            if (character.IsMutoid)
+            {
+                character.Faction?.Wallet?.Give(new ResourceUnit(ResourceType.Mutagen, amount), OperationReason.Refund);
+                return;
+            }
+            character.Progression.SkillPoints += amount;
         }
 
         /// <summary>Replay of <c>BuyAbility</c>:391-417 at model level.</summary>
