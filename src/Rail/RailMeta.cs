@@ -66,17 +66,39 @@ namespace Multiplayer.Network.Sync
 
         internal FieldInfo Fi;
         internal PropertyInfo Pi;
+        // Twin coercions (bridge/twin tables only — a direct-source member always matches its own type):
+        internal FieldInfo HopFi;    // alias chain "Hop.Member": entity → hop object (class) → Fi/Pi
+        internal FieldInfo WrapFi;   // live member is a one-field wrapper struct around ValueType
+                                     // (EarthUnits.Value ← float): unwrap on read, re-wrap on write
+        internal bool FactionRef;    // live member is GeoFaction, ValueType its def — unwrap to the def
+                                     // on read; the WRITE lookup needs a GeoLevelController and lives in
+                                     // GenericApplier (RailMeta.FactionByDef)
         private Func<object, object> _get;   // compiled once per member — see RailMeta.BuildGetter
 
         public bool CanRead => Fi != null || (Pi != null && Pi.CanRead);
 
         /// <summary>The host walk reads ~22k members every tick, so this goes through a compiled accessor
         /// cached beside the (already cached) RailType metadata instead of raw reflection. Same member,
-        /// same value — cost only.</summary>
-        public object GetValue(object o) => (_get ?? (_get = RailMeta.BuildGetter(this)))(o);
+        /// same value — cost only. Twin coercions (hop/unwrap) run only on fields that carry them.</summary>
+        public object GetValue(object o)
+        {
+            if (HopFi != null && (o = HopFi.GetValue(o)) == null) return null;
+            var v = (_get ?? (_get = RailMeta.BuildGetter(this)))(o);
+            if (v == null) return null;
+            if (WrapFi != null) return WrapFi.GetValue(v);
+            if (FactionRef) return RailMeta.DefOfFaction(v, ValueType);
+            return v;
+        }
 
         public void SetValue(object o, object v)
         {
+            if (HopFi != null && (o = HopFi.GetValue(o)) == null) return; // hop not initialised — nothing to write into
+            if (WrapFi != null && v != null)
+            {
+                var boxed = Activator.CreateInstance(RailMeta.MemberType((MemberInfo)Fi ?? Pi));
+                WrapFi.SetValue(boxed, v);
+                v = boxed;
+            }
             if (Fi != null) Fi.SetValue(o, v);
             else Pi.SetValue(o, v, null);
         }
@@ -146,17 +168,17 @@ namespace Multiplayer.Network.Sync
             var ser = RailMeta.GameSerializer;
             if (ser == null) return null; // pre-init — do NOT cache the miss
             rt = new RailType { Type = live, Source = "twin:" + dto.Name, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop)>();
             foreach (var dtoMi in RailMeta.SerializedMembers(ser, dto))
             {
                 var valType = RailMeta.MemberType(dtoMi);
-                var liveMi = RailMeta.ResolveLive(live, dtoMi.Name, valType, out var alias);
-                raw.Add((dtoMi.Name, valType, liveMi, alias, liveMi == null ? "dto-twin unresolved" : null));
+                var liveMi = RailMeta.ResolveLive(live, dtoMi.Name, valType, out var alias, out var hop);
+                raw.Add((dtoMi.Name, valType, liveMi, alias, liveMi == null ? "dto-twin unresolved" : null, hop));
             }
             foreach (var e in raw.OrderBy(e => e.name, StringComparer.Ordinal))
             {
                 if (rt._byName.ContainsKey(e.name)) continue; // hierarchy duplicate — first wins
-                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail);
+                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail, e.hop);
                 rt.Fields.Add(f);
                 rt._byName[e.name] = f;
             }
@@ -167,14 +189,14 @@ namespace Multiplayer.Network.Sync
         private static RailType Build(Type t, Serializer ser)
         {
             var rt = new RailType { Type = t, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop)>();
 
             var direct = RailMeta.SerializedMembers(ser, t);
             if (direct.Count > 0)
             {
                 rt.Source = "direct";
                 foreach (var mi in direct)
-                    raw.Add((mi.Name, RailMeta.MemberType(mi), mi, null, null));
+                    raw.Add((mi.Name, RailMeta.MemberType(mi), mi, null, null, null));
             }
             else
             {
@@ -188,7 +210,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var dtoMi in RailMeta.SerializedMembers(ser, bridge))
                 {
                     var valType = RailMeta.MemberType(dtoMi);
-                    var live = RailMeta.ResolveLive(t, dtoMi.Name, valType, out var alias);
+                    var live = RailMeta.ResolveLive(t, dtoMi.Name, valType, out var alias, out var hop);
 
                     // A DTO slot declared `object` is POLYMORPHIC: the game fills it at record time with a
                     // type the LIVE type itself declares (GeoFactionInstanceData.ExtendedInstanceData:48 is
@@ -208,38 +230,48 @@ namespace Multiplayer.Network.Sync
                         foreach (var nMi in RailMeta.SerializedMembers(ser, nested))
                         {
                             var nType = RailMeta.MemberType(nMi);
-                            var nLive = RailMeta.ResolveLive(t, nMi.Name, nType, out var nAlias);
-                            raw.Add((nMi.Name, nType, nLive, nAlias, nLive == null ? "bridge-unresolved" : null));
+                            var nLive = RailMeta.ResolveLive(t, nMi.Name, nType, out var nAlias, out var nHop);
+                            raw.Add((nMi.Name, nType, nLive, nAlias, nLive == null ? "bridge-unresolved" : null, nHop));
                         }
                         // The slot itself is not a field (there is no live member to read); keep the line so
                         // the baseline shows WHERE the flattened members came from.
-                        raw.Add((dtoMi.Name, valType, null, null, "flattened onto live type (" + nested.FullName + ")"));
+                        raw.Add((dtoMi.Name, valType, null, null, "flattened onto live type (" + nested.FullName + ")", null));
                         continue;
                     }
 
-                    raw.Add((dtoMi.Name, valType, live, alias, live == null ? "bridge-unresolved" : null));
+                    raw.Add((dtoMi.Name, valType, live, alias, live == null ? "bridge-unresolved" : null, hop));
                 }
             }
 
             foreach (var e in raw.OrderBy(e => e.name, StringComparer.Ordinal))
             {
                 if (rt._byName.ContainsKey(e.name)) continue; // hierarchy duplicate — first wins
-                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail);
+                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail, e.hop);
                 rt.Fields.Add(f);
                 rt._byName[e.name] = f;
             }
             return rt;
         }
 
-        private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail)
+        private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop = null)
         {
-            var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo };
+            var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo, HopFi = hop };
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
             if (RailMeta.IsPresentation(valType))
             { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
             var optOut = RailMeta.OptOutReason(live.DeclaringType, name);
             if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
+
+            // ResolveLive may accept a live member of a DIFFERENT type than the DTO declares (the codec
+            // always speaks the DTO type — wire parity); record which coercion bridges the two. Container
+            // shape (List↔HashSet↔GameTagsList) needs none: ApplyList dispatches on the live container.
+            var liveT = RailMeta.MemberType(live);
+            if (liveT != valType)
+            {
+                f.WrapFi = RailMeta.WrapperField(liveT, valType);
+                f.FactionRef = liveT == typeof(GeoFaction) && typeof(BaseDef).IsAssignableFrom(valType);
+            }
 
             // Leaf?
             if (RailMeta.LeafKindOf(valType, out var kind))
@@ -534,16 +566,48 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
-        /// <summary>Resolve a bridge member name onto the live type: same name first, then the UNIQUE live
-        /// member of the identical class type (catches renames like ManufactureQueue → Manufacture).</summary>
-        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias)
+        // Per-field twin aliases — the game's OWN Record/ProcessInstanceData mapping (decompile
+        // GeoVehicle.cs:1049-1129, GeoSite.cs:1528-1573) for members where neither name-, backing-field-
+        // nor unique-type matching can derive the live target. DATA only: resolution, classification and
+        // application still ride the one generic path. Key = declaring live type + DTO member name
+        // (looked up through base types, so DummyGeoVehicle inherits GeoVehicle's rows).
+        private static readonly Dictionary<string, string> _twinAliases = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.Name", "_vehicleName" },         // GeoVehicle.RecordInstanceData:1051 (the Name PROPERTY substitutes a localized default — not the store)
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.HitPoints", "Stats.HitPoints" }, // GeoVehicle.ProcessInstanceData:1119 (v3 arm; MaxHitPoints clamp is host-side truth)
+            { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
+        };
+
+        /// <summary>Resolve a bridge member name onto the live type: explicit twin alias first (the game's
+        /// own DTO→live mapping), then same name with a COMPATIBLE type (exact / one-field wrapper struct /
+        /// GeoFaction-for-def / same-element collection), then the `_name` backing-field convention (the
+        /// game exposes storage through read-only or shape-changed properties: _weapons/_modules/_addons),
+        /// then the UNIQUE live member of the identical class type (catches renames like
+        /// ManufactureQueue → Manufacture).</summary>
+        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out FieldInfo hop)
         {
             alias = null;
+            hop = null;
+            for (var cur = live; cur != null && cur != typeof(object); cur = cur.BaseType)
+            {
+                if (!_twinAliases.TryGetValue(cur.FullName + "." + name, out var target)) continue;
+                var am = ResolveAliasChain(live, target, valType, out hop);
+                if (am != null) { alias = target; return am; }
+                hop = null;
+                break; // an alias that no longer resolves must FAIL VISIBLY, not fall through to guessing
+            }
+
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
             var fi = HarmonyLib.AccessTools.Field(live, name);
-            if (fi != null && fi.FieldType == valType) return fi;
+            if (fi != null && TwinTypeCompatible(fi.FieldType, valType)) return fi;
             var pi = HarmonyLib.AccessTools.Property(live, name);
-            if (pi != null && pi.PropertyType == valType) return pi;
+            if (pi != null && TwinTypeCompatible(pi.PropertyType, valType)) return pi;
+
+            if (name[0] != '_')
+            {
+                var bf = HarmonyLib.AccessTools.Field(live, "_" + char.ToLowerInvariant(name[0]) + name.Substring(1));
+                if (bf != null && TwinTypeCompatible(bf.FieldType, valType)) { alias = bf.Name; return bf; }
+            }
 
             if (!valType.IsClass || valType == typeof(string)) return null; // unique-type fallback: class refs only
             MemberInfo unique = null;
@@ -560,6 +624,78 @@ namespace Multiplayer.Network.Sync
             }
             if (unique != null) alias = unique.Name;
             return unique;
+        }
+
+        /// <summary>An alias target, optionally one hop deep ("Stats.HitPoints"). The hop must be a
+        /// class-typed FIELD — writes go through the hop object by reference.
+        /// ponytail: single hop only; extend to a chain when a real mapping needs one.</summary>
+        private static MemberInfo ResolveAliasChain(Type live, string target, Type valType, out FieldInfo hop)
+        {
+            hop = null;
+            int dot = target.IndexOf('.');
+            if (dot < 0)
+            {
+                var m = (MemberInfo)HarmonyLib.AccessTools.Field(live, target) ?? HarmonyLib.AccessTools.Property(live, target);
+                return m != null && TwinTypeCompatible(MemberType(m), valType) ? m : null;
+            }
+            hop = HarmonyLib.AccessTools.Field(live, target.Substring(0, dot));
+            if (hop == null || hop.FieldType.IsValueType) { hop = null; return null; }
+            var leaf = target.Substring(dot + 1);
+            var mm = (MemberInfo)HarmonyLib.AccessTools.Field(hop.FieldType, leaf) ?? HarmonyLib.AccessTools.Property(hop.FieldType, leaf);
+            if (mm != null && TwinTypeCompatible(MemberType(mm), valType)) return mm;
+            hop = null;
+            return null;
+        }
+
+        /// <summary>Can a live member of type <paramref name="liveT"/> mirror a DTO value of type
+        /// <paramref name="dtoT"/>? Exact match; a one-field wrapper struct (EarthUnits ← float);
+        /// GeoFaction for its def (FactionRef coercion); or a same-element mutable collection the
+        /// existing ApplyList runtime dispatch already handles (List↔HashSet↔GameTagsList — never an
+        /// array, never a dictionary, and the container must actually be mutable in place).</summary>
+        private static bool TwinTypeCompatible(Type liveT, Type dtoT)
+        {
+            if (liveT == dtoT) return true;
+            if (WrapperField(liveT, dtoT) != null) return true;
+            if (liveT == typeof(GeoFaction) && typeof(BaseDef).IsAssignableFrom(dtoT)) return true;
+            var de = ElemTypeOf(dtoT);
+            return de != null && !liveT.IsArray && ElemTypeOf(liveT) == de &&
+                   GenericInterfaceArgs(liveT, typeof(IDictionary<,>)) == null &&
+                   GenericInterfaceArgs(dtoT, typeof(IDictionary<,>)) == null &&
+                   (typeof(IList).IsAssignableFrom(liveT) ||
+                    typeof(ICollection<>).MakeGenericType(de).IsAssignableFrom(liveT));
+        }
+
+        /// <summary>The single serialized, writable field of a one-member wrapper struct — the game's DTOs
+        /// store the naked value (GeoVehicleInstanceData.RangeRemaining: float) while the live member holds
+        /// the wrapper (GeoVehicle.RangeRemaining: EarthUnits, whose one member is float Value).</summary>
+        internal static FieldInfo WrapperField(Type liveT, Type dtoT)
+        {
+            if (!liveT.IsValueType || liveT.IsPrimitive || liveT.IsEnum) return null;
+            var ser = GameSerializer;
+            if (ser == null) return null;
+            var ms = SerializedMembers(ser, liveT);
+            return ms.Count == 1 && ms[0] is FieldInfo fi && !fi.IsInitOnly && fi.FieldType == dtoT ? fi : null;
+        }
+
+        /// <summary>Read half of the FactionRef coercion: the def the DTO records for a live GeoFaction
+        /// member (GeoVehicle.RecordInstanceData:1054 `Owner.Def.PPFactionDef`, GeoSite's records `Owner.Def`).</summary>
+        internal static object DefOfFaction(object faction, Type defType)
+        {
+            var def = (faction as GeoFaction)?.Def;
+            if (def == null) return null;
+            if (defType == typeof(PhoenixPoint.Common.Core.PPFactionDef)) return def.PPFactionDef;
+            return defType.IsInstanceOfType(def) ? def : null;
+        }
+
+        /// <summary>Write half of the FactionRef coercion (GeoSite.ProcessInstanceData:1552 /
+        /// GeoVehicle.ProcessInstanceData:1079 shape): the live faction for a decoded def. Null when the
+        /// level has no such faction — the applier then keeps the client's live value (boundary-law L-C).</summary>
+        internal static object FactionByDef(GeoLevelController geo, object def)
+        {
+            if (geo == null) return null;
+            if (def is GeoFactionDef gfd) return geo.GetFaction(gfd);
+            if (def is PhoenixPoint.Common.Core.PPFactionDef ppd) return geo.GetFaction(ppd, canFail: true);
+            return null;
         }
 
         // ─── Type shape helpers ─────────────────────────────────────────────

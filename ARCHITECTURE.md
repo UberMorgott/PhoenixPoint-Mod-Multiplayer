@@ -141,9 +141,20 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   segments onto the LIVE owner via `RailType.GetBridged` (DTO member names resolved by the same
   `ResolveLive` as the GeoFaction bridge; fieldIdx parity by identical member source + ordinal sort);
   nested component InstanceData (GeoHaven/GeoPhoenixBase/VehicleFactionController…) dispatches via
-  `GetComponent`, mirroring GeoSite.RecordInstanceData's own dispatch (GeoSite.cs:1501-1525). Members
-  with no live counterpart (HitPoints→Stats transform, SurfacePos→Surface, Weapons/Modules type
-  ambiguity, TacUnits `IList` vs `List`) are one-time "dto-twin gap" logs, never silent drops. Calling
+  `GetComponent`, mirroring GeoSite.RecordInstanceData's own dispatch (GeoSite.cs:1501-1525).
+  **Twin gap closure (2026-07-24):** `ResolveLive` gained three generic rungs + one data table —
+  (a) `_name` backing-field convention (Weapons→`_weapons`, Modules→`_modules`, TacUnits→`_tacUnits`,
+  MaintenancePointsToRepair→`_maintenancePointsToRepair`); (b) compatible-type name match: one-field
+  wrapper struct (`RangeRemaining` float ⇄ `EarthUnits.Value`, `RailField.WrapFi`), GeoFaction-for-def
+  (`OwnerFactionDef`/`Owner`/`DiplomaticObjectiveFaction` def⇄faction, `RailField.FactionRef` —
+  write half `RailMeta.FactionByDef` in the applier), same-element mutable collection
+  (Addons List⇄`_addons` HashSet — ApplyList already dispatches on the live container);
+  (c) `_twinAliases` per-field data table for the game's own Record/Process mapping where no
+  convention reaches (`Name`→`_vehicleName`, `HitPoints`→`Stats.HitPoints` via `RailField.HopFi`).
+  Twin tables are now IN the RailCheck baseline (GetBridged dump + nested-dispatch chase), and L14
+  asserts the coercions stay wired. Remaining members with no live counterpart (SurfacePos/SurfaceRot
+  — travel mirror is a later migration, `NextUpdate` schedule bookkeeping…) stay one-time
+  "dto-twin gap" logs, never silent drops. Calling
   the owner's `ProcessInstanceData` wholesale as a batch-end apply seam was audited and REFUSED for the
   live mirror: GeoSite's appends without clearing (`_addons`/`_tacUnits` doubling; GeoHaven `_zones` +
   `StockedResources`, the latter self-appending through a live-ref alias), re-registers/reschedules the
@@ -179,11 +190,14 @@ skipped loudly). Client→host resync request = `[MsgResyncRequest:u8]`.
 runtime report (read it, don't discover by bug). Expected day-one coverage: Wallet resources (per-type
 dict entries), ResearchElement `_state`/`ResearchProgress`/`IsInProgress` + requirement data,
 Research `Paused`, Timing `Paused`/`Scale`, GeoCharacter values (+ identity/progression/fatigue/health
-sub-objects), GeoVehicle scalar subset (Travelling/CanRedirect/CurrentSite/VehicleID…), GeoSite scalar
-subset (State/Weather/ExpiringTimerAt…), faction GameTags/UnlockedAugmentations. Known excluded-by-design:
-manufacture queue items (no stable element key — duplicates legal), Timing.OwnNow (read-only — client clock ticks locally; Paused/Scale mirror),
-vehicle SurfacePos/HitPoints (no live name match; travel mirror is a later migration), per-subsystem
-`*InstanceData`-only scalars (NextUpdate schedule bookkeeping — host-only sim, client gated anyway).
+sub-objects), GeoVehicle scalars + twins (Travelling/CanRedirect/CurrentSite/VehicleID/HitPoints/
+RangeRemaining/Name/Owner/Weapons/Modules/TacUnits…), GeoSite scalars + twins (State/Weather/
+ExpiringTimerAt/Owner/Addons/GameTags/TacUnits…), faction GameTags/UnlockedAugmentations. Known
+excluded-by-design: manufacture queue items (no stable element key — duplicates legal), Timing.OwnNow
+(read-only — client clock ticks locally; Paused/Scale mirror), vehicle SurfacePos/SurfaceRot (travel
+mirror is a later migration), per-subsystem `*InstanceData`-only scalars (NextUpdate schedule
+bookkeeping — host-only sim, client gated anyway). The committed twin tables in
+`docs/rail-baseline.txt` are the authoritative gap list.
 
 **Repaint primitive (2026-07-23) — native rebuild table, re-enter demoted to fallback.**
 `UiNativeRepaint` (lives with UiEventMap — the presentation-knowledge location) maps screen type →

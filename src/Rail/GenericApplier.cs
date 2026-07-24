@@ -249,6 +249,9 @@ namespace Multiplayer.Network.Sync
                         // client's live value — writing null over a valid ref would never be re-shipped
                         // (the host snapshot is unchanged) and the divergence would be silent.
                         if (ReferenceEquals(v, RailMeta.Unresolved)) return;
+                        // FactionRef twin: the wire carries the faction's DEF; the live member holds the
+                        // GeoFaction. Unknown def → keep the live value (same L-C shape as Unresolved).
+                        if (field.FactionRef && v != null && (v = RailMeta.FactionByDef(geo, v)) == null) return;
                         field.SetValue(entity, v);
                         break;
                     }

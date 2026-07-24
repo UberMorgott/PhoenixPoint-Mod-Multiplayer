@@ -250,11 +250,11 @@ PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState  [direct]  covered=4
   + Leaf PointOfInterest (GeoSite)
   + Descend Relation (Relation)
   - EXCLUDED Title (LocalizedTextBind): presentation-only type (LocalizedTextBind)
-PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanceData]  covered=12/32
-  - EXCLUDED AlienActivityEnabled (Boolean): bridge-unresolved
+PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanceData]  covered=16/32
+  + Leaf AlienActivityEnabled (Boolean) -> live _alienActivityEnabled
   + Descend AlienRaidManager (AlienRaidManager)
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
-  - EXCLUDED AncientSiteTargets (List`1): bridge-unresolved
+  - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Leaf BehemothEggSpawnPosition (Vector3)
   + Descend BuildingZone (GeoHavenZone)
   + Descend Diplomacy (FactionDiplomacy)
@@ -265,29 +265,29 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED InfestedHavenAircrafts (Dictionary`2): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
-  - EXCLUDED LastVehicleIndex (Int32): bridge-unresolved
+  + Leaf LastVehicleIndex (Int32) -> live _lastVehicleIndex
   + Descend ManufactureQueue (ItemManufacturing) -> live Manufacture
-  - EXCLUDED MistEnabled (Boolean): bridge-unresolved
+  + Leaf MistEnabled (Boolean) -> live _mistEnabled
   - EXCLUDED NextBaseBuildUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED NextBaseBuildUpdates (List`1): bridge-unresolved
-  - EXCLUDED NextFactionRequestCountdownDays (Int32): bridge-unresolved
+  + Leaf NextFactionRequestCountdownDays (Int32) -> live _nextFactionRequestCountdownDays
   - EXCLUDED NextHavenAttackUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED NextLoadoutUpdate (Int32): bridge-unresolved
   - EXCLUDED NextMistGeneratorActivationUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED NextResearchUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED Objectives (List`1): blob husk on GeoFactionObjective (_level:GeoLevelController)
-  - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
+  - EXCLUDED PhoenixBaseTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Descend Research (Research)
   - EXCLUDED ShouldSpawnEgg (Boolean): bridge-unresolved
   + LeafList UnlockedAlienBaseTypesData (List`1) -> live UnlockedAlienBaseTypes unordered=no apply=IList
   + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
-PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=15/36
+PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=18/36
   - EXCLUDED AlienBasesWithDiplomacyPenalty (Dictionary`2): dictionary with non-simple key/value (GeoSite,Boolean)
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   + Leaf AncientSiteProbes (Int32)
-  - EXCLUDED AncientSiteTargets (List`1): bridge-unresolved
+  - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   - EXCLUDED Bases (List`1): bridge-unresolved
   + Descend BuildingZone (GeoHavenZone)
   - EXCLUDED CapturedUnits (List`1): blob husk on GeoUnitDescriptor (__level:GeoLevelController,_temporaryStatsModifier:IStatsModifier)
@@ -301,16 +301,16 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   - EXCLUDED GameTags (GameTagsList): bridge-unresolved
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
-  - EXCLUDED LastNakedRecruitRefresh (TimeUnit): bridge-unresolved
-  - EXCLUDED LastVehicleIndex (Int32): bridge-unresolved
+  + Leaf LastNakedRecruitRefresh (TimeUnit) -> live _lastNakedRecruitRefresh
+  + Leaf LastVehicleIndex (Int32) -> live _lastVehicleIndex
   + Descend ManufactureQueue (ItemManufacturing) -> live Manufacture
   - EXCLUDED NewNakedRecruits (Dictionary`2): dictionary with non-simple key/value (GeoUnitDescriptor,ResourcePack)
   - EXCLUDED NextBaseUpdate (NextUpdate): bridge-unresolved
-  - EXCLUDED NextFactionRequestCountdownDays (Int32): bridge-unresolved
+  + Leaf NextFactionRequestCountdownDays (Int32) -> live _nextFactionRequestCountdownDays
   - EXCLUDED NextLoadoutUpdate (Int32): bridge-unresolved
   - EXCLUDED NextResearchUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED Objectives (List`1): blob husk on GeoFactionObjective (_level:GeoLevelController)
-  - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
+  - EXCLUDED PhoenixBaseTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Descend Replenisher (PostmissionReplenishManager) -> live _replenisher
   + Descend Research (Research)
   + Leaf Skillpoints (Int32)
@@ -320,9 +320,9 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
   - EXCLUDED _oldNakedRecruits (Dictionary`2): bridge-unresolved
-PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=9/20
+PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=11/20
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
-  - EXCLUDED AncientSiteTargets (List`1): bridge-unresolved
+  - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Descend BuildingZone (GeoHavenZone)
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED ExtendedInstanceData (Object): bridge-unresolved
@@ -330,13 +330,13 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   - EXCLUDED GameTags (GameTagsList): bridge-unresolved
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
-  - EXCLUDED LastVehicleIndex (Int32): bridge-unresolved
+  + Leaf LastVehicleIndex (Int32) -> live _lastVehicleIndex
   + Descend ManufactureQueue (ItemManufacturing) -> live Manufacture
-  - EXCLUDED NextFactionRequestCountdownDays (Int32): bridge-unresolved
+  + Leaf NextFactionRequestCountdownDays (Int32) -> live _nextFactionRequestCountdownDays
   - EXCLUDED NextLoadoutUpdate (Int32): bridge-unresolved
   - EXCLUDED NextResearchUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED Objectives (List`1): blob husk on GeoFactionObjective (_level:GeoLevelController)
-  - EXCLUDED PhoenixBaseTargets (List`1): bridge-unresolved
+  - EXCLUDED PhoenixBaseTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Descend Research (Research)
   + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
@@ -354,6 +354,140 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(0)
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
 
-summary: covered=188 excluded=98 blobbable=9 geoItemDicts=1
+twin tables (GetBridged: *InstanceData wire entries -> live owner members):
+PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=16/32
+  + Descend ActiveMission (GeoMission)
+  + LeafList Addons (List`1) -> live _addons unordered=no apply=IList
+  > dispatch AlienBaseData -> GetComponent(GeoAlienBase)
+  + Leaf CanBeRevealed (Boolean)
+  + Leaf DiplomaticObjectiveFaction (GeoFactionDef)
+  + Leaf EncounterID (String)
+  + Leaf ExpiringTimerAt (TimeUnit)
+  - EXCLUDED FactionsData (List`1): dto-twin unresolved
+  + LeafList GameTags (List`1) unordered=no apply=IList
+  > dispatch HarvestingSiteData -> GetComponent(GeoHarvestingSite)
+  > dispatch HavenData -> GetComponent(GeoHaven)
+  + Descend ItemStorage (ItemStorage)
+  + Descend MapPlotInstanceData (MapPlotInstanceData)
+  - EXCLUDED Motto (LocalizedTextBind): presentation-only type (LocalizedTextBind)
+  - EXCLUDED Name (LocalizedTextBind): dto-twin unresolved
+  - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
+  + Leaf OwnerFactionDef (GeoFactionDef) -> live Owner
+  > dispatch PhoenixBaseData -> GetComponent(GeoPhoenixBase)
+  - EXCLUDED Pos (Vector3): read-only
+  - EXCLUDED ProvideOwnerTags (List`1): dto-twin unresolved
+  + Leaf RandomSeed (Int32)
+  - EXCLUDED Rot (Quaternion): read-only
+  > dispatch ScavengingSiteData -> GetComponent(GeoScavengingSite)
+  + Leaf SiteId (Int32)
+  + LeafList SiteTags (List`1) unordered=no apply=IList
+  - EXCLUDED SiteType (GeoSiteType): dto-twin unresolved
+  - EXCLUDED Source (Object): untyped/interface member
+  - EXCLUDED SourceTemplate (Object): untyped/interface member
+  + Leaf State (GeoSiteState)
+  + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
+  - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
+  + Leaf Weather (GeoSiteWeather)
+PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=13/25
+  + Leaf CanRedirect (Boolean)
+  + Leaf CurrentSite (GeoSite)
+  + LeafList DestinationSites (List`1) unordered=no apply=IList
+  + Leaf HitPoints (Int32) -> live Stats.HitPoints
+  + Leaf MaintenancePointsToRepair (Int32) -> live _maintenancePointsToRepair
+  + EntityList Modules (List`1) -> live _modules unordered=no apply=IList
+  + Leaf Name (String) -> live _vehicleName
+  - EXCLUDED NextScheduledRepairTime (TimeUnit): dto-twin unresolved
+  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
+  + Leaf Owner (PPFactionDef)
+  - EXCLUDED Pos (Vector3): read-only
+  + Leaf RangeRemaining (Single)
+  - EXCLUDED Rot (Quaternion): read-only
+  - EXCLUDED Source (Object): untyped/interface member
+  - EXCLUDED SourceTemplate (Object): untyped/interface member
+  - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
+  - EXCLUDED SurfacePos (Vector3): dto-twin unresolved
+  - EXCLUDED SurfaceRot (Quaternion): dto-twin unresolved
+  + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
+  - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
+  + Leaf Travelling (Boolean)
+  > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
+  + Leaf VehicleID (Int32)
+  + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
+PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=12/25
+  + Leaf CanRedirect (Boolean)
+  - EXCLUDED CurrentSite (GeoSite): read-only
+  + LeafList DestinationSites (List`1) unordered=no apply=IList
+  + Leaf HitPoints (Int32) -> live Stats.HitPoints
+  + Leaf MaintenancePointsToRepair (Int32) -> live _maintenancePointsToRepair
+  + EntityList Modules (List`1) -> live _modules unordered=no apply=IList
+  + Leaf Name (String) -> live _vehicleName
+  - EXCLUDED NextScheduledRepairTime (TimeUnit): dto-twin unresolved
+  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
+  + Leaf Owner (PPFactionDef)
+  - EXCLUDED Pos (Vector3): read-only
+  + Leaf RangeRemaining (Single)
+  - EXCLUDED Rot (Quaternion): read-only
+  - EXCLUDED Source (Object): untyped/interface member
+  - EXCLUDED SourceTemplate (Object): untyped/interface member
+  - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
+  - EXCLUDED SurfacePos (Vector3): dto-twin unresolved
+  - EXCLUDED SurfaceRot (Quaternion): dto-twin unresolved
+  + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
+  - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
+  + Leaf Travelling (Boolean)
+  > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
+  + Leaf VehicleID (Int32)
+  + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
+PhoenixPoint.Geoscape.Entities.GeoAlienBase  <=  InstanceData  resolved=4/8
+  + Leaf AlienBaseTypeDef (GeoAlienBaseTypeDef)
+  + Leaf BaseAssaultProtectionHours (Int32)
+  - EXCLUDED BaseExpansion (EarthUnits): dto-twin unresolved
+  - EXCLUDED BaseRevealChecks (Int32): dto-twin unresolved
+  + Leaf CreatedAtEvolutionPoints (Int32) -> live _createdAtEvolutionPoints
+  - EXCLUDED HavenAttackCounter (Int32): read-only
+  + Descend Monster (GeoAlienMonster)
+  - EXCLUDED NextBaseExpansionUpdate (NextUpdate): dto-twin unresolved
+PhoenixPoint.Geoscape.Entities.Sites.GeoHarvestingSite  <=  InstanceData  resolved=2/4
+  + Leaf HarvestingForce (Int32)
+  - EXCLUDED HarvestingNextUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED Output (List`1): dto-twin unresolved
+  + Leaf StartedHarvestingAt (TimeUnit) -> live _startedHarvestingAt
+PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=8/14
+  + Leaf AlertLevel (HavenAlertLevel)
+  - EXCLUDED AlertLevelCooldown (Int32): dto-twin unresolved
+  + Leaf AlienAttackImmunityCounter (Int32)
+  - EXCLUDED AssignedResearchId (String): dto-twin unresolved
+  + Leaf EnvironmentTag (MissionTagDef) -> live HavenEnvironmentTag
+  + Descend Leader (GeoHavenLeader)
+  - EXCLUDED MistRepellerRange (EarthUnits): dto-twin unresolved
+  + Descend NewRecruit (GeoUnitDescriptor) -> live AvailableRecruit
+  - EXCLUDED OfferedResources (ResourcePack): dto-twin unresolved
+  + Leaf OriginalOwner (PPFactionDef)
+  + Leaf Population (Int32)
+  - EXCLUDED RecruitChecked (Boolean): dto-twin unresolved
+  + EntityCollection Zones (List`1) -> live _zones unordered=no apply=IList
+  - EXCLUDED _oldRecruit (GeoCharacter): dto-twin unresolved
+PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase  <=  InstanceData  resolved=3/9
+  - EXCLUDED AttackProtectionHours (Int32): dto-twin unresolved
+  + Leaf AutoAssignEnabled (Boolean)
+  + Leaf InfestationCounterBase (Int32) -> live _infestationCounterBase
+  + Descend Layout (GeoPhoenixBaseLayout)
+  - EXCLUDED LocationDescription (LocalizedTextBind): presentation-only type (LocalizedTextBind)
+  - EXCLUDED MistRepellerRange (EarthUnits): dto-twin unresolved
+  - EXCLUDED ScannerEnabled (Boolean): dto-twin unresolved
+  - EXCLUDED SiteScannerRange (EarthUnits): dto-twin unresolved
+  - EXCLUDED Version (Int32): dto-twin unresolved
+PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite  <=  InstanceData  resolved=0/2
+  - EXCLUDED NextEnemyRefreshUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED ScavengingSiteType (Int32): dto-twin unresolved
+PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resolved=0/3
+  - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
+  - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
+  - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
+twin summary: resolved=58 gaps=57 dispatch=7
+
+summary: covered=197 excluded=89 blobbable=9 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:

@@ -291,6 +291,61 @@ namespace RailCheck
                           " roundtrip=" + EntityListRoundTrip(t, laws) + "\n");
             }
 
+            // ─── Twin tables (DTO live-twin resolution — ARCHITECTURE.md "DTO twin resolution") ────
+            // The wire kind for an actor's SerializationData subtree IS the recorded *InstanceData DTO;
+            // the client applies those entries onto the LIVE owner through RailType.GetBridged. These
+            // tables are that apply surface: an EXCLUDED row here is a field the host SHIPS but the
+            // client cannot mirror (the runtime "dto-twin gap" log) — committed so closing or opening
+            // one is a reviewable diff instead of a log line nobody reads.
+            sb.Append("\ntwin tables (GetBridged: *InstanceData wire entries -> live owner members):\n");
+            int twinRes = 0, twinGap = 0, twinDispatch = 0;
+            var twinPairs = new List<(Type live, Type dto)>();
+            foreach (var t in types)
+                if (RailType.Get(t)?.FieldByName("SerializationData") != null && RailMeta.FindBridge(t) != null)
+                    twinPairs.Add((t, RailMeta.FindBridge(t)));
+            var twinSeen = new HashSet<string>(StringComparer.Ordinal);
+            for (int p = 0; p < twinPairs.Count; p++)
+            {
+                var (live, dto) = twinPairs[p];
+                if (!twinSeen.Add(live.FullName + "|" + dto.FullName)) continue;
+                var bt = RailType.GetBridged(live, dto);
+                if (bt == null) continue;
+                sb.Append(live.FullName + "  <=  " + dto.Name + "  resolved=" + bt.CoveredCount + "/" + bt.Fields.Count + "\n");
+                foreach (var f in bt.Fields)
+                {
+                    // The resolver's nested-component dispatch (IdentityResolver.Resolve): no live member,
+                    // but the DTO slot's declaring type is a Component — applied via GetComponent; its own
+                    // twin table is chased below.
+                    if (f.Fi == null && f.Pi == null && f.ValueType?.DeclaringType != null &&
+                        typeof(UnityEngine.Component).IsAssignableFrom(f.ValueType.DeclaringType))
+                    {
+                        sb.Append("  > dispatch " + f.Name + " -> GetComponent(" + f.ValueType.DeclaringType.Name + ")\n");
+                        twinDispatch++;
+                        twinPairs.Add((f.ValueType.DeclaringType, f.ValueType));
+                        continue;
+                    }
+                    if (f.Class == FieldClass.Excluded)
+                    { sb.Append("  - EXCLUDED " + f.Name + " (" + f.ValueType.Name + "): " + f.Exclude + "\n"); twinGap++; continue; }
+                    twinRes++;
+                    if (f.ValueType.FullName == "Base.UI.LocalizedTextBind" ||
+                        (f.ElemType != null && f.ElemType.FullName == "Base.UI.LocalizedTextBind"))
+                        laws.Add("L11 def-laundering-vector-rides: " + live.FullName + "<=" + dto.Name + "." + f.Name +
+                                 " carries LocalizedTextBind as " + f.Class + " — def-owned binds would be written on clients");
+                    var textra = "";
+                    if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)
+                    {
+                        var strat = RailMeta.ListApplyStrategy(f);
+                        textra = " unordered=" + (f.Unordered ? "yes" : "no") + " apply=" + (strat ?? "NONE");
+                        if (strat == null)
+                            laws.Add("L1 no-list-apply-strategy: " + live.FullName + "<=" + dto.Name + "." + f.Name +
+                                     " (" + f.ValueType.Name + ") rides as " + f.Class + " but ApplyList would throw");
+                    }
+                    sb.Append("  + " + f.Class + " " + f.Name + " (" + f.ValueType.Name + ")" +
+                              (f.LiveAlias != null ? " -> live " + f.LiveAlias : "") + textra + "\n");
+                }
+            }
+            sb.Append("twin summary: resolved=" + twinRes + " gaps=" + twinGap + " dispatch=" + twinDispatch + "\n");
+
             // L9 — GeoItemDict is a re-INCLUSION: the generic classifier excludes a BaseDef-keyed dict, and
             // FieldClass.GeoItemDict is what puts faction/site inventory back on the rail. So the count going
             // to zero is silent, total loss of inventory sync, and it can happen without touching rail code
@@ -708,6 +763,62 @@ namespace RailCheck
             var crcRewire = RailMeta.EncodeEntityList(crcEf, crcRelist);
             if (Crc32.Compute(crcWire) != Crc32.Compute(crcRewire) || !RailMeta.BytesEqual(crcWire, crcRewire))
                 yield return "L13 crc-entitylist: a decoded blob re-encodes to different bytes than the host sent";
+
+            // ─── L14 — twin coercions are WIRED, not just resolved ─────────────────────────────────
+            // The twin tables in the baseline show name RESOLUTION only; a member resolved onto a
+            // live target of a DIFFERENT type without its coercion recorded would pass the baseline
+            // and then throw ArgumentException on the first live apply. Assert the wiring on the real
+            // GetBridged tables + exercise the wrapper/hop accessor mechanics on constructible types.
+            // (FactionRef's WRITE half — RailMeta.FactionByDef — needs a live GeoLevelController and
+            // stays in-game; the flag and the read half are what is honestly checkable here.)
+            var twinV = RailType.GetBridged(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
+                                            typeof(PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData));
+            var twinS = RailType.GetBridged(typeof(PhoenixPoint.Geoscape.Entities.GeoSite),
+                                            typeof(PhoenixPoint.Geoscape.Entities.GeoSiteInstaceData));
+            var fRange = twinV?.FieldByName("RangeRemaining");
+            var fHp = twinV?.FieldByName("HitPoints");
+            var fName = twinV?.FieldByName("Name");
+            var fOwnerS = twinS?.FieldByName("OwnerFactionDef");
+            if (fRange == null || fRange.Class != FieldClass.Leaf || fRange.WrapFi == null)
+                yield return "L14 twin-coercion: GeoVehicle.RangeRemaining lost its EarthUnits wrapper — live apply would throw";
+            if (fHp == null || fHp.Class != FieldClass.Leaf || fHp.HopFi?.Name != "Stats" || fHp.Fi?.Name != "HitPoints")
+                yield return "L14 twin-coercion: GeoVehicle.HitPoints no longer routes through Stats.HitPoints";
+            if (fName == null || fName.Class != FieldClass.Leaf || fName.Fi?.Name != "_vehicleName")
+                yield return "L14 twin-coercion: GeoVehicle.Name no longer lands in _vehicleName (the Name property substitutes a localized default)";
+            if (fOwnerS == null || fOwnerS.Class != FieldClass.Leaf || !fOwnerS.FactionRef)
+                yield return "L14 twin-coercion: GeoSite.OwnerFactionDef lost the def→GeoFaction coercion";
+            // Wrapper mechanics: SetValue must box+wrap the naked float, GetValue must unwrap it.
+            var wrapHolder = new WrapHolder();
+            var synWrap = new RailField
+            {
+                Name = "R", ValueType = typeof(float), Class = FieldClass.Leaf, Leaf = LeafKind.Single,
+                Fi = typeof(WrapHolder).GetField("R"),
+                WrapFi = RailMeta.WrapperField(typeof(PhoenixPoint.Common.Core.EarthUnits), typeof(float))
+            };
+            synWrap.SetValue(wrapHolder, 7.5f);
+            if (synWrap.WrapFi == null || wrapHolder.R.Value != 7.5f || !(synWrap.GetValue(wrapHolder) is float rr) || rr != 7.5f)
+                yield return "L14 wrap-mechanics: EarthUnits wrapper set/get round-trip failed";
+            // Hop mechanics: read+write through the intermediate class member.
+            var hopHolder = new HopHolder();
+            var synHop = new RailField
+            {
+                Name = "HitPoints", ValueType = typeof(int), Class = FieldClass.Leaf, Leaf = LeafKind.Int64,
+                HopFi = typeof(HopHolder).GetField("Stats"),
+                Fi = typeof(PhoenixPoint.Geoscape.Core.GeoVehicleStats).GetField("HitPoints")
+            };
+            synHop.SetValue(hopHolder, 33);
+            if (hopHolder.Stats.HitPoints != 33 || !(synHop.GetValue(hopHolder) is int hh) || hh != 33)
+                yield return "L14 hop-mechanics: Stats.HitPoints hop set/get round-trip failed";
+        }
+
+        private sealed class WrapHolder
+        {
+            public PhoenixPoint.Common.Core.EarthUnits R = default; // written via RailField.SetValue (reflection)
+        }
+
+        private sealed class HopHolder
+        {
+            public PhoenixPoint.Geoscape.Core.GeoVehicleStats Stats = new PhoenixPoint.Geoscape.Core.GeoVehicleStats();
         }
 
         private sealed class ListHolder
