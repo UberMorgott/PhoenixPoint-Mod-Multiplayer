@@ -696,7 +696,8 @@ namespace RailCheck
             var crcSetClient = new ListHolder();
             var setBytes = RailMeta.EncodeFieldValue(crcSetF, crcSetHost.Set);
             RailMeta.ApplyList(crcSetClient, crcSetF, RailMeta.DecodeFieldValue(setBytes, crcSetF, null, out _) as List<object>);
-            if (Crc32.Compute(setBytes) != Crc32.Compute(RailMeta.EncodeFieldValue(crcSetF, crcSetClient.Set)))
+            var setReenc = RailMeta.EncodeFieldValue(crcSetF, crcSetClient.Set);
+            if (Crc32.Compute(setBytes) != Crc32.Compute(setReenc) || !RailMeta.BytesEqual(setBytes, setReenc))
                 yield return "L13 crc-unordered: a HashSet re-encodes differently after apply (canonical sort broken)";
             // EntityList blob, order included: decode → re-encode must reproduce the wire — a reorder
             // that applied but re-encoded differently would force-re-emit forever.
@@ -704,7 +705,8 @@ namespace RailCheck
             var crcWire = RailMeta.EncodeEntityList(crcEf, new List<Elem> { new Elem { N = 2, S = "b", L = { 9 } }, new Elem { N = 1, S = "a" } });
             var crcRelist = new List<Elem>();
             foreach (var o in RailMeta.DecodeEntityList(crcWire, crcEf, null)) crcRelist.Add((Elem)o);
-            if (Crc32.Compute(crcWire) != Crc32.Compute(RailMeta.EncodeEntityList(crcEf, crcRelist)))
+            var crcRewire = RailMeta.EncodeEntityList(crcEf, crcRelist);
+            if (Crc32.Compute(crcWire) != Crc32.Compute(crcRewire) || !RailMeta.BytesEqual(crcWire, crcRewire))
                 yield return "L13 crc-entitylist: a decoded blob re-encodes to different bytes than the host sent";
         }
 
