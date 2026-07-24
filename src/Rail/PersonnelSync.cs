@@ -48,9 +48,11 @@ namespace Multiplayer.Network.Sync
     ///     screen-exit commit (the pre-2026-07-25 lazy path the user reported as the stat-spend bug).
     ///   • <c>CommitStatChanges</c> (:367) — natively the ONE stage→model flush (base stats + ABSOLUTE
     ///     SP pools, :375/:378; reached from UIStateEditSoldier:232/:363/:715 and the two methods
-    ///     below). In a session it is a pure SKIP on every peer: per-click seams already put everything
-    ///     in the model, and the absolute pool write is exactly what reverted foreign SP spends when a
-    ///     peer sat on a stale stage (review risk 2026-07-25). Skip = no double apply, by construction.
+    ///     below). In a session the model flush is SKIPPED on every peer (per-click seams already put
+    ///     everything in the model; the absolute pool write is exactly what reverted foreign SP spends
+    ///     when a peer sat on a stale stage — review risk 2026-07-25), but its baseline tail
+    ///     (_starting* := _current*, :370-374/:384-386) is REPLICATED, else RefreshStats (:520-521)
+    ///     reseeds the stage from pre-gesture pools. Skip = no double apply, by construction.
     ///   • <c>ConsumeAbilityCost</c> (:428) — the staged SP debit of a perk/second-class buy; with the
     ///     commit skipped the HOST applies its stage delta to the model right here (mutoid branch :432
     ///     already hits the wallet natively). Client never reaches it — both callers are blocked below.
@@ -103,6 +105,16 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo FBoughtAbility = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbility");
         private static readonly FieldInfo FBoughtSource = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySource");
         private static readonly FieldInfo FBoughtLevel = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilityLevel");
+        // Stage BASELINES (_starting*) — native CommitStatChanges' tail resets them to _current*
+        // (:370/:372/:374 stats, :384-386 pools) and RefreshStats reseeds the pool stage FROM them
+        // (:520-521). With the model flush skipped in-session, that tail is replicated by
+        // <see cref="CommitStatsNeutralizePatch"/> — the only place these are written.
+        private static readonly FieldInfo FStartStrength = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingStrengthStat");
+        private static readonly FieldInfo FStartWill = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingWillStat");
+        private static readonly FieldInfo FStartSpeed = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingSpeedStat");
+        private static readonly FieldInfo FStartSkillPoints = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingSkillPoints");
+        private static readonly FieldInfo FStartFactionPoints = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingFactionPoints");
+        private static readonly FieldInfo FStartMutagens = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingMutagens");
 
         /// <summary>Loud bind check — a decompile-name drift makes every FieldInfo above null SILENTLY and
         /// the client would then fall through to writing the model locally. Checked once, at first use.</summary>
@@ -115,21 +127,34 @@ namespace Multiplayer.Network.Sync
                 _bindChecked = true;
                 if (FCharacter == null || FCurStrength == null || FCurWill == null || FCurSpeed == null ||
                     FCurSkillPoints == null || FCurFactionPoints == null || FCurMutagens == null ||
-                    FBoughtSlot == null || FBoughtAbility == null || FBoughtSource == null || FBoughtLevel == null)
+                    FBoughtSlot == null || FBoughtAbility == null || FBoughtSource == null || FBoughtLevel == null ||
+                    FStartStrength == null || FStartWill == null || FStartSpeed == null ||
+                    FStartSkillPoints == null || FStartFactionPoints == null || FStartMutagens == null)
                     Debug.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
                                    "stat/ability intents CANNOT be captured; client edits will not sync.");
                 else
                     Debug.Log("[MP][personnel] view-model fields bound");
             }
-            return FCharacter != null && FBoughtSlot != null && FCurSkillPoints != null;
+            // All-or-nothing: callers (ProgressionPanelInSync, the commit-tail replication) dereference the
+            // full set after one positive answer, so a partial bind must read as NOT bound.
+            return FCharacter != null && FCurStrength != null && FCurWill != null && FCurSpeed != null &&
+                   FCurSkillPoints != null && FCurFactionPoints != null && FCurMutagens != null &&
+                   FBoughtSlot != null && FBoughtAbility != null && FBoughtSource != null && FBoughtLevel != null &&
+                   FStartStrength != null && FStartWill != null && FStartSpeed != null &&
+                   FStartSkillPoints != null && FStartFactionPoints != null && FStartMutagens != null;
         }
 
         public static void Reset() => ResetForReloadBoundary();
 
-        /// <summary>Mid-session reload boundary: nothing geoscape-bound is cached here (the seam is
-        /// stateless per intent; dedup/nonce live in <see cref="IntentRail"/>) — same rca-3 contract as
-        /// <see cref="ResearchSync.ResetForReloadBoundary"/>.</summary>
-        public static void ResetForReloadBoundary() { }
+        /// <summary>Mid-session reload boundary (same rca-3 contract as
+        /// <see cref="ResearchSync.ResetForReloadBoundary"/>): the wire-op ledgers key on GeoTacUnitIds of
+        /// the dying geoscape — drop them with it (the reloaded save re-establishes what "committed"
+        /// means); dedup/nonce live in <see cref="IntentRail"/>, reset there.</summary>
+        public static void ResetForReloadBoundary()
+        {
+            WireStatNet.Clear();
+            WireFactionTaken.Clear();
+        }
 
         /// <summary>Arm the 0xAF surface on the generic intent engine: transport + dedup + reject
         /// discipline in <see cref="IntentRail"/>, ALL personnel validation/native replay stays below.
@@ -281,23 +306,42 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
-        /// Session-wide neutralization of the native stage→model flush, BOTH peers. Everything the flush
-        /// would transfer already reached the model at gesture time (host: <see cref="StatClickPatch"/> +
-        /// <see cref="ConsumeCostApplyPatch"/>; client: the op=1 replay), so letting it run could only
-        /// (a) double-apply the staged diff or (b) write the ABSOLUTE SP pools (:375/:378) from a stage
-        /// that went stale while a foreign spend landed — the host-side revert found in review. An exit
-        /// with no gestures was already zero traffic and stays so (nothing staged, nothing sent).
+        /// Session-wide neutralization of the native stage→model FLUSH, BOTH peers — but ONLY the flush.
+        /// Everything it would transfer already reached the model at gesture time (host:
+        /// <see cref="StatClickPatch"/> + <see cref="ConsumeCostApplyPatch"/>; client: the op=1 replay),
+        /// so letting it run could only (a) double-apply the staged diff or (b) write the ABSOLUTE SP
+        /// pools (:375/:378) from a stage that went stale while a foreign spend landed — the host-side
+        /// revert found in review. The native body's baseline TAIL is kept alive though: CommitStatChanges
+        /// also resets the stage floor (_starting* := _current*, stats :370/:372/:374, pools :384-386),
+        /// and RefreshStats reseeds the pool stage FROM those baselines (:520-521). A pure skip left them
+        /// stale, so after a host perk buy ConfirmationHandler (UIStateEditSoldier:716) re-showed PRE-buy
+        /// SP, the next click gated against the inflated stage, and its snapshot diff drove model
+        /// SkillPoints negative (review 2026-07-25 HIGH). An exit with no gestures stays zero traffic
+        /// (stage == baseline already; the copy is a no-op).
         ///
         /// Composes with <see cref="EquipFlushGate"/>, which also prefixes this method (it blocks inside
-        /// an apply and during session teardown; Harmony skips later prefixes once one returns false).
+        /// an apply and during session teardown; Harmony skips later prefixes once one returns false) —
+        /// the tail replication re-checks those same two conditions itself, so the composed behavior does
+        /// not depend on prefix order.
         /// </summary>
         [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.CommitStatChanges))]
         internal static class CommitStatsNeutralizePatch
         {
-            private static bool Prefix()
+            private static bool Prefix(UIModuleCharacterProgression __instance)
             {
                 var engine = NetworkEngine.Instance;
-                return engine == null || !engine.IsActiveSession; // solo native; in-session: skip on host AND client
+                if (engine == null || !engine.IsActiveSession) return true; // solo: fully native
+                if (!SessionEnd.InProgress && !SyncApplyScope.Active && BindOk())
+                {
+                    // Native baseline tail, verbatim minus the model writes.
+                    FStartStrength.SetValue(__instance, FCurStrength.GetValue(__instance));
+                    FStartWill.SetValue(__instance, FCurWill.GetValue(__instance));
+                    FStartSpeed.SetValue(__instance, FCurSpeed.GetValue(__instance));
+                    FStartSkillPoints.SetValue(__instance, FCurSkillPoints.GetValue(__instance));
+                    FStartFactionPoints.SetValue(__instance, FCurFactionPoints.GetValue(__instance));
+                    FStartMutagens.SetValue(__instance, FCurMutagens.GetValue(__instance));
+                }
+                return false; // in-session: the stage→model flush stays skipped on host AND client
             }
         }
 
@@ -504,11 +548,14 @@ namespace Multiplayer.Network.Sync
         /// A DECREASE is the undo half of "туда-сюда": refund per step = GetBaseStatCost of the value
         /// being stepped down FROM — the native decrement's own math (:909), the exact mirror of the
         /// increment's cost, so +1 then −1 is SP-neutral to the last point. The gesturing peer's native
-        /// stage already floors decrements at its screen-entry value (:907); host-side the floor is the
-        /// model's own (display ≥ 0, base ≥ 0 so the ModifyBaseStat clamp can never out-run the refund).
-        /// ponytail: refunds land in personal SkillPoints (and a faction-pool-funded +1 undone moves that
-        /// SP personal) — the exchange rate is identical both ways so nothing is minted; track a per-visit
-        /// pool split if it ever matters.</summary>
+        /// stage already floors decrements at its screen-entry value (:907), but that gate lives on the
+        /// CLIENT — host-side the trust-boundary floor is <see cref="WireStatNet"/>: a minus that would
+        /// drive a stat's net wire ops below 0 is a refund for a purchase the wire never made (stale
+        /// stage after a lost race, or a hostile client farming SP off base stats) and is rejected; the
+        /// base ≥ 0 check below additionally keeps the ModifyBaseStat clamp from out-running a refund.
+        /// Refunds land faction-first capped by <see cref="WireFactionTaken"/> (see <see cref="Refund"/>)
+        /// — the same split the gesturing client's stage predicted, so the echo matches and the staged
+        /// floor survives it.</summary>
         private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed)
         {
             var progression = character.Progression;
@@ -537,6 +584,14 @@ namespace Multiplayer.Network.Sync
                 // never refund steps the clamp would swallow (display > base by the bonus offset).
                 if (delta[i] < 0 && progression.GetBaseStat(stats[i]) + delta[i] < 0)
                 { Reject(peer, (int)character.Id, "stat below base floor " + stats[i]); return false; }
+                // Law 3 session floor: only what the wire bought may be wire-refunded (native's committed
+                // floor :907 lives on the gesturing client's stage — never trust it from here).
+                if (delta[i] < 0)
+                {
+                    WireStatNet.TryGetValue((int)character.Id, out var net);
+                    if ((net == null ? 0 : net[i]) + delta[i] < 0)
+                    { Reject(peer, (int)character.Id, "stat below wire floor " + stats[i]); return false; }
+                }
                 for (int v = display[i] + 1; v <= want; v++) total += progression.GetBaseStatCost(stats[i], v);
                 for (int v = display[i]; v > want; v--) total -= progression.GetBaseStatCost(stats[i], v);
             }
@@ -546,11 +601,30 @@ namespace Multiplayer.Network.Sync
             if (total < 0) Refund(character, -total);
             for (int i = 0; i < 3; i++)
                 if (delta[i] != 0) progression.ModifyBaseStat(stats[i], delta[i]);
+            int key = (int)character.Id; // ledger moves only on an APPLIED op — rejects above leave it exact
+            if (!WireStatNet.TryGetValue(key, out var applied)) WireStatNet[key] = applied = new int[3];
+            for (int i = 0; i < 3; i++) applied[i] += delta[i];
             return true;
         }
 
+        // ─── Wire-op session ledgers (HOST, law 3): what the wire bought, and where it was paid from ──
+        // Native never lets a decrement pass the committed value (ChangeCharacterStat:907 floors at the
+        // screen-entry stage) and refunds the faction pool FIRST, capped by what the visit took from it
+        // (:915-931). The host has no per-visit stage for remote peers, so the session-scoped equivalents
+        // live here; both key on GeoTacUnitId and die with the geoscape (ResetForReloadBoundary).
+        //   WireStatNet[charId] = net wire-applied stat steps [Str,Will,Speed] — floor for wire refunds.
+        //   WireFactionTaken[charId] = faction SP the wire's charges spilled into the shared pool —
+        //     the faction-first cap for <see cref="Refund"/>.
+        private static readonly Dictionary<int, int[]> WireStatNet = new Dictionary<int, int[]>();
+        private static readonly Dictionary<int, int> WireFactionTaken = new Dictionary<int, int>();
+
         /// <summary>Inverse of <see cref="Charge"/> for the undo gesture — mutoids get mutagens back in
-        /// the wallet, humans get personal SkillPoints (see the ApplyStats ponytail note on the split).</summary>
+        /// the wallet; humans refill the shared faction pool FIRST, capped by what the wire's own charges
+        /// took from it (<see cref="WireFactionTaken"/>), remainder personal. That is the native
+        /// decrement's exact split (ChangeCharacterStat:915-931: faction up to the _startingFactionPoints
+        /// gap, overflow into _currentSkillPoints) — always-personal permanently converted faction SP into
+        /// one soldier's, and mismatched the gesturing client's stage prediction (echo → reseed → staged
+        /// floor lost).</summary>
         private static void Refund(GeoCharacter character, int amount)
         {
             if (amount <= 0) return;
@@ -559,7 +633,16 @@ namespace Multiplayer.Network.Sync
                 character.Faction?.Wallet?.Give(new ResourceUnit(ResourceType.Mutagen, amount), OperationReason.Refund);
                 return;
             }
-            character.Progression.SkillPoints += amount;
+            int key = (int)character.Id;
+            WireFactionTaken.TryGetValue(key, out int taken);
+            int toFaction = amount < taken ? amount : taken;
+            if (toFaction > 0 && character.Faction is GeoPhoenixFaction phoenix)
+            {
+                phoenix.Skillpoints += toFaction;
+                WireFactionTaken[key] = taken - toFaction;
+                amount -= toFaction;
+            }
+            if (amount > 0) character.Progression.SkillPoints += amount;
         }
 
         /// <summary>Replay of <c>BuyAbility</c>:391-417 at model level.</summary>
@@ -734,7 +817,14 @@ namespace Multiplayer.Network.Sync
             if (progression.SkillPoints >= cost) { progression.SkillPoints -= cost; return true; }
             int overflow = cost - progression.SkillPoints;
             progression.SkillPoints = 0;
-            if (phoenix != null) phoenix.Skillpoints = pool - overflow;
+            if (phoenix != null)
+            {
+                phoenix.Skillpoints = pool - overflow;
+                // Ledger the faction spill: Refund's faction-first cap (native lumps stat clicks and
+                // ability buys into the same per-visit gap — ConsumeAbilityCost:439-441 spills the same way).
+                WireFactionTaken.TryGetValue((int)character.Id, out int taken);
+                WireFactionTaken[(int)character.Id] = taken + overflow;
+            }
             return true;
         }
 
