@@ -13,7 +13,9 @@ using PhoenixPoint.Common.Entities.Characters;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
+using PhoenixPoint.Geoscape.View.ViewControllers.Roster;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using UnityEngine;
 
@@ -37,13 +39,15 @@ namespace Multiplayer.Network.Sync
     /// client's OWN mirror paths (<c>GeoUnitDescriptor</c>:508 deserialize, <c>GeoCharacter</c>:1048 clone,
     /// <c>ResetAbilities</c>:309), so a blanket block there would corrupt roster mirroring.
     ///
-    /// The three UI methods below ARE the family's chokepoints, not "one button" — every geoscape entry
+    /// The UI methods below ARE the family's chokepoints, not "one button" — every geoscape entry
     /// point funnels through them (verified by call-site sweep over the decompile):
     ///   • <c>CommitStatChanges</c> (:367) — the ONE write of base stats + personal SP + faction pool +
     ///     mutagen. Reached from UIStateEditSoldier:232 (leave screen), :363 (switch soldier), :715
     ///     (after a buy), and from the two module methods below.
     ///   • <c>BuyAbility</c> (:389) — ability/perk purchase (human LearnAbility + mutoid AddAbility).
     ///   • <c>ChoseSecondSpecialization</c> (:813) — the second-class purchase (AddSecondaryClass).
+    ///   • <c>UIStateGeoRoster.OnActionSlotTransferInitiated</c> (:292) — the ONE roster base⇄vehicle
+    ///     transfer seam (drag and action-menu both funnel through it).
     ///
     /// HOST replay runs the identical native model calls those three make: <c>ModifyBaseStat</c> (:369-373),
     /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820) — with the SP
@@ -61,6 +65,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpSpendStats = 1;  // CommitStatChanges           → ModifyBaseStat ×3 + SP debit
         private const byte OpBuyAbility = 2;  // BuyAbility                  → LearnAbility / AddAbility
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
+        private const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
 
         // ─── Reflection: UIModuleCharacterProgression's staged view-model (all private) ──
         // The module stages the player's pending edit in _current*; _character is the soldier it is bound
@@ -119,6 +124,7 @@ namespace Multiplayer.Network.Sync
                 [OpSpendStats] = HandleIntentOp,
                 [OpBuyAbility] = HandleIntentOp,
                 [OpSecondSpec] = HandleIntentOp,
+                [OpReassign] = HandleIntentOp,
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -264,6 +270,35 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Intent capture for the roster base⇄vehicle transfer. ONE chokepoint (decompile
+        /// UIStateGeoRoster.cs:292-300): drag and action-menu transfers both funnel into
+        /// <c>OnActionSlotTransferInitiated</c> → <c>source.RemoveCharacter</c> +
+        /// <c>destination.AddCharacter</c> on the <c>_tacUnits</c> lists (GeoVehicle.cs:759-770 /
+        /// GeoSite.cs:983-993) — both rail-covered LeafLists, so the host outcome reaches every peer on
+        /// the value rail and UIStateGeoRoster's existing UiNativeRepaint entry repaints the open
+        /// roster. CLIENT: block the whole method (the module's slot-move view tail included — the
+        /// roster re-Inits from the mirrored containers when the delta lands) and ship
+        /// [charId, dstRef], dstRef = the container's root ref ("S#&lt;id&gt;"/"V#&lt;id&gt;").</summary>
+        [HarmonyPatch(typeof(UIStateGeoRoster), "OnActionSlotTransferInitiated")]
+        internal static class RosterTransferCapturePatch
+        {
+            private static bool Prefix(GeoRosterItem slot, IGeoCharacterContainer destination)
+            {
+                if (ShouldRunNative()) return true;
+                try
+                {
+                    var character = slot == null ? null : slot.Character;
+                    var dstRef = IdentityResolver.RootRef(destination);
+                    if (character == null || dstRef == null) return false; // unaddressable → drop the gesture
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpReassign,
+                        "reassign U#" + (int)character.Id + " -> " + dstRef,
+                        w => { w.Write((int)character.Id); w.Write(dstRef); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] reassign capture failed: " + ex); }
+                return false;
+            }
+        }
+
         // ─── HOST: resolve → validate → execute the SAME native methods (dedup/decode/reject = IntentRail) ──
 
         private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -292,6 +327,9 @@ namespace Multiplayer.Network.Sync
                     case OpBuyAbility:
                         ok = ApplyBuyAbility(senderPeerId, character, (AbilityTrackSource)r.ReadInt32(),
                                              r.ReadInt32(), r.ReadInt32(), r.ReadString());
+                        break;
+                    case OpReassign:
+                        ok = ApplyReassign(senderPeerId, geo, character, r.ReadString());
                         break;
                     default: // OpSecondSpec (the op set is table-gated upstream)
                         ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
@@ -446,6 +484,63 @@ namespace Multiplayer.Network.Sync
             progression.AddSecondaryClass(spec);
             return true;
         }
+
+        /// <summary>Replay of <c>UIStateGeoRoster.OnActionSlotTransferInitiated</c>:294-295 at model
+        /// level, with the native menu's own gates re-checked host-side:
+        /// <c>destination.CanTransferBetweenContainer(source)</c> is the listing filter
+        /// (GeoRosterTransferActionMenu.cs:58 — vehicle dst: docked, co-located, not travelling; site
+        /// dst: only from a vehicle at that site), and volume fit + the one-volume-3-unit rule are the
+        /// button gate (TransferActionMenuElement.cs:28-45). The SOURCE is the host's own answer to
+        /// "which container holds this character" — never the wire's. Outcome rides the covered
+        /// <c>_tacUnits</c> LeafLists; rejects re-emit both container subtrees.</summary>
+        private static bool ApplyReassign(ulong peer, GeoLevelController geo, GeoCharacter character, string dstRef)
+        {
+            int charId = (int)character.Id;
+            // dstRef is wire input fed to the resolver — accept only a bare container root ref.
+            if (string.IsNullOrEmpty(dstRef) || dstRef.IndexOf('.') >= 0 || (dstRef[0] != 'S' && dstRef[0] != 'V'))
+            { Reject(peer, charId, "bad destination '" + dstRef + "'"); return false; }
+            if (!(IdentityResolver.Resolve(geo, dstRef, null) is IGeoCharacterContainer destination))
+            { Reject(peer, charId, "unresolved destination " + dstRef); return false; }
+            var phoenix = geo.PhoenixFaction;
+            bool phoenixDst = destination is GeoVehicle dv ? ReferenceEquals(dv.Owner, phoenix)
+                            : destination is GeoSite ds && ReferenceEquals(ds.Owner, phoenix);
+            if (!phoenixDst)
+            { RejectReassign(peer, charId, "destination not Phoenix " + dstRef, null, dstRef); return false; }
+            var source = FindCharacterContainer(geo, character);
+            if (source == null)
+            { RejectReassign(peer, charId, "character in no container", null, dstRef); return false; }
+            if (ReferenceEquals(source, destination)) return false; // no-op: the client's view was behind
+            var srcRef = IdentityResolver.RootRef(source);
+            if (!destination.CanTransferBetweenContainer(source))
+            { RejectReassign(peer, charId, "not co-located " + srcRef + "→" + dstRef, srcRef, dstRef); return false; }
+            if (destination.MaxCharacterSpace < int.MaxValue)
+            {
+                if (destination.MaxCharacterSpace - destination.CurrentOccupiedSpace < character.TemplateDef.Volume)
+                { RejectReassign(peer, charId, "no space in " + dstRef, srcRef, dstRef); return false; }
+                if (character.TemplateDef.Volume == 3 &&
+                    destination.GetAllCharacters().Any(c => c.TemplateDef.Volume == 3))
+                { RejectReassign(peer, charId, "volume-3 unit already in " + dstRef, srcRef, dstRef); return false; }
+            }
+            source.RemoveCharacter(character);   // native :294
+            destination.AddCharacter(character); // native :295
+            return true;
+        }
+
+        /// <summary>Which container holds this character — vehicles first, then sites (the same
+        /// <c>_tacUnits</c>-backed <c>Units</c> the rail mirrors, GeoVehicle.cs:250 / GeoSite.cs:243).</summary>
+        private static IGeoCharacterContainer FindCharacterContainer(GeoLevelController geo, GeoCharacter character)
+        {
+            var map = geo.Map;
+            if (map == null) return null;
+            foreach (var v in map.Vehicles) if (v != null && v.Units.Contains(character)) return v;
+            foreach (var s in map.AllSites) if (s != null && s.Units.Contains(character)) return s;
+            return null;
+        }
+
+        /// <summary>Reassign reject: converge BOTH touched container subtrees (the transfer's outcome
+        /// lives in their _tacUnits lists, not on the character), null prefixes ignored by contract.</summary>
+        private static void RejectReassign(ulong peer, int charId, string why, string srcRef, string dstRef) =>
+            IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "char=U#" + charId + " — " + why, srcRef, dstRef);
 
         /// <summary>
         /// The SP economy, re-derived from the HOST's own numbers — the reason the wire never carries a
