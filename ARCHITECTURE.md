@@ -372,7 +372,12 @@ so it is reference identity at walk time:
     objects, never husks them), `ReorderByKeys` rearranges keyed collections in place by key;
     **L11** no `LocalizedTextBind` field/element rides covered — the STATIC belt for the runtime
     DefOwnership law (the known def-laundering vector; the runtime reference-identity law itself
-    needs a live `DefRepository` and is harness-invisible — see the baseline header note).
+    needs a live `DefRepository` and is harness-invisible — see the baseline header note);
+    **L12** the intent engine's pure halves: `IntentDedup` idempotence, peer+surface keying, bounded
+    ring, `ResetPeer` rejoin semantics, plus the [nonce][op] envelope round-trip on all four family
+    surfaces (0xAB/0xAE/0xAF/0xB0) and the empty reject-nudge envelope; **L13** field-codec
+    CRC(host)==CRC(client) — what the real apply calls wrote re-encodes to the host's exact bytes
+    (ordered/unordered leaf lists, EntityList blobs incl. order), hashed with the real `Crc32`.
   - It probes the codec (`ProbePolymorphicCodec`) rather than assuming: declared-type-only vs
     polymorphic decides the type closure, so "the ship side widened" is a detected event.
   - `docs/rail-baseline.txt` is the committed snapshot — full classifier table, per-type blob **husk**
@@ -380,8 +385,10 @@ so it is reference identity at walk time:
     Excluded↔covered is a reviewable diff, never a silent side effect. Intended change → re-run with
     `--update` and commit the baseline in the same commit.
 - **What stage 1 does NOT cover** (do not read green as "safe"):
-  - No simulation, no CRC(host)==CRC(client), no seeded command sequences — those need a live
-    `GeoLevelController`, so the mandate's original SimCluster shape is still unbuilt.
+  - No simulation, no LIVE-TREE CRC(host)==CRC(client), no seeded command sequences — those need a
+    live `GeoLevelController`, so the mandate's original SimCluster shape is still unbuilt. L13
+    covers only the separable identity underneath: re-encode-after-apply is byte/CRC-identical at
+    the field codec.
   - `LeafKind.DefRef` / `EntityRef` round-trip stays UNTESTABLE offline and is deliberately not faked:
     decode is `GameUtl.GameComponent<DefRepository>()` and the values are `BaseDef : ScriptableObject`,
     neither constructible outside the player; the classify side is the one-liner
@@ -392,8 +399,10 @@ so it is reference identity at walk time:
   - The diff layer proper and `GenericApplier`'s resolve path are still untested: `DiffEngine.Tick`'s
     snapshot/compare/emit is inline in a method needing a live `GeoLevelController`. Of that layer only
     the separable halves are covered — tombstone (L7) and seq (L8).
-  - `IntentRail` and `IntentDedup` have NO harness law (honest gap): nonce allocation, dedup
-    idempotence, dispatch and reject-reconverge discipline are exercised only by the in-game gate.
+  - `IntentDedup` (idempotence, peer/surface keying, bounded ring, rejoin reset) and the intent
+    envelope ([nonce][op] on all four family surfaces + the empty reject nudge) are covered by L12.
+    Still in-game-only: `IntentRail`'s nonce allocator, host dispatch and reject-reconverge (each
+    needs a live `NetworkEngine`), and the family BODY codecs (inline at capture/handler seams).
   - The closure is DECLARED types from the `IdentityResolver.Roots` kinds; runtime subtypes only
     enter it when the codec is polymorphic. Fields the live walk reaches through a subtype are invisible.
   - **It cannot catch a ship-side rule change that makes an already-classified type start riding as a

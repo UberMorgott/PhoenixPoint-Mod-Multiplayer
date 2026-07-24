@@ -77,8 +77,14 @@ BEHAVIOR (per-subsystem mirroring).
     non-vacuous (L9), element ORDER survives the wire — blob order round-trip, live-instance reuse,
     key-order in-place reorder (L10), no `LocalizedTextBind` field/element rides covered — static
     belt for the runtime DefOwnership law, which itself needs a live `DefRepository` and is
-    harness-invisible (L11). Honest gap: `IntentRail`/`IntentDedup` have NO harness law — intent
-    nonce/dedup/reject discipline is exercised only by the in-game gate.
+    harness-invisible (L11), intent dedup idempotence / peer+surface keying / bounded ring / rejoin
+    reset + the four families' [nonce][op] envelope round-trip (L12), field-codec
+    CRC(host)==CRC(client) — re-encode after a real apply reproduces the host's exact bytes, hashed
+    with the save-transfer `Crc32` (L13). Honest gaps: `IntentRail`'s nonce allocator, dispatch and
+    reject-reconverge + the family BODY codecs need a live `NetworkEngine` (in-game gate); the
+    live-tree differential CRC needs a `GeoLevelController`; DefRef round-trip stays deliberately
+    un-faked (encode = a single Guid write — tautology; decode needs a live `DefRepository` —
+    ARCHITECTURE.md §Verification).
   - `docs/rail-baseline.txt` is the committed classifier snapshot (table + per-type blob husk lists
     + today's known violations). **Any drift in it is RED** — that is the whole point: a field moving
     Excluded↔covered must be a reviewable diff, never a silent side effect. Change is intended →

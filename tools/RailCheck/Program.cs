@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Base.Serialization.General;
 using Multiplayer.Network.Sync;
+using Multiplayer.Util;
 using UnityEngine;
 
 namespace RailCheck
@@ -595,6 +596,116 @@ namespace RailCheck
                 else if (((IEnumerable<int>)fi.GetValue(holder)).Count() != 3)
                     yield return "L4 applylist-" + fname + ": expected 3 elements after apply";
             }
+
+            // ─── L12 — IntentRail/IntentDedup: the separable halves (ARCHITECTURE.md "harness gaps") ──
+            // IntentDedup is PURE by design ("no engine types → unit-tested", its own header) and the
+            // envelope codec is BCL-only, so the REAL classes run here. Still in-game-only: the nonce
+            // allocator, host dispatch and reject-reconverge (each needs a live NetworkEngine), and the
+            // family BODY codecs (inline at capture/handler seams, against live game state).
+            var dedup = new IntentDedup(16); // the constructor floor = smallest ring, so eviction is reachable
+            if (!dedup.IsNew(1, SurfaceIds.GeoResearchIntent, 1))
+                yield return "L12 dedup-first-drop: a never-seen (peer,surface,nonce) was dropped";
+            if (dedup.IsNew(1, SurfaceIds.GeoResearchIntent, 1))
+                yield return "L12 dedup-replay: a redelivered intent would double-apply (law 7 idempotence)";
+            // Peer discriminator: client nonces are client-LOCAL counters — with 2+ clients both emit
+            // nonce 1 on one surface and BOTH must apply (the key rationale in IntentDedup's header).
+            if (!dedup.IsNew(2, SurfaceIds.GeoResearchIntent, 1))
+                yield return "L12 dedup-peer-collision: a second client's nonce 1 was eaten by the first's";
+            // Surface discriminator: ONE shared client counter feeds all families (IntentRail._nextNonce);
+            // the same (peer,nonce) on another surface is a DIFFERENT intent.
+            if (!dedup.IsNew(1, SurfaceIds.GeoManufactureIntent, 1))
+                yield return "L12 dedup-surface-collision: same (peer,nonce) on another family was dropped";
+            // Bounded ring: overflow evicts the OLDEST key, which is then accepted again — the window
+            // semantics behind "a transport dupe arrives adjacent to its original, so 512 holds".
+            for (uint n = 100; n < 116; n++) dedup.IsNew(1, SurfaceIds.GeoResearchIntent, n);
+            if (!dedup.IsNew(1, SurfaceIds.GeoResearchIntent, 1))
+                yield return "L12 dedup-ring-unbounded: capacity overflow did not evict the oldest key";
+            // Rejoin (rca-3 audit b): ResetPeer drops ONE peer's window (its fresh engine restarts
+            // nonces at 1) and must leave every other peer's intact.
+            var dedup2 = new IntentDedup();
+            dedup2.IsNew(1, SurfaceIds.GeoPersonnelIntent, 1);
+            dedup2.IsNew(2, SurfaceIds.GeoPersonnelIntent, 1);
+            dedup2.ResetPeer(1);
+            if (!dedup2.IsNew(1, SurfaceIds.GeoPersonnelIntent, 1))
+                yield return "L12 dedup-rejoin-eaten: a rejoining peer's restarted nonce 1 was dropped";
+            if (dedup2.IsNew(2, SurfaceIds.GeoPersonnelIntent, 1))
+                yield return "L12 dedup-reset-bleed: ResetPeer(1) also forgot peer 2's window";
+            // Envelope round-trip, all four intent families: [nonce:u32][op:u8][opaque body] riding
+            // SyncKind.ActionRequest on the family's OWN surface (the surface byte IS the family
+            // discriminator) must come back byte-identical, with the [nonce][op] prefix reading exactly
+            // as IntentRail.HandleInbound does; and the reject nudge — a deliberately EMPTY envelope on
+            // the same surface — must decode to an empty payload, never a failure.
+            foreach (var sid in new[] { SurfaceIds.GeoResearchIntent, SurfaceIds.GeoManufactureIntent,
+                                        SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent })
+            {
+                byte[] inner;
+                using (var ims = new MemoryStream())
+                using (var iw = new BinaryWriter(ims, Encoding.UTF8))
+                {
+                    iw.Write(0xDEADBEEFu); // nonce
+                    iw.Write((byte)3);     // op
+                    iw.Write("body");      // opaque family body (the engine never parses past [nonce][op])
+                    iw.Write(-7);
+                    inner = ims.ToArray();
+                }
+                if (!SyncProtocol.TryDecodeEnvelope(SyncProtocol.EncodeEnvelope(sid, SyncKind.ActionRequest, inner),
+                        out var sid2, out var kind2, out var body) ||
+                    sid2 != sid || kind2 != SyncKind.ActionRequest || !RailMeta.BytesEqual(body, inner))
+                { yield return "L12 intent-envelope: surface 0x" + sid.ToString("X2") + " did not round-trip"; continue; }
+                using (var ims = new MemoryStream(body))
+                using (var ir = new BinaryReader(ims, Encoding.UTF8))
+                    if (ir.ReadUInt32() != 0xDEADBEEFu || ir.ReadByte() != 3)
+                        yield return "L12 intent-prefix: [nonce][op] on 0x" + sid.ToString("X2") +
+                                     " did not decode as HandleInbound reads it";
+                if (!SyncProtocol.TryDecodeEnvelope(SyncProtocol.EncodeEnvelope(sid, SyncKind.ActionRequest, null),
+                        out _, out _, out var nudge) || nudge.Length != 0)
+                    yield return "L12 reject-nudge: the empty reject envelope on 0x" + sid.ToString("X2") +
+                                 " did not decode to an empty payload";
+            }
+
+            // ─── L13 — CRC(host)==CRC(client) after apply, at the FIELD-CODEC level ────────────────
+            // (ARCHITECTURE.md "harness gaps".) The live-tree differential CRC still needs a
+            // GeoLevelController and stays in-game; what IS separable is the identity the law-7 CRC
+            // backstop rests on: re-encoding what the applier wrote must reproduce the host's EXACT
+            // bytes — otherwise idle ticks re-emit phantom diffs and a subtree CRC compare can never
+            // settle. L4/L6 assert decoded VALUE equality; this asserts re-encoded BYTE equality through
+            // the real apply calls (DecodeFieldValue + SetValue / ApplyList — GenericApplier.cs:247-273's
+            // exact pattern) and hashes with the real Crc32 (the save-transfer polynomial — one truth).
+            var crcHost = new Elem { N = 42, S = "crc", L = { 5, 4, 3 } };
+            var crcClient = new Elem { N = 0, S = null };
+            int crcChecked = 0;
+            foreach (var cf in RailType.Get(typeof(Elem)).Fields)
+            {
+                var hostBytes = RailMeta.EncodeFieldValue(cf, cf.GetValue(crcHost));
+                if (cf.Class == FieldClass.LeafList)
+                    RailMeta.ApplyList(crcClient, cf, RailMeta.DecodeFieldValue(hostBytes, cf, null, out _) as List<object>);
+                else
+                    cf.SetValue(crcClient, RailMeta.DecodeFieldValue(hostBytes, cf, null, out _));
+                var clientBytes = RailMeta.EncodeFieldValue(cf, cf.GetValue(crcClient));
+                if (Crc32.Compute(hostBytes) != Crc32.Compute(clientBytes) || !RailMeta.BytesEqual(hostBytes, clientBytes))
+                    yield return "L13 crc-diverged: Elem." + cf.Name + " re-encodes differently after apply — a client would never converge";
+                crcChecked++;
+            }
+            if (crcChecked < 3)
+                yield return "L13 crc-vacuous: Elem stopped exposing its 3 fields — the law checked nothing";
+            // Unordered set: host and client iterate a HashSet in ARBITRARY orders — the canonical sort
+            // is what makes a set CRC-comparable at all, so the re-encode after apply must match too.
+            var crcSetF = new RailField { Name = "Set", Class = FieldClass.LeafList, ValueType = typeof(HashSet<int>),
+                                          ElemType = typeof(int), Unordered = true, Fi = typeof(ListHolder).GetField("Set") };
+            var crcSetHost = new ListHolder { Set = { 3, 1, 2 } };
+            var crcSetClient = new ListHolder();
+            var setBytes = RailMeta.EncodeFieldValue(crcSetF, crcSetHost.Set);
+            RailMeta.ApplyList(crcSetClient, crcSetF, RailMeta.DecodeFieldValue(setBytes, crcSetF, null, out _) as List<object>);
+            if (Crc32.Compute(setBytes) != Crc32.Compute(RailMeta.EncodeFieldValue(crcSetF, crcSetClient.Set)))
+                yield return "L13 crc-unordered: a HashSet re-encodes differently after apply (canonical sort broken)";
+            // EntityList blob, order included: decode → re-encode must reproduce the wire — a reorder
+            // that applied but re-encoded differently would force-re-emit forever.
+            var crcEf = new RailField { Name = "e", Class = FieldClass.EntityList, ValueType = typeof(List<Elem>), ElemType = typeof(Elem) };
+            var crcWire = RailMeta.EncodeEntityList(crcEf, new List<Elem> { new Elem { N = 2, S = "b", L = { 9 } }, new Elem { N = 1, S = "a" } });
+            var crcRelist = new List<Elem>();
+            foreach (var o in RailMeta.DecodeEntityList(crcWire, crcEf, null)) crcRelist.Add((Elem)o);
+            if (Crc32.Compute(crcWire) != Crc32.Compute(RailMeta.EncodeEntityList(crcEf, crcRelist)))
+                yield return "L13 crc-entitylist: a decoded blob re-encodes to different bytes than the host sent";
         }
 
         private sealed class ListHolder
