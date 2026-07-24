@@ -618,6 +618,31 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<int, int[]> WireStatNet = new Dictionary<int, int[]>();
         private static readonly Dictionary<int, int> WireFactionTaken = new Dictionary<int, int>();
 
+        /// <summary>Ledger hygiene for the native skill-reset. The ONE model funnel is
+        /// <c>GeoCharacter.ResetCharacterProgression</c> (GeoCharacter.cs:604-615, gated by
+        /// _hasSkillReset; sole caller of <c>CharacterProgression.ResetAbilities</c>:225 — UI button
+        /// UseAllowedAbilityReset:446 and any mod path both route through it; TFTV: no direct calls).
+        /// The reset refunds ability SP straight into the model (:242/:250) — a session ledger kept
+        /// from before it no longer describes the character, so DROP it on the character that reset
+        /// (never carry a positive wire-net across a respec: a later wire −1 would pass the floor and
+        /// mint its step cost on top of the reset's own refund). Clearing is the strict direction —
+        /// floor falls back to 0, worst case a legit refund is rejected and law-7 reconverges the
+        /// client. Host-side state only, so the client's still-local reset (respec intent op — next
+        /// session) is unaffected by this patch.</summary>
+        [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.ResetCharacterProgression))]
+        internal static class SkillResetLedgerPatch
+        {
+            private static void Postfix(GeoCharacter __instance, bool __result)
+            {
+                if (!__result) return; // _hasSkillReset gate refused — nothing changed
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return; // solo: fully native
+                int charId = (int)__instance.Id;
+                WireStatNet.Remove(charId);
+                WireFactionTaken.Remove(charId);
+            }
+        }
+
         /// <summary>Inverse of <see cref="Charge"/> for the undo gesture — mutoids get mutagens back in
         /// the wallet; humans refill the shared faction pool FIRST, capped by what the wire's own charges
         /// took from it (<see cref="WireFactionTaken"/>), remainder personal. That is the native
