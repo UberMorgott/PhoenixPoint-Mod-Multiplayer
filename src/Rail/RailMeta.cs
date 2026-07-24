@@ -656,7 +656,8 @@ namespace Multiplayer.Network.Sync
         {
             if (liveT == dtoT) return true;
             if (WrapperField(liveT, dtoT) != null) return true;
-            if (liveT == typeof(GeoFaction) && typeof(BaseDef).IsAssignableFrom(dtoT)) return true;
+            if (liveT == typeof(GeoFaction) &&
+                (dtoT == typeof(GeoFactionDef) || dtoT == typeof(PhoenixPoint.Common.Core.PPFactionDef))) return true;
             var de = ElemTypeOf(dtoT);
             return de != null && !liveT.IsArray && ElemTypeOf(liveT) == de &&
                    GenericInterfaceArgs(liveT, typeof(IDictionary<,>)) == null &&
@@ -693,7 +694,7 @@ namespace Multiplayer.Network.Sync
         internal static object FactionByDef(GeoLevelController geo, object def)
         {
             if (geo == null) return null;
-            if (def is GeoFactionDef gfd) return geo.GetFaction(gfd);
+            if (def is GeoFactionDef gfd) return geo.Factions.FirstOrDefault(f => f.Def == gfd); // GetFaction(GeoFactionDef) throws when missing
             if (def is PhoenixPoint.Common.Core.PPFactionDef ppd) return geo.GetFaction(ppd, canFail: true);
             return null;
         }
