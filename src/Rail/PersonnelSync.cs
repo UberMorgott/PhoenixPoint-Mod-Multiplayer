@@ -49,11 +49,11 @@ namespace Multiplayer.Network.Sync
     /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820) — with the SP
     /// economy re-derived from the HOST's own numbers (<see cref="Charge"/>), never from the wire.
     ///
-    /// WHAT THE WIRE DELIBERATELY DOES NOT CARRY: the shared pool value. <c>GeoPhoenixFaction.Skillpoints</c>
-    /// is rail-UNCOVERED today (persisted only via ExtendedInstanceData, declared `object`,
-    /// bridge-unresolved), so a stat spend debits it host-side and clients will not SEE the new pool total
-    /// until that field gets rail coverage. Shipping the client's pool value here would have made the
-    /// client authoritative over a shared resource (law 3) to paper over a coverage gap — so it does not.
+    /// WHAT THE WIRE DELIBERATELY DOES NOT CARRY: any balance. Both halves of the SP economy are
+    /// rail-covered Leafs (rail-baseline.txt: <c>CharacterProgression.SkillPoints</c> :95,
+    /// <c>GeoPhoenixFaction.Skillpoints</c> :316), so a host-side debit reaches every client through the
+    /// 0xAC diff. Shipping a client's own numbers would make it authoritative over a shared resource
+    /// (law 3) — the host re-derives cost and pool from its own state (<see cref="Charge"/>).
     /// </summary>
     public static class PersonnelSync
     {

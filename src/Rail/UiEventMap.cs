@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
@@ -6,6 +7,7 @@ using Base.Entities.Statuses;
 using Base.UI;
 using HarmonyLib;
 using PhoenixPoint.Common.Core;
+using PhoenixPoint.Common.Entities.Characters;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
@@ -73,6 +75,22 @@ namespace Multiplayer.Network.Sync
                             // _timing.Now.DateTime every frame and repaints only when it changed (:143-149).
                             // So a latched anchor needs no event of its own to become visible.
                             break;
+                        case CharacterProgression cp:
+                            // Derived-stat recompute (stat-spend RCA): the rail wrote _baseStats /
+                            // SkillPoints RAW, so CharacterProgression.StatModifiedCallback never fired
+                            // and the owner's private GeoCharacter.UpdateStats (GeoCharacter.cs:1185, the
+                            // native recompute the callback drives) never ran — every open screen keeps
+                            // painting stale CharacterStats. Same per-kind shape as Wallet/ItemStorage:
+                            // run the native derive, then the universal repaint re-reads it.
+                            RefreshDerivedStats(OwnerOf(cp, geo));
+                            OpenUiRepaint.MarkDirty();
+                            break;
+                        case GeoCharacter gc:
+                            // Item lists (_armourItems…) also land raw — natively SetItems ends in
+                            // UpdateStats(recalculateBodparts: true) (GeoCharacter.cs:876-879); mirror that.
+                            RefreshDerivedStats(gc);
+                            OpenUiRepaint.MarkDirty();
+                            break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing + equip screens are PULL-model: NO StorageChanged subscription
@@ -97,6 +115,31 @@ namespace Multiplayer.Network.Sync
                 }
                 catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] UiEventMap fire failed for " + entity.GetType().Name + ": " + ex.Message); }
             }
+        }
+
+        private static readonly MethodInfo UpdateStatsMethod =
+            AccessTools.Method(typeof(GeoCharacter), "UpdateStats"); // private (bool recalculateBodparts)
+        private static readonly FieldInfo LevelTacUnitsField =
+            AccessTools.Field(typeof(GeoLevelController), "_tacUnits");
+
+        /// <summary>Owner of a touched progression: CharacterProgression carries no back-ref, so scan the
+        /// level's U# root registry (same _tacUnits dict IdentityResolver roots from) for the character
+        /// whose Progression IS this instance.</summary>
+        private static GeoCharacter OwnerOf(CharacterProgression cp, GeoLevelController geo)
+        {
+            if (geo == null || !(LevelTacUnitsField?.GetValue(geo) is IDictionary units)) return null;
+            foreach (var u in units.Values)
+                if (u is GeoCharacter c && ReferenceEquals(c.Progression, cp)) return c;
+            return null;
+        }
+
+        /// <summary>Native derived recompute, scoped like the other raisers (law 8: UpdateStats fires the
+        /// Stat callbacks a seam could hear). Idempotent — same inputs, same CharacterStats.</summary>
+        private static void RefreshDerivedStats(GeoCharacter character)
+        {
+            if (character == null || UpdateStatsMethod == null) return;
+            using (SyncApplyScope.Enter())
+                UpdateStatsMethod.Invoke(character, new object[] { true });
         }
 
         private static readonly System.Reflection.FieldInfo ResourcesChangedField =
