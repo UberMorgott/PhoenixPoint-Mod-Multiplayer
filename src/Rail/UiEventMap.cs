@@ -14,6 +14,7 @@ using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewControllers.PhoenixBase;
+using PhoenixPoint.Geoscape.View.ViewControllers.AugmentationScreen;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -253,6 +254,8 @@ namespace Multiplayer.Network.Sync
                     return Call(VsTabs, s) && Call(VsActions, s) && Call(VsReachable, s) && Call(VsObjectives, s, Viewer());
                 },
                 [typeof(UIStateNothingSelected)] = (s, v) => Call(NsObjectives, s, Viewer()),
+                [typeof(UIStateBionics)] = (s, v) => RepaintAugmentScreen(v.GeoscapeModules.BionicsModule, v.GeoscapeModules),
+                [typeof(UIStateMutate)] = (s, v) => RepaintAugmentScreen(v.GeoscapeModules.MutateModule, v.GeoscapeModules),
                 [typeof(UIStatePhoenixBaseLayout)] = (s, v) =>
                 {
                     var m = v.GeoscapeModules.BaseLayoutModule;
@@ -274,6 +277,51 @@ namespace Multiplayer.Network.Sync
         internal static bool TryRepaint(GeoscapeViewState current, GeoscapeView view)
         {
             return Table.TryGetValue(current.GetType(), out var rebuild) && rebuild(current, view);
+        }
+
+        /// <summary>UIStateBionics / UIStateMutate. These screens stage an unconfirmed trial IN the model
+        /// (OnAugmentClicked → SetItems, reverted on exit), so the generic Exit+Enter fallback is exactly
+        /// wrong here: it clears the player's mutation selection on every batch and re-snapshots
+        /// CharacterOriginalItems around whatever was staged. Native read-direction pieces instead:
+        ///   • the model moved UNDER the screen (armour ≠ snapshot AND ≠ trial — a foreign augment on this
+        ///     soldier, or a reject re-emit): run the screen's own rebind (CharacterChangedHandler shape,
+        ///     UIStateBionics.cs:118-122) — OnNewCharacter re-snapshots CharacterOriginalItems from the
+        ///     model (its internal revert-SetItems stays suppressed by SetItemsApplyGate — this runs under
+        ///     the repaint's SyncApplyScope) — plus the OnAugmentClicked doll refresh
+        ///     (UIModuleBionics.cs:199, DisplaySoldier(resetAnimation:false, addWeapon:false)).
+        ///   • otherwise snapshot, trial and selection are all still valid — keep them untouched.
+        ///     Wallet/storage bars repaint through their own native events. ponytail: UIModuleMutate's
+        ///     mutagen label (private InitCurrentMutagens) can stale here until the next selection
+        ///     change/reopen — wire its reflection call if that ever shows in play.</summary>
+        private static bool RepaintAugmentScreen(object module, GeoscapeModulesData mods)
+        {
+            GeoCharacter cur;
+            List<GeoItem> snapshot, trial;
+            switch (module)
+            {
+                case UIModuleBionics b: cur = b.CurrentCharacter; snapshot = b.CharacterOriginalItems; trial = b.CharacterCurrentItems; break;
+                case UIModuleMutate m: cur = m.CurrentCharacter; snapshot = m.CharacterOriginalItems; trial = m.CharacterCurrentItems; break;
+                default: return false;
+            }
+            if (cur == null || snapshot == null || trial == null) return false; // fallback re-enter re-seeds from scratch
+            var live = cur.ArmourItems;
+            if (!SameItems(live, snapshot) && !SameItems(live, trial))
+            {
+                if (module is UIModuleBionics b2) b2.OnNewCharacter(cur);
+                else ((UIModuleMutate)module).OnNewCharacter(cur);
+                mods.ActorCycleModule?.DisplaySoldier(cur, resetAnimation: false, addWeapon: false);
+            }
+            return true;
+        }
+
+        /// <summary>GeoItem.Equals is VALUE equality (def+count+charges, GeoItem.cs:124) — survives the
+        /// applier's live-instance reuse; both module lists preserve model order by construction.</summary>
+        private static bool SameItems(IReadOnlyList<GeoItem> live, List<GeoItem> list)
+        {
+            if (live == null || list == null || live.Count != list.Count) return false;
+            for (int i = 0; i < live.Count; i++)
+                if (!Equals(live[i], list[i])) return false;
+            return true;
         }
 
         private static bool ReseedEquipScreen(GeoscapeViewState state, GeoscapeModulesData mods,

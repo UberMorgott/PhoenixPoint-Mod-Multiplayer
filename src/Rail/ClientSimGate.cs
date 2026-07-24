@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -83,6 +84,29 @@ namespace Multiplayer.Network.Sync
             // (carried over from 4f0b5b5, whose own copy of this check targeted a gate that no longer exists).
             if (SessionEnd.InProgress) return false;
             if (!SyncApplyScope.Active) return true;          // not mirroring: the screen owns the model
+            var engine = NetworkEngine.Instance;
+            return engine == null || !engine.IsActiveSession; // solo: native, even under a stray scope
+        }
+    }
+
+    /// <summary>
+    /// N1 closed at the MODEL chokepoint instead of per-caller: <see cref="EquipFlushGate"/> enumerates
+    /// the equip screens' flush methods, but the augment screens revert THROUGH the same model write on
+    /// exit — <c>UIStateBionics.ExitState</c>:93 → <c>UIModuleBionics.Deinit</c>:119 →
+    /// <c>RevertUnconfirmedChanges</c>:127-129 → <c>GeoCharacter.SetItems(CharacterOriginalItems)</c> —
+    /// so the universal repaint's fallback re-enter (OpenUiRepaint, inside SyncApplyScope) overwrote a
+    /// just-applied augment delta with the PRE-augment snapshot in the same frame (RCA 2026-07-24).
+    /// Same law, zero enumeration: inside an apply, ANY view→model item flush is stale by construction
+    /// (verified: no rail code calls SetItems under the scope — GenericApplier writes the lists via
+    /// ApplyList, host intent replays run outside it — and EquipSync's gesture-send patch is a postfix
+    /// that already self-gates on the scope). Outside an apply, gestures/staging stay fully native.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
+    internal static class SetItemsApplyGate
+    {
+        private static bool Prefix()
+        {
+            if (!SyncApplyScope.Active) return true;          // native: gestures, host replays, solo
             var engine = NetworkEngine.Instance;
             return engine == null || !engine.IsActiveSession; // solo: native, even under a stray scope
         }

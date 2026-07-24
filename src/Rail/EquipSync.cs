@@ -427,6 +427,17 @@ namespace Multiplayer.Network.Sync
                 if (character == null || __0 == null) return false; // never write locally
                 ManufactureSync.SendIntent(ManufactureSync.OpAugment, __0.Guid, (int)character.Id);
                 Debug.Log("[MP][equip] CLIENT augment intent char=U#" + (int)character.Id + " def=" + __0.Guid);
+                // Mirror the native tail's VIEW-MODEL half (UIModuleBionics.cs:255-256 —
+                // CharacterOriginalItems := CharacterCurrentItems): the blocked body was the only thing
+                // that advanced the module's snapshot past the staged trial, and without it the screen's
+                // NEXT exit revert (Deinit/PopState → RevertUnconfirmedChanges → SetItems(snapshot), a
+                // user gesture OUTSIDE any apply scope) rolls the confirmed augment back off the mirror.
+                // Same obligation as PersonnelSync's ClearBoughtAbility mirror — view bookkeeping only,
+                // no model write, no wallet.
+                if (__instance is UIModuleBionics b && b.CharacterCurrentItems.Count > 0)
+                { b.CharacterOriginalItems.Clear(); b.CharacterOriginalItems.AddRange(b.CharacterCurrentItems); }
+                else if (__instance is UIModuleMutate m && m.CharacterCurrentItems.Count > 0)
+                { m.CharacterOriginalItems.Clear(); m.CharacterOriginalItems.AddRange(m.CharacterCurrentItems); }
                 return false;
             }
         }
