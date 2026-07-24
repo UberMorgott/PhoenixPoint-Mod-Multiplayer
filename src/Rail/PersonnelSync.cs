@@ -509,7 +509,8 @@ namespace Multiplayer.Network.Sync
             var source = FindCharacterContainer(geo, character);
             if (source == null)
             { RejectReassign(peer, charId, "character in no container", null, dstRef); return false; }
-            if (ReferenceEquals(source, destination)) return false; // no-op: the client's view was behind
+            if (ReferenceEquals(source, destination)) // no-op: the client's view was behind — re-emit heals its mirror
+            { RejectReassign(peer, charId, "already there", null, dstRef); return false; }
             var srcRef = IdentityResolver.RootRef(source);
             if (!destination.CanTransferBetweenContainer(source))
             { RejectReassign(peer, charId, "not co-located " + srcRef + "→" + dstRef, srcRef, dstRef); return false; }

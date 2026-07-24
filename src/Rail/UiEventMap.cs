@@ -87,8 +87,13 @@ namespace Multiplayer.Network.Sync
                             OpenUiRepaint.MarkDirty();
                             break;
                         case GeoCharacter gc:
-                            // Item lists (_armourItems…) also land raw — natively SetItems ends in
-                            // UpdateStats(recalculateBodparts: true) (GeoCharacter.cs:876-879); mirror that.
+                            // Item lists (_armourItems…) also land raw — natively SetItems runs
+                            // AddAbilitiesFromItems(updateStats: false) (GeoCharacter.cs:846) and THEN
+                            // UpdateStats(recalculateBodparts: true) (:876-879); mirror both, else
+                            // PassiveModifiersFromItems stays stale after armour/augment deltas.
+                            if (AddAbilitiesFromItemsMethod != null)
+                                using (SyncApplyScope.Enter())
+                                    AddAbilitiesFromItemsMethod.Invoke(gc, new object[] { false });
                             RefreshDerivedStats(gc);
                             OpenUiRepaint.MarkDirty();
                             break;
@@ -120,6 +125,8 @@ namespace Multiplayer.Network.Sync
 
         private static readonly MethodInfo UpdateStatsMethod =
             AccessTools.Method(typeof(GeoCharacter), "UpdateStats"); // private (bool recalculateBodparts)
+        private static readonly MethodInfo AddAbilitiesFromItemsMethod =
+            AccessTools.Method(typeof(GeoCharacter), "AddAbilitiesFromItems"); // private (bool updateStats = true), GeoCharacter.cs:617
         private static readonly FieldInfo LevelTacUnitsField =
             AccessTools.Field(typeof(GeoLevelController), "_tacUnits");
 
