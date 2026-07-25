@@ -105,7 +105,11 @@ namespace Multiplayer.Network.Sync
 
         internal bool IsWritable()
         {
-            if (Fi != null) return !Fi.IsInitOnly;
+            // A readonly (initonly) FIELD is writable to reflection — FieldInfo.SetValue is exactly how
+            // the game's own serializer fills GeoscapeEventRecord.EventId / GeoEventTimer.ID on load, and
+            // excluding them stripped the KEY member off blob-rebuilt dict elements. Only a setterless
+            // PROPERTY is genuinely unwritable.
+            if (Fi != null) return true;
             return Pi != null && Pi.GetSetMethod(true) != null;
         }
     }
@@ -501,6 +505,12 @@ namespace Multiplayer.Network.Sync
             // the level clock rides the TimeAnchor "TA" root. Excluding the Descend member kills the
             // churn without touching TimingInstanceData's OWN table — the "TA" anchor kind stays 6/6.
             { "Base.Entities.ActorInstanceData.TimingData", "per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor \"TA\" root)" },
+
+            // v<4 save-migration leftover (EventSystemInstanceData.OldTriggeredEncounters, PreviousNames
+            // "TriggeredEncounters") with NO live member — ResolveLive's unique-type fallback lands it on
+            // EmptyExplorationEventIds, the only other List<string> on GeoscapeEventSystem, which is
+            // def-driven CONFIG, not state. Migrated records already ride EncounterRecords.
+            { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.OldTriggeredEncounters", "v<4 migration leftover — unique-type fallback would alias def-driven config (EmptyExplorationEventIds)" },
         };
 
         /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.</summary>
@@ -549,6 +559,16 @@ namespace Multiplayer.Network.Sync
                           ?? cur.Assembly.GetType(cur.FullName + "InstaceData"); // game typo: GeoSiteInstaceData
                 if (dto != null && dto != t) return dto;
             }
+            // NESTED DTO fallback — only when NO sibling DTO exists anywhere in the hierarchy: some
+            // singletons persist through a nested *InstanceData type the sibling probe cannot see
+            // (GeoscapeEventSystem+EventSystemInstanceData — the name does not even start with the
+            // owner's). A FALLBACK, not an interleaved rung: probing nested types inside the first loop
+            // hijacked GeoPhoenixFaction+ExtendedInstanceData over the base GeoFactionInstanceData
+            // (extended blocks ride the polymorphic-slot flatten instead — Build's FindNestedDto arm).
+            // Metadata order is identical on every peer (same game DLL), so first match is canonical.
+            for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
+                foreach (var n in cur.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
+                    if (n.Name.EndsWith("InstanceData", StringComparison.Ordinal) && n != t) return n;
             return null;
         }
 
@@ -576,6 +596,8 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.Name", "_vehicleName" },         // GeoVehicle.RecordInstanceData:1051 (the Name PROPERTY substitutes a localized default — not the store)
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.HitPoints", "Stats.HitPoints" }, // GeoVehicle.ProcessInstanceData:1119 (v3 arm; MaxHitPoints clamp is host-side truth)
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
+            { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
+            { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
         };
 
         /// <summary>Resolve a bridge member name onto the live type: explicit twin alias first (the game's
@@ -659,11 +681,40 @@ namespace Multiplayer.Network.Sync
             if (liveT == typeof(GeoFaction) &&
                 (dtoT == typeof(GeoFactionDef) || dtoT == typeof(PhoenixPoint.Common.Core.PPFactionDef))) return true;
             var de = ElemTypeOf(dtoT);
-            return de != null && !liveT.IsArray && ElemTypeOf(liveT) == de &&
-                   GenericInterfaceArgs(liveT, typeof(IDictionary<,>)) == null &&
+            if (de == null) return false;
+            // Live Dictionary<K,V> mirroring a DTO List<V> — the game's own Record/Process shape
+            // (GeoscapeEventSystem: _records.Values.ToList() out, ToDictionary(s => s.EventId) back).
+            // Licensed only when the dict key is re-derivable from the element: exactly ONE serialized
+            // element member of the key type (DictKeyMember — EventId / GeoEventTimer.ID). The walk
+            // enumerates Values (EncodeEntityList), the apply rebuilds entries keyed by that member.
+            var da = GenericInterfaceArgs(liveT, typeof(IDictionary<,>));
+            if (da != null) return da[1] == de && DictKeyMember(de, da[0]) != null;
+            return !liveT.IsArray &&
+                   ElemTypeOf(liveT) == de &&
                    GenericInterfaceArgs(dtoT, typeof(IDictionary<,>)) == null &&
                    (typeof(IList).IsAssignableFrom(liveT) ||
                     typeof(ICollection<>).MakeGenericType(de).IsAssignableFrom(liveT));
+        }
+
+        /// <summary>The UNIQUE serialized member of <paramref name="elem"/> with the dict's key type —
+        /// how the game itself keys these containers (GeoscapeEventRecord.EventId, GeoEventTimer.ID).
+        /// Ambiguous or absent → null → the field stays a visible exclusion, never a guessed key.</summary>
+        private static readonly Dictionary<string, MemberInfo> _dictKeyCache = new Dictionary<string, MemberInfo>(StringComparer.Ordinal);
+        internal static MemberInfo DictKeyMember(Type elem, Type keyType)
+        {
+            var ck = elem.FullName + "|" + keyType.FullName;
+            if (_dictKeyCache.TryGetValue(ck, out var hit)) return hit;
+            var ser = GameSerializer;
+            if (ser == null) return null; // pre-init — do NOT cache the miss
+            MemberInfo unique = null;
+            foreach (var mi in SerializedMembers(ser, elem))
+            {
+                if (MemberType(mi) != keyType) continue;
+                if (unique != null) { unique = null; break; } // ambiguous
+                unique = mi;
+            }
+            _dictKeyCache[ck] = unique;
+            return unique;
         }
 
         /// <summary>The single serialized, writable field of a one-member wrapper struct — the game's DTOs
@@ -1227,9 +1278,16 @@ namespace Multiplayer.Network.Sync
         /// TagNull) survives on every unchanged element. Match = canonical element-encoding byte equality —
         /// the exact "changed?" question the host itself asked, so no second equality table can drift.
         /// A value-duplicate pool maps 1:1 (each live instance claimed once).</summary>
+        /// <summary>Element view of an EntityList container: a live Dictionary twin (DictKeyMember shape)
+        /// enumerates its VALUES — a raw dict enumeration yields KeyValuePairs, which are not the
+        /// element type the codec speaks.</summary>
+        private static IEnumerable ElementsOf(object container) =>
+            container is IDictionary d ? d.Values : (IEnumerable)container;
+
         internal static void ReuseLiveElements(RailField f, object current, List<object> items)
         {
             if (items == null || items.Count == 0 || !(current is IEnumerable src)) return;
+            src = ElementsOf(current);
             var pool = new List<object>();
             foreach (var e in src) if (e != null) pool.Add(e);
             if (pool.Count == 0) return;
@@ -1274,7 +1332,7 @@ namespace Multiplayer.Network.Sync
                 if (listVal == null) { w.Write(false); return ms.ToArray(); }
                 w.Write(true);
                 var items = new List<object>();
-                foreach (var e in (IEnumerable)listVal) items.Add(e);
+                foreach (var e in ElementsOf(listVal)) items.Add(e);
                 if (items.Count > ushort.MaxValue) throw new InvalidOperationException("entity list too large (" + items.Count + ")");
                 w.Write((ushort)items.Count);
                 foreach (var e in items)
@@ -1666,6 +1724,26 @@ namespace Multiplayer.Network.Sync
                 // below through the normal strategies, then attach it to the field.
                 try { current = Activator.CreateInstance(field.ValueType, true); created = true; }
                 catch { /* no parameterless ctor — falls through to the strategy error below */ }
+            }
+            if (current is IDictionary dict)
+            {
+                // Live Dictionary twin of a DTO List (TwinTypeCompatible's dict rung): rebuild entries
+                // keyed by the element's own key member — the same mapping the game's Process side uses
+                // (_records = EncounterRecords.ToDictionary(s => s.EventId)). Key member licensed at
+                // resolve time; a null key element is dropped (no addressable slot), like the game's own
+                // dict rebuilds. Clear+re-add keeps the LIVE container instance (aliases survive).
+                var da = GenericInterfaceArgs(current.GetType(), typeof(IDictionary<,>));
+                var keyMi = da == null ? null : DictKeyMember(field.ElemType, da[0]);
+                if (keyMi == null) throw new InvalidOperationException("no dict key member for " + field.ElemType.Name);
+                dict.Clear();
+                if (items != null)
+                    foreach (var it in items)
+                    {
+                        if (it == null) continue;
+                        var k = GetMemberValue(keyMi, it);
+                        if (k != null) dict[k] = it;
+                    }
+                return;
             }
             if (current is IList list && !(current is Array))
             {

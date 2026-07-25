@@ -47,6 +47,7 @@ namespace Multiplayer.Network.Sync
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
             _loggedMisses.Clear();
+            EventPopup.Reset(); // record latch re-seeds silently from the transferred save's records
             // The transferred save just replaced this client's clock — re-seed the anchor scratch from it,
             // or the next partial anchor would layer onto pre-reload values.
             TimeAnchor.Reset();

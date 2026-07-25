@@ -169,11 +169,11 @@ namespace Multiplayer.Network.Sync
 
             // Level-scope singleton components (decompile GeoLevelController.cs:105/132/144) — walked so
             // the opt-out guarantee NAMES them in rail-coverage.txt instead of skipping them invisibly:
-            //   ES GeoscapeEventSystem — persists via NESTED EventSystemInstanceData, which FindBridge's
-            //      assembly-level name probe cannot reach (and every live container is a Dictionary vs the
-            //      DTO's List<KVP>, so ResolveLive would resolve nothing anyway) → classifies [none],
-            //      visible "no persistent members" incident. Riding its state = a deliberate future
-            //      nested-DTO bridge, not a side effect here.
+            //   ES GeoscapeEventSystem — persists via NESTED EventSystemInstanceData; FindBridge's nested
+            //      probe reaches it and ResolveLive's dict rung maps the Values-shaped twins
+            //      (EncounterRecords→_records, Timers→_timers) — records/timers/SuppressEvents/
+            //      AmbushProtection ride; List<KVP> members (CustomVariables, RemoveEventsAfterTimers)
+            //      stay visible bridge-unresolved exclusions. EventPopup mirrors popups off the records.
             //   MG GeoMissionGenerator — genuinely stateless (def-derived caches rebuilt in Start(); the
             //      save carries no generator data) → visible "no persistent members" incident.
             //   MK GeoMarketplace — rides via the existing FindBridge (GeoMarketplaceInstanceData is a

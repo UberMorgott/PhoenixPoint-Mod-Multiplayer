@@ -97,6 +97,13 @@ namespace Multiplayer.Network.Sync
                             RefreshDerivedStats(gc);
                             OpenUiRepaint.MarkDirty();
                             break;
+                        case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem es:
+                            // Mirrored event records changed → raise/dismiss the client's event popup
+                            // from the state transitions (EventPopup latch). MarkDirty stays: site
+                            // encounter labels etc. ride the universal repaint like any other kind.
+                            EventPopup.Sync(es, geo);
+                            OpenUiRepaint.MarkDirty();
+                            break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing + equip screens are PULL-model: NO StorageChanged subscription
@@ -230,6 +237,11 @@ namespace Multiplayer.Network.Sync
                 // First two table citizens = the former special-case branches (9b35194 manufacturing
                 // opt-out, research per-kind path); their rebuild knowledge stays in the family files.
                 [typeof(UIStateManufacturing)] = (s, v) => { ManufactureSync.RepaintManufacturingUi(); return true; },
+                // Event dialog = a static modal (def text + choice buttons, nothing model-bound to
+                // repaint) — and the fallback re-enter would run its ExitState guard, which locally
+                // COMPLETES a still-Triggered event (UIStateGeoscapeEvent.cs:61-65) = client-side
+                // resolution of a host-authoritative choice. Declared repainted, deliberately.
+                [typeof(UIStateGeoscapeEvent)] = (s, v) => true,
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {

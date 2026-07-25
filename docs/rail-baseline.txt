@@ -6,7 +6,7 @@ def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs 
   so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is
   INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element
   rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).
-types: 48
+types: 53
 
 Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace  [bridge:GeoMarketplaceInstanceData]  covered=2/4
   + Leaf IsMissionInProgress (Boolean)
@@ -50,6 +50,8 @@ Base.Entities.Statuses.StatusStat  [direct]  covered=5/6
   + Leaf Name (String)
   + Leaf Value (ModifiableValue)
   + Leaf _roundingMode (StatRoundingMode)
+PhoenixPoint.Common.Core.EarthUnits  [direct]  covered=1/1
+  + Leaf Value (Single)
 PhoenixPoint.Common.Core.PartyDiplomacy+Relation  [direct]  covered=3/5
   + Leaf MaxValue (Int32)
   + Leaf MinValue (Int32)
@@ -65,9 +67,9 @@ PhoenixPoint.Common.Entities.BaseCharacterStats  [direct]  covered=3/3
   + Leaf Endurance (Single)
   + Leaf Speed (Single)
   + Leaf Willpower (Single)
-PhoenixPoint.Common.Entities.Characters.AbilityTrack  [direct]  covered=0/2
+PhoenixPoint.Common.Entities.Characters.AbilityTrack  [direct]  covered=1/2
   - EXCLUDED AbilitiesByLevel (AbilityTrackSlot[]): blob husk on AbilityTrackSlot (AbilityTrack:AbilityTrack)
-  - EXCLUDED Source (AbilityTrackSource): read-only
+  + Leaf Source (AbilityTrackSource)
 PhoenixPoint.Common.Entities.Characters.CharacterFatigue  [direct]  covered=3/3
   + Leaf _hunger (Int32)
   + Leaf _sheetDef (BaseStatSheetDef)
@@ -88,10 +90,10 @@ PhoenixPoint.Common.Entities.Characters.CharacterIdentity  [direct]  covered=15/
   + Leaf SecondaryColorTag (CustomizationColorTagDef)
   + Leaf Sex (GeoCharacterSex)
   + Leaf VoiceProfileTag (VoiceProfileTagDef)
-PhoenixPoint.Common.Entities.Characters.CharacterProgression  [direct]  covered=6/8
-  - EXCLUDED BaseStatSheet (BaseStatSheetDef): read-only
+PhoenixPoint.Common.Entities.Characters.CharacterProgression  [direct]  covered=8/8
+  + Leaf BaseStatSheet (BaseStatSheetDef)
   + Descend LevelProgression (LevelProgression)
-  - EXCLUDED MainSpecDef (SpecializationDef): read-only
+  + Leaf MainSpecDef (SpecializationDef)
   + Leaf SkillPoints (Int32)
   + LeafList _abilities (List`1) unordered=no apply=IList
   + EntityList _abilityTracks (List`1) unordered=no apply=IList
@@ -107,16 +109,18 @@ PhoenixPoint.Common.Entities.CommonItemData  [direct]  covered=4/5
   + Leaf _charges (Int32)
   + Leaf _count (Int32)
   + Leaf _malfunction (Int32)
+PhoenixPoint.Common.Entities.GeoTacUnitId  [direct]  covered=1/1
+  + Leaf _id (Int32)
 PhoenixPoint.Common.Entities.Items.ItemManufacturing  [direct]  covered=1/1
   + EntityList _queue (List`1) unordered=no apply=IList
 PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem  [direct]  covered=2/2
   + Leaf AccumulatedPoints (Single)
   + Descend ManufacturableItem (ManufacturableItem)
-PhoenixPoint.Common.Entities.Items.ManufacturableItem  [direct]  covered=4/5
+PhoenixPoint.Common.Entities.Items.ManufacturableItem  [direct]  covered=5/5
   + Leaf CostInManufacturePoints (Int32)
   + Leaf FactoryManufactureCost (Int32)
   + LeafList ManufacturePrice (ResourcePack) unordered=no apply=Clear+Add
-  - EXCLUDED RelatedItemDef (ItemDef): read-only
+  + Leaf RelatedItemDef (ItemDef)
   + LeafList ScrapReward (ResourcePack) unordered=no apply=Clear+Add
 PhoenixPoint.Geoscape.Entities.AlienRaidManager  [direct]  covered=5/6
   + Leaf HrsSinceLargeFlyerDestroyed (Int32)
@@ -125,7 +129,7 @@ PhoenixPoint.Geoscape.Entities.AlienRaidManager  [direct]  covered=5/6
   + Leaf NextUpdateCountdownHrs (Int32)
   + LeafList _activeBombedSites (HashSet`1) unordered=yes apply=ICollection<T>
   - EXCLUDED _currentRaids (List`1): blob husk on GeoscapeRaid (ParticleEffect:ParticleEffect)
-PhoenixPoint.Geoscape.Entities.GeoCharacter  [direct]  covered=18/21
+PhoenixPoint.Geoscape.Entities.GeoCharacter  [direct]  covered=20/21
   + LeafList AdditionalDeploymentTags (List`1) unordered=no apply=IList
   + Leaf IsTutorialUnit (Boolean)
   - EXCLUDED OtherStats (List`1): blob husk on BaseStat (Owner:StatHolder,StatsRepo:StatsRepo)
@@ -140,13 +144,13 @@ PhoenixPoint.Geoscape.Entities.GeoCharacter  [direct]  covered=18/21
   + Descend _fatigue (CharacterFatigue)
   + Leaf _hasSkillReset (Boolean)
   + Descend _health (StatusStat)
-  - EXCLUDED _id (GeoTacUnitId): no persistent members (GeoTacUnitId)
+  + Leaf _id (GeoTacUnitId)
   + Descend _identity (CharacterIdentity)
   + EntityList _inventoryItems (List`1) unordered=no apply=IList
   + EntityList _inventoryLoadoutItems (List`1) unordered=no apply=IList
   + Leaf _originalFactionDef (GeoFactionDef)
   + Descend _progression (CharacterProgression)
-  - EXCLUDED _templateDef (TacCharacterDef): read-only
+  + Leaf _templateDef (TacCharacterDef)
 PhoenixPoint.Geoscape.Entities.GeoItem  [direct]  covered=1/1
   + Descend _commonItemData (CommonItemData)
 PhoenixPoint.Geoscape.Entities.GeoSite  [direct]  covered=1/1
@@ -162,19 +166,19 @@ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor  [direct]  covered=10/10
   + Leaf _faction (PPFactionDef)
   + Descend _identity (CharacterIdentity)
   + Descend _personalAbilityTrack (AbilityTrack)
-PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+IdentityDescriptor  [direct]  covered=0/2
-  - EXCLUDED Name (String): read-only
-  - EXCLUDED Sex (GeoCharacterSex): read-only
-PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+ProgressionDescriptor  [direct]  covered=5/6
+PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+IdentityDescriptor  [direct]  covered=2/2
+  + Leaf Name (String)
+  + Leaf Sex (GeoCharacterSex)
+PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+ProgressionDescriptor  [direct]  covered=6/6
   + LeafList ExtraAbilities (List`1) unordered=no apply=IList
   + Leaf LearnPrimaryAbilities (Boolean)
   + Leaf Level (Int32)
-  - EXCLUDED MainSpecDef (SpecializationDef): read-only
+  + Leaf MainSpecDef (SpecializationDef)
   + LeafDict PersonalAbilities (Dictionary`2)
   + Leaf SecondarySpecDef (SpecializationDef)
-PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+UnitTypeDescriptor  [direct]  covered=1/2
+PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor+UnitTypeDescriptor  [direct]  covered=2/2
   + Leaf IsHuman (Boolean)
-  - EXCLUDED TemplateDef (TacCharacterDef): read-only
+  + Leaf TemplateDef (TacCharacterDef)
 PhoenixPoint.Geoscape.Entities.GeoVehicle  [direct]  covered=1/1
   + Descend SerializationData (ActorInstanceData)
 PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment  [direct]  covered=3/3
@@ -184,17 +188,17 @@ PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment  [dir
 PhoenixPoint.Geoscape.Entities.ItemStorage  [direct]  covered=2/2
   + Leaf _isFactionStorage (Boolean)
   + GeoItemDict _storageItems (Dictionary`2)
-PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility  [direct]  covered=7/11
+PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility  [direct]  covered=10/11
   + Leaf FacilityId (UInt32)
   + Leaf IsCorridor (Boolean)
-  - EXCLUDED _components (GeoFacilityComponent[]): no list apply strategy (GeoFacilityComponent[])
-  - EXCLUDED _def (PhoenixFacilityDef): read-only
+  - EXCLUDED _components (GeoFacilityComponent[]): blob husk on GeoFacilityComponent (Context:GeoFacilityComponentContext)
+  + Leaf _def (PhoenixFacilityDef)
   + Leaf _health (Int32)
   + Leaf _isPowered (Boolean)
   + Leaf _nextUpdateTime (TimeUnit)
-  - EXCLUDED _position (Vector2Int): read-only
+  + Leaf _position (Vector2Int)
   + Leaf _prevUpdateTime (TimeUnit)
-  - EXCLUDED _rotation (PhoenixBaseLayoutRotation): read-only
+  + Leaf _rotation (PhoenixBaseLayoutRotation)
   + Leaf _state (FacilityState)
 PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager  [direct]  covered=1/2
   + Leaf FreeRestore (Boolean)
@@ -202,33 +206,52 @@ PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager  [direct]  covered=1/
 PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData  [direct]  covered=2/2
   + Leaf Progress (Int32)
   + Leaf ResearchRequirementDefName (String)
-PhoenixPoint.Geoscape.Entities.Research.Research  [direct]  covered=5/6
+PhoenixPoint.Geoscape.Entities.Research.Research  [direct]  covered=6/6
   + EntityCollection AllResearchesArray (ResearchElement[]) unordered=no apply=array-assign
   + Descend CurrentResearch (ResearchElement)
   + Leaf Paused (Boolean)
-  - EXCLUDED _factionDef (PPFactionDef): read-only
+  + Leaf _factionDef (PPFactionDef)
   + EntityCollection _oldResearchQueue (LinkedList`1) unordered=yes apply=ICollection<T>
   + EntityCollection _researchQueue (List`1) unordered=no apply=IList
-PhoenixPoint.Geoscape.Entities.Research.ResearchElement  [direct]  covered=5/6
+PhoenixPoint.Geoscape.Entities.Research.ResearchElement  [direct]  covered=6/6
   + Leaf IsInProgress (Boolean)
-  - EXCLUDED ResearchID (String): read-only
+  + Leaf ResearchID (String)
   + Leaf ResearchProgress (Single)
   + EntityList _serializableRevealRequirementsData (List`1) unordered=no apply=IList
   + EntityList _serializableUnlockRequirementsData (List`1) unordered=no apply=IList
   + Leaf _state (ResearchState)
-PhoenixPoint.Geoscape.Entities.Sites.GeoHavenZone  [direct]  covered=2/4
-  - EXCLUDED Def (GeoHavenZoneDef): read-only
+PhoenixPoint.Geoscape.Entities.Sites.GeoHavenZone  [direct]  covered=4/4
+  + Leaf Def (GeoHavenZoneDef)
   + Descend Health (StatusStat)
-  - EXCLUDED ZoneCount (Int32): read-only
+  + Leaf ZoneCount (Int32)
   + Leaf _state (GeoHavenZoneState)
 PhoenixPoint.Geoscape.Entities.VehicleEquipmentStorage  [direct]  covered=1/1
   + EntityList _storageItems (List`1) unordered=no apply=IList
-PhoenixPoint.Geoscape.Events.GeoscapeEventSystem  [none]  covered=0/0
+PhoenixPoint.Geoscape.Events.GeoEventTimer  [direct]  covered=3/3
+  + Leaf EndAt (TimeUnit)
+  + Leaf ID (String)
+  + Leaf StartAt (TimeUnit)
+PhoenixPoint.Geoscape.Events.GeoscapeEventRecord  [direct]  covered=7/7
+  + Leaf EventId (String)
+  + Leaf FirstTriggerAt (TimeUnit)
+  + Leaf _completedAt (TimeUnit)
+  + Leaf _lastTriggerAt (TimeUnit)
+  + Leaf _selectedChoice (Int32)
+  + Leaf _state (GeoscapeEventRecordState)
+  + Leaf _triggerCount (Int32)
+PhoenixPoint.Geoscape.Events.GeoscapeEventSystem  [bridge:EventSystemInstanceData]  covered=4/7
+  + Leaf AmbushProtection (Int32) -> live _ambushProtection
+  - EXCLUDED CustomVariables (List`1): bridge-unresolved
+  + EntityList EncounterRecords (List`1) -> live _records unordered=no apply=IList
+  - EXCLUDED OldTriggeredEncounters (List`1): v<4 migration leftover — unique-type fallback would alias def-driven config (EmptyExplorationEventIds)
+  - EXCLUDED RemoveEventsAfterTimers (List`1): bridge-unresolved
+  + Leaf SupressEvents (Boolean) -> live SuppressEvents
+  + EntityList Timers (List`1) -> live _timers unordered=no apply=IList
 PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  [direct]  covered=1/1
   + Descend SerializationData (ActorInstanceData)
-PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData  [direct]  covered=0/2
-  - EXCLUDED Position (Vector3): read-only
-  - EXCLUDED Range (EarthUnits): read-only
+PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData  [direct]  covered=2/2
+  + Leaf Position (Vector3)
+  + Leaf Range (EarthUnits)
 PhoenixPoint.Geoscape.Levels.Factions.FactionAggressionRequest  [direct]  covered=6/8
   + Leaf Accepted (Boolean)
   + Leaf AgainstFaction (GeoFactionDef)
@@ -238,8 +261,8 @@ PhoenixPoint.Geoscape.Levels.Factions.FactionAggressionRequest  [direct]  covere
   + Leaf FromFaction (GeoFactionDef)
   + LeafList ResourcesReward (ResourcePack) unordered=no apply=Clear+Add
   - EXCLUDED Summary (LocalizedTextBind): presentation-only type (LocalizedTextBind)
-PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacy  [direct]  covered=1/4
-  - EXCLUDED Def (PartyDiplomacySettingsDef): read-only
+PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacy  [direct]  covered=2/4
+  + Leaf Def (PartyDiplomacySettingsDef)
   - EXCLUDED Party (IDiplomaticPartyKey): untyped/interface member
   + EntityList _factionsDiplomacyState (List`1) unordered=no apply=IList
   - EXCLUDED _relations (Dictionary`2): dictionary with non-simple key/value (IDiplomaticPartyKey,Relation)
@@ -342,20 +365,25 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
 PhoenixPoint.Geoscape.Levels.GeoMissionGenerator  [none]  covered=0/0
+UnityEngine.Vector2Int  [direct]  covered=2/2
+  + Leaf x (Int32)
+  + Leaf y (Int32)
 
 blob-reconstructed element types (Activator.CreateInstance + table fields):
   Base.Entities.Statuses.StatResult keyable=no customCreate=no husk=none roundtrip=ok(4)
-  PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(0)
+  PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=none roundtrip=unconstructible:MissingMethodException
   PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment keyable=no customCreate=no husk=none roundtrip=ok(2)
   PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData keyable=no customCreate=no husk=none roundtrip=ok(2)
-  PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer roundtrip=ok(3)
-  PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(0)
+  PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer roundtrip=ok(4)
+  PhoenixPoint.Geoscape.Events.GeoEventTimer keyable=no customCreate=no husk=none roundtrip=ok(3)
+  PhoenixPoint.Geoscape.Events.GeoscapeEventRecord keyable=no customCreate=no husk=none roundtrip=ok(7)
+  PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
-PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=16/32
+PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
   + Descend ActiveMission (GeoMission)
   + LeafList Addons (List`1) -> live _addons unordered=no apply=IList
   > dispatch AlienBaseData -> GetComponent(GeoAlienBase)
@@ -363,7 +391,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=16/32
   + Leaf DiplomaticObjectiveFaction (GeoFactionDef)
   + Leaf EncounterID (String)
   + Leaf ExpiringTimerAt (TimeUnit)
-  - EXCLUDED FactionsData (List`1): dto-twin unresolved
+  + EntityList FactionsData (List`1) -> live _factionsData unordered=no apply=IList
   + LeafList GameTags (List`1) unordered=no apply=IList
   > dispatch HarvestingSiteData -> GetComponent(GeoHarvestingSite)
   > dispatch HavenData -> GetComponent(GeoHaven)
@@ -486,8 +514,8 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
   - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
-twin summary: resolved=58 gaps=57 dispatch=7
+twin summary: resolved=59 gaps=56 dispatch=7
 
-summary: covered=197 excluded=89 blobbable=9 geoItemDicts=1
+summary: covered=235 excluded=72 blobbable=11 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:
