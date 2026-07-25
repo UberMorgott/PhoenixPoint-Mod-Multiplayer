@@ -137,6 +137,13 @@ namespace Multiplayer.Network.Sync
                     if (!family.Ops.TryGetValue(op, out var handler))
                     { Reject(surfaceId, senderPeerId, "unknown op " + op); return true; }
                     handler(engine, senderPeerId, nonce, op, r);
+                    // N3 second arm (the seam DiffEngine.ArmChangeDrivenFlush's doc already promises):
+                    // a dispatched intent just changed host state via a native op — ship it THIS frame
+                    // (Transport.Update dispatches before Sync.Tick) instead of waiting out the 0.5 s
+                    // poll + ~250 ms sliced cycle, which held EVERY confirming delta ~0.25-0.75 s while
+                    // the acting client stared at its own click. Rejects converge via ForceReemit (which
+                    // flushes itself); a silent no-op op costs one wasted walk at user-gesture rate.
+                    DiffEngine.FlushNow();
                 }
             }
             catch (Exception ex)
