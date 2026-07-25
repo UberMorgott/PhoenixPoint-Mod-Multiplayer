@@ -80,6 +80,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (engine == null || engine.IsHost) return true; // host never applies its own surface
                 if (payload[0] == DiffEngine.MsgDelta) ApplyDelta(engine, payload);
+                else if (payload[0] == DiffEngine.MsgStructural) ApplyStructural(engine, payload);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier inbound failed: " + ex); }
             return true;
@@ -149,6 +150,85 @@ namespace Multiplayer.Network.Sync
                 // (harmless nesting).
                 using (SyncApplyScope.Enter())
                     UiEventMap.Fire(touched, geo);
+            }
+        }
+
+        /// <summary>Structural create/destroy (law 3, host→client): the entity arrives as a native-
+        /// Serializer blob and is reconstructed through the game's OWN deserialization (PostRead
+        /// callbacks = the load path, SerializerRoundtrip), then registered exactly the way the game's
+        /// load registers it. Idempotent: a redelivered create finds the root already resolvable and
+        /// skips; a destroy of an unknown root skips. Rides the ONE ordered GeoRail seq stream, so a
+        /// stale packet is dropped by SurfaceSeq like any delta. Enabled kinds mirror the host table:
+        ///   "U#" GeoCharacter — register geo._tacUnits[unit.Id] (GeoLevelController.cs:607-610);
+        ///        destroy = native GeoLevelController.DestroyTacUnit (:1560-1563). Container membership
+        ///        (site/vehicle TacUnits ref-lists) rides the value rail; a create additionally requests
+        ///        the throttled resync so ref-list deltas applied BEFORE the root existed reconverge.
+        /// Anything else → logged once (the visible opt-out).</summary>
+        private static void ApplyStructural(NetworkEngine engine, byte[] payload)
+        {
+            var geo = GeoLevel();
+            if (geo == null) return; // mid-load: reload boundary + save transfer own this window
+
+            using (var ms = new MemoryStream(payload))
+            using (var r = new BinaryReader(ms, Encoding.UTF8))
+            {
+                r.ReadByte(); // MsgStructural
+                uint seq = r.ReadUInt32();
+                if (!Seq.ShouldApply(SurfaceIds.GeoRail, seq)) return; // stale/duplicate
+                if (_lastSeq != 0 && seq > _lastSeq + 1)
+                    RequestResync(engine, "seq gap (" + _lastSeq + "→" + seq + ")");
+                byte op = r.ReadByte();
+                string rootKey = r.ReadString();
+                var blob = r.ReadBytes(r.ReadInt32());
+
+                bool created = false;
+                var touched = new HashSet<object>();
+                try
+                {
+                    using (SyncApplyScope.Enter())
+                    {
+                        var existing = IdentityResolver.Resolve(geo, rootKey, null);
+                        if (op == 1 && existing == null)
+                        {
+                            if (rootKey.StartsWith("U#", StringComparison.Ordinal))
+                            {
+                                var unit = Multiplayer.Rail.SerializerRoundtrip.DeserializeGraph(blob, typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter), quiet: true)
+                                           as PhoenixPoint.Geoscape.Entities.GeoCharacter;
+                                var reg = IdentityResolver.TacUnitsDict(geo);
+                                if (unit == null || reg == null)
+                                { Debug.LogError("[Multiplayer][rail] structural create '" + rootKey + "': " + (unit == null ? "blob deserialize failed" : "no _tacUnits registry")); return; }
+                                reg[unit.Id] = unit; // the game's own load registration (ProcessInstanceData:609)
+                                created = true;
+                                touched.Add(unit);   // UiEventMap GeoCharacter arm: native derived-stat refresh + repaint
+                                Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + blob.Length + "B)");
+                            }
+                            else LogMissOnce("structural create for '" + rootKey + "' not enabled — skipped");
+                        }
+                        else if (op == 2 && existing != null)
+                        {
+                            if (existing is PhoenixPoint.Geoscape.Entities.Missions.IGeoTacUnit unit)
+                            {
+                                geo.DestroyTacUnit(unit); // native removal (GeoLevelController.cs:1560-1563)
+                                Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
+                            }
+                            else LogMissOnce("structural destroy for '" + rootKey + "' not enabled — skipped");
+                        }
+                        // op==1 with existing != null / op==2 with null = redelivery or already-converged: no-op (law 7)
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multiplayer][rail] structural apply '" + rootKey + "' failed: " + ex);
+                    return; // seq unmarked — the throttled resync path recovers
+                }
+                _lastSeq = seq;
+                Seq.Mark(SurfaceIds.GeoRail, seq);
+                _pathCache.Clear(); // a root appeared/vanished — cached resolutions are void
+                if (touched.Count > 0)
+                    using (SyncApplyScope.Enter())
+                        UiEventMap.Fire(touched, geo); // law 11: open roster/equip screens repaint NOW
+                if (created)
+                    RequestResync(engine, "structural create backfill"); // ref-lists shipped pre-create reconverge
             }
         }
 

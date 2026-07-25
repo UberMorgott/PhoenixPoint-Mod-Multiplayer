@@ -18,7 +18,10 @@ namespace Multiplayer.Network.Sync
     /// else (DiffEngine walk, GenericApplier resolve) is metadata-generic and asks this class three
     /// questions:
     ///   • <see cref="KeyOf"/> — stable key of a collection element (small ID-member pattern table:
-    ///     SiteId / VehicleID / ResearchID / Id / Def-GUID; NOT per-subsystem sync code).
+    ///     SiteId / VehicleID / ResearchID / FacilityId / Id / Def-GUID; NOT per-subsystem sync code).
+    ///     FacilityId sits BEFORE Def: GeoPhoenixFacility carries no other id member, and Def-keying
+    ///     aborted the whole _facilities collection on any base with two same-def facilities or
+    ///     corridors (duplicate keys — the rail-coverage S#165 incident, why base state never synced).
     ///   • <see cref="RootRef"/> / <see cref="IsRootEntityType"/> — the 4 root-registry entity kinds
     ///     (faction/site/vehicle/character) that can be referenced ACROSS the tree as one-string keys.
     ///   • <see cref="Roots"/> — the geoscape entry points (level clock + the level's own actor
@@ -31,7 +34,7 @@ namespace Multiplayer.Network.Sync
     public static class IdentityResolver
     {
         // ─── ID-member probe table (the one pattern table, checked in order) ───
-        private static readonly string[] IdProbes = { "SiteId", "VehicleID", "ResearchID", "Id", "Def" };
+        private static readonly string[] IdProbes = { "SiteId", "VehicleID", "ResearchID", "FacilityId", "Id", "Def" };
         private static readonly Dictionary<Type, Func<object, string>> _keyOfCache = new Dictionary<Type, Func<object, string>>();
 
         /// <summary>Stable key of an object (for collection-element addressing), or null when none derivable.</summary>
@@ -130,6 +133,10 @@ namespace Multiplayer.Network.Sync
         // ─── Roots — the geoscape entry points (the ONE hand-written table) ───
 
         private static readonly FieldInfo TacUnitsField = AccessTools.Field(typeof(GeoLevelController), "_tacUnits");
+
+        /// <summary>The level's tac-unit registry (structural applier: registering a created character is
+        /// the game's own load move, <c>_tacUnits[unit.Id] = unit</c> — GeoLevelController.cs:607-610).</summary>
+        internal static IDictionary TacUnitsDict(GeoLevelController geo) => TacUnitsField?.GetValue(geo) as IDictionary;
 
         /// <summary>Deterministic (key, object) root pairs: level clock + factions + sites + tac units +
         /// vehicles + the level-scope singleton components (event system / mission generator / marketplace).</summary>

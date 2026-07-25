@@ -37,6 +37,7 @@ namespace Multiplayer.Network.Sync
     {
         public const byte MsgDelta = 1;
         public const byte MsgResyncRequest = 2;
+        public const byte MsgStructural = 3; // root create/destroy (law 3): native-Serializer blob payloads (law 6)
 
         private const float TickInterval = 0.5f;   // ≤2 Hz
         private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
@@ -82,6 +83,18 @@ namespace Multiplayer.Network.Sync
         // at ~SliceBudgetMs of work per frame so it can never spike a frame; roots are SNAPSHOTTED here
         // at cycle start (never an enumerator over a live game collection held across frames). Forced
         // walks (FlushNow / ForceReemit / full resend) stay single-shot — see HostTick.
+        // ─── Structural layer (law 3): root-SET diff — a root key appearing/vanishing between walks
+        // is an entity create/destroy, which value deltas can never express. Enabled per root-key
+        // prefix (the one enable table of the ONE mechanism — everything else logs a visible opt-out,
+        // same contract as the coverage report). "U#" = GeoCharacter: a plain serializable class the
+        // game itself registers by dict write on load (GeoLevelController.ProcessInstanceData:607-610);
+        // MonoBehaviour-bound roots (GeoSite/GeoVehicle — law 3 "never replace") stay opted out.
+        private static readonly string[] StructuralPrefixes = { "U#" };
+        private static readonly Dictionary<string, object> _walkRoots = new Dictionary<string, object>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _prevRoots = new HashSet<string>(StringComparer.Ordinal);
+        private static bool _rootsSeeded;
+        private static readonly HashSet<string> _structuralSkipsLogged = new HashSet<string>(StringComparer.Ordinal);
+
         private static List<KeyValuePair<string, object>> _cycleRoots;
         private static int _cycleNext;
         private static int _cycleFrames;
@@ -107,6 +120,7 @@ namespace Multiplayer.Network.Sync
             _flushPending = false;
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
+            _prevRoots.Clear(); _rootsSeeded = false; // re-seed silently on the post-boundary baseline walk
             _baselined = false;
             _forceFull = false;
             _forcePrefixes.Clear();
@@ -342,6 +356,7 @@ namespace Multiplayer.Network.Sync
             _ordered.Clear();
             _visited.Clear();
             _snapshotBack.Clear();
+            _walkRoots.Clear();
         }
 
         /// <summary>Cycle start: SNAPSHOT the root list — the only live-graph enumeration that would
@@ -369,7 +384,10 @@ namespace Multiplayer.Network.Sync
             {
                 var root = _cycleRoots[_cycleNext++];
                 if (!(root.Value is UnityEngine.Object uo) || uo != null)
+                {
+                    _walkRoots[root.Key] = root.Value; // a fake-null (destroyed) root counts as ABSENT
                     VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
+                }
                 if (sw.Elapsed.TotalMilliseconds >= SliceBudgetMs) break;
             }
             _cycleFrames++;
@@ -403,6 +421,8 @@ namespace Multiplayer.Network.Sync
             foreach (var root in IdentityResolver.Roots(geo))
             {
                 roots++;
+                if (!(root.Value is UnityEngine.Object uo) || uo != null)
+                    _walkRoots[root.Key] = root.Value; // structural set-diff scratch (fake-null = absent)
                 VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
             }
             long walkMs = sw.ElapsedMilliseconds;
@@ -465,6 +485,7 @@ namespace Multiplayer.Network.Sync
             if (!_baselined && !wasForceFull)
             {
                 _baselined = true;
+                SeedRoots(); // baseline root set — clients got these entities via the save transfer (law 1)
                 Debug.Log("[Multiplayer][rail] DiffEngine BASELINE: entities=" + _entityCounts.Values.Sum() +
                           " fields=" + ordered.Count + " walk=" + walkMs + "ms (no emit — clients share the save)");
                 // A ForceReemit that raced the baseline shipped NOTHING — keep its prefixes armed and
@@ -476,6 +497,9 @@ namespace Multiplayer.Network.Sync
             _forcePrefixes.Clear(); // consumed: the emit below carries the forced scope (censuses + values)
 
             int packets = 0, bytes = 0;
+            // Structural create/destroy FIRST: the same batch's value entries for a just-created root
+            // (and refs to it) then resolve on the client in seq order.
+            EmitStructural(engine, ref packets, ref bytes);
             if (changed.Count > 0)
                 Emit(engine, changed, ref packets, ref bytes);
 
@@ -741,6 +765,92 @@ namespace Multiplayer.Network.Sync
             var line = t.Name + "." + field + ": " + reason + " [" + path + "]";
             if (_walkIncidents.Add(line) && _reportWritten)
                 Debug.LogWarning("[Multiplayer][rail] DiffEngine excluded: " + line);
+        }
+
+        // ─── Structural emit (root create/destroy — law 3) ─────────────────
+
+        private static void SeedRoots()
+        {
+            _prevRoots.Clear();
+            foreach (var k in _walkRoots.Keys) _prevRoots.Add(k);
+            _rootsSeeded = true;
+        }
+
+        private static bool StructuralEnabled(string rootKey)
+        {
+            for (int i = 0; i < StructuralPrefixes.Length; i++)
+                if (rootKey.StartsWith(StructuralPrefixes[i], StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        /// <summary>Root-set diff vs the previous walk → create/destroy packets. A create carries the
+        /// entity as a native-Serializer blob (law 6: blobs are licensed ONLY as structural payloads) —
+        /// the client reconstructs through the game's own deserialization, PostRead callbacks included.
+        /// One packet per item (hires/dismissals are rare, chunking games buy nothing); each packet its
+        /// own seq on the ONE ordered stream, emitted BEFORE the value delta of the same walk. A root
+        /// whose blob fails to serialize stays OUT of _prevRoots, so the next walk retries it. Non-enabled
+        /// kinds log once — the visible opt-out line, same contract as the coverage report.</summary>
+        private static void EmitStructural(NetworkEngine engine, ref int packets, ref int bytes)
+        {
+            if (!_rootsSeeded) { SeedRoots(); return; } // first non-baseline walk after an old-format boundary
+            List<string> removed = null;
+            foreach (var k in _prevRoots)
+                if (!_walkRoots.ContainsKey(k)) (removed = removed ?? new List<string>()).Add(k);
+            if (removed != null)
+                foreach (var k in removed)
+                {
+                    _prevRoots.Remove(k);
+                    if (!StructuralEnabled(k))
+                    {
+                        if (_structuralSkipsLogged.Add("d:" + k))
+                            Debug.Log("[Multiplayer][rail] structural: destroy of '" + k + "' not enabled — not mirrored");
+                        continue;
+                    }
+                    SendStructural(engine, 2, k, null, ref packets, ref bytes);
+                }
+            foreach (var kv in _walkRoots)
+            {
+                if (_prevRoots.Contains(kv.Key)) continue;
+                if (!StructuralEnabled(kv.Key))
+                {
+                    _prevRoots.Add(kv.Key); // remember it either way — the skip line must not repeat per walk
+                    if (_structuralSkipsLogged.Add("c:" + kv.Key))
+                        Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
+                    continue;
+                }
+                var blob = Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true);
+                if (blob == null || blob.Length == 0)
+                {
+                    Debug.LogError("[Multiplayer][rail] structural: blob for '" + kv.Key + "' failed — retrying next walk");
+                    continue; // NOT added to _prevRoots → re-detected next cycle
+                }
+                SendStructural(engine, 1, kv.Key, blob, ref packets, ref bytes);
+                _prevRoots.Add(kv.Key);
+            }
+        }
+
+        private static void SendStructural(NetworkEngine engine, byte op, string rootKey, byte[] blob, ref int packets, ref int bytes)
+        {
+            try
+            {
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                {
+                    w.Write(MsgStructural);
+                    w.Write(Seq.Next(SurfaceIds.GeoRail));
+                    w.Write(op);          // 1 = create, 2 = destroy
+                    w.Write(rootKey);
+                    w.Write(blob?.Length ?? 0);
+                    if (blob != null) w.Write(blob);
+                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.StateDelta, ms.ToArray());
+                    engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
+                    packets++;
+                    bytes += (int)ms.Length;
+                    Debug.Log("[Multiplayer][rail] structural " + (op == 1 ? "create" : "destroy") + " '" + rootKey +
+                              "' sent (" + (blob?.Length ?? 0) + "B blob)");
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] structural emit '" + rootKey + "' failed: " + ex.Message); }
         }
 
         // ─── Wire emit (chunked; each packet its own seq on one ordered stream) ───
