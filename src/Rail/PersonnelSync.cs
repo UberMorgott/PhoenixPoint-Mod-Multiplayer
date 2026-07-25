@@ -190,6 +190,7 @@ namespace Multiplayer.Network.Sync
         /// gesture turned out to be a no-op).</summary>
         private static bool ShouldRunNative()
         {
+            DiffEngine.FlushOnHostGesture();
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             return SyncApplyScope.Active; // law 8: applying a delta never echoes an intent
@@ -226,6 +227,7 @@ namespace Multiplayer.Network.Sync
                                         int[] __state, int __result)
             {
                 if (__result == 0 || __state == null) return;
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return; // solo: fully native
                 if (SyncApplyScope.Active) return;                     // law 8: never echo an apply
@@ -271,6 +273,7 @@ namespace Multiplayer.Network.Sync
 
             private static void Postfix(UIModuleCharacterProgression __instance, int[] __state)
             {
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
                 if (SyncApplyScope.Active || __state == null || !BindOk()) return;

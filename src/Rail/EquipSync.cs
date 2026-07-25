@@ -159,6 +159,7 @@ namespace Multiplayer.Network.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return;
                 SelfCheckGestureCommit();
+                DiffEngine.FlushOnHostGesture(); // host loadout write must not wait out the 0.5 s poll
                 if (engine.IsHost) return; // the flush IS the authoritative write; it rides the 0xAC diff
                 try { SendLoadoutIntent(__instance, freeReload); }
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] CLIENT gesture send failed: " + ex.Message); }
@@ -340,6 +341,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(GeoFaction __instance, GeoItem geoItem, int amount)
             {
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
                 if (SyncApplyScope.Active) return false; // law 8: applying never echoes an intent
@@ -420,6 +422,7 @@ namespace Multiplayer.Network.Sync
             // __0 = the augment ItemDef (positional: the two targets name the parameter differently).
             private static bool Prefix(object __instance, ItemDef __0)
             {
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
                 if (SyncApplyScope.Active) return false; // law 8

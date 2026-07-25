@@ -275,6 +275,7 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         private static bool CaptureIntent(Research research, ResearchElement element, byte op, int pos)
         {
+            DiffEngine.FlushOnHostGesture();
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             if (SyncApplyScope.Active) return true;              // law 8: applying a delta never echoes an intent

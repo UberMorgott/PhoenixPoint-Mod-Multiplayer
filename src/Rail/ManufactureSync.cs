@@ -533,6 +533,7 @@ namespace Multiplayer.Network.Sync
         /// FALSE = client blocks it (caller sends the intent instead).</summary>
         private static bool ShouldRunNative(ItemManufacturing instance)
         {
+            DiffEngine.FlushOnHostGesture();
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
             if (SyncApplyScope.Active) return true;                       // law 8: applying never echoes an intent
@@ -616,6 +617,7 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix]
             private static bool Prefix(UIModuleManufacturing __instance)
             {
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
                     return true; // host / no session / apply-scope → run native authoritatively
@@ -669,6 +671,7 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix]
             private static bool Prefix(UIInventorySlotSideButton __instance)
             {
+                DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
                     return true; // host / solo / apply scope → the native buy IS the authoritative one

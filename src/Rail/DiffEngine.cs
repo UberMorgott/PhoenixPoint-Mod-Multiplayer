@@ -173,6 +173,21 @@ namespace Multiplayer.Network.Sync
         /// must not wait for.</summary>
         public static void FlushNow() { _nextTickAt = 0f; _flushPending = true; }
 
+        /// <summary>N3 third arm — HOST-LOCAL gestures. The law-4a capture seams fire on the host too
+        /// (they conclude "run native"); this is their one-line exit into the same change-driven flush
+        /// the client-intent dispatch gets, so clients stop waiting out the 0.5 s poll to see the host
+        /// act. Guarded HERE, not at call sites: no-op unless we are the in-session HOST outside an
+        /// apply scope (host repaints re-enter capture seams under SyncApplyScope — not gestures).
+        /// <see cref="FlushNow"/> is a flag, so a same-frame burst — rapid clicks, or a gesture that
+        /// reached the seam both natively and as a dispatched client intent — coalesces into ONE
+        /// single-shot walk, never N.</summary>
+        public static void FlushOnHostGesture()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine != null && engine.IsHost && engine.IsActiveSession && !SyncApplyScope.Active)
+                FlushNow();
+        }
+
         /// <summary>
         /// N3 — change-driven flush on the game's OWN event, not a new channel. <c>Timing</c> raises
         /// <c>EffectiveScaleChangedEvent</c> (Base.Core/Timing.cs:186) from BOTH the <c>Scale</c> setter
