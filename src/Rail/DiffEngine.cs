@@ -680,7 +680,21 @@ namespace Multiplayer.Network.Sync
                         {
                             var childPath = path + "." + f.Name + "#" + key;
                             if (StructuralElemTypes.Contains(e.GetType()))
-                                _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
+                            {
+                                // CORRIDORS OPT OUT: derived per-peer decoration with UNSTABLE ids —
+                                // load STRIPS them (GeoPhoenixBaseLayout.InitAfterDeserialiaztion:904-919),
+                                // reshape replaces the object reusing the id (:677), removal zeroes it
+                                // (:231) — so host/client can hold different ids for the same visual
+                                // corridor. Mirroring them = ghost corridors; each peer's native rebuild
+                                // derives its own from real-facility placement.
+                                if (e is PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility pf && pf.IsCorridor)
+                                {
+                                    if (_structuralSkipsLogged.Add("corridor-optout"))
+                                        Debug.Log("[Multiplayer][rail] structural: corridors opted out (derived, per-peer ids — logged once)");
+                                }
+                                else
+                                    _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
+                            }
                             VisitEntity(childPath, e, visited, ordered, snap, depth + 1);
                         }
                         break;
