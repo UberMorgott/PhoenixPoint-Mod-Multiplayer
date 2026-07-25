@@ -144,6 +144,16 @@ namespace Multiplayer.Network.Sync
                     // the acting client stared at its own click. Rejects converge via ForceReemit (which
                     // flushes itself); a silent no-op op costs one wasted walk at user-gesture rate.
                     DiffEngine.FlushNow();
+                    // The HOST'S OWN open screen (law 11, missing half): FlushNow repaints the CLIENTS
+                    // (their appliers MarkDirty), and the host's native op fires whatever native UI
+                    // events exist — but where the game never needed one (UIModuleBaseLayout.
+                    // OnFacilityAdded:746 is an EMPTY body that is not even subscribed; facility remove
+                    // has no handler at all — single-player builds only ever change the screen through
+                    // its own build menu), the host applying a REMOTE intent repainted nothing and its
+                    // screen stayed stale until re-enter (2026-07-26 retest, symptoms 1+2). ONE mark at
+                    // the ONE dispatch covers every family; the flush's native rebuild runs under
+                    // SyncApplyScope (OpenUiRepaint.cs), so host capture seams cannot echo (law 8).
+                    OpenUiRepaint.MarkDirty();
                 }
             }
             catch (Exception ex)
