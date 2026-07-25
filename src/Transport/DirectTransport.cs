@@ -188,7 +188,7 @@ namespace Multiplayer.Transport
             TcpClient client = null;
             try
             {
-                client = new TcpClient();
+                client = new TcpClient { NoDelay = true }; // Nagle off: small intent/delta frames must not wait on ACKs
                 // APM BeginConnect + bounded wait = connect with timeout. On an unreachable host the
                 // wait returns false at ConnectTimeoutMs and we abort instead of blocking ~20s+.
                 var ar = client.BeginConnect(address, port, null, null);
@@ -480,6 +480,7 @@ namespace Multiplayer.Transport
                 try
                 {
                     var client = _listener.AcceptTcpClient();
+                    client.NoDelay = true; // Nagle off: small intent/delta frames must not wait on ACKs
                     var peerId = (ulong)Interlocked.Increment(ref _nextPeerId);
                     var endpoint = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
                     // Marshal the connect onto the main thread (drained in Update before packets) so the
