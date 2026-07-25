@@ -90,6 +90,16 @@ namespace Multiplayer.Network.Sync
         // game itself registers by dict write on load (GeoLevelController.ProcessInstanceData:607-610);
         // MonoBehaviour-bound roots (GeoSite/GeoVehicle — law 3 "never replace") stay opted out.
         private static readonly string[] StructuralPrefixes = { "U#" };
+        // Keyed-COLLECTION elements ride the same set-diff: the walk's EntityCollection arm records
+        // enabled element types under their full element path (…Layout._facilities#<FacilityId>), so
+        // create/destroy falls out of the identical _prevRoots comparison. Only listed types are
+        // recorded — an element path in the set is enabled BY CONSTRUCTION (StructuralEnabled's
+        // '.'-rule). GeoPhoenixFacility: plain class, native-blob constructable; client wiring =
+        // the game's own load path (GeoPhoenixBase.InitFacility, see GenericApplier).
+        private static readonly HashSet<Type> StructuralElemTypes = new HashSet<Type>
+        {
+            typeof(PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility),
+        };
         private static readonly Dictionary<string, object> _walkRoots = new Dictionary<string, object>(StringComparer.Ordinal);
         private static readonly HashSet<string> _prevRoots = new HashSet<string>(StringComparer.Ordinal);
         private static bool _rootsSeeded;
@@ -667,7 +677,12 @@ namespace Multiplayer.Network.Sync
                         if (liveKeys != null)
                             AddKeyOrder(ordered, snap, rt, f, (ushort)i, kindId, path, liveKeys);
                         foreach (var (key, e) in elems) // already sorted ordinal above
-                            VisitEntity(path + "." + f.Name + "#" + key, e, visited, ordered, snap, depth + 1);
+                        {
+                            var childPath = path + "." + f.Name + "#" + key;
+                            if (StructuralElemTypes.Contains(e.GetType()))
+                                _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
+                            VisitEntity(childPath, e, visited, ordered, snap, depth + 1);
+                        }
                         break;
                     }
                 }
@@ -778,6 +793,9 @@ namespace Multiplayer.Network.Sync
 
         private static bool StructuralEnabled(string rootKey)
         {
+            // An ELEMENT path (contains '.') only ever enters the set through the StructuralElemTypes
+            // gate in the EntityCollection arm — enabled by construction. Root keys never contain '.'.
+            if (rootKey.IndexOf('.') >= 0) return true;
             for (int i = 0; i < StructuralPrefixes.Length; i++)
                 if (rootKey.StartsWith(StructuralPrefixes[i], StringComparison.Ordinal)) return true;
             return false;

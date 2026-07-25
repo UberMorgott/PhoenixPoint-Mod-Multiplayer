@@ -7,6 +7,8 @@ using System.Text;
 using Base.Core;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
+using PhoenixPoint.Geoscape.Entities.PhoenixBases;
+using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
 
@@ -188,7 +190,16 @@ namespace Multiplayer.Network.Sync
                     using (SyncApplyScope.Enter())
                     {
                         var existing = IdentityResolver.Resolve(geo, rootKey, null);
-                        if (op == 1 && existing == null)
+                        if (rootKey.IndexOf('.') >= 0)
+                        {
+                            // Keyed-collection ELEMENT (…Layout._facilities#<id>): same set-diff wire,
+                            // element-specific native wiring below.
+                            if (op == 1 && existing == null)
+                                created = ApplyFacilityCreate(geo, rootKey, blob);
+                            else if (op == 2 && existing is GeoPhoenixFacility fac)
+                                ApplyFacilityDestroy(geo, rootKey, fac);
+                        }
+                        else if (op == 1 && existing == null)
                         {
                             if (rootKey.StartsWith("U#", StringComparison.Ordinal))
                             {
@@ -230,6 +241,71 @@ namespace Multiplayer.Network.Sync
                 if (created)
                     RequestResync(engine, "structural create backfill"); // ref-lists shipped pre-create reconverge
             }
+        }
+
+        // ─── Facility element wiring (structural create/destroy for …Layout._facilities#<id>) ───
+        // Resolve-all-first handles; a null anywhere declines the whole apply (LogMissOnce), never a
+        // partial wire. All private members grounded in the decompile (see ApplyFacilityCreate doc).
+        private static readonly FieldInfo FacListField = AccessTools.Field(typeof(GeoPhoenixBaseLayout), "_facilities");           // GeoPhoenixBaseLayout.cs:40
+        private static readonly MethodInfo FacStateHandler = AccessTools.Method(typeof(GeoPhoenixBaseLayout), "Facility_OnFacilityStateUpdated"); // :595
+        private static readonly MethodInfo FacUpdateCache = AccessTools.Method(typeof(GeoPhoenixBaseLayout), "UpdateLayoutCache"); // :590 caller
+        private static readonly MethodInfo FacInit = AccessTools.Method(typeof(GeoPhoenixBase), "InitFacility");                  // GeoPhoenixBase.cs:680
+        private static readonly MethodInfo FacUninit = AccessTools.Method(typeof(GeoPhoenixBase), "UninitFacility");              // :727
+
+        private static bool ResolveFacilityOwners(GeoLevelController geo, string rootKey, out GeoPhoenixBaseLayout layout, out GeoPhoenixBase pxBase, out string fieldSeg)
+        {
+            layout = null; pxBase = null; fieldSeg = null;
+            int h = rootKey.LastIndexOf('#');
+            int d = h > 0 ? rootKey.LastIndexOf('.', h) : -1;
+            if (d <= 0) return false;
+            fieldSeg = rootKey.Substring(d + 1, h - d - 1);
+            var parentPath = rootKey.Substring(0, d);
+            layout = IdentityResolver.Resolve(geo, parentPath, null) as GeoPhoenixBaseLayout;
+            int d2 = parentPath.LastIndexOf('.');
+            if (d2 > 0) pxBase = IdentityResolver.Resolve(geo, parentPath.Substring(0, d2), null) as GeoPhoenixBase;
+            return layout != null && pxBase != null && fieldSeg == "_facilities";
+        }
+
+        /// <summary>The game's own add + load wiring, minus the id assignment (FacilityId arrives in the
+        /// blob): AddFacility's body (GeoPhoenixBaseLayout.cs:585-593 — list add, state-handler
+        /// subscribe, UpdateLayoutCache; NOT called directly — it would reassign ++_lastFacilityId and
+        /// is private) followed by the load path's InitFacility (GeoPhoenixBase.cs:985 → :680 —
+        /// facility.Initialize(pxBase): PxBase back-ref + component Contexts, + the base's reactive
+        /// event subscriptions). Blob reconstruction = native Serializer (components ride serialized,
+        /// Context rewired by Initialize — the exact save-load shape).</summary>
+        private static bool ApplyFacilityCreate(GeoLevelController geo, string rootKey, byte[] blob)
+        {
+            if (FacListField == null || FacStateHandler == null || FacUpdateCache == null || FacInit == null)
+            { LogMissOnce("facility wiring handles unresolved — create skipped"); return false; }
+            if (!ResolveFacilityOwners(geo, rootKey, out var layout, out var pxBase, out _))
+            { LogMissOnce("facility owners unresolved at " + rootKey); return false; }
+            var fac = Multiplayer.Rail.SerializerRoundtrip.DeserializeGraph(blob, typeof(GeoPhoenixFacility), quiet: true) as GeoPhoenixFacility;
+            if (fac == null) { Debug.LogError("[Multiplayer][rail] structural create '" + rootKey + "': facility blob deserialize failed"); return false; }
+            if (!(FacListField.GetValue(layout) is IList list)) return false;
+            list.Add(fac);
+            fac.OnFacilityStateUpdated += (GeoPhoenixFacility.FacilityStateEventHandler)Delegate.CreateDelegate(
+                typeof(GeoPhoenixFacility.FacilityStateEventHandler), layout, FacStateHandler);
+            FacUpdateCache.Invoke(layout, null);
+            FacInit.Invoke(pxBase, new object[] { fac });
+            OpenUiRepaint.MarkDirty(); // open base screen rebuilds via the UIStatePhoenixBaseLayout table entry
+            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (facility " + fac.Def?.name + ", " + blob.Length + "B)");
+            return true;
+        }
+
+        /// <summary>The demolish path's structural half (GeoPhoenixBase demolish: DestroyFacility →
+        /// Layout.RemoveFacility → UninitFacility): native RemoveFacility (public,
+        /// GeoPhoenixBaseLayout.cs:227 — list remove, handler unsubscribe, FacilityId=0, cache, event)
+        /// + UninitFacility (GeoPhoenixBase.cs:727 — event unsubscribe). DestroyFacility itself is
+        /// skipped — it raises gameplay outcome events, and outcomes are host-side (law 3).</summary>
+        private static void ApplyFacilityDestroy(GeoLevelController geo, string rootKey, GeoPhoenixFacility fac)
+        {
+            if (FacUninit == null) { LogMissOnce("facility wiring handles unresolved — destroy skipped"); return; }
+            if (!ResolveFacilityOwners(geo, rootKey, out var layout, out var pxBase, out _))
+            { LogMissOnce("facility owners unresolved at " + rootKey); return; }
+            layout.RemoveFacility(fac);
+            FacUninit.Invoke(pxBase, new object[] { fac });
+            OpenUiRepaint.MarkDirty();
+            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (facility " + fac.Def?.name + ")");
         }
 
         private static void RegisterKind(byte kindId, string typeName, ushort fieldCount)
