@@ -22,6 +22,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.RegisterIntents();
             PersonnelSync.RegisterIntents();
             TimeSync.RegisterIntents();
+            FacilitySync.RegisterIntents();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // host→all order channels (0xAA research / 0xAD manufacture), the intent engine, and the
             // generic value rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the
