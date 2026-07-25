@@ -64,8 +64,9 @@ namespace Multiplayer.Network.Sync
     ///   • <c>GeoCharacter.ResetCharacterProgression</c> (:604) — the skill-reset (respec); here the
     ///     MODEL funnel is patchable directly, so the seam sits below the UI (see SkillResetPatch).
     ///   • <c>GeoHaven.TakeRecruit</c> (:810) / <c>GeoPhoenixFaction.KillCharacter</c> (:1377,
-    ///     Dismissed only) — hire and fire, both on their MODEL funnels (HavenHireCapturePatch /
-    ///     DismissCapturePatch; naked-recruit hire is BLOCKED client-side pending a stable key).
+    ///     Dismissed only) / <c>GeoPhoenixFaction.HireNakedRecruit</c> (:662, content-keyed) — hire
+    ///     and fire on their MODEL funnels (HavenHireCapturePatch / DismissCapturePatch /
+    ///     NakedHireCapturePatch).
     ///
     /// HOST replay runs the identical native model calls those seams make: <c>ModifyBaseStat</c> (:369-373),
     /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820),
@@ -96,6 +97,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpSkillReset = 5;  // UseAllowedAbilityReset       → ResetCharacterProgression (free respec, _hasSkillReset-gated)
         private const byte OpHire = 6;        // haven recruit purchase       → GeoHaven.TakeRecruit
         private const byte OpFire = 7;        // dismiss / scrap              → KillCharacter(Dismissed) (+ vehicle ScrapPrice tail)
+        private const byte OpHireNaked = 8;   // base Recruits-tab hire       → Wallet.Take + HireNakedRecruit (content-keyed)
 
         // ─── Reflection: UIModuleCharacterProgression's staged view-model (all private) ──
         // The module stages the player's pending edit in _current*; _character is the soldier it is bound
@@ -182,6 +184,7 @@ namespace Multiplayer.Network.Sync
                 [OpSkillReset] = HandleIntentOp,
                 [OpHire] = HandleHireIntent,   // no charId — the recruit does not exist yet
                 [OpFire] = HandleFireIntent,   // charId, but no Progression requirement (vehicles/mutogs)
+                [OpHireNaked] = HandleHireNakedIntent, // content-keyed — a GeoUnitDescriptor has no id
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -613,20 +616,35 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>CLIENT block (no intent yet) for the base Recruits-tab hire
-        /// (<c>GeoPhoenixFaction.HireNakedRecruit</c>, :662-671, UIStateRosterRecruits:301): a
-        /// GeoUnitDescriptor has NO stable wire id, so this flow cannot ride the intent rail until the
-        /// structural layer keys the recruit lists. Blocking beats the alternative — a locally spawned
-        /// soldier no other peer knows = permanent identity divergence (law 3). The UI's own
-        /// Wallet.Take (:300) still runs locally; wallet Leafs are absolute, the next host echo
-        /// overwrites it. ponytail: naked-recruit hire op once recruit lists have stable keys.</summary>
+        /// <summary>Intent capture for the base Recruits-tab hire, on the MODEL funnel
+        /// <c>GeoPhoenixFaction.HireNakedRecruit</c> (:662-671; sole gesture caller
+        /// UIStateRosterRecruits:301). ADDRESSING (op=8): a GeoUnitDescriptor has NO id anywhere — the
+        /// game's own save re-identifies recruits purely by graph position, and the rail carries the
+        /// haven twin as a whole VALUE (rail-baseline:493 Descend NewRecruit), so keyed elements are
+        /// impossible by construction. The wire ships a CONTENT key instead:
+        /// (Identity.Name :138, UnitType.TemplateDef.Guid :36, Level :206) — two descriptors with the
+        /// same triple are interchangeable generated recruits, so first-match on the HOST's own dict is
+        /// exact. Stale client list (host regenerated / other peer won the race) → no match → clean
+        /// reject. The UI's own Wallet.Take (:300) already ran locally before this funnel — wallet
+        /// Leafs are absolute, the host echo overwrites it.</summary>
         [HarmonyPatch(typeof(GeoPhoenixFaction), nameof(GeoPhoenixFaction.HireNakedRecruit))]
-        internal static class NakedHireBlockPatch
+        internal static class NakedHireCapturePatch
         {
-            private static bool Prefix()
+            private static bool Prefix(GeoUnitDescriptor character, IGeoCharacterContainer toContainer)
             {
                 if (ShouldRunNative()) return true;
-                Debug.LogWarning("[MP][personnel] CLIENT naked-recruit hire blocked — not wired to the rail yet (no stable recruit key)");
+                try
+                {
+                    var siteRef = toContainer == null ? null : IdentityResolver.RootRef(toContainer);
+                    if (character == null || siteRef == null) return false; // unaddressable → drop the gesture
+                    string name = character.Identity?.Name ?? "";
+                    string templateGuid = character.UnitType?.TemplateDef?.Guid ?? "";
+                    int level = character.Level;
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpHireNaked,
+                        "hireNaked '" + name + "' lvl=" + level + " -> " + siteRef,
+                        w => { w.Write(name); w.Write(templateGuid); w.Write(level); w.Write(siteRef); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] naked-hire capture failed: " + ex); }
                 return false;
             }
         }
@@ -765,6 +783,55 @@ namespace Multiplayer.Network.Sync
             if (def != null && !def.ScrapPrice.IsEmpty)
                 geo.PhoenixFaction.Wallet.Give(def.ScrapPrice, OperationReason.Scrap);
         }
+
+        /// <summary>Replay of the Recruits-tab hire, BOTH native halves in gesture order: the UI's
+        /// wallet debit (UIStateRosterRecruits:300) and the model hire (HireNakedRecruit :662-671),
+        /// with cost and gates re-derived from HOST state (GetNakedRecruitCost :644, CanRecruitCharacter
+        /// :614 — the same capacity+wallet gate every hire flow uses). Content-key resolution: see
+        /// <see cref="NakedHireCapturePatch"/>. RACE: sequential dispatch — the loser's recruit is
+        /// already out of the host dict → no match → reject. KNOWN LIMIT (handed to the coverage owner):
+        /// GeoFactionInstanceData.NewNakedRecruits is EXCLUDED from the rail (rail-baseline:330,
+        /// non-simple dict) and the client sim-gate never regenerates — so peers' recruit LISTS only
+        /// change on join until that dict rides as a replaced value; a reject cannot heal them either
+        /// (no covered subtree to re-emit — nudge-only).</summary>
+        private static void HandleHireNakedIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string name = null;
+            try
+            {
+                name = r.ReadString();
+                string templateGuid = r.ReadString();
+                int level = r.ReadInt32();
+                string siteRef = r.ReadString();
+                var geo = GeoLevel();
+                if (geo == null) { RejectNaked(senderPeerId, name, "no geoscape"); return; }
+                var phoenix = geo.PhoenixFaction;
+                GeoUnitDescriptor recruit = null;
+                foreach (var d in phoenix.NakedRecruits.Keys)
+                {
+                    if (d != null && string.Equals(d.Identity?.Name, name, StringComparison.Ordinal) &&
+                        (d.UnitType?.TemplateDef?.Guid ?? "") == templateGuid && d.Level == level)
+                    { recruit = d; break; }
+                }
+                if (recruit == null)
+                { RejectNaked(senderPeerId, name, "not on host list (regenerated or already taken)"); return; }
+                if (!(IdentityResolver.Resolve(geo, siteRef, null) is GeoSite site) ||
+                    !ReferenceEquals(site.Owner, phoenix))
+                { RejectNaked(senderPeerId, name, "unresolved or foreign site " + siteRef); return; }
+                var cost = phoenix.GetNakedRecruitCost(recruit);
+                if (!phoenix.CanRecruitCharacter(recruit, cost))
+                { RejectNaked(senderPeerId, name, "capacity or resources short"); return; }
+
+                phoenix.Wallet.Take(cost, OperationReason.Purchase); // native UI half (:300)
+                phoenix.HireNakedRecruit(recruit, site);             // native model half (:662)
+                Debug.Log("[MP][personnel] HOST intent APPLIED op=hireNaked '" + name + "' nonce=" + nonce + " peer=" + senderPeerId);
+                OpenUiRepaint.MarkDirty();
+            }
+            catch (Exception ex) { RejectNaked(senderPeerId, name, "(throw) " + ex.Message); }
+        }
+
+        private static void RejectNaked(ulong peer, string name, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "hireNaked '" + (name ?? "?") + "' — " + why);
 
         /// <summary>Replay of one stat GESTURE (per-click ±1 since 2026-07-25; the shape still takes the
         /// three-delta wire body unchanged). Cost and cap are checked on the DISPLAY scale, exactly like
