@@ -60,9 +60,12 @@ namespace Multiplayer.Network.Sync
     ///   • <c>ChoseSecondSpecialization</c> (:813) — the second-class purchase (AddSecondaryClass).
     ///   • <c>UIStateGeoRoster.OnActionSlotTransferInitiated</c> (:292) — the ONE roster base⇄vehicle
     ///     transfer seam (drag and action-menu both funnel through it).
+    ///   • <c>GeoCharacter.ResetCharacterProgression</c> (:604) — the skill-reset (respec); here the
+    ///     MODEL funnel is patchable directly, so the seam sits below the UI (see SkillResetPatch).
     ///
     /// HOST replay runs the identical native model calls those seams make: <c>ModifyBaseStat</c> (:369-373),
-    /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820) — with the SP
+    /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820),
+    /// <c>ResetCharacterProgression</c> (GeoCharacter.cs:604) — with the SP
     /// economy re-derived from the HOST's own numbers (<see cref="Charge"/>), never from the wire.
     ///
     /// UNDO ("туда-сюда") — native staging stays ALIVE on both peers: ChangeCharacterStat's own gates
@@ -86,6 +89,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpBuyAbility = 2;  // BuyAbility                  → LearnAbility / AddAbility
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
         private const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
+        private const byte OpSkillReset = 5;  // UseAllowedAbilityReset       → ResetCharacterProgression (free respec, _hasSkillReset-gated)
 
         // ─── Reflection: UIModuleCharacterProgression's staged view-model (all private) ──
         // The module stages the player's pending edit in _current*; _character is the soldier it is bound
@@ -168,6 +172,7 @@ namespace Multiplayer.Network.Sync
                 [OpBuyAbility] = HandleIntentOp,
                 [OpSecondSpec] = HandleIntentOp,
                 [OpReassign] = HandleIntentOp,
+                [OpSkillReset] = HandleIntentOp,
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -512,6 +517,9 @@ namespace Multiplayer.Network.Sync
                     case OpReassign:
                         ok = ApplyReassign(senderPeerId, geo, character, r.ReadString());
                         break;
+                    case OpSkillReset:
+                        ok = ApplySkillReset(senderPeerId, character);
+                        break;
                     default: // OpSecondSpec (the op set is table-gated upstream)
                         ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
                         break;
@@ -618,20 +626,46 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<int, int[]> WireStatNet = new Dictionary<int, int[]>();
         private static readonly Dictionary<int, int> WireFactionTaken = new Dictionary<int, int>();
 
-        /// <summary>Ledger hygiene for the native skill-reset. The ONE model funnel is
+        /// <summary>The skill-reset seam, BOTH halves on the ONE model funnel
         /// <c>GeoCharacter.ResetCharacterProgression</c> (GeoCharacter.cs:604-615, gated by
-        /// _hasSkillReset; sole caller of <c>CharacterProgression.ResetAbilities</c>:225 — UI button
-        /// UseAllowedAbilityReset:446 and any mod path both route through it; TFTV: no direct calls).
-        /// The reset refunds ability SP straight into the model (:242/:250) — a session ledger kept
-        /// from before it no longer describes the character, so DROP it on the character that reset
-        /// (never carry a positive wire-net across a respec: a later wire −1 would pass the floor and
-        /// mint its step cost on top of the reset's own refund). Clearing is the strict direction —
-        /// floor falls back to 0, worst case a legit refund is rejected and law-7 reconverges the
-        /// client. Host-side state only, so the client's still-local reset (respec intent op — next
-        /// session) is unaffected by this patch.</summary>
+        /// _hasSkillReset :606; sole caller of <c>CharacterProgression.ResetAbilities</c>:225 — UI button
+        /// UseAllowedAbilityReset:444-450 and any mod path both route through it; TFTV: no direct calls).
+        ///
+        /// PREFIX = intent capture (law 4a), op=5. Patching the model funnel instead of the UI button
+        /// catches every caller; the mirror never calls it (applies write fields raw), and ShouldRunNative's
+        /// SyncApplyScope arm keeps law 8 anyway. Wire body = charId ONLY — the reset is free (the
+        /// _hasSkillReset allowance is the whole price) and every refund is re-derived host-side from the
+        /// HOST's own tracks (ResetAbilities :235-250), so there is nothing else a client could be trusted
+        /// to say. CLIENT: block + send; __result=false keeps the caller's reseed branch (:448) cold — the
+        /// panel repaints when the host's 0xAC echo lands (every mutation is rail-covered: _abilities /
+        /// _abilityTracks / SkillPoints / _secondarySpecializationDef, plus _hasSkillReset Leaf
+        /// rail-baseline:141, which also hides ResetSkillsButton on the reseed :490; mutoid refund =
+        /// covered wallet). Zero traffic when the native gate would refuse (no allowance).
+        ///
+        /// POSTFIX = ledger hygiene (host). The reset refunds ability SP straight into the model
+        /// (:242/:250) — a session ledger kept from before it no longer describes the character, so DROP
+        /// it on the character that reset (never carry a positive wire-net across a respec: a later wire
+        /// −1 would pass the floor and mint its step cost on top of the reset's own refund). Clearing is
+        /// the strict direction — floor falls back to 0, worst case a legit refund is rejected and law-7
+        /// reconverges the client.</summary>
         [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.ResetCharacterProgression))]
-        internal static class SkillResetLedgerPatch
+        internal static class SkillResetPatch
         {
+            private static bool Prefix(GeoCharacter __instance, ref bool __result)
+            {
+                if (ShouldRunNative()) return true;
+                __result = false;
+                try
+                {
+                    if (__instance.Progression == null || !__instance.HasSkillReset) return false; // native gate would refuse — zero traffic
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSkillReset,
+                        "skillReset U#" + (int)__instance.Id,
+                        w => w.Write((int)__instance.Id));
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] skill-reset capture failed: " + ex); }
+                return false;
+            }
+
             private static void Postfix(GeoCharacter __instance, bool __result)
             {
                 if (!__result) return; // _hasSkillReset gate refused — nothing changed
@@ -755,6 +789,17 @@ namespace Multiplayer.Network.Sync
             if (!Charge(character, levels.Def.SecondSpecializationSpCost))
             { Reject(peer, charId, "cannot afford second class"); return false; }
             progression.AddSecondaryClass(spec);
+            return true;
+        }
+
+        /// <summary>Replay of the skill-reset: the SAME native funnel the capture blocked client-side
+        /// (see <see cref="SkillResetPatch"/> for the full ground). No Charge/Refund here — the native
+        /// body IS the refund, computed from the host's own tracks; its false return (allowance already
+        /// spent / no progression) is the reject. Ledger drop rides the patch's own postfix.</summary>
+        private static bool ApplySkillReset(ulong peer, GeoCharacter character)
+        {
+            if (!character.ResetCharacterProgression())
+            { Reject(peer, (int)character.Id, "no skill reset allowance"); return false; }
             return true;
         }
 

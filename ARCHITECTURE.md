@@ -483,7 +483,7 @@ so it is reference identity at walk time:
    snapshot resync).
 4. Diplomacy (mostly values) — not started.
 5. Personnel — intent+value layer **DONE pending in-game gate** (0xAF spendStats/buyAbility/
-   secondSpec; hire/death structural still open).
+   secondSpec/reassign/skillReset; hire/death structural still open).
 6. Aircraft — not started (scalar subset already rides the generic rail).
 7. GeoSites (spawn/despawn, fog, Unity views) — not started.
 8. Mission generation — last.
