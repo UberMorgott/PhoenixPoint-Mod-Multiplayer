@@ -620,7 +620,17 @@ namespace Multiplayer.Network.Sync
                 DiffEngine.FlushOnHostGesture();
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
+                {
+                    // HOST confirm runs the native method, which never re-validates the cart against live
+                    // storage: a queued item a CLIENT meanwhile equipped/moved (mirrored into host storage)
+                    // → TryGetValue null → ScrapItem(null,…) NRE (UIModuleManufacturing.cs:856-863); a
+                    // shrunk stack → GeoFaction.ScrapItem refunds the full stale count with no clamp
+                    // (GeoFaction.cs:1217-1228) = ghost resources. Solo cannot race — prune only in-session.
+                    if (engine != null && engine.IsActiveSession && engine.IsHost && !SyncApplyScope.Active)
+                        try { PruneCartsToLiveStorage(__instance); }
+                        catch (Exception ex) { Debug.LogWarning("[MP][scrap] cart prune failed: " + ex.Message); }
                     return true; // host / no session / apply-scope → run native authoritatively
+                }
 
                 var scrapCart = ScrapItemsField(__instance);
                 foreach (var kv in scrapCart.Items)
@@ -646,6 +656,30 @@ namespace Multiplayer.Network.Sync
                 __instance.ScrapAllButton.SetInteractable(isInteractable: false);
                 SetupQueueMethod?.Invoke(__instance, null);
                 return false;
+            }
+
+            /// <summary>Scrap-what-remains: drop/clamp cart entries to the LIVE faction storage — the
+            /// same storage-count law the client intent path already enforces host-side (OpScrap
+            /// validation above). RemoveItem drops the whole dict entry once its count hits 0
+            /// (ItemStorage.cs:87-89), so a fully vanished item leaves the cart instead of NREing
+            /// the native loop.</summary>
+            private static void PruneCartsToLiveStorage(UIModuleManufacturing module)
+            {
+                var faction = GeoLevel()?.PhoenixFaction;
+                if (faction == null) return;
+                var cart = ScrapItemsField(module);
+                foreach (var def in cart.Items.Keys.ToList())
+                {
+                    faction.ItemStorage.Items.TryGetValue(def, out var live);
+                    int have = live?.CommonItemData?.Count ?? 0;
+                    int queued = cart.Items[def].CommonItemData.Count;
+                    if (queued > have)
+                        cart.RemoveItem(new GeoItem(def, queued - have, def.ChargesMax));
+                }
+                var vehCart = VehicleScrapItemsField(module);
+                foreach (var def in vehCart.Items.Select(v => v.EquipmentDef).Distinct().ToList())
+                    while (vehCart.CountItem(def) > faction.AircraftItemStorage.CountItem(def))
+                        vehCart.RemoveItem(vehCart.GetItem(def));
             }
         }
 
