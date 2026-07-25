@@ -9,6 +9,7 @@ using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Entities;
+using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Common.Entities.Characters;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
@@ -62,6 +63,9 @@ namespace Multiplayer.Network.Sync
     ///     transfer seam (drag and action-menu both funnel through it).
     ///   • <c>GeoCharacter.ResetCharacterProgression</c> (:604) — the skill-reset (respec); here the
     ///     MODEL funnel is patchable directly, so the seam sits below the UI (see SkillResetPatch).
+    ///   • <c>GeoHaven.TakeRecruit</c> (:810) / <c>GeoPhoenixFaction.KillCharacter</c> (:1377,
+    ///     Dismissed only) — hire and fire, both on their MODEL funnels (HavenHireCapturePatch /
+    ///     DismissCapturePatch; naked-recruit hire is BLOCKED client-side pending a stable key).
     ///
     /// HOST replay runs the identical native model calls those seams make: <c>ModifyBaseStat</c> (:369-373),
     /// <c>LearnAbility</c>/<c>AddAbility</c> (:416/:408), <c>AddSecondaryClass</c> (:820),
@@ -90,6 +94,8 @@ namespace Multiplayer.Network.Sync
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
         private const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
         private const byte OpSkillReset = 5;  // UseAllowedAbilityReset       → ResetCharacterProgression (free respec, _hasSkillReset-gated)
+        private const byte OpHire = 6;        // haven recruit purchase       → GeoHaven.TakeRecruit
+        private const byte OpFire = 7;        // dismiss / scrap              → KillCharacter(Dismissed) (+ vehicle ScrapPrice tail)
 
         // ─── Reflection: UIModuleCharacterProgression's staged view-model (all private) ──
         // The module stages the player's pending edit in _current*; _character is the soldier it is bound
@@ -174,6 +180,8 @@ namespace Multiplayer.Network.Sync
                 [OpSecondSpec] = HandleIntentOp,
                 [OpReassign] = HandleIntentOp,
                 [OpSkillReset] = HandleIntentOp,
+                [OpHire] = HandleHireIntent,   // no charId — the recruit does not exist yet
+                [OpFire] = HandleFireIntent,   // charId, but no Progression requirement (vehicles/mutogs)
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -549,6 +557,80 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Intent capture for the haven recruit purchase, on the MODEL funnel
+        /// <c>GeoHaven.TakeRecruit</c> (GeoHaven.cs:810-836 — cost derived+charged :817-818, recruit
+        /// spawned :824, reward container :827, AvailableRecruit cleared :829; both UI callers route
+        /// here: HavenFacilityItemController:576, HavenInteractionController:257). Wire = the two
+        /// stable root refs only — the recruit itself has no id yet and the HOST's own
+        /// <c>AvailableRecruit</c>/<c>GetRecruitCost</c> are the only truth (law 3).</summary>
+        [HarmonyPatch(typeof(GeoHaven), nameof(GeoHaven.TakeRecruit))]
+        internal static class HavenHireCapturePatch
+        {
+            private static bool Prefix(GeoHaven __instance, GeoVehicle vehicle, ref IGeoCharacterContainer __result)
+            {
+                if (ShouldRunNative()) return true;
+                __result = null; // both callers ignore it; the mirrored outcome repaints the haven UI
+                try
+                {
+                    var siteRef = __instance.Site == null ? null : IdentityResolver.RootRef(__instance.Site);
+                    var vehicleRef = vehicle == null ? null : IdentityResolver.RootRef(vehicle);
+                    if (siteRef == null || vehicleRef == null) return false; // unaddressable → drop the gesture
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpHire,
+                        "hire " + siteRef + " via " + vehicleRef,
+                        w => { w.Write(siteRef); w.Write(vehicleRef); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] hire capture failed: " + ex); }
+                return false;
+            }
+        }
+
+        /// <summary>Intent capture for dismiss/scrap, on the MODEL funnel
+        /// <c>GeoPhoenixFaction.KillCharacter</c> — gated to <c>reason == Dismissed</c>, the ONE reason
+        /// only user gestures pass (UIStateEditSoldier:425, UIStateEditVehicle:556, UIStateViewVehicle's
+        /// twin callback); every other death reason (combat, events, host sim) stays fully native so
+        /// mirror/tactical paths are untouched. Patching the OVERRIDE (GeoPhoenixFaction.cs:1377), not
+        /// the base — TFTV patches this same target (TFTVBaseRework\PersonnelDismissal.cs:158), so the
+        /// host replay re-runs TFTV's civilian-conversion prefix natively and its outcome mirrors; with
+        /// TFTV installed the CLIENT-side ordering of the two prefixes is untested (flagged in report).
+        /// Known accepted drift: the vehicle-scrap UI callback also Gives ScrapPrice LOCALLY after this
+        /// block (UIStateEditVehicle:563) — wallet Leafs are absolute, so the host echo (which performs
+        /// the same Give via <see cref="GiveVehicleScrap"/>) overwrites it within the echo.</summary>
+        [HarmonyPatch(typeof(GeoPhoenixFaction), nameof(GeoPhoenixFaction.KillCharacter))]
+        internal static class DismissCapturePatch
+        {
+            private static bool Prefix(GeoCharacter unit, CharacterDeathReason reason)
+            {
+                if (reason != CharacterDeathReason.Dismissed) return true; // gesture-only seam
+                if (ShouldRunNative()) return true;
+                try
+                {
+                    if (unit != null)
+                        IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpFire,
+                            "fire U#" + (int)unit.Id, w => w.Write((int)unit.Id));
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] fire capture failed: " + ex); }
+                return false;
+            }
+        }
+
+        /// <summary>CLIENT block (no intent yet) for the base Recruits-tab hire
+        /// (<c>GeoPhoenixFaction.HireNakedRecruit</c>, :662-671, UIStateRosterRecruits:301): a
+        /// GeoUnitDescriptor has NO stable wire id, so this flow cannot ride the intent rail until the
+        /// structural layer keys the recruit lists. Blocking beats the alternative — a locally spawned
+        /// soldier no other peer knows = permanent identity divergence (law 3). The UI's own
+        /// Wallet.Take (:300) still runs locally; wallet Leafs are absolute, the next host echo
+        /// overwrites it. ponytail: naked-recruit hire op once recruit lists have stable keys.</summary>
+        [HarmonyPatch(typeof(GeoPhoenixFaction), nameof(GeoPhoenixFaction.HireNakedRecruit))]
+        internal static class NakedHireBlockPatch
+        {
+            private static bool Prefix()
+            {
+                if (ShouldRunNative()) return true;
+                Debug.LogWarning("[MP][personnel] CLIENT naked-recruit hire blocked — not wired to the rail yet (no stable recruit key)");
+                return false;
+            }
+        }
+
         // ─── HOST: resolve → validate → execute the SAME native methods (dedup/decode/reject = IntentRail) ──
 
         private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -606,6 +688,82 @@ namespace Multiplayer.Network.Sync
                 // not in IntentRail's dispatch, so the reject still carries the character subtree.
                 Reject(senderPeerId, charId, "(throw) " + ex.Message);
             }
+        }
+
+        /// <summary>Replay of <c>GeoHaven.TakeRecruit</c> with the native UI's own gates re-checked
+        /// host-side (HavenFacilityItemController:420 CanRecruitCharacter, docked-vehicle listing):
+        /// cost/recruit/capacity all re-derived from HOST state, nothing priced by the wire. RACE:
+        /// intents dispatch sequentially on the host loop — the second hire of the same recruit sees
+        /// <c>AvailableRecruit == null</c> (cleared by the first replay's RemoveRecruit :829) and
+        /// rejects; the loser's stale haven panel heals via the "S#" subtree re-emit (law 7). No
+        /// double-spend: the client never touched its wallet (capture blocked the whole native body).</summary>
+        private static void HandleHireIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string siteRef = null;
+            try
+            {
+                siteRef = r.ReadString();
+                string vehicleRef = r.ReadString();
+                var geo = GeoLevel();
+                if (geo == null) { RejectHire(senderPeerId, null, "no geoscape"); return; }
+                var phoenix = geo.PhoenixFaction;
+                if (!(IdentityResolver.Resolve(geo, siteRef, null) is GeoSite site) ||
+                    !(site.GetComponent<GeoHaven>() is GeoHaven haven))
+                { RejectHire(senderPeerId, siteRef, "unresolved haven " + siteRef); return; }
+                if (!(IdentityResolver.Resolve(geo, vehicleRef, null) is GeoVehicle vehicle) ||
+                    !ReferenceEquals(vehicle.Owner, phoenix))
+                { RejectHire(senderPeerId, siteRef, "unresolved or foreign vehicle " + vehicleRef); return; }
+                if (haven.AvailableRecruit == null)
+                { RejectHire(senderPeerId, siteRef, "no recruit available (lost the race?)"); return; }
+                if (!ReferenceEquals(vehicle.CurrentSite, site))
+                { RejectHire(senderPeerId, siteRef, "vehicle not at haven"); return; }
+                if (!phoenix.CanRecruitCharacter(haven.AvailableRecruit, haven.GetRecruitCost(phoenix)))
+                { RejectHire(senderPeerId, siteRef, "capacity or resources short"); return; }
+
+                haven.TakeRecruit(vehicle); // the native buy: charge, spawn, reward container, RemoveRecruit
+                Debug.Log("[MP][personnel] HOST intent APPLIED op=hire " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
+                OpenUiRepaint.MarkDirty();
+            }
+            catch (Exception ex) { RejectHire(senderPeerId, siteRef, "(throw) " + ex.Message); }
+        }
+
+        private static void RejectHire(ulong peer, string siteRef, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "hire " + (siteRef ?? "?") + " — " + why, siteRef);
+
+        /// <summary>Replay of the dismiss: the SAME override the capture blocked (TFTV's prefix included,
+        /// so its dismissal rework applies host-side), plus the vehicle-scrap wallet tail the native UI
+        /// callback owns (UIStateEditVehicle:558-564) — model-level parity for the whole gesture.
+        /// Deliberately NOT the stat preamble: vehicles/mutogs have no Progression.</summary>
+        private static void HandleFireIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            int charId = -1;
+            try
+            {
+                charId = r.ReadInt32();
+                var geo = GeoLevel();
+                if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
+                if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
+                { Reject(senderPeerId, charId, "unresolved character (already dismissed?)"); return; }
+                if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
+                { Reject(senderPeerId, charId, "not a Phoenix unit"); return; }
+
+                geo.PhoenixFaction.KillCharacter(character, CharacterDeathReason.Dismissed); // strip equipment :1625, container removal, DestroyTacUnit
+                GiveVehicleScrap(geo, character);
+                Debug.Log("[MP][personnel] HOST intent APPLIED op=fire char=U#" + charId + " nonce=" + nonce + " peer=" + senderPeerId);
+                OpenUiRepaint.MarkDirty();
+            }
+            catch (Exception ex) { Reject(senderPeerId, charId, "(throw) " + ex.Message); }
+        }
+
+        /// <summary>The scrap-refund tail of the native dismiss UI (UIStateEditVehicle:558-564),
+        /// verbatim at model level: exact-match GroundVehicleItemDef by template, Give ScrapPrice.
+        /// FirstOrDefault is null for humans — no-op, same as native.</summary>
+        private static void GiveVehicleScrap(GeoLevelController geo, GeoCharacter unit)
+        {
+            var def = GameUtl.GameComponent<DefRepository>().GetAllDefs<GroundVehicleItemDef>()
+                .FirstOrDefault(d => d.VehicleTemplateDef == unit.TemplateDef);
+            if (def != null && !def.ScrapPrice.IsEmpty)
+                geo.PhoenixFaction.Wallet.Give(def.ScrapPrice, OperationReason.Scrap);
         }
 
         /// <summary>Replay of one stat GESTURE (per-click ±1 since 2026-07-25; the shape still takes the
