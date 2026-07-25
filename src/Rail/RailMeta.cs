@@ -292,6 +292,30 @@ namespace Multiplayer.Network.Sync
                 { f.Class = FieldClass.LeafDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
                 if (GeoItemCodec.Handles(dictArgs[0], dictArgs[1]))
                 { f.Class = FieldClass.GeoItemDict; f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1]; return f; }
+                // Unkeyable-element dict → whole-dict REPLACED VALUE (EntityList over the PAIR type).
+                // For dictionaries whose elements have no derivable identity at all (GeoUnitDescriptor
+                // has no id member — the save re-identifies by graph position), per-key addressing is
+                // impossible BY CONSTRUCTION; the dict rides as one canonical blob instead.
+                // Dictionary<K,V> implements ICollection<KVP<K,V>> (explicit Add), so ListApplyStrategy
+                // licenses it and ApplyList's pair route rebuilds in place; the pair codec is the
+                // IsKvpType arm of EncodeValue/DecodeValue. Each class-typed side husk-gates exactly
+                // like an EntityList element.
+                {
+                    var kOk = RailMeta.LeafKindOf(dictArgs[0], out _) || (dictArgs[0].IsClass && RailMeta.HasPersistentMembers(dictArgs[0]));
+                    var vOk = RailMeta.LeafKindOf(dictArgs[1], out _) || (dictArgs[1].IsClass && RailMeta.HasPersistentMembers(dictArgs[1]));
+                    if (kOk && vOk)
+                    {
+                        var huskSide = !RailMeta.LeafKindOf(dictArgs[0], out _) && RailMeta.HuskMembers(dictArgs[0]).Count > 0 ? dictArgs[0]
+                                     : !RailMeta.LeafKindOf(dictArgs[1], out _) && RailMeta.HuskMembers(dictArgs[1]).Count > 0 ? dictArgs[1] : null;
+                        if (huskSide != null)
+                        { f.Class = FieldClass.Excluded; f.Exclude = "dict-blob husk on " + huskSide.Name + " (" + string.Join(",", RailMeta.HuskMembers(huskSide)) + ")"; return f; }
+                        f.Class = FieldClass.EntityList;
+                        f.ElemType = typeof(KeyValuePair<,>).MakeGenericType(dictArgs[0], dictArgs[1]);
+                        f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1];
+                        f.Unordered = true; // dict enumeration order is not state
+                        return f;
+                    }
+                }
                 f.Class = FieldClass.Excluded; f.Exclude = "dictionary with non-simple key/value (" + dictArgs[0].Name + "," + dictArgs[1].Name + ")";
                 return f;
             }
@@ -505,6 +529,15 @@ namespace Multiplayer.Network.Sync
             // the level clock rides the TimeAnchor "TA" root. Excluding the Descend member kills the
             // churn without touching TimingInstanceData's OWN table — the "TA" anchor kind stays 6/6.
             { "Base.Entities.ActorInstanceData.TimingData", "per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor \"TA\" root)" },
+
+            // NakedRecruits pair blob (whole-dict replaced value) — GeoUnitDescriptor's two non-carried
+            // refs are SAFE nulls, argued from the decompile, so the husk gate must not veto the dict:
+            //   __level: lazy self-healing singleton — LevelController getter re-resolves it on first
+            //     touch (GeoUnitDescriptor.cs:214 `__level ?? (__level = GameUtl.CurrentLevel()...)`).
+            //   _temporaryStatsModifier: generation-PREVIEW scratch — set and NULLED by a Dispose scope
+            //     around stat rolls (GeoUnitDescriptor.cs:166-171); null at rest by construction.
+            { "PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor.__level", "lazy self-healing level ref (LevelController getter re-resolves, GeoUnitDescriptor.cs:214)" },
+            { "PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor._temporaryStatsModifier", "transient generation-preview scratch (Dispose-scoped, GeoUnitDescriptor.cs:166-171) — null at rest" },
 
             // v<4 save-migration leftover (EventSystemInstanceData.OldTriggeredEncounters, PreviousNames
             // "TriggeredEncounters") with NO live member — ResolveLive's unique-type fallback lands it on
@@ -1089,7 +1122,12 @@ namespace Multiplayer.Network.Sync
 
         internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
 
-        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5;
+        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5, TagLeafDict = 6;
+
+        /// <summary>KeyValuePair&lt;,&gt; — the pair element type of a whole-dict blob (unkeyable-element
+        /// dictionaries riding as EntityList; see BuildField's dict arm).</summary>
+        internal static bool IsKvpType(Type t) =>
+            t != null && t.IsGenericType && t.GetGenericTypeDefinition() == typeof(KeyValuePair<,>);
         private const int MaxBlobDepth = 8;
 
         private struct Fixup { public object Target; public RailField Field; public int Idx; }
@@ -1278,16 +1316,17 @@ namespace Multiplayer.Network.Sync
         /// TagNull) survives on every unchanged element. Match = canonical element-encoding byte equality —
         /// the exact "changed?" question the host itself asked, so no second equality table can drift.
         /// A value-duplicate pool maps 1:1 (each live instance claimed once).</summary>
-        /// <summary>Element view of an EntityList container: a live Dictionary twin (DictKeyMember shape)
-        /// enumerates its VALUES — a raw dict enumeration yields KeyValuePairs, which are not the
-        /// element type the codec speaks.</summary>
-        private static IEnumerable ElementsOf(object container) =>
-            container is IDictionary d ? d.Values : (IEnumerable)container;
+        /// <summary>Element view of an EntityList container. A live Dictionary twin (DictKeyMember shape)
+        /// enumerates its VALUES — raw dict enumeration yields KeyValuePairs, not the element type the
+        /// codec speaks. EXCEPT when the pairs ARE the element type (whole-dict blob, ElemType = KVP):
+        /// then the pair enumeration is exactly right.</summary>
+        private static IEnumerable ElementsOf(object container, Type elemType) =>
+            container is IDictionary d && !IsKvpType(elemType) ? d.Values : (IEnumerable)container;
 
         internal static void ReuseLiveElements(RailField f, object current, List<object> items)
         {
             if (items == null || items.Count == 0 || !(current is IEnumerable src)) return;
-            src = ElementsOf(current);
+            src = ElementsOf(current, f.ElemType);
             var pool = new List<object>();
             foreach (var e in src) if (e != null) pool.Add(e);
             if (pool.Count == 0) return;
@@ -1332,7 +1371,7 @@ namespace Multiplayer.Network.Sync
                 if (listVal == null) { w.Write(false); return ms.ToArray(); }
                 w.Write(true);
                 var items = new List<object>();
-                foreach (var e in ElementsOf(listVal)) items.Add(e);
+                foreach (var e in ElementsOf(listVal, f.ElemType)) items.Add(e);
                 if (items.Count > ushort.MaxValue) throw new InvalidOperationException("entity list too large (" + items.Count + ")");
                 w.Write((ushort)items.Count);
                 foreach (var e in items)
@@ -1345,6 +1384,16 @@ namespace Multiplayer.Network.Sync
         {
             if (v == null) { w.Write(TagNull); return; }
             if (LeafKindOf(declared, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
+            if (IsKvpType(declared))
+            {
+                // Pair of a whole-dict blob: Key then Value through this same codec (leaf or blob per
+                // side). TagBlob on the wire — DecodeValue branches on the declared pair type.
+                var ka = declared.GetGenericArguments();
+                w.Write(TagBlob);
+                EncodeValue(w, ser, ka[0], declared.GetProperty("Key").GetValue(v, null), locals, depth + 1);
+                EncodeValue(w, ser, ka[1], declared.GetProperty("Value").GetValue(v, null), locals, depth + 1);
+                return;
+            }
             for (int i = 0; i < locals.Count; i++)
                 if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
             var t = v.GetType();
@@ -1441,9 +1490,23 @@ namespace Multiplayer.Network.Sync
                                     { fw.Write((ushort)i); fw.Write(TagBackRef); fw.Write((ushort)b); n++; break; }
                             break;
                         }
-                        // LeafDict / GeoItemDict inside a blob: none exist on current element types.
-                        // ponytail: not carried (warned once); add sub-key encode here when one appears.
                         case FieldClass.LeafDict:
+                        {
+                            // First real occupant: ProgressionDescriptor.PersonalAbilities inside the
+                            // NakedRecruits pair blob — dropping it would husk every recruit's rolled
+                            // abilities. Canonical order (law 6): entries sorted by encoded key.
+                            if (!(v is IDictionary dict)) break; // null/absent → decode keeps ctor default
+                            var des = new List<(string sub, object dv)>();
+                            foreach (DictionaryEntry de in dict) des.Add((EncodeDictKey(de.Key), de.Value));
+                            des.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
+                            fw.Write((ushort)i); fw.Write(TagLeafDict); fw.Write((ushort)des.Count);
+                            foreach (var (sub, dv) in des)
+                            { fw.Write(sub); EncodeValue(fw, ser, f.DictValType, dv, locals, depth + 1); }
+                            n++;
+                            break;
+                        }
+                        // GeoItemDict inside a blob: none exist on current element types.
+                        // ponytail: not carried (warned once); add GeoItemCodec encode here when one appears.
                         case FieldClass.GeoItemDict:
                             WarnOnce("blob: dict field " + t.Name + "." + f.Name + " not carried");
                             break;
@@ -1513,7 +1576,18 @@ namespace Multiplayer.Network.Sync
                     if (v == null) WarnOnce("blob back-ref to unconstructed local #" + bi + " (" + declared.Name + ") — null substituted");
                     return v;
                 }
-                case TagBlob: return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
+                case TagBlob:
+                    if (IsKvpType(declared))
+                    {
+                        var ka = declared.GetGenericArguments();
+                        var k = DecodeValue(r, ser, ka[0], geo, locals, fixups, depth);
+                        var val = DecodeValue(r, ser, ka[1], geo, locals, fixups, depth);
+                        // Unresolved on either side poisons the pair — the applier drops it (never a
+                        // null-keyed dict entry); the host's next change re-ships the whole dict anyway.
+                        if (ReferenceEquals(k, Unresolved) || ReferenceEquals(val, Unresolved) || k == null) return Unresolved;
+                        return Activator.CreateInstance(declared, k, val);
+                    }
+                    return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
                 default: throw new IOException("bad blob tag " + tag);
             }
         }
@@ -1590,6 +1664,20 @@ namespace Multiplayer.Network.Sync
                         ApplyList(o, f, DecodeList(r, f, geo));
                         break;
                     }
+                    case TagLeafDict:
+                    {
+                        if (f.KeyType == null) throw new IOException("blob leaf-dict tag on non-dict field " + t.Name + "." + f.Name);
+                        int dn = r.ReadUInt16();
+                        var dict = f.GetValue(o) as IDictionary; // ctor-initialized on every current shape
+                        dict?.Clear();
+                        for (int j = 0; j < dn; j++)
+                        {
+                            var key = DecodeDictKey(r.ReadString(), f.KeyType);
+                            var dv = DecodeValue(r, ser, f.DictValType, geo, locals, fixups, depth + 1);
+                            if (dict != null && !ReferenceEquals(dv, Unresolved)) dict[key] = dv;
+                        }
+                        break;
+                    }
                     default: throw new IOException("bad blob field tag " + tag);
                 }
             }
@@ -1660,6 +1748,11 @@ namespace Multiplayer.Network.Sync
                     // 7ef0a30 NOTEXT husk — is exactly this shape and was invisible without it).
                     var name = fi.Name[0] == '<' ? fi.Name.Substring(1, fi.Name.IndexOf('>') - 1) : fi.Name;
                     if (carried.Contains(name)) continue;
+                    // A member the opt-out table names is a REVIEWED deliberate exclusion (with its safety
+                    // argument in the reason string) — the husk gate exists to catch SILENT nulls, not to
+                    // veto documented ones (GeoUnitDescriptor.__level self-heals, _temporaryStatsModifier
+                    // is transient scratch).
+                    if (OptOutReason(cur, name) != null) continue;
                     husk.Add(name + ":" + fi.FieldType.Name);
                 }
             husk.Sort(StringComparer.Ordinal);
@@ -1727,6 +1820,21 @@ namespace Multiplayer.Network.Sync
             }
             if (current is IDictionary dict)
             {
+                // Whole-dict blob (ElemType = KVP): items ARE the entries — rebuild directly.
+                if (IsKvpType(field.ElemType))
+                {
+                    var kProp = field.ElemType.GetProperty("Key");
+                    var vProp = field.ElemType.GetProperty("Value");
+                    dict.Clear();
+                    if (items != null)
+                        foreach (var it in items)
+                        {
+                            if (it == null) continue;
+                            var k = kProp.GetValue(it, null);
+                            if (k != null) dict[k] = vProp.GetValue(it, null);
+                        }
+                    return;
+                }
                 // Live Dictionary twin of a DTO List (TwinTypeCompatible's dict rung): rebuild entries
                 // keyed by the element's own key member — the same mapping the game's Process side uses
                 // (_records = EncounterRecords.ToDictionary(s => s.EventId)). Key member licensed at

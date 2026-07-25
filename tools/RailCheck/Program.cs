@@ -377,6 +377,21 @@ namespace RailCheck
         private static string EntityListRoundTrip(Type t, List<string> laws)
         {
             object src;
+            // Whole-dict pair element (KeyValuePair<K,V>): the codec DROPS a pair whose KEY decodes
+            // null/unresolved by contract (an unaddressable dict slot must not become a null-keyed
+            // entry). A default-constructed pair has exactly that null key, so for keys that need a
+            // live graph (EntityRef roots) or a DefRepository the round-trip is LIVE-GATED — the same
+            // honest gap the doc above records for DefRef/EntityRef leaf fields. Class-typed keys
+            // construct headless and round-trip for real.
+            if (RailMeta.IsKvpType(t))
+            {
+                var ka = t.GetGenericArguments();
+                object key = RailMeta.LeafKindOf(ka[0], out var kk) ? SampleLeaf(kk, ka[0]) : TryConstruct(ka[0]);
+                if (key == null) return "live-gated(pair key " + ka[0].Name + ")";
+                object pv = RailMeta.LeafKindOf(ka[1], out var vk) ? SampleLeaf(vk, ka[1]) : TryConstruct(ka[1]);
+                src = Activator.CreateInstance(t, key, pv); // null value side is legal — only the key gates
+            }
+            else
             // The codec itself builds elements with Activator.CreateInstance(nonPublic) — same call here.
             // A type it cannot construct is a HARNESS limit (recorded, reviewable), not a rail law breach.
             try { src = Activator.CreateInstance(t, nonPublic: true); }
@@ -417,6 +432,13 @@ namespace RailCheck
                 return "MISMATCH:" + f.Name;
             }
             return "ok(" + planted.Count + ")";
+        }
+
+        /// <summary>Headless best-effort construction of a pair side; null = cannot be built offline.</summary>
+        private static object TryConstruct(Type t)
+        {
+            if (!t.IsClass) return null;
+            try { return Activator.CreateInstance(t, nonPublic: true); } catch { return null; }
         }
 
         /// <summary>A deterministic non-default value for a leaf kind, or null when none can exist headless.</summary>

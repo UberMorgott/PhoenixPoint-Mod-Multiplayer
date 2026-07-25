@@ -6,7 +6,7 @@ def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs 
   so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is
   INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element
   rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).
-types: 53
+types: 56
 
 Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace  [bridge:GeoMarketplaceInstanceData]  covered=2/4
   + Leaf IsMissionInProgress (Boolean)
@@ -200,9 +200,9 @@ PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility  [direct]  covere
   + Leaf _prevUpdateTime (TimeUnit)
   + Leaf _rotation (PhoenixBaseLayoutRotation)
   + Leaf _state (FacilityState)
-PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager  [direct]  covered=1/2
+PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager  [direct]  covered=2/2
   + Leaf FreeRestore (Boolean)
-  - EXCLUDED _preferredLoadouts (Dictionary`2): dictionary with non-simple key/value (GeoCharacter,Loadout)
+  + EntityList _preferredLoadouts (Dictionary`2) unordered=yes apply=ICollection<T>
 PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData  [direct]  covered=2/2
   + Leaf Progress (Int32)
   + Leaf ResearchRequirementDefName (String)
@@ -306,14 +306,14 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
-PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=18/36
-  - EXCLUDED AlienBasesWithDiplomacyPenalty (Dictionary`2): dictionary with non-simple key/value (GeoSite,Boolean)
+PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=21/36
+  + EntityList AlienBasesWithDiplomacyPenalty (Dictionary`2) -> live _alienBasesWithRevealPenalty unordered=yes apply=ICollection<T>
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   + Leaf AncientSiteProbes (Int32)
   - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   - EXCLUDED Bases (List`1): bridge-unresolved
   + Descend BuildingZone (GeoHavenZone)
-  - EXCLUDED CapturedUnits (List`1): blob husk on GeoUnitDescriptor (__level:GeoLevelController,_temporaryStatsModifier:IStatsModifier)
+  + EntityList CapturedUnits (List`1) -> live _capturedUnits unordered=no apply=IList
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED DismambleAt (TimeUnit): bridge-unresolved
   - EXCLUDED DismambleForResource (ResourceType): bridge-unresolved
@@ -327,7 +327,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   + Leaf LastNakedRecruitRefresh (TimeUnit) -> live _lastNakedRecruitRefresh
   + Leaf LastVehicleIndex (Int32) -> live _lastVehicleIndex
   + Descend ManufactureQueue (ItemManufacturing) -> live Manufacture
-  - EXCLUDED NewNakedRecruits (Dictionary`2): dictionary with non-simple key/value (GeoUnitDescriptor,ResourcePack)
+  + EntityList NewNakedRecruits (Dictionary`2) -> live _nakedRecruits unordered=yes apply=ICollection<T>
   - EXCLUDED NextBaseUpdate (NextUpdate): bridge-unresolved
   + Leaf NextFactionRequestCountdownDays (Int32) -> live _nextFactionRequestCountdownDays
   - EXCLUDED NextLoadoutUpdate (Int32): bridge-unresolved
@@ -365,6 +365,9 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
 PhoenixPoint.Geoscape.Levels.GeoMissionGenerator  [none]  covered=0/0
+System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoCharacter, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager+Loadout, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]]  [none]  covered=0/0
+System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoSite, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]]  [none]  covered=0/0
+System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Common.Core.ResourcePack, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]]  [none]  covered=0/0
 UnityEngine.Vector2Int  [direct]  covered=2/2
   + Leaf x (Int32)
   + Leaf y (Int32)
@@ -374,6 +377,7 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=none roundtrip=unconstructible:MissingMethodException
+  PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor keyable=no customCreate=no husk=none roundtrip=ok(0)
   PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment keyable=no customCreate=no husk=none roundtrip=ok(2)
   PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData keyable=no customCreate=no husk=none roundtrip=ok(2)
   PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer roundtrip=ok(4)
@@ -381,6 +385,9 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Events.GeoscapeEventRecord keyable=no customCreate=no husk=none roundtrip=ok(7)
   PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
+  System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoCharacter, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager+Loadout, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoCharacter)
+  System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoSite, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoSite)
+  System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Common.Core.ResourcePack, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=ok(0)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
 PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
@@ -516,6 +523,6 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
 twin summary: resolved=59 gaps=56 dispatch=7
 
-summary: covered=235 excluded=72 blobbable=11 geoItemDicts=1
+summary: covered=239 excluded=68 blobbable=15 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:
