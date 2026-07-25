@@ -158,6 +158,7 @@ namespace Multiplayer.Network.Sync
         {
             WireStatNet.Clear();
             WireFactionTaken.Clear();
+            _floorCharId = -1; // visit floor keys on the dying geoscape's ids too
         }
 
         /// <summary>Arm the 0xAF surface on the generic intent engine: transport + dedup + reject
@@ -352,6 +353,66 @@ namespace Multiplayer.Network.Sync
                 return false; // in-session: the stage→model flush stays skipped on host AND client
             }
         }
+
+        /// <summary>
+        /// The undo floor SURVIVES mid-visit reseeds (in-game RCA 2026-07-25: spend→undo→spend→
+        /// "уже не откатить"). The minus gate and its refund walk live on the panel's stage floor
+        /// (_starting* stats — ChangeCharacterStat:907 gate, :795-808 interactability), and native
+        /// RefreshStats OVERWRITES that floor with the current display (:516-518) on every full reseed.
+        /// Solo that happens once per visit (entry / soldier switch / post-buy), but in a session ANY
+        /// foreign delta that moves one of ProgressionPanelInSync's six compared values lands a full
+        /// reseed on the open panel (UiEventMap edit-soldier entry → SelectCharacterProgression), so the
+        /// FIRST foreign batch after a spend silently reset the floor to the spent value — the next
+        /// minus click failed the :907 gate with ZERO traffic (repro log: U#6 nonces 9/+1, 10/−1, 11/+1
+        /// all HOST-APPLIED, no nonce 12 ever sent; no host REJECT anywhere — the wire ledgers were
+        /// innocent). Fix at the ONE floor writer: remember the visit-entry floor per bound character
+        /// and restore it after every later RefreshStats for the SAME character, clamped to the fresh
+        /// display (min — a respec/foreign drop lowers the floor, never raises it). Session-scoped and
+        /// view-only; solo path untouched. Both peers: the host's own open panel loses its floor to
+        /// client-driven repaints the same way. The HOST's wire floor (<see cref="WireStatNet"/>) stays
+        /// the trust boundary — a restored floor can only re-ALLOW the gesture, every refund is still
+        /// host-derived. ponytail: after a reseed the stage's faction-refund memory
+        /// (_startingFactionPoints gap) is gone, so a host-own-click undo of a faction-spilled spend
+        /// refunds personal — total conserved, no mint; wire refunds keep the exact split via
+        /// WireFactionTaken. Upgrade path if it ever matters: ledger host own-click spills too.
+        /// </summary>
+        [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.RefreshStats))]
+        internal static class StatFloorKeepPatch
+        {
+            private static void Postfix(UIModuleCharacterProgression __instance)
+            {
+                try
+                {
+                    var engine = NetworkEngine.Instance;
+                    if (engine == null || !engine.IsActiveSession) { _floorCharId = -1; return; } // solo: native semantics
+                    if (!BindOk()) return;
+                    var character = FCharacter.GetValue(__instance) as GeoCharacter;
+                    if (character == null || character.TemplateDef == null || !character.TemplateDef.IsHuman)
+                    { _floorCharId = -1; return; } // vehicle panel has no stat stage
+                    int id = (int)character.Id;
+                    if (id != _floorCharId)
+                    {
+                        // New bind = the visit floor is born here, from the values native just seeded.
+                        _floorCharId = id;
+                        _floorStats = new[]
+                        {
+                            (int)FStartStrength.GetValue(__instance),
+                            (int)FStartWill.GetValue(__instance),
+                            (int)FStartSpeed.GetValue(__instance),
+                        };
+                        return;
+                    }
+                    // Same character, later reseed: native just reset the floor to the display — restore.
+                    FStartStrength.SetValue(__instance, Math.Min(_floorStats[0], (int)FStartStrength.GetValue(__instance)));
+                    FStartWill.SetValue(__instance, Math.Min(_floorStats[1], (int)FStartWill.GetValue(__instance)));
+                    FStartSpeed.SetValue(__instance, Math.Min(_floorStats[2], (int)FStartSpeed.GetValue(__instance)));
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] stat-floor keep failed: " + ex); }
+            }
+        }
+
+        private static int _floorCharId = -1;   // GeoTacUnitId the kept floor belongs to; -1 = none
+        private static int[] _floorStats;       // [Str,Will,Speed] display values at visit entry
 
         /// <summary>
         /// Reseed skip for the repaint seam (UiNativeRepaint's edit-soldier / edit-vehicle entries): TRUE
