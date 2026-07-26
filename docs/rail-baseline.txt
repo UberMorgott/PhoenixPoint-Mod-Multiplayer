@@ -6,7 +6,7 @@ def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs 
   so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is
   INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element
   rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).
-types: 56
+types: 57
 
 Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace  [bridge:GeoMarketplaceInstanceData]  covered=2/4
   + Leaf IsMissionInProgress (Boolean)
@@ -67,9 +67,12 @@ PhoenixPoint.Common.Entities.BaseCharacterStats  [direct]  covered=3/3
   + Leaf Endurance (Single)
   + Leaf Speed (Single)
   + Leaf Willpower (Single)
-PhoenixPoint.Common.Entities.Characters.AbilityTrack  [direct]  covered=1/2
-  - EXCLUDED AbilitiesByLevel (AbilityTrackSlot[]): blob husk on AbilityTrackSlot (AbilityTrack:AbilityTrack)
+PhoenixPoint.Common.Entities.Characters.AbilityTrack  [direct]  covered=2/2
+  + EntityList AbilitiesByLevel (AbilityTrackSlot[]) unordered=no apply=array-assign
   + Leaf Source (AbilityTrackSource)
+PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot  [direct]  covered=2/2
+  + Leaf Ability (TacticalAbilityDef)
+  + Leaf RequiresPrevAbility (Boolean)
 PhoenixPoint.Common.Entities.Characters.CharacterFatigue  [direct]  covered=3/3
   + Leaf _hunger (Int32)
   + Leaf _sheetDef (BaseStatSheetDef)
@@ -375,6 +378,7 @@ UnityEngine.Vector2Int  [direct]  covered=2/2
 blob-reconstructed element types (Activator.CreateInstance + table fields):
   Base.Entities.Statuses.StatResult keyable=no customCreate=no husk=none roundtrip=ok(4)
   PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(1)
+  PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=none roundtrip=unconstructible:MissingMethodException
   PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor keyable=no customCreate=no husk=none roundtrip=ok(0)
@@ -523,6 +527,6 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
 twin summary: resolved=59 gaps=56 dispatch=7
 
-summary: covered=239 excluded=68 blobbable=15 geoItemDicts=1
+summary: covered=242 excluded=67 blobbable=16 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:

@@ -539,6 +539,14 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor.__level", "lazy self-healing level ref (LevelController getter re-resolves, GeoUnitDescriptor.cs:214)" },
             { "PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor._temporaryStatsModifier", "transient generation-preview scratch (Dispose-scoped, GeoUnitDescriptor.cs:166-171) — null at rest" },
 
+            // 2026-07-26 recruit-screen regression root: this backref was AbilityTrackSlot's only husk
+            // member, which kept AbilitiesByLevel excluded — so a blob-rebuilt AbilityTrack came back
+            // with a NULL slots array, its own PostRead rebind then NRE'd (AbilityTrack.cs:138-144
+            // dereferences the array), and UIStateRosterRecruits.PrepareRecruitListEntryData crashed on
+            // `.Where(AbilitiesByLevel)` — half-built recruit lists on every peer. The backref is
+            // SELF-HEALING: the owning track's PostRead loop calls SetAbilityTrack(this) on every slot.
+            { "PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot.AbilityTrack", "self-healing backref — owner's PostRead rebind sets it (AbilityTrack.OnDeserialized:138-144 SetAbilityTrack(this))" },
+
             // v<4 save-migration leftover (EventSystemInstanceData.OldTriggeredEncounters, PreviousNames
             // "TriggeredEncounters") with NO live member — ResolveLive's unique-type fallback lands it on
             // EmptyExplorationEventIds, the only other List<string> on GeoscapeEventSystem, which is
@@ -1548,6 +1556,13 @@ namespace Multiplayer.Network.Sync
         {
             if (o == null) return;
             try { ser.GetSerializationType(o.GetType())?.InvokePostRead(o, null); }
+            catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is NullReferenceException)
+            {
+                // Reflection-invoked callbacks wrap their throw — a serObj-dereferencing callback
+                // (CharacterIdentity.PostRead reads SerializedVersion first line) arrived here as TIE
+                // and dodged the NRE arm below, logging as an anonymous throw. Same shape, same answer.
+                WarnOnce("blob post-read on " + o.GetType().Name + " dereferences SerializedObjectData (unavailable in rail decode) — callback aborted mid-run, its rebind/migration did NOT apply");
+            }
             catch (NullReferenceException)
             {
                 // The callback dereferenced its SerializedObjectData parameter — save-load-only context the
