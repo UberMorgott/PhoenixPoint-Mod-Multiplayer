@@ -473,9 +473,11 @@ namespace Multiplayer.Network.Sync
                 }
                 // Suppress the tombstone when the whole entity path is gone (moved/vanished) — that is a
                 // structural change, not a dict-key delete; emitting one would false-delete on the client
-                // (and could hit a different entity that took over the old path). ponytail: an entity whose
-                // ONLY covered field is this dict would lose its stale keys here, but such entities don't exist.
-                if (!livePaths.Contains(kv.Value.Path)) continue;
+                // (and could hit a different entity that took over the old path). An entity whose ONLY
+                // covered fields are dicts emits NO entries once they empty, so livePaths alone would
+                // suppress its tombstones forever — mod-state roots ARE that shape (dict-only stores);
+                // a path still in _walkRoots was walked this cycle and is alive by construction.
+                if (!livePaths.Contains(kv.Value.Path) && !_walkRoots.ContainsKey(kv.Value.Path)) continue;
                 // dictionary key removed on host while the entity persists → explicit tombstone (distinct
                 // sentinel so the client never confuses it with a genuine present-null value).
                 changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone }, Key = kv.Key });
@@ -973,7 +975,7 @@ namespace Multiplayer.Network.Sync
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("RAIL COVERAGE REPORT " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId> | ES (event system) | MG (mission generator) | MK (marketplace)");
+                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId> | ES (event system) | MG (mission generator) | MK (marketplace) | M#<name> (registered mod-state roots)");
                 sb.AppendLine("total snapshot fields: " + totalFields);
                 sb.AppendLine();
                 int cov = 0, exc = 0;

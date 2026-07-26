@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Text;
 using Base.Core;
 using Base.Defs;
+using Base.Serialization.General;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Core;
@@ -94,8 +95,9 @@ namespace Multiplayer.Network.Sync
         // early like OpSetItems. EquipSync owns capture, validation and the native replay.
         internal const byte OpScrapEquipped = 12;
         // Shared scrap cart: the module's cart is per-screen UI state the game clears on every
-        // reopen/mode switch (UIModuleManufacturing.Init:363-371), so the shared truth is a
-        // host-authoritative MOD store echoed to all on 0xB2. Gesture ops ride this surface.
+        // reopen/mode switch (UIModuleManufacturing.Init:363-371), so the shared truth is the
+        // host-authoritative MOD store (ScrapCartState), mirrored to all by the generic value rail
+        // as mod root "M#cart". Gesture ops ride this surface.
         private const byte OpCartAdd = 13;    // [defGuid][isVehicle:i32] — queue ONE unit for scrapping
         private const byte OpCartRemove = 14; // [defGuid][isVehicle:i32] — unqueue ONE unit
         private const byte OpCartScrap = 15;  // (body unused) — scrap the WHOLE shared cart; any peer may confirm
@@ -107,12 +109,12 @@ namespace Multiplayer.Network.Sync
         private static float _nextTickAt;            // realtime throttle (0.5 s → max 2 Hz)
         private static string _lastSentQueue;        // "guid:intPts|"… joined (order + rounded-points sensitive)
 
-        // Shared scrap cart store: def guid → queued count. On the HOST authoritative; on a client a
-        // mirror written ONLY by the 0xB2 echo. ponytail: a mid-session joiner sees the cart only after
-        // the next change (no seed-on-join channel; carts are short-lived) — add to the join reseed if
-        // it ever matters.
-        private static readonly Dictionary<string, int> _cartItems = new Dictionary<string, int>();
-        private static readonly Dictionary<string, int> _cartVeh = new Dictionary<string, int>();
+        // Shared scrap cart store — MOD state riding the generic rail as mod root "M#cart"
+        // (IdentityResolver.RegisterModRoot): the host walks/diffs it like any game root; on a client
+        // it is a mirror written ONLY by the generic applier. Host mutations ship via the normal flush
+        // seams (IntentRail dispatch FlushNow; ShouldRunNative's FlushOnHostGesture for host gestures).
+        internal const string CartRootKey = "M#cart";
+        internal static readonly ScrapCartState Cart = new ScrapCartState();
 
         private static readonly MethodInfo SetupQueueMethod =
             AccessTools.Method(typeof(UIModuleManufacturing), "SetupQueue");
@@ -165,13 +167,17 @@ namespace Multiplayer.Network.Sync
             ops[OpCartRemove] = HandleCartMutateIntent;
             ops[OpCartScrap] = HandleCartScrapIntent;
             IntentRail.Register(SurfaceIds.GeoManufactureIntent, "manufacture", ops, ForceQueueResend);
+            // The shared cart rides the value rail as a mod-state root: same registration on BOTH peers
+            // (this runs in SyncEngine's ctor host and client alike); the client's instance is the apply target.
+            IdentityResolver.RegisterModRoot(CartRootKey, Cart);
         }
 
         private static void ForceQueueResend()
         {
             _lastSentQueue = null;
             PushQueueSnapshot(NetworkEngine.Instance); // self-guards non-host / no session / no geoscape
-            BroadcastCart(NetworkEngine.Instance);     // reject reconverge heals the cart mirror too
+            // Cart needs no reject reconverge: clients never write the mirror locally (block-first),
+            // so a reject leaves nothing to heal — the rail is the only writer.
         }
 
         /// <summary>Mid-session reload boundary (rca-3 contract): drop the dying-geoscape hook + the last-sent
@@ -180,9 +186,10 @@ namespace Multiplayer.Network.Sync
         {
             Unhook();
             _lastSentQueue = null;
-            // Cart is transient UX state; a reload re-shapes storage under it — start clean.
-            _cartItems.Clear();
-            _cartVeh.Clear();
+            // Cart is transient UX state; a reload re-shapes storage under it — start clean on BOTH
+            // peers (mod-root contract: mod state is EMPTY at every boundary — baselines don't emit).
+            Cart.Items.Clear();
+            Cart.Vehicles.Clear();
         }
 
         private static GeoLevelController GeoLevel()
@@ -288,11 +295,6 @@ namespace Multiplayer.Network.Sync
         /// rides <see cref="IntentRail.HandleInbound"/>).</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
-            if (surfaceId == SurfaceIds.GeoScrapCart)
-            {
-                if (engine != null && !engine.IsHost) ApplyCartEcho(payload);
-                return true;
-            }
             if (surfaceId != SurfaceIds.GeoManufacture) return false;
             if (engine == null || engine.IsHost) return true; // host never applies its own surface
             try
@@ -554,7 +556,7 @@ namespace Multiplayer.Network.Sync
             {
                 var repo = GameUtl.GameComponent<DefRepository>();
                 var targets = new Dictionary<ItemDef, int>();
-                foreach (var kv in _cartItems)
+                foreach (var kv in Cart.Items)
                     if (repo?.GetDef(kv.Key) is ItemDef d && !(d is GeoVehicleEquipmentDef)) targets[d] = kv.Value;
                 foreach (var kv in cart.Items.ToList())
                 {
@@ -573,7 +575,7 @@ namespace Multiplayer.Network.Sync
                 }
 
                 var vehTargets = new Dictionary<GeoVehicleEquipmentDef, int>();
-                foreach (var kv in _cartVeh)
+                foreach (var kv in Cart.Vehicles)
                     if (repo?.GetDef(kv.Key) is GeoVehicleEquipmentDef vd) vehTargets[vd] = kv.Value;
                 foreach (var def in vehCart.Items.Select(v => v.EquipmentDef).Distinct().ToList())
                 {
@@ -712,35 +714,24 @@ namespace Multiplayer.Network.Sync
 
                 // Shared cart: ONE intent scraps the whole host-authoritative store (any peer may
                 // confirm — the user's ask; a racing second confirm finds an empty store host-side and
-                // no-ops, so nothing can double-scrap or refund twice). Optimistic local mirror clear;
-                // the empty-cart 0xB2 echo confirms it.
+                // no-ops, so nothing can double-scrap or refund twice). Block-first (client-posture
+                // law): NO local writes, not even the mirror — the host's storage/wallet deltas plus
+                // the cart root's dict tombstones repaint the screen (ResyncScrapSnapshot empties the
+                // staged carts; DoFilter re-derives ScrapAllButton natively, RefreshItemList:1176).
                 SendIntent(OpCartScrap, "", 0);
-                _cartItems.Clear();
-                _cartVeh.Clear();
-                var scrapCart = ScrapItemsField(__instance);
-                var vehCart = VehicleScrapItemsField(__instance);
-
-                // Optimistic UI: empty the carts + disable the button + rebuild the scrap panel (mirrors native's
-                // own post-scrap UI; the real storage/wallet change arrives via the host rails).
-                scrapCart.Clear();
-                vehCart.Clear();
-                __instance.ScrapAllButton.SetInteractable(isInteractable: false);
-                SetupQueueMethod?.Invoke(__instance, null);
                 return false;
             }
 
             /// <summary>HOST confirm scrapped the module carts (≡ the spliced shared store, post-prune):
-            /// retire the store and echo empty so every peer's cart vanishes. A client OpCartScrap that
-            /// raced this finds the store empty and no-ops — no double-scrap, no double-refund.</summary>
+            /// retire the store — the rail's dict tombstones empty every peer's mirror (the prefix
+            /// already armed the host-gesture flush). A client OpCartScrap that raced this finds the
+            /// store empty and no-ops — no double-scrap, no double-refund.</summary>
             [HarmonyPostfix]
             private static void Postfix()
             {
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || !engine.IsHost || SyncApplyScope.Active) return;
-                if (_cartItems.Count == 0 && _cartVeh.Count == 0) return;
-                _cartItems.Clear();
-                _cartVeh.Clear();
-                BroadcastCart(engine);
+                if (!CartHostRecording()) return;
+                Cart.Items.Clear();
+                Cart.Vehicles.Clear();
             }
 
             /// <summary>Scrap-what-remains: drop/clamp cart entries to the LIVE faction storage — the
@@ -768,16 +759,7 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        // ─── Shared scrap cart (host-authoritative store + 0xB2 echo + gesture seams) ─────
-
-        /// <summary>TRUE = run the native cart move (host, solo, or inside an apply/splice).
-        /// No FlushOnHostGesture here: cart changes are MOD state riding 0xB2, not the value rail.</summary>
-        private static bool CartShouldRunNative()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            return SyncApplyScope.Active;
-        }
+        // ─── Shared scrap cart (host-authoritative MOD store on rail root "M#cart" + gesture seams) ─────
 
         /// <summary>TRUE = we are the in-session host outside an apply scope — record the accepted
         /// native gesture into the store (the postfix gate).</summary>
@@ -789,11 +771,11 @@ namespace Multiplayer.Network.Sync
 
         private static void CartHostMutate(string defGuid, bool veh, int delta)
         {
-            var store = veh ? _cartVeh : _cartItems;
+            var store = veh ? Cart.Vehicles : Cart.Items;
             store.TryGetValue(defGuid, out int cur);
             int next = cur + delta;
             if (next <= 0) store.Remove(defGuid); else store[defGuid] = next;
-            BroadcastCart(NetworkEngine.Instance);
+            // Ships on the rail: the capture prefix's ShouldRunNative already armed the host-gesture flush.
         }
 
         private static int CartLiveCount(string defGuid, bool veh)
@@ -808,14 +790,14 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>Host: apply a client queue/unqueue gesture to the store. Add validates against live
-        /// storage (store count may never exceed it); a stale unqueue is a deliberate no-op. A reject
-        /// reconverges via ForceQueueResend, which now re-broadcasts the cart.</summary>
+        /// storage (store count may never exceed it); a stale unqueue is a deliberate no-op. The change
+        /// rides the rail — IntentRail's dispatch FlushNow ships it this frame.</summary>
         private static void HandleCartMutateIntent(NetworkEngine engine, ulong peer, uint nonce, byte op, BinaryReader r)
         {
             string defGuid = r.ReadString();
             bool veh = r.ReadInt32() != 0;
             if (string.IsNullOrEmpty(defGuid)) return;
-            var store = veh ? _cartVeh : _cartItems;
+            var store = veh ? Cart.Vehicles : Cart.Items;
             store.TryGetValue(defGuid, out int cur);
             if (op == OpCartAdd)
             {
@@ -828,7 +810,6 @@ namespace Multiplayer.Network.Sync
                 if (cur <= 0) return;
                 if (cur == 1) store.Remove(defGuid); else store[defGuid] = cur - 1;
             }
-            BroadcastCart(engine);
             if (MpDiag.On) Debug.Log("[MP][scrapcart] HOST op=" + op + " def=" + defGuid + " veh=" + veh + " peer=" + peer);
         }
 
@@ -840,9 +821,9 @@ namespace Multiplayer.Network.Sync
         {
             var faction = GeoLevel()?.PhoenixFaction;
             if (faction == null) return;
-            if (_cartItems.Count == 0 && _cartVeh.Count == 0) return;
+            if (Cart.Items.Count == 0 && Cart.Vehicles.Count == 0) return;
             var repo = GameUtl.GameComponent<DefRepository>();
-            foreach (var kv in _cartItems.ToList())
+            foreach (var kv in Cart.Items.ToList())
             {
                 if (!(repo?.GetDef(kv.Key) is ItemDef def)) continue;
                 if (!faction.ItemStorage.Items.TryGetValue(def, out var gi)) continue;
@@ -851,7 +832,7 @@ namespace Multiplayer.Network.Sync
                 faction.ScrapItem(gi, n);
                 if (gi.CommonItemData.IsEmpty()) faction.ItemStorage.RemoveItem(gi);
             }
-            foreach (var kv in _cartVeh.ToList())
+            foreach (var kv in Cart.Vehicles.ToList())
             {
                 if (!(repo?.GetDef(kv.Key) is GeoVehicleEquipmentDef vd)) continue;
                 for (int i = 0; i < kv.Value; i++)
@@ -861,71 +842,21 @@ namespace Multiplayer.Network.Sync
                     faction.ScrapVehicleEquipment(ve);
                 }
             }
-            _cartItems.Clear();
-            _cartVeh.Clear();
-            BroadcastCart(engine);
+            Cart.Items.Clear();
+            Cart.Vehicles.Clear();
             Debug.Log("[MP][scrapcart] HOST scrapped shared cart (confirm by peer=" + peer + " nonce=" + nonce + ")");
-        }
-
-        /// <summary>Host→all cart snapshot on 0xB2 (own SurfaceSeq stream). Full snapshot, tiny at
-        /// gesture rate; re-applying an identical snapshot is a no-op by the reconcile's construction.</summary>
-        private static void BroadcastCart(NetworkEngine engine)
-        {
-            if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
-            try
-            {
-                using (var ms = new MemoryStream())
-                using (var w = new BinaryWriter(ms, Encoding.UTF8))
-                {
-                    w.Write(Seq.Next(SurfaceIds.GeoScrapCart));
-                    w.Write((ushort)_cartItems.Count);
-                    foreach (var kv in _cartItems) { w.Write(kv.Key); w.Write((ushort)kv.Value); }
-                    w.Write((ushort)_cartVeh.Count);
-                    foreach (var kv in _cartVeh) { w.Write(kv.Key); w.Write((ushort)kv.Value); }
-                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoScrapCart, SyncKind.StateDelta, ms.ToArray());
-                    engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
-                }
-            }
-            catch (Exception ex) { Debug.LogError("[MP][scrapcart] broadcast failed: " + ex.Message); }
-        }
-
-        /// <summary>Client: replace the mirror with the snapshot (state on arrival wins — a local click
-        /// is never lost, it is an in-flight intent whose own echo lands next), then splice any open
-        /// scrap screen via the normal repaint (ResyncScrapSnapshot does the reconcile).</summary>
-        private static void ApplyCartEcho(byte[] payload)
-        {
-            try
-            {
-                using (var ms = new MemoryStream(payload))
-                using (var r = new BinaryReader(ms, Encoding.UTF8))
-                {
-                    uint seq = r.ReadUInt32();
-                    if (!Seq.ShouldApply(SurfaceIds.GeoScrapCart, seq)) return;
-                    _cartItems.Clear();
-                    _cartVeh.Clear();
-                    int n = r.ReadUInt16();
-                    for (int i = 0; i < n; i++) { var g = r.ReadString(); _cartItems[g] = r.ReadUInt16(); }
-                    n = r.ReadUInt16();
-                    for (int i = 0; i < n; i++) { var g = r.ReadString(); _cartVeh[g] = r.ReadUInt16(); }
-                    Seq.Mark(SurfaceIds.GeoScrapCart, seq);
-                }
-                using (SyncApplyScope.Enter())
-                    RepaintManufacturingUi();
-                if (MpDiag.On) Debug.Log("[MP][scrapcart] CLIENT cart mirror items=" + _cartItems.Count + " veh=" + _cartVeh.Count);
-            }
-            catch (Exception ex) { Debug.LogError("[MP][scrapcart] echo apply failed: " + ex.Message); }
         }
 
         /// <summary>Queue-for-scrap gesture (UIModuleManufacturing.AddToScrapQueue:1094). CLIENT: block
         /// native + send the intent — the module never shows un-acked state, so the click cannot be
-        /// lost, only confirmed by the echo (~1 frame on LAN). HOST: native runs; the postfix records
-        /// the ACCEPTED gesture (a throwing add never reaches it) and broadcasts.</summary>
+        /// lost, only confirmed by the mirrored delta (~1 frame on LAN). HOST: native runs; the postfix
+        /// records the ACCEPTED gesture (a throwing add never reaches it) and the rail ships it.</summary>
         [HarmonyPatch(typeof(UIModuleManufacturing), "AddToScrapQueue")]
         internal static class CartAddCapturePatch
         {
             private static bool Prefix(GeoManufactureItem item, bool addSecondary, ref bool __result)
             {
-                if (CartShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 var def = addSecondary ? item?.SecondaryItemDef : item?.ItemDef;
                 if (def == null) return false;
                 SendIntent(OpCartAdd, def.Guid, def is GeoVehicleEquipmentDef ? 1 : 0);
@@ -947,7 +878,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(IManufacturableUIElement item)
             {
-                if (CartShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 var def = item?.ItemDef;
                 if (def == null) return false;
                 SendIntent(OpCartRemove, def.Guid, def is GeoVehicleEquipmentDef ? 1 : 0);
@@ -974,7 +905,7 @@ namespace Multiplayer.Network.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return;
                 if (__instance.Mode != UIModuleManufacturing.UIMode.Scrap) return;
-                if (_cartItems.Count == 0 && _cartVeh.Count == 0) return;
+                if (Cart.Items.Count == 0 && Cart.Vehicles.Count == 0) return;
                 try
                 {
                     using (SyncApplyScope.Enter())
@@ -1050,5 +981,18 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+    }
+
+    /// <summary>
+    /// The shared scrap cart — the first MOD-STATE rail root ("M#cart"): a plain serializer-visible
+    /// class the generic engine walks/diffs/mirrors exactly like a game root (contract at
+    /// <see cref="IdentityResolver.RegisterModRoot"/>). Host authoritative; client instance is the
+    /// generic applier's write target. Values are def-guid → queued-for-scrap count.
+    /// </summary>
+    [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
+    public sealed class ScrapCartState
+    {
+        public Dictionary<string, int> Items = new Dictionary<string, int>();     // ItemDef guid → count
+        public Dictionary<string, int> Vehicles = new Dictionary<string, int>();  // GeoVehicleEquipmentDef guid → count
     }
 }

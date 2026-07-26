@@ -28,7 +28,7 @@ namespace Multiplayer.Network.Sync
     ///     registries). This is the entire hand-written root table; the walk below it is generic.
     /// Path grammar (law 2 path addressing): segments joined by '.', each segment = memberName or
     /// memberName#elementKey; the first segment is a root key ("T", "F#&lt;guid&gt;", "S#&lt;id&gt;",
-    /// "V#&lt;id&gt;", "U#&lt;id&gt;"). Resolution is symmetric: the client walks its own live graph with
+    /// "V#&lt;id&gt;", "U#&lt;id&gt;", "M#&lt;modRoot&gt;"). Resolution is symmetric: the client walks its own live graph with
     /// the same keys (<see cref="Resolve"/>).
     /// </summary>
     public static class IdentityResolver
@@ -132,6 +132,31 @@ namespace Multiplayer.Network.Sync
 
         // ─── Roots — the geoscape entry points (the ONE hand-written table) ───
 
+        // MOD-state roots: MOD-owned shared state riding the SAME walk/diff/apply as game roots. The
+        // registry is the whole mechanism — no per-feature engine code. Contract for a feature:
+        //   • one plain class marked [SerializeType(SerializeMembersByDefault = SerializeMembersType
+        //     .SerializeAll)] so RailType.Get classifies it "direct" off the same serializer metadata
+        //     as everything else (fields ride by their normal FieldClass; coverage report shows it);
+        //   • BOTH peers register the SAME key with THEIR instance at engine construction (host walks
+        //     its instance, the client's resolves as the apply target — symmetric, like game roots);
+        //   • state must be EMPTY at every reload boundary (baseline walks don't emit — game roots ride
+        //     the save transfer, mod state does not; a non-empty store heals only via full resend).
+        private static readonly SortedDictionary<string, object> _modRoots =
+            new SortedDictionary<string, object>(StringComparer.Ordinal);
+
+        /// <summary>Register MOD-owned state as a rail root. Key grammar: "M#&lt;name&gt;" (the reserved
+        /// mod-root kind), no '.' and no further '#' — path segments would corrupt addressing.</summary>
+        public static void RegisterModRoot(string key, object state)
+        {
+            if (state == null || key == null || !key.StartsWith("M#", StringComparison.Ordinal) ||
+                key.IndexOf('.') >= 0 || key.IndexOf('#', 2) >= 0)
+            {
+                Debug.LogError("[Multiplayer][rail] RegisterModRoot: invalid key '" + key + "' (grammar: \"M#<name>\", no '.'/'#') — ignored");
+                return;
+            }
+            _modRoots[key] = state;
+        }
+
         private static readonly FieldInfo TacUnitsField = AccessTools.Field(typeof(GeoLevelController), "_tacUnits");
 
         /// <summary>The level's tac-unit registry (structural applier: registering a created character is
@@ -189,6 +214,9 @@ namespace Multiplayer.Network.Sync
             if (geo.EventSystem != null) yield return new KeyValuePair<string, object>("ES", geo.EventSystem);
             if (geo.MissionGenerator != null) yield return new KeyValuePair<string, object>("MG", geo.MissionGenerator);
             if (geo.Marketplace != null) yield return new KeyValuePair<string, object>("MK", geo.Marketplace);
+
+            // Registered mod-state roots (sorted dictionary — deterministic order, law 6).
+            foreach (var kv in _modRoots) yield return kv;
         }
 
         // ─── Client-side path resolution (symmetric to the host walk) ──────
@@ -287,6 +315,7 @@ namespace Multiplayer.Network.Sync
 
         private static object ResolveRoot(GeoLevelController geo, string root)
         {
+            if (_modRoots.TryGetValue(root, out var mod)) return mod; // client's own registered instance
             if (root == "T") return geo.Timing;
             if (root == "TA") return TimeAnchor.ClientDto(geo.Timing); // scratch DTO; loaded in ApplyIfTouched
             if (root == "ES") return geo.EventSystem;
