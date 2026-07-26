@@ -77,10 +77,19 @@ namespace Multiplayer.Network.Sync
             GenericApplier.ResetForReloadBoundary();
         }
         public void ResetIntentDedupForPeer(ulong peerId) => IntentRail.ResetIntentDedupForPeer(peerId);
-        // Deliberate no-ops: the legacy push-reseed seam. SessionManager (JoinReady) and
-        // SaveTransferCoordinator still drive it on the join paths, but on the rail a joiner is
-        // seeded by the save transfer + resync-on-gap (law 7) — nothing to broadcast here.
+
+        /// <summary>Deliberate no-op: the wallet is ordinary covered state and rides the value rail.</summary>
         public void BroadcastFullWallet() { }
-        public void BroadcastAllChannels() { }
+
+        /// <summary>The HOST re-seed seam, driven by both join paths (SaveTransferCoordinator.OnJoinReady
+        /// for a mid-session joiner that reached the live geoscape, HostReseedAfterReveal after a reload)
+        /// — both host-guarded at the call site. GAME roots ride the save transfer (law 1), but two things
+        /// do NOT: MOD roots (IdentityResolver mod-root contract — the host's M#cart can hold staged items
+        /// the joiner's empty store never learns, and dict deltas ship per-subkey so it never converges),
+        /// and the kind-id table (DiffEngine._sentKinds is per-SESSION, not per-peer — a joiner would get
+        /// deltas whose kindIds it was never taught). The joiner cannot heal itself either: its own
+        /// gap-resync is suppressed on the first delta it ever sees (GenericApplier "_lastSeq != 0").
+        /// ONE full resend fixes all of it generically — every root, every future mod root.</summary>
+        public void BroadcastAllChannels() => DiffEngine.RequestFullResend();
     }
 }
