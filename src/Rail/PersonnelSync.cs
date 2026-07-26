@@ -57,9 +57,10 @@ namespace Multiplayer.Network.Sync
     ///     — Dismissed → op=7 intent, EVERY other reason blocked on a client, see DismissCapturePatch)
     ///     / <c>GeoPhoenixFaction.HireNakedRecruit</c> (:662, content-keyed) — hire and fire funnels.
     ///   • TFTV <c>TrainingFacilityRework.RedeployDismissedOperative</c> /
-    ///     <c>FinalizeRecruitTrainingForUI</c> — TFTV's base→base moves (native GeoSite transfer
-    ///     requires a docked vehicle, so op=4 cannot carry them); late-bound via TftvLateBinder,
-    ///     host re-runs the SAME TFTV method (ops 9/10).
+    ///     <c>FinalizeRecruitTrainingForUI</c> / <c>PromoteCivilianToOperative</c> — TFTV's base→base
+    ///     moves (native GeoSite transfer requires a docked vehicle, so op=4 cannot carry them) and the
+    ///     civilian→operative CREATION (op=4's container guard deliberately drops creations); late-bound
+    ///     via TftvLateBinder, host re-runs the SAME TFTV method (ops 9/10/11).
     ///
     /// WHAT THE WIRE DELIBERATELY DOES NOT CARRY: any balance. A client's own numbers would make it
     /// authoritative over a shared resource (law 3) — the host re-derives every cost and pool from its
@@ -78,6 +79,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpHireNaked = 8;   // base Recruits-tab hire       → Wallet.Take + HireNakedRecruit (content-keyed)
         private const byte OpTftvRedeploy = 9;    // TFTV RedeployDismissedOperative(level, char, targetBase) — base→base move
         private const byte OpTftvTrainDeploy = 10; // TFTV FinalizeRecruitTrainingForUI(level, char, early) — training deploy/relocate
+        private const byte OpTftvPromote = 11;     // TFTV PromoteCivilianToOperative(level, char, targetBase, spec) — civilian→operative CREATION
 
         // ─── Reflection: UIModuleCharacterProgression's private view-model — READ-ONLY here ──
         // _character = the soldier the panel is bound to; _bought* = the staged ability purchase the
@@ -126,8 +128,9 @@ namespace Multiplayer.Network.Sync
                 [OpHire] = HandleHireIntent,   // no charId — the recruit does not exist yet
                 [OpFire] = HandleFireIntent,   // charId, but no Progression requirement (vehicles/mutogs)
                 [OpHireNaked] = HandleHireNakedIntent, // content-keyed — a GeoUnitDescriptor has no id
-                [OpTftvRedeploy] = HandleTftvMove,     // TFTV base→base moves — host runs the SAME TFTV method
+                [OpTftvRedeploy] = HandleTftvMove,     // TFTV base→base moves / promote — host runs the SAME TFTV method
                 [OpTftvTrainDeploy] = HandleTftvMove,
+                [OpTftvPromote] = HandleTftvMove,
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -159,9 +162,7 @@ namespace Multiplayer.Network.Sync
             private static void Postfix(UIModuleCharacterProgression __instance, CharacterBaseAttribute baseStat, int __result)
             {
                 if (__result == 0) return;
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost) return; // solo/host: native (host flushes via the wrapper postfix)
-                if (SyncApplyScope.Active) return;                                      // law 8: never echo an apply
+                if (IntentRail.ShouldRunNative()) return; // solo/host/apply-scope: the shared law, no local copy
                 if (!BindOk()) return;
                 try
                 {
@@ -574,11 +575,58 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>HOST replay of the TFTV base→base ops: resolve the character (+ target base for
-        /// op=9), then invoke the SAME TFTV static method the client blocked — TFTV's own gates
-        /// (redeploy SP cost, dismissed marker, session lookup) all re-run against HOST state; a null
-        /// return is TFTV's own refusal → reject (nudge + "U#" re-emit). TFTV missing on the host
-        /// cannot happen in a real session (ParityManifest blocks the join) — rejected anyway.</summary>
+        /// <summary>Capture of <c>PromoteCivilianToOperative(level, character, targetBase, mainClass)</c>
+        /// — the UI's immediate-deploy click (TFTVBaseRework\UI.cs:1640). A CREATION flow, not a
+        /// transfer: the reassign seam (op=4) deliberately drops it (the created operative is not in
+        /// any local container), so without this seam it was DEAD on clients. Wire = the CIVILIAN's id
+        /// + target site ref + spec guid. ID-HAZARD GUARD (same law as CaptureMembershipAdd): the
+        /// civilian must already sit in a LOCAL container — container membership only ever arrives via
+        /// the rail, so a container member's id IS a host-known id; a client-allocated id (a client-side
+        /// creation flow) can never ship and thus never resolve an unrelated existing host unit. The
+        /// CREATED operative never rides the wire at all — the host allocates it and it mirrors back
+        /// via the structural create applier. Null return reads as "refused" to TFTV's UI (its
+        /// PersonnelData bookkeeping stays untouched, same posture as ops 9/10).</summary>
+        [HarmonyPatch]
+        internal static class TftvPromoteCapturePatch
+        {
+            private static bool Prepare() => AccessTools.TypeByName(TftvTrainingTypeName) != null;
+
+            private static MethodBase TargetMethod() =>
+                AccessTools.Method(AccessTools.TypeByName(TftvTrainingTypeName), "PromoteCivilianToOperative");
+
+            private static bool Prefix(GeoCharacter character, GeoPhoenixBase targetBase,
+                                       SpecializationDef mainClass, ref GeoCharacter __result)
+            {
+                if (IntentRail.ShouldRunNative()) return true;
+                __result = null;
+                try
+                {
+                    var siteRef = targetBase == null ? null : IdentityResolver.RootRef(targetBase.Site);
+                    if (character == null || siteRef == null || mainClass == null)
+                    { OpenUiRepaint.MarkDirty(); return false; }
+                    var geo = GeoLevel();
+                    if (geo == null || FindCharacterContainer(geo, character) == null)
+                    {
+                        Debug.LogWarning("[MP][personnel] CLIENT TFTV promote DROPPED — U#" + (int)character.Id +
+                                         " not in any local container (client-allocated id must never ship)");
+                        OpenUiRepaint.MarkDirty();
+                        return false;
+                    }
+                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpTftvPromote,
+                        "tftvPromote U#" + (int)character.Id + " -> " + siteRef + " spec=" + mainClass.Guid,
+                        w => { w.Write((int)character.Id); w.Write(siteRef); w.Write(mainClass.Guid); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][personnel] TFTV promote capture failed: " + ex); }
+                return false;
+            }
+        }
+
+        /// <summary>HOST replay of the TFTV base→base ops + the civilian promote: resolve the character
+        /// (+ target base for op=9/11, + spec for op=11), then invoke the SAME TFTV static method the
+        /// client blocked — TFTV's own gates (redeploy SP cost, dismissed marker, session lookup,
+        /// dismissed-civilian refusal) all re-run against HOST state; a null return is TFTV's own
+        /// refusal → reject (nudge + "U#" re-emit). TFTV missing on the host cannot happen in a real
+        /// session (ParityManifest blocks the join) — rejected anyway.</summary>
         private static void HandleTftvMove(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int charId = -1;
@@ -595,7 +643,7 @@ namespace Multiplayer.Network.Sync
                 if (tftv == null) { Reject(senderPeerId, charId, "TFTV not loaded on host"); return; }
 
                 object result;
-                if (op == OpTftvRedeploy)
+                if (op == OpTftvRedeploy || op == OpTftvPromote)
                 {
                     string siteRef = r.ReadString();
                     var target = IdentityResolver.Resolve(geo, siteRef, null) is GeoSite site
@@ -603,8 +651,18 @@ namespace Multiplayer.Network.Sync
                         : null;
                     if (target == null)
                     { RejectReassign(senderPeerId, charId, "unresolved target base " + siteRef, null, siteRef); return; }
-                    result = AccessTools.Method(tftv, "RedeployDismissedOperative")
-                        ?.Invoke(null, new object[] { geo, character, target });
+                    if (op == OpTftvPromote)
+                    {
+                        // The spec guid is wire input: only a real SpecializationDef may reach TFTV's
+                        // method (it stamps the new operative's main class).
+                        if (!(ResolveDef(r.ReadString()) is SpecializationDef spec))
+                        { Reject(senderPeerId, charId, "unknown spec (promote)"); return; }
+                        result = AccessTools.Method(tftv, "PromoteCivilianToOperative")
+                            ?.Invoke(null, new object[] { geo, character, target, spec });
+                    }
+                    else
+                        result = AccessTools.Method(tftv, "RedeployDismissedOperative")
+                            ?.Invoke(null, new object[] { geo, character, target });
                 }
                 else
                 {
