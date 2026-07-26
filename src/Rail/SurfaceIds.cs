@@ -25,7 +25,7 @@ namespace Multiplayer.Network.Sync
         // families keep their own surface ids below (the surface byte IS the family discriminator —
         // SurfaceRouter already routes on it) and register op tables into IntentRail, which owns
         // nonce/dedup/dispatch. GeoOutcome/GeoReject never materialized on the wire: outcomes ride the
-        // normal rail diff (0xAC) / order channels (0xAA/0xAD), rejects ride scoped DiffEngine
+        // normal rail diff (0xAC) / the 0xAD order channel, rejects ride scoped DiffEngine
         // re-emits (IntentRail.Reject). Do not reuse these three ids.
         public const byte GeoIntent = 0xA2;   // retired: never emitted
         public const byte GeoOutcome = 0xA3;  // retired: never emitted
