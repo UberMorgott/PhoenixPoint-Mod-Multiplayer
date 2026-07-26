@@ -209,6 +209,11 @@ namespace RailCheck
 
             int cov = 0, exc = 0, geoItemDicts = 0;
             var blobbable = new SortedDictionary<string, Type>(StringComparer.Ordinal);
+            // L15 seeds: only EntityList elements are BLOB-REBUILT at top level. A top-level
+            // EntityCollection is element-ADDRESSED (leaves written into existing client elements —
+            // its husk list is informational, not a rebuild risk); nested inside a blob it TagList-
+            // encodes, which the sweep's recursion reaches on its own.
+            var l15Seeds = new List<Type>();
             foreach (var t in types)
             {
                 var rt = RailType.Get(t);
@@ -248,6 +253,7 @@ namespace RailCheck
                             laws.Add("L1 no-list-apply-strategy: " + t.FullName + "." + f.Name +
                                      " (" + f.ValueType.Name + ") rides as " + f.Class + " but ApplyList would throw");
                         if (f.Class != FieldClass.LeafList) blobbable[f.ElemType.FullName] = f.ElemType;
+                        if (f.Class == FieldClass.EntityList) l15Seeds.Add(f.ElemType);
                     }
                     sb.Append("  + " + f.Class + " " + f.Name + " (" + f.ValueType.Name + ")" +
                               (f.LiveAlias != null ? " -> live " + f.LiveAlias : "") + extra + "\n");
@@ -289,6 +295,58 @@ namespace RailCheck
                           " customCreate=" + (HasCustomCreate(ser, t) ? "yes" : "no") +
                           " husk=" + (husk.Count == 0 ? "none" : string.Join(",", husk)) +
                           " roundtrip=" + EntityListRoundTrip(t, laws) + "\n");
+            }
+
+            // ─── L15 — RECURSIVE husk sweep over the blob closure ─────────────────────────────────
+            // The 2026-07-26 recruit-screen freeze: GeoUnitDescriptor passed the TOP-level husk gate
+            // ("husk=none") while its Descend-carried AbilityTrack had an excluded slots array — the
+            // blob shipped a half-built object into live UI. The top-level gate cannot see nesting, so
+            // this walks the WHOLE reachable graph of every blob-carried type: each uncarried reference
+            // member at ANY depth must be WAIVED with a JUSTIFIED reason — "self-heal*" (the game's own
+            // PostRead restores it) or "null at rest" (transient scratch) — anything else is a law
+            // violation, not a note. Cycle-safe by a visited-TYPE set (backrefs are exactly what loops).
+            sb.Append("\nnested husk sweep (recursive over the blob closure; waived = justified opt-out):\n");
+            {
+                var visited = new HashSet<Type>();
+                var queue = new Queue<Type>(l15Seeds);
+                var lines = new List<string>();
+                while (queue.Count > 0)
+                {
+                    var nt = queue.Dequeue();
+                    if (nt == null || !visited.Add(nt)) continue;
+                    if (nt.IsAbstract || nt.IsInterface || nt == typeof(object)) continue;
+                    if (typeof(UnityEngine.Object).IsAssignableFrom(nt)) continue;
+                    if (RailMeta.IsKvpType(nt))
+                    {
+                        foreach (var a in nt.GetGenericArguments()) if (!RailMeta.LeafKindOf(a, out _)) queue.Enqueue(a);
+                        continue;
+                    }
+                    foreach (var m in RailMeta.HuskScan(nt))
+                    {
+                        if (m.Waiver == null)
+                            laws.Add("L15 nested-husk: " + nt.FullName + "." + m.Name + " (" + m.Type.Name +
+                                     ") arrives null on the client — carry it or add a JUSTIFIED waiver");
+                        else if (m.Waiver.IndexOf("self-heal", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                 m.Waiver.IndexOf("null at rest", StringComparison.OrdinalIgnoreCase) < 0)
+                            laws.Add("L15 unjustified-waiver: " + nt.FullName + "." + m.Name +
+                                     " waived without a self-heal/null-at-rest argument: " + m.Waiver);
+                        else
+                            lines.Add("  ~ " + nt.FullName + "." + m.Name + " waived: " + m.Waiver);
+                    }
+                    var nrt = RailType.Get(nt);
+                    if (nrt == null) continue;
+                    foreach (var f in nrt.Fields)
+                    {
+                        if (f.Class == FieldClass.Excluded) continue;
+                        // Leaves terminate (DefRef/EntityRef resolve against live state — not husks).
+                        if (f.Class == FieldClass.Descend && !RailMeta.LeafKindOf(f.ValueType, out _)) queue.Enqueue(f.ValueType);
+                        if (f.ElemType != null && !RailMeta.LeafKindOf(f.ElemType, out _)) queue.Enqueue(f.ElemType);
+                        if (f.DictValType != null && !RailMeta.LeafKindOf(f.DictValType, out _)) queue.Enqueue(f.DictValType);
+                    }
+                }
+                lines.Sort(StringComparer.Ordinal);
+                foreach (var l in lines) sb.Append(l + "\n");
+                sb.Append("  (types swept: " + visited.Count + ")\n");
             }
 
             // ─── Twin tables (DTO live-twin resolution — ARCHITECTURE.md "DTO twin resolution") ────

@@ -547,6 +547,13 @@ namespace Multiplayer.Network.Sync
             // SELF-HEALING: the owning track's PostRead loop calls SetAbilityTrack(this) on every slot.
             { "PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot.AbilityTrack", "self-healing backref — owner's PostRead rebind sets it (AbilityTrack.OnDeserialized:138-144 SetAbilityTrack(this))" },
 
+            // CharacterIdentity's shared-def refs: every consumer path calls InitSharedTags() first,
+            // which lazily re-resolves all three from the DefRepository when _sharedGameTags is null
+            // (CharacterIdentity.cs:131-139; callers :144/:156…) — textbook self-healing.
+            { "PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedData", "self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)" },
+            { "PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedGameTags", "self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)" },
+            { "PhoenixPoint.Common.Entities.Characters.CharacterIdentity._humanCustomization", "self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)" },
+
             // v<4 save-migration leftover (EventSystemInstanceData.OldTriggeredEncounters, PreviousNames
             // "TriggeredEncounters") with NO live member — ResolveLive's unique-type fallback lands it on
             // EmptyExplorationEventIds, the only other List<string> on GeoscapeEventSystem, which is
@@ -1573,7 +1580,17 @@ namespace Multiplayer.Network.Sync
                 // Loud by design — a type of this shape riding a blob is a classification bug, not noise.
                 WarnOnce("blob post-read on " + o.GetType().Name + " dereferences SerializedObjectData (unavailable in rail decode) — callback aborted mid-run, its rebind/migration did NOT apply");
             }
-            catch (Exception ex) { WarnOnce("blob post-read on " + o.GetType().Name + " threw " + ex.GetType().Name); }
+            catch (Exception ex)
+            {
+                // GENUINE failure (not the null-serObj shape): rethrow. The element decode then fails,
+                // the whole-field apply is skipped with a LogMissOnce ERROR, and the client keeps its
+                // stale-but-healthy value — loud staleness beats the AbilityTrack lesson (a swallowed
+                // rebind failure shipped half-built objects into live UI and froze the game). The
+                // NRE-shape arms above stay tolerated: CharacterIdentity.PostRead reads
+                // serObj.SerializedVersion on line one (benign v>=5 early-return equivalence) and the
+                // rail cannot supply a SerializedObjectData.
+                throw new InvalidOperationException("blob post-read on " + o.GetType().Name + " FAILED — element not usable", ex);
+            }
         }
 
         private static object DecodeValue(BinaryReader r, Serializer ser, Type declared, GeoLevelController geo,
@@ -1721,6 +1738,20 @@ namespace Multiplayer.Network.Sync
         internal static List<string> HuskMembers(Type t)
         {
             var husk = new List<string>();
+            foreach (var m in HuskScan(t))
+                if (m.Waiver == null) husk.Add(m.Name + ":" + m.Type.Name);
+            husk.Sort(StringComparer.Ordinal);
+            return husk;
+        }
+
+        /// <summary>ALL uncarried reference members of a type, each with its waiver (opt-out reason;
+        /// null = a REAL husk). ONE enumeration, two consumers — the classifier's gate
+        /// (<see cref="HuskMembers"/>: waived = not husk) and RailCheck's RECURSIVE husk sweep, which
+        /// prints the waivers and fails on unwaived/unjustified ones at every nesting depth (the
+        /// AbilityTrackSlot lesson: a nested husk is invisible to the top-level gate).</summary>
+        internal static List<(string Name, Type Type, string Waiver)> HuskScan(Type t)
+        {
+            var husk = new List<(string, Type, string)>();
             var ser = GameSerializer;
             if (ser == null) return husk; // pre-init: no metadata yet, and nothing is classified either
 
@@ -1765,12 +1796,9 @@ namespace Multiplayer.Network.Sync
                     if (carried.Contains(name)) continue;
                     // A member the opt-out table names is a REVIEWED deliberate exclusion (with its safety
                     // argument in the reason string) — the husk gate exists to catch SILENT nulls, not to
-                    // veto documented ones (GeoUnitDescriptor.__level self-heals, _temporaryStatsModifier
-                    // is transient scratch).
-                    if (OptOutReason(cur, name) != null) continue;
-                    husk.Add(name + ":" + fi.FieldType.Name);
+                    // veto documented ones. The sweep re-checks the reason's JUSTIFICATION class.
+                    husk.Add((name, fi.FieldType, OptOutReason(cur, name)));
                 }
-            husk.Sort(StringComparer.Ordinal);
             return husk;
         }
 

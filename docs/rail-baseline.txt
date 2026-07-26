@@ -393,6 +393,15 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoSite, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoSite)
   System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Common.Core.ResourcePack, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=ok(0)
 
+nested husk sweep (recursive over the blob closure; waived = justified opt-out):
+  ~ PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot.AbilityTrack waived: self-healing backref — owner's PostRead rebind sets it (AbilityTrack.OnDeserialized:138-144 SetAbilityTrack(this))
+  ~ PhoenixPoint.Common.Entities.Characters.CharacterIdentity._humanCustomization waived: self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)
+  ~ PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedData waived: self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)
+  ~ PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedGameTags waived: self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)
+  ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor.__level waived: lazy self-healing level ref (LevelController getter re-resolves, GeoUnitDescriptor.cs:214)
+  ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor._temporaryStatsModifier waived: transient generation-preview scratch (Dispose-scoped, GeoUnitDescriptor.cs:166-171) — null at rest
+  (types swept: 26)
+
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
 PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
   + Descend ActiveMission (GeoMission)
