@@ -173,17 +173,33 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>The programmatic pause funnel (screen-open pauses, launch resume). Always the
         /// LEVEL clock (SetGamePauseState body reads _context.Level.Timing). Blocked wholesale on a
-        /// client: the TimeLimit branch inside it is host-only logic.</summary>
+        /// client: the TimeLimit branch inside it is host-only logic.
+        ///
+        /// UNLIKE the two gesture seams above, this method is ENGINE-driven: almost every geoscape UI
+        /// transition re-asserts the pause state on an already-paused clock (UIModuleGeoSectionBar.cs:119-194
+        /// on every section click, UIStateResearch:22, UIStateManufacturing:51, UIStateDiplomacy:27/39,
+        /// UIStateGeoscapeLog:18, UIStateGeoscapeOptions:36, GeoscapeView.RequestPauseCrt:1293). Those
+        /// no-change calls are tested out BEFORE the shared gate, because the gate's host arm
+        /// (DiffEngine.FlushOnHostGesture) would otherwise force one MONOLITHIC diff walk — and abandon
+        /// the in-flight sliced cycle (DiffEngine.HostTick:320) — per UI transition.</summary>
         [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.SetGamePauseState))]
         internal static class ProgrammaticPauseCapturePatch
         {
             private static bool Prefix(bool paused)
             {
-                if (IntentRail.ShouldRunNative()) return true;
                 try
                 {
                     var geo = GeoLevel();
-                    if (geo != null && geo.Timing.Paused != paused)
+                    // Native is provably INERT here: its only side branch needs (!paused && timing.Paused)
+                    // = a change (GeoscapeView.cs:1259), and the else-write is swallowed by the
+                    // change-gated Paused setter (Timing.cs:112). So nothing to capture and nothing to
+                    // ship, on either peer. A REAL host pause/resume still flushes same-frame without
+                    // this seam: that same setter raises EffectiveScaleChangedEvent (Timing.cs:126) →
+                    // DiffEngine.OnEffectiveScaleChanged → FlushNow (DiffEngine.cs:243).
+                    if (geo != null && geo.Timing.Paused == paused) return true;
+
+                    if (IntentRail.ShouldRunNative()) return true;
+                    if (geo != null)
                         Send(OpPause, paused ? (byte)1 : (byte)0, paused ? "pause (screen)" : "resume (screen)");
                 }
                 catch (Exception ex) { Debug.LogError("[MP][time] screen-pause capture failed: " + ex); }
