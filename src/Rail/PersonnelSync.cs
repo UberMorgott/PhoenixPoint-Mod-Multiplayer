@@ -591,6 +591,18 @@ namespace Multiplayer.Network.Sync
                                      " dst=" + (dstRef ?? (destination == null ? "null" : destination.GetType().Name)));
                     return false;
                 }
+                // Only a unit already in a LOCAL container is a TRANSFER. Client-reachable CREATION
+                // flows (TrainMutoidInBase / DeployAsset → AddRecruitToContainerFinal,
+                // GeoPhoenixFaction.cs:673-741) hit this same funnel with a CLIENT-allocated id —
+                // shipping it would let a stale id counter resolve an unrelated EXISTING host unit
+                // and ApplyReassign would silently move the wrong soldier on every peer.
+                var geo = GeoLevel();
+                if (geo == null || FindCharacterContainer(geo, character) == null)
+                {
+                    Debug.LogWarning("[MP][personnel] CLIENT membership add DROPPED — U#" + (int)character.Id +
+                                     " -> " + dstRef + " not in any local container (creation flow, not a transfer)");
+                    return false;
+                }
                 IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpReassign,
                     "reassign U#" + (int)character.Id + " -> " + dstRef,
                     w => { w.Write((int)character.Id); w.Write(dstRef); });
