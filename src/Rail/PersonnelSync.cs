@@ -520,6 +520,10 @@ namespace Multiplayer.Network.Sync
         /// ModInit — the load-order trap). TFTV absent → fully inert.</summary>
         private const string TftvTrainingTypeName = "TFTV.TFTVBaseRework.TrainingFacilityRework";
 
+        /// <summary>TFTV's personnel registry (<c>TFTVBaseRework\Data.cs:262</c>), same assembly as the
+        /// type above — carries both the host's promote gate and the row cleanup the native caller does.</summary>
+        private const string TftvPersonnelTypeName = "TFTV.TFTVBaseRework.PersonnelData";
+
         /// <summary>Capture of <c>RedeployDismissedOperative(level, character, targetBase)</c> — the
         /// UI's "redeploy dismissed operative" click (TFTVBaseRework\UI.cs:1422). Null return reads as
         /// "refused" to TFTV's UI; the host echo relocates the soldier and repaints.</summary>
@@ -626,7 +630,9 @@ namespace Multiplayer.Network.Sync
         /// client blocked — TFTV's own gates (redeploy SP cost, dismissed marker, session lookup,
         /// dismissed-civilian refusal) all re-run against HOST state; a null return is TFTV's own
         /// refusal → reject (nudge + "U#" re-emit). TFTV missing on the host cannot happen in a real
-        /// session (ParityManifest blocks the join) — rejected anyway.</summary>
+        /// session (ParityManifest blocks the join) — rejected anyway. op=11 needs two things TFTV's
+        /// static does NOT do for itself: a civilian gate (its own is only the dismissed marker) and the
+        /// native caller's personnel-row cleanup — see there.</summary>
         private static void HandleTftvMove(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int charId = -1;
@@ -657,8 +663,29 @@ namespace Multiplayer.Network.Sync
                         // method (it stamps the new operative's main class).
                         if (!(ResolveDef(r.ReadString()) is SpecializationDef spec))
                         { Reject(senderPeerId, charId, "unknown spec (promote)"); return; }
+                        // TFTV's own method guards ONLY the dismissed marker (TrainingFacilityRework.cs:872)
+                        // — it never verifies the unit IS a civilian, and its tail RemoveCharacter()s the
+                        // source (:733). Ungated, any stale/desynced/hostile Phoenix charId would DELETE a
+                        // veteran and mint a level-1 copy of their Identity. Gate on TFTV's own record:
+                        // rows exist only for hidden civilians (Data.cs:1044/1108) and dismissed operatives
+                        // (:447) — a real operative has none, so this is exactly the set the personnel
+                        // screen itself offers to promote.
+                        var personnel = AccessTools.TypeByName(TftvPersonnelTypeName);
+                        var row = AccessTools.Method(personnel, "GetPersonnelByUnitId")
+                            ?.Invoke(null, new object[] { charId });
+                        if (row == null)
+                        { Reject(senderPeerId, charId, "not TFTV personnel (promote)"); return; }
                         result = AccessTools.Method(tftv, "PromoteCivilianToOperative")
                             ?.Invoke(null, new object[] { geo, character, target, spec });
+                        // The native caller's tail (UI.cs:1643-1644): invoking the static directly skips it,
+                        // so the row outlives its GeoCharacter — a ghost on the host's personnel screen that
+                        // mints a SECOND operative when clicked (its RemoveCharacter then a no-op).
+                        if (result != null)
+                        {
+                            AccessTools.Field(row.GetType(), "TrainingSpec")?.SetValue(row, spec);
+                            AccessTools.Method(personnel, "RemovePersonnel")
+                                ?.Invoke(null, new object[] { geo.PhoenixFaction, row });
+                        }
                     }
                     else
                         result = AccessTools.Method(tftv, "RedeployDismissedOperative")
