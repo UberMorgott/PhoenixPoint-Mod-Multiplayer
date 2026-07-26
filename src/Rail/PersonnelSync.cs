@@ -630,9 +630,26 @@ namespace Multiplayer.Network.Sync
         /// client blocked — TFTV's own gates (redeploy SP cost, dismissed marker, session lookup,
         /// dismissed-civilian refusal) all re-run against HOST state; a null return is TFTV's own
         /// refusal → reject (nudge + "U#" re-emit). TFTV missing on the host cannot happen in a real
-        /// session (ParityManifest blocks the join) — rejected anyway. op=11 needs two things TFTV's
-        /// static does NOT do for itself: a civilian gate (its own is only the dismissed marker) and the
-        /// native caller's personnel-row cleanup — see there.</summary>
+        /// session (ParityManifest blocks the join) — rejected anyway.
+        ///
+        /// MIRRORING THE NATIVE CALLER'S TAIL: invoking the statics directly skips whatever their UI
+        /// callers do afterwards, so each tail statement is decided per op — MODEL work is replayed,
+        /// clicker-local PRESENTATION is not (running it here would drive the HOST player's screen):
+        ///   • op=9  <c>UI.cs:1425</c> RemovePersonnel → REPLAY. <c>:1426</c> RefreshResourceInfo,
+        ///     <c>:1434</c> refresh, <c>:1435</c> CloseModal → clicker-local.
+        ///   • op=10 <c>UI.cs:1672</c> RemovePersonnel → REPLAY. <c>:1674</c> CloseModal,
+        ///     <c>:1676</c> _deploymentUIActive, <c>:1682</c> PrepareDeployAsset → clicker-local (that
+        ///     one literally opens a deployment UI). <c>:1679</c> faction.RemoveCharacter is model, but
+        ///     it is only the SETUP half of that deploy-asset handoff — replaying it without :1682 would
+        ///     orphan the operative, so it is skipped too. TFTV already placed the operative at
+        ///     <c>Bases.FirstOrDefault()</c> (TrainingFacilityRework.cs:549), so it lands in a real base;
+        ///     the clicker just loses the "pick which base" step.
+        ///   • op=11 <c>UI.cs:1643</c> TrainingSpec + <c>:1644</c> RemovePersonnel → REPLAY.
+        ///     <c>:1650</c> refresh, <c>:1651</c> CloseModal → clicker-local.
+        /// Without the RemovePersonnel replay the row outlives its GeoCharacter — a ghost on the host's
+        /// personnel screen that re-runs the whole flow when clicked.
+        /// op=11 additionally needs a civilian gate TFTV's static does not do for itself (its own is
+        /// only the dismissed marker) — see there.</summary>
         private static void HandleTftvMove(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int charId = -1;
@@ -647,8 +664,14 @@ namespace Multiplayer.Network.Sync
                 { Reject(senderPeerId, charId, "not a Phoenix soldier"); return; }
                 var tftv = AccessTools.TypeByName(TftvTrainingTypeName);
                 if (tftv == null) { Reject(senderPeerId, charId, "TFTV not loaded on host"); return; }
+                var personnel = AccessTools.TypeByName(TftvPersonnelTypeName);
+                // Resolved BEFORE the replay: op=11 consumes the source character, so afterwards the id
+                // no longer finds its row. Rows exist only for hidden civilians (Data.cs:1044/1108) and
+                // dismissed operatives (:447) — a plain operative legitimately has none.
+                var row = AccessTools.Method(personnel, "GetPersonnelByUnitId")?.Invoke(null, new object[] { charId });
 
                 object result;
+                SpecializationDef promoteSpec = null;
                 if (op == OpTftvRedeploy || op == OpTftvPromote)
                 {
                     string siteRef = r.ReadString();
@@ -663,29 +686,21 @@ namespace Multiplayer.Network.Sync
                         // method (it stamps the new operative's main class).
                         if (!(ResolveDef(r.ReadString()) is SpecializationDef spec))
                         { Reject(senderPeerId, charId, "unknown spec (promote)"); return; }
+                        promoteSpec = spec;
                         // TFTV's own method guards ONLY the dismissed marker (TrainingFacilityRework.cs:872)
                         // — it never verifies the unit IS a civilian, and its tail RemoveCharacter()s the
                         // source (:733). Ungated, any stale/desynced/hostile Phoenix charId would DELETE a
-                        // veteran and mint a level-1 copy of their Identity. Gate on TFTV's own record:
-                        // rows exist only for hidden civilians (Data.cs:1044/1108) and dismissed operatives
-                        // (:447) — a real operative has none, so this is exactly the set the personnel
-                        // screen itself offers to promote.
-                        var personnel = AccessTools.TypeByName(TftvPersonnelTypeName);
-                        var row = AccessTools.Method(personnel, "GetPersonnelByUnitId")
-                            ?.Invoke(null, new object[] { charId });
+                        // veteran and mint a level-1 copy of their Identity. Gate on TFTV's own record —
+                        // exactly the set the personnel screen itself offers to promote.
                         if (row == null)
                         { Reject(senderPeerId, charId, "not TFTV personnel (promote)"); return; }
+                        // Strict native equivalence: the screen routes a row still IN TRAINING to the
+                        // finalize flow instead (UI.cs:1359/:1374), so no legitimate client emits promote
+                        // for one. Refuse rather than leave an orphaned RecruitSession behind.
+                        if (AccessTools.Field(row.GetType(), "Assignment")?.GetValue(row)?.ToString() == "Training")
+                        { Reject(senderPeerId, charId, "row is in training (promote)"); return; }
                         result = AccessTools.Method(tftv, "PromoteCivilianToOperative")
                             ?.Invoke(null, new object[] { geo, character, target, spec });
-                        // The native caller's tail (UI.cs:1643-1644): invoking the static directly skips it,
-                        // so the row outlives its GeoCharacter — a ghost on the host's personnel screen that
-                        // mints a SECOND operative when clicked (its RemoveCharacter then a no-op).
-                        if (result != null)
-                        {
-                            AccessTools.Field(row.GetType(), "TrainingSpec")?.SetValue(row, spec);
-                            AccessTools.Method(personnel, "RemovePersonnel")
-                                ?.Invoke(null, new object[] { geo.PhoenixFaction, row });
-                        }
                     }
                     else
                         result = AccessTools.Method(tftv, "RedeployDismissedOperative")
@@ -698,6 +713,14 @@ namespace Multiplayer.Network.Sync
                         ?.Invoke(null, new object[] { geo, character, early });
                 }
                 if (result == null) { Reject(senderPeerId, charId, "TFTV refused (op=" + op + ")"); return; }
+                // The native callers' MODEL tail — all three drop the PersonnelInfo row on success
+                // (UI.cs:1425 / :1672 / :1644); op=11 also stamps the chosen spec first (:1643). Everything
+                // else those callers do is clicker-local presentation (see the summary above).
+                if (row != null)
+                {
+                    if (promoteSpec != null) AccessTools.Field(row.GetType(), "TrainingSpec")?.SetValue(row, promoteSpec);
+                    AccessTools.Method(personnel, "RemovePersonnel")?.Invoke(null, new object[] { geo.PhoenixFaction, row });
+                }
                 Debug.Log("[MP][personnel] HOST intent APPLIED op=" + op + " (TFTV move) char=U#" + charId +
                           " nonce=" + nonce + " peer=" + senderPeerId);
                 OpenUiRepaint.MarkDirty();
