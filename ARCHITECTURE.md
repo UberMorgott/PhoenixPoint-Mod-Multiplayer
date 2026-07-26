@@ -96,8 +96,12 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   metadata, e.g. TimeUnit/ResourceUnit)).
 - `IdentityResolver.cs` — the ONLY place that names things (law 2). ID-probe table
   SiteId/VehicleID/ResearchID/Id/Def-GUID; root registry `T | TA | F#<defGuid> | S#<siteId> |
-  U#<tacUnitId> | V#<vehicleId> | MK | ES | MG` (level clock + "TA" anchor + the level's actor
-  registries + level singletons — the entire hand-written table); path grammar
+  U#<tacUnitId> | V#<vehicleId> | MK | ES | MG | M#<name>` (level clock + "TA" anchor + the
+  level's actor registries + level singletons + mod-owned roots — the entire hand-written table);
+  `RegisterModRoot(key, state)` lets mod state ride the same generic engine under an `"M#<name>"`
+  key on both peers (e.g. shared scrap cart "M#cart"; the bespoke 0xB2 channel was deleted).
+  Engine fix: tombstone suppression no longer swallows deletes for a root that emits zero entries.
+  Path grammar
   `root.Member.Member#elemKey…`; resolution symmetric on the client (same keys over its own graph).
   No stable key derivable → subtree EXCLUDED from the value rail (never index-addressed) + reported.
   **Root-visibility rule (2026-07-23):** every level singleton is a ROOT even when little or nothing
@@ -237,11 +241,17 @@ messages, sim gates (law 4b).
 
 ## Generic client-intent engine (src/Rail/IntentRail.cs, 2026-07-23)
 
-- ONE engine for every client→host intent surface (0xAB research / 0xAE manufacture+equip /
-  0xAF personnel / 0xB0 time). Families register op tables (`RegisterIntents()` in the SyncEngine
-  ctor: op → handler + optional reject-reconverge action); domain validators/appliers stay in the
-  family files. The surface byte IS the family discriminator — no single shared surface; 0xA2-0xA4
-  (GeoIntent/GeoOutcome/GeoReject) stay retired tombstones.
+- ONE engine for every client→host intent surface (0xAB research / 0xAE manufacture /
+  0xAF personnel / 0xB0 time / 0xB1 base / 0xB3 equip). Families register op tables
+  (`RegisterIntents()` in the SyncEngine ctor: op → handler + optional reject-reconverge action);
+  domain validators/appliers stay in the family files. The surface byte IS the family
+  discriminator — no single shared surface; 0xA2-0xA4 (GeoIntent/GeoOutcome/GeoReject) stay
+  retired tombstones.
+- **Client-posture gate — BLOCK-FIRST, codified once** at `IntentRail.ShouldRunNative`
+  (`c10fabc`): on a client outside `SyncApplyScope`, a native state mutation is BLOCKED and
+  converted into an intent; the HOST executes the native method; the result mirrors back via the
+  Delta rail. Presentation staging may proceed; model writes may not. All families route through
+  this single gate (duplicated per-family copies collapsed).
 - Engine owns: envelope `[nonce:u32][op:u8][family body]` (`IntentRail.Send`, one client emit), ONE
   shared nonce allocator (dedup key is (peer, surface, nonce) — no cross-surface collision, no
   two-senders-one-surface counter drift), ONE host-side IntentDedup (idempotence, law 7: a reliable
@@ -483,6 +493,13 @@ so it is reference identity at walk time:
   invisible to the harness, and each one needs its own seed line until the closure follows runtime
   types the way the walk does.
 
+## Known temporary state
+
+- **`TEMP diag` trace on `.TacUnits`** in `DiffEngine.cs` and `GenericApplier.cs`: logs every
+  changed TacUnits list leaving the host and every TacUnits apply/skip on the client. Kept
+  deliberately for one pending in-game verification (host-initiated reassign mirroring on clients);
+  marked for removal right after that retest.
+
 ## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
 1. Research — **DONE pending in-game gate** (generic rail 0xAC + intents 0xAB; the 0xAA side
@@ -491,10 +508,15 @@ so it is reference identity at walk time:
 2. Wallet/Resources — **DONE pending in-game gate** (rides the generic rail 0xAC + `ClientSimGate`;
    repaint via native ResourcesChanged + open-screen dirty-mark).
 3. Manufacturing — **DONE pending in-game gate** (0xAD order snapshot + 0xAE intents + scrap-mode
-   snapshot resync).
+   snapshot resync; equip ops split to own 0xB3 GeoEquipIntent surface 2026-07-26).
 4. Diplomacy (mostly values) — not started.
-5. Personnel — intent+value layer **DONE pending in-game gate** (0xAF spendStats/buyAbility/
-   secondSpec/reassign/skillReset; hire/death structural still open).
+5. Personnel — intent+value+structural layer **DONE pending in-game gate** (0xAF spendStats/
+   buyAbility/secondSpec/reassign/skillReset/hire/fire/hireNaked + TFTV ops 9/10/11
+   tftvRedeploy/tftvTrainDeploy/tftvPromote via TftvLateBinder; reassign seam moved to model
+   funnel on `GeoSite.AddCharacter/RemoveCharacter` + `GeoVehicle` twins (`7d4a083`/`228de05`);
+   stat co-management deleted (`c400a6a`) — host commits natively per gesture via
+   `UIModuleCharacterProgression.CommitStatChanges`, minus-button undo is a host round-trip
+   (accepted trade-off)).
 6. Aircraft — not started (scalar subset already rides the generic rail).
 7. GeoSites (spawn/despawn, fog, Unity views) — not started.
 8. Mission generation — last.
