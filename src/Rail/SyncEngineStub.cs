@@ -58,7 +58,6 @@ namespace Multiplayer.Network.Sync
             ResearchSync.Reset();
             ManufactureSync.Reset();
             EquipSync.Reset();
-            PersonnelSync.Reset();
             TimeSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
@@ -74,7 +73,6 @@ namespace Multiplayer.Network.Sync
             ResearchSync.ResetForReloadBoundary();
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
-            PersonnelSync.ResetForReloadBoundary();
             TimeSync.ResetForReloadBoundary();
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();

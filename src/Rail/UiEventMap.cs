@@ -247,21 +247,18 @@ namespace Multiplayer.Network.Sync
                 {
                     if (EsSelectProgression == null) return false; // resolve-all-first: decline BEFORE the reseed mutates anything
                     if (!ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)) return false;
-                    var cur = v.GeoscapeModules.ActorCycleModule.CurrentCharacter;
-                    // Own-gesture echo: the progression stage already shows the post-delta model — a reseed
-                    // would repaint zero difference and only wipe the staged decrement floor (the minus
-                    // button's undo affordance). Foreign changes always mismatch → full native reseed.
-                    return PersonnelSync.ProgressionPanelInSync(v.GeoscapeModules.CharacterProgressionModule, cur)
-                           || Call(EsSelectProgression, s, cur);
+                    // Progression panel: ALWAYS the full native reseed from the mirrored model — the
+                    // client-posture law (IntentRail.ShouldRunNative doc) repaints from the model, own
+                    // echo included; the stage floor resets with it (undo = one host round-trip).
+                    return Call(EsSelectProgression, s, v.GeoscapeModules.ActorCycleModule.CurrentCharacter);
                 },
                 [typeof(UIStateEditVehicle)] = (s, v) =>
                 {
                     var mods = v.GeoscapeModules;
                     if (!ReseedEquipScreen(s, mods, EvRefreshFlag, EvGetData, EvDisplay, EvRefreshStorage)) return false;
                     // progression panel: EnterState calls the module directly (UIStateEditVehicle.cs:162);
-                    // same own-echo reseed skip as the edit-soldier entry (crew stat clicks stage here too)
-                    if (!PersonnelSync.ProgressionPanelInSync(mods.CharacterProgressionModule, mods.ActorCycleModule.CurrentCharacter))
-                        mods.CharacterProgressionModule.SetCharacterProgression(Viewer(), mods.ActorCycleModule.CurrentCharacter);
+                    // always the full native reseed — same client-posture law as the edit-soldier entry
+                    mods.CharacterProgressionModule.SetCharacterProgression(Viewer(), mods.ActorCycleModule.CurrentCharacter);
                     return true;
                 },
                 [typeof(UIStateGeoRoster)] = (s, v) =>

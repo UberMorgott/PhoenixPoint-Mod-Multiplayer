@@ -23,11 +23,12 @@ namespace Multiplayer.Harmony
     // the same way. Auto-discovery would have to parse each Prepare's TFTV gate — not worth it.
     internal static class TftvLateBinder
     {
-        // Every TFTV-type-gated guard class in this assembly. EMPTY in the rail rewrite skeleton — the
-        // legacy guard patches stayed in the quarry; add each new TFTV-gated [HarmonyPatch] class here
-        // as the rail migration reintroduces it (the late-bind mechanism itself is proven, keep it armed).
+        // Every TFTV-type-gated guard class in this assembly. Add each new TFTV-gated [HarmonyPatch]
+        // class here or it silently dies when TFTV loads after us (Prepare() false at PatchAll time).
         private static readonly Type[] _patchClasses =
         {
+            typeof(Multiplayer.Network.Sync.PersonnelSync.TftvRedeployCapturePatch),
+            typeof(Multiplayer.Network.Sync.PersonnelSync.TftvTrainDeployCapturePatch),
         };
 
         private static readonly object _lock = new object();

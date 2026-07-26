@@ -73,6 +73,31 @@ namespace Multiplayer.Network.Sync
         /// <summary>Rejoin (rca-3 audit b): the returning peer's fresh engine restarts its nonce at 1.</summary>
         public static void ResetIntentDedupForPeer(ulong peerId) => Intents.ResetPeer(peerId);
 
+        // ─── THE CLIENT-POSTURE LAW: BLOCK-FIRST ───────────────────────────
+
+        /// <summary>
+        /// THE CLIENT-POSTURE LAW — BLOCK-FIRST, the ONE posture every intent family follows.
+        /// On a client, outside <see cref="SyncApplyScope"/>, a native STATE mutation is BLOCKED at its
+        /// model funnel and converted into an intent; the HOST executes the same native method; the
+        /// result reaches every peer through the delta rail; the client NEVER writes the model
+        /// optimistically. PRESENTATION-ONLY work (widget staging, slot animation, popups — anything
+        /// that lives on a view/view-model, not the game model) may proceed: the mirrored echo reseeds
+        /// it. A family is either block-first or fully native (solo/host) — never "result-ship", and
+        /// never co-managing a native view-model's lifecycle across the wire (the 2026-07-25/26
+        /// personnel floor/commit/ledger loop was exactly that, 11 RCAs deep).
+        /// TRUE = run the native code: host, solo, or inside a delta apply (law 8 — an apply that fires
+        /// native events must never re-enter capture). FALSE = client: block, send the intent (or
+        /// nothing, when the gesture is a no-op). Families still carrying a private copy of this
+        /// decision migrate here in a follow-up package — new seams call THIS one.
+        /// </summary>
+        public static bool ShouldRunNative()
+        {
+            DiffEngine.FlushOnHostGesture(); // host gestures ship this frame (N3 third arm), no-op elsewhere
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            return SyncApplyScope.Active;
+        }
+
         // ─── CLIENT: the one emit ──────────────────────────────────────────
 
         /// <summary>Send one intent to the host: [nonce][op] + whatever <paramref name="writeBody"/>
