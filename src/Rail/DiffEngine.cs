@@ -100,6 +100,11 @@ namespace Multiplayer.Network.Sync
         {
             typeof(PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility),
         };
+
+        /// <summary>Apply-side twin of the set above (GenericApplier): structurally-owned elements get
+        /// their membership from the create/destroy set-diff, so the order-vector must stay order-only
+        /// for them (vector-driven removal would also delete the client's corridors — per-peer ids).</summary>
+        internal static bool IsStructuralElemType(Type t) => t != null && StructuralElemTypes.Contains(t);
         private static readonly Dictionary<string, object> _walkRoots = new Dictionary<string, object>(StringComparer.Ordinal);
         private static readonly HashSet<string> _prevRoots = new HashSet<string>(StringComparer.Ordinal);
         private static bool _rootsSeeded;
@@ -638,8 +643,10 @@ namespace Multiplayer.Network.Sync
                             // set — without a carrier the walk emits NOTHING for it. Capture the LIVE
                             // sequence BEFORE the canonical sort; AddKeyOrder below rides it through the
                             // normal snapshot diff, so it ships exactly when membership/order changed and
-                            // stays silent on idle ticks. Singletons cannot reorder — no entry.
-                            if (!f.Unordered && elems.Count > 1)
+                            // stays silent on idle ticks. Empty/singleton sequences ship too: the vector is
+                            // also the MEMBERSHIP carrier for alias collections (GenericApplier), so a
+                            // 2→1 or 1→0 transition must still produce an entry.
+                            if (!f.Unordered)
                             {
                                 liveKeys = new List<string>(elems.Count);
                                 foreach (var (k, _) in elems) liveKeys.Add(k);

@@ -302,32 +302,42 @@ so it is reference identity at walk time:
 - Interception's private clock stays native. Per-actor `TimingInstanceData.OwnNow/OwnFixedNow` stay
   opted out ship-side (the churn — see DTO twin resolution above); client actor clocks tick locally.
 
-## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16)
+## Migration #1 — Research (src/Rail/ResearchSync.cs, 2026-07-16; 0xAA retired 2026-07-26)
 
-- **Host→all (GeoResearch 0xAA, observe = native event subs + ≤2 Hz poll, zero Harmony):** start
-  (OnResearchStarted → serializer blob; >u16 → value-only fallback), queue-order snapshot (poll — the
-  catch-all for cancel/reorder/queue-add: `Research.Cancel` of a non-current element fires NO native
-  event), complete (OnResearchCompleted → id delta). RETIRED 2026-07-17 onto the generic rail:
-  MsgProgress + the 2 Hz progress poll (`ResearchProgress` is a plain value field → DiffEngine 0xAC).
-  MsgQueue KEPT (transitional): since 2026-07-22 the rail itself mirrors keyed-collection ORDER
-  generically — an ordered container (List/array) of keyed elements ships its live KEY sequence as one
-  order-vector entry when membership/order changes (keys, never indices — law 2 holds), and the client
-  reorders in place by key (DiffEngine.AddKeyOrder / RailMeta.ReorderByKeys). MsgQueue retires after the
-  in-game gate confirms the generic channel alone keeps queue order.
+- **Host→all: the generic rail ONLY (0xAC).** The GeoResearch 0xAA side channel (MsgStart serializer
+  blob / MsgQueue order snapshot / MsgComplete id delta; MsgProgress already retired 2026-07-17) is
+  DELETED — no sender, no receiver, id tombstoned in SurfaceIds. Coverage that replaced it:
+  element state/progress/flags = covered ResearchElement leaves (`_state`, `ResearchProgress`,
+  `IsInProgress`, requirement-instance lists — rail-baseline.txt); queue MEMBERSHIP + ORDER = the
+  order-vector, which since 2026-07-26 is authoritative for the SET too on ALIAS collections
+  (elements owned by a sibling container — queue ⊂ catalog): `RailMeta.SyncMembersByKeys` prunes
+  unlisted local elements and adopts missing keys by resolving the LIVE instance from a sibling
+  EntityCollection of the same owner (`GenericApplier.ResolveSiblingElement`), then `ReorderByKeys`
+  sequences them; structurally-owned elements (facilities) keep membership on the create/destroy
+  set-diff and their vector stays order-only (`DiffEngine.IsStructuralElemType` — vector-driven
+  removal would delete the client's per-peer-id corridors). Vectors ship for empty/singleton
+  sequences too (a 2→1 / 1→0 membership change needs a carrier). `Research.Current` is derived
+  (`_researchQueue[0]`, Research.cs:53-61) — mirroring the queue mirrors it.
+- **Client presentation (law 4c), fed by rail deltas:** `ResearchSync.PresentFromMirror` (called
+  from the UiEventMap research arm) latches viewer-faction transitions — new queue head → raise the
+  native `Research.OnResearchStarted` delegate (geoscape log; the exact moment the game itself
+  raises it, Research.SetNext :455-473), element entered Completed → native completed modal
+  (`GeoscapeView.OnFactionResearchCompleted`) + log line (`GeoscapeLog.Faction_ResearchCompleted`)
+  invoked directly on the private handlers. Latch seeds silently on the first fire after a
+  reset/reload (EventPopup contract — no backlog spam).
 - **Client→host intents (GeoResearchIntent 0xAB):** intent-capture prefixes on
   `Research.AddResearchToQueue/Cancel/PutInFromOfQueue/PutUpInQueue/PutDownInQueue/InsertAtPosition`
   (all UIModuleResearch entry points route there). Client: native call BLOCKED, intent sent. Host:
-  validate → run the SAME native method; observe seams broadcast the outcome. Transport/nonce/dedup/
-  dispatch/reject discipline ride the generic intent engine since 2026-07-23 (see IntentRail above).
-  Echo loop closed by `SyncApplyScope` (src/Rail/SyncApplyScope.cs):
+  validate → run the SAME native method; the rail broadcasts the outcome (IntentRail dispatch
+  FlushNow + host-screen MarkDirty). Reject reconverge = scoped `ForceReemit("F#<guid>.Research")`.
+  Transport/nonce/dedup/dispatch/reject discipline ride the generic intent engine since 2026-07-23
+  (see IntentRail above). Echo loop closed by `SyncApplyScope` (src/Rail/SyncApplyScope.cs):
   every client apply wraps itself in it; the capture seam passes native through inside it.
 - **Sim gating (law 4b):** `Research.Update` prefix-skipped on the client (clock not frozen — the
   local hourly tick would double-progress and locally complete research).
-- **Reward-chain boundary (law 3):** client completion stamps `ResearchElement._state` via the
-  BACKING FIELD — never the native State setter, whose `Complete()` runs the reward chain
-  (ApplyRewards / RewardReputation / Wallet.Give) = host-only logic. Presentation fired directly:
-  native completed modal (`GeoscapeView.OnFactionResearchCompleted`) + log line
-  (`GeoscapeLog.Faction_ResearchCompleted`).
+- **Reward-chain boundary (law 3):** the rail's leaf apply writes `ResearchElement._state` as a
+  FIELD — never the native State setter, whose `Complete()` runs the reward chain
+  (ApplyRewards / RewardReputation / Wallet.Give) = host-only logic.
 - **Known limitations (accepted, resolved by later subsystems):** reward side-effects (resources,
   reputation, manufacture unlocks) reach the client only via their own subsystems; dependent-research
   reveal/unlock cascades arrive with that research's start blob, not at completion (client pedia/
@@ -475,8 +485,9 @@ so it is reference identity at walk time:
 
 ## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
 
-1. Research — **DONE pending in-game gate** (0xAA/0xAB + generic rail; MsgQueue transitional until
-   the order-vector gate).
+1. Research — **DONE pending in-game gate** (generic rail 0xAC + intents 0xAB; the 0xAA side
+   channel retired 2026-07-26 — queue membership+order ride the order-vector, presentation is a
+   mirror-fed latch; gate = start/cancel/reorder/complete from both peers).
 2. Wallet/Resources — **DONE pending in-game gate** (rides the generic rail 0xAC + `ClientSimGate`;
    repaint via native ResourcesChanged + open-screen dirty-mark).
 3. Manufacturing — **DONE pending in-game gate** (0xAD order snapshot + 0xAE intents + scrap-mode

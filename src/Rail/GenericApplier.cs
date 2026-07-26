@@ -465,12 +465,29 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.EntityCollection:
                     {
-                        // The keyed-collection ORDER channel: the only field-level entry an EntityCollection
-                        // ever ships is the host's live key sequence of an ordered container (DiffEngine.
-                        // AddKeyOrder). Reorder the live list IN PLACE by key — elements are live entities,
-                        // never rebuilt here; unknown keys wait for their structural create.
+                        // The keyed-collection ORDER+MEMBERSHIP channel: the only field-level entry an
+                        // EntityCollection ever ships is the host's FULL live key sequence of an ordered
+                        // container (DiffEngine.AddKeyOrder). For ALIAS collections (elements owned by a
+                        // sibling container — research queue ⊂ catalog) the vector is authoritative for the
+                        // SET too: prune unlisted local elements, adopt missing keys by resolving the LIVE
+                        // instance from a sibling collection on the same owner (never rebuilt — law 3).
+                        // Structurally-owned elements (facilities) keep membership on the create/destroy
+                        // set-diff: vector stays order-only there, unknown keys wait for their create.
                         if (value.Length == 0 || value[0] != RailMeta.OrderVectorMarker) return;
-                        if (!RailMeta.ReorderByKeys(field.GetValue(entity), RailMeta.DecodeKeyOrder(value))) return;
+                        var keys = RailMeta.DecodeKeyOrder(value);
+                        var container = field.GetValue(entity);
+                        bool changed = false;
+                        if (!DiffEngine.IsStructuralElemType(field.ElemType))
+                        {
+                            string p = path, fn = field.Name;
+                            changed = RailMeta.SyncMembersByKeys(container, keys, k =>
+                            {
+                                var inst = ResolveSiblingElement(entity, field, k);
+                                if (inst == null) LogMissOnce("order-vector member '" + k + "' unresolved at " + p + "." + fn);
+                                return inst;
+                            });
+                        }
+                        if (!RailMeta.ReorderByKeys(container, keys) && !changed) return;
                         break;
                     }
                     case FieldClass.GeoItemDict:
@@ -498,6 +515,30 @@ namespace Multiplayer.Network.Sync
             {
                 LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
+        }
+
+        /// <summary>Resolve a live instance for an order-vector key that is missing from an ALIAS
+        /// collection: scan the OTHER keyed collections of the SAME owner entity (the alias pattern —
+        /// the queue's elements live in the catalog next door). Type-gated per element so an id-keyed
+        /// stranger can never be adopted into a foreign list. Full live-type table, not the wire kind's:
+        /// the owner may be a subtype of the wire type.</summary>
+        private static object ResolveSiblingElement(object entity, RailField field, string key)
+        {
+            var rt = RailType.Get(entity.GetType());
+            if (rt == null) return null;
+            foreach (var f in rt.Fields)
+            {
+                if (f.Class != FieldClass.EntityCollection || !f.CanRead ||
+                    string.Equals(f.Name, field.Name, StringComparison.Ordinal)) continue;
+                object v;
+                try { v = f.GetValue(entity); } catch { continue; }
+                if (!(v is IEnumerable src)) continue;
+                foreach (var e in src)
+                    if (e != null && field.ElemType.IsInstanceOfType(e) &&
+                        string.Equals(IdentityResolver.KeyOf(e), key, StringComparison.Ordinal))
+                        return e;
+            }
+            return null;
         }
 
         /// <summary>

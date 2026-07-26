@@ -24,12 +24,11 @@ namespace Multiplayer.Network.Sync
             TimeSync.RegisterIntents();
             FacilitySync.RegisterIntents();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
-            // host→all order channels (0xAA research / 0xAD manufacture), the intent engine, and the
-            // generic value rail (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the
-            // host-side intent dedup.
+            // the 0xAD manufacture order channel, the intent engine, and the generic value rail
+            // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
+            // (0xAA research retired 2026-07-26 — research rides 0xAC + 0xAB only.)
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
-                ResearchSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
+                ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -43,7 +42,6 @@ namespace Multiplayer.Network.Sync
         // post-reload deltas keep applying).
         public void Tick()
         {
-            ResearchSync.HostTick(_engine);
             ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)

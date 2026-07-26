@@ -66,7 +66,15 @@ namespace Multiplayer.Network.Sync
                             break;
                         case Research _:
                         case ResearchElement _:
-                            if (!researchDone) { researchDone = true; ResearchSync.RepaintResearchUi(); }
+                            // Presentation latch first (started log / completed modal from the mirrored
+                            // transition — the 0xAA channel's former MsgStart/MsgComplete job), then the
+                            // proven repaint path.
+                            if (!researchDone)
+                            {
+                                researchDone = true;
+                                ResearchSync.PresentFromMirror(geo);
+                                ResearchSync.RepaintResearchUi();
+                            }
                             break;
                         case Timing _:
                         case TimingInstanceData _: // the TimeAnchor scratch DTO

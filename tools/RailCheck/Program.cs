@@ -711,6 +711,28 @@ namespace RailCheck
                 !ReferenceEquals(klist[0], k2) || !ReferenceEquals(klist[1], k3) || !ReferenceEquals(klist[2], k1))
                 yield return "L10 reorder-tail: elements missing from the vector keep their relative order at the tail";
 
+            // (e) SyncMembersByKeys (alias-collection membership half, run before ReorderByKeys):
+            //     prunes local keys the vector no longer lists, adopts missing keys ONLY when the
+            //     resolver yields a live instance (unresolvable keys wait), no-ops on a converged set,
+            //     and declines fixed-size containers (arrays stay permute-only).
+            var m1 = new KeyedElem { Id = 1 };
+            var m2 = new KeyedElem { Id = 2 };
+            var m3 = new KeyedElem { Id = 3 };
+            var mlist = new List<KeyedElem> { m1, m3 };
+            if (!RailMeta.SyncMembersByKeys(mlist, new[] { "1", "2", "3" }, k => k == "2" ? m2 : null) ||
+                mlist.Count != 3 || !mlist.Contains(m2))
+                yield return "L10 members-adopt: a missing key with a resolvable live instance must be added";
+            if (RailMeta.SyncMembersByKeys(mlist, new[] { "1", "2", "3" }, k => null))
+                yield return "L10 members-idempotent: a converged membership set must report no change";
+            if (!RailMeta.SyncMembersByKeys(mlist, new[] { "2" }, k => null) ||
+                mlist.Count != 1 || !ReferenceEquals(mlist[0], m2))
+                yield return "L10 members-prune: local keys absent from the vector must be removed";
+            if (RailMeta.SyncMembersByKeys(mlist, new[] { "2", "9" }, k => null) || mlist.Count != 1)
+                yield return "L10 members-wait: an unresolvable key must be skipped without reporting a change";
+            var marr = new[] { m1, m3 };
+            if (RailMeta.SyncMembersByKeys(marr, new[] { "1" }, k => null) || marr.Length != 2)
+                yield return "L10 members-fixed: a fixed-size container must decline membership sync";
+
             var vecBytes = RailMeta.EncodeKeyOrder(new List<string> { "a", "b", "c" }, null);
             var vecBack = RailMeta.DecodeKeyOrder(vecBytes);
             if (vecBack == null || !vecBack.SequenceEqual(new[] { "a", "b", "c" }))

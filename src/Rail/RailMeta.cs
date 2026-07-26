@@ -1325,6 +1325,38 @@ namespace Multiplayer.Network.Sync
             return changed;
         }
 
+        /// <summary>MEMBERSHIP half of the order-vector apply, for ALIAS collections only (elements owned
+        /// by another container — research queue ⊂ catalog; structurally-owned elements ride the
+        /// create/destroy set-diff and never come here). The vector is the host's FULL live key sequence,
+        /// so it is authoritative for the SET too: prune local elements the host no longer lists, adopt
+        /// missing keys as LIVE instances via <paramref name="resolveMissing"/> (null = not resolvable
+        /// here yet — skipped, the next vector/resync retries). Raw list ops only — a projector mirrors
+        /// membership, it never runs the native add/remove logic (law 3). Fixed-size containers (arrays)
+        /// are permute-only by construction. Order is <see cref="ReorderByKeys"/>' job, run after this.</summary>
+        internal static bool SyncMembersByKeys(object container, string[] keys, Func<string, object> resolveMissing)
+        {
+            if (!(container is IList list) || list.IsFixedSize || list.IsReadOnly) return false;
+            bool changed = false;
+            var want = new HashSet<string>(keys, StringComparer.Ordinal);
+            for (int j = list.Count - 1; j >= 0; j--)
+            {
+                var k = IdentityResolver.KeyOf(list[j]);
+                if (k == null || !want.Contains(k)) { list.RemoveAt(j); changed = true; }
+            }
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var e in list) have.Add(IdentityResolver.KeyOf(e));
+            foreach (var k in keys)
+            {
+                if (have.Contains(k)) continue;
+                var inst = resolveMissing?.Invoke(k);
+                if (inst == null) continue;
+                list.Add(inst);
+                have.Add(k);
+                changed = true;
+            }
+            return changed;
+        }
+
         /// <summary>Substitute value-identical LIVE elements for freshly decoded ones before
         /// <see cref="ApplyList"/>: a pure reorder then MOVES the client's existing objects instead of
         /// replacing them, and state the blob does not carry (a loaded weapon's AmmoManager rides as
