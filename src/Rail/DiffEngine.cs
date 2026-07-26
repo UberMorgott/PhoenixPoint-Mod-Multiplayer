@@ -475,9 +475,14 @@ namespace Multiplayer.Network.Sync
                 // structural change, not a dict-key delete; emitting one would false-delete on the client
                 // (and could hit a different entity that took over the old path). An entity whose ONLY
                 // covered fields are dicts emits NO entries once they empty, so livePaths alone would
-                // suppress its tombstones forever — mod-state roots ARE that shape (dict-only stores);
-                // a path still in _walkRoots was walked this cycle and is alive by construction.
-                if (!livePaths.Contains(kv.Value.Path) && !_walkRoots.ContainsKey(kv.Value.Path)) continue;
+                // suppress its tombstones forever — MOD-state roots ARE that shape (dict-only stores).
+                // The _walkRoots arm is scoped to those ("M#") on purpose: _walkRoots is filled BEFORE
+                // VisitEntity, which has whole-entity bails (depth :549, entity cap :550, def-owned :555,
+                // no fields :559) — for a GAME root a bail would tombstone every dict subkey under it and
+                // wipe live client dicts, and the deterministic entity-cap bail would do it permanently.
+                if (!livePaths.Contains(kv.Value.Path) &&
+                    !(kv.Value.Path.StartsWith("M#", StringComparison.Ordinal) && _walkRoots.ContainsKey(kv.Value.Path)))
+                    continue;
                 // dictionary key removed on host while the entity persists → explicit tombstone (distinct
                 // sentinel so the client never confuses it with a genuine present-null value).
                 changed.Add(new Entry { KindId = kv.Value.KindId, Path = kv.Value.Path, FieldIdx = kv.Value.FieldIdx, SubKey = kv.Value.SubKey, Value = new[] { RailMeta.DictTombstone }, Key = kv.Key });
