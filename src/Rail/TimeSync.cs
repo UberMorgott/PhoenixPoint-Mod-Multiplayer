@@ -111,14 +111,6 @@ namespace Multiplayer.Network.Sync
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
-        /// <summary>TRUE = let the native write run (host, solo, or inside an apply).</summary>
-        private static bool ShouldRunNative()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            return SyncApplyScope.Active; // law 8: applying a delta never echoes an intent
-        }
-
         /// <summary>Only the geoscape LEVEL clock is shared state; the interception module drives a
         /// private mini-game clock and stays native. No geoscape (mid-load) → native too: the reload
         /// boundary + save transfer own that window. Callers check <see cref="BindOk"/> first.</summary>
@@ -143,7 +135,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(UIModuleTimeControl __instance, bool pause)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 if (!BindOk()) return false;                 // cannot identify the clock: never write locally
                 if (!IsLevelClock(__instance)) return true;  // interception clock / mid-load: local by design
                 try
@@ -166,7 +158,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(UIModuleTimeControl __instance)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 if (!BindOk()) return false;                 // cannot identify the clock: never write locally
                 if (!IsLevelClock(__instance)) return true;  // interception clock / mid-load: local by design
                 try
@@ -187,7 +179,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(bool paused)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 try
                 {
                     var geo = GeoLevel();

@@ -9,9 +9,9 @@ namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// THE generic client-intent engine (law 1 "Intent" primitive, one implementation). Every intent
-    /// family (research 0xAB / manufacture+equip 0xAE / personnel 0xAF / time 0xB0) registers its op
-    /// table here at SyncEngine construction; the framework owns the plumbing that was previously
-    /// copy-pasted per family with drift:
+    /// family (research 0xAB / manufacture 0xAE / personnel 0xAF / time 0xB0 / base 0xB1 / equip 0xB3)
+    /// registers its op table here at SyncEngine construction; the framework owns the plumbing that was
+    /// previously copy-pasted per family with drift:
     ///   • Envelope: [nonce:u32][op:u8][family body] riding SyncKind.ActionRequest on the family's OWN
     ///     surface id — the surface byte IS the family discriminator (SurfaceRouter already routes on
     ///     it), so no inner family id and no single shared surface. The reserved 0xA2-0xA4 action-relay
@@ -87,8 +87,9 @@ namespace Multiplayer.Network.Sync
         /// personnel floor/commit/ledger loop was exactly that, 11 RCAs deep).
         /// TRUE = run the native code: host, solo, or inside a delta apply (law 8 — an apply that fires
         /// native events must never re-enter capture). FALSE = client: block, send the intent (or
-        /// nothing, when the gesture is a no-op). Families still carrying a private copy of this
-        /// decision migrate here in a follow-up package — new seams call THIS one.
+        /// nothing, when the gesture is a no-op). Every capture seam calls THIS one (2026-07-26
+        /// collapse); a family may AND extra native-passthrough arms on top (foreign-faction /
+        /// non-viewer targets stay native and un-synced) but never re-states the base decision.
         /// </summary>
         public static bool ShouldRunNative()
         {

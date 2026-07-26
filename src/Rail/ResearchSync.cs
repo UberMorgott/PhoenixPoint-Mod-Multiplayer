@@ -118,16 +118,14 @@ namespace Multiplayer.Network.Sync
         // ─── CLIENT: intent capture (fed by the Harmony prefixes below) ────
 
         /// <summary>
-        /// The one intent-capture decision (law 4a + law 8). Returns TRUE = run the native method
-        /// (host, no session, apply scope, non-viewer faction), FALSE = blocked on the client and an
-        /// intent was sent instead.
+        /// The one intent-capture decision (law 4a + law 8): the shared law
+        /// (<see cref="IntentRail.ShouldRunNative"/>) plus the family arms. Returns TRUE = run the native
+        /// method (host, no session, apply scope, non-viewer faction), FALSE = blocked on the client and
+        /// an intent was sent instead.
         /// </summary>
         private static bool CaptureIntent(Research research, ResearchElement element, byte op, int pos)
         {
-            DiffEngine.FlushOnHostGesture();
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            if (SyncApplyScope.Active) return true;              // law 8: applying a delta never echoes an intent
+            if (IntentRail.ShouldRunNative()) return true;
             if (research?.Faction == null || element == null) return false; // law 3: client never runs native logic — block, nothing to send
             if (!research.Faction.IsViewerFaction) return true;  // NPC sim paths stay native (and un-synced)
 

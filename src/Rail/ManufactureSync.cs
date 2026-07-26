@@ -75,25 +75,16 @@ namespace Multiplayer.Network.Sync
         // internal: EquipSync's GeoFaction.ScrapItem capture (equip-screen scrap dialog) reuses this op.
         internal const byte OpScrap = 6;       // GeoFaction.ScrapItem(item, count)   — item-storage scrap
         private const byte OpScrapVehicle = 7; // GeoFaction.ScrapVehicleEquipment(v) — vehicle-equipment scrap (count unused)
-        // Soldier-loadout intent (per-GESTURE, sent by EquipSync's UI seams) — rides THIS surface (0xAE) but
-        // its payload after [nonce][op] is EquipSync's own ([charId][flags][slot triples]); HandleIntent
-        // branches early, before the fixed [defGuid][index] header the other ops share.
-        internal const byte OpSetItems = 8;
-        // Augment install (UIModuleMutate/UIModuleBionics.OnAugmentApplied confirm). The augment def is
-        // BOUGHT on the spot (Wallet.Take(ManufacturePrice)), never taken from storage, so it cannot ride
-        // OpSetItems' storage validation. defGuid slot = augment def, index slot = charId. EquipSync owns
-        // validation + native replay. ponytail: id 9 deliberately left free — never reuse ids.
-        internal const byte OpAugment = 10;
+        // Ops 8 (setItems), 10 (augment), 12 (scrapEquipped) moved to the 0xB3 GeoEquipIntent surface
+        // 2026-07-26 (EquipSync owns them end-to-end; the surface byte IS the family). Id 9 was never
+        // used. Do NOT reuse 8-10/12 on THIS surface — a stale peer would misroute them.
         // Equip-screen QUICK PRODUCE (the side button on an empty slot): the native handler
         // UIStateEditSoldier.ItemManufactureHandler:615 / UIStateEditVehicle:166 does Wallet.Take +
         // `new GeoItem(def)` INLINE and never touches ItemManufacturing — so none of the intent seams above
         // ever saw it, and a client bought items that existed only on that client, forever (RCA 2026-07-18).
+        // Stays a MANUFACTURE op (host replay = wallet buy into faction storage, this family's validation).
         // defGuid slot = the item def; index unused.
         private const byte OpQuickProduce = 11;
-        // Equip-screen scrap of an EQUIPPED item — per-INSTANCE, unlike def-addressed OpScrap. Payload
-        // after [nonce][op] is EquipSync's own ([charId][list][slot triple][amount]); HandleIntent branches
-        // early like OpSetItems. EquipSync owns capture, validation and the native replay.
-        internal const byte OpScrapEquipped = 12;
         // Shared scrap cart: the module's cart is per-screen UI state the game clears on every
         // reopen/mode switch (UIModuleManufacturing.Init:363-371), so the shared truth is the
         // host-authoritative MOD store (ScrapCartState), mirrored to all by the generic value rail
@@ -150,19 +141,17 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>Arm the 0xAE surface on the generic intent engine. Ops with the shared [defGuid][index]
-        /// body ride <see cref="HandleDefIndexIntent"/>; the EquipSync-owned payloads (loadout / equipped-
-        /// scrap) get their own table entries — the old hand-rolled early-branching inside one switch is
-        /// now just registration. Reconverge on reject = forced queue-order resend (the un-keyable queue
-        /// rides the 0xAD order channel, out of ForceReemit's reach; content-identical resends are an
-        /// in-place rebuild + repaint on clients, harmless at reject rate).</summary>
+        /// body ride <see cref="HandleDefIndexIntent"/>; the cart ops get their own table entries.
+        /// (The EquipSync-owned ops moved to the 0xB3 GeoEquipIntent surface 2026-07-26.) Reconverge on
+        /// reject = forced queue-order resend (the un-keyable queue rides the 0xAD order channel, out of
+        /// ForceReemit's reach; content-identical resends are an in-place rebuild + repaint on clients,
+        /// harmless at reject rate).</summary>
         internal static void RegisterIntents()
         {
             var ops = new Dictionary<byte, IntentRail.OpHandler>();
             foreach (byte op in new[] { OpQueue, OpCancel, OpFront, OpUp, OpDown,
-                                        OpScrap, OpScrapVehicle, OpAugment, OpQuickProduce })
+                                        OpScrap, OpScrapVehicle, OpQuickProduce })
                 ops[op] = HandleDefIndexIntent;
-            ops[OpSetItems] = (engine, peer, nonce, op, r) => EquipSync.HandleIntent(engine, peer, nonce, r);
-            ops[OpScrapEquipped] = (engine, peer, nonce, op, r) => EquipSync.HandleScrapEquippedIntent(peer, nonce, r);
             ops[OpCartAdd] = HandleCartMutateIntent;
             ops[OpCartRemove] = HandleCartMutateIntent;
             ops[OpCartScrap] = HandleCartScrapIntent;
@@ -321,8 +310,8 @@ namespace Multiplayer.Network.Sync
 
         // ─── HOST: intent apply (validate → execute NATIVELY; dedup/decode/reject = IntentRail) ──────
 
-        /// <summary>Every 0xAE op with the shared [defGuid][index] body (the EquipSync-owned payloads
-        /// have their own table entries — see <see cref="RegisterIntents"/>).</summary>
+        /// <summary>Every 0xAE op with the shared [defGuid][index] body (the cart ops have their own
+        /// table entries — see <see cref="RegisterIntents"/>).</summary>
         private static void HandleDefIndexIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             string defGuid = r.ReadString();
@@ -385,12 +374,6 @@ namespace Multiplayer.Network.Sync
                 }
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "scrapVehicle missing " + defGuid);
                 if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
-            }
-            else if (op == OpAugment)
-            {
-                // Augment install: index slot = charId. Bought with resources, not storage — EquipSync
-                // owns the cost/fit validation + the native replay (and its own scoped rejects).
-                ok = EquipSync.HandleAugmentIntent(senderPeerId, nonce, defGuid, index);
             }
             else if (op == OpQuickProduce)
             {
@@ -610,15 +593,11 @@ namespace Multiplayer.Network.Sync
         // ─── CLIENT: intent capture (fed by the Harmony prefixes below) ────
 
         /// <summary>TRUE = run the native method (host, no session, apply scope, or a non-Phoenix manufacture);
-        /// FALSE = client blocks it (caller sends the intent instead).</summary>
+        /// FALSE = client blocks it (caller sends the intent instead). The base decision is THE shared law
+        /// (<see cref="IntentRail.ShouldRunNative"/>); the one family arm on top: NPC/foreign manufacture
+        /// stays native (un-synced).</summary>
         private static bool ShouldRunNative(ItemManufacturing instance)
-        {
-            DiffEngine.FlushOnHostGesture();
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            if (SyncApplyScope.Active) return true;                       // law 8: applying never echoes an intent
-            return !ReferenceEquals(instance, PhoenixManufacture());      // NPC/foreign manufacture stays native (un-synced)
-        }
+            => IntentRail.ShouldRunNative() || !ReferenceEquals(instance, PhoenixManufacture());
 
         /// <summary>The shared [defGuid][index] intent body on 0xAE (EquipSync's scrap/augment captures
         /// reuse it too). Nonce + envelope + send ride <see cref="IntentRail.Send"/>.</summary>
@@ -697,16 +676,14 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix]
             private static bool Prefix(UIModuleManufacturing __instance)
             {
-                DiffEngine.FlushOnHostGesture();
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
+                if (IntentRail.ShouldRunNative())
                 {
                     // HOST confirm runs the native method, which never re-validates the cart against live
                     // storage: a queued item a CLIENT meanwhile equipped/moved (mirrored into host storage)
                     // → TryGetValue null → ScrapItem(null,…) NRE (UIModuleManufacturing.cs:856-863); a
                     // shrunk stack → GeoFaction.ScrapItem refunds the full stale count with no clamp
                     // (GeoFaction.cs:1217-1228) = ghost resources. Solo cannot race — prune only in-session.
-                    if (engine != null && engine.IsActiveSession && engine.IsHost && !SyncApplyScope.Active)
+                    if (CartHostRecording())
                         try { PruneCartsToLiveStorage(__instance); }
                         catch (Exception ex) { Debug.LogWarning("[MP][scrap] cart prune failed: " + ex.Message); }
                     return true; // host / no session / apply-scope → run native authoritatively
@@ -941,9 +918,7 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix]
             private static bool Prefix(UIInventorySlotSideButton __instance)
             {
-                DiffEngine.FlushOnHostGesture();
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost || SyncApplyScope.Active)
+                if (IntentRail.ShouldRunNative())
                     return true; // host / solo / apply scope → the native buy IS the authoritative one
 
                 var state = StateField(__instance);

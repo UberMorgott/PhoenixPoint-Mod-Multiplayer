@@ -33,14 +33,34 @@ namespace Multiplayer.Network.Sync
     /// scrap-off-doll) and the next native SetItems flush turns one mark into exactly ONE intent. The mark is
     /// a bool; nothing is ever encoded per frame.
     ///
-    /// HOST: dedup (IntentRail, shared 0xAE surface) → resolve the character by the rail's stable key
-    /// (IdentityResolver "U#&lt;charId&gt;") → match every wire slot against the character's OWN live GeoItems
-    /// → PopItem from storage only for genuine GAINS, AddItem back whatever the client dropped → native
-    /// GeoCharacter.SetItems. The result reaches every peer through the normal rail (GeoCharacter EntityList
-    /// fields + storage GeoItemDict on DiffEngine 0xAC) — no bespoke echo.
+    /// HOST: dedup (IntentRail, own 0xB3 surface — split off 0xAE 2026-07-26, the surface byte IS the
+    /// family) → resolve the character by the rail's stable key (IdentityResolver "U#&lt;charId&gt;") →
+    /// match every wire slot against the character's OWN live GeoItems → PopItem from storage only for
+    /// genuine GAINS, AddItem back whatever the client dropped → native GeoCharacter.SetItems. The result
+    /// reaches every peer through the normal rail (GeoCharacter EntityList fields + storage GeoItemDict on
+    /// DiffEngine 0xAC) — no bespoke echo.
     /// </summary>
     public static class EquipSync
     {
+        // Intent ops (GeoEquipIntent 0xB3 inner payload). Byte values kept from their 0xAE tenure —
+        // never renumber a live op (no version negotiation; both peers must agree byte-for-byte).
+        internal const byte OpSetItems = 8;       // per-gesture loadout commit [charId][flags][slot triples]
+        internal const byte OpAugment = 10;       // augment install confirm [defGuid][charId] — bought (Wallet.Take), never from storage
+        internal const byte OpScrapEquipped = 12; // per-INSTANCE scrap of an equipped item [charId][list][slot triple][amount]
+
+        /// <summary>Arm the 0xB3 surface on the generic intent engine. No family reconverge — every
+        /// reject passes its scoped subtree prefixes explicitly (<see cref="Reject"/>).</summary>
+        internal static void RegisterIntents()
+        {
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpSetItems] = (engine, peer, nonce, op, r) => HandleIntent(engine, peer, nonce, r),
+                [OpScrapEquipped] = (engine, peer, nonce, op, r) => HandleScrapEquippedIntent(peer, nonce, r),
+                [OpAugment] = (engine, peer, nonce, op, r) => HandleAugmentIntent(peer, nonce, r.ReadString(), r.ReadInt32()),
+            };
+            IntentRail.Register(SurfaceIds.GeoEquipIntent, "equip", ops);
+        }
+
         // ─── EVERY PEER: one pending flag, set per LOCAL user gesture ──────
         private static bool _gesturePending;
         private static string _gestureSource; // for the per-gesture [MP][equip] log line
@@ -312,14 +332,14 @@ namespace Multiplayer.Network.Sync
                 Debug.Log("[MP][equip] self-check OK " + key + " shown=" + shown + " list=" + items.Count);
         }
 
-        /// <summary>ONE intent per gesture: [nonce][OpSetItems][charId][body] on the shared 0xAE surface —
+        /// <summary>ONE intent per gesture: [nonce][OpSetItems][charId][body] on the 0xB3 equip surface —
         /// decoded host-side by <see cref="HandleIntent"/>. Nonce/envelope/send ride <see cref="IntentRail"/>
         /// (its shared allocator replaced the old borrowed ManufactureSync.NextNonce counter).</summary>
         private static void SendLoadoutIntent(GeoCharacter character, bool freeReload)
         {
             int charId = (int)character.Id;
             var body = EncodeBody(freeReload, ListValue(character, 0), ListValue(character, 1), ListValue(character, 2));
-            IntentRail.Send(SurfaceIds.GeoManufactureIntent, ManufactureSync.OpSetItems,
+            IntentRail.Send(SurfaceIds.GeoEquipIntent, OpSetItems,
                 "loadout char=U#" + charId + " gesture=" + _gestureSource + " bytes=" + body.Length +
                 " freeReload=" + freeReload,
                 w => { w.Write(charId); w.Write(body); });
@@ -341,10 +361,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(GeoFaction __instance, GeoItem geoItem, int amount)
             {
-                DiffEngine.FlushOnHostGesture();
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
-                if (SyncApplyScope.Active) return false; // law 8: applying never echoes an intent
+                if (IntentRail.ShouldRunNative()) return true;
                 var def = geoItem?.ItemDef;
                 // Non-viewer faction (unreachable from UI) → block the local write, no intent.
                 if (def == null || !ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction)) return false;
@@ -384,12 +401,12 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
-        /// <summary>[nonce][OpScrapEquipped][charId][list][defGuid][count][charges][amount] on the shared
-        /// 0xAE surface — decoded host-side by <see cref="HandleScrapEquippedIntent"/>. The (def, count,
+        /// <summary>[nonce][OpScrapEquipped][charId][list][defGuid][count][charges][amount] on the 0xB3
+        /// equip surface — decoded host-side by <see cref="HandleScrapEquippedIntent"/>. The (def, count,
         /// charges) triple is the same slot ADDRESS OpSetItems uses: count/charges only disambiguate
         /// same-def siblings, the host answers with its OWN live instance.</summary>
         private static void SendScrapEquippedIntent(int charId, byte listIdx, GeoItem item, int amount)
-            => IntentRail.Send(SurfaceIds.GeoManufactureIntent, ManufactureSync.OpScrapEquipped,
+            => IntentRail.Send(SurfaceIds.GeoEquipIntent, OpScrapEquipped,
                 "equipped-scrap char=U#" + charId + " list=" + listIdx + " def=" + item.ItemDef.Guid +
                 " amount=" + amount,
                 w =>
@@ -422,14 +439,14 @@ namespace Multiplayer.Network.Sync
             // __0 = the augment ItemDef (positional: the two targets name the parameter differently).
             private static bool Prefix(object __instance, ItemDef __0)
             {
-                DiffEngine.FlushOnHostGesture();
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // native
-                if (SyncApplyScope.Active) return false; // law 8
+                if (IntentRail.ShouldRunNative()) return true;
                 var character = (__instance as IAugmentationUIModule)?.CurrentCharacter;
                 if (character == null || __0 == null) return false; // never write locally
-                ManufactureSync.SendIntent(ManufactureSync.OpAugment, __0.Guid, (int)character.Id);
-                Debug.Log("[MP][equip] CLIENT augment intent char=U#" + (int)character.Id + " def=" + __0.Guid);
+                string defGuid = __0.Guid;
+                int charId = (int)character.Id;
+                IntentRail.Send(SurfaceIds.GeoEquipIntent, OpAugment,
+                    "op=" + OpAugment + " def=" + defGuid + " char=U#" + charId,
+                    w => { w.Write(defGuid); w.Write(charId); });
                 // Mirror the native tail's VIEW-MODEL half (UIModuleBionics.cs:255-256 —
                 // CharacterOriginalItems := CharacterCurrentItems): the blocked body was the only thing
                 // that advanced the module's snapshot past the staged trial, and without it the screen's
@@ -811,7 +828,7 @@ namespace Multiplayer.Network.Sync
         private static void Reject(ulong peer, int charId, string why)
         {
             var phoenix = GeoLevel()?.PhoenixFaction;
-            IntentRail.Reject(SurfaceIds.GeoManufactureIntent, peer, "equip char=U#" + charId + " — " + why,
+            IntentRail.Reject(SurfaceIds.GeoEquipIntent, peer, "equip char=U#" + charId + " — " + why,
                 charId >= 0 ? "U#" + charId : null,
                 phoenix?.Def != null ? "F#" + phoenix.Def.Guid + ".ItemStorage" : null);
         }

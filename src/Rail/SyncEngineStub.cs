@@ -15,11 +15,12 @@ namespace Multiplayer.Network.Sync
         public SyncEngine(NetworkEngine engine)
         {
             _engine = engine;
-            // Every client-intent surface (0xAB research / 0xAE manufacture+equip / 0xAF personnel /
-            // 0xB0 time) rides the ONE generic intent engine — families register their op tables, the
-            // engine owns nonce/dedup/dispatch/reject (idempotent re-registration).
+            // Every client-intent surface (0xAB research / 0xAE manufacture / 0xAF personnel / 0xB0 time
+            // / 0xB1 base / 0xB3 equip) rides the ONE generic intent engine — families register their op
+            // tables, the engine owns nonce/dedup/dispatch/reject (idempotent re-registration).
             ResearchSync.RegisterIntents();
             ManufactureSync.RegisterIntents();
+            EquipSync.RegisterIntents();
             PersonnelSync.RegisterIntents();
             TimeSync.RegisterIntents();
             FacilitySync.RegisterIntents();

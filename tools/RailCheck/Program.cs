@@ -790,13 +790,14 @@ namespace RailCheck
                 yield return "L12 dedup-rejoin-eaten: a rejoining peer's restarted nonce 1 was dropped";
             if (dedup2.IsNew(2, SurfaceIds.GeoPersonnelIntent, 1))
                 yield return "L12 dedup-reset-bleed: ResetPeer(1) also forgot peer 2's window";
-            // Envelope round-trip, all four intent families: [nonce:u32][op:u8][opaque body] riding
+            // Envelope round-trip, every intent family: [nonce:u32][op:u8][opaque body] riding
             // SyncKind.ActionRequest on the family's OWN surface (the surface byte IS the family
             // discriminator) must come back byte-identical, with the [nonce][op] prefix reading exactly
             // as IntentRail.HandleInbound does; and the reject nudge — a deliberately EMPTY envelope on
             // the same surface — must decode to an empty payload, never a failure.
             foreach (var sid in new[] { SurfaceIds.GeoResearchIntent, SurfaceIds.GeoManufactureIntent,
-                                        SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent })
+                                        SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent,
+                                        SurfaceIds.GeoBaseIntent, SurfaceIds.GeoEquipIntent })
             {
                 byte[] inner;
                 using (var ims = new MemoryStream())

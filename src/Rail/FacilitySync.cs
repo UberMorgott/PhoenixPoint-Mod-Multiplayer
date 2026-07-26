@@ -70,16 +70,7 @@ namespace Multiplayer.Network.Sync
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
-        /// <summary>TRUE = let the native method run (host, solo, or inside an apply).</summary>
-        private static bool ShouldRunNative()
-        {
-            DiffEngine.FlushOnHostGesture();
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            return SyncApplyScope.Active; // law 8: applying a delta never echoes an intent
-        }
-
-        // ─── CLIENT: capture seams (law 4a) ────────────────────────────────
+        // ─── CLIENT: capture seams (law 4a; gate = IntentRail.ShouldRunNative, the shared law) ─────
 
         /// <summary>Build gesture (see class doc for why this level and not the model funnel).
         /// The menu is closed like the blocked native tail would have; the facility itself appears
@@ -89,7 +80,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(UIModuleBaseLayout __instance, PhoenixFacilityController slot, PhoenixFacilityDef facilityDef)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 try
                 {
                     var px = __instance.PxBase;
@@ -116,7 +107,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(GeoPhoenixBase __instance, GeoPhoenixFacility facility, bool scrap)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 try
                 {
                     if (scrap && facility != null && __instance.Site != null)
@@ -135,7 +126,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(GeoPhoenixBase __instance, GeoPhoenixFacility facility)
             {
-                if (ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return true;
                 try
                 {
                     if (facility != null && __instance.Site != null)

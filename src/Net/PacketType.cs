@@ -41,10 +41,9 @@ namespace Multiplayer.Network.MessageLayer
         //   GeoReject 0xA4). Do NOT reuse the ids.
         // 0x33 (CampaignActionResult) + 0x34 (CampaignStateUpdate) removed: never sent, no handler. Do NOT reuse the ids.
         // 0x35 (GeoStateDiff) + 0x36 (GeoEntityOp) retired: orphan ids, no sender/handler; the diff codec they fronted no longer exists. Do NOT reuse the ids.
-        TimeAnchor = 0x37,    // host->all: authoritative anchor {version, tAnchor, gAnchor, paused, speedIndex}
-        TimeRequest = 0x38,   // client->host: time-control request {paused, speedIndex}
-        TimeClockPing = 0x39, // client->host: NTP-style offset ping {pingId, t0}
-        TimeClockPong = 0x3A, // host->client: NTP-style offset pong {pingId, t0, t1}
+        // 0x37-0x3A (TimeAnchor/TimeRequest/TimeClockPing/TimeClockPong) removed 2026-07-26: zero senders/
+        //   handlers — time control rides the 0xB0 GeoTimeIntent surface + the "TA" TimeAnchor root on the
+        //   0xAC value rail (TimeAnchor.EnforceDrift is the standing corrector). Do NOT reuse the ids.
 
         // Management
         // 0x40 (PermissionUpdate) + 0x41 (SoldierAssignment) reserved: no sender ever wired — per-flag permission
@@ -69,18 +68,12 @@ namespace Multiplayer.Network.MessageLayer
         // geoscape action relay rides the 0x67 SyncEnvelope on GeoIntent 0xA2 / GeoOutcome 0xA3 / GeoReject 0xA4.
         // See the tombstone block below. Do NOT reuse the ids.
         // 0x63 (WalletSync) + 0x64 (StateSync) RETIRED — see the tombstone block below. Do NOT reuse the ids.
-        EventRaised   = 0x65,   // host -> all: show a geoscape event dialog on clients [eventId][siteId]
-        EventDismiss  = 0x66,   // host -> all: close the open geoscape event dialog on clients [eventId]
         SyncEnvelope  = 0x67,   // any direction: unified surface envelope [surfaceId:u8][kind:u8][len:u16][payload:N]
-        // 0x68 retired (was ChoiceClaim): geoscape event-choice resolution now rides AnswerEventAction over the
-        // research-style ActionRequest/ActionApply relay (occId on the action wire). Do NOT reuse this id.
-        ReportModalShow = 0x69, // host -> all: show a geoscape REPORT modal on clients (Phase-A report-window mirror)
-        EventAdvanceResult = 0x6A, // host -> all: single-choice PROMPT->RESULT advance (no native CompleteEvent fires); reuses the EventDismiss codec (occId/eventId/choiceIndex/siteId, no reward blob)
-        EventAdvanceRequest = 0x6B, // client -> host: "advance your single-choice PROMPT" (client OK'd its prompt mirror; event already auto-completed at trigger so AnswerEventAction can't drive the host UI); reuses the EventDismiss codec (occId/eventId only); idempotent first-wins on the host
-        ReportModalHide = 0x6C, // host -> all: close the mirrored BLOCKING report modal (ambush brief) on clients — the host resolved it [modalType:u8]
-        GeoLogNotice = 0x6D,    // host -> all: mirror a small geoscape LOG toast (GeoscapeLog.AddEntry) — the client sim
-                                // is frozen + domain state arrives via silent channel writes, so the native GeoscapeLog
-                                // handlers never fire client-side; host ships the pre-resolved line [highPriority:u8][text:str]
+        // 0x65, 0x66, 0x68-0x6D (EventRaised/EventDismiss/ChoiceClaim/ReportModalShow/EventAdvanceResult/
+        //   EventAdvanceRequest/ReportModalHide/GeoLogNotice) removed 2026-07-26: zero senders/handlers —
+        //   the old repo's event/report/log mirroring never rode here (this repo: state mirrors via the
+        //   0xAC value rail, presentation is client-local off the mirrored state — the client sim RUNS,
+        //   only law-4b gates skip the mutators; see ClientSimGate). Do NOT reuse the ids.
 
         // Chat
         ChatMessage = 0x50,
@@ -108,6 +101,8 @@ namespace Multiplayer.Network.MessageLayer
         //                      its first envelope home, GeoWallet 0xA0, is itself retired)
         //   0x64             — StateSync → per-channel state rides the same 0xAC generic value rail
         //                      (its first envelope home, GeoState 0xA1, is itself retired)
-        //   0x68             — ChoiceClaim → event-choice resolution rides AnswerEventAction (occId on the action wire)
+        //   0x37-0x3A        — TimeAnchor/TimeRequest/TimeClockPing/TimeClockPong (legacy time channel → 0xB0 intent + "TA" root on 0xAC)
+        //   0x65, 0x66, 0x68-0x6D — EventRaised/EventDismiss/ChoiceClaim/ReportModalShow/EventAdvanceResult/
+        //                      EventAdvanceRequest/ReportModalHide/GeoLogNotice (old-repo event/report/log mirroring; never sent here)
     }
 }
