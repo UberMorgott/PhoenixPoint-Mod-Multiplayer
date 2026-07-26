@@ -393,7 +393,12 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { LogMissOnce("census failed " + path + "." + field.Name + ": " + ex.Message); }
                 return;
             }
-            if (Unchanged(entity, field, subKey, value)) return; // no-op entry: not applied, not touched, no repaint
+            if (Unchanged(entity, field, subKey, value))
+            {
+                // TEMP diag (reassign retest): a TacUnits delta that arrived but matched local bytes.
+                if (field.Name == "TacUnits") Debug.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
+                return; // no-op entry: not applied, not touched, no repaint
+            }
 
             try
             {
@@ -431,6 +436,14 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.LeafList:
                     {
                         var items = RailMeta.DecodeFieldValue(value, field, geo, out var isNull) as List<object>;
+                        // TEMP diag (reassign retest): every TacUnits list apply. Pull after the retest.
+                        if (field.Name == "TacUnits")
+                        {
+                            var ids = new StringBuilder();
+                            if (items != null) foreach (var u in items) ids.Append(IdentityResolver.RootRef(u) ?? "?").Append(' ');
+                            Debug.Log("[MP][diag] TacUnits APPLY " + path + " count=" + (isNull || items == null ? -1 : items.Count) +
+                                      " [" + ids.ToString().TrimEnd() + "]");
+                        }
                         RailMeta.ApplyList(entity, field, isNull ? null : items);
                         break;
                     }

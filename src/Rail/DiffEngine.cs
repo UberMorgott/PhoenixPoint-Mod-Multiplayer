@@ -758,6 +758,16 @@ namespace Multiplayer.Network.Sync
             try { enc = RailMeta.EncodeFieldValue(f, val, _snapshot.TryGetValue(key, out var prev) ? prev.Value : null); }
             catch (Exception ex) { Incident(rt.Type, f.Name, failedWhat + ex.Message, path); return; }
             var e = new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = enc, Key = key };
+            // TEMP diag (reassign retest): every CHANGED TacUnits list leaving the host (an unchanged
+            // encode returns the previous tick's array by reference). Pull after the in-game retest.
+            if (f.Name == "TacUnits" && val is IList tacDiag &&
+                (!_snapshot.TryGetValue(key, out var tacPrev) || !ReferenceEquals(tacPrev.Value, enc)))
+            {
+                var ids = new StringBuilder();
+                foreach (var u in tacDiag) ids.Append(IdentityResolver.RootRef(u) ?? "?").Append(' ');
+                Debug.Log("[MP][diag] TacUnits HOST-ENCODE " + path + " count=" + tacDiag.Count +
+                          " [" + ids.ToString().TrimEnd() + "]");
+            }
             snap[key] = e;
             ordered.Add(e);
         }

@@ -14,9 +14,7 @@ using PhoenixPoint.Common.Entities.Characters;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
-using PhoenixPoint.Geoscape.View.ViewControllers.Roster;
 using PhoenixPoint.Geoscape.View.ViewModules;
-using PhoenixPoint.Geoscape.View.ViewStates;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using UnityEngine;
 
@@ -59,8 +57,9 @@ namespace Multiplayer.Network.Sync
     ///     already hits the wallet natively). Client never reaches it — both callers are blocked below.
     ///   • <c>BuyAbility</c> (:389) — ability/perk purchase (human LearnAbility + mutoid AddAbility).
     ///   • <c>ChoseSecondSpecialization</c> (:813) — the second-class purchase (AddSecondaryClass).
-    ///   • <c>UIStateGeoRoster.OnActionSlotTransferInitiated</c> (:292) — the ONE roster base⇄vehicle
-    ///     transfer seam (drag and action-menu both funnel through it).
+    ///   • <c>GeoSite.AddCharacter/RemoveCharacter</c> (:983/:989) + the <c>GeoVehicle</c> twins
+    ///     (:759/:766) — roster membership on its MODEL funnel (every transfer path, UI or mod, ends
+    ///     in these four; see the membership guard patches).
     ///   • <c>GeoCharacter.ResetCharacterProgression</c> (:604) — the skill-reset (respec); here the
     ///     MODEL funnel is patchable directly, so the seam sits below the UI (see SkillResetPatch).
     ///   • <c>GeoHaven.TakeRecruit</c> (:810) / <c>GeoPhoenixFaction.KillCharacter</c> (:1377,
@@ -531,33 +530,85 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Intent capture for the roster base⇄vehicle transfer. ONE chokepoint (decompile
-        /// UIStateGeoRoster.cs:292-300): drag and action-menu transfers both funnel into
-        /// <c>OnActionSlotTransferInitiated</c> → <c>source.RemoveCharacter</c> +
-        /// <c>destination.AddCharacter</c> on the <c>_tacUnits</c> lists (GeoVehicle.cs:759-770 /
-        /// GeoSite.cs:983-993) — both rail-covered LeafLists, so the host outcome reaches every peer on
-        /// the value rail and UIStateGeoRoster's existing UiNativeRepaint entry repaints the open
-        /// roster. CLIENT: block the whole method (the module's slot-move view tail included — the
-        /// roster re-Inits from the mirrored containers when the delta lands) and ship
-        /// [charId, dstRef], dstRef = the container's root ref ("S#&lt;id&gt;"/"V#&lt;id&gt;").</summary>
-        [HarmonyPatch(typeof(UIStateGeoRoster), "OnActionSlotTransferInitiated")]
-        internal static class RosterTransferCapturePatch
+        /// <summary>Roster-membership guard on the MODEL funnel — the four container mutators every
+        /// membership change funnels through (GeoSite.cs:983/:989, GeoVehicle.cs:759/:766; AddUnit/
+        /// RemoveUnit/ClearUnits route into them, GeoSite.cs:999/:1011/:1023). Replaces the UI-level
+        /// <c>OnActionSlotTransferInitiated</c> capture (48388d2): field logs showed ZERO [MP][intent]
+        /// sends from that seam while the client ran the native move locally — and with membership
+        /// double-represented (site._tacUnits + vehicle._tacUnits, no cross-list transaction) a
+        /// client-local native write diverges the two lists until the host re-ships them whole
+        /// (duplicate on one side, vanished local-only member on the other). At model level nothing
+        /// slips past: drag, action menu, or any mod path all end in these four methods.
+        ///
+        /// PAIR ENCODING (why a half-move can never reach the host): the native transfer is
+        /// <c>source.RemoveCharacter</c> + <c>destination.AddCharacter</c>, synchronous in ONE call
+        /// (UIStateGeoRoster.cs:294-295). The client blocks BOTH natives; ONLY the Add emits op=4
+        /// [charId, dstRef]. <see cref="ApplyReassign"/> re-derives the source from HOST state and
+        /// replays the full native pair — a lone blocked Remove ships NOTHING (client state untouched,
+        /// still a pure mirror) and a lone Add IS a complete transfer by construction. Host, solo and
+        /// rail applies pass through (<see cref="ShouldRunNative"/>; the rail's ApplyList and native
+        /// save-load both write _tacUnits directly anyway — GeoSite.cs:1566, GeoVehicle.cs:1087).</summary>
+        [HarmonyPatch(typeof(GeoSite), nameof(GeoSite.AddCharacter))]
+        internal static class SiteAddGuardPatch
         {
-            private static bool Prefix(GeoRosterItem slot, IGeoCharacterContainer destination)
+            private static bool Prefix(GeoSite __instance, GeoCharacter character) =>
+                CaptureMembershipAdd(__instance, character);
+        }
+
+        [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.AddCharacter))]
+        internal static class VehicleAddGuardPatch
+        {
+            private static bool Prefix(GeoVehicle __instance, GeoCharacter character) =>
+                CaptureMembershipAdd(__instance, character);
+        }
+
+        [HarmonyPatch(typeof(GeoSite), nameof(GeoSite.RemoveCharacter))]
+        internal static class SiteRemoveGuardPatch
+        {
+            private static bool Prefix(GeoSite __instance, GeoCharacter character) =>
+                CaptureMembershipRemove(__instance, character);
+        }
+
+        [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.RemoveCharacter))]
+        internal static class VehicleRemoveGuardPatch
+        {
+            private static bool Prefix(GeoVehicle __instance, GeoCharacter character) =>
+                CaptureMembershipRemove(__instance, character);
+        }
+
+        /// <summary>Client Add half = the WHOLE move on the wire. Never a silent drop — the previous
+        /// seam's silent unaddressable exit masked this family's bug once already.</summary>
+        private static bool CaptureMembershipAdd(IGeoCharacterContainer destination, GeoCharacter character)
+        {
+            if (ShouldRunNative()) return true;
+            try
             {
-                if (ShouldRunNative()) return true;
-                try
+                var dstRef = IdentityResolver.RootRef(destination);
+                if (character == null || dstRef == null)
                 {
-                    var character = slot == null ? null : slot.Character;
-                    var dstRef = IdentityResolver.RootRef(destination);
-                    if (character == null || dstRef == null) return false; // unaddressable → drop the gesture
-                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpReassign,
-                        "reassign U#" + (int)character.Id + " -> " + dstRef,
-                        w => { w.Write((int)character.Id); w.Write(dstRef); });
+                    Debug.LogWarning("[MP][personnel] CLIENT membership add DROPPED — unaddressable char=" +
+                                     (character == null ? "null" : "U#" + (int)character.Id) +
+                                     " dst=" + (dstRef ?? (destination == null ? "null" : destination.GetType().Name)));
+                    return false;
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] reassign capture failed: " + ex); }
-                return false;
+                IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpReassign,
+                    "reassign U#" + (int)character.Id + " -> " + dstRef,
+                    w => { w.Write((int)character.Id); w.Write(dstRef); });
             }
+            catch (Exception ex) { Debug.LogError("[MP][personnel] reassign capture failed: " + ex); }
+            return false;
+        }
+
+        /// <summary>Client Remove half: block native, ship NOTHING — the gesture's own Add (same
+        /// synchronous call) carries the move and the host re-derives the source itself. Logged so a
+        /// LONE remove (a flow that should not run on a client) stays visible, never silent.</summary>
+        private static bool CaptureMembershipRemove(IGeoCharacterContainer source, GeoCharacter character)
+        {
+            if (ShouldRunNative()) return true;
+            Debug.Log("[MP][personnel] CLIENT membership remove blocked (paired Add carries the move) char=" +
+                      (character == null ? "null" : "U#" + (int)character.Id) +
+                      " src=" + (IdentityResolver.RootRef(source) ?? "?"));
+            return false;
         }
 
         /// <summary>Intent capture for the haven recruit purchase, on the MODEL funnel
@@ -660,9 +711,11 @@ namespace Multiplayer.Network.Sync
 
                 var geo = GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
-                if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character) ||
-                    character.Progression == null)
+                if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
+                // Reassign moves ground vehicles/mutogs too — no Progression (same relaxation as op=fire).
+                if (character.Progression == null && op != OpReassign)
+                { Reject(senderPeerId, charId, "no progression"); return; }
                 // Ownership: the rail resolves ANY character — never let a client intent drive an
                 // NPC-faction soldier's progression.
                 if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
