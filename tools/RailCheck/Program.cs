@@ -217,6 +217,10 @@ namespace RailCheck
             // its husk list is informational, not a rebuild risk); nested inside a blob it TagList-
             // encodes, which the sweep's recursion reaches on its own.
             var l15Seeds = new List<Type>();
+            // L16 inputs, harvested from the SAME pass: every EntityList's (live owner, element) pair, and
+            // every type a covered Descend field can hand the applier as a LIVE owner.
+            var listOwners = new List<(Type Owner, Type Elem)>();
+            var descendTypes = new HashSet<Type>();
             foreach (var t in types)
             {
                 var rt = RailType.Get(t);
@@ -240,6 +244,7 @@ namespace RailCheck
                         laws.Add("L11 def-laundering-vector-rides: " + t.FullName + "." + f.Name +
                                  " carries LocalizedTextBind as " + f.Class + " — def-owned binds would be written on clients");
                     if (f.Class == FieldClass.GeoItemDict) geoItemDicts++;
+                    if (f.Class == FieldClass.Descend) descendTypes.Add(f.ValueType);
                     var extra = "";
                     if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)
                     {
@@ -256,7 +261,7 @@ namespace RailCheck
                             laws.Add("L1 no-list-apply-strategy: " + t.FullName + "." + f.Name +
                                      " (" + f.ValueType.Name + ") rides as " + f.Class + " but ApplyList would throw");
                         if (f.Class != FieldClass.LeafList) blobbable[f.ElemType.FullName] = f.ElemType;
-                        if (f.Class == FieldClass.EntityList) l15Seeds.Add(f.ElemType);
+                        if (f.Class == FieldClass.EntityList) { l15Seeds.Add(f.ElemType); listOwners.Add((t, f.ElemType)); }
                     }
                     sb.Append("  + " + f.Class + " " + f.Name + " (" + f.ValueType.Name + ")" +
                               (f.LiveAlias != null ? " -> live " + f.LiveAlias : "") + extra + "\n");
@@ -351,6 +356,32 @@ namespace RailCheck
                 foreach (var l in lines) sb.Append(l + "\n");
                 sb.Append("  (types swept: " + visited.Count + ")\n");
             }
+
+            // ─── L16 — an owner-PostRead waiver must be HEALED on the path the owner is reached by ───────
+            // L15 accepts any "self-heal*" waiver as justified, but WHO heals decides WHERE it heals. The
+            // owner-backref shape (element E waives a member whose TYPE is the list's owner T — precisely
+            // AbilityTrackSlot.AbilityTrack on AbilityTrack.AbilitiesByLevel) heals for free only while T
+            // is a blob LOCAL: DecodeEntityList fires post-read on constructed objects, nothing else. The
+            // moment T is ALSO reachable by a live Descend field, ApplyList array-assigns fresh elements
+            // into a LIVE T that no post-read ever touches, and the waiver silently becomes a null-backref
+            // shipper (11bdb7d's regression: the waiver was argued from "nothing ever descends INTO an
+            // AbilityTrack", which _personalAbilityTrack falsifies).
+            //
+            // The signature is read from METADATA, not from the reason string, deliberately: the reason is
+            // what a human wrote and got wrong. The marker is only what the APPLIER keys on, so this law is
+            // exactly "the two derivations agree" — remove RailMeta's marker or the ApplyList hook and the
+            // law fires, which is what makes it a belt rather than a tautology.
+            foreach (var (owner, elem) in listOwners)
+                foreach (var m in RailMeta.HuskScan(elem))
+                {
+                    if (m.Waiver == null || !m.Type.IsAssignableFrom(owner)) continue;   // not a backref to the owner
+                    if (!descendTypes.Any(d => owner.IsAssignableFrom(d))) continue;     // owner is only ever a blob local
+                    if (!RailMeta.OwnerPostReadWaived(elem))
+                        laws.Add("L16 owner-postread-waiver-unhealed: " + elem.FullName + "." + m.Name +
+                                 " backrefs " + owner.FullName + ", which IS reachable by live Descend — the waiver's " +
+                                 "healer never runs there. Fire the live owner's post-read in ApplyList (mark the waiver \"" +
+                                 RailMeta.OwnerPostReadWaiver + "\") or carry the member.");
+                }
 
             // ─── Twin tables (DTO live-twin resolution — ARCHITECTURE.md "DTO twin resolution") ────
             // The wire kind for an actor's SerializationData subtree IS the recorded *InstanceData DTO;

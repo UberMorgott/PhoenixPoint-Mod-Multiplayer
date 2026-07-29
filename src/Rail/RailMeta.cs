@@ -569,6 +569,34 @@ namespace Multiplayer.Network.Sync
             return why;
         }
 
+        /// <summary>Waiver CLASS marker. The reason string IS the class — the same mechanism RailCheck's
+        /// L15 husk sweep already classifies with ("self-heal*" / "null at rest"), one rung finer: this
+        /// names WHO heals, the LIVE OWNER's own post-read callback (AbilityTrackSlot.AbilityTrack above).
+        ///
+        /// Such a member heals for free while its owner is a blob LOCAL — <see cref="DecodeEntityList"/>
+        /// fires post-read on every object the decode CONSTRUCTED. It heals for NOBODY when the list is
+        /// applied onto a LIVE owner reached by Descend, which is the one case <see cref="ApplyList"/>
+        /// now covers. RailCheck L16 is the belt: an owner-backref waiver on a live-Descend-reachable
+        /// owner WITHOUT this marker is a law violation.</summary>
+        internal const string OwnerPostReadWaiver = "owner's PostRead";
+
+        private static readonly Dictionary<Type, bool> _ownerPostReadCache = new Dictionary<Type, bool>();
+
+        /// <summary>Does rebuilding a list of this element type leave holes only the LIVE owner's post-read
+        /// can fill — i.e. does any husk member of it carry an <see cref="OwnerPostReadWaiver"/> waiver?</summary>
+        internal static bool OwnerPostReadWaived(Type elem)
+        {
+            if (elem == null) return false;
+            if (_ownerPostReadCache.TryGetValue(elem, out var v)) return v;
+            if (GameSerializer == null) return false; // pre-init: HuskScan is empty — don't cache the miss
+            v = false;
+            foreach (var m in HuskScan(elem))
+                if (m.Waiver != null && m.Waiver.IndexOf(OwnerPostReadWaiver, StringComparison.OrdinalIgnoreCase) >= 0)
+                { v = true; break; }
+            _ownerPostReadCache[elem] = v;
+            return v;
+        }
+
         /// <summary>Persistent members of a type per the game's own discovery (ReadWrite mode only).</summary>
         internal static List<MemberInfo> SerializedMembers(Serializer ser, Type t)
         {
@@ -1123,11 +1151,18 @@ namespace Multiplayer.Network.Sync
         //
         // Post-read fires over the blob's own `locals` — EVERY object the decode CONSTRUCTED, at every
         // nesting depth (DecodeObjectBody registers each one) — and never on the LIVE OWNER of the field
-        // being applied. That is the whole contract, and it is sufficient: AbilityTrack is itself a blob
-        // element (CharacterProgression._abilityTracks is an EntityList, so nothing ever descends INTO an
-        // AbilityTrack), so it is a local, so its OnDeserialized runs and its slots get SetAbilityTrack.
+        // being applied.
         //
-        // Firing the live owner's post-read as well has been proposed and is REFUSED. Those callbacks are
+        // That was once claimed sufficient because "AbilityTrack is itself a blob element, so nothing ever
+        // descends INTO an AbilityTrack". FALSE: GeoUnitDescriptor._personalAbilityTrack is Descend, and
+        // the descriptor is reachable LIVE through the NewRecruit/DismambleUnit bridges — so the live
+        // AbilityTrack gets its slots array-assigned with no post-read anywhere, and every fresh slot keeps
+        // a NULL .AbilityTrack backref (UICharacterProgressionUtl:12, HumanAbilityTrackContainer:24,
+        // CharacterProgression:164/178 all dereference it). ApplyList now fires the live owner's post-read
+        // for exactly the element types whose waiver names that owner post-read as the healer
+        // (OwnerPostReadWaiver / OwnerPostReadWaived); RailCheck L16 asserts the two stay in step.
+        //
+        // Firing the live owner's post-read UNCONDITIONALLY stays REFUSED. Those callbacks are
         // save-load migrations, not re-link hooks: GeoCharacter.InitAfterDeserialiaztion (decompile
         // GeoCharacter.cs:1592) branches on serObj.SerializedVersion — which we have no honest value for —
         // and can call Init() and SetItems(), i.e. real gameplay side-effects on the client's authoritative
@@ -1869,6 +1904,23 @@ namespace Multiplayer.Network.Sync
         /// Shared by the client applier (top-level LeafList/EntityList fields) and the blob codec
         /// (nested lists on freshly constructed elements).</summary>
         internal static void ApplyList(object entity, RailField field, List<object> items)
+        {
+            ApplyListCore(entity, field, items);
+            // The ONE live-owner post-read, licensed per ELEMENT TYPE by the reviewed waiver table
+            // (OwnerPostReadWaiver) — never per call site. A rebuilt element whose only healer is
+            // "the owner's PostRead" is healed by nobody here: post-read fires over the blob's own
+            // locals (DecodeEntityList) and `entity` is the LIVE owner, never a local. Concrete shape
+            // this closes: AbilityTrack reached by live Descend (GeoUnitDescriptor._personalAbilityTrack,
+            // DismambleUnit/NewRecruit bridges) array-assigns fresh AbilityTrackSlots whose .AbilityTrack
+            // backref stays NULL — the 2026-07-26 recruit-screen NRE, one level up.
+            // Every OTHER owner post-read stays refused (see the EntityList codec header). Re-firing on a
+            // blob local (nested-list caller) is harmless: this waiver class IS the idempotent rebind.
+            var ser = GameSerializer;
+            if (ser != null && entity != null && OwnerPostReadWaived(field.ElemType))
+                InvokePostReadSafe(ser, entity);
+        }
+
+        private static void ApplyListCore(object entity, RailField field, List<object> items)
         {
             // Unresolved EntityRef/DefRef elements decode to the Unresolved sentinel (referent not spawned /
             // def unknown on the client) — it can never be added to a typed live list, and a genuine null
