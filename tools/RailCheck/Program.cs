@@ -1629,6 +1629,28 @@ namespace RailCheck
             if (EventPopup.Backlog(records, long.MaxValue).Count != 1)
                 yield return "L26 open-decision-retired: a still-Triggered record dropped out of the backlog at a maxed " +
                              "cursor — a host window open at join time would then reach the joiner never";
+
+            // The cursor is per-peer LOCAL progress and it is the only thing standing between a reload and a
+            // popup storm, so it outlives the process as a STRING (PlayerPrefs) — which makes its CODEC the
+            // whole contract. A locale-sensitive write or read hands back 0 = "replay this peer's entire
+            // event history", with nothing logged as wrong: the silent-swallow class again, one layer down.
+            // Both halves are asserted here because both are pure; the PlayerPrefs I/O around them cannot be
+            // (a method that merely references an ECall extern fails to JIT headless, ClientIdentity.cs:82-88).
+            foreach (var ticks in new[] { 0L, 1L, at, long.MaxValue })
+            {
+                var text = EventPopup.FormatCursor(ticks);
+                long back = EventPopup.ParseCursor(text);
+                if (back != ticks)
+                    yield return "L26 cursor-round-trip: " + ticks + " persists as '" + text + "' and reads back as " +
+                                 back + " — after a reload this peer either replays every window it already " +
+                                 "clicked through or is owed none of them, and the only symptom is doubles";
+            }
+            if (EventPopup.Backlog(resolvedOnly, EventPopup.ParseCursor(EventPopup.FormatCursor(at))).Count != 0)
+                yield return "L26 cursor-round-trip: a RESTORED cursor does not retire the record the live cursor " +
+                             "retired — the window the player just closed comes back on every reload";
+            if (EventPopup.ParseCursor("") != 0 || EventPopup.ParseCursor(null) != 0)
+                yield return "L26 cursor-round-trip: an ABSENT stored cursor does not read back as 0 — a peer's first " +
+                             "join would take a garbage cursor instead of falling back to the record seed";
         }
 
         private static Base.Core.TimeUnit Ticks(long t) => Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(t));

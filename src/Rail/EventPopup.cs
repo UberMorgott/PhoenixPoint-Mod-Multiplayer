@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Core;
 using PhoenixPoint.Geoscape.Events;
@@ -68,13 +70,15 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Reflection.MethodInfo SetChoiceReward =
             AccessTools.PropertySetter(typeof(GeoscapeEvent), "ChoiceReward");
 
-        /// <summary>Reload/session boundary: forget the in-flight raise set and re-seed the cursor from
-        /// whatever the transferred save already carries.</summary>
+        /// <summary>Reload/session boundary: forget the in-flight raise set and re-derive the cursor against
+        /// the records the new save actually carries. The cursor is NOT dropped here — it is this peer's
+        /// private progress through the history and it outlives the process (<see cref="StoreCursor"/>).
+        /// Zeroing it was what made an unread OUTCOME window vanish on every reload: the re-seed then fell
+        /// back to "max over all RESOLVED records", i.e. exactly the windows the player had not read yet.</summary>
         public static void Reset()
         {
             _inFlight.Clear();
             _loggedSkips.Clear();
-            _cursor = 0;
             _cursorSeeded = false;
         }
 
@@ -158,26 +162,104 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>First pass after a reload/join: the transferred save carries the whole campaign's
-        /// resolved history, which is NOT this player's unseen backlog. Seeded from the resolved
-        /// records only, so an unanswered event still rides. Logged — a boundary that drops work
-        /// silently is the bug class this file exists to kill.</summary>
+        /// <summary>First pass after a reload/join. Two sources, in this order:
+        ///   • the PERSISTED cursor, when this peer has one — that is the whole point of persisting it: a
+        ///     reload must not replay what the player already clicked through, and must not swallow what they
+        ///     had not read yet. CLAMPED to the newest record present, which is what makes the storage key
+        ///     safe without a campaign id (see <see cref="CursorKey"/>): a value carried over from another
+        ///     campaign can then retire at most the resolved records — exactly the fallback below — and never
+        ///     more, because a still-<c>Triggered</c> record rides the backlog regardless of the cursor.
+        ///   • otherwise the record seed: the transferred save carries the whole campaign's resolved history,
+        ///     which is NOT this player's unseen backlog, so max over the RESOLVED records — an unanswered
+        ///     event still rides.
+        /// Logged either way, with which branch ran — a boundary that drops work silently is the bug class
+        /// this file exists to kill.</summary>
         private static void SeedCursor(IDictionary<string, GeoscapeEventRecord> records)
         {
             if (_cursorSeeded) return;
             _cursorSeeded = true;
+            long resolved = 0, newest = 0;
             foreach (var rec in records.Values)
-                if (rec != null && rec.State != GeoscapeEventRecordState.Triggered)
-                {
-                    long t = rec.LastTriggerAt.TimeSpan.Ticks;
-                    if (t > _cursor) _cursor = t;
-                }
-            Debug.Log("[MP][events] cursor seeded to " + _cursor + " from " + records.Count +
-                      " record(s) at the reload/join boundary — resolved history before that point is not replayed");
+            {
+                if (rec == null) continue;
+                long t = rec.LastTriggerAt.TimeSpan.Ticks;
+                if (t > newest) newest = t;
+                if (rec.State != GeoscapeEventRecordState.Triggered && t > resolved) resolved = t;
+            }
+            long saved = LoadCursor();
+            if (saved > 0)
+            {
+                _cursor = saved < newest ? saved : newest;
+                Debug.Log("[MP][events] cursor restored to " + _cursor + " (persisted " + saved + ", newest record " +
+                          newest + ") from " + records.Count + " record(s) — a window this peer never read is " +
+                          "still owed to it");
+            }
+            else
+            {
+                _cursor = resolved;
+                Debug.Log("[MP][events] cursor seeded to " + _cursor + " from " + records.Count +
+                          " record(s) — first join on this peer, resolved history before that point is not replayed");
+            }
+        }
+
+        /// <summary>Cursor codec. Invariant BOTH ways, deliberately: the value is a TimeUnit tick count that
+        /// crosses a process boundary as a STRING, and a peer whose locale formats or parses integers with
+        /// group separators would read back 0 = "replay this peer's entire event history" with nothing logged
+        /// as wrong. Pure and PlayerPrefs-free so RailCheck L26 can round-trip it headless — a method that
+        /// merely REFERENCES a PlayerPrefs ECall fails to JIT there (ClientIdentity.cs:82-88).</summary>
+        internal static string FormatCursor(long ticks) => ticks.ToString(CultureInfo.InvariantCulture);
+
+        internal static long ParseCursor(string stored) =>
+            long.TryParse(stored, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticks) ? ticks : 0;
+
+        /// <summary>PER-PEER, not per-machine: two instances on ONE machine (the local co-op test rig,
+        /// D:\PP-Instance2) share the PlayerPrefs store, so a single key would let player 1's progress
+        /// swallow player 2's backlog. <c>ClientIdentity.PlayerGuid</c> is already per-instance (its own
+        /// identity-N.json, plus the MULTIPLAYER_IDENTITY override), so it is the key.
+        /// NOT per-campaign: this game exposes no campaign id (no GUID, no seed; Timing.StartTime is the same
+        /// def constant for every campaign), so two parallel campaigns DO share one entry. That is made
+        /// harmless in <see cref="SeedCursor"/> rather than papered over: clamping the loaded value to the
+        /// newest live record degrades a foreign cursor to precisely the record-seed behaviour, which is what
+        /// a first join does anyway. ponytail: if a campaign id ever appears, append it here.</summary>
+        private static string CursorKey() => "Multiplayer_EventCursor_" + ClientIdentity.PlayerGuid;
+
+        /// <summary>Wrapped like ClientIdentity's own prefs access: PlayerPrefs.* are InternalCall externs
+        /// that throw at JIT time in a headless host, BEFORE any try/catch in the referencing method runs —
+        /// hence the NoInlining isolation, and hence a caller-side catch. A prefs failure must never break the
+        /// pump: worst case the backlog replays after a reload, which is where this started.</summary>
+        private static long LoadCursor()
+        {
+            try { return ParseCursor(ReadCursorPref()); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[MP][events] cursor load failed (" + ex.Message + ") — falling back to the record seed");
+                return 0;
+            }
+        }
+
+        private static void StoreCursor(long ticks)
+        {
+            try { WriteCursorPref(FormatCursor(ticks)); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[MP][events] cursor save failed (" + ex.Message + ") — this peer's backlog will " +
+                                 "replay from the record seed after a reload");
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static string ReadCursorPref() => PlayerPrefs.GetString(CursorKey(), "");
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void WriteCursorPref(string value)
+        {
+            PlayerPrefs.SetString(CursorKey(), value);
+            PlayerPrefs.Save();
         }
 
         /// <summary>A window we pushed is gone from the whole native pipeline ⇒ the player clicked
-        /// through it. That is the ONLY thing that advances the cursor, so a crash or quit re-shows it.</summary>
+        /// through it. That is the ONLY thing that advances the cursor, so a crash or quit re-shows it —
+        /// and the ONLY thing that writes it out, once per pass rather than once per id.</summary>
         private static void RetireClosed(GeoscapeView view, IDictionary<string, GeoscapeEventRecord> records)
         {
             if (_inFlight.Count == 0) return;
@@ -192,6 +274,7 @@ namespace Multiplayer.Network.Sync
                 if (t > _cursor) _cursor = t;
                 Debug.Log("[MP][events] cursor advanced to " + _cursor + " after closing '" + id + "'");
             }
+            StoreCursor(_cursor);
         }
 
         /// <summary>Law 11 repaint of the OPEN event dialog — the <c>UiNativeRepaint.Table</c> entry for
