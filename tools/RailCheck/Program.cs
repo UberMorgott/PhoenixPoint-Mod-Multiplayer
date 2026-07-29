@@ -82,6 +82,7 @@ namespace RailCheck
             laws.AddRange(CrcBackstopLaw());
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
+            laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(VehicleIntentLaw());
             laws.AddRange(HuskContentLaw(game));
             laws.AddRange(RootOwnershipLaw(types));
@@ -2787,6 +2788,103 @@ namespace RailCheck
             // A def with no choices at all: only the "no choice" resolution is addressable.
             if (EventSync.Validate(GeoscapeEventRecordState.Triggered, 0, 0) == null)
                 yield return "L27 index-unchecked: index 0 passed validation against an EMPTY choice list";
+        }
+
+        /// <summary>L36 — the GeoscapeEvent completion-funnel SET, not one funnel. The class has TWO ways to
+        /// grant a <c>GeoFactionReward</c> — <c>CompleteEvent</c> (GeoscapeEvent.cs:86) and
+        /// <c>CompleteMarketplaceEvent</c> (:74) — and for one session only the first was covered, so a client
+        /// could buy from the marketplace: <c>Wallet.Take</c> out of the replicated wallet plus a local
+        /// <c>ChoiceReward.Apply</c>, which the diff can never correct (it compares host-now against
+        /// host-before and never mentions a change only the client made). Both arms below are asserted PER
+        /// FUNNEL, so the third funnel the game adds is named RED instead of shipping unguarded.
+        ///
+        /// The funnel set is DISCOVERED, never declared: a public instance method of <c>GeoscapeEvent</c> that
+        /// takes a <c>GeoEventChoice</c>. That is the semantic signature (you cannot resolve a choice without
+        /// receiving it) and it selects exactly the two above out of the class's five methods — a name
+        /// heuristic ("Complete*") or a hard-coded pair would both stay green through a rename.
+        ///
+        /// Arm (a) ARBITER: our own prefix on the funnel itself. Arm (b) CAPTURE: a prefix of ours on a
+        /// PRESENTATION method from which the funnel is reachable through presentation-only calls. Arm (b)
+        /// exists because the arbiter is structurally too late — the gesture charges the shared wallet BEFORE
+        /// the funnel (UIModuleSiteEncounters.cs:571-573, UIModuleTheMarketplace.cs:215) — and it is proven by
+        /// IL, not by a table naming which seam belongs to which funnel (law: a comment is not evidence).
+        /// Presentation is the game's own namespace split, the same discriminator <see cref="PatchesPresentationOnly"/>
+        /// and L21 use.
+        ///
+        /// LIMITATION (upgrade path, not a waiver): arm (b) proves that a guarded path EXISTS, not that every
+        /// path is guarded — a second, unpatched UI route into the same funnel is invisible here. Catching that
+        /// wants the REVERSE closure (every presentation caller of a funnel must have one of our prefixes above
+        /// it), which means an IL walk of every presentation type in Assembly-CSharp rather than the handful of
+        /// methods we patch. Arm (a) is the backstop that makes the gap survivable: whatever path is taken, the
+        /// funnel itself still refuses on a client.</summary>
+        // ponytail: forward closure from our seams; reverse closure over all presentation types if a second
+        // unguarded route into a funnel ever actually appears.
+        private static IEnumerable<string> FunnelCoverageLaw(Assembly game)
+        {
+            var funnels = typeof(GeoscapeEvent).GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                                               .Where(m => m.GetParameters().Any(p => p.ParameterType == typeof(GeoEventChoice)))
+                                               .OrderBy(m => m.Name, StringComparer.Ordinal).ToList();
+            if (funnels.Count == 0)
+            {
+                yield return "L36 funnels-undiscovered: no public GeoscapeEvent method takes a GeoEventChoice — the " +
+                             "discovery rule no longer matches the game (renamed or re-signatured funnel), so this law " +
+                             "is asleep and every funnel is unchecked";
+                yield break;
+            }
+
+            var asm = typeof(IntentRail).Assembly;
+            Type[] declared;
+            try { declared = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+
+            var arbitrated = new HashSet<int>();   // funnel tokens carrying a prefix of ours ON the funnel
+            var seams = new List<MethodBase>();    // our prefixed PRESENTATION targets = the block-first capture set
+            foreach (var t in declared)
+            {
+                var attrs = t.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false).Cast<HarmonyLib.HarmonyPatch>().ToList();
+                if (attrs.Count == 0 || t.GetMethod("Prefix", AllMembers) == null) continue;
+                foreach (var a in attrs)
+                {
+                    var info = a.info;
+                    if (info?.declaringType == null || string.IsNullOrEmpty(info.methodName)) continue;
+                    MethodBase target = null;
+                    try { target = HarmonyLib.AccessTools.Method(info.declaringType, info.methodName, info.argumentTypes); }
+                    catch { }
+                    if (target == null) continue;   // getter/setter targets and unresolvable signatures: L23's beat
+                    if (info.declaringType == typeof(GeoscapeEvent)) arbitrated.Add(target.MetadataToken);
+                    else if (IsPresentation(info.declaringType)) seams.Add(target);
+                }
+            }
+
+            // ONE forward closure from every capture seam at once, expanding through presentation methods only
+            // (a click handler reaches the model funnel in 1-2 UI hops: OnChoiceSelected → SelectChoice →
+            // CompleteEvent). Direct call/callvirt edges only — a delegate LOAD references a method it never
+            // runs, which would invent coverage.
+            var captured = new HashSet<int>();
+            var seen = new HashSet<int>();
+            var queue = new Queue<MethodBase>();
+            foreach (var s in seams) if (seen.Add(s.MetadataToken)) queue.Enqueue(s);
+            while (queue.Count > 0)
+                foreach (var callee in Callees(queue.Dequeue(), game, directCallsOnly: true))
+                {
+                    if (callee.DeclaringType == typeof(GeoscapeEvent)) captured.Add(callee.MetadataToken);
+                    else if (callee.DeclaringType != null && IsPresentation(callee.DeclaringType) &&
+                             seen.Add(callee.MetadataToken)) queue.Enqueue(callee);
+                }
+
+            foreach (var f in funnels)
+            {
+                if (!arbitrated.Contains(f.MetadataToken))
+                    yield return "L36 funnel-unarbitrated: GeoscapeEvent." + f.Name + " carries no Harmony PREFIX of " +
+                                 "ours — on a client it resolves locally and grants the entire reward off the rail, and " +
+                                 "on any peer it re-grants over an already-resolved record (IsCompleted is per-INSTANCE, " +
+                                 "GeoscapeEvent.cs:36)";
+                if (!captured.Contains(f.MetadataToken))
+                    yield return "L36 funnel-uncaptured: no block-first presentation seam of ours reaches GeoscapeEvent." +
+                                 f.Name + " — the gesture that resolves it charges the SHARED wallet before the funnel " +
+                                 "(UIModuleSiteEncounters.cs:571-573, UIModuleTheMarketplace.cs:215), so the arbiter " +
+                                 "alone cannot stop a client from spending";
+            }
         }
 
         /// <summary>L32 — the AIRCRAFT intent family (RCA gap A2). Three properties, all headless:

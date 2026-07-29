@@ -625,6 +625,45 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
+    /// The SAME intent-capture seam (law 4a) at the event class's SECOND completion funnel. The
+    /// marketplace window is a different module with a different model funnel — its click
+    /// (UIModuleTheMarketplace.OnChoiceSelected:210) calls
+    /// <c>GeoscapeEvent.CompleteMarketplaceEvent</c> (GeoscapeEvent.cs:74), never
+    /// <c>CompleteEvent</c> — so neither <see cref="EventChoiceClientLock"/> (wrong module) nor
+    /// <see cref="EventCompleteArbiter"/> (wrong funnel) ever saw it. RailCheck L36 is what keeps the
+    /// two funnels' coverage from drifting apart again.
+    ///
+    /// BLOCK-FIRST for the same reason the lock above is: <c>Wallet.Take</c>:215 charges the shared
+    /// wallet two lines BEFORE the funnel (:219), so a model-seam refusal cannot save the resources.
+    ///
+    /// It really is reachable on a client, and with NO RECORD at all: MarketplaceAbility
+    /// .ActivateInternal:43 → <c>GeoscapeView.ToMarketplace</c>:734-738 builds a fresh
+    /// <c>GeoscapeEvent</c> (Record == null) and calls the view's <c>OnGeoscapeEventRaised</c>:2034
+    /// DIRECTLY, bypassing <c>GeoscapeEventSystem</c> — so <see cref="GeoscapeEventRaiseGate"/> does not
+    /// cover it, <see cref="Raise"/>:465 deliberately never raises marketplace windows on a client, and
+    /// <c>GeoscapeView.SuppressEvents</c> is written by nothing but a console toggle
+    /// (GeoscapeView.cs:2205). A client purchase would apply <c>ChoiceReward</c> locally and spend from
+    /// the replicated wallet: PERMANENT divergence, because the diff is host-now vs host-before and never
+    /// mentions a change only the client made.
+    ///
+    /// Refused, not relayed as a 0xB4 op: the offer LIST is not replicated (docs/rail-baseline.txt:14 —
+    /// GeoMarketplace.MarketplaceOptions EXCLUDED, bridge-unresolved), so "buy offer N" would index into
+    /// a list the host does not share. Blocking a divergence beats half an intent.
+    /// </summary>
+    [HarmonyPatch(typeof(UIModuleTheMarketplace), "OnChoiceSelected", new[] { typeof(GeoEventChoice) })]
+    internal static class MarketplaceChoiceClientLock
+    {
+        private static bool Prefix()
+        {
+            if (IntentRail.ShouldRunNative()) return true;
+            Debug.Log("[MP][events] marketplace purchase BLOCKED on a client — the host owns the wallet and the " +
+                      "reward (OnChoiceSelected:215 charges Wallet.Take before CompleteMarketplaceEvent:219); " +
+                      "buying stays host-only until the offer list is replicated");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Esc/back on a mirrored event dialog, PEER-SYMMETRIC (the name is history — this covers the host too):
     /// while the record is UNRESOLVED the modal must stay open, because the native
     /// OnCancel → FinishQueriedState → ExitState guard answers a still-Triggered event with

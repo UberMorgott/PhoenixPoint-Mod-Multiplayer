@@ -143,6 +143,20 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoscapeEvent), nameof(GeoscapeEvent.CompleteEvent))]
     internal static class EventCompleteArbiter
     {
+        /// <summary>The arm EVERY funnel in the set shares: a CLIENT never resolves an event locally, not
+        /// even an OPEN one (law 3). Single-sourced because the set is PLURAL — <c>GeoscapeEvent</c> has
+        /// two completion funnels (see <see cref="MarketplaceCompleteArbiter"/>) — so a funnel added to
+        /// the class inherits the decision instead of a hand-written copy of it. <paramref name="reach"/>
+        /// is the funnel's own answer to "then what still reaches it here?", because that differs per
+        /// funnel and a refusal line must say something true. null = let native run.</summary>
+        internal static string ClientRefusal(string reach)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return null;      // solo: nobody else can claim it
+            if (engine.IsHost || SyncApplyScope.Active) return null;         // an apply may legitimately reach it
+            return "a client never resolves an event locally — " + reach;
+        }
+
         private static bool Prefix(GeoscapeEvent __instance, ref GeoFactionReward __result)
         {
             var engine = NetworkEngine.Instance;
@@ -150,23 +164,56 @@ namespace Multiplayer.Network.Sync
             if (string.IsNullOrEmpty(__instance?.EventID)) return true;      // synthetic closing page (SetClosingEncounter:326-331)
             var rec = EventPopup.LiveRecord(__instance.EventID, __instance.Record);
 
-            // A CLIENT never resolves an event locally, not even an OPEN one (law 3). Its own clicks are
-            // already blocked one layer up (EventChoiceClientLock), so what still reaches this funnel on a
-            // client is a dialog TEARDOWN with no user in it: UIStateGeoscapeEvent.ExitState:61-65
-            // completes a still-Triggered event with Choices.Last() and throws the reward away, and it is
-            // reached by the universal repaint's fallback Exit+Enter (OpenUiRepaint.cs:189-206). B3 makes
-            // that structurally unreachable with a UiNativeRepaint entry for the screen; until then this
-            // is the only thing between a repaint and a client-side grant of a choice nobody picked.
-            string why = !engine.IsHost && !SyncApplyScope.Active
-                ? "a client never resolves an event locally — this funnel is only reachable from a dialog teardown"
-                : rec == null || rec.State == GeoscapeEventRecordState.Triggered
+            // The client arm's reach: its own clicks are already blocked one layer up
+            // (EventChoiceClientLock), so what still gets here on a client is a dialog TEARDOWN with no
+            // user in it: UIStateGeoscapeEvent.ExitState:61-65 completes a still-Triggered event with
+            // Choices.Last() and throws the reward away, reached by the universal repaint's fallback
+            // Exit+Enter (OpenUiRepaint.cs:189-206). B3 makes that structurally unreachable with a
+            // UiNativeRepaint entry for the screen; until then this is the only thing between a repaint
+            // and a client-side grant of a choice nobody picked.
+            string why = ClientRefusal("this funnel is only reachable from a dialog teardown")
+                ?? (rec == null || rec.State == GeoscapeEventRecordState.Triggered
                     ? null
-                    : "the record is " + rec.State + " (choice " + rec.SelectedChoice + ") — the first answer is frozen";
+                    : "the record is " + rec.State + " (choice " + rec.SelectedChoice + ") — the first answer is frozen");
             if (why == null) return true;
 
             EventPopup.MarkResolvedInstance(__instance);
             __result = __instance.ChoiceReward;
             Debug.Log("[MP][events] CompleteEvent for '" + __instance.EventID + "' skipped — " + why);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The same backstop at the class's OTHER funnel: <c>GeoscapeEvent.CompleteMarketplaceEvent</c>
+    /// (GeoscapeEvent.cs:74). Same law, same shared decision (<see cref="EventCompleteArbiter.ClientRefusal"/>),
+    /// separate patch class only because Harmony cannot inject <c>__result</c> into a prefix on a VOID
+    /// method — <c>CompleteEvent</c> returns the reward its callers dereference, this one returns nothing.
+    ///
+    /// The record-freeze arm deliberately does NOT apply here: this funnel never writes the record
+    /// (compare <c>CompleteEvent</c>:97/:114 — there is no <c>Record.SelectChoice</c>/<c>Complete</c> in
+    /// :74-84), so the record is not its ledger and a freeze check would refuse legitimate HOST purchases
+    /// — the marketplace is an N-purchase shop whose offers are consumed from
+    /// <c>GeoMarketplace.MarketplaceChoices</c>, and path (a) below has no record at all while a
+    /// system-raised one stays <c>Triggered</c> across every purchase.
+    ///
+    /// The client's own click is blocked a layer up (<see cref="MarketplaceChoiceClientLock"/>, which has
+    /// to be block-first because <c>Wallet.Take</c> runs before this funnel). This is the backstop for the
+    /// paths that layer cannot see, and it writes NOTHING on refusal: <c>ChoiceReward</c> stays null,
+    /// which is exactly the state a marketplace instance is in before its first purchase, and
+    /// <c>IsCompleted</c> must stay false or the window's own priority logic
+    /// (GeoscapeView.cs:2049) reads a purchase as a closed event.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeEvent), nameof(GeoscapeEvent.CompleteMarketplaceEvent))]
+    internal static class MarketplaceCompleteArbiter
+    {
+        private static bool Prefix(GeoscapeEvent __instance)
+        {
+            string why = EventCompleteArbiter.ClientRefusal(
+                "the marketplace window is a purely LOCAL gesture (MarketplaceAbility.ActivateInternal:43 → " +
+                "GeoscapeView.ToMarketplace:734), so nothing on the rail legitimately reaches it here");
+            if (why == null) return true;
+            Debug.Log("[MP][events] CompleteMarketplaceEvent for '" + __instance?.EventID + "' skipped — " + why);
             return false;
         }
     }
