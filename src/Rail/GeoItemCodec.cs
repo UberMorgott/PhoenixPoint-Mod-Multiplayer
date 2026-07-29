@@ -4,8 +4,10 @@ using System.Reflection;
 using Base.Core;
 using Base.Defs;
 using HarmonyLib;
+using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Geoscape.Entities;
+using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
@@ -74,6 +76,82 @@ namespace Multiplayer.Network.Sync
                 int malfunction = r.ReadInt32();
                 return new GeoItem(def, count, charges, null, malfunction);
             }
+        }
+
+        // ─── ORDINAL VALUE-ELEMENT RECORD (the reusable half) ──────────────────────────────────────
+        //
+        // The class of gap this closes: state hidden in a NESTED collection whose DECLARED element type
+        // the blob codec cannot rebuild — an interface (no Activator, and EncodeValue refuses a runtime
+        // subtype), so the whole field classified Excluded and everything under it vanished in SILENCE.
+        // When such an element's ENTIRE state is a def address plus a few ints, the collection can ride
+        // ORDINALLY: one record per element, in list order. Same record as a storage-dict entry above,
+        // plus the def GUID — a dict entry reads its def off the KEY, a list element must carry it.
+        //
+        // First occupant: AmmoManager.LoadedMagazines (List<ICommonItem>). Its exclusion is what made
+        // AmmoManager contentless (RailMeta.HasBlobContent), so CommonItemData.Ammo shipped as TagNull
+        // and every loaded weapon arrived with Ammo == null — where CurrentCharges silently falls back
+        // to _charges (CommonItemData.cs:33), i.e. a storage-fresh gun reads FULL on the client and
+        // empty on the host. Next occupant: return true for its element type here — nothing else.
+
+        /// <summary>Declared element types that ride as an ordinal VALUE RECORD instead of a graph blob.
+        /// The contract: instances are fully described by (def, count, charges, malfunction), and are
+        /// rebuilt through the PUBLIC ctor — so blob husk-gating does not apply to them.</summary>
+        internal static bool IsValueElementType(Type declared) => declared == typeof(ICommonItem);
+
+        internal struct ItemRec
+        {
+            internal string Guid;
+            internal int Count, Charges, Malfunction;
+        }
+
+        internal static ItemRec RecOf(object item)
+        {
+            var it = (ICommonItem)item;
+            var cid = it.CommonItemData;
+            // A record carries no nested collection. Ammo INSIDE ammo is not a shape the game ships
+            // (a magazine def has no CompatibleAmmunition, so SetOwnerItem never builds it an
+            // AmmoManager) — if it ever appears, say so instead of dropping it quietly.
+            if (cid.Ammo != null && cid.Ammo.LoadedMagazines != null && cid.Ammo.LoadedMagazines.Count > 0)
+                Debug.LogError("[Multiplayer][rail] value-record " + it.ItemDef?.name + " carries " +
+                               cid.Ammo.LoadedMagazines.Count + " NESTED magazines — the record cannot ship them");
+            return new ItemRec
+            {
+                Guid = it.ItemDef?.Guid,
+                Count = cid.Count,
+                Charges = cid.CurrentCharges, // Ammo == null here → the item's own _charges
+                Malfunction = cid.Malfunction,
+            };
+        }
+
+        internal static void WriteRec(BinaryWriter w, ItemRec rec)
+        {
+            w.Write(rec.Guid ?? "");
+            w.Write(rec.Count);
+            w.Write(rec.Charges);
+            w.Write(rec.Malfunction);
+        }
+
+        internal static ItemRec ReadRec(BinaryReader r) => new ItemRec
+        {
+            Guid = r.ReadString(),
+            Count = r.ReadInt32(),
+            Charges = r.ReadInt32(),
+            Malfunction = r.ReadInt32(),
+        };
+
+        /// <summary>Record → live element via the PUBLIC ctor (Ammo left null — a magazine has none).
+        /// Null = unresolvable def, which mod parity (law 10) says cannot happen: LOUD, never silent.
+        /// The caller turns it into the Unresolved sentinel so the applier drops the hole.</summary>
+        internal static object FromRec(ItemRec rec)
+        {
+            var def = ResolveDef(rec.Guid);
+            if (def == null)
+            {
+                Debug.LogError("[Multiplayer][rail] value-record: unknown ItemDef guid '" + rec.Guid +
+                               "' — element DROPPED (mod parity broken?)");
+                return null;
+            }
+            return new GeoItem(def, rec.Count, rec.Charges, null, rec.Malfunction);
         }
     }
 }

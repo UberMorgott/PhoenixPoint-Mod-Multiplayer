@@ -73,6 +73,7 @@ namespace RailCheck
             var laws = new List<string>();
             var sb = new StringBuilder(Snapshot(types, polymorphicCodec, laws));
             laws.AddRange(RoundTrip());
+            laws.AddRange(ValueRecordLaw());
             laws.AddRange(ExitWriteBackLaw(types));
             laws.Sort(StringComparer.Ordinal);
 
@@ -312,6 +313,16 @@ namespace RailCheck
             foreach (var kv in blobbable)
             {
                 var t = kv.Value;
+                // Value element (GeoItemCodec.IsValueElementType): declared abstract/interface, yet it does
+                // NOT abort at encode — it rides an ordinal (defGuid,count,charges,malfunction) record and
+                // is rebuilt through the public ctor, so none of the blob laws below (create params, husk,
+                // Activator round-trip) are the right questions to ask of it. L22 checks it instead.
+                if (GeoItemCodec.IsValueElementType(t))
+                {
+                    sb.Append("  " + kv.Key + " VALUE-RECORD (defGuid+count+charges+malfunction, ordinal) — " +
+                              "public-ctor rebuild, not blob-reconstructed\n");
+                    continue;
+                }
                 if (t.IsAbstract)
                 {
                     // Declared abstract + declared-type-only codec = every concrete element aborts at
@@ -695,6 +706,69 @@ namespace RailCheck
             var f = new RailField { Name = "probe", Class = FieldClass.EntityList, ValueType = typeof(List<PolyBase>), ElemType = typeof(PolyBase) };
             try { RailMeta.EncodeEntityList(f, new List<PolyBase> { new PolyDerived { A = 1 } }); return true; }
             catch (NotSupportedException) { return false; }
+        }
+
+        /// <summary>L22 — the ordinal VALUE-RECORD codec (GeoItemCodec.WriteRec/ReadRec) and the coverage it
+        /// exists for. Non-vacuity first, exactly like L9: AmmoManager.LoadedMagazines riding covered is a
+        /// re-INCLUSION (the generic classifier excludes an interface-element collection), so it can go back
+        /// to Excluded without a single rail file changing — and then every loaded weapon silently ships
+        /// with Ammo == null again and CurrentCharges falls back to _charges (CommonItemData.cs:33), which is
+        /// the bug this class of codec was added to end. Then the codec itself: charges and ORDER must
+        /// survive, and an ABSENT collection must stay distinguishable from an EMPTY one (a null list means
+        /// "the owner has no ammo manager state", an empty one means "loaded magazines: none" — collapsing
+        /// them re-creates the silent substitution). Honest gap, same one GeoItemDict has (Program.cs:484):
+        /// a real element needs an ItemDef, and ItemDef is a ScriptableObject — so the wire's element TAG
+        /// path is in-game-gated, while the record bytes are checked here for real.</summary>
+        private static IEnumerable<string> ValueRecordLaw()
+        {
+            var rt = RailType.Get(typeof(PhoenixPoint.Common.Entities.AmmoManager));
+            var lm = rt?.Fields.FirstOrDefault(f => f.Name == "LoadedMagazines");
+            if (lm == null)
+                yield return "L22 value-list-vacuous: AmmoManager.LoadedMagazines is not in the rail table at all";
+            else if (lm.Class != FieldClass.EntityList || !GeoItemCodec.IsValueElementType(lm.ElemType))
+                yield return "L22 value-list-vacuous: AmmoManager.LoadedMagazines rides as " + lm.Class +
+                             " (elem " + lm.ElemType?.Name + ") — a loaded weapon ships EMPTY again";
+            else if (RailMeta.ListApplyStrategy(lm) == null)
+                yield return "L22 value-list-unappliable: AmmoManager.LoadedMagazines has no ApplyList strategy";
+
+            // Record bytes: order + every field, including a 0-charge (spent) and a partial magazine.
+            var src = new[]
+            {
+                new GeoItemCodec.ItemRec { Guid = "mag-A", Count = 1, Charges = 12, Malfunction = -100 },
+                new GeoItemCodec.ItemRec { Guid = "mag-B", Count = 3, Charges = 0,  Malfunction = 7 },
+                new GeoItemCodec.ItemRec { Guid = "mag-A", Count = 1, Charges = 40, Malfunction = -100 },
+            };
+            var back = new List<GeoItemCodec.ItemRec>();
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8, true))
+                    foreach (var rec in src) GeoItemCodec.WriteRec(w, rec);
+                ms.Position = 0;
+                using (var r = new BinaryReader(ms, Encoding.UTF8, true))
+                    for (int i = 0; i < src.Length; i++) back.Add(GeoItemCodec.ReadRec(r));
+            }
+            for (int i = 0; i < src.Length; i++)
+                if (back[i].Guid != src[i].Guid || back[i].Count != src[i].Count ||
+                    back[i].Charges != src[i].Charges || back[i].Malfunction != src[i].Malfunction)
+                    yield return "L22 value-record-round-trip: element " + i + " came back as (" + back[i].Guid + "," +
+                                 back[i].Count + "," + back[i].Charges + "," + back[i].Malfunction + ") not (" +
+                                 src[i].Guid + "," + src[i].Count + "," + src[i].Charges + "," + src[i].Malfunction + ")";
+
+            // Absent vs empty, through the real field codec (zero elements → no def resolution needed).
+            var vf = new RailField
+            {
+                Name = "v",
+                Class = FieldClass.EntityList,
+                ValueType = typeof(List<PhoenixPoint.Common.Entities.ICommonItem>),
+                ElemType = typeof(PhoenixPoint.Common.Entities.ICommonItem),
+            };
+            if (RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(vf, null), vf, null) != null)
+                yield return "L22 value-list-null: a null collection decodes as a present one";
+            var emptyBack = RailMeta.DecodeEntityList(
+                RailMeta.EncodeEntityList(vf, new List<PhoenixPoint.Common.Entities.ICommonItem>()), vf, null);
+            if (emptyBack == null || emptyBack.Count != 0)
+                yield return "L22 value-list-empty: an empty collection decodes as " +
+                             (emptyBack == null ? "null" : emptyBack.Count + " elements");
         }
 
         private static IEnumerable<string> RoundTrip()

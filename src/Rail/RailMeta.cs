@@ -355,6 +355,23 @@ namespace Multiplayer.Network.Sync
                     if (!f.IsWritable() && valType.IsArray) { f.Class = FieldClass.Excluded; f.Exclude = "read-only array"; }
                     return f;
                 }
+                // Value-element collection: the DECLARED element type is not blob-reconstructible (an
+                // interface — no Activator, and EncodeValue refuses a runtime subtype), but the element's
+                // whole state is a def address + a few ints, so the list rides ORDINALLY through
+                // GeoItemCodec's record (see IsValueElementType). Husk-gating below does not apply: nothing
+                // is Activator-rebuilt, the element is reconstructed through its PUBLIC ctor from the def —
+                // exactly like a storage-dict entry. Without this arm the field falls to the "un-keyable
+                // element" exclusion and everything under it is dropped in silence (AmmoManager).
+                if (GeoItemCodec.IsValueElementType(elem))
+                {
+                    f.ElemType = elem;
+                    f.Unordered = !(valType.IsArray ||
+                                    (valType.IsGenericType && valType.GetGenericTypeDefinition() == typeof(List<>)));
+                    if (RailMeta.ListApplyStrategy(f) == null)
+                    { f.Class = FieldClass.Excluded; f.Exclude = "no list apply strategy (" + valType.Name + ")"; return f; }
+                    f.Class = FieldClass.EntityList;
+                    return f;
+                }
                 if (elem.IsClass && RailMeta.HasPersistentMembers(elem))
                 {
                     // Keyable element type → per-element descend at path.Name#key. Keyless (GeoItem,
@@ -1212,7 +1229,8 @@ namespace Multiplayer.Network.Sync
 
         internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
 
-        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5, TagLeafDict = 6;
+        private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5,
+                           TagLeafDict = 6, TagValueItem = 7;
 
         /// <summary>KeyValuePair&lt;,&gt; — the pair element type of a whole-dict blob (unkeyable-element
         /// dictionaries riding as EntityList; see BuildField's dict arm).</summary>
@@ -1506,6 +1524,12 @@ namespace Multiplayer.Network.Sync
         {
             if (v == null) { w.Write(TagNull); return; }
             if (LeafKindOf(declared, out _)) { w.Write(TagLeaf); EncodeLeaf(w, declared, v); return; }
+            // Value element (GeoItemCodec.IsValueElementType): an ordinal (defGuid, count, charges,
+            // malfunction) record instead of a graph blob. Declared-type only, so a GeoItem riding under
+            // its OWN declared type (the character's item lists) keeps the full blob with its nested Ammo —
+            // it is the INTERFACE-declared occupant (AmmoManager.LoadedMagazines) that has no other route.
+            if (GeoItemCodec.IsValueElementType(declared))
+            { w.Write(TagValueItem); GeoItemCodec.WriteRec(w, GeoItemCodec.RecOf(v)); return; }
             if (IsKvpType(declared))
             {
                 // Pair of a whole-dict blob: Key then Value through this same codec (leaf or blob per
@@ -1726,6 +1750,9 @@ namespace Multiplayer.Network.Sync
             {
                 case TagNull: return null;
                 case TagLeaf: return DecodeLeaf(r, declared, geo);
+                // Unknown def is LOUD inside FromRec; the sentinel makes ApplyList drop the hole rather
+                // than insert a null element into a list native code dereferences (AmmoManager.cs:119-127).
+                case TagValueItem: return GeoItemCodec.FromRec(GeoItemCodec.ReadRec(r)) ?? Unresolved;
                 case TagBackRef:
                 {
                     int bi = r.ReadUInt16();

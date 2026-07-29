@@ -63,8 +63,8 @@ PhoenixPoint.Common.Core.PartyDiplomacy+Relation  [direct]  covered=3/5
   - EXCLUDED _withParty (IDiplomaticPartyKey): untyped/interface member
 PhoenixPoint.Common.Core.Wallet  [direct]  covered=1/1
   + LeafDict _resources (Dictionary`2)
-PhoenixPoint.Common.Entities.AmmoManager  [direct]  covered=0/2
-  - EXCLUDED LoadedMagazines (List`1): collection of un-keyable/unsupported ICommonItem
+PhoenixPoint.Common.Entities.AmmoManager  [direct]  covered=1/2
+  + EntityList LoadedMagazines (List`1) unordered=no apply=IList
   - EXCLUDED ParentItem (ICommonItem): untyped/interface member
 PhoenixPoint.Common.Entities.BaseCharacterStats  [direct]  covered=3/3
   + Leaf Endurance (Single)
@@ -384,6 +384,7 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   Base.Entities.Statuses.StatResult keyable=no customCreate=no husk=none roundtrip=ok(4)
   PhoenixPoint.Common.Entities.Characters.AbilityTrack keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Common.Entities.Characters.AbilityTrackSlot keyable=no customCreate=no husk=none roundtrip=ok(1)
+  PhoenixPoint.Common.Entities.ICommonItem VALUE-RECORD (defGuid+count+charges+malfunction, ordinal) — public-ctor rebuild, not blob-reconstructed
   PhoenixPoint.Common.Entities.Items.ItemManufacturing+ManufactureQueueItem keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=none roundtrip=unconstructible:MissingMethodException
   PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor keyable=no customCreate=no husk=none roundtrip=ok(0)
@@ -407,7 +408,7 @@ nested husk sweep (recursive over the blob closure; waived = justified opt-out):
   ~ PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedGameTags waived: self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)
   ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor.__level waived: lazy self-healing level ref (LevelController getter re-resolves, GeoUnitDescriptor.cs:214)
   ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor._temporaryStatsModifier waived: transient generation-preview scratch (Dispose-scoped, GeoUnitDescriptor.cs:166-171) — null at rest
-  (types swept: 29)
+  (types swept: 30)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
 PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
@@ -545,6 +546,6 @@ twin summary: resolved=59 gaps=56 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
-summary: covered=246 excluded=65 blobbable=18 geoItemDicts=1
+summary: covered=247 excluded=64 blobbable=19 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:
