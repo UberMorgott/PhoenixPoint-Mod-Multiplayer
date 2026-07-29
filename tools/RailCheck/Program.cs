@@ -75,6 +75,7 @@ namespace RailCheck
             var sb = new StringBuilder(Snapshot(types, polymorphicCodec, laws));
             laws.AddRange(RoundTrip());
             laws.AddRange(ValueRecordLaw());
+            laws.AddRange(TextBindCodecLaw());
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
@@ -218,6 +219,10 @@ namespace RailCheck
         /// <summary>The field classes whose apply/decode writes INTO a live container instead of assigning a
         /// value — i.e. every class that needs one to exist. Arrays are excluded by the caller: those are
         /// assigned wholesale (ApplyList's array-assign strategy), so a null one is normal.</summary>
+        /// <summary>The def-laundering vector L11 belts, by TYPE. Asked by FullName rather than typeof so the
+        /// harness keeps compiling if the game ever drops the type — a missing vector is L35's problem.</summary>
+        private static bool IsTextBind(Type t) => t?.FullName == "Base.UI.LocalizedTextBind";
+
         private static bool IsContainerClass(FieldClass c) =>
             c == FieldClass.LeafDict || c == FieldClass.GeoItemDict || c == FieldClass.LeafList ||
             c == FieldClass.EntityList || c == FieldClass.EntityCollection;
@@ -242,8 +247,9 @@ namespace RailCheck
             sb.Append("polymorphic-codec: " + (polymorphicCodec ? "yes" : "no") + "\n");
             sb.Append("def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs a live DefRepository,\n");
             sb.Append("  so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is\n");
-            sb.Append("  INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element\n");
-            sb.Append("  rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).\n");
+            sb.Append("  INVISIBLE here; this harness asserts only the static belt (L11: a LocalizedTextBind may ride ONLY as\n");
+            sb.Append("  a leaf VALUE — never Descend/EntityList, which would write into the instance the def graph shares;\n");
+            sb.Append("  ItemDef.GetDisplayName returns def state by ref. L35 keeps the leaf codec itself non-vacuous).\n");
             sb.Append("types: " + types.Count + "\n\n");
 
             int cov = 0, exc = 0, geoItemDicts = 0;
@@ -295,16 +301,28 @@ namespace RailCheck
                     }
                     // L11 — the static belt of the RUNTIME ownership law (src/Rail/DefOwnership.cs):
                     // LocalizedTextBind instances are routinely def-OWNED (ItemDef.GetDisplayName returns
-                    // ViewElementDef.DisplayName1/2 by reference, decompile ItemDef.cs:165-173), so a
-                    // covered bind field is a def-state write vector on the client. The real law is
-                    // reference identity over a live DefRepository — untestable headless (see header);
-                    // this asserts that the classify-time refusal (RailMeta.IsPresentation) stays intact.
-                    // If that belt is ever replaced by the runtime law alone (N7 exit criterion), revise
-                    // L11 in the same commit — the baseline diff makes that reviewable.
-                    if (f.ValueType.FullName == "Base.UI.LocalizedTextBind" ||
-                        (f.ElemType != null && f.ElemType.FullName == "Base.UI.LocalizedTextBind"))
-                        laws.Add("L11 def-laundering-vector-rides: " + t.FullName + "." + f.Name +
-                                 " carries LocalizedTextBind as " + f.Class + " — def-owned binds would be written on clients");
+                    // ViewElementDef.DisplayName1/2 by reference, decompile ItemDef.cs:165-173), so writing
+                    // INTO one is a def-state write on the client. The real law is reference identity over a
+                    // live DefRepository — untestable headless (see header).
+                    //
+                    // NARROWED (was: "no bind rides covered at all") the commit that added
+                    // LeafKind.TextBind, which is the N7 exit this law's own note pointed at. What made a
+                    // covered bind dangerous was never the coverage, it was the CLASS: Descend /
+                    // EntityCollection / EntityList / a Composite member all make the client write into the
+                    // instance it already holds — the shared one. A LEAF replaces the entity's reference with
+                    // a freshly-constructed bind and never touches the shared instance, which is the exact
+                    // argument both ownership arms already exempt leaves by (DiffEngine.cs:844-848,
+                    // GenericApplier.cs:624-635). So the belt now asserts the part that is still true: a bind
+                    // may ride ONLY as a leaf value. Falsify by deleting the LeafKindOf arm — every bind
+                    // field classifies Descend/EntityList again and this fires on all of them.
+                    if (IsTextBind(f.ValueType) && f.Class != FieldClass.Leaf)
+                        laws.Add("L11 text-bind-written-in-place: " + t.FullName + "." + f.Name +
+                                 " carries LocalizedTextBind as " + f.Class + " — anything but Leaf writes INTO the " +
+                                 "instance the client holds, which the def graph may share");
+                    if (IsTextBind(f.ElemType) && f.Class != FieldClass.LeafList)
+                        laws.Add("L11 text-bind-written-in-place: " + t.FullName + "." + f.Name +
+                                 " carries LocalizedTextBind ELEMENTS as " + f.Class + " — only a LeafList rebuilds " +
+                                 "them as fresh values instead of writing into shared instances");
                     if (f.Class == FieldClass.GeoItemDict) geoItemDicts++;
                     if (f.Class == FieldClass.Descend) descendTypes.Add(f.ValueType);
                     var extra = "";
@@ -495,10 +513,18 @@ namespace RailCheck
                     if (f.Class == FieldClass.Excluded)
                     { sb.Append("  - EXCLUDED " + f.Name + " (" + f.ValueType.Name + "): " + f.Exclude + "\n"); twinGap++; continue; }
                     twinRes++;
-                    if (f.ValueType.FullName == "Base.UI.LocalizedTextBind" ||
-                        (f.ElemType != null && f.ElemType.FullName == "Base.UI.LocalizedTextBind"))
-                        laws.Add("L11 def-laundering-vector-rides: " + live.FullName + "<=" + dto.Name + "." + f.Name +
-                                 " carries LocalizedTextBind as " + f.Class + " — def-owned binds would be written on clients");
+                    // L11, twin-table arm — same narrowing as the direct arm above. GeoSiteInstaceData.Motto
+                    // and GeoPhoenixBase+InstanceData.LocationDescription are the two binds that ride here,
+                    // and they are precisely the ones the deleted type-name refusal dropped (the (d) NOTEXT
+                    // haven names/mottos symptom): as leaves they now mirror, without a def write.
+                    if (IsTextBind(f.ValueType) && f.Class != FieldClass.Leaf)
+                        laws.Add("L11 text-bind-written-in-place: " + live.FullName + "<=" + dto.Name + "." + f.Name +
+                                 " carries LocalizedTextBind as " + f.Class + " — anything but Leaf writes INTO the " +
+                                 "instance the client holds, which the def graph may share");
+                    if (IsTextBind(f.ElemType) && f.Class != FieldClass.LeafList)
+                        laws.Add("L11 text-bind-written-in-place: " + live.FullName + "<=" + dto.Name + "." + f.Name +
+                                 " carries LocalizedTextBind ELEMENTS as " + f.Class + " — only a LeafList rebuilds " +
+                                 "them as fresh values instead of writing into shared instances");
                     var textra = "";
                     if (f.Class == FieldClass.LeafList || f.Class == FieldClass.EntityList || f.Class == FieldClass.EntityCollection)
                     {
@@ -796,6 +822,119 @@ namespace RailCheck
                 yield return "L22 value-list-empty: an empty collection decodes as " +
                              (emptyBack == null ? "null" : emptyBack.Count + " elements");
         }
+
+        /// <summary>L35 — the text-bind codec class: a member whose CONTENT the rail used to refuse and now
+        /// CARRIES must round-trip its localization KEY, and a bind that rebuilds without a resolvable key
+        /// must be named rather than handed to the UI as a null.
+        ///
+        /// Why a law and not just a round-trip case in L4: the coverage this codec unblocks is a RE-INCLUSION,
+        /// exactly like L22's. Four subsystems (the geoscape log, faction diplomacy state, sabotage faction
+        /// requests, the displayed faction objectives) were refused ONLY because their blob leaves were
+        /// LocalizedTextBind — the husk gate refuses a blob whose content the rail refuses (43ac747). Delete
+        /// the one LeafKindOf arm and all four go back to Excluded with no rail file otherwise changing and
+        /// nothing failing: silence, which is this project's dominant bug class. So non-vacuity is asserted
+        /// FIRST, then the bytes.
+        ///
+        /// The bind is TWO members, not one (decompile Base.UI/LocalizedTextBind.cs:11/:13): the key, and the
+        /// private `_doNotLocalize` that decides whether the key is a key or a literal (Localize:37-41 returns
+        /// it verbatim when set). A codec that carried only the key would turn every literal-text bind into a
+        /// failed lookup, so the flag is round-tripped in both states here.</summary>
+        private static IEnumerable<string> TextBindCodecLaw()
+        {
+            var bindT = typeof(Base.UI.LocalizedTextBind);
+
+            // (a) NON-VACUITY — the leaf kind exists, so the four subsystems above stay unblocked.
+            if (!RailMeta.LeafKindOf(bindT, out var kind) || kind != LeafKind.TextBind)
+            {
+                yield return "L35 text-bind-not-a-leaf: LocalizedTextBind is not LeafKind.TextBind (" +
+                             kind + ") — it classifies as a class again, the husk gate re-refuses every blob " +
+                             "containing one, and the geoscape log / diplomacy state / faction requests stop " +
+                             "mirroring in SILENCE";
+                yield break; // every arm below would report the same one cause
+            }
+
+            // The tag must stay outside the marker space it shares the first byte with. L7 does this for the
+            // two dict sentinels; the three list markers are not LeafKinds but occupy the same slot.
+            foreach (var (mname, mval) in new[]
+            {
+                ("EntityListMarker", RailMeta.EntityListMarker),
+                ("OrderVectorMarker", RailMeta.OrderVectorMarker),
+                ("DictCensusMarker", RailMeta.DictCensusMarker),
+                ("DictTombstone", RailMeta.DictTombstone),
+            })
+                if ((byte)LeafKind.TextBind == mval)
+                    yield return "L35 text-bind-tag-collision: LeafKind.TextBind encodes to the same first byte as " +
+                                 mname + " (" + mval + ")";
+
+            // (b) the KEY and the flag survive, in both flag states; (c) a null bind stays absent; (f) an
+            // EMPTY key still rebuilds a NON-NULL bind — GeoscapeLogEntry.GenerateMessage:23-25 dereferences
+            // Text and Parameters unconditionally, and its catch is FormatException only, so a null there is
+            // the NRE this whole codec exists to prevent.
+            foreach (var (key, noLoc) in new[] { ("KEY_ABC", false), ("literal text", true), ("", false) })
+            {
+                var back = RoundTripLeaf(bindT, new Base.UI.LocalizedTextBind(key, noLoc)) as Base.UI.LocalizedTextBind;
+                if (back == null)
+                { yield return "L35 text-bind-lost: a bind with key '" + key + "' decoded to null"; continue; }
+                if (back.LocalizationKey != key)
+                    yield return "L35 text-bind-key-round-trip: '" + key + "' came back as '" + back.LocalizationKey + "'";
+                if (BindNoLocalize(back) != noLoc)
+                    yield return "L35 text-bind-flag-round-trip: _doNotLocalize " + noLoc + " came back as " +
+                                 BindNoLocalize(back) + " for key '" + key + "' — a literal would become a failed lookup";
+            }
+            if (RoundTripLeaf(bindT, null) != null)
+                yield return "L35 text-bind-null: an absent bind decodes as a present one";
+
+            // (d) the ELEMENT form — GeoscapeLogEntry.Parameters is a LocalizedTextBind[], which rides as a
+            // LeafList of this kind. Array shape on purpose: that is the declaration in the game.
+            var pf = new RailField
+            {
+                Name = "Parameters", Class = FieldClass.LeafList,
+                ValueType = typeof(Base.UI.LocalizedTextBind[]), ElemType = bindT,
+            };
+            var src = new[] { new Base.UI.LocalizedTextBind("P0"), new Base.UI.LocalizedTextBind("P1", true) };
+            var got = RailMeta.DecodeFieldValue(RailMeta.EncodeFieldValue(pf, src), pf, null, out _) as List<object>;
+            if (got == null || got.Count != 2)
+                yield return "L35 text-bind-list: a 2-element bind array decoded as " +
+                             (got == null ? "null" : got.Count + " elements");
+            else
+                for (int i = 0; i < 2; i++)
+                    if ((got[i] as Base.UI.LocalizedTextBind)?.LocalizationKey != src[i].LocalizationKey)
+                        yield return "L35 text-bind-list-order: element " + i + " is '" +
+                                     (got[i] as Base.UI.LocalizedTextBind)?.LocalizationKey + "', expected '" +
+                                     src[i].LocalizationKey + "'";
+
+            // (e) the codec is only worth its bytes if the blob it unblocks is actually licensed. The log
+            // entry is the witness found BY HAND in 43ac747: every member carried, husk EMPTY, so the husk
+            // gate lets the keyless entry list ride.
+            var entry = typeof(PhoenixPoint.Geoscape.Levels.GeoscapeLogEntry);
+            var ert = RailType.Get(entry);
+            var textF = ert?.FieldByName("Text");
+            if (textF == null || textF.Class != FieldClass.Leaf || textF.Leaf != LeafKind.TextBind)
+                yield return "L35 log-entry-text-refused: GeoscapeLogEntry.Text rides as " +
+                             (textF == null ? "<absent>" : textF.Class + "/" + textF.Leaf) +
+                             " — a rebuilt entry carries Text=null and GenerateMessage() NREs on it";
+            var eh = RailMeta.HuskMembers(entry);
+            if (eh.Count > 0)
+                yield return "L35 log-entry-husked: GeoscapeLogEntry still husks " + string.Join(",", eh) +
+                             " — the husk gate refuses the log's keyless entry list and the log does not mirror";
+        }
+
+        private static object RoundTripLeaf(Type declared, object v)
+        {
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8, true)) RailMeta.EncodeLeaf(w, declared, v);
+                ms.Position = 0;
+                using (var r = new BinaryReader(ms, Encoding.UTF8, true)) return RailMeta.DecodeLeaf(r, declared, null);
+            }
+        }
+
+        /// <summary>Reads the bind's private flag. NOT a static field: a static initializer touching a game
+        /// type runs before Main installs the AssemblyResolve handler, and the whole class then fails to load
+        /// (the same hazard the NoInlining on Run guards).</summary>
+        private static bool BindNoLocalize(Base.UI.LocalizedTextBind b) =>
+            (bool)typeof(Base.UI.LocalizedTextBind)
+                .GetField("_doNotLocalize", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(b);
 
         private static IEnumerable<string> RoundTrip()
         {
@@ -1621,12 +1760,13 @@ namespace RailCheck
         private static readonly Dictionary<string, string> _huskContentWitnesses =
             new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // L11 def-laundering refusal ("presentation-only type (LocalizedTextBind)"). The rail cannot
-            // carry a LocalizedTextBind at all, so every one of these lands null in a blob-rebuilt element.
-            { "PhoenixPoint.Geoscape.Levels.GeoscapeLogEntry", "Parameters,Text" },
-            { "PhoenixPoint.Geoscape.Levels.Factions.FactionAggressionRequest", "Description,Summary" },
-            { "PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState", "Description,Title" },
-            { "PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective", "Description,Title" },
+            // RETIRED with the refusal they witnessed, not silenced: GeoscapeLogEntry (Parameters,Text),
+            // FactionAggressionRequest (Description,Summary), FactionDiplomacyState (Description,Title) and
+            // GeoFactionObjective (Description,Title) were all rows about the SAME refused content — a
+            // LocalizedTextBind. LeafKind.TextBind carries it, so those members are genuinely CARRIED now and
+            // a witness demanding they be named as husks would be asserting something false (and would fail
+            // as "husk-content-uncounted" the moment the codec works). RailCheck L35 is what guards that
+            // coverage from silently reverting; the rows below keep L34's own semantics under test.
             // "untyped/interface member" — an ICommonItem back-ref to the item that owns the data. Set only
             // by a ctor (CommonItemData.SetOwnerItem from :53/:72, AmmoManager :26) with NO PostRead anywhere,
             // and dereferenced immediately (CommonItemData.ItemDef => OwnerItem.ItemDef :31,
@@ -1727,7 +1867,11 @@ namespace RailCheck
 
             // The GL bridge's declared opt-outs. Asserted through OptOutReason, so an accidental
             // "bridge-unresolved" (a convention that merely fails TODAY) does not satisfy the law.
-            foreach (var name in new[] { "TacUnits", "ModData", "ContextHelpData", "GeoscapeLog" })
+            // "GeoscapeLog" left this list when LeafKind.TextBind landed: its opt-out reason string named a
+            // text-key codec as the missing piece, and with the codec the log RIDES (Descend -> _entries
+            // EntityList, GeoscapeLogEntry covered 4/4). It is no longer a landmine, so demanding an opt-out
+            // for it would be demanding the refusal back.
+            foreach (var name in new[] { "TacUnits", "ModData", "ContextHelpData" })
             {
                 var owner = typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController);
                 var declared = RailMeta.OptOutReason(owner, name);

@@ -489,73 +489,12 @@ namespace Multiplayer.Network.Sync
 
         private static void OnEffectiveScaleChanged(Timing timing) => FlushNow();
 
-        // ─── N7: the def-aliasing falsifier (a MEASUREMENT, not a fix) ─────
-
-        private static bool _aliasProbed;
-
-        /// <summary>
-        /// Decides whether <c>RailMeta._presentationTypes</c> (the LocalizedTextBind refusal) may stay a
-        /// cheap type-name stopgap or must be replaced by the general reference-identity law.
-        ///
-        /// The question: are any live <c>GeoSite.SiteName</c> / <c>.Motto</c> binds the SAME OBJECT as a
-        /// bind owned by a def — <c>HavenSettingDbDef.HavenSettings[*]</c>
-        /// (HavenName/HavenMotto/LeaderName, HavenSetting.cs:12/14/18) or
-        /// <c>ArcheologySettingsDef.AncientSiteSetting[*]</c> (HarvestSiteName/RefinerySiteName,
-        /// ArcheologySettingsDef.cs:49/51)? Only reference identity can answer it; a type name cannot.
-        ///
-        ///   aliased == 0 on a FRESH campaign → writing a bind could never land in shared def state, the
-        ///     type-name refusal is merely coarse, and it stays as a permanent stopgap.
-        ///   aliased  > 0 → the refusal is load-bearing for the wrong reason and the real law (a reference
-        ///     index over DefRepositoryDef.AllDefs) must be built, and the type list deleted with it.
-        ///
-        /// MUST be read on a FRESH campaign, not a loaded save: LocalizedTextBind is Embedded, so a load
-        /// un-shares every bind and would report 0 whatever the truth is.
-        ///
-        /// ponytail: one-shot, host-only, behind MpDiag.On — cost is one pass over the site list on a
-        /// single tick, and zero when the flag is off. Delete this whole member once the count is known.
-        /// </summary>
-        private static void ProbeDefAliasedBinds(GeoLevelController geo)
-        {
-            if (_aliasProbed || !MpDiag.On) return;
-            _aliasProbed = true;
-            try
-            {
-                var repo = GameUtl.GameComponent<Base.Defs.DefRepository>();
-                if (repo == null) { Debug.Log("[MP][n7] no DefRepository — probe skipped"); return; }
-
-                var defOwned = new HashSet<object>(ReferenceEqualityComparer.Instance);
-                foreach (var db in repo.GetAllDefs<PhoenixPoint.Geoscape.Levels.HavenSettingDbDef>())
-                    foreach (var hs in db?.HavenSettings ?? new List<PhoenixPoint.Geoscape.Levels.HavenSetting>())
-                    {
-                        if (hs == null) continue;
-                        if (hs.HavenName != null) defOwned.Add(hs.HavenName);
-                        if (hs.HavenMotto != null) defOwned.Add(hs.HavenMotto);
-                        if (hs.LeaderName != null) defOwned.Add(hs.LeaderName);
-                    }
-                foreach (var ar in repo.GetAllDefs<PhoenixPoint.Geoscape.Levels.ArcheologySettingsDef>())
-                    foreach (var s in ar?.AncientSiteSetting ?? new List<PhoenixPoint.Geoscape.Levels.ArcheologySettingsDef.AncientSiteSettings>())
-                    {
-                        if (s == null) continue;
-                        if (s.HarvestSiteName != null) defOwned.Add(s.HarvestSiteName);
-                        if (s.RefinerySiteName != null) defOwned.Add(s.RefinerySiteName);
-                    }
-
-                int sites = 0, aliased = 0;
-                foreach (var site in geo.Map?.AllSites ?? Enumerable.Empty<PhoenixPoint.Geoscape.Entities.GeoSite>())
-                {
-                    if (site == null) continue;
-                    sites++;
-                    if (site.SiteName != null && defOwned.Contains(site.SiteName)) aliased++;
-                    else if (site.Motto != null && defOwned.Contains(site.Motto)) aliased++;
-                }
-                Debug.Log("[MP][n7] def-aliased LocalizedTextBind falsifier: defBinds=" + defOwned.Count +
-                          " sites=" + sites + " aliased=" + aliased +
-                          (aliased == 0
-                              ? " — ZERO: the type-name refusal in RailMeta._presentationTypes stays a permanent stopgap; delete this probe."
-                              : " — NONZERO: build the reference-identity law and DELETE the type-name list."));
-            }
-            catch (Exception ex) { Debug.LogWarning("[MP][n7] probe failed: " + ex.Message); }
-        }
+        // ─── N7: the def-aliasing falsifier — DELETED with the list it measured ─────
+        // It existed to answer ONE question: may RailMeta's type-name LocalizedTextBind refusal stay a
+        // stopgap, or must it be replaced by the general reference-identity law? Both branches of its own
+        // exit criterion are now moot: the refusal is gone, a bind rides as LeafKind.TextBind (a leaf apply
+        // REPLACES the reference and cannot write into a def-shared instance), and DefOwnership is the
+        // reference-identity index the criterion asked for. Counting aliased binds would change nothing.
 
         public static void HostTick(NetworkEngine engine)
         {
@@ -570,7 +509,6 @@ namespace Multiplayer.Network.Sync
             var geo = GeoLevel();
             if (geo == null) { AbandonCycle(); _nextTickAt = now + TickInterval; return; }
             ArmChangeDrivenFlush(geo.Timing);
-            ProbeDefAliasedBinds(geo);
 
             try
             {

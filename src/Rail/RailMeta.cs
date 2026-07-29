@@ -49,7 +49,10 @@ namespace Multiplayer.Network.Sync
     {
         Null = 0, Bool = 1, Int64 = 2, UInt64 = 3, Single = 4, Double = 5, String = 6, Enum = 7,
         TimeSpanTicks = 8, Vector3 = 9, Quaternion = 10, DefRef = 11, EntityRef = 12, Composite = 13,
-        DateTimeTicks = 14
+        DateTimeTicks = 14,
+        // 15/16/17 are NOT free: EntityListMarker = 15, OrderVectorMarker = 16, DictCensusMarker = 17 all
+        // live in the same first-byte space as a LeafKind, and RailCheck L7 asserts the disjointness.
+        TextBind = 18
     }
 
     public sealed class RailField
@@ -302,8 +305,6 @@ namespace Multiplayer.Network.Sync
             if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
-            if (RailMeta.IsPresentation(valType))
-            { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
 
             // ResolveLive may accept a live member of a DIFFERENT type than the DTO declares (the codec
             // always speaks the DTO type — wire parity); record which coercion bridges the two. Container
@@ -345,8 +346,6 @@ namespace Multiplayer.Network.Sync
             var elem = RailMeta.ElemTypeOf(valType);
             if (elem != null)
             {
-                if (RailMeta.IsPresentation(elem))
-                { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
                 // A collection OF PAIRS is the same whole-dict blob under its other declaration: the game
                 // records a dict whose key is not a member of its value as `dict.ToList()` —
                 // List<KeyValuePair<K,V>> (GeoscapeEventSystem.RecordInstanceData:665/669
@@ -525,35 +524,22 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        // ─── Presentation refusal (same principle as the Unity-scene-object refusal) ───
-        // Rendering artifacts are never game state, so they never ride the rail — regardless of the fact
-        // that the save serializer happens to persist them. LocalizedTextBind is a CLASS with a writable
-        // public LocalizationKey (decompile Base.UI/LocalizedTextBind.cs:9-13), so it fails the IsValueType
-        // composite test and would otherwise classify as Descend (member) or EntityList/EntityCollection
-        // (element) — i.e. the client would WRITE localization keys. Live proof from the last full walk
-        // (rail-coverage.txt:26-28): 874 instances reached, LocalizationKey + _doNotLocalize as leaves,
-        // owned by GeoSiteInstaceData.Motto/.Name (428) and GeoPhoenixBase+InstanceData.LocationDescription
-        // (18). Nothing on a client can legitimately need a localization key shipped to it, and where an
-        // instance is shared with a def the write would land in shared def state.
-        //
-        // STOPGAP, WITH AN EXIT CRITERION — a type-name list is the shape this repo's mandate forbids, and
-        // it is here only because it is one line against an OBSERVED symptom ((d) NOTEXT haven/site names
-        // and mottos). The general law is reference identity: only that can tell a def-OWNED
-        // LocalizedTextBind (shared with the def, must never be written) from a per-instance one (harmless).
-        // DiffEngine's N7 falsifier measures whether def-aliased binds actually occur. Exit criterion,
-        // binding:
-        //   aliased == 0 on a fresh campaign  → this list stays as a permanent cheap stopgap, delete N7.
-        //   aliased >  0                      → build the reference-identity index over DefRepositoryDef
-        //                                       .AllDefs and DELETE this list; it is then strictly wrong,
-        //                                       because it also drops Name/Motto on the ~428 sites whose
-        //                                       binds are NOT def-owned (recorded as risk R10).
-        // Do not add a second type to this set. A second entry means the general law is overdue.
-        private static readonly HashSet<string> _presentationTypes = new HashSet<string>
-        {
-            "Base.UI.LocalizedTextBind",
-        };
-
-        internal static bool IsPresentation(Type t) => t != null && _presentationTypes.Contains(t.FullName);
+        // ─── Presentation refusal — DELETED, replaced by LeafKind.TextBind ───
+        // What used to live here: a one-entry type-NAME set ("Base.UI.LocalizedTextBind") that BuildField
+        // turned into an exclusion, plus a binding exit criterion — "the general law is reference identity;
+        // build the DefRepository index and DELETE this list". The list is gone because BOTH of its jobs are
+        // now done by mechanisms that were built since:
+        //   • def-laundering (the reason for the refusal) — a bind rides as LeafKind.TextBind, and a leaf
+        //     apply REPLACES the entity's reference instead of writing into the instance the def graph
+        //     shares. Both ownership-law arms already exempt leaves on exactly that argument
+        //     (DiffEngine.cs:844-848, GenericApplier.cs:624-635), and DefOwnership is the reference-identity
+        //     index the exit criterion asked for.
+        //   • "nothing on a client needs a localization key" — FALSE, measured: it cost the geoscape log
+        //     (rebuilt entries NRE'd on a null Text), faction diplomacy state, sabotage faction requests and
+        //     the displayed faction objectives, because the husk gate refuses any blob whose leaves the rail
+        //     refuses (see 43ac747).
+        // The narrow truth that remains — a bind may ride ONLY as that leaf kind, never as a Descend /
+        // EntityList / EntityCollection the client would write INTO — is asserted by RailCheck L11.
 
         // ─── Explicit member opt-out ───────────────────────────────────────
         // Same principle as the presentation refusal above, one granularity down (PRIME DIRECTIVE: mirror
@@ -657,20 +643,13 @@ namespace Multiplayer.Network.Sync
             // ride by accident: per-peer hint/tutorial progress, i.e. presentation — mirroring the host's
             // would hijack each player's own context help.
             { "PhoenixPoint.Geoscape.Levels.GeoLevelController.ContextHelpData", "per-peer context-help/hint progress (presentation) — each player owns their own (GeoLevelController.cs:318)" },
-            // GeoscapeLog resolves onto live `Log` (GeoLevelController.cs:316) and its payload is the
-            // KEYLESS `List<GeoscapeLogEntry> _entries` (GeoscapeLog.cs:36-37) — so it rides as ONE blob
-            // that REBUILDS every entry with Activator + table fields. The entry's whole CONTENT is two
-            // LocalizedTextBind members (GeoscapeLogEntry.cs:11-13) which the rail refuses by law (L11
-            // def-laundering vector; both print "presentation-only" in this baseline), so a rebuilt entry
-            // comes back with EventDate + HighPriority and Text = null — and LocalizedTextBind is a CLASS,
-            // so GeoscapeLogEntry.GenerateMessage:23-25 NREs on it (its catch is FormatException only).
-            // That is the 7ef0a30 ResearchElement husk exactly (DiffEngine's keyless-list refusal). The husk
-            // gate USED not to catch it — <see cref="HuskScan"/> let the serializer's member list overrule
-            // the rail's own refusal, so an EXCLUDED ReadWrite member certified as carried; the gate now
-            // names it (and RailCheck L34 keeps a witness on this exact type). This row stays regardless: it
-            // stops the Descend into the log itself, one level above the entry list.
-            // Mirroring the log needs a text-key codec for LocalizedTextBind first — its own batch.
-            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.GeoscapeLog", "keyless List<GeoscapeLogEntry> blob whose whole content is rail-refused LocalizedTextBind — rebuilt entries carry Text=null and GenerateMessage() NREs (GeoscapeLogEntry.cs:11-13/:23-25); needs a text-key codec first" },
+            // GeoscapeLog: the opt-out is GONE — LeafKind.TextBind is the text-key codec its reason string
+            // said it was waiting for. The log resolves onto live `Log` (GeoLevelController.cs:316) and its
+            // payload is the KEYLESS `List<GeoscapeLogEntry> _entries` (GeoscapeLog.cs:36-37), which rides as
+            // ONE blob that REBUILDS every entry with Activator + table fields. All four of the entry's
+            // members now carry (Text + Parameters as TextBind leaves, EventDate, HighPriority), so the husk
+            // gate licenses the blob and GenerateMessage:23-25 has a real bind to localize instead of the
+            // null it used to NRE on.
         };
 
         /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.
@@ -1070,6 +1049,22 @@ namespace Multiplayer.Network.Sync
             if (t == typeof(DateTime)) { kind = LeafKind.DateTimeTicks; return true; }
             if (t == typeof(Vector3)) { kind = LeafKind.Vector3; return true; }
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
+            // A localization BIND is a text ADDRESS, so it rides like every other address on this rail: by
+            // value, never as a graph. Its whole state is a key + the do-not-localize flag (decompile
+            // Base.UI/LocalizedTextBind.cs:11/:13), and the public 2-arg ctor rebuilds it exactly, so the
+            // wire form is (string, bool) and the client gets a WORKING bind rather than a null.
+            //
+            // Being a LEAF is the load-bearing part, not a convenience. Without a leaf kind the type is a
+            // CLASS with a writable public field, so it classifies Descend (member) / EntityList (element)
+            // and the client would WRITE LocalizationKey INTO the very instance the def graph may share
+            // (ItemDef.GetDisplayName returns ViewElementDef.DisplayName1/2 by reference, decompile
+            // ItemDef.cs:165-173) — the def-laundering vector the old type-name refusal existed to block.
+            // A LEAF apply cannot do that: it REPLACES the entity's reference and never touches the shared
+            // instance, which is exactly why both ownership-law arms already exempt leaves by construction
+            // (DiffEngine.cs:844-848, GenericApplier.cs:624-635). So the refusal is replaced by the
+            // MECHANISM it was a stopgap for, and RailCheck L11 now asserts the narrow truth that remains:
+            // a bind may ride ONLY as this kind, never as a class the client descends into.
+            if (t == typeof(Base.UI.LocalizedTextBind)) { kind = LeafKind.TextBind; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
             if (IdentityResolver.IsRefAddressableType(t)) { kind = LeafKind.EntityRef; return true; }
             if (t.IsValueType && !t.IsPrimitive)
@@ -1136,6 +1131,26 @@ namespace Multiplayer.Network.Sync
             return bytes;
         }
 
+        // The bind's second member is private (decompile Base.UI/LocalizedTextBind.cs:13) and decides whether
+        // the key is a KEY or a literal (Localize:37-41 returns it verbatim when set) — so dropping it would
+        // turn a literal into a failed lookup. Read once through Harmony's accessor, like every other private
+        // game member on this rail. A null FieldInfo (the field renamed) means the flag cannot be read at all:
+        // that is a NAMED false, never a silent one.
+        private static readonly FieldInfo BindNoLocFi =
+            HarmonyLib.AccessTools.Field(typeof(Base.UI.LocalizedTextBind), "_doNotLocalize");
+
+        private static bool BindNoLocalize(Base.UI.LocalizedTextBind bind)
+        {
+            if (BindNoLocFi == null)
+            {
+                WarnOnce("LocalizedTextBind._doNotLocalize is gone from this build — every bind ships as " +
+                         "LOCALIZE and a literal-text bind will arrive as a failed key lookup");
+                return false;
+            }
+            try { return (bool)BindNoLocFi.GetValue(bind); }
+            catch { return false; }
+        }
+
         public static void EncodeLeaf(BinaryWriter w, Type declared, object v)
         {
             if (v == null) { w.Write((byte)LeafKind.Null); return; }
@@ -1169,6 +1184,22 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Vector3: { var x = (Vector3)v; w.Write(x.x); w.Write(x.y); w.Write(x.z); break; }
                 case LeafKind.Quaternion: { var q = (Quaternion)v; w.Write(q.x); w.Write(q.y); w.Write(q.z); w.Write(q.w); break; }
                 case LeafKind.DateTimeTicks: w.Write(((DateTime)v).Ticks); break;
+                case LeafKind.TextBind:
+                {
+                    var bind = (Base.UI.LocalizedTextBind)v;
+                    var key = bind.LocalizationKey;
+                    // A bind with no key is the ONE thing this codec cannot carry usefully — it rebuilds as a
+                    // bind that localizes to nothing. Named here (the host is the only peer that can see the
+                    // live instance), never silent, and shipped as "" rather than null: a null format string
+                    // makes GeoscapeLogEntry.GenerateMessage throw ArgumentNullException, which its
+                    // FormatException-only catch does NOT hold (decompile GeoscapeLogEntry.cs:20-31).
+                    if (string.IsNullOrEmpty(key))
+                        WarnOnce("EncodeLeaf: a LocalizedTextBind has no LocalizationKey — it ships as an EMPTY " +
+                                 "bind and the client's text for it will be blank");
+                    w.Write(key ?? "");
+                    w.Write(BindNoLocalize(bind));
+                    break;
+                }
                 case LeafKind.DefRef: w.Write(((BaseDef)v).Guid ?? ""); break;
                 case LeafKind.Composite:
                 {
@@ -1250,6 +1281,9 @@ namespace Multiplayer.Network.Sync
                     return declared == typeof(TimeUnit) ? (object)TimeUnit.FromTimeSpan(ts) : ts;
                 }
                 case LeafKind.DateTimeTicks: return new DateTime(r.ReadInt64());
+                // The 2-arg public ctor IS the rebuild (decompile Base.UI/LocalizedTextBind.cs:24-28) — a
+                // FRESH instance, never a write into the one the host (or a def) holds.
+                case LeafKind.TextBind: return new Base.UI.LocalizedTextBind(r.ReadString(), r.ReadBoolean());
                 case LeafKind.Vector3: return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.Quaternion: return new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.DefRef:
@@ -2369,10 +2403,10 @@ namespace Multiplayer.Network.Sync
             // type's rt-table is BUILT FROM GetSerializedMembers, so every rail-EXCLUDED ReadWrite member was
             // immediately re-added as carried and could never be reported — the husk gate could see that a
             // member is absent, never that its CONTENT is refused. That is how GeoscapeLogEntry.Text
-            // (LocalizedTextBind, excluded "presentation-only" by L11) certified as carried while a rebuilt
-            // entry arrives with Text=null and GenerateMessage() NREs on it: a blob whose leaves the rail
-            // refuses passes the gate and lands hollow. WriteOnly create params are unaffected — they are
-            // outside SerializedMembers, so they are never in `refused`.
+            // (a LocalizedTextBind, refused outright before LeafKind.TextBind existed) certified as carried
+            // while a rebuilt entry arrived with Text=null and GenerateMessage() NREs on it: a blob whose
+            // leaves the rail refuses passes the gate and lands hollow. WriteOnly create params are
+            // unaffected — they are outside SerializedMembers, so they are never in `refused`.
             try
             {
                 foreach (var mwa in ser.GetSerializedMembers(t))
