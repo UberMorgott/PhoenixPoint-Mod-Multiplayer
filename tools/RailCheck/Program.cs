@@ -90,6 +90,7 @@ namespace RailCheck
             laws.AddRange(RootCoverageLaw());
             laws.AddRange(StructuralDescendLaw(game, types));
             laws.AddRange(StructuralActorLaw());
+            laws.AddRange(RepaintRelevanceLaw(types, game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -498,6 +499,11 @@ namespace RailCheck
             // client cannot mirror (the runtime "dto-twin gap" log) — committed so closing or opening
             // one is a reviewable diff instead of a log line nobody reads.
             sb.Append("\ntwin tables (GetBridged: *InstanceData wire entries -> live owner members):\n");
+            // Live types the apply surface addresses that are NOT in the classifier closure — the twin walk's
+            // nested-component dispatch targets (GeoHaven / GeoAlienBase arrive as HavenData / AlienBaseData
+            // slots and are applied via GetComponent, so they never enter `types` yet DO land in the applier's
+            // touched set). Published here so L38 asks the same question this section answers instead of
+            // re-deriving the walk and drifting from it.
             int twinRes = 0, twinGap = 0, twinDispatch = 0;
             var twinPairs = new List<(Type live, Type dto)>();
             foreach (var t in types)
@@ -507,6 +513,7 @@ namespace RailCheck
             for (int p = 0; p < twinPairs.Count; p++)
             {
                 var (live, dto) = twinPairs[p];
+                BridgedApplyTargets.Add(live);
                 if (!twinSeen.Add(live.FullName + "|" + dto.FullName)) continue;
                 var bt = RailType.GetBridged(live, dto);
                 if (bt == null) continue;
@@ -1654,6 +1661,9 @@ namespace RailCheck
 
         private static List<EquipSync.SlotRef> Slots(params (string guid, int count, int charges)[] items)
             => items.Select(i => new EquipSync.SlotRef { Guid = i.guid, Count = i.count, Charges = i.charges }).ToList();
+
+        /// <summary>See the twin-tables section of <see cref="Snapshot"/>, which fills this.</summary>
+        private static readonly HashSet<Type> BridgedApplyTargets = new HashSet<Type>();
 
         private const BindingFlags AllMembers = BindingFlags.Public | BindingFlags.NonPublic |
                                                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
@@ -3229,6 +3239,126 @@ namespace RailCheck
             }
             if (checkedTargets == 0)
                 yield return "L23 vacuous: no attribute-declared Harmony target was resolved — the target check is asleep";
+        }
+
+        /// <summary>L38 — REPAINT RELEVANCE, both arms of one class: a repaint must fire for exactly the
+        /// kinds that can change what the open screen paints.
+        ///
+        /// Arm 1, OVER-repaint (the fps class): the blanket default in <c>UiEventMap.Fire</c> marked the open
+        /// screen dirty for ANY touched kind, so 15 permanently-churning world kinds rebuilt the equip lists
+        /// AND the whole perk tree on every rail batch (4-5 fps on UIStateEditSoldier). The fix is the
+        /// declaration in <c>UiNativeRepaint.IgnoredKinds</c> plus the kind-carrying
+        /// <c>OpenUiRepaint.MarkDirty(Type, GeoLevelController)</c>; this arm asserts that wiring exists and
+        /// that no arm of <c>Fire</c> still reaches the parameterless blanket <c>MarkDirty()</c>, which would
+        /// silently put that kind back outside the declaration. Plus declaration hygiene: an empty table is
+        /// reported ASLEEP, a declared screen must be in <c>UiNativeRepaint.Table</c> (a screen repainted by
+        /// the Exit+Enter fallback has un-audited reads, so the exclusion would rest on nothing), and a
+        /// declared kind must be one the classifier covers — a typo or a renamed type silences no delta and
+        /// is dead weight that reads like protection.
+        ///
+        /// Arm 2, the DANGEROUS INVERSE (stale screen, the silent-swallow class): a kind that CAN affect the
+        /// screen must never be declared irrelevant, or the screen keeps painting pre-delta state with
+        /// nothing red — strictly worse than the fps drop. DERIVED, not trusted: walk the screen's OWN native
+        /// <c>EnterState</c> through presentation code (the same discriminators L21 uses) and reject any
+        /// declared kind whose non-accessor methods that walk reaches. EnterState is the root because it is
+        /// the screen's full native build and therefore a SUPERSET of the table entry's reseed path — error
+        /// lands in the safe direction: more reads found = more declarations rejected.
+        ///
+        /// LIMITATIONS, stated: a read reached only through a field-held delegate is invisible (Callees takes
+        /// call/callvirt only), and a kind read ONLY through property accessors passes — deliberately, since
+        /// what a getter returns is either a derived value or a reference to an object that is its own
+        /// replicated kind and marks dirty on its own account. Both are the same approximations L21 already
+        /// ships. Neither can be closed statically, and the in-game gate is what catches a stale panel.</summary>
+        private static IEnumerable<string> RepaintRelevanceLaw(List<Type> types, Assembly game)
+        {
+            var declared = UiNativeRepaint.IgnoredKinds;
+            if (declared.Count == 0)
+            {
+                yield return "L38 vacuous: UiNativeRepaint.IgnoredKinds is empty — no screen declines any kind, " +
+                             "so every touched kind dirties the open screen again and this law asserts nothing";
+                yield break;
+            }
+
+            // ── Arm 1: the gate is WIRED, and nothing bypasses it ──
+            var ours = typeof(UiEventMap).Assembly;
+            var fire = typeof(UiEventMap).GetMethod("Fire", AllMembers);
+            var kindMark = typeof(OpenUiRepaint).GetMethod("MarkDirty", AllMembers, null,
+                                                           new[] { typeof(Type), typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController) }, null);
+            var blanketMark = typeof(OpenUiRepaint).GetMethod("MarkDirty", AllMembers, null, Type.EmptyTypes, null);
+            if (fire == null || kindMark == null || blanketMark == null)
+                yield return "L38 gate-unresolved: UiEventMap.Fire / OpenUiRepaint.MarkDirty(Type, GeoLevelController) / " +
+                             "MarkDirty() did not all resolve — the relevance gate cannot be verified and the " +
+                             "declaration below may be applying to nothing";
+            else
+            {
+                // DIRECT callees only: the switch arms are inline in Fire, and a blanket MarkDirty reached
+                // through a helper (the structural appliers, intent rejects, post-intent reseeds) is legal —
+                // those carry no entity and are meant to repaint unconditionally.
+                var direct = Callees(fire, ours, directCallsOnly: true).ToList();
+                if (!direct.Any(c => Same(c, kindMark)))
+                    yield return "L38 relevance-unwired: UiEventMap.Fire never calls OpenUiRepaint.MarkDirty(Type, " +
+                                 "GeoLevelController) — the per-kind relevance declaration is consulted by nobody, so " +
+                                 "every churning world kind marks the open screen dirty again";
+                if (direct.Any(c => Same(c, blanketMark)))
+                    yield return "L38 relevance-bypassed: UiEventMap.Fire calls the parameterless " +
+                                 "OpenUiRepaint.MarkDirty() — that arm dirties the open screen for a kind nobody " +
+                                 "checked, which is exactly the blanket default this law closes";
+            }
+
+            // ── Arm 2: no declared-irrelevant kind is one the screen's own native build READS ──
+            var covered = new HashSet<Type>(types);
+            foreach (var screen in declared.Keys.OrderBy(t => t.FullName, StringComparer.Ordinal))
+            {
+                if (!UiNativeRepaint.Table.ContainsKey(screen))
+                    yield return "L38 screen-unrepainted: " + screen.Name + " declares irrelevant kinds but is not in " +
+                                 "UiNativeRepaint.Table — its repaint is the Exit+Enter fallback, whose reads were never " +
+                                 "audited, so the exclusion rests on nothing";
+                var enter = screen.GetMethod("EnterState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (enter == null || enter.GetMethodBody() == null)
+                {
+                    yield return "L38 vacuous: " + screen.Name + ".EnterState has no body — the read path this law " +
+                                 "derives relevance from resolved to nothing and arm 2 is asleep for that screen";
+                    continue;
+                }
+                var reads = ReadKinds(enter, game);
+                foreach (var kind in declared[screen].OrderBy(t => t.FullName, StringComparer.Ordinal))
+                {
+                    // Addressable = in the classifier closure OR a twin-walk component-dispatch target
+                    // (GeoHaven/GeoAlienBase are applied via GetComponent and never enter `types`, yet do
+                    // land in the applier's touched set — so closure membership alone would cry wolf).
+                    if (!covered.Contains(kind) && !BridgedApplyTargets.Contains(kind))
+                        yield return "L38 kind-unaddressable: " + screen.Name + " declares " + kind.Name + " irrelevant, " +
+                                     "but the rail neither classifies nor bridges that type — no delta ever carries it, " +
+                                     "so the row silences nothing and only reads like protection";
+                    if (reads.Contains(kind))
+                        yield return "L38 relevant-kind-declared-irrelevant: " + screen.Name + ".EnterState reaches a " +
+                                     "non-accessor method of " + kind.Name + ", so that kind CAN change what the screen " +
+                                     "paints — declaring it irrelevant makes the screen go STALE on those deltas with " +
+                                     "nothing red, which is worse than the repaint storm it saves";
+                }
+            }
+        }
+
+        /// <summary>A screen's READ SET, derived from IL: the non-presentation types whose own non-accessor
+        /// methods its native build reaches. Same BFS shape and same discriminators as
+        /// <see cref="FirstModelCommand"/> — descend through presentation, stop at the model boundary — but
+        /// it collects the OWNERS instead of the first command, and keeps statics (a static helper on the kind
+        /// is still that kind's code, and over-collecting only rejects more declarations).</summary>
+        private static HashSet<Type> ReadKinds(MethodBase root, Assembly game)
+        {
+            var reads = new HashSet<Type>();
+            var seen = new HashSet<int> { root.MetadataToken };
+            var queue = new Queue<MethodBase>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+                foreach (var callee in Callees(queue.Dequeue(), game, directCallsOnly: true))
+                {
+                    var owner = callee.DeclaringType;
+                    if (owner?.FullName == null || !seen.Add(callee.MetadataToken)) continue;
+                    if (IsPresentation(owner)) { queue.Enqueue(callee); continue; }
+                    if (!callee.IsConstructor && !IsAccessor(callee)) reads.Add(owner);
+                }
+            return reads;
         }
 
         /// <summary>BFS from a screen teardown through presentation code; returns "Type.Method" of the first

@@ -43,6 +43,8 @@ namespace Multiplayer.Network.Sync
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         private static readonly System.Collections.Generic.HashSet<string> _loggedFallback =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _loggedSkips =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>Defer ceiling in frames (~5 s at 60 fps). See <see cref="FlushIfDirty"/>.</summary>
         private const int MaxDeferFrames = 300;
@@ -61,6 +63,41 @@ namespace Multiplayer.Network.Sync
         /// per chunk on a multi-packet resend.</summary>
         public static void MarkDirty() { _dirty = true; _marksSinceFlush++; }
 
+        /// <summary>
+        /// The same mark, carrying WHICH KIND changed — so the OPEN screen can decline a change that
+        /// cannot affect it. A screen must not be marked dirty by a kind it provably never paints: a
+        /// soldier's inventory/perk sheet has no business rebuilding because a GeoSite timer ticked, and
+        /// that blanket dirtying (15 churning kinds × every rail batch × the heaviest entry in
+        /// UiNativeRepaint.Table) is what dropped that screen to 4-5 fps.
+        ///
+        /// The relevance itself is DECLARED, per screen, in <see cref="UiNativeRepaint.IgnoredKinds"/> and
+        /// machine-checked by RailCheck L38 — never decided here. Asked at MARK time rather than at flush
+        /// time because <see cref="UiEventMap.Fire"/> already holds the level, so the open-screen lookup is
+        /// free, and nothing has to accumulate kinds across a frame boundary (a mark raised by a native
+        /// event DURING a repaint then cannot be swallowed — <c>_dirty</c> was already cleared).
+        ///
+        /// CONSERVATIVE BY CONSTRUCTION: an undeclared kind, an undeclared screen, an exact-type miss on a
+        /// subclass, or no open screen at all → marks, exactly like <see cref="MarkDirty()"/>.
+        /// </summary>
+        public static void MarkDirty(Type kind, GeoLevelController geo)
+        {
+            var screen = geo?.View?.CurrentViewState;
+            if (screen != null && kind != null &&
+                UiNativeRepaint.IgnoredKinds.TryGetValue(screen.GetType(), out var ignored) &&
+                ignored.Contains(kind))
+            {
+                // Law 1 (silent swallow): a refusal to repaint is never invisible. Once per kind per screen
+                // and NOT behind MpDiag — this runs at rail-batch rate, so a per-mark line would BE the
+                // freeze it exists to report, while a diag-gated one would leave the default build silent
+                // about work it declined to do.
+                if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
+                    Debug.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
+                              " — kind declared irrelevant to this screen (logged once per kind per screen)");
+                return;
+            }
+            MarkDirty();
+        }
+
         /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
         /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
         public static void Reset()
@@ -71,6 +108,7 @@ namespace Multiplayer.Network.Sync
             _marksSinceFlush = 0;
             _loggedFailures.Clear();
             _loggedFallback.Clear();
+            _loggedSkips.Clear();
         }
 
         /// <summary>

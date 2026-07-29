@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -39,6 +39,9 @@ namespace Multiplayer.Network.Sync
     ///     re-enters it, or for UIStateManufacturing routes to its dedicated per-panel rebuild.
     ///     Covers GeoFaction + GeoSite.
     ///   • Unknown kind → logged ONCE — the to-do list for the next event-map entry.
+    ///   • RELEVANCE: every arm marks through <c>MarkDirty(kind, geo)</c>, so the OPEN screen may
+    ///     decline a kind it provably cannot paint (<see cref="UiNativeRepaint.IgnoredKinds"/>).
+    ///     Undeclared kind or undeclared screen still marks — the exclusion is opt-in, never implied.
     /// </summary>
     public static class UiEventMap
     {
@@ -63,7 +66,7 @@ namespace Multiplayer.Network.Sync
                             // menu, research cost gating) → also the universal repaint seam.
                             // Safe from inside SyncApplyScope: MarkDirty only sets a flag, the
                             // flush stays in SyncEngine.Tick with its own scope + defer/coalescing.
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case Research _:
                         case ResearchElement _:
@@ -93,7 +96,7 @@ namespace Multiplayer.Network.Sync
                             // painting stale CharacterStats. Same per-kind shape as Wallet/ItemStorage:
                             // run the native derive, then the universal repaint re-reads it.
                             RefreshDerivedStats(OwnerOf(cp, geo));
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case GeoCharacter gc:
                             // Item lists (_armourItems…) also land raw — natively SetItems runs
@@ -104,7 +107,7 @@ namespace Multiplayer.Network.Sync
                                 using (SyncApplyScope.Enter())
                                     AddAbilitiesFromItemsMethod.Invoke(gc, new object[] { false });
                             RefreshDerivedStats(gc);
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility fac:
                             // Facility leaves (_isPowered, state, update times) land RAW, so the native
@@ -118,7 +121,7 @@ namespace Multiplayer.Network.Sync
                             // the universal repaint re-reads it.
                             using (SyncApplyScope.Enter())
                                 if (fac.PxBase != null) fac.PxBase.UpdateStats();
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem es:
                             // Mirrored event records changed → re-derive the client's event-window
@@ -127,7 +130,7 @@ namespace Multiplayer.Network.Sync
                             // MarkDirty stays: site encounter labels etc. ride the universal repaint
                             // like any other kind.
                             EventPopup.Sync(es, geo);
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
@@ -138,14 +141,16 @@ namespace Multiplayer.Network.Sync
                             // go through the universal repaint seam; the flush dispatches to the screen's
                             // native rebuild via the UiNativeRepaint table below (manufacturing's entry
                             // also re-snapshots the scrap-mode storage copies).
-                            OpenUiRepaint.MarkDirty();
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         default:
                             // Law 11 universal cover, guaranteed HERE: any kind without a per-kind
                             // native event still repaints the open geoscape screen through the
-                            // generic seam — no unmapped type is ever silently repaint-less,
-                            // regardless of what the caller does after Fire().
-                            OpenUiRepaint.MarkDirty();
+                            // generic seam, regardless of what the caller does after Fire(). The ONE
+                            // exception is declared, not implicit: a kind listed against the open
+                            // screen in UiNativeRepaint.IgnoredKinds cannot change anything that
+                            // screen paints, and skipping it is logged once per kind per screen.
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             if (_loggedUnknown.Add(entity.GetType().Name))
                                 Debug.Log("[Multiplayer][rail] UiEventMap: no per-kind mapping for " + entity.GetType().Name + " — universal open-screen repaint (logged once)");
                             break;
@@ -344,6 +349,56 @@ namespace Multiplayer.Network.Sync
                     foreach (var slot in slots) { slot.VisualsContainer.SetActive(true); slot.DetachPrefab(); }
                     return Call(BlLeftInfo, m) && Call(BlLayout, m);
                 },
+            };
+
+        /// <summary>Kinds carrying no character/item content — pure geoscape WORLD simulation (map sites,
+        /// aircraft, havens, alien bases, generated missions, run statistics, the geoscape log). Named once
+        /// and shared, because "world layer" is a property of the KIND, not of any one screen. Every entry
+        /// is a type the classifier covers (docs/rail-baseline.txt) and every one appeared in the client
+        /// log as a permanently-churning unmapped kind.</summary>
+        private static readonly Type[] WorldLayerKinds =
+        {
+            typeof(GeoSite), typeof(GeoVehicle), typeof(GeoHaven), typeof(GeoAlienBase),
+            typeof(GeoAlienBaseMission), typeof(GeoScavengingMission), typeof(GeoHavenDefenseMission),
+            typeof(GeoHavenDefenseMissionInstanceData), typeof(AlienRaidManager),
+            typeof(GeoscapeStats), typeof(GeoscapeLog),
+        };
+
+        /// <summary>
+        /// RELEVANCE, declared in the EXCLUSION direction: per screen, the entity kinds whose deltas
+        /// provably cannot change anything that screen paints. Read by
+        /// <see cref="OpenUiRepaint.MarkDirty(Type, GeoLevelController)"/> — a marked kind listed here does
+        /// not dirty that screen. The defect it closes: the blanket default arm in <see cref="UiEventMap"/>
+        /// let 15 permanently-churning world kinds mark the open screen dirty on EVERY rail batch, and on
+        /// UIStateEditSoldier that is the heaviest entry in <see cref="Table"/> (faction-storage re-read +
+        /// equip-list rebuild + a rebuild of the whole perk tree) → 4-5 fps.
+        ///
+        /// EXCLUSION and not inclusion, ON PURPOSE: an UNDECLARED kind — or any kind on an undeclared
+        /// screen — still repaints, exactly as before. So a missing entry costs a wasted repaint
+        /// (recoverable, and visible as frame rate) and can NEVER cost a stale screen, which is the
+        /// silent-swallow class this repo fights. Inclusion would carry that risk the other way round.
+        ///
+        /// A row is a CLAIM, and RailCheck L38 proves it three ways: the screen must be in
+        /// <see cref="Table"/> (a screen repainted by the Exit+Enter fallback has un-audited reads), the
+        /// kind must be a type the classifier actually covers (a typo silences nothing), and — the arm that
+        /// keeps this from becoming a stale-UI bug — the screen's own native <c>EnterState</c> must not
+        /// reach a non-accessor method of that kind. Which is exactly why GeoPhoenixFaction, GeoCharacter
+        /// and StatusStat are ABSENT here despite churning just as hard: UIStateEditSoldier.EnterState
+        /// reaches `_faction.GetTotalAvailableStorage()` (:596) and `CurrentCharacter.HasLostHandStatus()` /
+        /// `.GetEquippedItemHealthMap()` (:495-497).
+        ///
+        /// Only the kind-carrying marks in <see cref="UiEventMap.Fire"/> consult this. The structural
+        /// appliers, intent rejects and post-intent reseeds mark UNCONDITIONALLY, so a site or aircraft
+        /// APPEARING still repaints every screen — the ignore list is about a kind's leaf deltas, never
+        /// about its identity coming or going.
+        ///
+        /// UIStateEditVehicle is deliberately NOT declared: same reseed shape, but its whole subject IS a
+        /// GeoVehicle and its read path was not audited. One line to add once it is.
+        /// </summary>
+        internal static readonly Dictionary<Type, HashSet<Type>> IgnoredKinds =
+            new Dictionary<Type, HashSet<Type>>
+            {
+                [typeof(UIStateEditSoldier)] = new HashSet<Type>(WorldLayerKinds),
             };
 
         /// <summary>True = the open screen has a native rebuild and it ran (caller skips the re-enter).

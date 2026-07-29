@@ -245,16 +245,25 @@ namespace Multiplayer.Network.Sync
         private static void AlignFirstValueMatchToReference(List<ICommonItem> list, ICommonItem target)
         {
             if (list == null) return;
-            int byValue = list.IndexOf(target);
-            if (byValue < 0 || ReferenceEquals(list[byValue], target)) return;
-            // Anything before byValue is not value-equal to target, so the instance can only be after it.
-            for (int i = byValue + 1; i < list.Count; i++)
+            // ONE pass for both indices. The old shape ran list.IndexOf (a full value-equality scan) and
+            // THEN a second forward scan for the reference — twice the comparisons, on a handler that fires
+            // once per item per list per rebuild, i.e. O(items²) on a repaint of the equip screen. The
+            // instance is value-equal to itself, so the first value match can never sit AFTER it: reaching
+            // the reference with no earlier value match means the list is already aligned and there is
+            // nothing to do — which is the normal case and now exits at the item's own index.
+            int firstValue = -1;
+            for (int i = 0; i < list.Count; i++)
             {
-                if (!ReferenceEquals(list[i], target)) continue;
-                list[i] = list[byValue];
-                list[byValue] = target;
-                return;
+                if (ReferenceEquals(list[i], target))
+                {
+                    if (firstValue < 0) return;         // already the first match — no-op
+                    list[i] = list[firstValue];
+                    list[firstValue] = target;
+                    return;
+                }
+                if (firstValue < 0 && Equals(list[i], target)) firstValue = i;
             }
+            // target is not in this list at all → no-op, same as before.
         }
 
         /// <summary>Loud bind check for the two <see cref="UIInventoryList"/> handler patches. A rename or a
