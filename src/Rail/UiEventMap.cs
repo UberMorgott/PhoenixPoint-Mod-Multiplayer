@@ -106,6 +106,20 @@ namespace Multiplayer.Network.Sync
                             RefreshDerivedStats(gc);
                             OpenUiRepaint.MarkDirty();
                             break;
+                        case PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility fac:
+                            // Facility leaves (_isPowered, state, update times) land RAW, so the native
+                            // notify chain never ran: SetPowered (GeoPhoenixFacility.cs:317) fires
+                            // OnPowerStateChanged → GeoPhoenixBase.Facility_PowerStateChanged (:860-863)
+                            // → UpdateStats (:393). PhoenixBaseStats CACHES PowerConsumption/PowerOutput
+                            // (PhoenixBaseStats.cs:18-26 — RemainingPower/Underpowered are derived from
+                            // them and refreshed ONLY by that call), so without this the client's base
+                            // screen keeps painting pre-delta power even once the value arrives. Same
+                            // per-kind shape as CharacterProgression/GeoCharacter: native derive, then
+                            // the universal repaint re-reads it.
+                            using (SyncApplyScope.Enter())
+                                if (fac.PxBase != null) fac.PxBase.UpdateStats();
+                            OpenUiRepaint.MarkDirty();
+                            break;
                         case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem es:
                             // Mirrored event records changed → raise/dismiss the client's event popup
                             // from the state transitions (EventPopup latch). MarkDirty stays: site

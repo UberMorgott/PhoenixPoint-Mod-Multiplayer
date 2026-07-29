@@ -1,11 +1,14 @@
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
+using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
@@ -118,6 +121,53 @@ namespace Multiplayer.Network.Sync
             if (!SyncApplyScope.Active) return true;          // native: gestures, host replays, solo
             var engine = NetworkEngine.Instance;
             return engine == null || !engine.IsActiveSession; // solo: native, even under a stray scope
+        }
+    }
+
+    /// <summary>
+    /// FOURTH seam, same law, at the POWER funnel: <c>GeoPhoenixFacility.SetPowered</c>
+    /// (GeoPhoenixFacility.cs:317) is the ONE writer of <c>_isPowered</c> — every power mutator on a
+    /// client routes through it: the UI toggle (UIModuleBaseLayout.TogglePower:856, captured as an
+    /// intent by FacilitySync), the auto-router <c>GeoPhoenixBase.RoutePower</c> (:594/:616, reached
+    /// from :555 post-load and :706 on a power-output change) and the auto-(un)plug on facility state
+    /// change (:800-822). One gate in the funnel instead of a guard per caller: the client never writes
+    /// authoritative state (law 3), and <c>_isPowered</c> is a rail-covered leaf that arrives as a delta.
+    /// Blocking the client's own RoutePower is CORRECT, not collateral: the save it loaded came from the
+    /// host with the routing already decided, and any later re-route is the host's to make and ship.
+    /// The apply arm stays OPEN (a rail path that ever reaches the setter must land), and the setter is
+    /// void — nothing dereferences a blocked return.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoPhoenixFacility), nameof(GeoPhoenixFacility.SetPowered))]
+    internal static class FacilityPowerGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool Prefix(GeoPhoenixFacility __instance, bool powered)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            bool allow = SyncApplyScope.Active;
+
+            // Diagnostic (power retest 2026-07-29): WHO tried to write power on a client, and whether it
+            // got through. Client branch only, log-once per distinct message — a RoutePower loop over N
+            // facilities collapses to one line per (caller, facility, value) and cannot spam a frame.
+            string caller = "?";
+            try
+            {
+                var st = new System.Diagnostics.StackTrace(1, false);
+                var names = new List<string>();
+                for (int i = 0; i < st.FrameCount && names.Count < 3; i++)
+                {
+                    var n = st.GetFrame(i)?.GetMethod()?.Name;
+                    if (!string.IsNullOrEmpty(n)) names.Add(n);
+                }
+                caller = string.Join("<", names.ToArray());
+            }
+            catch { }
+            string msg = (allow ? "ALLOW(apply) " : "BLOCK ") + (__instance?.Def != null ? __instance.Def.name : "?") +
+                         " fid=" + (__instance != null ? __instance.FacilityId : 0) + " powered=" + powered + " from=" + caller;
+            if (_logged.Add(msg)) Debug.Log("[MP][diag] SetPowered " + msg);
+            return allow;
         }
     }
 }

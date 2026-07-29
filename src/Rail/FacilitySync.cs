@@ -18,7 +18,7 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Base-construction intent family (surface 0xB1, law 1): build / demolish-scrap / repair ride the
+    /// Base-construction intent family (surface 0xB1, law 1): build / demolish-scrap / repair / power ride the
     /// ONE generic <see cref="IntentRail"/>; the host executes the SAME native funnels the UI uses —
     /// GeoPhoenixBase.ConstructFacility (GeoPhoenixBase.cs:229, wallet take + place + under-construction),
     /// RemoveFacility (:277, scrap refund path = the UI demolish/cancel gesture) and RepairFacility
@@ -48,6 +48,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpBuild = 1;
         private const byte OpDemolish = 2;  // UI demolish/cancel-construction (scrap:true refund path)
         private const byte OpRepair = 3;
+        private const byte OpTogglePower = 4;
 
         // Blocked native body's own position derivation (UIModuleBaseLayout.ConstructFacility:459).
         private static readonly MethodInfo CoordByIdx =
@@ -60,6 +61,7 @@ namespace Multiplayer.Network.Sync
                 [OpBuild] = HandleIntent,
                 [OpDemolish] = HandleIntent,
                 [OpRepair] = HandleIntent,
+                [OpTogglePower] = HandleIntent,
             };
             IntentRail.Register(SurfaceIds.GeoBaseIntent, "base", ops);
         }
@@ -139,6 +141,31 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Power on/off gesture. Captured at the UI funnel (UIModuleBaseLayout.TogglePower:856),
+        /// which is where the native validation lives (PowerCost==0 / RemainingPower) — the model funnel
+        /// GeoPhoenixFacility.SetPowered is the class-wide BLOCK instead (ClientSimGate.FacilityPowerGate),
+        /// because every non-gesture power write (RoutePower, state-change auto-plug) also lands there and
+        /// must stay host-only. The caller TogglePowerOnSlot:850-854 still refreshes the slot widget from
+        /// the un-mutated model; the host's delta repaints it for real.</summary>
+        [HarmonyPatch(typeof(UIModuleBaseLayout), "TogglePower")]
+        internal static class TogglePowerCapturePatch
+        {
+            private static bool Prefix(UIModuleBaseLayout __instance, GeoPhoenixFacility facility)
+            {
+                if (IntentRail.ShouldRunNative()) return true;
+                try
+                {
+                    var px = __instance == null ? null : __instance.PxBase;
+                    if (facility != null && px != null && px.Site != null)
+                        IntentRail.Send(SurfaceIds.GeoBaseIntent, OpTogglePower,
+                            "power " + facility.Def.name + " fid=" + facility.FacilityId, w =>
+                            { w.Write(px.Site.SiteId); w.Write(facility.FacilityId); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][base] power capture failed: " + ex); }
+                return false;
+            }
+        }
+
         // ─── HOST: apply through the SAME native funnels (dedup/decode/reject = IntentRail) ─────
 
         private static void HandleIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -178,6 +205,17 @@ namespace Multiplayer.Network.Sync
                 if (fac.CannotDemolish)
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "cannot demolish " + fac.Def.name, "S#" + siteId); return; }
                 px.RemoveFacility(fac, scrap: true);
+            }
+            else if (op == OpTogglePower)
+            {
+                // The native gesture body (UIModuleBaseLayout.cs:856-878), replayed from HOST state — the
+                // client sends only "toggle this facility", never a target value or a power number.
+                if (fac.Def.PowerCost == 0)
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "no power switch on " + fac.Def.name, "S#" + siteId); return; }
+                if (fac.IsPowered) fac.SetPowered(powered: false);
+                else if (fac.Def.PowerCost <= px.Stats.RemainingPower) fac.SetPowered(powered: true);
+                else
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "not enough power for " + fac.Def.name, "S#" + siteId); return; }
             }
             else // OpRepair (op set is table-gated upstream)
             {

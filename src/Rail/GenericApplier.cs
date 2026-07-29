@@ -414,6 +414,12 @@ namespace Multiplayer.Network.Sync
                         // FactionRef twin: the wire carries the faction's DEF; the live member holds the
                         // GeoFaction. Unknown def → keep the live value (same L-C shape as Unresolved).
                         if (field.FactionRef && v != null && (v = RailMeta.FactionByDef(geo, v)) == null) return;
+                        // TEMP diag (power retest 2026-07-29): the host→client direction of the facility
+                        // power leaf has never been observed live. One line at the write, at delta rate
+                        // for this ONE field (Unchanged already filtered no-ops above).
+                        if (field.Name == "_isPowered")
+                            Debug.Log("[MP][diag] facility power APPLY " + path + "." + field.Name + " " +
+                                      (field.CanRead ? field.GetValue(entity) : null) + "→" + v);
                         field.SetValue(entity, v);
                         break;
                     }
