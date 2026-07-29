@@ -324,6 +324,10 @@ namespace RailCheck
                     if (nt == null || !visited.Add(nt)) continue;
                     if (nt.IsAbstract || nt.IsInterface || nt == typeof(object)) continue;
                     if (typeof(UnityEngine.Object).IsAssignableFrom(nt)) continue;
+                    // A leaf collection terminates like a leaf: the codec's TagLeafList arm rebuilds a
+                    // FRESH container (ctor + Add) instead of blob-reconstructing it, so its internals
+                    // (List<T>._items/_syncRoot) are never husks on the client.
+                    if (RailMeta.IsLeafCollection(nt)) continue;
                     if (RailMeta.IsKvpType(nt))
                     {
                         foreach (var a in nt.GetGenericArguments()) if (!RailMeta.LeafKindOf(a, out _)) queue.Enqueue(a);
@@ -516,6 +520,19 @@ namespace RailCheck
                 laws.Add("L6 entitylist-round-trip-shape: " + t.FullName + " did not come back as exactly one " + t.Name);
                 return "BADSHAPE";
             }
+            if (RailMeta.IsKvpType(t))
+            {
+                // A pair's sides are not RailFields, so the planted-leaf comparison below never sees them.
+                // This is the check that fails if the pair codec — or its leaf-collection value arm — stops
+                // carrying content.
+                var kp = t.GetProperty("Key"); var vp = t.GetProperty("Value");
+                if (!SamePairValue(kp.GetValue(src, null), kp.GetValue(back[0], null)) ||
+                    !SamePairValue(vp.GetValue(src, null), vp.GetValue(back[0], null)))
+                {
+                    laws.Add("L6 pair-round-trip: " + t.FullName + " key/value did not survive the wire");
+                    return "PAIRMISMATCH";
+                }
+            }
             foreach (var f in planted)
             {
                 object a = f.GetValue(src), b = f.GetValue(back[0]);
@@ -529,8 +546,33 @@ namespace RailCheck
         /// <summary>Headless best-effort construction of a pair side; null = cannot be built offline.</summary>
         private static object TryConstruct(Type t)
         {
+            // Leaf collection (the codec's TagLeafList value arm): seed ONE element — an EMPTY list
+            // survives even a codec that carries nothing, so it would test nothing.
+            if (RailMeta.IsLeafCollection(t))
+            {
+                var lst = (IList)Activator.CreateInstance(t);
+                var e = RailMeta.ElemTypeOf(t);
+                var sv = RailMeta.LeafKindOf(e, out var ek) ? SampleLeaf(ek, e) : null;
+                if (sv != null) lst.Add(sv);
+                return lst;
+            }
             if (!t.IsClass) return null;
             try { return Activator.CreateInstance(t, nonPublic: true); } catch { return null; }
+        }
+
+        /// <summary>Value equality for a PAIR side. A leaf collection compares element-wise (the only
+        /// check that fails if the leaf-list value arm stops carrying content); a headless-constructed
+        /// class side has no meaningful equality, so only presence is asserted.</summary>
+        private static bool SamePairValue(object a, object b)
+        {
+            if (a is IList la && b is IList lb)
+            {
+                if (la.Count != lb.Count) return false;
+                for (int i = 0; i < la.Count; i++) if (!Equals(la[i], lb[i])) return false;
+                return true;
+            }
+            if (RailMeta.LeafKindOf((a ?? b)?.GetType() ?? typeof(object), out _)) return Equals(a, b);
+            return a == null || b != null;
         }
 
         /// <summary>A deterministic non-default value for a leaf kind, or null when none can exist headless.</summary>

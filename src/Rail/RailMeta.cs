@@ -257,6 +257,34 @@ namespace Multiplayer.Network.Sync
             return rt;
         }
 
+        /// <summary>Whole-dict blob: the dict rides as ONE canonical EntityList of KeyValuePair elements.
+        /// Reached from the TWO declarations of the same state — a real IDictionary member, and the
+        /// List&lt;KeyValuePair&lt;K,V&gt;&gt; a DTO records for it — so one classification serves both.
+        /// Each side must be something the pair codec (the IsKvpType arm of EncodeValue/DecodeValue) can
+        /// actually carry: a leaf, a leaf collection, or a blob-able class — and a class side husk-gates
+        /// exactly like an EntityList element.</summary>
+        private static RailField PairBlobField(RailField f, Type kt, Type vt)
+        {
+            if (!PairSideOk(kt) || !PairSideOk(vt))
+            { f.Class = FieldClass.Excluded; f.Exclude = "dictionary with non-simple key/value (" + kt.Name + "," + vt.Name + ")"; return f; }
+            var huskSide = HuskSideOf(kt) ?? HuskSideOf(vt);
+            if (huskSide != null)
+            { f.Class = FieldClass.Excluded; f.Exclude = "dict-blob husk on " + huskSide.Name + " (" + string.Join(",", RailMeta.HuskMembers(huskSide)) + ")"; return f; }
+            f.Class = FieldClass.EntityList;
+            f.ElemType = typeof(KeyValuePair<,>).MakeGenericType(kt, vt);
+            f.KeyType = kt; f.DictValType = vt;
+            f.Unordered = true; // dict enumeration order is not state
+            return f;
+        }
+
+        private static bool PairSideOk(Type t) =>
+            RailMeta.LeafKindOf(t, out _) || RailMeta.IsLeafCollection(t) ||
+            (t.IsClass && RailMeta.HasPersistentMembers(t));
+
+        private static Type HuskSideOf(Type t) =>
+            !RailMeta.LeafKindOf(t, out _) && !RailMeta.IsLeafCollection(t) &&
+            RailMeta.HuskMembers(t).Count > 0 ? t : null;
+
         private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop = null)
         {
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo, HopFi = hop };
@@ -300,24 +328,7 @@ namespace Multiplayer.Network.Sync
                 // licenses it and ApplyList's pair route rebuilds in place; the pair codec is the
                 // IsKvpType arm of EncodeValue/DecodeValue. Each class-typed side husk-gates exactly
                 // like an EntityList element.
-                {
-                    var kOk = RailMeta.LeafKindOf(dictArgs[0], out _) || (dictArgs[0].IsClass && RailMeta.HasPersistentMembers(dictArgs[0]));
-                    var vOk = RailMeta.LeafKindOf(dictArgs[1], out _) || (dictArgs[1].IsClass && RailMeta.HasPersistentMembers(dictArgs[1]));
-                    if (kOk && vOk)
-                    {
-                        var huskSide = !RailMeta.LeafKindOf(dictArgs[0], out _) && RailMeta.HuskMembers(dictArgs[0]).Count > 0 ? dictArgs[0]
-                                     : !RailMeta.LeafKindOf(dictArgs[1], out _) && RailMeta.HuskMembers(dictArgs[1]).Count > 0 ? dictArgs[1] : null;
-                        if (huskSide != null)
-                        { f.Class = FieldClass.Excluded; f.Exclude = "dict-blob husk on " + huskSide.Name + " (" + string.Join(",", RailMeta.HuskMembers(huskSide)) + ")"; return f; }
-                        f.Class = FieldClass.EntityList;
-                        f.ElemType = typeof(KeyValuePair<,>).MakeGenericType(dictArgs[0], dictArgs[1]);
-                        f.KeyType = dictArgs[0]; f.DictValType = dictArgs[1];
-                        f.Unordered = true; // dict enumeration order is not state
-                        return f;
-                    }
-                }
-                f.Class = FieldClass.Excluded; f.Exclude = "dictionary with non-simple key/value (" + dictArgs[0].Name + "," + dictArgs[1].Name + ")";
-                return f;
+                return PairBlobField(f, dictArgs[0], dictArgs[1]);
             }
 
             // Collection?
@@ -326,6 +337,17 @@ namespace Multiplayer.Network.Sync
             {
                 if (RailMeta.IsPresentation(elem))
                 { f.Class = FieldClass.Excluded; f.Exclude = "collection of presentation-only " + elem.Name; return f; }
+                // A collection OF PAIRS is the same whole-dict blob under its other declaration: the game
+                // records a dict whose key is not a member of its value as `dict.ToList()` —
+                // List<KeyValuePair<K,V>> (GeoscapeEventSystem.RecordInstanceData:665/669
+                // CustomVariables / RemoveEventsAfterTimers). Same wire shape, same apply route (ApplyList
+                // dispatches on the LIVE container, dict or list), so it takes the same classification
+                // rather than falling through to "un-keyable element KeyValuePair`2".
+                if (RailMeta.IsKvpType(elem))
+                {
+                    var pa = elem.GetGenericArguments();
+                    return PairBlobField(f, pa[0], pa[1]);
+                }
                 if (RailMeta.LeafKindOf(elem, out _))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
@@ -674,6 +696,7 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
+            { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.RemoveEventsAfterTimers", "_removeEventsAfterTimerExpires" }, // GeoscapeEventSystem.RecordInstanceData:669 — DTO name is not the storage name and no convention reaches it
         };
 
         /// <summary>Resolve a bridge member name onto the live type: explicit twin alias first (the game's
@@ -763,8 +786,15 @@ namespace Multiplayer.Network.Sync
             // Licensed only when the dict key is re-derivable from the element: exactly ONE serialized
             // element member of the key type (DictKeyMember — EventId / GeoEventTimer.ID). The walk
             // enumerates Values (EncodeEntityList), the apply rebuilds entries keyed by that member.
+            // …or a DTO List<KeyValuePair<K,V>> — the game's OTHER dict record shape, used when the key is
+            // NOT a member of the value so nothing could re-derive it (GeoscapeEventSystem.
+            // RecordInstanceData:665 `_customVariables.ToList()`, :669 the same for the timer→events map).
+            // The pairs carry the key themselves, so no DictKeyMember is needed; BuildField classifies both
+            // declarations into the identical whole-dict blob (PairBlobField).
             var da = GenericInterfaceArgs(liveT, typeof(IDictionary<,>));
-            if (da != null) return da[1] == de && DictKeyMember(de, da[0]) != null;
+            if (da != null)
+                return de == typeof(KeyValuePair<,>).MakeGenericType(da[0], da[1]) ||
+                       (da[1] == de && DictKeyMember(de, da[0]) != null);
             return !liveT.IsArray &&
                    ElemTypeOf(liveT) == de &&
                    GenericInterfaceArgs(dtoT, typeof(IDictionary<,>)) == null &&
@@ -841,6 +871,16 @@ namespace Multiplayer.Network.Sync
             if (t.IsArray) return t.GetElementType();
             var args = GenericInterfaceArgs(t, typeof(IEnumerable<>));
             return args?[0];
+        }
+
+        /// <summary>A rebuildable collection of LEAF elements (List&lt;string&gt;) — carryable as a naked
+        /// VALUE by the TagLeafList arm of EncodeValue/DecodeValue, not only as a LeafList FIELD. Non-array
+        /// IList only: decode reconstructs it with the parameterless ctor + Add.</summary>
+        internal static bool IsLeafCollection(Type t)
+        {
+            if (t.IsArray || !typeof(IList).IsAssignableFrom(t)) return false;
+            var e = ElemTypeOf(t);
+            return e != null && LeafKindOf(e, out _);
         }
 
         internal static bool IsSimpleKey(Type t) =>
@@ -1476,6 +1516,21 @@ namespace Multiplayer.Network.Sync
                 EncodeValue(w, ser, ka[1], declared.GetProperty("Value").GetValue(v, null), locals, depth + 1);
                 return;
             }
+            if (IsLeafCollection(declared))
+            {
+                // A leaf collection as a naked VALUE (a pair side, a create-param): the same shape
+                // FieldClass.LeafList carries for a MEMBER, minus the RailField. Order is written as-is —
+                // a naked value has no Unordered flag, and every occupant is a List<T> whose order the
+                // game itself wrote (GeoscapeEventSystem._removeEventsAfterTimerExpires' List<string>).
+                var le = ElemTypeOf(declared);
+                var items = new List<object>();
+                foreach (var e in (IEnumerable)v) items.Add(e);
+                if (items.Count > ushort.MaxValue) throw new InvalidOperationException("leaf list too large (" + items.Count + ")");
+                w.Write(TagLeafList);
+                w.Write((ushort)items.Count);
+                foreach (var e in items) EncodeLeaf(w, le, e);
+                return;
+            }
             for (int i = 0; i < locals.Count; i++)
                 if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
             var t = v.GetType();
@@ -1687,6 +1742,19 @@ namespace Multiplayer.Network.Sync
                         return Activator.CreateInstance(declared, k, val);
                     }
                     return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
+                case TagLeafList:
+                {
+                    var le = ElemTypeOf(declared);
+                    if (le == null) throw new IOException("blob leaf-list tag on non-collection " + declared.Name);
+                    int n = r.ReadUInt16();
+                    var lst = Activator.CreateInstance(declared, true) as IList;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var e = DecodeLeaf(r, le, geo);
+                        if (lst != null && !ReferenceEquals(e, Unresolved)) lst.Add(e);
+                    }
+                    return lst;
+                }
                 default: throw new IOException("bad blob tag " + tag);
             }
         }
