@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -106,6 +106,51 @@ namespace Multiplayer.Network.Sync
         /// their membership from the create/destroy set-diff, so the order-vector must stay order-only
         /// for them (vector-driven removal would also delete the client's corridors — per-peer ids).</summary>
         internal static bool IsStructuralElemType(Type t) => t != null && StructuralElemTypes.Contains(t);
+
+        // A Descend FIELD going null↔non-null is the THIRD structural shape — neither a root key nor a
+        // keyed-collection element, and the one the set-diff had no representation for. Untreated it is a
+        // silent swallow in BOTH directions: on null→obj every value entry under the path dies at
+        // GenericApplier's "entity not found" (the object it addresses does not exist on the client), and
+        // on obj→null NOTHING is emitted at all — the tombstone loop only ever deletes dict SUBkeys
+        // (:467-468), so a vanished path leaves the client's object in place forever. Recording the child
+        // path in VisitEntity's Descend arm makes both directions fall out of the identical _prevRoots
+        // comparison in EmitStructural, with no new message kind.
+        //
+        // Gated on the DECLARED field type, so one row covers a whole abstract family (GeoMission has 12
+        // concretions; a runtime-type set would have to list them all). GeoMission: plain class
+        // (decompile GeoMission.cs:44), every classified member covered by the value rail
+        // (docs/rail-baseline.txt), client wiring = the game's OWN load path
+        // (GeoSite.ProcessInstanceData:1621-1631 — see GenericApplier.ApplyDescendCreate).
+        private static readonly Type[] StructuralDescendKindTable =
+        {
+            typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
+        };
+        private static readonly HashSet<Type> StructuralDescendTypes = new HashSet<Type>(StructuralDescendKindTable);
+
+        /// <summary>The declaration above, for RailCheck L29 and its closure seed — ONE table, so a new
+        /// row cannot land with the harness still sweeping the old set (same contract as
+        /// <see cref="IdentityResolver.RootKinds"/>).</summary>
+        internal static Type[] StructuralDescendKinds => StructuralDescendKindTable;
+        internal static bool IsStructuralDescendType(Type t) => t != null && StructuralDescendTypes.Contains(t);
+
+        /// <summary>ONE definition of the three structural path shapes, read by the host emit AND the
+        /// client apply (two copies would be free to disagree — the GeoItem/TypeKeyable bug shape):
+        /// root key = no '.', keyed-collection ELEMENT = the last segment carries '#', Descend FIELD =
+        /// neither. The shape decides the CREATE payload: a Descend field ships its concrete TYPE NAME,
+        /// not a native graph blob, because the blob is not expressible here — a mission's serialized
+        /// members include `Site` (GeoSite) and `_stealAircraft` (GeoVehicle), both MonoBehaviour-bound
+        /// actors with [SerializeCustomCreate] spawners, so decoding such a blob would CREATE duplicate
+        /// site/vehicle actors on the client (law 3: never replace a MonoBehaviour-bound instance). The
+        /// type name is enough because the field's own value entries ride the SAME batch immediately
+        /// behind the create packet (EmitStructural runs before Emit), and the rail covers the whole
+        /// object — including `Site`, which classifies as a stable-id Leaf/EntityRef, not a walk-into.
+        /// A type name on this wire is the existing convention, not a new concept: kind defs already
+        /// ship Type.FullName (:1095) and the client resolves them with AccessTools.TypeByName.</summary>
+        internal static bool IsDescendPath(string key)
+        {
+            int d = key.LastIndexOf('.');
+            return d > 0 && key.IndexOf('#', d) < 0;
+        }
         private static readonly Dictionary<string, object> _walkRoots = new Dictionary<string, object>(StringComparer.Ordinal);
         private static readonly HashSet<string> _prevRoots = new HashSet<string>(StringComparer.Ordinal);
         private static bool _rootsSeeded;
@@ -755,8 +800,16 @@ namespace Multiplayer.Network.Sync
                         break;
                     }
                     case FieldClass.Descend:
-                        if (val != null) VisitEntity(path + "." + f.Name, val, visited, ordered, snap, depth + 1);
+                    {
+                        if (val == null) break;   // absent from _walkRoots ⇒ the set-diff reads it as destroyed
+                        var descendPath = path + "." + f.Name;
+                        // Structural set-diff for a nullable Descend field (see StructuralDescendTypes).
+                        // !_crcWalk for the same reason as the element arm: the CRC walk must ship nothing
+                        // and touch no tick state.
+                        if (!_crcWalk && StructuralDescendTypes.Contains(f.ValueType)) _walkRoots[descendPath] = val;
+                        VisitEntity(descendPath, val, visited, ordered, snap, depth + 1);
                         break;
+                    }
                     case FieldClass.EntityList:
                         // Keyless-element list: the WHOLE list is one canonical value blob (order inside
                         // the payload — law 2 forbids element indices in the path, so no key is needed).
@@ -1032,10 +1085,15 @@ namespace Multiplayer.Network.Sync
                         Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
                     continue;
                 }
-                var blob = Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true);
+                // Payload per path shape (IsDescendPath): a Descend field ships its concrete type name,
+                // everything else the native graph blob.
+                var blob = IsDescendPath(kv.Key)
+                    ? Encoding.UTF8.GetBytes(kv.Value.GetType().FullName)
+                    : Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true);
                 if (blob == null || blob.Length == 0)
                 {
-                    Debug.LogError("[Multiplayer][rail] structural: blob for '" + kv.Key + "' failed — retrying next walk");
+                    Debug.LogError("[Multiplayer][rail] structural: payload for '" + kv.Key + "' (" +
+                                   kv.Value.GetType().Name + ") failed — retrying next walk");
                     continue; // NOT added to _prevRoots → re-detected next cycle
                 }
                 SendStructural(engine, 1, kv.Key, blob, ref packets, ref bytes);

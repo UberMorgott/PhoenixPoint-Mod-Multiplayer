@@ -206,7 +206,16 @@ namespace Multiplayer.Network.Sync
                     using (SyncApplyScope.Enter())
                     {
                         var existing = IdentityResolver.Resolve(geo, rootKey, null);
-                        if (rootKey.IndexOf('.') >= 0)
+                        if (DiffEngine.IsDescendPath(rootKey))
+                        {
+                            // Descend FIELD (S#<id>.SerializationData.ActiveMission): the third shape.
+                            // Payload = the concrete type name; the field's values ride the next packet.
+                            if (op == 1 && existing == null)
+                                created = ApplyDescendCreate(geo, rootKey, blob, touched);
+                            else if (op == 2 && existing != null)
+                                ApplyDescendDestroy(geo, rootKey, touched);
+                        }
+                        else if (rootKey.IndexOf('.') >= 0)
                         {
                             // Keyed-collection ELEMENT (…Layout._facilities#<id>): same set-diff wire,
                             // element-specific native wiring below.
@@ -257,6 +266,118 @@ namespace Multiplayer.Network.Sync
                 if (created)
                     RequestResync(engine, "structural create backfill"); // ref-lists shipped pre-create reconverge
             }
+        }
+
+        // ─── Descend-field wiring (structural create/destroy for a field going null↔non-null) ───
+        // The generic half — owner + field resolution + construction — carries no subsystem knowledge;
+        // only the post-assign NATIVE wiring is per-owner, exactly like the facility pair below (the
+        // game's own load path differs per type, and re-deriving it is what keeps the client a mirror).
+
+        /// <summary>Owner path + member name of a Descend path (`S#12.SerializationData.ActiveMission`
+        /// → `S#12.SerializationData`, `ActiveMission`). The owner resolves to the LIVE entity even when
+        /// the trailing segments are a recorded-DTO twin (IdentityResolver keeps `cur` on the live actor
+        /// and only re-keys the member lookup), so the field must be looked up in the DIRECT table first
+        /// and the bridged twin table second — the same two rungs ApplyEntry uses at :373-385.</summary>
+        private static bool ResolveDescendTarget(GeoLevelController geo, string rootKey, out object owner, out RailField field)
+        {
+            owner = null; field = null;
+            int d = rootKey.LastIndexOf('.');
+            if (d <= 0) return false;
+            var name = rootKey.Substring(d + 1);
+            owner = IdentityResolver.Resolve(geo, rootKey.Substring(0, d), null);
+            if (owner == null) return false;
+            field = RailType.Get(owner.GetType())?.FieldByName(name);
+            if (field == null)
+            {
+                var dto = RailMeta.FindBridge(owner.GetType());
+                field = dto == null ? null : RailType.GetBridged(owner.GetType(), dto)?.FieldByName(name);
+            }
+            return field != null && field.Class == FieldClass.Descend;
+        }
+
+        // GeoSite.RegisterMission (private, GeoSite.cs:787) — the load path's own mission wiring:
+        // subscribes OnMissionActivated/PreApplyResult/Completed/Cancel and raises SiteMissionStarted,
+        // which is what repaints the site's geoscape marker natively. EXACT param type (law 5): the real
+        // parameter is GeoMission, and AccessTools.Method matches Type[] exactly — a base would bind null.
+        private static readonly MethodInfo SiteRegisterMission = AccessTools.Method(
+            typeof(PhoenixPoint.Geoscape.Entities.GeoSite), "RegisterMission",
+            new[] { typeof(PhoenixPoint.Geoscape.Entities.GeoMission) });
+
+        /// <summary>Construct the object the host reports as newly non-null and hand it to the owner's
+        /// native load wiring. Construction is the game's OWN: its `[SerializeCustomCreate]` static
+        /// (GeoHavenDefenseMission.cs:156-160 `new GeoHavenDefenseMission(null, null, null)` — most
+        /// mission subclasses have NO parameterless ctor, so this rung is load-bearing, not a nicety),
+        /// else `Activator.CreateInstance(nonPublic)` — the identical two-rung order the blob codec
+        /// already uses (RailMeta.DecodeObjectBody:1892-1911). No field is filled here: the value entries
+        /// for this path ride the very next packet of the same batch, and the rail covers every
+        /// classified member of every mission subclass.
+        ///
+        /// `Site` is assigned directly rather than waited for. It IS rail-covered (Leaf/EntityRef) and
+        /// would arrive one packet later, but the game's own load path assigns it BEFORE registering
+        /// (GeoSite.cs:1628) and the native subscribers raised by RegisterMission read it — so this
+        /// closes the one-packet window instead of NRE-ing inside it. Same value either way.
+        ///
+        /// Deliberately NOT replayed from GeoSite.cs:1630: `(mission as GeoUpdateableMission)
+        /// .ResumeUpdating(Timing)`. That starts the mission's own updateable on the client, i.e. local
+        /// sim over state the host already ships (`SerializedNextUpdate`, `_status` are covered leaves) —
+        /// law 3. The client stays a projector; the countdown it shows is the host's.</summary>
+        private static bool ApplyDescendCreate(GeoLevelController geo, string rootKey, byte[] blob, HashSet<object> touched)
+        {
+            if (!ResolveDescendTarget(geo, rootKey, out var owner, out var field))
+            { LogMissOnce("descend owner/field unresolved at " + rootKey + " — create skipped"); return false; }
+            var typeName = blob == null || blob.Length == 0 ? null : Encoding.UTF8.GetString(blob);
+            var t = string.IsNullOrEmpty(typeName) ? null : AccessTools.TypeByName(typeName);
+            if (t == null || !field.ValueType.IsAssignableFrom(t))
+            {
+                LogMissOnce("descend create at " + rootKey + ": payload type '" + (typeName ?? "<empty>") +
+                            "' " + (t == null ? "unresolvable" : "is not a " + field.ValueType.Name) + " — skipped");
+                return false;
+            }
+            object made;
+            try { made = RailMeta.ConstructLikeLoad(t); }
+            catch (Exception ex)
+            { LogMissOnce("descend create at " + rootKey + ": " + t.Name + " construction threw " + ex.GetType().Name + " — skipped"); return false; }
+            if (made == null) { LogMissOnce("descend create at " + rootKey + ": " + t.Name + " could not be constructed — skipped"); return false; }
+            // Law 1: the ONE thing this payload shape cannot carry gets a line, not silence. A custom
+            // create's params are WriteOnly members — outside SerializedMembers, so the value rail will
+            // never fill them either (RailCheck L29 names the same types statically).
+            var cp = RailMeta.CreateParamNames(t);
+            if (cp.Length > 0)
+                LogMissOnce("descend create at " + rootKey + ": " + t.Name + " has custom-create params (" +
+                            string.Join(",", cp) + ") that a type-name payload cannot carry — they arrive NULL");
+
+            field.SetValue(owner, made);
+            if (owner is PhoenixPoint.Geoscape.Entities.GeoSite site &&
+                made is PhoenixPoint.Geoscape.Entities.GeoMission mission)
+            {
+                if (SiteRegisterMission == null)
+                { LogMissOnce("GeoSite.RegisterMission handle unresolved — mission wired but not registered"); }
+                else
+                {
+                    mission.Site = site;                                  // GeoSite.cs:1628
+                    SiteRegisterMission.Invoke(site, new object[] { mission }); // GeoSite.cs:1629
+                }
+            }
+            else LogMissOnce("descend create at " + rootKey + ": no native wiring for " +
+                             owner.GetType().Name + "." + field.Name + " — field assigned RAW");
+            touched.Add(owner);
+            OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
+            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
+            return true;
+        }
+
+        /// <summary>The host's field went null — clear the client's. This is the half that used to vanish
+        /// with no entry, no tombstone and no log line (RCA gap B1/B2). Nothing to un-wire: the
+        /// subscriptions RegisterMission created live ON the dropped object, and the client never resumed
+        /// its updateable, so there is no EndUpdating to mirror (GeoSite.cs:1070).</summary>
+        private static void ApplyDescendDestroy(GeoLevelController geo, string rootKey, HashSet<object> touched)
+        {
+            if (!ResolveDescendTarget(geo, rootKey, out var owner, out var field))
+            { LogMissOnce("descend owner/field unresolved at " + rootKey + " — destroy skipped"); return; }
+            field.SetValue(owner, null);
+            touched.Add(owner);
+            OpenUiRepaint.MarkDirty();
+            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
         }
 
         // ─── Facility element wiring (structural create/destroy for …Layout._facilities#<id>) ───

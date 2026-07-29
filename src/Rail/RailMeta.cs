@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -1362,6 +1362,42 @@ namespace Multiplayer.Network.Sync
             }
             _createInfoCache[t] = ci;
             return ci;
+        }
+
+        private static readonly string[] _noCreateParams = new string[0];
+
+        /// <summary>The `[SerializeCustomCreate]` parameter members of <paramref name="t"/> — empty when
+        /// the type has no custom create. These are WriteOnly members: the blob codec ships them as ctor
+        /// ARGUMENTS (GeoItem's ItemDef), but a structural payload that carries only a TYPE NAME
+        /// (<c>DiffEngine.IsDescendPath</c>) cannot, and the value rail never will either — WriteOnly is
+        /// outside <c>SerializedMembers</c>. So for a structural Descend create these are exactly the
+        /// members that arrive NULL. ONE table (<see cref="CreateInfoOf"/>) behind both the applier's log
+        /// line and RailCheck L29, so the runtime warning and the static law cannot drift apart.</summary>
+        internal static string[] CreateParamNames(Type t)
+        {
+            var ser = GameSerializer;
+            var ci = ser == null ? null : CreateInfoOf(ser, t);
+            if (ci == null || ci.Params.Length == 0) return _noCreateParams;
+            var names = new string[ci.Params.Length];
+            for (int i = 0; i < names.Length; i++) names[i] = ci.Params[i]?.Name ?? "?";
+            return names;
+        }
+
+        /// <summary>Construct an instance the way the game's own LOAD does — the identical two rungs in
+        /// the identical order as the blob codec (<see cref="DecodeObjectBody"/>): the type's
+        /// `[SerializeCustomCreate]` static first, `Activator.CreateInstance(nonPublic)` only as the
+        /// fallback. The first rung is load-bearing rather than a nicety: most `GeoMission` subclasses
+        /// have NO parameterless ctor at all, and their custom create IS their construction path
+        /// (decompile GeoHavenDefenseMission.cs:156-160 → `new GeoHavenDefenseMission(null, null, null)`).
+        /// Create params are passed null — <see cref="CreateParamNames"/> is what that costs. Throws
+        /// (MissingMethodException) when neither rung applies; the caller logs and declines.</summary>
+        internal static object ConstructLikeLoad(Type t)
+        {
+            var ser = GameSerializer;
+            var ci = ser == null ? null : CreateInfoOf(ser, t);
+            return ci != null
+                ? ci.Method.Invoke(new object[ci.Params.Length + 1]) // [0] = SerializedObjectData
+                : Activator.CreateInstance(t, true);
         }
 
         internal static object GetMemberValue(MemberInfo mi, object o) =>
