@@ -455,7 +455,7 @@ namespace Multiplayer.Network.Sync
 
             // Plain object ref?
             if (valType == typeof(object) || valType.IsInterface)
-            { f.Class = FieldClass.Excluded; f.Exclude = "untyped/interface member"; return f; }
+            { f.Class = FieldClass.Excluded; f.Exclude = RailMeta.UntypedMemberExclusion; return f; }
             if (typeof(UnityEngine.Object).IsAssignableFrom(valType))
             { f.Class = FieldClass.Excluded; f.Exclude = "Unity scene object"; return f; }
             if (valType.IsClass && RailMeta.HasPersistentMembers(valType))
@@ -2155,7 +2155,7 @@ namespace Multiplayer.Network.Sync
                 {
                     var locals = new List<object>();
                     var fixups = new List<Fixup>();
-                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0);
+                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0, new List<OwnerFrame>());
                     foreach (var fx in fixups)
                     {
                         try { fx.Field.SetValue(fx.Target, locals[fx.Idx]); }
@@ -2203,7 +2203,7 @@ namespace Multiplayer.Network.Sync
         }
 
         private static object DecodeValue(BinaryReader r, Serializer ser, Type declared, GeoLevelController geo,
-                                          List<object> locals, List<Fixup> fixups, int depth)
+                                          List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain)
         {
             byte tag = r.ReadByte();
             switch (tag)
@@ -2224,14 +2224,14 @@ namespace Multiplayer.Network.Sync
                     if (IsKvpType(declared))
                     {
                         var ka = declared.GetGenericArguments();
-                        var k = DecodeValue(r, ser, ka[0], geo, locals, fixups, depth);
-                        var val = DecodeValue(r, ser, ka[1], geo, locals, fixups, depth);
+                        var k = DecodeValue(r, ser, ka[0], geo, locals, fixups, depth, chain);
+                        var val = DecodeValue(r, ser, ka[1], geo, locals, fixups, depth, chain);
                         // Unresolved on either side poisons the pair — the applier drops it (never a
                         // null-keyed dict entry); the host's next change re-ships the whole dict anyway.
                         if (ReferenceEquals(k, Unresolved) || ReferenceEquals(val, Unresolved) || k == null) return Unresolved;
                         return Activator.CreateInstance(declared, k, val);
                     }
-                    return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth);
+                    return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth, chain);
                 case TagLeafList:
                 {
                     var le = ElemTypeOf(declared);
@@ -2250,10 +2250,14 @@ namespace Multiplayer.Network.Sync
         }
 
         private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
-                                               List<object> locals, List<Fixup> fixups, int depth)
+                                               List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain)
         {
             int myIdx = locals.Count;
             locals.Add(null); // placeholder: mirrors encode registration order; backfilled after construction
+            // This frame joins the owner chain BEFORE its create params are read: a create param is decoded
+            // while its owner does not exist yet (GeoItem's CommonItemData is exactly that), so the chain
+            // carries local INDICES, not objects, and the re-wire is a deferred fixup like every back-ref.
+            chain.Add(new OwnerFrame { Idx = myIdx, Type = t });
 
             int cpCount = r.ReadByte();
             var ci = CreateInfoOf(ser, t);
@@ -2263,7 +2267,7 @@ namespace Multiplayer.Network.Sync
                 var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
                 for (int i = 0; i < cpCount; i++)
                 {
-                    var a = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1);
+                    var a = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1, chain);
                     // Unresolved ref as a create arg: pass null (fresh construction, nothing clobbered) —
                     // the sentinel itself would throw a type mismatch inside the create method.
                     args[i + 1] = ReferenceEquals(a, Unresolved) ? null : a;
@@ -2273,12 +2277,15 @@ namespace Multiplayer.Network.Sync
             }
             else
             {
-                for (int i = 0; i < cpCount; i++) DecodeValue(r, ser, typeof(object), geo, locals, fixups, depth + 1); // drift: consume
+                for (int i = 0; i < cpCount; i++) DecodeValue(r, ser, typeof(object), geo, locals, fixups, depth + 1, chain); // drift: consume
                 o = Activator.CreateInstance(t, true);
             }
             locals[myIdx] = o;
 
             var rt = RailType.Get(t);
+            // Which field indices the wire actually carried — the owner re-wire below must never overwrite
+            // one. Allocated only for the types that HAVE such a member (nothing else can be overwritten).
+            var arrived = HasOwnerBackRef(rt) ? new List<int>() : null;
             int fCount = r.ReadByte();
             for (int i = 0; i < fCount; i++)
             {
@@ -2303,7 +2310,7 @@ namespace Multiplayer.Network.Sync
                         fixups.Add(new Fixup { Target = o, Field = f, Idx = r.ReadUInt16() });
                         break;
                     case TagBlob:
-                        f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1));
+                        f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1, chain));
                         break;
                     case TagList:
                     {
@@ -2311,7 +2318,7 @@ namespace Multiplayer.Network.Sync
                         int en = r.ReadUInt16();
                         var elems = new List<object>(en);
                         for (int j = 0; j < en; j++)
-                            elems.Add(DecodeValue(r, ser, f.ElemType, geo, locals, fixups, depth + 1));
+                            elems.Add(DecodeValue(r, ser, f.ElemType, geo, locals, fixups, depth + 1, chain));
                         ApplyList(o, f, elems);
                         break;
                     }
@@ -2339,15 +2346,84 @@ namespace Multiplayer.Network.Sync
                         for (int j = 0; j < dn; j++)
                         {
                             var key = DecodeDictKey(r.ReadString(), f.KeyType);
-                            var dv = DecodeValue(r, ser, f.DictValType, geo, locals, fixups, depth + 1);
+                            var dv = DecodeValue(r, ser, f.DictValType, geo, locals, fixups, depth + 1, chain);
                             if (dict != null && !ReferenceEquals(dv, Unresolved)) dict[key] = dv;
                         }
                         break;
                     }
                     default: throw new IOException("bad blob field tag " + tag);
                 }
+                arrived?.Add(idx);
             }
+            RewireOwnerBackRefs(o, rt, chain, fixups, arrived);
+            // Leaving the frame. No try/finally: a throw here aborts the WHOLE element decode (the caller
+            // skips the field and logs), and the chain is per-element scratch that goes with it.
+            chain.RemoveAt(chain.Count - 1);
             return o;
+        }
+
+        /// <summary>One frame of the blob decode's owner chain: which LOCAL the frame will be, and its
+        /// declared type. Declared is exact here — <see cref="EncodeValue"/> refuses a runtime/declared
+        /// mismatch outright, so a blob body's type is never a subtype surprise.</summary>
+        private struct OwnerFrame { public int Idx; public Type Type; }
+
+        private static readonly Dictionary<Type, bool> _ownerBackRefCache = new Dictionary<Type, bool>();
+
+        /// <summary>Does a blob of this type have any member the owner re-wire must fill? Cached beside the
+        /// (already cached) table so the common answer — no — costs one hash lookup per decoded object.</summary>
+        private static bool HasOwnerBackRef(RailType rt)
+        {
+            if (rt == null) return false;
+            if (_ownerBackRefCache.TryGetValue(rt.Type, out var v)) return v;
+            v = false;
+            foreach (var f in rt.Fields) if (SalvagesOwnerBackRef(rt.Type, f)) { v = true; break; }
+            _ownerBackRefCache[rt.Type] = v;
+            return v;
+        }
+
+        /// <summary>THE generic owner back-reference re-wire (salvage case (c)): a child's pointer back at the
+        /// object that owns it is restored from the frame the decode is nested in, for every type, with no
+        /// per-type table.
+        ///
+        /// Why it cannot come off the wire alone: the encode side (<see cref="EncodeObjectBody"/>'s case (b))
+        /// only writes a back-ref when the host instance's pointer HAPPENS to aim at another object already
+        /// registered in this blob. That is a property of the host's heap, not of the blob's shape — so the
+        /// husk gate could never count it, and both `CommonItemData.OwnerItem` and `AmmoManager.ParentItem`
+        /// stood as baselined L15 violations (43ac747). Here the wiring is a property of the DECODE: the
+        /// owning frame is known by construction, whatever the host shipped.
+        ///
+        /// "The owner" = the NEAREST enclosing frame whose type is assignable to the member — nearest, not
+        /// root, and not the immediate parent either: `AmmoManager.ParentItem` (ICommonItem) hangs under
+        /// `CommonItemData`, which is NOT an ICommonItem, and one frame further up sits the `GeoItem` that is.
+        /// A sibling local can look assignable and is never consulted, which is exactly why this walks the
+        /// chain and not the flat `locals` list.
+        ///
+        /// The wire always wins: a field the blob actually carried (case (a) leaf, case (b) back-ref) is left
+        /// alone. And a member with no assignable owner above it is NAMED, once, per type+member — it is the
+        /// one shape that still lands null, and RailCheck's L15 owner-back-ref arm proves statically that no
+        /// such shape exists in the closure the gate licenses.</summary>
+        private static void RewireOwnerBackRefs(object o, RailType rt, List<OwnerFrame> chain,
+                                                List<Fixup> fixups, List<int> arrived)
+        {
+            if (o == null || !HasOwnerBackRef(rt)) return;
+            for (int i = 0; i < rt.Fields.Count; i++)
+            {
+                var f = rt.Fields[i];
+                if (!SalvagesOwnerBackRef(rt.Type, f) || (arrived != null && arrived.Contains(i))) continue;
+                int owner = -1;
+                for (int c = chain.Count - 2; c >= 0 && owner < 0; c--) // -2: this frame is the child itself
+                    if (f.ValueType.IsAssignableFrom(chain[c].Type)) owner = chain[c].Idx;
+                if (owner < 0)
+                {
+                    var above = new System.Text.StringBuilder();
+                    for (int c = 0; c < chain.Count - 1; c++) above.Append(c > 0 ? " -> " : "").Append(chain[c].Type.Name);
+                    WarnOnce("blob: " + rt.Type.Name + "." + f.Name + " (" + f.ValueType.Name + ") is an owner " +
+                             "back-ref with no assignable owner above it (" +
+                             (above.Length == 0 ? "<blob root>" : above.ToString()) + ") — it stays NULL on the client");
+                    continue;
+                }
+                fixups.Add(new Fixup { Target = o, Field = f, Idx = owner });
+            }
         }
 
         /// <summary>Reference-typed members of a type that a BLOB of it would NOT carry. The codec builds
@@ -2364,10 +2440,68 @@ namespace Multiplayer.Network.Sync
         /// fields only (<see cref="EncodeObjectBody"/>'s Excluded case (a)). <see cref="HuskMembers"/> must
         /// ask the exact same question — it used to count ANY initonly field as carried, so an initonly
         /// NON-leaf ref member would slip the husk gate and still land null on the client. (Salvage case (b),
-        /// the in-blob back-ref, is instance-dependent and deliberately NOT counted: the gate stays
-        /// conservative — absent from the gate ⇒ reported as husk.)</summary>
+        /// the ENCODE-side reference match, stays uncounted: it depends on the host instance's own pointer
+        /// happening to aim at another object in this blob. What IS counted is case (c),
+        /// <see cref="SalvagesOwnerBackRef"/> — a DECODE-side property that holds whatever the host shipped.)</summary>
         private static bool SalvagesInitOnlyLeaf(RailField f) =>
             f.Fi != null && f.Fi.IsInitOnly && LeafKindOf(f.ValueType, out _);
+
+        /// <summary>The exclusion reason for a member the classifier cannot type (an interface or bare
+        /// <c>object</c>). A const rather than a literal because <see cref="SalvagesOwnerBackRef"/> keys on
+        /// exactly THIS refusal and no other: an interface member excluded one rung earlier (a declared
+        /// opt-out, unreadable, no live member) is a reviewed decision the re-wire must not override.</summary>
+        internal const string UntypedMemberExclusion = "untyped/interface member";
+
+        /// <summary>Salvage case (c): an untypeable reference member that the blob decoder re-wires as an
+        /// OWNER BACK-REF — the child points back at the object it hangs under, and the decode knows that
+        /// object because it is the frame it is nested in (<see cref="RewireOwnerBackRefs"/>).
+        ///
+        /// This is what makes such a member CARRIED for the husk gate, and it is a class, not a pair of
+        /// names: `CommonItemData.OwnerItem` and `AmmoManager.ParentItem` (both `ICommonItem`) are simply the
+        /// first two occupants. Neither is set by anything but a ctor (CommonItemData.SetOwnerItem :53/:72,
+        /// AmmoManager :26), neither type has a PostRead, the client's own create is
+        /// `new GeoItem(ItemDef, CommonItemData)` (GeoItem.cs:42-46) which does NOT call SetOwnerItem, and
+        /// both are dereferenced on first use (CommonItemData.ItemDef => OwnerItem.ItemDef :31,
+        /// ParentItem.ItemDef :32/:82/:106) — so a null one is an NRE in the item/equipment path, not a
+        /// cosmetic gap.
+        ///
+        /// Counting it is honest only while an assignable owner really is above it on EVERY blob path; that
+        /// is a static reachability question the runtime cannot answer, so RailCheck's L15 owner-back-ref arm
+        /// answers it (same division of labour as L16 and the OwnerPostReadWaiver marker). Where the decoder
+        /// finds no owner it says so, named, and leaves the member null.
+        ///
+        /// A member the type's own CUSTOM CREATE fills is NOT one of these, and the exclusion is not cosmetic:
+        /// `PartyDiplomacy+Relation._thisParty/._withParty` (both `IDiplomaticPartyKey`) are the two parties of
+        /// a relation, not a pointer at an owner — nothing above a Relation is a party — and the L15 arm caught
+        /// exactly that when this predicate first went in without the guard. The create packet already carries
+        /// them (the same reason <see cref="HuskScan"/>'s reflection loop skips create-param TYPES), so
+        /// re-wiring would overwrite a correct value with the wrong object, or warn about a hole that is
+        /// filled.</summary>
+        internal static bool SalvagesOwnerBackRef(Type owner, RailField f) =>
+            f.Class == FieldClass.Excluded && f.Exclude == UntypedMemberExclusion && f.IsWritable() &&
+            !CreateParamTypes(owner).Contains(f.ValueType);
+
+        private static readonly Dictionary<Type, HashSet<Type>> _createParamTypes = new Dictionary<Type, HashSet<Type>>();
+
+        /// <summary>The member TYPES a type's `[SerializeCustomCreate]` fills — which field each param lands in
+        /// is not knowable, but its type is (see <see cref="HuskScan"/>'s own use of this). Empty for the
+        /// normal case.</summary>
+        private static HashSet<Type> CreateParamTypes(Type t)
+        {
+            if (t == null) return _noCreateParamTypes;
+            if (_createParamTypes.TryGetValue(t, out var set)) return set;
+            var ser = GameSerializer;
+            if (ser == null) return _noCreateParamTypes; // pre-init: don't cache the miss
+            set = new HashSet<Type>();
+            var ci = CreateInfoOf(ser, t);
+            if (ci != null)
+                foreach (var p in ci.Params)
+                    if (p != null) set.Add(MemberType(p));
+            _createParamTypes[t] = set;
+            return set;
+        }
+
+        private static readonly HashSet<Type> _noCreateParamTypes = new HashSet<Type>();
 
         internal static List<string> HuskMembers(Type t)
         {
@@ -2394,7 +2528,7 @@ namespace Multiplayer.Network.Sync
             var rt = RailType.Get(t);
             if (rt != null)
                 foreach (var f in rt.Fields)
-                    if (f.Class != FieldClass.Excluded || SalvagesInitOnlyLeaf(f)) carried.Add(f.Name);
+                    if (f.Class != FieldClass.Excluded || SalvagesInitOnlyLeaf(f) || SalvagesOwnerBackRef(t, f)) carried.Add(f.Name);
                     else refused.Add(f.Name);
             // ALL modes on purpose (not SerializedMembers, which keeps ReadWrite only): a WriteOnly member is
             // a custom-create PARAMETER, and the blob does carry those — GeoItem's ItemDef rides as a ctor arg.
@@ -2421,11 +2555,7 @@ namespace Multiplayer.Network.Sync
             // would drop all six GeoCharacter item lists. Which field a param fills is not knowable, but its
             // TYPE is — so a field whose type is a create param's type counts as carried. Scoped to create
             // params ONLY: same-type matching in general would erase real husks (BaseStat.Owner).
-            var createParamTypes = new HashSet<Type>();
-            var ci = CreateInfoOf(ser, t);
-            if (ci != null)
-                foreach (var p in ci.Params)
-                    if (p != null) createParamTypes.Add(MemberType(p));
+            var createParamTypes = CreateParamTypes(t);
 
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)

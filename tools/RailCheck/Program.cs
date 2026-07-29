@@ -76,6 +76,7 @@ namespace RailCheck
             laws.AddRange(RoundTrip());
             laws.AddRange(ValueRecordLaw());
             laws.AddRange(TextBindCodecLaw());
+            laws.AddRange(OwnerBackRefCodecLaw());
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
@@ -408,6 +409,16 @@ namespace RailCheck
                 var visited = new HashSet<Type>();
                 var queue = new Queue<Type>(l15Seeds);
                 var lines = new List<string>();
+                // Blob OWNER edges, harvested from the same walk (the sweep already knows every one of them):
+                // "which types can a blob of this type be nested under". The L15 owner-back-ref arm below is
+                // the only consumer — it needs the whole ancestry, not just the frame that enqueued a type.
+                var parents = new Dictionary<Type, HashSet<Type>>();
+                void Blob(Type child, Type owner)
+                {
+                    if (!parents.TryGetValue(child, out var ps)) parents[child] = ps = new HashSet<Type>();
+                    ps.Add(owner);
+                    queue.Enqueue(child);
+                }
                 while (queue.Count > 0)
                 {
                     var nt = queue.Dequeue();
@@ -441,14 +452,15 @@ namespace RailCheck
                     {
                         if (f.Class == FieldClass.Excluded) continue;
                         // Leaves terminate (DefRef/EntityRef resolve against live state — not husks).
-                        if (f.Class == FieldClass.Descend && !RailMeta.LeafKindOf(f.ValueType, out _)) queue.Enqueue(f.ValueType);
-                        if (f.ElemType != null && !RailMeta.LeafKindOf(f.ElemType, out _)) queue.Enqueue(f.ElemType);
-                        if (f.DictValType != null && !RailMeta.LeafKindOf(f.DictValType, out _)) queue.Enqueue(f.DictValType);
+                        if (f.Class == FieldClass.Descend && !RailMeta.LeafKindOf(f.ValueType, out _)) Blob(f.ValueType, nt);
+                        if (f.ElemType != null && !RailMeta.LeafKindOf(f.ElemType, out _)) Blob(f.ElemType, nt);
+                        if (f.DictValType != null && !RailMeta.LeafKindOf(f.DictValType, out _)) Blob(f.DictValType, nt);
                     }
                 }
                 lines.Sort(StringComparer.Ordinal);
                 foreach (var l in lines) sb.Append(l + "\n");
                 sb.Append("  (types swept: " + visited.Count + ")\n");
+                laws.AddRange(OwnerBackRefLaw(visited, parents, new HashSet<Type>(l15Seeds)));
             }
 
             // ─── L16 — an owner-PostRead waiver must be HEALED on the path the owner is reached by ───────
@@ -739,6 +751,40 @@ namespace RailCheck
             [Base.Serialization.General.SerializeMember] public List<int> L = new List<int>();
         }
 
+        // ─── L15 owner-back-ref probe types (the shape CommonItemData/AmmoManager have) ───
+        // Synthetic on purpose: a real GeoItem is `roundtrip=unconstructible` here (its custom create needs an
+        // ItemDef, i.e. a ScriptableObject), so the ONE thing the static arm cannot check — that the decoder
+        // actually re-wires — needs a type the harness can build. Same move as L30/L31 for the create frames.
+        /// <summary>[SerializeType] on the INTERFACE is what makes the serializer discover an interface-typed
+        /// member at all (Serializer.cs:308 IsSerializeableType) — `ICommonItem` carries it for the same
+        /// reason. Without it the member is invisible and the probe would silently test nothing.</summary>
+        [Base.Serialization.General.SerializeType]
+        private interface IOwnerProbe { }
+
+        [Base.Serialization.General.SerializeType]
+        private sealed class OwnerProbe : IOwnerProbe
+        {
+            [Base.Serialization.General.SerializeMember] public int N;
+            [Base.Serialization.General.SerializeMember] public ChildProbe Child;
+        }
+
+        [Base.Serialization.General.SerializeType]
+        private sealed class ChildProbe
+        {
+            /// <summary>CommonItemData.OwnerItem's shape: interface-typed, so "untyped/interface member".</summary>
+            [Base.Serialization.General.SerializeMember] public IOwnerProbe Back;
+            [Base.Serialization.General.SerializeMember] public GrandChildProbe Deep;
+        }
+
+        [Base.Serialization.General.SerializeType]
+        private sealed class GrandChildProbe
+        {
+            /// <summary>AmmoManager.ParentItem's shape: the assignable owner is TWO frames up, because the
+            /// frame in between (ChildProbe / CommonItemData) is not assignable to the interface.</summary>
+            [Base.Serialization.General.SerializeMember] public IOwnerProbe Back;
+            [Base.Serialization.General.SerializeMember] public int M;
+        }
+
 #pragma warning disable 649 // D is assigned by reflection only — that is exactly the shape under test
         /// <summary>L20's probe: the GeoUnitDescriptor.ProgressionDescriptor.PersonalAbilities shape —
         /// readonly dictionary, NO field initializer, filled only by a ctor the blob codec never calls.</summary>
@@ -821,6 +867,119 @@ namespace RailCheck
             if (emptyBack == null || emptyBack.Count != 0)
                 yield return "L22 value-list-empty: an empty collection decodes as " +
                              (emptyBack == null ? "null" : emptyBack.Count + " elements");
+        }
+
+        /// <summary>L15, owner-back-ref arm — a back-ref the husk gate COUNTS must really have an owner.
+        ///
+        /// <c>RailMeta.SalvagesOwnerBackRef</c> makes an untypeable member (an interface / bare object) count
+        /// as CARRIED because the blob decoder re-wires it from the frame the child is nested in. That count
+        /// is a promise, and the runtime cannot check it: the decoder sees ONE path (the one it is decoding)
+        /// and can only say "no assignable owner above me" after the fact, in a log line, with the member
+        /// already null. The static question — is an assignable owner above this type on EVERY blob path? —
+        /// is answerable only here, from the sweep's own owner edges. Same division of labour as L16: the
+        /// applier keys on the marker, the harness proves the marker's premise.
+        ///
+        /// A type with no owner edge at all is a blob ROOT (an EntityList element): nothing is above it, so a
+        /// back-ref member on one is a REAL husk that the count would hide. Computed as a monotone fixpoint
+        /// rather than a recursion so an owner CYCLE (a back-ref is exactly what loops) terminates.</summary>
+        private static IEnumerable<string> OwnerBackRefLaw(HashSet<Type> swept,
+                                                          Dictionary<Type, HashSet<Type>> parents,
+                                                          HashSet<Type> seeds)
+        {
+            foreach (var t in swept.OrderBy(x => x.FullName, StringComparer.Ordinal))
+            {
+                var rt = RailType.Get(t);
+                if (rt == null) continue;
+                foreach (var f in rt.Fields)
+                {
+                    if (!RailMeta.SalvagesOwnerBackRef(t, f)) continue;
+                    if (OwnerOnEveryPath(t, f.ValueType, swept, parents, seeds)) continue;
+                    yield return "L15 ownerbackref-no-owner: " + t.FullName + "." + f.Name + " (" + f.ValueType.Name +
+                                 ") is counted as CARRIED by the owner re-wire, but this type " +
+                                 (seeds.Contains(t) ? "IS a blob ROOT (nothing is above it)" : "has a blob path with no " +
+                                  f.ValueType.Name + "-assignable owner above it") +
+                                 " — the member lands NULL there and the husk gate licenses the blob anyway";
+                }
+            }
+        }
+
+        /// <summary>Does every blob path to <paramref name="t"/> pass through an owner assignable to
+        /// <paramref name="iface"/>? Monotone fixpoint over the sweep's owner edges — "uncovered" starts as
+        /// the blob ROOTS (nothing above them) and spreads to any type one of whose owners is neither
+        /// assignable nor covered itself. A fixpoint rather than recursion because an owner CYCLE is exactly
+        /// what a back-ref creates.</summary>
+        private static bool OwnerOnEveryPath(Type t, Type iface, HashSet<Type> swept,
+                                             Dictionary<Type, HashSet<Type>> parents, HashSet<Type> seeds)
+        {
+            var uncovered = new HashSet<Type>();
+            foreach (var x in swept)
+                if (seeds.Contains(x) || !parents.TryGetValue(x, out var ps) || ps.Count == 0) uncovered.Add(x);
+            for (bool grew = true; grew; )
+            {
+                grew = false;
+                foreach (var x in swept)
+                {
+                    if (uncovered.Contains(x) || !parents.TryGetValue(x, out var ps)) continue;
+                    foreach (var p in ps)
+                        if (!iface.IsAssignableFrom(p) && uncovered.Contains(p)) { uncovered.Add(x); grew = true; break; }
+                }
+            }
+            return !uncovered.Contains(t);
+        }
+
+        /// <summary>L15, owner-back-ref EXECUTED arm — the re-wire must actually run.
+        ///
+        /// The static arm above proves an assignable owner is reachable; it cannot prove the decoder uses it,
+        /// and a mechanism nobody executes is the silent-swallow shape this project fights (green build, green
+        /// harness, null back-ref in game). So this drives the real encode→decode over a synthetic blob whose
+        /// shape IS the game's:
+        ///   • <c>ChildProbe.Back</c> is left NULL on the "host" — the encode side's reference match (case (b))
+        ///     writes nothing for a null, so ONLY the decode re-wire can fill it. That is the arm that closes
+        ///     `CommonItemData.OwnerItem` for real rather than depending on the host's own pointer.
+        ///   • <c>GrandChildProbe.Back</c> sits under a frame that is NOT assignable to the interface, exactly
+        ///     like `AmmoManager` under `CommonItemData`: the re-wire has to walk PAST it. An "own owner only"
+        ///     implementation passes the first arm and fails this one.</summary>
+        private static IEnumerable<string> OwnerBackRefCodecLaw()
+        {
+            var backF = RailType.Get(typeof(ChildProbe))?.FieldByName("Back");
+            if (backF == null || !RailMeta.SalvagesOwnerBackRef(typeof(ChildProbe), backF))
+            {
+                yield return "L15 ownerbackref-uncounted: ChildProbe.Back is not recognised as an owner back-ref (" +
+                             (backF == null ? "<absent from the table>" : backF.Class + "/" + backF.Exclude) +
+                             ") — the probe cannot test the re-wire and the real back-refs are husks again";
+                yield break;
+            }
+
+            var f = new RailField
+            {
+                Name = "probe", Class = FieldClass.EntityList,
+                ValueType = typeof(List<OwnerProbe>), ElemType = typeof(OwnerProbe),
+            };
+            var owner = new OwnerProbe { N = 3 };
+            owner.Child = new ChildProbe { Back = null, Deep = new GrandChildProbe { M = 4, Back = null } };
+
+            List<object> back = null;
+            string err = null;
+            try { back = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(f, new List<OwnerProbe> { owner }), f, null); }
+            catch (Exception ex) { err = ex.GetType().Name + ": " + ex.Message; }
+            if (err != null) { yield return "L15 ownerbackref-round-trip threw " + err; yield break; }
+
+            var got = back != null && back.Count == 1 ? back[0] as OwnerProbe : null;
+            if (got?.Child == null)
+            { yield return "L15 ownerbackref-round-trip: the probe blob did not come back with its child"; yield break; }
+
+            if (!ReferenceEquals(got.Child.Back, got))
+                yield return "L15 ownerbackref-not-rewired: ChildProbe.Back came back as " +
+                             (got.Child.Back == null ? "NULL" : "a foreign object") +
+                             " — a blob-rebuilt child keeps a null owner back-ref and NREs on first use " +
+                             "(CommonItemData.ItemDef => OwnerItem.ItemDef)";
+            if (got.Child.Deep == null)
+                yield return "L15 ownerbackref-round-trip: the probe's grandchild did not come back";
+            else if (!ReferenceEquals(got.Child.Deep.Back, got))
+                yield return "L15 ownerbackref-not-transitive: GrandChildProbe.Back came back as " +
+                             (got.Child.Deep.Back == null ? "NULL" : "a foreign object") +
+                             " — the re-wire did not look PAST the non-assignable frame between them, which is " +
+                             "exactly AmmoManager.ParentItem under CommonItemData";
         }
 
         /// <summary>L35 — the text-bind codec class: a member whose CONTENT the rail used to refuse and now
@@ -1767,13 +1926,20 @@ namespace RailCheck
             // a witness demanding they be named as husks would be asserting something false (and would fail
             // as "husk-content-uncounted" the moment the codec works). RailCheck L35 is what guards that
             // coverage from silently reverting; the rows below keep L34's own semantics under test.
-            // "untyped/interface member" — an ICommonItem back-ref to the item that owns the data. Set only
-            // by a ctor (CommonItemData.SetOwnerItem from :53/:72, AmmoManager :26) with NO PostRead anywhere,
-            // and dereferenced immediately (CommonItemData.ItemDef => OwnerItem.ItemDef :31,
-            // AmmoManager.ParentItem.ItemDef :32/:82/:106) — so this is a REAL husk, not a self-heal, and it
-            // is baselined as an L15 violation rather than waived with an argument that is not true.
-            { "PhoenixPoint.Common.Entities.AmmoManager", "ParentItem" },
-            { "PhoenixPoint.Common.Entities.CommonItemData", "OwnerItem" },
+            // AmmoManager.ParentItem / CommonItemData.OwnerItem left this table the same way: the rail now
+            // CARRIES them (RailMeta.SalvagesOwnerBackRef — the blob decoder re-wires a child's owner
+            // back-ref from the frame it is nested in), so demanding that HuskScan name them would demand the
+            // null back. What replaced the witness is the L15 owner-back-ref arm below, which proves the
+            // owner really is reachable on every blob path instead of trusting the count.
+            //
+            // The two witnesses that remain are refused CONTENT of a different kind — a member the rail
+            // excludes for its own reasons while the game's serializer still discovers it, which is precisely
+            // the overrule L34 exists to catch. Both were VERIFIED by running the pre-43ac747 scan: with the
+            // unconditional `carried.Add` restored, `BaseStat (Modifications,Owner,StatsRepo)` collapses to
+            // `(Owner,StatsRepo)` and `GeoscapeRaid (ParticleEffect,PostRaidReturnActor)` to
+            // `(ParticleEffect)` — i.e. these two names are exactly the ones the blind scan loses.
+            { "Base.Entities.Statuses.BaseStat", "Modifications" },
+            { "PhoenixPoint.Geoscape.Levels.GeoscapeRaid", "PostRaidReturnActor" },
         };
 
         /// <summary>L34 — a member whose own CONTENT the rail refuses must be NAMED, never counted as carried.
