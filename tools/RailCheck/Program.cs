@@ -988,6 +988,22 @@ namespace RailCheck
             synHop.SetValue(hopHolder, 33);
             if (hopHolder.Stats.HitPoints != 33 || !(synHop.GetValue(hopHolder) is int hh) || hh != 33)
                 yield return "L14 hop-mechanics: Stats.HitPoints hop set/get round-trip failed";
+
+            // L17 — a duplicate ROOT key must be an INCIDENT, never a silent drop. Root keys are minted by
+            // IdentityResolver (per-owner ids qualified by owner) and consumed by DiffEngine.WalkRoot; when
+            // two entities land on one key the second one's whole subtree is eaten by the walk's first-wins
+            // dedup, which is invisible unless the detector speaks. Runs on plain objects — the mechanism is
+            // key-vs-key, no live GeoLevelController needed.
+            int inc0 = DiffEngine.WalkIncidents.Count;
+            object r1 = new object(), r2 = new object();
+            DiffEngine.WalkRoot("V#1@fa", r1);
+            DiffEngine.WalkRoot("V#1@fb", r2);   // same VehicleID, different owner = different roots
+            DiffEngine.WalkRoot("V#1@fa", r1);   // same entity re-walked (slice retry) = not a collision
+            if (DiffEngine.WalkIncidents.Count != inc0)
+                yield return "L17 root-dup-false-positive: distinct root keys (or a re-walk of the same entity) raised an incident";
+            DiffEngine.WalkRoot("V#1@fa", r2);   // two entities, one key
+            if (DiffEngine.WalkIncidents.Count == inc0)
+                yield return "L17 root-dup-undetected: a duplicate ROOT key was swallowed silently — the 'entity invisible to the rail' class is unreportable again";
         }
 
         private sealed class WrapHolder

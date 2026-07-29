@@ -400,7 +400,7 @@ namespace Multiplayer.Network.Sync
                 var root = _cycleRoots[_cycleNext++];
                 if (!(root.Value is UnityEngine.Object uo) || uo != null)
                 {
-                    _walkRoots[root.Key] = root.Value; // a fake-null (destroyed) root counts as ABSENT
+                    WalkRoot(root.Key, root.Value); // a fake-null (destroyed) root counts as ABSENT
                     VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
                 }
                 if (sw.Elapsed.TotalMilliseconds >= SliceBudgetMs) break;
@@ -437,7 +437,7 @@ namespace Multiplayer.Network.Sync
             {
                 roots++;
                 if (!(root.Value is UnityEngine.Object uo) || uo != null)
-                    _walkRoots[root.Key] = root.Value; // structural set-diff scratch (fake-null = absent)
+                    WalkRoot(root.Key, root.Value); // structural set-diff scratch (fake-null = absent)
                 VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
             }
             long walkMs = sw.ElapsedMilliseconds;
@@ -813,6 +813,28 @@ namespace Multiplayer.Network.Sync
             return id;
         }
 
+        /// <summary>Structural-scratch write for one walked root AND the ROOT-key collision detector.
+        /// Element keys have had a duplicate check since day one (VisitEntity's keyless abort), root keys
+        /// had none: two entities minted the same root key, the second one's whole subtree hit the
+        /// "first deterministic path wins" dedup in <see cref="Add"/>/<see cref="AddEncoded"/> and vanished
+        /// with no incident, no log, nothing in rail-coverage.txt — the class "this entity does not exist
+        /// for the rail" was the one exclusion class the coverage guarantee could not see (how 17 of 27
+        /// GeoVehicles stayed unsynced behind faction-local VehicleIDs). Same Incident channel as the
+        /// element exclusions, so a clash is a report line, not a silent drop.</summary>
+        internal static void WalkRoot(string key, object value)
+        {
+            if (_walkRoots.TryGetValue(key, out var first) && !ReferenceEquals(first, value))
+                Incident(value?.GetType() ?? typeof(object), "(root)",
+                         "duplicate ROOT key — a second " + (value?.GetType().Name ?? "null") +
+                         " collides with an already-walked " + (first?.GetType().Name ?? "null") +
+                         "; its whole subtree is dropped by first-wins dedup (entity invisible to the rail)", key);
+            _walkRoots[key] = value;
+        }
+
+        /// <summary>This walk's exclusion incidents (the coverage report's "! " lines) — read by the
+        /// stage-1 harness to assert the detector above still fires.</summary>
+        internal static ICollection<string> WalkIncidents => _walkIncidents;
+
         private static void Incident(Type t, string field, string reason, string path)
         {
             var line = t.Name + "." + field + ": " + reason + " [" + path + "]";
@@ -980,8 +1002,22 @@ namespace Multiplayer.Network.Sync
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("RAIL COVERAGE REPORT " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId> | ES (event system) | MG (mission generator) | MK (marketplace) | M#<name> (registered mod-state roots)");
+                sb.AppendLine("roots: T (level clock) | F#<factionDefGuid> | S#<siteId> | U#<tacUnitId> | V#<vehicleId>@<ownerFactionDefGuid> | ES (event system) | MG (mission generator) | MK (marketplace) | M#<name> (registered mod-state roots)");
                 sb.AppendLine("total snapshot fields: " + totalFields);
+                // Root CENSUS: how many DISTINCT root keys the walk actually addressed, per kind. Instance
+                // counts below say how many objects were visited; this says how many the rail can NAME —
+                // the two disagreeing is the collision signature (27 GeoVehicle instances vs 10 "V#" keys
+                // was faction-local VehicleIDs colliding, before the owner qualifier).
+                var rootKinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
+                foreach (var k in _walkRoots.Keys)
+                {
+                    int h = k.IndexOf('#');
+                    var kind = h < 0 ? k : k.Substring(0, h + 1);
+                    rootKinds.TryGetValue(kind, out var n);
+                    rootKinds[kind] = n + 1;
+                }
+                sb.AppendLine("distinct root keys: " + _walkRoots.Count + "  (" +
+                              string.Join(" ", rootKinds.Select(kv => kv.Key + "=" + kv.Value)) + ")");
                 sb.AppendLine();
                 int cov = 0, exc = 0;
                 foreach (var kv in _entityCounts.OrderBy(k => k.Key.FullName, StringComparer.Ordinal))
