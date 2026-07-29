@@ -195,6 +195,13 @@ namespace RailCheck
         // this report merely displays it. A private copy here would be two tables free to disagree — the
         // exact shape of the GeoItem/TypeKeyable bug.
 
+        /// <summary>The field classes whose apply/decode writes INTO a live container instead of assigning a
+        /// value — i.e. every class that needs one to exist. Arrays are excluded by the caller: those are
+        /// assigned wholesale (ApplyList's array-assign strategy), so a null one is normal.</summary>
+        private static bool IsContainerClass(FieldClass c) =>
+            c == FieldClass.LeafDict || c == FieldClass.GeoItemDict || c == FieldClass.LeafList ||
+            c == FieldClass.EntityList || c == FieldClass.EntityCollection;
+
         // ─── Snapshot (the reviewable artifact) ─────────────────────────────
 
         private static string Snapshot(List<Type> types, bool polymorphicCodec, List<string> laws)
@@ -212,6 +219,10 @@ namespace RailCheck
             sb.Append("types: " + types.Count + "\n\n");
 
             int cov = 0, exc = 0, geoItemDicts = 0;
+            // L20 audit: covered collection fields that are NULL on a freshly constructed instance — the
+            // shape every decoder/applier used to assume away ("the ctor built one"). Committed so a field
+            // acquiring or losing its initializer is a reviewable diff, not a silent behaviour change.
+            var nullOnCtor = new List<string>();
             var blobbable = new SortedDictionary<string, Type>(StringComparer.Ordinal);
             // L15 seeds: only EntityList elements are BLOB-REBUILT at top level. A top-level
             // EntityCollection is element-ADDRESSED (leaves written into existing client elements —
@@ -227,11 +238,33 @@ namespace RailCheck
                 var rt = RailType.Get(t);
                 if (rt == null) continue;
                 sb.Append(t.FullName + "  [" + rt.Source + "]  covered=" + rt.CoveredCount + "/" + rt.Fields.Count + "\n");
+                object probe = null; bool probed = false; // L20, built lazily the way the blob codec builds elements
                 foreach (var f in rt.Fields)
                 {
                     if (f.Class == FieldClass.Excluded)
                     { sb.Append("  - EXCLUDED " + f.Name + " (" + f.ValueType.Name + "): " + f.Exclude + "\n"); exc++; continue; }
                     cov++;
+                    // ─── L20 — no decode/apply path may rely on the ctor having built the collection ───
+                    // GeoUnitDescriptor.ProgressionDescriptor.PersonalAbilities (readonly, no initializer,
+                    // assigned only by a non-default ctor) arrived NULL on every blob-built element and the
+                    // decoder dropped its entries in silence → recruit-list NRE under a MessageBox handler,
+                    // client UI frozen (2026-07-29). The instance question is asked the way the codec asks
+                    // it — construct with the parameterless ctor and look. Own plain fields only: a hop
+                    // alias or a property getter on a bare instance says nothing about the ctor.
+                    if (IsContainerClass(f.Class) && f.Fi != null && f.HopFi == null && !f.ValueType.IsArray)
+                    {
+                        if (!probed) { probed = true; try { probe = Activator.CreateInstance(t, true); } catch { probe = null; } }
+                        object live = null;
+                        if (probe != null) { try { live = f.GetValue(probe); } catch { live = null; } }
+                        if (probe != null && live == null)
+                        {
+                            nullOnCtor.Add(t.Name + "." + f.Name + " (" + f.Class + ")");
+                            if (RailMeta.MaterializeContainer(probe, f) == null)
+                                laws.Add("L20 unmaterializable-container: " + t.FullName + "." + f.Name + " (" + f.ValueType.Name +
+                                         ") is null on a freshly constructed instance and cannot be materialized — " +
+                                         "every entry the decoder produces for it is dropped");
+                        }
+                    }
                     // L11 — the static belt of the RUNTIME ownership law (src/Rail/DefOwnership.cs):
                     // LocalizedTextBind instances are routinely def-OWNED (ItemDef.GetDisplayName returns
                     // ViewElementDef.DisplayName1/2 by reference, decompile ItemDef.cs:165-173), so a
@@ -454,6 +487,8 @@ namespace RailCheck
                 laws.Add("L9 geoitemdict-vacuous: no field in the closure classifies as GeoItemDict — " +
                          "GeoItemCodec ships nothing and faction/site inventory is not mirrored");
 
+            sb.Append("\nnull-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): " +
+                      (nullOnCtor.Count == 0 ? "none" : string.Join(", ", nullOnCtor)) + "\n");
             sb.Append("\nsummary: covered=" + cov + " excluded=" + exc + " blobbable=" + blobbable.Count +
                       " geoItemDicts=" + geoItemDicts + "\n");
             return sb.ToString();
@@ -639,6 +674,17 @@ namespace RailCheck
             [Base.Serialization.General.SerializeMember] public string S;
             [Base.Serialization.General.SerializeMember] public List<int> L = new List<int>();
         }
+
+#pragma warning disable 649 // D is assigned by reflection only — that is exactly the shape under test
+        /// <summary>L20's probe: the GeoUnitDescriptor.ProgressionDescriptor.PersonalAbilities shape —
+        /// readonly dictionary, NO field initializer, filled only by a ctor the blob codec never calls.</summary>
+        [Base.Serialization.General.SerializeType]
+        private sealed class DictElem
+        {
+            [Base.Serialization.General.SerializeMember] public int N;
+            [Base.Serialization.General.SerializeMember] public readonly Dictionary<int, string> D;
+        }
+#pragma warning restore 649
 
         /// <summary>Does the blob codec carry runtime types (5a056cd) or abort on a declared/runtime
         /// mismatch (its own exclusion law)? The closure above depends on the answer, so ask the code
@@ -1075,6 +1121,43 @@ namespace RailCheck
             // otherwise-identical loadout MUST still ship it. This is the loadout-preset path.
             if (EquipSync.ChangedBody(true, new[] { Slots(("a", 1, 0), ("b", 1, 5)), cur[1], cur[2] }, cur) == null)
                 yield return "L19 freereload-swallowed: a free reload over an identical loadout produced no intent — preset loads would never reload on any peer";
+
+            // ─── L20's RUNNABLE half — entries must survive into a container the ctor never built ────
+            // The static half (Snapshot) only asks whether such a field COULD be materialized; this asks
+            // whether the decode path actually does it. Both halves exist because the failure was silent
+            // on BOTH counts: no throw, no log, a "successful" decode and a null field.
+            var de = new DictElem { N = 3 };
+            var dFi = typeof(DictElem).GetField("D");
+            string setErr = null;
+            // Doubles as the empirical proof that FieldInfo.SetValue writes an initonly INSTANCE field —
+            // the assumption the whole materialize path rests on (RailField.IsWritable).
+            try { dFi.SetValue(de, new Dictionary<int, string> { { 1, "a" }, { 2, "b" } }); }
+            catch (Exception ex) { setErr = ex.GetType().Name + ": " + ex.Message; }
+            if (setErr != null)
+                yield return "L20 readonly-unwritable: FieldInfo.SetValue refused an initonly instance field (" + setErr +
+                             ") — materializing a readonly container is impossible on this runtime and the fix is void";
+            else
+            {
+                var dField = RailType.Get(typeof(DictElem))?.FieldByName("D");
+                if (dField == null || dField.Class != FieldClass.LeafDict)
+                    yield return "L20 vacuous: the probe's dict field classified as " +
+                                 (dField == null ? "absent" : dField.Class.ToString()) + ", not LeafDict — this law checked nothing";
+                else
+                {
+                    var def2 = new RailField { Name = "d", Class = FieldClass.EntityList, ValueType = typeof(List<DictElem>), ElemType = typeof(DictElem) };
+                    List<object> rtd = null;
+                    string derr = null;
+                    try { rtd = RailMeta.DecodeEntityList(RailMeta.EncodeEntityList(def2, new List<DictElem> { de }), def2, null); }
+                    catch (Exception ex) { derr = ex.GetType().Name + ": " + ex.Message; }
+                    var back2 = rtd != null && rtd.Count == 1 ? ((DictElem)rtd[0]).D : null;
+                    if (derr != null)
+                        yield return "L20 round-trip threw " + derr;
+                    else if (back2 == null || back2.Count != 2 || back2[1] != "a" || back2[2] != "b")
+                        yield return "L20 null-container-swallow: a dict field the ctor never built came back " +
+                                     (back2 == null ? "NULL" : "with " + back2.Count + "/2 entries") +
+                                     " — the decoder dropped entries into a null container in silence (the recruit-hire freeze shape)";
+                }
+            }
         }
 
         private static List<EquipSync.SlotRef> Slots(params (string guid, int count, int charges)[] items)

@@ -1632,7 +1632,10 @@ namespace Multiplayer.Network.Sync
                             // First real occupant: ProgressionDescriptor.PersonalAbilities inside the
                             // NakedRecruits pair blob — dropping it would husk every recruit's rolled
                             // abilities. Canonical order (law 6): entries sorted by encoded key.
-                            if (!(v is IDictionary dict)) break; // null/absent → decode keeps ctor default
+                            // Host-side null = nothing to state: the field is omitted (absent ≠ null), and the
+                            // decoder leaves the fresh element's own container alone. Symmetric with the
+                            // TagLeafDict decode, which materializes only when entries actually arrive.
+                            if (!(v is IDictionary dict)) break;
                             var des = new List<(string sub, object dv)>();
                             foreach (DictionaryEntry de in dict) des.Add((EncodeDictKey(de.Key), de.Value));
                             des.Sort((a, b) => string.CompareOrdinal(a.sub, b.sub));
@@ -1835,8 +1838,17 @@ namespace Multiplayer.Network.Sync
                     {
                         if (f.KeyType == null) throw new IOException("blob leaf-dict tag on non-dict field " + t.Name + "." + f.Name);
                         int dn = r.ReadUInt16();
-                        var dict = f.GetValue(o) as IDictionary; // ctor-initialized on every current shape
-                        dict?.Clear();
+                        // NEVER "as IDictionary" on the raw field: a dict the ctor did not build is null on
+                        // a blob-constructed element, and dropping the entries into that null is the silent
+                        // failure MaterializeContainer exists to end (its header carries the RCA).
+                        var dict = MaterializeContainer(o, f) as IDictionary;
+                        if (dict == null)
+                        {
+                            if (dn > 0)
+                                Debug.LogError("[Multiplayer][rail] blob leaf-dict " + t.Name + "." + f.Name +
+                                               ": no live dictionary — " + dn + " decoded entries DROPPED");
+                        }
+                        else dict.Clear();
                         for (int j = 0; j < dn; j++)
                         {
                             var key = DecodeDictKey(r.ReadString(), f.KeyType);
@@ -1968,6 +1980,55 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
+        /// <summary>THE one answer to "this field's container is null on this instance" — for EVERY
+        /// collection class and every consumer (blob decode, LeafDict/GeoItemDict apply, ApplyList).
+        /// Materializes the declared container type and ATTACHES it, then returns the live instance.
+        ///
+        /// The premise it replaces ("the ctor already built one") is false and was failing in SILENCE:
+        /// blob elements are built with the parameterless <c>Activator</c>, so a field the game only ever
+        /// fills from a NON-default ctor arrives null — <c>GeoUnitDescriptor.ProgressionDescriptor.
+        /// PersonalAbilities</c> (decompile GeoUnitDescriptor.cs:106, `public readonly Dictionary&lt;int,
+        /// TacticalAbilityDef&gt;` with NO initializer, assigned only by the 2-arg ctor at :123-127) is the
+        /// proven shape. Every decoded entry was dropped into a null check, the field stayed null, and the
+        /// decode reported success — which surfaced as an NRE inside
+        /// <c>AbilityTrack.CreateFromDictionary</c> under a MessageBox click handler, i.e. a client UI
+        /// frozen with no way out (2026-07-29 recruit-hire RCA).
+        ///
+        /// <c>readonly</c> is not an obstacle: <see cref="FieldInfo.SetValue"/> writes initonly INSTANCE
+        /// fields, which is exactly how the game's own serializer fills them (see
+        /// <see cref="RailField.IsWritable"/>). Arrays return null quietly — the caller assigns those
+        /// wholesale. Anything else that cannot be attached is a LOUD error, never a silent drop.</summary>
+        internal static object MaterializeContainer(object owner, RailField field)
+        {
+            if (owner == null) return null;
+            var cur = field.GetValue(owner);
+            if (cur != null) return cur;
+            var vt = field.ValueType;
+            if (vt.IsArray) return null; // whole-array assignment is the caller's strategy
+            if (!field.IsWritable() || vt.IsAbstract || vt.IsInterface)
+            {
+                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                               " (" + vt.Name + ") is null and cannot be materialized (not writable / not concrete) — entries would be dropped");
+                return null;
+            }
+            object made;
+            try { made = Activator.CreateInstance(vt, true); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                               " (" + vt.Name + ") is null and has no usable parameterless ctor: " + ex.Message + " — entries would be dropped");
+                return null;
+            }
+            field.SetValue(owner, made);
+            // Re-read rather than trust: a hop alias whose intermediate object is null makes SetValue a
+            // no-op, and returning the detached instance would be the same silent drop one level down.
+            var back = field.GetValue(owner);
+            if (back == null)
+                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                               " did not attach after materialization — entries would be dropped");
+            return back;
+        }
+
         /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.
         /// Shared by the client applier (top-level LeafList/EntityList fields) and the blob codec
         /// (nested lists on freshly constructed elements).</summary>
@@ -2003,16 +2064,12 @@ namespace Multiplayer.Network.Sync
             }
             var current = field.GetValue(entity);
             if (current == null && items == null) return; // both absent — nothing to reconcile
-            bool created = false;
-            if (current == null && !field.ValueType.IsArray && field.IsWritable())
-            {
-                // Container never constructed on this instance: blob elements are built via the
-                // parameterless ctor, so ctor-assigned containers arrive null (ManufacturableItem.
-                // ManufacturePrice/ScrapReward = ResourcePack). Construct one generically, fill it
-                // below through the normal strategies, then attach it to the field.
-                try { current = Activator.CreateInstance(field.ValueType, true); created = true; }
-                catch { /* no parameterless ctor — falls through to the strategy error below */ }
-            }
+            // Container never constructed on this instance: blob elements are built via the parameterless
+            // ctor, so ctor-ARG-assigned containers arrive null (ManufacturableItem.ManufacturePrice/
+            // ScrapReward = ResourcePack). Materialize AND attach through the one shared helper — the
+            // attach used to be a `created` flag re-tested per strategy, and the dict route below simply
+            // forgot it, so a null Dictionary field was filled and then thrown away.
+            if (current == null) current = MaterializeContainer(entity, field);
             if (current is IDictionary dict)
             {
                 // Whole-dict blob (ElemType = KVP): items ARE the entries — rebuild directly.
@@ -2052,7 +2109,6 @@ namespace Multiplayer.Network.Sync
             {
                 list.Clear();
                 if (items != null) foreach (var it in items) list.Add(it);
-                if (created) field.SetValue(entity, current);
                 return;
             }
             if (current != null && !(current is Array))
@@ -2074,7 +2130,6 @@ namespace Multiplayer.Network.Sync
                 {
                     clear.Invoke(current, null);
                     if (items != null) foreach (var it in items) add.Invoke(current, new[] { it });
-                    if (created) field.SetValue(entity, current);
                     return;
                 }
             }

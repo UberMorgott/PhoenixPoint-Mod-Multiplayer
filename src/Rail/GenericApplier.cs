@@ -419,10 +419,13 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.LeafDict:
                     {
-                        var target = field.GetValue(entity);
+                        // Materialize: a dict the ctor never built is null on this instance, and writing the
+                        // entry into that null used to be a SILENT return (see RailMeta.MaterializeContainer).
+                        var target = RailMeta.MaterializeContainer(entity, field);
                         if (!(target is IDictionary dict))
                         {
-                            if (target != null) LogMissOnce("dict field not a non-generic IDictionary at " + path + "." + field.Name + " (" + target.GetType().Name + ")");
+                            LogMissOnce("dict field not a live non-generic IDictionary at " + path + "." + field.Name +
+                                        " (" + (target == null ? "null" : target.GetType().Name) + ") — entry dropped");
                             return;
                         }
                         var key = RailMeta.DecodeDictKey(subKey, field.KeyType);
@@ -492,10 +495,11 @@ namespace Multiplayer.Network.Sync
                     }
                     case FieldClass.GeoItemDict:
                     {
-                        var target = field.GetValue(entity);
+                        var target = RailMeta.MaterializeContainer(entity, field);
                         if (!(target is IDictionary dict))
                         {
-                            if (target != null) LogMissOnce("GeoItemDict field not a non-generic IDictionary at " + path + "." + field.Name + " (" + target.GetType().Name + ")");
+                            LogMissOnce("GeoItemDict field not a live non-generic IDictionary at " + path + "." + field.Name +
+                                        " (" + (target == null ? "null" : target.GetType().Name) + ") — entry dropped");
                             return;
                         }
                         var def = GeoItemCodec.ResolveDef(subKey); // key IS the ItemDef

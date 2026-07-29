@@ -543,6 +543,8 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
 twin summary: resolved=59 gaps=56 dispatch=7
 
+null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
+
 summary: covered=246 excluded=65 blobbable=18 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:
