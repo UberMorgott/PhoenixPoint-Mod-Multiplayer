@@ -80,6 +80,7 @@ namespace RailCheck
             laws.AddRange(CrcBackstopLaw());
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
+            laws.AddRange(RootOwnershipLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -124,21 +125,14 @@ namespace RailCheck
 
         private static List<Type> Closure(Assembly game, bool polymorphicCodec)
         {
-            var rootKinds = new[]
+            // The rail's OWN ordered root table is the seed list — one source of truth for "what the walk
+            // enters through" (it used to be re-typed here, so a new root row could land with the harness
+            // still sweeping the old set). "TA" = TimeAnchor's latched clock DTO, which otherwise reaches
+            // the closure only incidentally through ActorInstanceData.TimingData; "ES"/"MG" classify
+            // [none] (visible), "MK" rides the GeoMarketplaceInstanceData bridge, "GL" the
+            // GeoLevelInstanceData bridge.
+            var rootKinds = IdentityResolver.RootKinds.Select(r => r.Type).Concat(new[]
             {
-                typeof(Base.Core.Timing),
-                // Root "TA" — TimeAnchor's latched clock DTO. Seeded explicitly: it reaches the closure
-                // today only incidentally, through ActorInstanceData.TimingData.
-                typeof(Base.Core.TimingInstanceData),
-                typeof(PhoenixPoint.Geoscape.Levels.GeoFaction),
-                typeof(PhoenixPoint.Geoscape.Entities.GeoSite),
-                typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter),
-                typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
-                // Roots "ES"/"MG"/"MK" — level-scope singleton components (IdentityResolver.Roots):
-                // ES/MG classify [none] (visible), MK rides via the GeoMarketplaceInstanceData bridge.
-                typeof(PhoenixPoint.Geoscape.Events.GeoscapeEventSystem),
-                typeof(PhoenixPoint.Geoscape.Levels.GeoMissionGenerator),
-                typeof(Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace),
                 // NOT a rail root (ARCHITECTURE.md "Named next steps"). Seeded because the closure is
                 // DECLARED-type-only while the live walk types every hop by obj.GetType():
                 // GeoSite.SerializationData is declared ActorInstanceData but IS a GeoSiteInstaceData at
@@ -149,7 +143,7 @@ namespace RailCheck
                 // Mod-state roots (IdentityResolver.RegisterModRoot): MOD-owned classes riding the same
                 // walk. Sealed → Concretions never scans the game assembly for them.
                 typeof(Multiplayer.Network.Sync.ScrapCartState), // root "M#cart" (shared scrap cart)
-            };
+            }).ToList();
 
             var seen = new HashSet<Type>();
             var queue = new Queue<Type>();
@@ -1568,6 +1562,126 @@ namespace RailCheck
             if (msgBytes.Distinct().Count() != msgBytes.Length)
                 yield return "L25 msg-byte-collision: the CRC report shares its leading byte with another 0xAC message " +
                              "kind — it would be parsed as that one, silently";
+        }
+
+        // Root pairs where a LATER root's declared-type closure reaches an EARLIER root's type. Legal —
+        // the earlier root is walked first and OWNS the instance — but never by accident: the later root
+        // emits NOTHING for it (a silent return in VisitEntity), so the coverage must be known to ride
+        // under the earlier path. Grammar: "<later>-><earlier>". A row that stops being observed is a
+        // violation too, so this cannot rot into a permanent allowance list.
+        private static readonly HashSet<string> _declaredRootReach = new HashSet<string>(StringComparer.Ordinal)
+        {
+        };
+
+        /// <summary>L28 — root ownership: ONE instance, ONE root path.
+        ///
+        /// The walk's reference `visited` set (<c>DiffEngine.VisitEntity</c>) makes the SECOND arrival at
+        /// an instance a silent return: no entries, no tombstone, no incident. So when two declared roots
+        /// can reach the same instance, the ORDER in <c>IdentityResolver.RootKinds</c> silently decides
+        /// which path owns every field under it — and reordering the table moves coverage with no other
+        /// visible effect. This law makes that a static, named fact:
+        ///   • an EARLIER root must not reach a LATER root's own type (the later root's paths would never
+        ///     exist on the wire, while the client still resolves them — RCA gap B3 trap T1);
+        ///   • the reverse direction is legal but must be DECLARED (and a stale declaration is red);
+        ///   • "GL" — the only root whose closure spans the whole level — must be LAST;
+        ///   • the GL bridge's landmine members must be EXPLICIT opt-outs, not accidents of a lookup that
+        ///     happens to fail today (<c>TacUnits</c> would rebuild the U#-owned registry from a blob).
+        /// Closure is over DECLARED types (deterministic, same on both peers); the reach test compares
+        /// with assignability in both directions so a declared base (GeoActor) counts as reaching its
+        /// concretions, which is what the live walk really does (it types every hop by obj.GetType()).</summary>
+        private static IEnumerable<string> RootOwnershipLaw()
+        {
+            var kinds = IdentityResolver.RootKinds;
+            var last = kinds[kinds.Length - 1];
+            if (last.Key != "GL")
+                yield return "L28 gl-not-last: IdentityResolver.RootKinds ends with '" + last.Key + "' (" + last.Type.Name +
+                             "), not 'GL' — the level root is the one whose member closure spans the whole level, so " +
+                             "walking it earlier makes other roots' own visits a silent return";
+
+            var closures = new Dictionary<string, HashSet<Type>>(StringComparer.Ordinal);
+            foreach (var r in kinds) closures[r.Key] = TypeClosure(r.Type);
+            var observed = new HashSet<string>(StringComparer.Ordinal);
+
+            for (int i = 0; i < kinds.Length; i++)
+                for (int j = i + 1; j < kinds.Length; j++)
+                {
+                    var earlier = kinds[i];
+                    var later = kinds[j];
+                    var hitLater = ReachedBy(closures[earlier.Key], later.Type);
+                    if (hitLater != null)
+                        yield return "L28 root-owned-instance-two-paths: root '" + later.Key + "' (" + later.Type.Name +
+                                     ") is reachable from the EARLIER root '" + earlier.Key + "' via " + hitLater.FullName +
+                                     " — the earlier walk consumes the instance and '" + later.Key + "' emits nothing, " +
+                                     "with no tombstone and no incident";
+                    var hitEarlier = ReachedBy(closures[later.Key], earlier.Type);
+                    if (hitEarlier == null) continue;
+                    var row = later.Key + "->" + earlier.Key;
+                    observed.Add(row);
+                    if (!_declaredRootReach.Contains(row))
+                        yield return "L28 undeclared-root-reach: root '" + earlier.Key + "' (" + earlier.Type.Name +
+                                     ") is reachable from the LATER root '" + later.Key + "' via " + hitEarlier.FullName +
+                                     " — legal ('" + earlier.Key + "' is walked first and owns it) but '" + later.Key +
+                                     "' silently emits nothing for it: declare \"" + row + "\" or reorder the table";
+                }
+            foreach (var row in _declaredRootReach)
+                if (!observed.Contains(row))
+                    yield return "L28 stale-root-reach-declaration: \"" + row + "\" is declared but no longer observed — " +
+                                 "the allowance now hides nothing and would mask a real overlap later";
+
+            // The GL bridge's declared opt-outs. Asserted through OptOutReason, so an accidental
+            // "bridge-unresolved" (a convention that merely fails TODAY) does not satisfy the law.
+            foreach (var name in new[] { "TacUnits", "ModData", "ContextHelpData", "GeoscapeLog" })
+            {
+                var owner = typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController);
+                var declared = RailMeta.OptOutReason(owner, name);
+                var f = RailType.Get(owner)?.FieldByName(name);
+                if (f == null)
+                    yield return "L28 declared-exclusion-absent: GeoLevelController." + name + " is not in the GL table at " +
+                                 "all — the bridge no longer carries it, so the opt-out guards nothing";
+                else if (declared == null || f.Class != FieldClass.Excluded || f.Exclude != declared)
+                    yield return "L28 undeclared-exclusion: GeoLevelController." + name + " is " + f.Class + " (reason='" +
+                                 (f.Exclude ?? "<none>") + "') — it must be an EXPLICIT opt-out in RailMeta._optOutMembers, " +
+                                 "not a lookup that happens to fail today";
+            }
+        }
+
+        /// <summary>Types a root can reach through its own classified tables — Descend / element types /
+        /// composite leaves, i.e. exactly the edges <c>DiffEngine.VisitEntity</c> follows. Excluded fields
+        /// are not edges (nothing rides them). Declared types only, seed itself not included.</summary>
+        private static HashSet<Type> TypeClosure(Type seed)
+        {
+            var seen = new HashSet<Type>();
+            var queue = new Queue<Type>();
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                var rt = RailType.Get(queue.Dequeue());
+                if (rt?.Fields == null) continue;
+                foreach (var f in rt.Fields)
+                {
+                    if (f.Class == FieldClass.Excluded) continue;
+                    Type next = null;
+                    switch (f.Class)
+                    {
+                        case FieldClass.Descend: next = f.ValueType; break;
+                        case FieldClass.EntityCollection:
+                        case FieldClass.EntityList: next = f.ElemType; break;
+                        case FieldClass.Leaf when f.Leaf == LeafKind.Composite: next = f.ValueType; break;
+                    }
+                    if (next != null && next != seed && seen.Add(next)) queue.Enqueue(next);
+                }
+            }
+            return seen;
+        }
+
+        /// <summary>The closure member that reaches <paramref name="rootType"/>, or null. Assignability in
+        /// BOTH directions: a declared base reaches its concretions (the live walk types by obj.GetType()),
+        /// and a declared subclass is reached by its base root kind.</summary>
+        private static Type ReachedBy(HashSet<Type> closure, Type rootType)
+        {
+            foreach (var c in closure)
+                if (c == rootType || c.IsAssignableFrom(rootType) || rootType.IsAssignableFrom(c)) return c;
+            return null;
         }
 
         private static DiffEngine.Entry Ent(string path, ushort fieldIdx, string subKey, byte value) =>

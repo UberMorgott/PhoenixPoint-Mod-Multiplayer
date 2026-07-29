@@ -180,8 +180,42 @@ namespace Multiplayer.Network.Sync
         /// the game's own load move, <c>_tacUnits[unit.Id] = unit</c> — GeoLevelController.cs:607-610).</summary>
         internal static IDictionary TacUnitsDict(GeoLevelController geo) => TacUnitsField?.GetValue(geo) as IDictionary;
 
+        /// <summary>The ordered ROOT KINDS — one table so the yield ORDER and the entity TYPE of every
+        /// root are readable statically (RailCheck seeds its type closure from it and asserts L28 against
+        /// it, instead of keeping a second hand-written copy that can drift).
+        ///
+        /// ORDER IS LOAD-BEARING, not cosmetic: the walk's reference `visited` set makes the SECOND
+        /// arrival at an instance a SILENT return (DiffEngine.VisitEntity), so an earlier row OWNS every
+        /// instance it reaches and a later row that reaches the same instance emits nothing for it. "GL"
+        /// (the level itself) is therefore LAST — it is the one root whose member closure can reach other
+        /// roots' instances. Law L28 is the static belt; DiffEngine logs the runtime line.
+        ///
+        /// Rows with an accessor ARE the yield below (single instance per level). Rows without one are
+        /// order+type declarations for the collection kinds enumerated inline in <see cref="Roots"/>.</summary>
+        internal static readonly (string Key, Type Type, Func<GeoLevelController, object> Get)[] RootKinds =
+        {
+            ("T",  typeof(Timing), null),
+            ("TA", typeof(TimingInstanceData), null),
+            ("F#", typeof(GeoFaction), null),
+            ("S#", typeof(GeoSite), null),
+            ("U#", typeof(GeoCharacter), null),
+            ("V#", typeof(GeoVehicle), null),
+            ("ES", typeof(PhoenixPoint.Geoscape.Events.GeoscapeEventSystem), geo => geo.EventSystem),
+            ("MG", typeof(GeoMissionGenerator), geo => geo.MissionGenerator),
+            ("MK", typeof(Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace), geo => geo.Marketplace),
+            // The level itself: persists through GeoLevelInstanceData, reached by FindBridge's
+            // record-contract rung (GeoLevelController.RecordInstanceData():387 — a DTO whose name AND
+            // namespace differ from the owner's, so neither the sibling nor the nested probe sees it).
+            // Brings the dead-soldier memorial, difficulty, StartingPopulation, ExtraGameSettings and
+            // NextTacUnitId onto the rail (docs/rail-baseline.txt: covered 5/24);
+            // every member no convention resolves is now a NAMED exclusion there, instead of an absent
+            // type with no line anywhere.
+            ("GL", typeof(GeoLevelController), geo => geo),
+        };
+
         /// <summary>Deterministic (key, object) root pairs: level clock + factions + sites + tac units +
-        /// vehicles + the level-scope singleton components (event system / mission generator / marketplace).
+        /// vehicles + the level-scope singleton components (event system / mission generator / marketplace)
+        /// + the level itself.
         /// <paramref name="hostWalk"/> false = the client's own read of the SAME table (the law-7 CRC
         /// backstop walks its mirror with it): synthesized per-peer DTO roots are skipped, see "TA".</summary>
         public static IEnumerable<KeyValuePair<string, object>> Roots(GeoLevelController geo, bool hostWalk = true)
@@ -238,9 +272,15 @@ namespace Multiplayer.Network.Sync
             //   MK GeoMarketplace — rides via the existing FindBridge (GeoMarketplaceInstanceData is a
             //      top-level type matching the name pattern): MissionID + IsMissionInProgress mirror; the
             //      rest are visible bridge-unresolved exclusions.
-            if (geo.EventSystem != null) yield return new KeyValuePair<string, object>("ES", geo.EventSystem);
-            if (geo.MissionGenerator != null) yield return new KeyValuePair<string, object>("MG", geo.MissionGenerator);
-            if (geo.Marketplace != null) yield return new KeyValuePair<string, object>("MK", geo.Marketplace);
+            //   GL GeoLevelController — the level itself, LAST (see RootKinds).
+            foreach (var r in RootKinds)
+            {
+                if (r.Get == null) continue; // collection kind — enumerated above
+                var v = r.Get(geo);
+                // Unity fake-null: a destroyed component is ref-nonnull but == null under the overload.
+                if (v is UnityEngine.Object uo ? uo != null : v != null)
+                    yield return new KeyValuePair<string, object>(r.Key, v);
+            }
 
             // Registered mod-state roots (sorted dictionary — deterministic order, law 6).
             foreach (var kv in _modRoots) yield return kv;
@@ -345,9 +385,11 @@ namespace Multiplayer.Network.Sync
             if (_modRoots.TryGetValue(root, out var mod)) return mod; // client's own registered instance
             if (root == "T") return geo.Timing;
             if (root == "TA") return TimeAnchor.ClientDto(geo.Timing); // scratch DTO; loaded in ApplyIfTouched
-            if (root == "ES") return geo.EventSystem;
-            if (root == "MG") return geo.MissionGenerator;
-            if (root == "MK") return geo.Marketplace;
+            // Singleton roots resolve through the SAME accessor the host walk yields them with — one table
+            // ("ES"/"MG"/"MK"/"GL"), so a new root row cannot land host-side while the client silently has
+            // no way to resolve its paths (every delta under them would die as "entity not found").
+            foreach (var r in RootKinds)
+                if (r.Get != null && string.Equals(r.Key, root, StringComparison.Ordinal)) return r.Get(geo);
             int hash = root.IndexOf('#');
             if (hash < 0) return null;
             string kind = root.Substring(0, hash), id = root.Substring(hash + 1);

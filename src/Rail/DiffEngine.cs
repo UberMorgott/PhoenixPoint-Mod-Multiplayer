@@ -514,11 +514,7 @@ namespace Multiplayer.Network.Sync
             while (_cycleNext < _cycleRoots.Count)
             {
                 var root = _cycleRoots[_cycleNext++];
-                if (!(root.Value is UnityEngine.Object uo) || uo != null)
-                {
-                    WalkRoot(root.Key, root.Value); // a fake-null (destroyed) root counts as ABSENT
-                    VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
-                }
+                VisitRoot(root.Key, root.Value);
                 if (sw.Elapsed.TotalMilliseconds >= SliceBudgetMs) break;
             }
             _cycleFrames++;
@@ -552,9 +548,7 @@ namespace Multiplayer.Network.Sync
             foreach (var root in IdentityResolver.Roots(geo))
             {
                 roots++;
-                if (!(root.Value is UnityEngine.Object uo) || uo != null)
-                    WalkRoot(root.Key, root.Value); // structural set-diff scratch (fake-null = absent)
-                VisitEntity(root.Key, root.Value, _visited, _ordered, _snapshotBack, 0);
+                VisitRoot(root.Key, root.Value);
             }
             long walkMs = sw.ElapsedMilliseconds;
             DiffAndEmit(engine, walkMs, walkMs, 1, roots);
@@ -662,6 +656,28 @@ namespace Multiplayer.Network.Sync
             path + "\u0001" + fieldIdx.ToString(CultureInfo.InvariantCulture) + "\u0001" + subKey;
 
         // ─── The universal walker (NO subsystem knowledge) ─────────────────
+
+        /// <summary>One declared root: structural scratch + the walk. Shared by the sliced cycle and the
+        /// monolithic tick so both carry the same guards.
+        ///
+        /// The "already visited" line is a SILENT-SWALLOW counter, not diagnostics: an earlier root's
+        /// closure can reach a later root's instance, and <see cref="VisitEntity"/>'s reference `visited`
+        /// set then returns with NO entries, NO tombstone and NO incident — the earlier path owns every
+        /// field and this root's own paths never appear on the wire. Deterministic (the root order is
+        /// fixed, IdentityResolver.RootKinds) but invisible, so name it once per key. RailCheck L28 is the
+        /// static belt over the same property.</summary>
+        private static void VisitRoot(string key, object value)
+        {
+            if (value is UnityEngine.Object uo && uo == null) return; // destroyed root = ABSENT (structural)
+            WalkRoot(key, value);
+            if (value != null && _visited.Contains(value) && _dupRootLogged.Add(key))
+                Debug.LogWarning("[Multiplayer][rail] root '" + key + "' (" + value.GetType().Name +
+                                 ") was already reached from an EARLIER root — its own subtree ships under that path, nothing under '" +
+                                 key + "'. Reorder IdentityResolver.RootKinds if this root should own it.");
+            VisitEntity(key, value, _visited, _ordered, _snapshotBack, 0);
+        }
+
+        private static readonly HashSet<string> _dupRootLogged = new HashSet<string>(StringComparer.Ordinal);
 
         private static void VisitEntity(string path, object obj, HashSet<object> visited, List<Entry> ordered,
                                         Dictionary<string, Entry> snap, int depth)

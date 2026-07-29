@@ -186,7 +186,7 @@ namespace Multiplayer.Network.Sync
             foreach (var e in raw.OrderBy(e => e.name, StringComparer.Ordinal))
             {
                 if (rt._byName.ContainsKey(e.name)) continue; // hierarchy duplicate — first wins
-                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail, e.hop);
+                var f = BuildField(live, e.name, e.valType, e.live, e.alias, e.fail, e.hop);
                 rt.Fields.Add(f);
                 rt._byName[e.name] = f;
             }
@@ -254,7 +254,7 @@ namespace Multiplayer.Network.Sync
             foreach (var e in raw.OrderBy(e => e.name, StringComparer.Ordinal))
             {
                 if (rt._byName.ContainsKey(e.name)) continue; // hierarchy duplicate — first wins
-                var f = BuildField(e.name, e.valType, e.live, e.alias, e.fail, e.hop);
+                var f = BuildField(t, e.name, e.valType, e.live, e.alias, e.fail, e.hop);
                 rt.Fields.Add(f);
                 rt._byName[e.name] = f;
             }
@@ -289,15 +289,20 @@ namespace Multiplayer.Network.Sync
             !RailMeta.LeafKindOf(t, out _) && !RailMeta.IsLeafCollection(t) &&
             RailMeta.HuskMembers(t).Count > 0 ? t : null;
 
-        private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop = null)
+        private static RailField BuildField(Type owner, string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop = null)
         {
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo, HopFi = hop };
+            // DECLARED opt-out FIRST, ahead of the unresolved bail. An opt-out on a member no convention
+            // resolves was DEAD CODE before (the bail below printed "bridge-unresolved" instead), which
+            // makes such an exclusion a comment asserting an invariant rather than a mechanism: it would
+            // arm itself silently the day the convention starts resolving. Keyed on the OWNER type (whose
+            // table this is) + base types, never on the resolved member — there may be no member.
+            var optOut = RailMeta.OptOutReason(owner, name);
+            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
             if (RailMeta.IsPresentation(valType))
             { f.Class = FieldClass.Excluded; f.Exclude = "presentation-only type (" + valType.Name + ")"; return f; }
-            var optOut = RailMeta.OptOutReason(live.DeclaringType, name);
-            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
 
             // ResolveLive may accept a live member of a DIFFERENT type than the DTO declares (the codec
             // always speaks the DTO type — wire parity); record which coercion bridges the two. Container
@@ -602,14 +607,53 @@ namespace Multiplayer.Network.Sync
             // EmptyExplorationEventIds, the only other List<string> on GeoscapeEventSystem, which is
             // def-driven CONFIG, not state. Migrated records already ride EncounterRecords.
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.OldTriggeredEncounters", "v<4 migration leftover — unique-type fallback would alias def-driven config (EmptyExplorationEventIds)" },
+
+            // ─── The "GL" root (GeoLevelController via GeoLevelInstanceData) ───
+            // Keyed on the LIVE owner, so they hold whether or not a convention resolves the member —
+            // which is the point: all three are landmines that arm themselves the moment one does.
+            //
+            // TacUnits: DTO List<IGeoTacUnit> (GeoLevelInstanceData.cs:30) against the live registry
+            // `private readonly Dictionary<GeoTacUnitId, IGeoTacUnit> _tacUnits` (GeoLevelController.cs:162).
+            // The `_name` backing-field rung finds it and TwinTypeCompatible's live-dict-from-DTO-list rung
+            // licenses that shape whenever DictKeyMember can re-derive the key (IGeoTacUnit.Id) — and then
+            // the whole registry would be rebuilt from an EntityList blob: husked GeoCharacters replacing
+            // live ones, colliding head-on with the "U#" STRUCTURAL applier that owns exactly this
+            // dictionary (GenericApplier ApplyCharacterCreate / _tacUnits[unit.Id] = unit).
+            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.TacUnits", "the U# root registry — identity is STRUCTURAL (law 3); a value-rebuild from an EntityList blob would husk live GeoCharacters (GeoLevelController.cs:162 _tacUnits)" },
+            // ModData: RCA gap B7, dangerous on BOTH ends, never as a side effect of this batch.
+            // RECORD calls every mod's RecordGeoscapeInstanceData per walk (ModManager.cs:730-744 — TFTV
+            // allocates a JSON graph and logs a line, TFTVGeoscape.cs:224-226); APPLY is the load-shaped
+            // ProcessGeoscapeInstanceData over ALL mods at once (ModManager.cs:746-767), which TFTV
+            // Harmony-patches (TFTVCriticalStuff.cs:111-151). Needs a change-driven cadence + per-mod
+            // opt-in of its own.
+            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.ModData", "other mods' geoscape state — needs its own cadence + per-mod opt-in (record calls every mod per walk, apply is load-shaped ProcessGeoscapeInstanceData; RCA gap B7)" },
+            // ContextHelpData resolves EXACTLY by name and type (GeoLevelController.cs:318), so it would
+            // ride by accident: per-peer hint/tutorial progress, i.e. presentation — mirroring the host's
+            // would hijack each player's own context help.
+            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.ContextHelpData", "per-peer context-help/hint progress (presentation) — each player owns their own (GeoLevelController.cs:318)" },
+            // GeoscapeLog resolves onto live `Log` (GeoLevelController.cs:316) and its payload is the
+            // KEYLESS `List<GeoscapeLogEntry> _entries` (GeoscapeLog.cs:36-37) — so it rides as ONE blob
+            // that REBUILDS every entry with Activator + table fields. The entry's whole CONTENT is two
+            // LocalizedTextBind members (GeoscapeLogEntry.cs:11-13) which the rail refuses by law (L11
+            // def-laundering vector; both print "presentation-only" in this baseline), so a rebuilt entry
+            // comes back with EventDate + HighPriority and Text = null — and LocalizedTextBind is a CLASS,
+            // so GeoscapeLogEntry.GenerateMessage:23-25 NREs on it (its catch is FormatException only).
+            // That is the 7ef0a30 ResearchElement husk exactly (DiffEngine's keyless-list refusal). The
+            // husk gate does NOT catch it: HuskScan counts every GetSerializedMembers name as carried
+            // (RailMeta.cs:2020-2023), so a rail-EXCLUDED ReadWrite member is never reported as a husk.
+            // Mirroring the log needs a text-key codec for LocalizedTextBind first — its own batch.
+            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.GeoscapeLog", "keyless List<GeoscapeLogEntry> blob whose whole content is rail-refused LocalizedTextBind — rebuilt entries carry Text=null and GenerateMessage() NREs (GeoscapeLogEntry.cs:11-13/:23-25); needs a text-key codec first" },
         };
 
-        /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.</summary>
+        /// <summary>Exclusion reason for an explicitly opted-out member, or null when it rides normally.
+        /// Walks base types (same move as the <c>_twinAliases</c> lookup): a table is built for the
+        /// DERIVED type but a row is written against the declaration that owns the member
+        /// (ActorInstanceData.TimingData is inherited by GeoSiteInstaceData/GeoVehicleInstanceData).</summary>
         internal static string OptOutReason(Type owner, string name)
         {
-            if (owner == null) return null;
-            _optOutMembers.TryGetValue(owner.FullName + "." + name, out var why);
-            return why;
+            for (var cur = owner; cur != null && cur != typeof(object); cur = cur.BaseType)
+                if (_optOutMembers.TryGetValue(cur.FullName + "." + name, out var why)) return why;
+            return null;
         }
 
         /// <summary>Waiver CLASS marker. The reason string IS the class — the same mechanism RailCheck's
@@ -678,6 +722,21 @@ namespace Multiplayer.Network.Sync
                           ?? cur.Assembly.GetType(cur.FullName + "InstaceData"); // game typo: GeoSiteInstaceData
                 if (dto != null && dto != t) return dto;
             }
+            // RECORD-CONTRACT rung — the type's OWN parameterless RecordInstanceData() when its return
+            // type is an IInstanceData. The game's own persistence contract, so no name list and no
+            // per-type code: it reaches DTOs the name conventions cannot (GeoLevelController's DTO is
+            // PhoenixPoint.Geoscape.GeoLevelInstanceData — different NAME and different NAMESPACE, and
+            // GeoLevelController declares no nested *InstanceData either, so both probes miss).
+            // TYPE-LEVEL ONLY: ReturnType is read, the method is NEVER invoked. Invoking it would record
+            // every faction + the event system and call every MOD's RecordGeoscapeInstanceData
+            // (GeoLevelController.cs:389-393, :420) once per walk — RCA gap B7's flood.
+            // AccessTools.Method with an EXACT empty param list: the overload that takes arguments is a
+            // different contract (a DTO handed in), and matching it here would read the wrong ReturnType.
+            for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
+            {
+                var rec = HarmonyLib.AccessTools.Method(cur, "RecordInstanceData", new Type[0])?.ReturnType;
+                if (rec != null && rec != t && typeof(IInstanceData).IsAssignableFrom(rec)) return rec;
+            }
             // NESTED DTO fallback — only when NO sibling DTO exists anywhere in the hierarchy: some
             // singletons persist through a nested *InstanceData type the sibling probe cannot see
             // (GeoscapeEventSystem+EventSystemInstanceData — the name does not even start with the
@@ -688,8 +747,22 @@ namespace Multiplayer.Network.Sync
             for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
                 foreach (var n in cur.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
                     if (n.Name.EndsWith("InstanceData", StringComparison.Ordinal) && n != t) return n;
+            // The silent-swallow line: the GAME says this type persists (it has a record contract) and
+            // NO probe reached its DTO — so it classifies with 0 members and VisitEntity drops it with a
+            // "no persistent members" incident that only ever lands in rail-coverage.txt, and only if it
+            // is a declared root. Once per type; the guard keeps it to the handful of types that really
+            // declare RecordInstanceData (never the thousands that do not).
+            if (_noBridgeLogged.Add(t))
+            {
+                var rec = HarmonyLib.AccessTools.Method(t, "RecordInstanceData", new Type[0])?.ReturnType;
+                if (rec != null)
+                    Debug.LogWarning("[Multiplayer][rail] FindBridge(" + t.FullName + "): no *InstanceData sibling/nested, and RecordInstanceData() returns " +
+                                     rec.FullName + " which is not IInstanceData — this type classifies with 0 persistent members");
+            }
             return null;
         }
+
+        private static readonly HashSet<Type> _noBridgeLogged = new HashSet<Type>();
 
         /// <summary>The type a polymorphic <c>object</c> DTO slot actually carries: the same-named nested type
         /// declared by the live type or one of its bases. Same generic move as <see cref="FindBridge"/> — a

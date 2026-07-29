@@ -6,7 +6,7 @@ def-ownership law: RUNTIME-ONLY — DefOwnership's reference-identity set needs 
   so walk-time def-aliasing (an instance reachable from BOTH a live entity and the def graph) is
   INVISIBLE here; this harness asserts only the static belt (L11: no LocalizedTextBind field/element
   rides covered — the known def-laundering vector, ItemDef.GetDisplayName returns def state by ref).
-types: 60
+types: 63
 
 Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace  [bridge:GeoMarketplaceInstanceData]  covered=2/4
   + Leaf IsMissionInProgress (Boolean)
@@ -128,6 +128,8 @@ PhoenixPoint.Common.Entities.Items.ManufacturableItem  [direct]  covered=5/5
   + LeafList ManufacturePrice (ResourcePack) unordered=no apply=Clear+Add
   + Leaf RelatedItemDef (ItemDef)
   + LeafList ScrapReward (ResourcePack) unordered=no apply=Clear+Add
+PhoenixPoint.Common.Game.PhoenixGameExtraSettings  [direct]  covered=1/1
+  + Leaf DamagedBodypartsDrainsAllStamina (Boolean)
 PhoenixPoint.Geoscape.Entities.AlienRaidManager  [direct]  covered=5/6
   + Leaf HrsSinceLargeFlyerDestroyed (Int32)
   + Leaf HrsSinceLastSupplyRaidSuccess (Int32)
@@ -370,7 +372,33 @@ PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covere
   + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
+PhoenixPoint.Geoscape.Levels.GeoLevelController  [bridge:GeoLevelInstanceData]  covered=5/24
+  - EXCLUDED ContextHelpData (ContextHelpInstanceData): per-peer context-help/hint progress (presentation) — each player owns their own (GeoLevelController.cs:318)
+  + Leaf CurrentDifficultyLevel (GameDifficultyLevelDef)
+  + EntityList DeadSoldiers (Dictionary`2) unordered=yes apply=ICollection<T>
+  - EXCLUDED DynamicDifficultySystemInstanceData (DifficultyInstanceData): bridge-unresolved
+  - EXCLUDED EventSystemInstanceData (EventSystemInstanceData): bridge-unresolved
+  + Descend ExtraGameSettings (PhoenixGameExtraSettings)
+  - EXCLUDED FactionsInstanceData (List`1): bridge-unresolved
+  - EXCLUDED GeoscapeLog (GeoscapeLog): keyless List<GeoscapeLogEntry> blob whose whole content is rail-refused LocalizedTextBind — rebuilt entries carry Text=null and GenerateMessage() NREs (GeoscapeLogEntry.cs:11-13/:23-25); needs a text-key codec first
+  - EXCLUDED LastSelectedActor (GeoActor): bridge-unresolved
+  - EXCLUDED MarketplaceInstanceData (GeoMarketplaceInstanceData): bridge-unresolved
+  - EXCLUDED MissionSchedulerData (InstanceData): bridge-unresolved
+  - EXCLUDED MissionToComplete (GeoMission): bridge-unresolved
+  - EXCLUDED MistData (MistRendererInstanceData): bridge-unresolved
+  - EXCLUDED ModData (Dictionary`2): other mods' geoscape state — needs its own cadence + per-mod opt-in (record calls every mod per walk, apply is load-shaped ProcessGeoscapeInstanceData; RCA gap B7)
+  + Leaf NextTacUnitId (Int32) -> live _nextTacUnitId
+  - EXCLUDED PhoenixpediaData (InstanceData): bridge-unresolved
+  - EXCLUDED ScannerHistoryData (List`1): bridge-unresolved
+  + Leaf StartingPopulation (Int32)
+  - EXCLUDED Statistics (PhoenixStatistics): bridge-unresolved
+  - EXCLUDED SubFactions (List`1): blob husk on GeoSubFaction (_level:GeoLevelController)
+  - EXCLUDED TacUnits (List`1): the U# root registry — identity is STRUCTURAL (law 3); a value-rebuild from an EntityList blob would husk live GeoCharacters (GeoLevelController.cs:162 _tacUnits)
+  - EXCLUDED TimingData (TimingInstanceData): bridge-unresolved
+  - EXCLUDED TutorialInstanceData (InstanceData): bridge-unresolved
+  - EXCLUDED ViewStateSwitchQuery (List`1): bridge-unresolved
 PhoenixPoint.Geoscape.Levels.GeoMissionGenerator  [none]  covered=0/0
+System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Common.Entities.GeoTacUnitId, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]]  [none]  covered=0/0
 System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoCharacter, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager+Loadout, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]]  [none]  covered=0/0
 System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoSite, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]]  [none]  covered=0/0
 System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Common.Core.ResourcePack, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]]  [none]  covered=0/0
@@ -395,6 +423,7 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Events.GeoscapeEventRecord keyable=no customCreate=no husk=none roundtrip=ok(7)
   PhoenixPoint.Geoscape.Levels.Factions.Archeology.AncientSiteProbeHistoryData keyable=no customCreate=no husk=none roundtrip=ok(1)
   PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState keyable=no customCreate=no husk=none roundtrip=ok(1)
+  System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Common.Entities.GeoTacUnitId, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoTacUnitId)
   System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoCharacter, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Geoscape.Entities.PostmissionReplenishManager+Loadout, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoCharacter)
   System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoSite, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]] keyable=no customCreate=yes husk=none roundtrip=live-gated(pair key GeoSite)
   System.Collections.Generic.KeyValuePair`2[[PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null],[PhoenixPoint.Common.Core.ResourcePack, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]] keyable=no customCreate=yes husk=none roundtrip=ok(0)
@@ -408,7 +437,7 @@ nested husk sweep (recursive over the blob closure; waived = justified opt-out):
   ~ PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedGameTags waived: self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)
   ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor.__level waived: lazy self-healing level ref (LevelController getter re-resolves, GeoUnitDescriptor.cs:214)
   ~ PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor._temporaryStatsModifier waived: transient generation-preview scratch (Dispose-scoped, GeoUnitDescriptor.cs:166-171) — null at rest
-  (types swept: 30)
+  (types swept: 31)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
 PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
@@ -546,6 +575,6 @@ twin summary: resolved=63 gaps=52 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
-summary: covered=247 excluded=64 blobbable=19 geoItemDicts=1
+summary: covered=253 excluded=83 blobbable=20 geoItemDicts=1
 
 known law violations (0) — each one is a rail bug, not a harness limit:

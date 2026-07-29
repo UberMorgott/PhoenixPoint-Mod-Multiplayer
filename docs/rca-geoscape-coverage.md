@@ -100,7 +100,38 @@ unimplemented batches below are from the original draft — renumber at implemen
   the same site. Then client joins mid-flight and must NOT free-run (log: zero
   `[MP][diag] SetPowered`-style local writes; assert `Travelling`/`RangeRemaining` only change on apply).
 
-### Batch 2 — `GeoLevelController` becomes a root *(gap B3, + the two traps)*
+### Batch 2 — `GeoLevelController` becomes a root *(gap B3, + the two traps)* — LANDED
+
+> Law **L28** `root-owned-instance-two-paths` / `undeclared-root-reach` / `stale-root-reach-declaration`
+> / `gl-not-last` / `undeclared-exclusion`, every arm falsified. Baseline: `types 60→63`,
+> `covered 247→253`, `excluded 64→83` — the GL table is **covered 5/24**
+> (CurrentDifficultyLevel, DeadSoldiers, ExtraGameSettings, NextTacUnitId, StartingPopulation).
+> Four DECLARED exclusions: `TacUnits`, `ModData`, `ContextHelpData`, `GeoscapeLog`.
+>
+> **Three corrections to this section, found by executing it:**
+> 1. `RailType.Build`'s bridge arm has **no component-dispatch rung** — the `> dispatch X ->
+>    GetComponent(T)` in the twin tables is the CLIENT resolve path (`IdentityResolver.cs:288-292`),
+>    fed on the host by walking a RECORDED DTO object (`GeoSite.SerializationData`).
+>    `GeoLevelController` has no such property, so `MissionSchedulerData` / `EventSystemInstanceData` /
+>    `MistData` / `TutorialInstanceData` / `PhoenixpediaData` /
+>    `DynamicDifficultySystemInstanceData` / `MarketplaceInstanceData` are now NAMED
+>    `bridge-unresolved` exclusions, not coverage. **MissionScheduler still does not mirror** ⇒ "new
+>    missions never appear" is NOT fixed by this batch. Next batch = one generic host-side rung (a
+>    `GetComponent(valType.DeclaringType)` accessor kind on `RailField`, the closure seeded with the
+>    component type so its coverage stays baseline-visible). Trap T1's double-visit with `ES`/`MK` is
+>    therefore not armed YET — it arms with that rung, which is why L28 landed first.
+> 2. `TacUnits` does **not** resolve today (T1's `PREDICTED` settled): `TwinTypeCompatible`'s
+>    live-dict-from-DTO-list rung needs `DictKeyMember(IGeoTacUnit, GeoTacUnitId)` and
+>    `GetSerializedMembers` yields nothing for an INTERFACE. The landmine is disarmed only by a lookup
+>    that fails ⇒ the declared opt-out is what actually holds it (falsified: removing it leaves
+>    `reason='bridge-unresolved'`, and L28 goes RED).
+> 3. `GeoscapeLog` DOES resolve (onto live `Log`) and had to be excluded: its keyless
+>    `List<GeoscapeLogEntry>` blob rebuilds entries whose whole content is rail-refused
+>    `LocalizedTextBind`, and that type is a CLASS ⇒ `GenerateMessage()` NREs on `Text == null`
+>    (`GeoscapeLogEntry.cs:11-13`, `:23-25`). **The husk gate misses this class entirely**: `HuskScan`
+>    counts every `GetSerializedMembers` name as carried (`RailMeta.cs:2020-2023`), so a member the
+>    RAIL excludes but the SAVE serializes is never a husk — a generic gap deserving its own batch and
+>    law. Mirroring the log needs a text-key codec for `LocalizedTextBind` first.
 
 1. `FindBridge` (`RailMeta.cs:669-688`): new rung = own parameterless `RecordInstanceData()`
    returning an `IInstanceData`.
@@ -270,6 +301,11 @@ risky — last batch, change-driven cadence only, per-mod opt-in.
 - **UNVERIFIED**: whether `GeoBehemothActor` reaches `GeoNavComponent.Navigate` on a client in
   practice (its callers are read: `GeoBehemothActor.cs:325/:351/:365/:706`) — the batch 1 gate
   condition is written so the answer does not matter.
-- **UNVERIFIED**: whether `GeoPhoenixpedia.InstanceData` / `MistRendererSystem.MistRendererInstanceData`
-  / `GeoscapeTutorial.InstanceData` implement `IInstanceData` (would make them bridge candidates under
-  the batch-2 rung and widen the baseline diff further than the GLC row alone).
+- ~~**UNVERIFIED**: whether `GeoPhoenixpedia.InstanceData` / `MistRendererSystem.MistRendererInstanceData`
+  / `GeoscapeTutorial.InstanceData` implement `IInstanceData`~~ — **SETTLED 2026-07-29: they do NOT.**
+  All three (plus `GeoMissionScheduler.InstanceData`) are plain `public class` with no base list
+  (`GeoPhoenixpedia.cs:25`, `MistRendererSystem.cs:24`, `GeoscapeTutorial.cs:41`,
+  `GeoMissionScheduler.cs:36`), so batch 2's record-contract rung is INERT for them — they keep riding
+  `FindBridge`'s nested probe and the baseline widened by the `GL` row alone (+3 types). Same check
+  disarmed the hijack risk on the two roots that already exist: `GeoscapeEventSystem
+  .RecordInstanceData()` (`:660`) and `GeoFaction.RecordInstanceData()` (`:354`) return **void**.
