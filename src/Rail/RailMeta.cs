@@ -292,7 +292,7 @@ namespace Multiplayer.Network.Sync
 
         private static RailField BuildField(Type owner, string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop = null)
         {
-            var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo, HopFi = hop };
+            var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = RailMeta.DeclaredView(live as PropertyInfo), HopFi = hop };
             // DECLARED opt-out FIRST, ahead of the unresolved bail. An opt-out on a member no convention
             // resolves was DEAD CODE before (the bail below printed "bridge-unresolved" instead), which
             // makes such an exclusion a comment asserting an invariant rather than a mechanism: it would
@@ -358,7 +358,16 @@ namespace Multiplayer.Network.Sync
                     var pa = elem.GetGenericArguments();
                     return PairBlobField(f, pa[0], pa[1]);
                 }
-                if (RailMeta.LeafKindOf(elem, out _))
+                // A list of REFERENCES is a leaf list — but only where the element is owned SOMEWHERE ELSE.
+                // A ref-addressable SUB-entity (IdentityResolver.IsRefAddressableType) is owned by THIS
+                // collection: its ref key is the path THROUGH the collection, so classifying the container
+                // as refs is circular — nothing would ever descend into an element and the element's own
+                // state would stop shipping entirely (GeoHaven.Zones: _state/Health/ZoneCount). Root
+                // entities live in their own registry, so a list of them genuinely is refs (GeoSite in
+                // _addons / AttackingSites). Falls through to the keyable-element rung below, which makes it
+                // the EntityCollection it already was.
+                if (RailMeta.LeafKindOf(elem, out var elemKind) &&
+                    (elemKind != LeafKind.EntityRef || IdentityResolver.IsRootEntityType(elem)))
                 {
                     f.Class = FieldClass.LeafList; f.ElemType = elem;
                     f.Unordered = valType.IsGenericType && valType.GetGenericTypeDefinition() == typeof(HashSet<>);
@@ -781,6 +790,21 @@ namespace Multiplayer.Network.Sync
 
         private static readonly HashSet<Type> _noBridgeLogged = new HashSet<Type>();
 
+        /// <summary>A property as its DECLARING type sees it. Reflection through a DERIVED type HIDES a base
+        /// class's private accessor: <c>GeoFaction.BuildingZone { get; private set; }</c> (decompile
+        /// GeoFaction.cs:243) asked through <c>GeoAlienFaction</c> returns a PropertyInfo with the same
+        /// DeclaringType but <c>GetSetMethod(true) == null</c> — measured, not assumed. So
+        /// <see cref="RailField.IsWritable"/> called the member read-only and the classifier excluded it on
+        /// every DERIVED owner while the base owner's identical member rode, and <see cref="RailField.SetValue"/>
+        /// would have thrown on the apply side. One normalization at construction fixes both, for every
+        /// base-declared <c>{ get; private set; }</c> the twin/bridge resolver reaches through a subclass.</summary>
+        internal static PropertyInfo DeclaredView(PropertyInfo pi)
+        {
+            if (pi == null || pi.GetSetMethod(true) != null || pi.DeclaringType == null) return pi;
+            return pi.DeclaringType.GetProperty(pi.Name,
+                       BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ?? pi;
+        }
+
         /// <summary>The type a polymorphic <c>object</c> DTO slot actually carries: the same-named nested type
         /// declared by the live type or one of its bases. Same generic move as <see cref="FindBridge"/> — a
         /// name pattern over the game's own metadata, never a type list — and resolved from the TYPE, not from
@@ -1045,7 +1069,7 @@ namespace Multiplayer.Network.Sync
             if (t == typeof(Vector3)) { kind = LeafKind.Vector3; return true; }
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
-            if (IdentityResolver.IsRootEntityType(t)) { kind = LeafKind.EntityRef; return true; }
+            if (IdentityResolver.IsRefAddressableType(t)) { kind = LeafKind.EntityRef; return true; }
             if (t.IsValueType && !t.IsPrimitive)
             {
                 var rt = RailType.Get(t);
@@ -1117,7 +1141,16 @@ namespace Multiplayer.Network.Sync
             if (kind == LeafKind.EntityRef)
             {
                 var key = IdentityResolver.RootRef(v);
-                if (key == null) { w.Write((byte)LeafKind.Null); return; }
+                // No key = the ref ships as a wire NULL, and DecodeLeaf cannot tell that from a real null:
+                // the client writes null over a live ref. Documented cases exist (a GeoSite mid-creation
+                // still has SiteId -1, a haven zone detached by an upgrade), so this is a named WARNING
+                // rather than a refusal — but it is never silent again.
+                if (key == null)
+                {
+                    WarnOnce("EncodeLeaf: no stable ref key for a live " + v.GetType().Name +
+                             " — the field ships NULL and the client clears its own reference");
+                    w.Write((byte)LeafKind.Null); return;
+                }
                 w.Write((byte)kind); w.Write(key); return;
             }
             w.Write((byte)kind);

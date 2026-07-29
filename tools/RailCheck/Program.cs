@@ -81,7 +81,7 @@ namespace RailCheck
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(VehicleIntentLaw());
-            laws.AddRange(RootOwnershipLaw());
+            laws.AddRange(RootOwnershipLaw(types));
             laws.AddRange(RootCoverageLaw());
             laws.AddRange(StructuralDescendLaw(game, types));
             laws.AddRange(StructuralActorLaw());
@@ -147,6 +147,13 @@ namespace RailCheck
                 // Mod-state roots (IdentityResolver.RegisterModRoot): MOD-owned classes riding the same
                 // walk. Sealed → Concretions never scans the game assembly for them.
                 typeof(Multiplayer.Network.Sync.ScrapCartState), // root "M#cart" (shared scrap cart)
+                // Ref-addressable SUB-entities (IdentityResolver.IsRefAddressableType). Their state ships as
+                // elements of the collection that OWNS them, but that collection lives in a TWIN table
+                // (GeoHaven <= InstanceData . Zones) and the expansion below only follows a type's own
+                // Descend/element fields — so nothing enqueues them and their coverage table would silently
+                // vanish from the snapshot. It rode here by accident while GeoStealAircraftMission._zone was
+                // still a Descend; seeded explicitly now that the field is a ref.
+                typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoHavenZone),
             })
             // Structurally-enabled Descend families (DiffEngine.StructuralDescendKinds): the live walk
             // reaches their CONCRETIONS by obj.GetType() while this closure is declared-type-only, and the
@@ -1612,7 +1619,7 @@ namespace RailCheck
         /// Closure is over DECLARED types (deterministic, same on both peers); the reach test compares
         /// with assignability in both directions so a declared base (GeoActor) counts as reaching its
         /// concretions, which is what the live walk really does (it types every hop by obj.GetType()).</summary>
-        private static IEnumerable<string> RootOwnershipLaw()
+        private static IEnumerable<string> RootOwnershipLaw(List<Type> types)
         {
             var kinds = IdentityResolver.RootKinds;
             var last = kinds[kinds.Length - 1];
@@ -1666,6 +1673,115 @@ namespace RailCheck
                                  (f.Exclude ?? "<none>") + "') — it must be an EXPLICIT opt-out in RailMeta._optOutMembers, " +
                                  "not a lookup that happens to fail today";
             }
+
+            foreach (var v in SubEntityRefArm(types)) yield return v;
+        }
+
+        /// <summary>L28, sub-entity arm — a ref key that is a PATH must still be a path that RESOLVES.
+        ///
+        /// A ROOT ref is self-validating: "S#5" is one segment and <c>ResolveRoot</c> owns it. A SUB-entity
+        /// ref (<c>IdentityResolver.IsRefAddressableType</c> minus the roots) is named by the rail path its
+        /// OWNER addresses it by, so its key silently depends on four independent facts holding at once —
+        /// the owner chain's member names, the terminal field still being a KEYED collection, that
+        /// collection's element type, and the element still being <c>KeyOf</c>-addressable. Any one of them
+        /// moving turns every such ref into a wire NULL that the client writes over a live reference: the
+        /// exact silent-swallow class, and invisible to every other law because the FIELD still classifies
+        /// fine as a Leaf.
+        ///
+        /// So the law re-derives the template through the real metadata tables — the same hops
+        /// <c>IdentityResolver.Resolve</c> takes at runtime (IInstanceData -> twin DTO, a DTO slot whose
+        /// declaring type is a Component -> GetComponent) — instead of trusting the string. Falsify it by
+        /// renaming a segment, flipping the terminal collection's class, or dropping the element's id probe.
+        ///
+        /// What it CANNOT assert, stated rather than implied: that a live haven actually holds the zone.
+        /// The harness has no GeoLevelController (see Main) — resolution itself is the in-game gate.</summary>
+        private static IEnumerable<string> SubEntityRefArm(List<Type> types)
+        {
+            // Rows: sub-entity type -> the owner path template RootRef pastes its element key onto, and the
+            // ROOT kind the template hangs off. One row per non-root ref-addressable type; a type that gains
+            // ref-addressability without a row here is itself a violation (last arm).
+            var rows = new (Type Sub, string Root, string Path)[]
+            {
+                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoHavenZone), "S#", IdentityResolver.HavenZoneOwnerPath),
+            };
+
+            foreach (var (sub, root, path) in rows)
+            {
+                if (!IdentityResolver.IsRefAddressableType(sub) || IdentityResolver.IsRootEntityType(sub))
+                {
+                    yield return "L28 subentity-ref-row-stale: " + sub.FullName + " is declared here as a sub-entity ref " +
+                                 "kind but IsRefAddressableType no longer names it (or it became a root) — the row " +
+                                 "asserts nothing and the next reader will trust it";
+                    continue;
+                }
+                if (!IdentityResolver.TypeKeyable(sub))
+                {
+                    yield return "L28 subentity-ref-unkeyable: " + sub.FullName + " rides as an EntityRef but " +
+                                 "IdentityResolver.KeyOf can no longer derive its element key (id-probe table) — " +
+                                 "RootRef returns null and every reference to one ships as a wire NULL";
+                    continue;
+                }
+                var rootType = IdentityResolver.RootKinds.FirstOrDefault(r => r.Key == root).Type;
+                if (rootType == null)
+                {
+                    yield return "L28 subentity-ref-root-absent: root kind '" + root + "' is gone from " +
+                                 "IdentityResolver.RootKinds, so no " + sub.Name + " ref can ever resolve";
+                    continue;
+                }
+
+                // Walk the template exactly as Resolve does, but over types instead of instances.
+                Type cur = rootType, twinDto = null, terminalElem = null;
+                string fail = null, terminalClass = null;
+                foreach (var seg in path.Split('.'))
+                {
+                    RailField f;
+                    if (twinDto != null)
+                    {
+                        f = RailType.GetBridged(cur, twinDto)?.FieldByName(seg);
+                        if (f == null) { fail = "no bridged member '" + seg + "' on " + cur.Name + " <= " + twinDto.Name; break; }
+                        if (f.Fi == null && f.Pi == null)
+                        {
+                            var decl = f.ValueType?.DeclaringType;
+                            if (decl == null || !typeof(UnityEngine.Component).IsAssignableFrom(decl))
+                            { fail = "'" + seg + "' resolves to no live member and dispatches to no Component"; break; }
+                            cur = decl; twinDto = f.ValueType; continue;   // Resolve's GetComponent hop
+                        }
+                        twinDto = null;
+                    }
+                    else
+                    {
+                        f = RailType.Get(cur)?.FieldByName(seg);
+                        if (f == null) { fail = "no member '" + seg + "' on " + cur.Name; break; }
+                        if (typeof(Base.Core.IInstanceData).IsAssignableFrom(f.ValueType))
+                        { twinDto = RailMeta.FindBridge(cur) ?? f.ValueType; continue; }  // Resolve's DTO hop
+                    }
+                    terminalClass = f.Class.ToString();
+                    terminalElem = f.ElemType;
+                    cur = f.ValueType;
+                }
+                if (fail != null)
+                {
+                    yield return "L28 subentity-ref-path-broken: the owner path '" + root + "." + path + "' that names a " +
+                                 sub.Name + " no longer walks the metadata — " + fail + ". Every ref to one ships as a " +
+                                 "wire NULL and the client clears its live reference, with the FIELD still classifying " +
+                                 "as a perfectly good Leaf";
+                    continue;
+                }
+                if (terminalClass != FieldClass.EntityCollection.ToString() || terminalElem != sub)
+                    yield return "L28 subentity-ref-terminal: the owner path '" + root + "." + path + "' ends in a " +
+                                 terminalClass + " of " + (terminalElem?.Name ?? "<none>") + ", not an EntityCollection of " +
+                                 sub.Name + " — only a KEYED collection is addressable by '#key', so the ref cannot " +
+                                 "resolve (and if it turned into a list of refs, the path is circular: nothing would " +
+                                 "descend into an element and the sub-entity's own state would stop shipping)";
+            }
+
+            // The reverse direction: a type may not become ref-addressable without a row above.
+            foreach (var t in types)
+                if (IdentityResolver.IsRefAddressableType(t) && !IdentityResolver.IsRootEntityType(t) &&
+                    !rows.Any(r => r.Sub.IsAssignableFrom(t)))
+                    yield return "L28 subentity-ref-undeclared: " + t.FullName + " rides as an EntityRef but is not a " +
+                                 "root and has no owner-path row in SubEntityRefArm — its key shape is unasserted, so " +
+                                 "a broken owner path would only ever surface in-game as a cleared reference";
         }
 
         // Root kinds that legitimately ride with an EMPTY covered set, with the reason. Grammar: root key.

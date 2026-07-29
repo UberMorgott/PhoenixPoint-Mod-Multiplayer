@@ -395,7 +395,7 @@ PhoenixPoint.Geoscape.Entities.Missions.GeoStealAircraftMission  [direct]  cover
   + Descend _squad (GeoSquad)
   + Leaf _stealAircraft (GeoVehicle)
   + Leaf _threatLevel (DifficultyThreatLevel)
-  + Descend _zone (GeoHavenZone)
+  + Leaf _zone (GeoHavenZone)
 PhoenixPoint.Geoscape.Entities.Missions.GeoStealResearchMission  [direct]  covered=7/7
   + Descend GlobalTime (UnityDateTime)
   + Descend MissionData (MissionParams)
@@ -503,7 +503,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Leaf BehemothEggSpawnPosition (Vector3)
-  + Descend BuildingZone (GeoHavenZone)
+  + Leaf BuildingZone (GeoHavenZone)
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED EvolutionProgress (Int32): read-only
   - EXCLUDED ExtendedInstanceData (Object): flattened onto live type (PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction+ExtendedInstanceData)
@@ -536,7 +536,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   + Leaf AncientSiteProbes (Int32)
   - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   - EXCLUDED Bases (List`1): bridge-unresolved
-  + Descend BuildingZone (GeoHavenZone)
+  + Leaf BuildingZone (GeoHavenZone)
   + EntityList CapturedUnits (List`1) -> live _capturedUnits unordered=no apply=IList
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED DismambleAt (TimeUnit): bridge-unresolved
@@ -570,7 +570,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
 PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=11/20
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
-  + Descend BuildingZone (GeoHavenZone)
+  + Leaf BuildingZone (GeoHavenZone)
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED ExtendedInstanceData (Object): bridge-unresolved
   - EXCLUDED FactionDef (PPFactionDef): read-only
@@ -728,9 +728,9 @@ PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=
   > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
   + Leaf VehicleID (Int32)
   + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
-PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=14/25
+PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=15/25
   + Leaf CanRedirect (Boolean)
-  - EXCLUDED CurrentSite (GeoSite): read-only
+  + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
   + Leaf HitPoints (Int32) -> live Stats.HitPoints
   + Leaf MaintenancePointsToRepair (Int32) -> live _maintenancePointsToRepair
@@ -800,11 +800,10 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
   - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
-twin summary: resolved=63 gaps=52 dispatch=7
+twin summary: resolved=64 gaps=51 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
 summary: covered=441 excluded=85 blobbable=29 geoItemDicts=1
 
-known law violations (1) — each one is a rail bug, not a harness limit:
-  ! L29 descend-nullable-unenabled: PhoenixPoint.Geoscape.Entities.Missions.GeoStealAircraftMission._zone (GeoHavenZone) is NULL on a freshly built GeoMission and is not structurally enabled — when the host fills it the client gets value entries for an object it has no way to create, and when the host clears it the client is never told at all
+known law violations (0) — each one is a rail bug, not a harness limit:

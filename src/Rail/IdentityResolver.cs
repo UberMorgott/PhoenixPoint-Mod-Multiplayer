@@ -8,6 +8,7 @@ using Base.Core;
 using Base.Defs;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
 
@@ -116,7 +117,24 @@ namespace Multiplayer.Network.Sync
             typeof(GeoSite).IsAssignableFrom(t) || typeof(GeoVehicle).IsAssignableFrom(t) ||
             typeof(GeoCharacter).IsAssignableFrom(t) || typeof(GeoFaction).IsAssignableFrom(t);
 
-        /// <summary>One-string root reference ("S#5"), or null when the entity has no valid id yet.</summary>
+        /// <summary>Can an object of this type be named ACROSS the tree — i.e. does <see cref="RootRef"/>
+        /// have a key shape for it? Two answers, one question:
+        ///   • a ROOT entity is owned by its own registry, so every other mention of it is a REFERENCE;
+        ///   • a SUB-entity is owned by the collection that holds it, so only mentions OUTSIDE that
+        ///     collection are references — the collection itself stays an EntityCollection (see
+        ///     <c>RailType.BuildField</c>'s LeafList rung, which asks <see cref="IsRootEntityType"/> for
+        ///     exactly that reason: a list of sub-entity REFS would be circular and nothing would ever
+        ///     descend into an element to ship its state).
+        /// Read by <c>RailMeta.LeafKindOf</c> — the ONE place that decides a member rides as
+        /// <c>LeafKind.EntityRef</c> instead of being walked into.</summary>
+        public static bool IsRefAddressableType(Type t) =>
+            IsRootEntityType(t) || typeof(GeoHavenZone).IsAssignableFrom(t);
+
+        /// <summary>One-string reference to an entity the rail names across the tree, or null when it has
+        /// no derivable key yet. A root entity's key is its registry key ("S#5"); a SUB-entity's key is the
+        /// rail PATH its owner already addresses it by — <see cref="Resolve"/> is a general path resolver
+        /// and <c>RailMeta.DecodeLeaf</c>'s EntityRef arm hands it this string verbatim, so a root ref is
+        /// simply the one-segment case of the same grammar. No new wire concept, no second resolver.</summary>
         public static string RootRef(object o)
         {
             switch (o)
@@ -126,8 +144,36 @@ namespace Multiplayer.Network.Sync
                 case GeoVehicle v: return "V#" + v.VehicleID + OwnerQualifier(v.Owner);
                 case GeoCharacter c: return "U#" + (int)c.Id;
                 case GeoFaction f: return f.Def == null ? null : "F#" + f.Def.Guid;
+                case GeoHavenZone z: return HavenZoneRef(z);
                 default: return null;
             }
+        }
+
+        /// <summary>The one hop from a sub-entity to the owner path that names it. Segment template, so the
+        /// L28 belt can re-derive it through the real metadata tables instead of a second string copy:
+        /// the site's recorded DTO -> the haven component's nested DTO -> the haven's live zone list.</summary>
+        internal const string HavenZoneOwnerPath = "SerializationData.HavenData.Zones";
+
+        /// <summary>A haven zone is not a root and never will be: it has no id member of its own, it is
+        /// CREATED by its haven (GeoHaven.BuildZone -> _zones.Insert, decompile GeoHaven.cs:410) and every
+        /// other mention of one in the save graph is an ALIAS into that list — GeoStealAircraftMission._zone
+        /// (a ctor param; the v&lt;2 migration literally reads it back as Haven.Zones.FirstOrDefault,
+        /// GeoStealAircraftMission.cs:80) and GeoFaction.BuildingZone (GeoFaction.cs:1496 &lt;-
+        /// QueryBuildZoneAtHaven -> haven.BuildZone :1522). So its stable key is the path to the owning
+        /// slot, built from the SAME two derivations both peers already share: the haven's site root key,
+        /// and <see cref="KeyOf"/> of the zone itself (the "Def" probe -> the zone def GUID, which is also
+        /// the element key the haven's own EntityCollection ships it under). Nothing host-assigned.
+        ///
+        /// Null (no key) when the zone is not attached to a haven — GeoHaven.UninitZone clears
+        /// <c>Haven</c> on the zone an upgrade replaces (GeoHaven.cs:427-430), and that zone is removed
+        /// from _zones in the same breath, so there is genuinely no slot to name. The caller logs it.</summary>
+        private static string HavenZoneRef(GeoHavenZone z)
+        {
+            var haven = z.Haven;                        // Unity ==: a destroyed component is fake-null
+            if (haven == null || haven.Site == null) return null;
+            var siteRef = RootRef(haven.Site);
+            var key = KeyOf(z);
+            return siteRef == null || key == null ? null : siteRef + "." + HavenZoneOwnerPath + "#" + key;
         }
 
         /// <summary>Owner qualifier for a root whose id the game issues PER OWNER instead of level-wide.

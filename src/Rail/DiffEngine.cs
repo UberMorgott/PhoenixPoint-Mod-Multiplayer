@@ -201,13 +201,11 @@ namespace Multiplayer.Network.Sync
         //     construction site in the game is a fresh `new GeoSquad(...)` built for that one mission
         //     (GeoSite.cs:1170, GeoscapeView.cs:1045, UIStateRosterDeployment.cs:324). Its `Units` ride as
         //     EntityRefs, so the client's copy points at the client's OWN GeoCharacters.
-        // DELIBERATELY ABSENT — GeoHavenZone (GeoStealAircraftMission._zone): that field ALIASES the
-        // haven's own zone (`_zone = Haven.Zones.FirstOrDefault()`, GeoStealAircraftMission.cs:80), so
-        // constructing one would hand the client's mission a phantom zone instead of the haven's, and
-        // Def/ZoneCount/Health are readonly (GeoHavenZone.cs:15,18,22) so they would never be filled.
-        // Carrying it as a REFERENCE is the right answer and needs GeoHavenZone to have a stable key,
-        // which it has not — IdentityResolver.KeyOf cannot address it. That is a KEYING gap, not a
-        // structural-payload one, so L29 keeps naming it rather than this table pretending to cover it.
+        // DELIBERATELY ABSENT — GeoHavenZone (GeoStealAircraftMission._zone, GeoFaction.BuildingZone):
+        // constructing one would hand the client a phantom instead of the haven's own zone. It was a KEYING
+        // gap, and it is closed as one: the zone is named by the path its haven addresses it by
+        // (IdentityResolver.IsRefAddressableType / HavenZoneRef), so the field rides as a Leaf/EntityRef —
+        // a reference, never a create. Belt = RailCheck L28 subentity-ref-*.
         private static readonly Type[] StructuralDescendKindTable =
         {
             typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
