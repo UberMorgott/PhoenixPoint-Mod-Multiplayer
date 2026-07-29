@@ -121,9 +121,11 @@ namespace Multiplayer.Network.Sync
                             OpenUiRepaint.MarkDirty();
                             break;
                         case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem es:
-                            // Mirrored event records changed → raise/dismiss the client's event popup
-                            // from the state transitions (EventPopup latch). MarkDirty stays: site
-                            // encounter labels etc. ride the universal repaint like any other kind.
+                            // Mirrored event records changed → re-derive the client's event-window
+                            // backlog from them (EventPopup.Backlog; SyncEngine.Tick pumps the same
+                            // method ~1 Hz for the records that arrive with a SAVE instead of a delta).
+                            // MarkDirty stays: site encounter labels etc. ride the universal repaint
+                            // like any other kind.
                             EventPopup.Sync(es, geo);
                             OpenUiRepaint.MarkDirty();
                             break;

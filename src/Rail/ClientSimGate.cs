@@ -225,4 +225,45 @@ namespace Multiplayer.Network.Sync
             return false;
         }
     }
+
+    /// <summary>
+    /// SIXTH seam, same law, at the GEOSCAPE EVENT funnel: <c>GeoscapeEventSystem.OnGeoscapeEvent</c>
+    /// (GeoscapeEventSystem.cs:606) is the ONE place a geoscape event is ever raised. Both routes land
+    /// here — the eventus handler registration (:542 / unregister :547) and the direct
+    /// <c>TriggerGeoscapeEvent</c> path (:319-329, calling it at :328) — and <c>OnEventTriggered</c>
+    /// (:638), which mints the record and fires <c>GeoscapeEventRaised</c>, is reachable only FROM it
+    /// (:622). One prefix therefore covers the class.
+    ///
+    /// The client's geoscape clock is deliberately not frozen, so its own timers
+    /// (<c>Update</c>:550 → <c>CompleteTimer</c>:568) and arrival/visit handlers (:412, :421) run and
+    /// can roll a DIFFERENT random encounter than the host did. That mints an authoritative record on
+    /// a projector client (law 3) which the diff rail can never correct — the diff is host-now vs
+    /// host-before, so a record only the client has is never mentioned. Blocked, every record on a
+    /// client arrives as a delta, which is exactly what <see cref="EventPopup.Backlog"/> derives its
+    /// window queue from.
+    ///
+    /// <c>SuppressEvents</c> cannot serve here: it is a rail-MIRRORED leaf
+    /// (docs/rail-baseline.txt:254) carrying the host's <c>false</c>, so a local write is overwritten
+    /// by the next delta. The apply arm stays OPEN (a rail path that reaches the funnel must land) and
+    /// the method is void — nothing dereferences a blocked return.
+    /// Parameter types are named EXACTLY: <c>AccessTools</c>/<c>HarmonyPatch</c> do no widening, and a
+    /// base-typed guess resolves to null, which PatchAll turns into one swallowed warning (RailCheck L23).
+    /// </summary>
+    [HarmonyPatch(typeof(PhoenixPoint.Geoscape.Events.GeoscapeEventSystem), "OnGeoscapeEvent",
+                  new[] { typeof(Base.Eventus.BaseEventData), typeof(Base.Eventus.BaseEventContext) })]
+    internal static class GeoscapeEventRaiseGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool Prefix(Base.Eventus.BaseEventData eventData)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            if (SyncApplyScope.Active) return true;                                      // an apply may legitimately reach it
+            string id = (eventData as PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData)?.EventID ?? "?";
+            if (_logged.Add(id))
+                Debug.Log("[MP][events] client-local raise of '" + id + "' BLOCKED — the host's record arrives via the rail");
+            return false;
+        }
+    }
 }

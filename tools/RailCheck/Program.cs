@@ -77,6 +77,7 @@ namespace RailCheck
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
+            laws.AddRange(BacklogLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1543,6 +1544,65 @@ namespace RailCheck
         private static DiffEngine.Entry Ent(string path, ushort fieldIdx, string subKey, byte value) =>
             new DiffEngine.Entry { Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = new[] { value },
                                    Key = path + "" + fieldIdx + "" + subKey };
+
+        /// <summary>L26 — the event-window BACKLOG derivation, headless. <c>EventPopup.Backlog</c> and
+        /// <c>EventPopup.Mode</c> are pure functions over <c>GeoscapeEventRecord</c>, which has a public
+        /// ctor and public Trigger/SelectChoice/Complete/Reset and touches no Unity and no level — so the
+        /// one thing the rail cannot state as metadata ("which windows does a peer still owe the player,
+        /// in what order") is assertable right here. Every arm is one of the silent swallows this engine
+        /// replaced: the seed that ate a joiner's whole backlog with no log line, a picker offered for a
+        /// record somebody already resolved (= a double grant on click), a cursor that retires nothing
+        /// or too much, a Reset record replayed forever, and dictionary-order output (law 6).</summary>
+        private static IEnumerable<string> BacklogLaw()
+        {
+            var open = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_open", Ticks(100));
+            var done = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_done", Ticks(200));
+            done.SelectChoice(1);
+            done.Complete(Ticks(210));
+            // Insertion order is the REVERSE of the required output order, so a dict walk cannot pass by luck.
+            var records = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal)
+                { { done.EventId, done }, { open.EventId, open } };
+
+            var backlog = EventPopup.Backlog(records, 0);
+            if (backlog.Count != 2)
+                yield return "L26 backlog-swallowed-on-seed: cursor 0 over 1 Triggered + 1 Completed record yields " +
+                             backlog.Count + " window(s), not 2 — a peer's accumulated history is eaten with no log line";
+            else if (backlog[0].EventId != "EV_open" || backlog[1].EventId != "EV_done")
+                yield return "L26 backlog-nondeterministic: order came back as " + backlog[0].EventId + "," +
+                             backlog[1].EventId + " — that is dictionary order, not (LastTriggerAt, EventId) ascending";
+
+            if (EventPopup.Mode(PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Triggered) != "picker")
+                yield return "L26 picker-lost: a Triggered record no longer maps to 'picker' — an OPEN decision would " +
+                             "be shown as read-only history and nobody could answer it";
+            foreach (var s in new[] { PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.SelectedChoice,
+                                      PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Completed,
+                                      PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.MigratedCompleted })
+                if (EventPopup.Mode(s) != "outcome")
+                    yield return "L26 picker-for-resolved: state " + s + " maps to '" + EventPopup.Mode(s) + "', not " +
+                                 "'outcome' — the peer is offered a choice that is already frozen, and taking it " +
+                                 "re-grants the reward (GeoscapeEvent.IsCompleted is per-instance)";
+            if (EventPopup.Mode(PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Reset) != null)
+                yield return "L26 reset-replayed: a Reset record is displayable — ReEneableEvent (GeoscapeEvent.cs:103-106) " +
+                             "puts the event back in the pool, so that window would re-raise forever";
+
+            var resolvedOnly = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal)
+                { { done.EventId, done } };
+            long at = done.LastTriggerAt.TimeSpan.Ticks;
+            if (EventPopup.Backlog(resolvedOnly, at).Count != 0)
+                yield return "L26 backlog-not-idempotent: a record at the cursor still rides — the same window re-raises " +
+                             "on every pump for the rest of the session";
+            if (EventPopup.Backlog(resolvedOnly, at - 1).Count != 1)
+                yield return "L26 cursor-overshoots: a record NEWER than the cursor was retired — a window the player " +
+                             "never saw is gone for good";
+            // An UNRESOLVED record is never retired by the cursor: the host's currently-OPEN window is the one
+            // thing the save transfer does not carry (GeoscapeViewSwitchQuery.GetRestorableData:28 walks only
+            // the pending list), so the derivation is all that can bring it back.
+            if (EventPopup.Backlog(records, long.MaxValue).Count != 1)
+                yield return "L26 open-decision-retired: a still-Triggered record dropped out of the backlog at a maxed " +
+                             "cursor — a host window open at join time would then reach the joiner never";
+        }
+
+        private static Base.Core.TimeUnit Ticks(long t) => Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(t));
 
         private static IEnumerable<string> HandleSweepLaw()
         {
