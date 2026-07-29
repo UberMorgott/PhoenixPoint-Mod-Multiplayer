@@ -143,6 +143,19 @@ namespace Multiplayer.Network.Sync
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
+            // A reseed (table entry OR fallback re-enter, both below) recomputes the screen's own
+            // UI-SESSION BASELINE from the model, which eats the local user's undo floor while they
+            // are mid-edit — a delta arriving from ANY peer would otherwise cancel the local
+            // "revert what I just staged" gesture. The set of baseline fields is DECLARED per screen
+            // in UiNativeRepaint.StageBaselines; this checkpoint is the only place that saves and
+            // restores them, and it names no screen.
+            var baseline = UiNativeRepaint.StageSnapshot.Capture(current, view);
+            try { Repaint(current, view, marks); }
+            finally { baseline.Restore(); }
+        }
+
+        private static void Repaint(GeoscapeViewState current, GeoscapeView view, int marks)
+        {
             try
             {
                 // law 8: a native refresh can fire UI events an intent-capture seam listens to.

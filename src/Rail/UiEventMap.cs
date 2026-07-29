@@ -257,7 +257,8 @@ namespace Multiplayer.Network.Sync
                     if (!ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)) return false;
                     // Progression panel: ALWAYS the full native reseed from the mirrored model — the
                     // client-posture law (IntentRail.ShouldRunNative doc) repaints from the model, own
-                    // echo included; the stage floor resets with it (undo = one host round-trip).
+                    // echo included. The reseed also recomputes the visit's undo baseline; the
+                    // StageBaselines checkpoint below puts it back (see OpenUiRepaint).
                     return Call(EsSelectProgression, s, v.GeoscapeModules.ActorCycleModule.CurrentCharacter);
                 },
                 [typeof(UIStateEditVehicle)] = (s, v) =>
@@ -310,6 +311,118 @@ namespace Multiplayer.Network.Sync
         internal static bool TryRepaint(GeoscapeViewState current, GeoscapeView view)
         {
             return Table.TryGetValue(current.GetType(), out var rebuild) && rebuild(current, view);
+        }
+
+        // ─── UI-SESSION BASELINE — declarative, keyed like the Table above ──────────────────────
+        // A screen that stages an edit also keeps a per-VISIT BASELINE: the value the visit started
+        // at, which the screen's own native undo/revert gate compares against. That baseline is UI
+        // state, not model state — but every reseed recomputes it FROM the model
+        // (UIModuleCharacterProgression.RefreshStats:516-518), so repainting the peer that is
+        // mid-edit raises its undo floor to "already spent": the native minus gate
+        // (ChangeCharacterStat:907 `currentStatValue - 1 >= startingStatValue`) and its highlight
+        // (:799-808) go false forever and the spend can never be taken back. The spend itself is
+        // fine — only the peer's ability to undo it dies, and only on the peer that clicked.
+        // Declared here, applied generically: OpenUiRepaint saves before / restores after the
+        // reseed, PersonnelSync re-aligns at the native stage→model flush. No screen is named in
+        // either mechanism.
+        // NOT in this table: list-shaped snapshots (UIModuleBionics/UIModuleMutate
+        // CharacterOriginalItems) — a numeric clamp is meaningless for them, and
+        // RepaintAugmentScreen already preserves those by declining to reseed.
+
+        /// <summary>One staged value: the visit baseline field + the live stage field it is compared
+        /// against. Declared as a pair because both consumers need both halves.</summary>
+        internal sealed class StagePair
+        {
+            internal FieldInfo Baseline;
+            internal FieldInfo Stage;
+        }
+
+        /// <summary>Baseline owner TYPE → its staged values. Internal for the RailCheck bind law.</summary>
+        internal static readonly Dictionary<Type, StagePair[]> StageBaselines = new Dictionary<Type, StagePair[]>
+        {
+            [typeof(UIModuleCharacterProgression)] = Pairs(typeof(UIModuleCharacterProgression),
+                "_startingStrengthStat", "_currentStrengthStat",
+                "_startingWillStat",     "_currentWillStat",
+                "_startingSpeedStat",    "_currentSpeedStat"),
+        };
+
+        /// <summary>Screen → the object its baseline lives on (the module, not the view state).</summary>
+        private static readonly Dictionary<Type, Func<GeoscapeView, object>> BaselineOwners =
+            new Dictionary<Type, Func<GeoscapeView, object>>
+            {
+                [typeof(UIStateEditSoldier)] = v => v.GeoscapeModules.CharacterProgressionModule,
+            };
+
+        /// <summary>Bind at declaration time: a renamed/retyped field is a LOUD dead entry, never a
+        /// silent one (the int type is also what lets the snapshot skip defensive casts).</summary>
+        private static StagePair[] Pairs(Type owner, params string[] names)
+        {
+            var pairs = new List<StagePair>(names.Length / 2);
+            for (int i = 0; i + 1 < names.Length; i += 2)
+            {
+                var b = AccessTools.Field(owner, names[i]);
+                var s = AccessTools.Field(owner, names[i + 1]);
+                if (b != null && s != null && b.FieldType == typeof(int) && s.FieldType == typeof(int))
+                    pairs.Add(new StagePair { Baseline = b, Stage = s });
+                else
+                    Debug.LogError("[Multiplayer][rail] stage-baseline bind FAILED on " + owner.Name + "." +
+                                   names[i] + " — that screen's undo floor is unprotected against repaints");
+            }
+            return pairs.ToArray();
+        }
+
+        /// <summary>The one non-mechanical rule of the restore. NEVER put the floor above what the
+        /// reseed just read from the model: <c>saved &lt;= fresh</c> is the normal case (this visit's
+        /// own spends) and keeps the undo window open, while <c>saved &gt; fresh</c> means the points
+        /// are gone — a foreign refund, a respec or a host reject — and re-claiming them would let
+        /// this peer refund what it no longer owns.</summary>
+        internal static int ClampBaseline(int saved, int fresh) => saved < fresh ? saved : fresh;
+
+        /// <summary>Baseline of the open screen, captured BEFORE a repaint and restored after. A screen
+        /// with no declaration captures nothing and restores nothing.</summary>
+        internal struct StageSnapshot
+        {
+            private object _owner;
+            private StagePair[] _pairs;
+            private int[] _saved;
+
+            internal static StageSnapshot Capture(GeoscapeViewState screen, GeoscapeView view)
+            {
+                var snap = default(StageSnapshot);
+                if (screen == null || view == null) return snap;
+                if (!BaselineOwners.TryGetValue(screen.GetType(), out var ownerOf)) return snap;
+                var owner = ownerOf(view);
+                if (owner == null || !StageBaselines.TryGetValue(owner.GetType(), out var pairs)) return snap;
+                var saved = new int[pairs.Length];
+                for (int i = 0; i < pairs.Length; i++) saved[i] = (int)pairs[i].Baseline.GetValue(owner);
+                snap._owner = owner;
+                snap._pairs = pairs;
+                snap._saved = saved;
+                return snap;
+            }
+
+            /// <summary>After the reseed the baseline field holds the FRESH model value (that is what
+            /// the native refresh writes into it) — which makes it both the value to clamp against and
+            /// the correct answer when nothing was staged.</summary>
+            internal void Restore()
+            {
+                if (_owner == null) return;
+                for (int i = 0; i < _pairs.Length; i++)
+                {
+                    var f = _pairs[i].Baseline;
+                    f.SetValue(_owner, ClampBaseline(_saved[i], (int)f.GetValue(_owner)));
+                }
+            }
+        }
+
+        /// <summary>The native stage→model flush is about to run: make its baseline the live stage so
+        /// the flush's DELTA half is a no-op. For peers where the model already carries every staged
+        /// click (PersonnelSync applies each gesture on its own) and only the flush's ABSOLUTE half
+        /// must stay native — that half is what a native ability purchase pays with.</summary>
+        internal static void AlignStageBaseline(object owner)
+        {
+            if (owner == null || !StageBaselines.TryGetValue(owner.GetType(), out var pairs)) return;
+            foreach (var p in pairs) p.Baseline.SetValue(owner, p.Stage.GetValue(owner));
         }
 
         /// <summary>UIStateBionics / UIStateMutate. These screens stage an unconfirmed trial IN the model

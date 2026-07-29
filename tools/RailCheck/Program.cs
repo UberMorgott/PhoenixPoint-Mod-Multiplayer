@@ -1004,6 +1004,39 @@ namespace RailCheck
             DiffEngine.WalkRoot("V#1@fa", r2);   // two entities, one key
             if (DiffEngine.WalkIncidents.Count == inc0)
                 yield return "L17 root-dup-undetected: a duplicate ROOT key was swallowed silently — the 'entity invisible to the rail' class is unreportable again";
+
+            // ─── L18 — the UI-session baseline a repaint must not eat ──────────────────────────────
+            // UiNativeRepaint.StageBaselines declares, per screen module, the fields holding the
+            // player's per-VISIT undo floor; OpenUiRepaint saves them around a reseed and restores
+            // ClampBaseline(saved, fresh). Two ways that silently dies, both checked here:
+            //   (a) a decompile rename makes AccessTools.Field return null → the pair drops out and
+            //       the undo floor is unprotected again with nothing red;
+            //   (b) the clamp loses its direction — the only non-mechanical line in the mechanism.
+            // The restore itself needs a live GeoscapeView + MonoBehaviour module and stays in-game.
+            int pairsBound = 0;
+            foreach (var kv in UiNativeRepaint.StageBaselines)
+            {
+                if (kv.Value.Length == 0)
+                    yield return "L18 baseline-unbound: " + kv.Key.Name + " declares no bound stage pair — its undo floor is eaten by every repaint";
+                foreach (var p in kv.Value)
+                {
+                    if (p.Baseline?.DeclaringType != kv.Key || p.Stage?.DeclaringType != kv.Key ||
+                        p.Baseline.FieldType != typeof(int) || p.Stage.FieldType != typeof(int))
+                        yield return "L18 baseline-drift: a stage pair on " + kv.Key.Name + " no longer binds to two int fields of that type";
+                    pairsBound++;
+                }
+            }
+            if (pairsBound < 3)
+                yield return "L18 baseline-vacuous: fewer than the 3 declared stat pairs bound — the table checked nothing";
+            // saved <= fresh: this visit's own spends — the undo window MUST stay open (the whole bug).
+            if (UiNativeRepaint.ClampBaseline(10, 12) != 10)
+                yield return "L18 clamp-window: the visit baseline was not restored below the reseeded value — the minus button greys out and the spend cannot be undone";
+            // saved > fresh: those points are gone (foreign refund / respec / host reject) — never
+            // restore a floor the model cannot back, or the peer refunds what it no longer owns.
+            if (UiNativeRepaint.ClampBaseline(10, 8) != 8)
+                yield return "L18 clamp-overclaim: a stale baseline above the model value was restored — refundable points that no longer exist";
+            if (UiNativeRepaint.ClampBaseline(10, 10) != 10)
+                yield return "L18 clamp-identity: an unchanged baseline did not survive the restore";
         }
 
         private sealed class WrapHolder
