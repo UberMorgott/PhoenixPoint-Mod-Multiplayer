@@ -33,9 +33,10 @@ namespace Multiplayer.Network.Sync
     /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2034-2066 does it, with <c>PauseGame=false</c>
     /// (pause is host-authoritative and arrives via the TimeAnchor).
     ///
-    /// Client choice resolution is still FORBIDDEN (host-authoritative): the lock patches below
-    /// swallow a real choice click and hold Esc while the record is unresolved. Relaying the client's
-    /// pick host-ward through IntentRail is the next batch.
+    /// Client choice resolution stays FORBIDDEN (host-authoritative), but the click is no longer
+    /// swallowed: <see cref="EventChoiceClientLock"/> BLOCKS it and relays it as a 0xB4 answer intent
+    /// (<see cref="EventSync"/>), whose host-side arbiter freezes the first answer for everyone.
+    /// Esc is still held while the record is unresolved.
     /// </summary>
     internal static class EventPopup
     {
@@ -133,14 +134,14 @@ namespace Multiplayer.Network.Sync
 
             SeedCursor(records);
             FlipResolvedOpenWindow(view, records);
-            RetireClosed(q, view, records);
+            RetireClosed(view, records);
 
             var backlog = Backlog(records, _cursor);
             bool announced = false;
             foreach (var rec in backlog)
             {
                 if (_inFlight.Contains(rec.EventId) || _loggedSkips.Contains(rec.EventId)) continue;
-                if (IsQueuedNatively(q, view, rec.EventId)) { _inFlight.Add(rec.EventId); continue; }
+                if (IsQueuedNatively(view, rec.EventId)) { _inFlight.Add(rec.EventId); continue; }
                 if (!announced)
                 {
                     announced = true; // one line per pass that actually raises — the pump itself stays silent
@@ -171,12 +172,12 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>A window we pushed is gone from the whole native pipeline ⇒ the player clicked
         /// through it. That is the ONLY thing that advances the cursor, so a crash or quit re-shows it.</summary>
-        private static void RetireClosed(GeoscapeViewSwitchQuery q, GeoscapeView view, IDictionary<string, GeoscapeEventRecord> records)
+        private static void RetireClosed(GeoscapeView view, IDictionary<string, GeoscapeEventRecord> records)
         {
             if (_inFlight.Count == 0) return;
             List<string> closed = null;
             foreach (var id in _inFlight)
-                if (!IsQueuedNatively(q, view, id)) (closed ?? (closed = new List<string>())).Add(id);
+                if (!IsQueuedNatively(view, id)) (closed ?? (closed = new List<string>())).Add(id);
             if (closed == null) return;
             foreach (var id in closed)
             {
@@ -217,17 +218,33 @@ namespace Multiplayer.Network.Sync
         /// pending queue (GeoscapeView.cs:349 → GeoscapeViewSwitchQuery.RestoreData:39-56), so without
         /// this a joiner sees each of those windows TWICE. Silent on a hit: "we already have that
         /// window" is the steady state, and the raise that put it there was logged once.</summary>
-        private static bool IsQueuedNatively(GeoscapeViewSwitchQuery q, GeoscapeView view, string eventId)
+        private static bool IsQueuedNatively(GeoscapeView view, string eventId) => LiveInstance(view, eventId) != null;
+
+        /// <summary>The live <c>GeoscapeEvent</c> this peer's own view holds for an id — on screen, popped
+        /// and mid-switch, or still queued — else null. The HOST answer handler wants it because that
+        /// instance carries the real <c>Context</c> (site + vehicle) the reward is applied against; the
+        /// client pump wants only whether it exists.</summary>
+        internal static GeoscapeEvent LiveInstance(GeoscapeView view, string eventId)
         {
-            if (EventIdOf(view.CurrentViewState) == eventId) return true;
-            if (CurrentRequestField?.GetValue(q) is GeoscapeViewStateSwitchRequest cur && EventIdOf(cur.State) == eventId) return true;
+            if (view == null || string.IsNullOrEmpty(eventId)) return null;
+            var onScreen = EventOf(view.CurrentViewState);
+            if (onScreen != null && onScreen.EventID == eventId) return onScreen;
+            if (!(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q)) return null;
+            if (CurrentRequestField?.GetValue(q) is GeoscapeViewStateSwitchRequest cur)
+            {
+                var mid = EventOf(cur.State);
+                if (mid != null && mid.EventID == eventId) return mid;
+            }
             if (RequestsField?.GetValue(q) is IEnumerable<GeoscapeViewStateSwitchRequest> pending)
                 foreach (var r in pending)
-                    if (r != null && EventIdOf(r.State) == eventId) return true;
-            return false;
+                {
+                    var queued = r == null ? null : EventOf(r.State);
+                    if (queued != null && queued.EventID == eventId) return queued;
+                }
+            return null;
         }
 
-        private static string EventIdOf(object state) => (state as UIStateGeoscapeEvent)?.Event?.EventID;
+        private static GeoscapeEvent EventOf(object state) => (state as UIStateGeoscapeEvent)?.Event;
 
         private static void Raise(GeoscapeEventSystem es, GeoLevelController geo, GeoscapeViewSwitchQuery q, GeoscapeEventRecord rec)
         {
@@ -278,8 +295,10 @@ namespace Multiplayer.Network.Sync
         /// PICKER windows need none of this: a <c>Triggered</c> record always has ≥2 choices, because
         /// the host auto-completes <c>HasSingleChoice</c> (<c>Choices.Count &lt;= 1</c>,
         /// GeoscapeEventData.cs:65) at trigger (GeoscapeEventSystem.cs:651-656), so
-        /// <c>ShowEncounter</c> takes the <c>SetEncounter</c> branch and calls nothing that resolves.</summary>
-        private static void MarkResolvedInstance(GeoscapeEvent ev)
+        /// <c>ShowEncounter</c> takes the <c>SetEncounter</c> branch and calls nothing that resolves.
+        /// Second consumer: <see cref="EventCompleteArbiter"/> refusing a resolution needs the very same
+        /// pair of writes — a non-null reward to hand back and an instance that will not try again.</summary>
+        internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
             SetChoiceReward?.Invoke(ev, new object[] { new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() } });
@@ -309,11 +328,18 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// Intent-capture seam (law 4a): the client never resolves an event choice locally. The choice-button
-    /// handler (UIModuleSiteEncounters.OnChoiceSelected:546) would run CompleteEvent → rewards applied
-    /// client-side (divergence the rail cannot fully correct — StartMission spawns are structural).
-    /// Swallow it on the client for any real host event; paging clicks (multi-page description text,
-    /// _pagingEvent:157) stay native — they advance text only. Relaying the pick host-ward = follow-up.
+    /// Intent-capture seam (law 4a), BLOCK-FIRST: the client never resolves an event choice locally — the
+    /// native handler (UIModuleSiteEncounters.OnChoiceSelected:546) would take the choice's cost out of
+    /// the local wallet (:573, BEFORE any arbitration can happen) and run CompleteEvent, applying the
+    /// whole reward client-side (divergence the rail cannot fully correct — StartMission spawns are
+    /// structural). Blocked, the click becomes a 0xB4 <c>answer</c> intent and the HOST resolves it.
+    /// Paging clicks (multi-page description text, <c>_pagingEvent</c>:548) stay native — they advance
+    /// text only.
+    ///
+    /// The HOST arm is not a pass-through: a host dialog whose record another peer already answered must
+    /// not reach :573 either, or the losing host pays for a choice it did not get.
+    /// <see cref="EventCompleteArbiter"/> cannot cover that — the charge happens two calls before the
+    /// funnel it guards.
     /// </summary>
     [HarmonyPatch(typeof(UIModuleSiteEncounters), "OnChoiceSelected")]
     internal static class EventChoiceClientLock
@@ -323,10 +349,30 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(UIModuleSiteEncounters __instance, GeoEventChoice choice)
         {
-            if (!EventPopup.IsClient) return true;
             if (PagingField != null && (bool)(PagingField.GetValue(__instance) ?? false)) return true;
             var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
             if (string.IsNullOrEmpty(ev?.EventID)) return true; // not a mirrored host event
+            var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
+            bool frozen = rec == null || rec.State != GeoscapeEventRecordState.Triggered;
+
+            if (IntentRail.ShouldRunNative())
+            {
+                // HOST / solo / inside an apply. Refuse only a click that would CHARGE or RESOLVE on a
+                // record that is no longer open. A choice carrying neither Outcome nor Requirments is the
+                // closing page's OK button (SetClosingEncounter:346-351 builds it with Text only): it
+                // charges nothing (:571 needs Requirments) and it is the ONLY way out of a re-enabled
+                // event's page, where the record is already Reset while the instance still reports
+                // IsCompleted==false (GeoscapeEvent.cs:112-116 skips the flag on a Reset record).
+                if (frozen && !ev.IsCompleted && choice != null && (choice.Outcome != null || choice.Requirments != null))
+                {
+                    Debug.Log("[MP][events] stale click on '" + ev.EventID + "' ignored — already answered (record=" +
+                              (rec == null ? "none" : rec.State.ToString()) + ", choice " +
+                              (rec == null ? -1 : rec.SelectedChoice) + ")");
+                    return false;
+                }
+                return true;
+            }
+
             // The OK/Continue button of a CLOSING page carries neither Outcome nor Requirments
             // (SetClosingEncounter:346-351 builds it with Text only), yet _geoEvent still points at the
             // REAL event there — SetEncounter never reassigns it (:265-303). Without this arm the only
@@ -334,7 +380,26 @@ namespace Multiplayer.Network.Sync
             // nothing: no Wallet.Take (:571-573 needs Requirments) and CompleteEvent is skipped on an
             // instance already marked completed (:562-567 and :580 → SelectChoice:600).
             if (ev.IsCompleted && choice != null && choice.Outcome == null && choice.Requirments == null) return true;
-            Debug.Log("[MP][events] choice click swallowed on client for '" + ev.EventID + "' — the host decides");
+            if (frozen)
+            {
+                // Not an error — two peers clicking within one RTT is the normal case. The outcome is
+                // already on its way; FlipResolvedOpenWindow turns this picker into it.
+                Debug.Log("[MP][events] click on '" + ev.EventID + "' dropped — already answered (record=" +
+                          (rec == null ? "none" : rec.State.ToString()) + "), the first choice is frozen");
+                return false;
+            }
+            // The wire carries the INDEX into the def's Choices, which is what CompleteEvent works in
+            // (GeoscapeEvent.cs:97); -1 is native's "no choice" resolution (:562-566).
+            int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);
+            if (choice != null && index < 0)
+            {
+                Debug.LogWarning("[MP][events] click on '" + ev.EventID + "' dropped — the clicked choice is not in " +
+                                 "this peer's def (mod parity), so it cannot be keyed for the host");
+                return false;
+            }
+            string id = ev.EventID;
+            IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
+                            w => { w.Write(id); w.Write(index); });
             return false;
         }
     }

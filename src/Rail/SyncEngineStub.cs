@@ -16,14 +16,16 @@ namespace Multiplayer.Network.Sync
         {
             _engine = engine;
             // Every client-intent surface (0xAB research / 0xAE manufacture / 0xAF personnel / 0xB0 time
-            // / 0xB1 base / 0xB3 equip) rides the ONE generic intent engine — families register their op
-            // tables, the engine owns nonce/dedup/dispatch/reject (idempotent re-registration).
+            // / 0xB1 base / 0xB3 equip / 0xB4 event) rides the ONE generic intent engine — families
+            // register their op tables, the engine owns nonce/dedup/dispatch/reject (idempotent
+            // re-registration).
             ResearchSync.RegisterIntents();
             ManufactureSync.RegisterIntents();
             EquipSync.RegisterIntents();
             PersonnelSync.RegisterIntents();
             TimeSync.RegisterIntents();
             FacilitySync.RegisterIntents();
+            EventSync.RegisterIntents();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.

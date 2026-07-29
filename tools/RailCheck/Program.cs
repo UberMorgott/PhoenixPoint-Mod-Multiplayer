@@ -10,6 +10,7 @@ using System.Text;
 using Base.Serialization.General;
 using Multiplayer.Network.Sync;
 using Multiplayer.Util;
+using PhoenixPoint.Geoscape.Events;
 using UnityEngine;
 
 namespace RailCheck
@@ -78,6 +79,7 @@ namespace RailCheck
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
             laws.AddRange(BacklogLaw());
+            laws.AddRange(AnswerValidatorLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -995,7 +997,8 @@ namespace RailCheck
             // the same surface — must decode to an empty payload, never a failure.
             foreach (var sid in new[] { SurfaceIds.GeoResearchIntent, SurfaceIds.GeoManufactureIntent,
                                         SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent,
-                                        SurfaceIds.GeoBaseIntent, SurfaceIds.GeoEquipIntent })
+                                        SurfaceIds.GeoBaseIntent, SurfaceIds.GeoEquipIntent,
+                                        SurfaceIds.GeoEventIntent })
             {
                 byte[] inner;
                 using (var ims = new MemoryStream())
@@ -1603,6 +1606,60 @@ namespace RailCheck
         }
 
         private static Base.Core.TimeUnit Ticks(long t) => Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(t));
+
+        /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for
+        /// everyone" true. <see cref="EventSync.Validate"/> is deliberately pure (record STATE + index +
+        /// choice count, no live level) precisely so this law can exist headless: the in-game window where
+        /// it matters is two peers clicking inside one RTT, which no manual test reproduces on demand, and
+        /// a double grant is silent — the reward simply lands twice.</summary>
+        private static IEnumerable<string> AnswerValidatorLaw()
+        {
+            const int count = 3;
+            var frozen = new[] { GeoscapeEventRecordState.SelectedChoice, GeoscapeEventRecordState.Completed,
+                                 GeoscapeEventRecordState.MigratedCompleted, GeoscapeEventRecordState.Reset };
+
+            // An OPEN decision with a legal index must be accepted, or nobody can ever answer anything.
+            foreach (var idx in new[] { -1, 0, count - 1 })
+            {
+                var why = EventSync.Validate(GeoscapeEventRecordState.Triggered, idx, count);
+                if (why != null)
+                    yield return "L27 valid-answer-refused: an open (Triggered) record refused choice index " + idx +
+                                 " of " + count + " — \"" + why + "\"; every peer's click would be rejected and no " +
+                                 "event could ever be answered";
+            }
+
+            // The freeze itself: a record that already carries an answer must never accept a second one.
+            // GeoscapeEvent.IsCompleted is per-INSTANCE (GeoscapeEvent.cs:36), so nothing downstream would
+            // catch this — a synthesised instance re-runs ChoiceReward.Apply and grants the whole reward
+            // again (wallet, sites, diplomacy, created soldiers GeoEventChoiceOutcome:296/305).
+            foreach (var st in frozen)
+            {
+                var why = EventSync.Validate(st, 0, count);
+                if (why == null)
+                    yield return "L27 double-answer-accepted: state " + st + " accepted a second answer — the loser of " +
+                                 "a two-peer race re-grants the entire reward and the first choice is not frozen";
+                else if (why.Trim().Length == 0)
+                    yield return "L27 silent-reject: state " + st + " was refused with a BLANK reason — IntentRail.Reject " +
+                                 "would log an empty line, which is the swallow class this family exists to kill";
+            }
+
+            // Range: the index comes off a peer's own mirror, so a stale or def-mismatched one must be
+            // named, not indexed into (data.Choices[index] would throw IndexOutOfRange) and not silently
+            // coerced to the "no choice" resolution.
+            foreach (var idx in new[] { count, count + 7, -2, int.MinValue })
+            {
+                var why = EventSync.Validate(GeoscapeEventRecordState.Triggered, idx, count);
+                if (why == null)
+                    yield return "L27 index-unchecked: choice index " + idx + " passed validation against " + count +
+                                 " choices — the host would throw inside the handler or resolve a choice nobody clicked";
+                else if (why.Trim().Length == 0)
+                    yield return "L27 silent-reject: index " + idx + " was refused with a BLANK reason — the rejected " +
+                                 "click leaves no readable trace";
+            }
+            // A def with no choices at all: only the "no choice" resolution is addressable.
+            if (EventSync.Validate(GeoscapeEventRecordState.Triggered, 0, 0) == null)
+                yield return "L27 index-unchecked: index 0 passed validation against an EMPTY choice list";
+        }
 
         private static IEnumerable<string> HandleSweepLaw()
         {
