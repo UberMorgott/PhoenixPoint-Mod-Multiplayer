@@ -52,7 +52,7 @@ namespace Multiplayer.Network
         ///
         /// Level-scoped rather than a plain bool ON PURPOSE: a bool would stay true until the next
         /// <c>NetworkEngine.Initialize()</c>, and a player who drops to the menu and then starts a SOLO
-        /// campaign never calls that — the stale flag would keep <c>EquipFlushGate</c> shut forever and
+        /// campaign never calls that — the stale flag would keep <c>EquipStorageGate</c> shut forever and
         /// break single-player inventory. <c>Game.LoadAndSetCurrentCrt</c> nulls <c>CurrentLevel</c>
         /// (Game.cs:185) for the entire teardown+load window and only re-assigns it once the next level
         /// is loaded (:205), so "a DIFFERENT level is current" is exactly the end of the phase — and the

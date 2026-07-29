@@ -36,42 +36,33 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// N1 — sim gating (law 4b), SECOND narrow seam: the one law governing the equip screens' native
-    /// view-model → model flushes.
+    /// N1 — sim gating (law 4b), SECOND narrow seam: the equip screens' STORAGE write-back, the ONE half
+    /// of those screens with no model funnel underneath it.
     ///
-    /// While UIStateEditSoldier / UIStateEditVehicle are open, the screen periodically re-flushes its OWN
-    /// widget lists into the live model: <c>UpdateStorage</c> Except-diffs the faction <c>ItemStorage</c>
-    /// (UIStateEditSoldier.cs:564 / UIStateEditVehicle.cs:384) and <c>UpdateSoldierEquipment</c> /
-    /// <c>UpdateVehicleEquipment</c> call <c>GeoCharacter.SetItems</c> (:546 / :410).
-    /// <c>UIModuleCharacterProgression.CommitStatChanges</c> (:367) is the THIRD such commit — reached
-    /// from UIStateEditSoldier.cs:232, :363 and :715 — and no gate in this repo's history ever covered it.
+    /// <c>UIStateEditSoldier.UpdateStorage</c> (:564-578) / <c>UIStateEditVehicle.UpdateStorage</c>
+    /// (:384-398) rebuild an <c>ItemStorage</c> out of the widget's storage list, Except-diff it against
+    /// the faction's real one and then <c>RemoveItems</c>/<c>AddItems</c> the difference — a direct
+    /// authoritative write. (The loadout half of the same screens bottoms out in
+    /// <c>GeoCharacter.SetItems</c> and is captured THERE, block-first, by EquipSync.SetItemsCapturePatch;
+    /// listing its callers here as well is the enumeration this seam has been shedding since 402e950.)
     ///
-    /// THE LAW, one boolean: a flush is legitimate EXCEPT while a mirror apply is on the stack.
-    ///   • Outside an apply the screen is native and authoritative on BOTH peers, and the local user's own
-    ///     gestures must commit normally. Nothing is gated, so nothing has to be enumerated.
-    ///   • Inside one, the widgets hold PRE-apply content by construction, so the flush writes stale UI
-    ///     back over state that just arrived: on a client it stomps the mirror within a frame, on the host
-    ///     it reverts a just-applied remote intent (RCA 2026-07-18: an intent removed
-    ///     PX_Assault_Legs_ItemDef at frame 12189, the open equip screen added it back at frame 12190 —
-    ///     inside the 0.5 s diff tick, so the walk saw changed=0 and the removal reached NO peer).
-    ///
-    /// Why peer, caller and screen all collapse into that single condition: both callers of
-    /// <c>RepaintOpenGeoscapeScreen</c> already run inside <c>SyncApplyScope.Enter()</c>
-    /// (OpenUiRepaint.cs), so mechanically the ONLY flush that can be stale is one running underneath an
-    /// apply. That is why this replaces 8fdfd86's per-frame model gate, 61d0987's client-only gate and
-    /// 402e950's hand-listed gesture allow-list at once: each of those was an enumeration that had to be
-    /// exhaustive to be correct, and none of them was.
+    /// Two arms, one line:
+    ///   • CLIENT: never, apply or no apply. Storage is a pure mirror (law 3) — the client's own
+    ///     storage↔soldier drag goes to the host as an OpSetItems, the host's UpdateStorage-equivalent
+    ///     (PopItem/AddItem in HandleIntent) is the real write, and the delta brings it back. Letting this
+    ///     run is precisely how a client's storage edits stayed local and reached NO peer.
+    ///   • HOST inside an apply: the widgets hold PRE-apply content by construction, so the flush reverts
+    ///     the delta that just landed (RCA 2026-07-18: an intent removed PX_Assault_Legs_ItemDef at frame
+    ///     12189, the open screen put it back at 12190 — inside the 0.5 s tick, so the walk saw changed=0
+    ///     and the removal reached NO peer). Outside an apply the host screen owns the model, natively.
     /// </summary>
     [HarmonyPatch]
-    internal static class EquipFlushGate
+    internal static class EquipStorageGate
     {
         private static IEnumerable<MethodBase> TargetMethods()
         {
             yield return AccessTools.Method(typeof(UIStateEditSoldier), "UpdateStorage");
             yield return AccessTools.Method(typeof(UIStateEditVehicle), "UpdateStorage");
-            yield return AccessTools.Method(typeof(UIStateEditSoldier), "UpdateSoldierEquipment");
-            yield return AccessTools.Method(typeof(UIStateEditVehicle), "UpdateVehicleEquipment");
-            yield return AccessTools.Method(typeof(UIModuleCharacterProgression), "CommitStatChanges");
         }
 
         private static bool Prefix()
@@ -83,6 +74,23 @@ namespace Multiplayer.Network.Sync
             // commit a stale UI→model flush inside CleanupView and NRE the level-switch coroutine
             // (carried over from 4f0b5b5, whose own copy of this check targeted a gate that no longer exists).
             if (SessionEnd.InProgress) return false;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true; // solo: the screen owns the model
+            return engine.IsHost && !SyncApplyScope.Active;
+        }
+    }
+
+    /// <summary>
+    /// Same law, the THIRD commit on those screens: <c>UIModuleCharacterProgression.CommitStatChanges</c>
+    /// (:367), reached from UIStateEditSoldier.cs:232, :363 and :715. Only the apply arm applies here — the
+    /// client's own stat clicks are captured by PersonnelSync, not blocked wholesale.
+    /// </summary>
+    [HarmonyPatch(typeof(UIModuleCharacterProgression), "CommitStatChanges")]
+    internal static class StatCommitApplyGate
+    {
+        private static bool Prefix()
+        {
+            if (SessionEnd.InProgress) return false;         // see EquipStorageGate for why this is first
             if (!SyncApplyScope.Active) return true;          // not mirroring: the screen owns the model
             var engine = NetworkEngine.Instance;
             return engine == null || !engine.IsActiveSession; // solo: native, even under a stray scope
@@ -90,16 +98,17 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// N1 closed at the MODEL chokepoint instead of per-caller: <see cref="EquipFlushGate"/> enumerates
-    /// the equip screens' flush methods, but the augment screens revert THROUGH the same model write on
-    /// exit — <c>UIStateBionics.ExitState</c>:93 → <c>UIModuleBionics.Deinit</c>:119 →
+    /// N1's apply arm at the MODEL chokepoint, covering every caller at once. The equip screens are not
+    /// the only route: the augment screens revert THROUGH the same model write on exit —
+    /// <c>UIStateBionics.ExitState</c>:93 → <c>UIModuleBionics.Deinit</c>:119 →
     /// <c>RevertUnconfirmedChanges</c>:127-129 → <c>GeoCharacter.SetItems(CharacterOriginalItems)</c> —
     /// so the universal repaint's fallback re-enter (OpenUiRepaint, inside SyncApplyScope) overwrote a
     /// just-applied augment delta with the PRE-augment snapshot in the same frame (RCA 2026-07-24).
     /// Same law, zero enumeration: inside an apply, ANY view→model item flush is stale by construction
     /// (verified: no rail code calls SetItems under the scope — GenericApplier writes the lists via
-    /// ApplyList, host intent replays run outside it — and EquipSync's gesture-send patch is a postfix
-    /// that already self-gates on the scope). Outside an apply, gestures/staging stay fully native.
+    /// ApplyList, host intent replays run outside it). Outside an apply, gestures/staging stay native on
+    /// the host and are captured block-first on the client (EquipSync.SetItemsCapturePatch), whose prefix
+    /// hands this one the decision by returning true for the whole in-apply case.
     /// </summary>
     [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
     internal static class SetItemsApplyGate

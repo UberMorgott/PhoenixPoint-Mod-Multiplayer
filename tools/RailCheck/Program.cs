@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Base.Serialization.General;
@@ -1037,6 +1038,187 @@ namespace RailCheck
                 yield return "L18 clamp-overclaim: a stale baseline above the model value was restored — refundable points that no longer exist";
             if (UiNativeRepaint.ClampBaseline(10, 10) != 10)
                 yield return "L18 clamp-identity: an unchanged baseline did not survive the restore";
+
+            // ─── L19 — BLOCK-FIRST is structural: no intent may be emitted from a POSTFIX ──────────
+            // The equip family lived by RESULT-SHIP for a month: a gesture postfix set a bool and a
+            // postfix on a LATER method (GeoCharacter.SetItems) turned that mark into the intent. When the
+            // second method did not fire, the emission simply died — silently, with the patch-bind log
+            // still cheerfully reporting "bound" (RCA 2026-07-29: zero intents all session, three peers).
+            // A Harmony POSTFIX runs AFTER the native body, so an IntentRail.Send reachable from one means
+            // the local model was mutated FIRST and the wire got a result — exactly the posture
+            // IntentRail.ShouldRunNative's law forbids. Statically decidable, so it is decided here.
+            foreach (var v in ResultShipLaw()) yield return v;
+
+            // The RUNNABLE core of the same law. EquipSync.ChangedBody is what replaced the deleted marks,
+            // and it is the piece that fails in SILENCE: too eager and every repaint's re-flush bounces
+            // back as a fresh intent; too lazy and the gesture the family exists to carry never ships.
+            // Pure SlotRefs, so it runs headless — GeoItem needs a live ItemDef (see L9).
+            var cur = new[] { Slots(("a", 1, 0), ("b", 1, 5)), Slots(("w", 1, 3)), Slots(("i", 2, 0)) };
+            if (EquipSync.ChangedBody(false, new[] { Slots(("a", 1, 0), ("b", 1, 5)), Slots(("w", 1, 3)), Slots(("i", 2, 0)) }, cur) != null)
+                yield return "L19 noop-emit: an identical re-flush produced an intent — every host echo repaint would bounce back as new traffic";
+            if (EquipSync.ChangedBody(false, new List<EquipSync.SlotRef>[3], cur) != null)
+                yield return "L19 untouched-emit: an all-null (touches nothing) call produced an intent — null must resolve to the character's own content";
+            // A list the call does not touch must be FILLED from the canon, not shipped as null: the body
+            // is both the wire payload and the compare key, so the two must be the same bytes.
+            var changed = EquipSync.ChangedBody(false, new[] { Slots(("a", 1, 0)), null, null }, cur);
+            if (changed == null)
+                yield return "L19 missed-emit: a real loadout change did not produce an intent — the gesture dies silently, which is the whole bug";
+            else if (!RailMeta.BytesEqual(changed, EquipSync.EncodeBody(false, new[] { Slots(("a", 1, 0)), cur[1], cur[2] })))
+                yield return "L19 untouched-fill: the untouched lists were not filled from the character's canon — wire body and compare key have diverged";
+            // Order IS state (L10): a reposition that reorders the list is a real change and must ship.
+            if (EquipSync.ChangedBody(false, new[] { Slots(("b", 1, 5), ("a", 1, 0)), cur[1], cur[2] }, cur) == null)
+                yield return "L19 order-blind: a reordered loadout compared equal — slot order would never reach any peer";
+            // Same-def siblings are told apart by (count, charges) — that is what the triple is FOR.
+            if (EquipSync.ChangedBody(false, new[] { Slots(("a", 1, 0), ("b", 1, 4)), cur[1], cur[2] }, cur) == null)
+                yield return "L19 charge-blind: a charges-only difference compared equal — same-def siblings would swap slots unnoticed";
+            // freeReload is a mutation in its own right (GeoCharacter.cs:838-844 ReloadForFree), so an
+            // otherwise-identical loadout MUST still ship it. This is the loadout-preset path.
+            if (EquipSync.ChangedBody(true, new[] { Slots(("a", 1, 0), ("b", 1, 5)), cur[1], cur[2] }, cur) == null)
+                yield return "L19 freereload-swallowed: a free reload over an identical loadout produced no intent — preset loads would never reload on any peer";
+        }
+
+        private static List<EquipSync.SlotRef> Slots(params (string guid, int count, int charges)[] items)
+            => items.Select(i => new EquipSync.SlotRef { Guid = i.guid, Count = i.count, Charges = i.charges }).ToList();
+
+        private const BindingFlags AllMembers = BindingFlags.Public | BindingFlags.NonPublic |
+                                                BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+        /// <summary>L19's static half: resolve every call token in the shipped assembly's IL and walk the
+        /// call graph BACKWARDS from IntentRail.Send. Reaching a method named Postfix = result-ship.
+        /// Honest gap: only direct calls and delegate loads (OperandType.InlineMethod covers call/callvirt/
+        /// newobj/ldftn/ldvirtftn) are edges — an emit reached through a field-held delegate is invisible.</summary>
+        private static IEnumerable<string> ResultShipLaw()
+        {
+            var asm = typeof(IntentRail).Assembly;
+            var roots = typeof(IntentRail).GetMethods(AllMembers).Where(m => m.Name == "Send").ToList();
+            if (roots.Count == 0)
+            {
+                yield return "L19 send-unresolved: IntentRail.Send did not resolve — the block-first law checked nothing";
+                yield break;
+            }
+
+            Type[] declared;
+            try { declared = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+
+            var callers = new Dictionary<int, List<MethodBase>>();
+            foreach (var t in declared)
+                foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                    foreach (var callee in Callees(m, asm))
+                    {
+                        if (!callers.TryGetValue(callee, out var l)) callers[callee] = l = new List<MethodBase>();
+                        l.Add(m);
+                    }
+
+            var seen = new HashSet<int>(roots.Select(r => r.MetadataToken));
+            var queue = new Queue<int>(seen);
+            var offenders = new List<string>();
+            int reached = 0;
+            while (queue.Count > 0)
+            {
+                if (!callers.TryGetValue(queue.Dequeue(), out var ups)) continue;
+                foreach (var up in ups)
+                {
+                    if (!seen.Add(up.MetadataToken)) continue;
+                    reached++;
+                    // Report and stop: everything above a postfix is already condemned by the postfix.
+                    if (up.Name == "Postfix") { if (!PatchesPresentationOnly(up.DeclaringType)) offenders.Add(up.DeclaringType.FullName); }
+                    else queue.Enqueue(up.MetadataToken);
+                }
+            }
+            if (reached == 0)
+                yield return "L19 vacuous: nothing in the assembly reaches IntentRail.Send — the IL walk resolved no edges and this law is asleep";
+            foreach (var o in offenders.OrderBy(o => o, StringComparer.Ordinal))
+                yield return "L19 result-ship: " + o + ".Postfix reaches IntentRail.Send from a MODEL patch — a postfix runs " +
+                             "AFTER the native mutation, so the local write already happened and this family ships RESULTS " +
+                             "instead of blocking first (IntentRail.ShouldRunNative)";
+        }
+
+        /// <summary>The one line separating a forbidden result-ship from a legal observation: WHAT the
+        /// postfix is attached to. A postfix on a MODEL method (GeoCharacter.SetItems) has already let the
+        /// authoritative write through — there is nothing left to block, so any emit from it is a result.
+        /// A postfix on a PRESENTATION method (UIModuleCharacterProgression's stat click, which stages into
+        /// the module's own view-model; its MODEL commit CommitStatChanges is separately block-first) is
+        /// observing staging, which the client-posture law explicitly permits. The game splits the two by
+        /// namespace — presentation lives under PhoenixPoint.*.View.* — so the discriminator is grounded,
+        /// not guessed. A patch whose targets cannot be read statically (attribute-less TargetMethods) is
+        /// NOT presumed presentation: unknown target + emit-from-postfix is exactly what wants review.</summary>
+        private static bool PatchesPresentationOnly(Type patchClass)
+        {
+            var targets = patchClass.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                    .Cast<HarmonyLib.HarmonyPatch>()
+                                    .Select(a => a.info?.declaringType)
+                                    .Where(t => t != null)
+                                    .ToList();
+            return targets.Count > 0 && targets.All(t => t.FullName.Contains(".View."));
+        }
+
+        private static readonly Dictionary<short, OpCode> OpCodeByValue = BuildOpCodes();
+
+        private static Dictionary<short, OpCode> BuildOpCodes()
+        {
+            var map = new Dictionary<short, OpCode>();
+            foreach (var f in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+                if (f.FieldType == typeof(OpCode)) { var op = (OpCode)f.GetValue(null); map[op.Value] = op; }
+            return map;
+        }
+
+        /// <summary>In-assembly call targets of one method, by metadata token. Walks the IL with the real
+        /// operand-size table — a naive byte scan for the call opcodes would match operand bytes and invent
+        /// edges, and a law that cries wolf is a law that gets ignored. Anything unparseable ABANDONS the
+        /// method rather than guessing (under-reporting is survivable here; a false red is not).</summary>
+        private static IEnumerable<int> Callees(MethodBase m, Assembly asm)
+        {
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) yield break;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
+            var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) yield break;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) yield break;
+                if (op.OperandType == OperandType.InlineMethod)
+                {
+                    MethodBase callee = null;
+                    try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
+                    if (callee != null && callee.Module.Assembly == asm) yield return callee.MetadataToken;
+                }
+                i += size;
+            }
+        }
+
+        private static int OperandSize(OperandType t, byte[] il, int pos)
+        {
+            switch (t)
+            {
+                case OperandType.InlineNone: return 0;
+                case OperandType.ShortInlineBrTarget:
+                case OperandType.ShortInlineI:
+                case OperandType.ShortInlineVar: return 1;
+                case OperandType.InlineVar: return 2;
+                case OperandType.InlineBrTarget:
+                case OperandType.InlineField:
+                case OperandType.InlineI:
+                case OperandType.InlineMethod:
+                case OperandType.InlineSig:
+                case OperandType.InlineString:
+                case OperandType.InlineTok:
+                case OperandType.InlineType:
+                case OperandType.ShortInlineR: return 4;
+                case OperandType.InlineI8:
+                case OperandType.InlineR: return 8;
+                case OperandType.InlineSwitch: return pos + 4 > il.Length ? -1 : 4 + 4 * BitConverter.ToInt32(il, pos);
+                default: return -1;
+            }
         }
 
         private sealed class WrapHolder

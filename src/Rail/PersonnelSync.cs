@@ -210,7 +210,7 @@ namespace Multiplayer.Network.Sync
         ///     with (ConsumeAbilityCost debits the stage pools, :405 flushes them). This is the ONLY
         ///     place the baseline is dropped, and it is exactly where native drops it too.
         ///   • Solo: fully native, nothing aligned.
-        /// Composes with EquipFlushGate's prefix on this same method, which blocks the flush inside a
+        /// Composes with StatCommitApplyGate's prefix on this same method, which blocks the flush inside a
         /// mirror apply + during session teardown on EITHER peer (the flush-legitimacy law) — hence
         /// the scope check here: a repaint-internal commit must not eat the baseline either.
         /// </summary>
@@ -220,7 +220,7 @@ namespace Multiplayer.Network.Sync
             private static bool Prefix(UIModuleCharacterProgression __instance)
             {
                 if (!IntentRail.ShouldRunNative()) return false; // client: blocked
-                if (SyncApplyScope.Active) return true;          // repaint-internal: EquipFlushGate blocks it
+                if (SyncApplyScope.Active) return true;          // repaint-internal: StatCommitApplyGate blocks it
                 var engine = NetworkEngine.Instance;
                 if (engine != null && engine.IsActiveSession) UiNativeRepaint.AlignStageBaseline(__instance);
                 return true;

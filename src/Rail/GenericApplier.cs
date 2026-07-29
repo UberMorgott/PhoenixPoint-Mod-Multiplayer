@@ -146,7 +146,7 @@ namespace Multiplayer.Network.Sync
                 // every geo hour) must NOT Exit+Enter the client's open screen.
                 // Fire runs INSIDE SyncApplyScope (law 8): its native repaints (SetupQueue rebuild,
                 // ResourcesChanged/StorageChanged subscribers) reach the intent-capture seams and
-                // EquipFlushGate, which all key on Active — an apply-driven repaint must stay suppressed
+                // EquipStorageGate, which all key on Active — an apply-driven repaint must stay suppressed
                 // exactly like the apply itself. The same rebuild reached from ResearchSync's own appliers
                 // already runs inside their scopes; the Wallet/Storage raisers keep their inner scopes
                 // (harmless nesting).

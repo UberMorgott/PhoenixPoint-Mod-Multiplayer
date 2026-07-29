@@ -183,7 +183,7 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   agenda-tracker `_needsRefresh` nudge); Timing → none needed (Paused/Scale applied through native
   property setters which fire OnPausedEvent/EffectiveScaleChangedEvent); unknown kind → logged once.
   `Fire` runs inside `SyncApplyScope` — apply-driven repaints stay suppressed at intent seams +
-  EquipFlushGate.
+  EquipStorageGate / SetItemsApplyGate.
 - `ClientSimGate.cs` (law 4b) — client sim not frozen (clock ticks); gated local mutators:
   `GeoLevelController.LevelHourlyUpdateCrt` (ONE chokepoint: faction `ResourceIncome.Apply(Wallet)`,
   UpdateHavens, UpdateBasesHourly, UpdateResearch wallet drain, `Manufacture.Update`, GenerateRecruits,
