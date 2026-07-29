@@ -13,6 +13,7 @@ using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.DataObjects;
 using PhoenixPoint.Geoscape.View.ViewControllers.PhoenixBase;
 using PhoenixPoint.Geoscape.View.ViewControllers.AugmentationScreen;
 using PhoenixPoint.Geoscape.View.ViewModules;
@@ -228,6 +229,19 @@ namespace Multiplayer.Network.Sync
         private static readonly MethodInfo VsActions = AccessTools.Method(typeof(UIStateVehicleSelected), "UpdateVehicleActions");
         private static readonly MethodInfo VsReachable = AccessTools.Method(typeof(UIStateVehicleSelected), "UpdateReachableSitesMarkers");
         private static readonly MethodInfo VsObjectives = AccessTools.Method(typeof(UIStateVehicleSelected), "OnFactionObjectivesChanged");
+        // UIStateVehicleRoster.OnVehicleCycled (:214-227) = this screen's OWN model-change reaction: the
+        // handler the native selection path raises (UIModuleVehicleCycle.SelectVehicle:197 →
+        // OnVehicleChanged, subscribed at UIStateVehicleRoster.cs:77). READ-direction throughout — :222
+        // re-selects the slot from the LIVE module (so the highlight follows the model, not a stale
+        // _initialVehicle), :223-226 rebuild weapons/modules/storage widgets from
+        // GetBaseObject<GeoVehicle>().Weapons/Modules + ViewerFaction.AircraftItemStorage.Items.
+        // Only `newVehicle` is read, and only for the null branch.
+        // Its write-direction siblings are deliberately NOT called: UpdateVehicleEquipments:244-276
+        // (ReplaceEquipments) and UpdateAircraftStorage:278-290 (RemoveItems/AddItems on the live storage)
+        // push the UI lists BACK into the model — which is exactly what ExitState:128-131 does and why the
+        // Exit+Enter fallback reverted every delta this screen had just been sent.
+        private static readonly MethodInfo VrCycled = AccessTools.Method(typeof(UIStateVehicleRoster), "OnVehicleCycled",
+            new[] { typeof(VehicleDisplayData), typeof(VehicleDisplayData), typeof(bool) });
         // UIStateNothingSelected.OnFactionObjectivesChanged (:519-525): objectives module + section-bar
         // diplomacy count. Site markers live on GeoscapeView, outside any view state — nothing else on
         // this screen reads the model.
@@ -239,7 +253,9 @@ namespace Multiplayer.Network.Sync
         private static readonly MethodInfo BlLayout = AccessTools.Method(typeof(UIModuleBaseLayout), "SetupBaseLayout");
         private static readonly FieldInfo BlSlots = AccessTools.Field(typeof(UIModuleBaseLayout), "_slots");
 
-        private static readonly Dictionary<Type, Func<GeoscapeViewState, GeoscapeView, bool>> Table =
+        /// <summary>Internal, not private: the RailCheck L21 belt reads the KEYS — a screen whose ExitState
+        /// writes back into the live model must be declared here, or the Exit+Enter fallback undoes deltas.</summary>
+        internal static readonly Dictionary<Type, Func<GeoscapeViewState, GeoscapeView, bool>> Table =
             new Dictionary<Type, Func<GeoscapeViewState, GeoscapeView, bool>>
             {
                 // First two table citizens = the former special-case branches (9b35194 manufacturing
@@ -286,6 +302,15 @@ namespace Multiplayer.Network.Sync
                     if (VsSelected == null || VsTabs == null || VsActions == null || VsReachable == null || VsObjectives == null) return false;
                     if (VsSelected.GetValue(s, null) == null) return false;
                     return Call(VsTabs, s) && Call(VsActions, s) && Call(VsReachable, s) && Call(VsObjectives, s, Viewer());
+                },
+                [typeof(UIStateVehicleRoster)] = (s, v) =>
+                {
+                    var cycle = v.GeoscapeModules.VehicleCycleModule;
+                    if (cycle?.CurrentVehicle == null) return false; // empty vehicle bay → fallback re-enter
+                    if (!Call(VrCycled, s, null, cycle.CurrentVehicle, false)) return false;
+                    cycle.UpdateAircraftInfoController();                                // header/info panel (:330)
+                    v.GeoscapeModules.VehicleRoster?.UpdateSelectedVehicleEquipments();  // roster slot (:112)
+                    return true;
                 },
                 [typeof(UIStateNothingSelected)] = (s, v) => Call(NsObjectives, s, Viewer()),
                 [typeof(UIStateBionics)] = (s, v) => RepaintAugmentScreen(v.GeoscapeModules.BionicsModule, v.GeoscapeModules),
