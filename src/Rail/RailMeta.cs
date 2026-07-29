@@ -67,7 +67,11 @@ namespace Multiplayer.Network.Sync
         internal FieldInfo Fi;
         internal PropertyInfo Pi;
         // Twin coercions (bridge/twin tables only — a direct-source member always matches its own type):
-        internal FieldInfo HopFi;    // alias chain "Hop.Member": entity → hop object (class) → Fi/Pi
+        internal MemberInfo HopFi;   // alias chain "Hop.Member": entity → hop object (class) → Fi/Pi.
+                                     // FIELD or PROPERTY: the game exposes carriers through auto-properties
+                                     // (GeoActor.Surface, decompile GeoVehicle.cs:89) — a field-only hop left
+                                     // GeoVehicle.SurfacePos/SurfaceRot "dto-twin unresolved", i.e. a client
+                                     // aircraft that never moved. Read-only here (writes land on Fi/Pi).
         internal FieldInfo WrapFi;   // live member is a one-field wrapper struct around ValueType
                                      // (EarthUnits.Value ← float): unwrap on read, re-wrap on write
         internal bool FactionRef;    // live member is GeoFaction, ValueType its def — unwrap to the def
@@ -82,7 +86,7 @@ namespace Multiplayer.Network.Sync
         /// same value — cost only. Twin coercions (hop/unwrap) run only on fields that carry them.</summary>
         public object GetValue(object o)
         {
-            if (HopFi != null && (o = HopFi.GetValue(o)) == null) return null;
+            if (HopFi != null && (o = RailMeta.GetMemberValue(HopFi, o)) == null) return null;
             var v = (_get ?? (_get = RailMeta.BuildGetter(this)))(o);
             if (v == null) return null;
             if (WrapFi != null) return WrapFi.GetValue(v);
@@ -92,7 +96,7 @@ namespace Multiplayer.Network.Sync
 
         public void SetValue(object o, object v)
         {
-            if (HopFi != null && (o = HopFi.GetValue(o)) == null) return; // hop not initialised — nothing to write into
+            if (HopFi != null && (o = RailMeta.GetMemberValue(HopFi, o)) == null) return; // hop not initialised — nothing to write into
             if (WrapFi != null && v != null)
             {
                 var boxed = Activator.CreateInstance(RailMeta.MemberType((MemberInfo)Fi ?? Pi));
@@ -172,7 +176,7 @@ namespace Multiplayer.Network.Sync
             var ser = RailMeta.GameSerializer;
             if (ser == null) return null; // pre-init — do NOT cache the miss
             rt = new RailType { Type = live, Source = "twin:" + dto.Name, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop)>();
             foreach (var dtoMi in RailMeta.SerializedMembers(ser, dto))
             {
                 var valType = RailMeta.MemberType(dtoMi);
@@ -193,7 +197,7 @@ namespace Multiplayer.Network.Sync
         private static RailType Build(Type t, Serializer ser)
         {
             var rt = new RailType { Type = t, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop)>();
 
             var direct = RailMeta.SerializedMembers(ser, t);
             if (direct.Count > 0)
@@ -285,7 +289,7 @@ namespace Multiplayer.Network.Sync
             !RailMeta.LeafKindOf(t, out _) && !RailMeta.IsLeafCollection(t) &&
             RailMeta.HuskMembers(t).Count > 0 ? t : null;
 
-        private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail, FieldInfo hop = null)
+        private static RailField BuildField(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop = null)
         {
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = live as PropertyInfo, HopFi = hop };
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
@@ -710,6 +714,15 @@ namespace Multiplayer.Network.Sync
         {
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.Name", "_vehicleName" },         // GeoVehicle.RecordInstanceData:1051 (the Name PROPERTY substitutes a localized default — not the store)
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.HitPoints", "Stats.HitPoints" }, // GeoVehicle.ProcessInstanceData:1119 (v3 arm; MaxHitPoints clamp is host-side truth)
+            // The two carriers of an aircraft's POSITION on the globe. Not presentation: GeoActor.cs:25
+            // declares `WorldPosition => Surface.position`, so this member IS the actor's world position
+            // for gameplay and UI alike, and the mesh hangs off the same transform (VisualsRoot =
+            // Surface.gameObject, GeoVehicle.cs:316). World-space setters, so the client's stale
+            // PivotTransform (which is what nav rotates to fly, GeoNavComponent.cs:111) cannot skew them.
+            // Both hops go through the auto-property GeoActor.Surface — a PROPERTY hop, which is why
+            // these rows only work alongside the MemberInfo hop above.
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfacePos", "Surface.position" }, // GeoVehicle.RecordInstanceData:1052 / ProcessInstanceData:1077
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfaceRot", "Surface.rotation" }, // GeoVehicle.RecordInstanceData:1053 / ProcessInstanceData:1078 — world rotation carries the rendered heading (UpdateHeading writes Surface.localEulerAngles, GeoNavComponent.cs:213)
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
@@ -722,7 +735,7 @@ namespace Multiplayer.Network.Sync
         /// game exposes storage through read-only or shape-changed properties: _weapons/_modules/_addons),
         /// then the UNIQUE live member of the identical class type (catches renames like
         /// ManufactureQueue → Manufacture).</summary>
-        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out FieldInfo hop)
+        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out MemberInfo hop)
         {
             alias = null;
             hop = null;
@@ -764,10 +777,14 @@ namespace Multiplayer.Network.Sync
             return unique;
         }
 
-        /// <summary>An alias target, optionally one hop deep ("Stats.HitPoints"). The hop must be a
-        /// class-typed FIELD — writes go through the hop object by reference.
+        /// <summary>An alias target, optionally one hop deep ("Stats.HitPoints", "Surface.position").
+        /// The hop must be a class-typed FIELD or PROPERTY — writes go through the hop object by
+        /// reference, so a value-typed hop would write into a copy and is refused. A property hop is
+        /// not a special case for vehicles: the game routinely exposes a carrier as an auto-property
+        /// (GeoActor.Surface — decompile GeoVehicle.cs:89), and a field-only hop silently resolved to
+        /// nothing there ("dto-twin unresolved") instead of failing visibly.
         /// ponytail: single hop only; extend to a chain when a real mapping needs one.</summary>
-        private static MemberInfo ResolveAliasChain(Type live, string target, Type valType, out FieldInfo hop)
+        private static MemberInfo ResolveAliasChain(Type live, string target, Type valType, out MemberInfo hop)
         {
             hop = null;
             int dot = target.IndexOf('.');
@@ -776,10 +793,13 @@ namespace Multiplayer.Network.Sync
                 var m = (MemberInfo)HarmonyLib.AccessTools.Field(live, target) ?? HarmonyLib.AccessTools.Property(live, target);
                 return m != null && TwinTypeCompatible(MemberType(m), valType) ? m : null;
             }
-            hop = HarmonyLib.AccessTools.Field(live, target.Substring(0, dot));
-            if (hop == null || hop.FieldType.IsValueType) { hop = null; return null; }
+            var hopName = target.Substring(0, dot);
+            hop = (MemberInfo)HarmonyLib.AccessTools.Field(live, hopName) ?? HarmonyLib.AccessTools.Property(live, hopName);
+            if (hop == null) return null;
+            var hopType = MemberType(hop);
+            if (hopType.IsValueType) { hop = null; return null; }
             var leaf = target.Substring(dot + 1);
-            var mm = (MemberInfo)HarmonyLib.AccessTools.Field(hop.FieldType, leaf) ?? HarmonyLib.AccessTools.Property(hop.FieldType, leaf);
+            var mm = (MemberInfo)HarmonyLib.AccessTools.Field(hopType, leaf) ?? HarmonyLib.AccessTools.Property(hopType, leaf);
             if (mm != null && TwinTypeCompatible(MemberType(mm), valType)) return mm;
             hop = null;
             return null;
@@ -1271,7 +1291,7 @@ namespace Multiplayer.Network.Sync
             return ci;
         }
 
-        private static object GetMemberValue(MemberInfo mi, object o) =>
+        internal static object GetMemberValue(MemberInfo mi, object o) =>
             mi is FieldInfo fi ? fi.GetValue(o) : ((PropertyInfo)mi).GetValue(o, null);
 
         /// <summary>True when a blob of this type would carry anything (covered fields, salvageable

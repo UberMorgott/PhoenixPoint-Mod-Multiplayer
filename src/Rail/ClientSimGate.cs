@@ -170,4 +170,59 @@ namespace Multiplayer.Network.Sync
             return allow;
         }
     }
+
+    /// <summary>
+    /// FIFTH seam, same law, at the GEOSCAPE MOVEMENT funnel: <c>GeoNavComponent.Navigate</c>
+    /// (GeoNavComponent.cs:152). It is the ONE entry point for geoscape navigation — every geoscape
+    /// caller in the game passes a <c>List&lt;Vector3&gt;</c> and lands here (GeoVehicle.cs:388 the
+    /// mid-flight-join resume, :529/:541 StartTravel, GeoBehemothActor.cs:325/:351/:365/:706,
+    /// GeoscapeRaid.cs:125, plus the internal resume GeoNavComponent.cs:185); the inherited
+    /// <c>Navigate(Vector3)</c> overload (NavigationComponent.cs:162) is tactical-only. One prefix
+    /// therefore covers the class, with no reach into tactical nav.
+    ///
+    /// <c>NavigateRoutine</c> (GeoNavComponent.cs:86-143) is an AUTHORITATIVE writer, not presentation:
+    /// it sets <c>Travelling</c> (:88/:94/:138) and <c>RangeRemaining</c> (:116/:135) — both rail-covered
+    /// leaves — and fires <c>Arrived</c> (:139) → <c>GeoVehicle.OnArrived</c>:327-350 →
+    /// <c>CurrentSite.VehicleArrived</c> + <c>OnArrivedAtDestination</c>, i.e. gameplay outcomes on a
+    /// projector client (law 3). It is reachable on a client today: a client that joins mid-flight loads
+    /// a save with <c>Travelling</c> set, and <c>GeoVehicle.OnLevelStart</c>:385-388 re-issues Navigate —
+    /// after which the client flies its own timeline and the diff rail can never correct it (the diff is
+    /// host-now vs host-before, so a client-local mutation is permanent). Blocked, the client's aircraft
+    /// is a pure projection of the host's <c>Surface.position</c>/<c>.rotation</c> deltas instead.
+    ///
+    /// Phrased on the RAIL's own knowledge, not on a type list: only an actor the rail actually mirrors
+    /// is gated (<c>IdentityResolver.RootRef</c> != null). Every faction's GeoVehicle is a root
+    /// (IdentityResolver.cs:218-221 walks <c>map.Vehicles</c> wholesale), so no aircraft is ever frozen
+    /// WITHOUT also being mirrored; <c>GeoBehemothActor</c> is not a root (RootRef's default arm,
+    /// IdentityResolver.cs:129) so behemoths keep dead-reckoning exactly as before — and the day one
+    /// becomes a root, this gate extends itself. Known ceiling, presentation only: the flying animator
+    /// pose is set by nav (<c>InitiateTravelling</c> → GeoVehicle.cs:583, cleared at :344), so a mirrored
+    /// client shows the landed pose while the icon steps at the walk cadence. The gameplay half of
+    /// <c>Travelling</c> (VehicleLeft + CurrentSite=null, GeoVehicle.cs:209-217) still lands, via the leaf.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class GeoNavigateGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        // Exact parameter match — AccessTools.Method does no widening, and the base type declares a
+        // same-named Vector3 overload that must NOT be caught here.
+        private static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(GeoNavComponent), nameof(GeoNavComponent.Navigate), new[] { typeof(List<Vector3>) });
+
+        private static bool Prefix(GeoNavComponent __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            if (SyncApplyScope.Active) return true;                                      // an apply may rewire nav
+            var root = IdentityResolver.RootRef(__instance?.NavActor?.Actor);
+            if (root == null) return true; // not rail-mirrored — leave its local dead-reckoning alone
+
+            // Never silent (the dominant bug class): say which actor's navigation was refused and why.
+            // Log-once per root — Navigate is per route leg, not per frame, but the join resume retries.
+            if (_logged.Add(root))
+                Debug.Log("[MP][diag] GeoNavigateGate BLOCK " + root + " — client nav is host-mirrored (Surface.position/.rotation deltas)");
+            return false;
+        }
+    }
 }

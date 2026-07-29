@@ -444,7 +444,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=17/32
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Weather (GeoSiteWeather)
-PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=13/25
+PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=15/25
   + Leaf CanRedirect (Boolean)
   + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -462,15 +462,15 @@ PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
-  - EXCLUDED SurfacePos (Vector3): dto-twin unresolved
-  - EXCLUDED SurfaceRot (Quaternion): dto-twin unresolved
+  + Leaf SurfacePos (Vector3) -> live Surface.position
+  + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Travelling (Boolean)
   > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
   + Leaf VehicleID (Int32)
   + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
-PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=12/25
+PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=14/25
   + Leaf CanRedirect (Boolean)
   - EXCLUDED CurrentSite (GeoSite): read-only
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -488,8 +488,8 @@ PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
-  - EXCLUDED SurfacePos (Vector3): dto-twin unresolved
-  - EXCLUDED SurfaceRot (Quaternion): dto-twin unresolved
+  + Leaf SurfacePos (Vector3) -> live Surface.position
+  + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Travelling (Boolean)
@@ -542,7 +542,7 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
   - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
-twin summary: resolved=59 gaps=56 dispatch=7
+twin summary: resolved=63 gaps=52 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 

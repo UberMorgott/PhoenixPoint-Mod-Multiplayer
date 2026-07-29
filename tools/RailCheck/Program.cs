@@ -1089,6 +1089,32 @@ namespace RailCheck
                 yield return "L14 twin-coercion: GeoVehicle.Name no longer lands in _vehicleName (the Name property substitutes a localized default)";
             if (fOwnerS == null || fOwnerS.Class != FieldClass.Leaf || !fOwnerS.FactionRef)
                 yield return "L14 twin-coercion: GeoSite.OwnerFactionDef lost the def→GeoFaction coercion";
+            // An aircraft's position rides through a PROPERTY hop (GeoActor.Surface is an auto-property,
+            // decompile GeoVehicle.cs:89), so a field-only ResolveAliasChain silently classifies both
+            // carriers "dto-twin unresolved" — the client's aircraft then never moves and NOTHING says so
+            // (the host never ships the field, so GenericApplier's dto-twin-gap line never fires either).
+            // Assert COVERED, and assert the hop is the Surface property landing on Transform's own member.
+            foreach (var (dtoName, leafName) in new[] { ("SurfacePos", "position"), ("SurfaceRot", "rotation") })
+            {
+                var fSurf = twinV?.FieldByName(dtoName);
+                if (fSurf == null || fSurf.Class != FieldClass.Leaf)
+                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " is not a covered Leaf (" +
+                                 (fSurf?.Exclude ?? "absent") + ") — a client aircraft cannot mirror the host's position";
+                else if (!(fSurf.HopFi is PropertyInfo) || fSurf.HopFi.Name != "Surface" || fSurf.Pi?.Name != leafName)
+                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " no longer routes through the Surface property onto Transform." + leafName;
+            }
+            // Hop mechanics, PROPERTY arm: the hop is only ever READ, so a get-only property must work.
+            var propHop = new HopHolder();
+            var synPropHop = new RailField
+            {
+                Name = "HitPoints", ValueType = typeof(int), Class = FieldClass.Leaf, Leaf = LeafKind.Int64,
+                HopFi = typeof(HopHolder).GetProperty("StatsProp"),
+                Fi = typeof(PhoenixPoint.Geoscape.Core.GeoVehicleStats).GetField("HitPoints")
+            };
+            synPropHop.SetValue(propHop, 41);
+            if (!(synPropHop.HopFi is PropertyInfo) || propHop.Stats.HitPoints != 41 ||
+                !(synPropHop.GetValue(propHop) is int ph) || ph != 41)
+                yield return "L14 hop-mechanics: a PROPERTY hop does not set/get round-trip — GeoVehicle.SurfacePos/SurfaceRot cannot ride";
             // Wrapper mechanics: SetValue must box+wrap the naked float, GetValue must unwrap it.
             var wrapHolder = new WrapHolder();
             var synWrap = new RailField
@@ -1629,6 +1655,11 @@ namespace RailCheck
         private sealed class HopHolder
         {
             public PhoenixPoint.Geoscape.Core.GeoVehicleStats Stats = new PhoenixPoint.Geoscape.Core.GeoVehicleStats();
+            // The PROPERTY-hop arm of L14: GeoActor.Surface is an auto-property, and Transform is not
+            // constructible headless, so the MECHANICS are exercised on a stand-in of the same shape
+            // (get-only class-typed property) while the real Surface.position wiring is asserted on the
+            // live GeoVehicle metadata above.
+            public PhoenixPoint.Geoscape.Core.GeoVehicleStats StatsProp => Stats;
         }
 
         private sealed class ListHolder
