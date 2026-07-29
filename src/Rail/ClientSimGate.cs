@@ -49,6 +49,12 @@ namespace Multiplayer.Network.Sync
     /// <c>GeoCharacter.SetItems</c> and is captured THERE, block-first, by EquipSync.SetItemsCapturePatch;
     /// listing its callers here as well is the enumeration this seam has been shedding since 402e950.)
     ///
+    /// Third row, same shape, same law: <c>UIStateVehicleRoster.UpdateAircraftStorage</c> (:278-290) does
+    /// the identical Except-diff against the faction's <c>AircraftItemStorage</c>. It is the storage half
+    /// of the aircraft loadout gesture whose model half (<c>GeoVehicle.ReplaceEquipments</c>) is captured
+    /// block-first by VehicleSync — the host's own replay is the real write there too, and both halves have
+    /// to be blocked or the client keeps a divergent storage the rail can never correct.
+    ///
     /// Two arms, one line:
     ///   • CLIENT: never, apply or no apply. Storage is a pure mirror (law 3) — the client's own
     ///     storage↔soldier drag goes to the host as an OpSetItems, the host's UpdateStorage-equivalent
@@ -66,6 +72,7 @@ namespace Multiplayer.Network.Sync
         {
             yield return AccessTools.Method(typeof(UIStateEditSoldier), "UpdateStorage");
             yield return AccessTools.Method(typeof(UIStateEditVehicle), "UpdateStorage");
+            yield return AccessTools.Method(typeof(UIStateVehicleRoster), "UpdateAircraftStorage");
         }
 
         private static bool Prefix()

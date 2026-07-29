@@ -80,6 +80,7 @@ namespace RailCheck
             laws.AddRange(CrcBackstopLaw());
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
+            laws.AddRange(VehicleIntentLaw());
             laws.AddRange(RootOwnershipLaw());
             laws.AddRange(StructuralDescendLaw(game, types));
             laws.AddRange(StructuralActorLaw());
@@ -1007,7 +1008,7 @@ namespace RailCheck
             foreach (var sid in new[] { SurfaceIds.GeoResearchIntent, SurfaceIds.GeoManufactureIntent,
                                         SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent,
                                         SurfaceIds.GeoBaseIntent, SurfaceIds.GeoEquipIntent,
-                                        SurfaceIds.GeoEventIntent })
+                                        SurfaceIds.GeoEventIntent, SurfaceIds.GeoVehicleIntent })
             {
                 byte[] inner;
                 using (var ims = new MemoryStream())
@@ -2174,6 +2175,179 @@ namespace RailCheck
             // A def with no choices at all: only the "no choice" resolution is addressable.
             if (EventSync.Validate(GeoscapeEventRecordState.Triggered, 0, 0) == null)
                 yield return "L27 index-unchecked: index 0 passed validation against an EMPTY choice list";
+        }
+
+        /// <summary>L32 — the AIRCRAFT intent family (RCA gap A2). Three properties, all headless:
+        /// (a) EVERY DECLARED op has a validator that reads replicated facts — the op set is read off
+        /// <see cref="VehicleSync"/>'s own <c>Op*</c> constants, so an op added without a
+        /// <see cref="VehicleSync.Validate"/> case goes RED here instead of shipping an unchecked gesture
+        /// (a law over a table stays green when the real switch is reverted; this one drives the switch);
+        /// (b) a rejected op REJECTS — a non-blank reason and the vehicle's own root key as the re-emit
+        /// scope, never a throw and never a blank line; (c) capture is BLOCK-FIRST — asserted positively
+        /// on this family's own patch classes, which is the thing L19 cannot promise: <c>ResultShipLaw</c>
+        /// exempts any patch class whose Harmony targets are all <c>*.View.*</c> types. (This family's
+        /// seams happen to sit on <c>GeoVehicle</c>, a MODEL type, so L19 does cover them today — the arm
+        /// keeps that true if a seam ever moves onto a screen.)
+        /// Plus the slot assignment, the one piece of real arithmetic in the family, driven as the REAL
+        /// generic function with plain guid strings (a live GeoVehicleEquipment needs a DefRepository).
+        /// UNCOVERED and in-game only: <c>GeoNavComponent.FindPath</c> (needs a live navigation graph),
+        /// so "no route" is the one refusal this law cannot exercise.</summary>
+        private static IEnumerable<string> VehicleIntentLaw()
+        {
+            var legal = new VehicleSync.Facts
+            {
+                Resolved = true, OwnedByPlayer = true, CanRedirect = true, TargetResolved = true,
+                TargetIsIdleCurrentSite = false, Docked = true, SlotCountDelta = 0,
+            };
+
+            var ops = typeof(VehicleSync).GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+                .Where(f => f.IsLiteral && f.FieldType == typeof(byte) && f.Name.StartsWith("Op", StringComparison.Ordinal))
+                .OrderBy(f => f.Name, StringComparer.Ordinal)
+                .Select(f => new { f.Name, Op = (byte)f.GetRawConstantValue() }).ToList();
+            if (ops.Count == 0)
+                yield return "L32 vacuous: VehicleSync declares no Op* constant — the validator law checked nothing";
+
+            foreach (var o in ops)
+            {
+                var why = VehicleSync.Validate(o.Op, legal);
+                if (why != null)
+                    yield return "L32 unvalidated-op: " + o.Name + " (op " + o.Op + ") refused a fully LEGAL gesture — \"" + why +
+                                 "\"; either the op has no case in Validate (the default arm refuses by design) or its " +
+                                 "gates are inverted, and every peer's click on it is rejected forever";
+                foreach (var c in StaleVehicleCases(o.Op, legal))
+                {
+                    var w = VehicleSync.Validate(o.Op, c.Value);
+                    if (w == null)
+                        yield return "L32 stale-accepted: " + o.Name + " accepted " + c.Key + " — the native call runs on a " +
+                                     "stale or forged target, which is exactly the divergence this validator exists to stop";
+                    else if (w.Trim().Length == 0)
+                        yield return "L32 silent-reject: " + o.Name + " refused " + c.Key + " with a BLANK reason — " +
+                                     "IntentRail.Reject would log an empty line, the swallow class again";
+                }
+            }
+
+            // ─── the slot assignment (setEquipment's arithmetic), through the real function ──────────
+            Func<string, string> id = s => s;
+
+            // Vehicle-FIRST is not a preference: with the same def on the aircraft and in storage, taking it
+            // out of storage would remove-and-re-add an item every re-flush, so the loadout never settles.
+            var onV = new List<string> { "a", "b" };
+            var inS = new List<string> { "a", "c" };
+            var taken = new List<string>(); var fromS = new List<bool>();
+            var err = VehicleSync.TakeSlots(new[] { "a", "c" }, onV, inS, id, taken, fromS);
+            if (err != null)
+                yield return "L32 pool-exact-refused: a fully satisfiable slot list was refused — \"" + err +
+                             "\"; no client could ever change an aircraft's loadout";
+            else if (fromS.Count != 2 || fromS[0] || !fromS[1])
+                yield return "L32 pool-churn: a def already on the aircraft was taken from STORAGE instead of reused in " +
+                             "place — every re-flush then removes and re-adds it and the loadout never settles";
+            else if (onV.Count != 1 || onV[0] != "b")
+                yield return "L32 pool-leftover: the UNEQUIPPED slot did not stay in the vehicle pool — the handler puts " +
+                             "the leftovers back into storage, so the item is destroyed instead of stored";
+            else if (inS.Count != 1 || inS[0] != "a")
+                yield return "L32 pool-overdraw: storage did not end up holding exactly what no slot asked for — either a " +
+                             "consumed item stayed on the shelf (the host duplicated it) or an untouched one vanished";
+
+            onV = new List<string> { "a" }; inS = new List<string>();
+            taken = new List<string>(); fromS = new List<bool>();
+            err = VehicleSync.TakeSlots(new[] { "zz" }, onV, inS, id, taken, fromS);
+            if (err == null)
+                yield return "L32 pool-missing-accepted: a def on NEITHER the aircraft nor the host's storage was assigned " +
+                             "anyway — the host equips an item nobody owns, out of a stale client mirror";
+            else if (err.Trim().Length == 0)
+                yield return "L32 silent-reject: an unavailable def was refused with a BLANK reason";
+
+            onV = new List<string> { "a" }; inS = new List<string>();
+            taken = new List<string>(); fromS = new List<bool>();
+            err = VehicleSync.TakeSlots(new[] { "", "a" }, onV, inS, id, taken, fromS);
+            if (err != null || taken.Count != 2 || taken[0] != null || taken[1] != "a")
+                yield return "L32 pool-empty-slot: an EMPTY slot did not survive as a null placeholder — " +
+                             "ReplaceEquipments needs the nulls (GeoVehicle.cs:899-910 AddNullModule), otherwise every " +
+                             "later slot shifts up and the aircraft loses a slot";
+
+            var onW = new List<string>(); var onM = new List<string>(); inS = new List<string> { "a" };
+            var tW = new List<string>(); var fW = new List<bool>();
+            var tM = new List<string>(); var fM = new List<bool>();
+            err = VehicleSync.TakeSlots(new[] { "a" }, onW, inS, id, tW, fW)
+                  ?? VehicleSync.TakeSlots(new[] { "a" }, onM, inS, id, tM, fM);
+            if (err == null)
+                yield return "L32 pool-double-spend: ONE stored item satisfied TWO slots — the weapon and module passes do " +
+                             "not share the storage pool, so the host duplicates equipment out of thin air";
+
+            // ─── the reject scope, and block-first as a positive assertion ───────────────────────────
+            if (VehicleSync.Scope("V#3@guid") != "V#3@guid" || VehicleSync.Scope(null) != null || VehicleSync.Scope("") != null)
+                yield return "L32 reject-unscoped: the reject scope is not the aircraft's own root key — IntentRail.Reject " +
+                             "then re-emits the WHOLE covered graph (or nothing at all) instead of the vehicle subtree";
+
+            int seams = 0;
+            foreach (var t in typeof(VehicleSync).GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+                                                 .OrderBy(t => t.Name, StringComparer.Ordinal))
+            {
+                if (t.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false).Length == 0) continue;
+                seams++;
+                if (t.GetMethod("Prefix", AllMembers) == null)
+                    yield return "L32 capture-not-block-first: " + t.Name + " declares no Prefix — a seam that cannot " +
+                                 "block lets the client write the model first, which is a result-ship";
+                if (t.GetMethod("Postfix", AllMembers) != null)
+                    yield return "L32 capture-postfix: " + t.Name + " declares a Postfix — the native mutation has " +
+                                 "already happened by then, so the intent ships a RESULT (L19's rule, asserted here " +
+                                 "because ResultShipLaw exempts view-only patch classes)";
+            }
+            if (seams < 2)
+                yield return "L32 capture-missing: VehicleSync declares " + seams + " Harmony capture seam(s) — gap A2 needs " +
+                             "both the route funnel (GeoVehicle.StartTravel) and the loadout funnel (ReplaceEquipments); " +
+                             "a gesture that reaches no seam produces no log line at all";
+
+            // The loadout gesture's STORAGE half rides EquipStorageGate.TargetMethods() — the exact shape L23
+            // says it cannot read ("a TargetMethods() body is not [readable]"), so drive the real iterator: a
+            // null yielded from it makes PatchAll THROW into the one warning MultiplayerMain swallows, which
+            // kills every later patch in the same PatchAll.
+            var gate = typeof(IntentRail).Assembly.GetType("Multiplayer.Network.Sync.EquipStorageGate");
+            var targets = gate == null ? null : gate.GetMethod("TargetMethods", AllMembers);
+            if (targets == null)
+                yield return "L32 storage-gate-missing: EquipStorageGate.TargetMethods did not resolve — the client's own " +
+                             "storage write-back has no gate at all";
+            else
+            {
+                var yielded = ((IEnumerable<MethodBase>)targets.Invoke(null, null)).ToList();
+                for (int i = 0; i < yielded.Count; i++)
+                    if (yielded[i] == null)
+                        yield return "L32 storage-gate-unbound: EquipStorageGate.TargetMethods yields NULL at index " + i +
+                                     " — a mistyped or drifted method name; PatchAll throws and the warning is swallowed";
+                if (!yielded.Any(m => m != null && m.Name == "UpdateAircraftStorage"))
+                    yield return "L32 storage-gate-unbound: UIStateVehicleRoster.UpdateAircraftStorage is not among " +
+                                 "EquipStorageGate's targets — the client's own AircraftItemStorage write-back is ungated " +
+                                 "and diverges permanently (the loadout gesture's other half)";
+            }
+        }
+
+        private static IEnumerable<KeyValuePair<string, VehicleSync.Facts>> StaleVehicleCases(byte op, VehicleSync.Facts legal)
+        {
+            // Universal: no op may act on an aircraft the host does not have, or on one that is not the
+            // shared player faction's (a client must never order an alien or haven vehicle).
+            var f = legal; f.Resolved = false;
+            yield return new KeyValuePair<string, VehicleSync.Facts>("an unresolved vehicle root key", f);
+            f = legal; f.OwnedByPlayer = false;
+            yield return new KeyValuePair<string, VehicleSync.Facts>("a foreign-faction aircraft", f);
+
+            if (op == VehicleSync.OpTravelTo)
+            {
+                f = legal; f.TargetResolved = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("a destination that does not exist host-side", f);
+                f = legal; f.CanRedirect = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("an aircraft that cannot be redirected", f);
+                f = legal; f.TargetIsIdleCurrentSite = true;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("a route to the site it is already idle at", f);
+            }
+            if (op == VehicleSync.OpSetEquipment)
+            {
+                f = legal; f.Docked = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("an aircraft that is not docked at a Phoenix base", f);
+                f = legal; f.SlotCountDelta = 1;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("one slot too many", f);
+                f = legal; f.SlotCountDelta = -2;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("two slots too few", f);
+            }
         }
 
         private static IEnumerable<string> HandleSweepLaw()
