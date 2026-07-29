@@ -603,6 +603,7 @@ namespace Multiplayer.Network.Sync
                 _appliedBefore[charId] = EncodeBody(false, Slots(character));
 
                 var newLists = new List<GeoItem>[3];
+                var gained = new List<GeoItem>(); // popped out of storage = the half the widget also ammo-loads
                 int took = 0;
                 for (int i = 0; i < 3; i++)
                 {
@@ -616,7 +617,7 @@ namespace Multiplayer.Network.Sync
                         // .CreateCharacter / UIInventoryList both build them singly), so a stack split inside a
                         // loadout resolves at whole-instance granularity. Revisit only if counts >1 ever appear.
                         var got = storage.PopItem((ItemDef)entry);
-                        if (got != null) { newLists[i].Add(got); took++; }
+                        if (got != null) { newLists[i].Add(got); gained.Add(got); took++; }
                     }
                 }
 
@@ -624,6 +625,11 @@ namespace Multiplayer.Network.Sync
                 // Whatever the client did NOT ask for is what the loadout LOST: hand back the LIVE instance so
                 // per-instance charges survive and AddItem natively unloads its magazines into storage.
                 foreach (var dropped in pool) storage.AddItem(dropped);
+                // …and the OTHER half of the widget gesture the block intercepted (see AutoLoadAmmo).
+                // AFTER the returns: storage is then in the state the screen's own storage commit leaves it
+                // (UIStateEditSoldier.UpdateStorage:564-578), so a swap can reload out of the magazines the
+                // swapped-out weapon just unloaded — the same pool the client's widget list was showing.
+                foreach (var got in gained) AutoLoadAmmo(got, storage);
                 SelfCheckApplied(character, wire, charId);
 
                 try { (character.Faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
@@ -638,6 +644,63 @@ namespace Multiplayer.Network.Sync
             {
                 Reject(senderPeerId, charId, "(throw) " + ex);
             }
+        }
+
+        /// <summary>HOST replay of the ammo half of the intercepted gesture. Vanilla auto-load is WIDGET
+        /// work, not model work: UIInventoryList.AddItem:154-163 → TryLoadAmmo:256-293 →
+        /// TryLoadItemWithItem:295-313 pulls magazines out of the storage list and LoadMagazine's them into
+        /// the weapon, and the storage half is committed later by UIStateEditSoldier.UpdateStorage:564-578.
+        /// The intent carries an ADDRESS, so the host answers it with <c>storage.PopItem</c> — and a faction
+        /// ItemStorage UNLOADS every magazine on the way IN (ItemStorage.cs:52-63), so what it hands back is
+        /// always empty while the client's screen shows a loaded gun. Replaying only half the funnel is what
+        /// made the gun arrive empty on the host.
+        ///
+        /// Driven entirely by def METADATA (<c>ItemDef.CompatibleAmmunition</c>/<c>ChargesMax</c>,
+        /// ItemDef.cs:44/47) — every weapon, every ammo type, both equip screens, no per-item knowledge.
+        /// Same licensed move as <see cref="HandleScrapEquippedIntent"/>'s UnloadMagazines replay.
+        /// The REVERSE direction needs nothing: <c>storage.AddItem</c> unloads natively.</summary>
+        private static void AutoLoadAmmo(GeoItem item, ItemStorage storage)
+        {
+            var ammo = item.CommonItemData.Ammo; // non-null exactly for ammo-compatible defs (CommonItemData.cs:76-83)
+            if (ammo == null || storage == null) return;
+            // Vehicle gear reloads FOR FREE and never out of storage (TryLoadAmmo:256-259) — the wire's
+            // freeReload bit covers the flushes that carry one, this covers the ones that do not.
+            if (IsVehicleEquipment(item)) { item.ReloadForFree(); return; }
+            int max = item.ItemDef.ChargesMax;
+            var compat = item.ItemDef.CompatibleAmmunition;
+            if (compat == null) return;
+            foreach (var magDef in compat)
+            {
+                if (magDef == null) continue; // ItemDef.cs:178-183 logs these exist
+                while (ammo.CurrentCharges < max)
+                {
+                    if (!storage.Items.TryGetValue(magDef, out var stack)) break; // out of stock: native stops too
+                    // What PopItem is about to hand back: a stack >1 splits off a FULL fresh GeoItem, a
+                    // single one is the instance itself with its own charges (ItemStorage.cs:95-111).
+                    int magCharges = stack.CommonItemData.Count > 1 ? magDef.ChargesMax
+                                                                    : stack.CommonItemData.CurrentCharges;
+                    // AmmoManager.LoadMagazine:32-35 EVICTS LoadedMagazines[0] when the load overflows —
+                    // a magazine destroyed for nothing, in a loop that can then never fill. Stop instead.
+                    if (magCharges <= 0 || ammo.CurrentCharges + magCharges > max) break;
+                    var mag = storage.PopItem(magDef);
+                    if (mag == null) break;
+                    ammo.LoadMagazine(mag);
+                }
+                if (ammo.CurrentCharges >= max) return;
+            }
+            // Cheap falsifier for the replay above: a gun that stayed EMPTY while its own ammo sits in
+            // storage means the pop/load path lost the gesture — the exact symptom this replay exists for.
+            if (ammo.CurrentCharges == 0 &&
+                compat.Any(d => d != null && storage.Items.TryGetValue(d, out var s) && s.CommonItemData.CurrentCharges > 0))
+                Debug.LogError("[MP][equip] SELF-CHECK FAIL ammo — " + item.ItemDef.name +
+                               " stayed empty while storage still holds compatible ammunition");
+        }
+
+        /// <summary>UIInventoryList.IsVehicleEquipment:250-253, model side.</summary>
+        private static bool IsVehicleEquipment(GeoItem item)
+        {
+            var tags = Base.Core.GameUtl.GameComponent<SharedData>()?.SharedGameTags;
+            return tags != null && item.ItemDef.Tags != null && item.ItemDef.Tags.Contains(tags.VehicleClassTag);
         }
 
         /// <summary>HOST replay of the edit-screen scrap of an EQUIPPED item at model level
