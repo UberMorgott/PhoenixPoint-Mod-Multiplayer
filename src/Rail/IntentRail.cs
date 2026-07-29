@@ -191,14 +191,26 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        /// <summary>Uniform reject: log + scoped re-emit of the touched subtrees + the family's
-        /// registered reconverge. Null/empty prefixes are ignored (ForceReemit's own contract), so
-        /// callers can pass conditionally-known ids straight through.</summary>
+        /// <summary>Uniform reject: log + re-emit of the host truth + the family's registered reconverge.
+        /// Re-emit is UNCONDITIONAL — <paramref name="reemitPrefixes"/> only NARROWS it. A reject changes
+        /// no host state, so the diff has nothing of its own to ship: without a forced re-emit the client
+        /// keeps whatever its optimistic local gesture staged, forever (PersonnelSync's hireNaked reject
+        /// passed no prefix and the client's debited resources never came back). Callers that know the
+        /// touched subtree pass its path prefixes and pay a scoped re-emit; a caller that knows no scope —
+        /// or passes only conditionally-known ids that came out null — falls back to the full covered
+        /// graph, because "nothing" is a permanent divergence and a reject is user-gesture rate.</summary>
         public static void Reject(byte surfaceId, ulong peer, string why, params string[] reemitPrefixes)
         {
             Debug.LogWarning("[MP][intent] HOST " + Tag(surfaceId) + " REJECT peer=" + peer + " — " + why);
+            int scoped = 0;
             if (reemitPrefixes != null)
-                foreach (var p in reemitPrefixes) DiffEngine.ForceReemit(p);
+                foreach (var p in reemitPrefixes)
+                    if (!string.IsNullOrEmpty(p)) { DiffEngine.ForceReemit(p); scoped++; }
+            if (scoped == 0)
+            {
+                DiffEngine.RequestFullResend();
+                DiffEngine.FlushNow(); // converge on the next frame, not on the ≤0.5 s poll
+            }
             if (_families.TryGetValue(surfaceId, out var f)) f.Reconverge?.Invoke();
             // The re-emit reconverges the client's MODEL, but a reject means host state did not change —
             // re-emitted values arrive byte-equal, apply as Unchanged and repaint nothing, leaving the
