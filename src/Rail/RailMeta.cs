@@ -1457,8 +1457,99 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Leading type name of an <see cref="EncodeDescendCreate"/> frame — the client resolves
-        /// and validates it against the carrier field's declared type before constructing anything.</summary>
+        /// <summary>The structural CREATE payload for a MonoBehaviour-bound ACTOR root (GeoVehicle today):
+        /// the SAME <c>[string typeName][byte n][leaf x n]</c> frame as <see cref="EncodeDescendCreate"/>,
+        /// read by the same <see cref="DescendCreateTypeName"/>, with n = 1. Only the param SOURCE differs,
+        /// and it has to: an actor's `[SerializeCustomCreate]` is
+        /// <c>ActorComponent.CreateActor(SerializedObjectData, ActorCreateData)</c> (decompile
+        /// ActorComponent.cs:336-377, inherited by GeoVehicle.cs:26 -> GeoActor.cs:15), whose one param
+        /// member is the get-only property <c>ActorComponent.ActorCreateData</c> (:51) typed as a plain
+        /// composite CLASS (ActorCreateData.cs:8-15) — so <see cref="LeafKindOf"/> refuses it,
+        /// <see cref="UncarriableCreateParams"/> names it, and <see cref="ConstructLikeLoad"/> would invoke
+        /// <c>CreateActor(null, null)</c> and NRE on <c>ActorCreateData.ActorSetDef</c>.
+        ///
+        /// What the client actually needs is the ONE field of that composite the spawn branch reads:
+        /// <c>ActorCreateData.ActorSetDef</c>, recorded as <c>GetComponent&lt;ComponentSet&gt;().SetDef</c>
+        /// (ActorComponent.cs:323) and consumed as <c>Repo.Instantiate&lt;ActorComponent&gt;(ActorSetDef)</c>
+        /// (:342). That is a <see cref="BaseDef"/>, i.e. a DefRef Guid, i.e. already a leaf — so the actor
+        /// frame keeps the whole "carried as a reference, never as a graph" property of the mechanism, and
+        /// never ships a native graph blob (law 3 / RailCheck L3: a blob of a GeoVehicle would re-CREATE
+        /// MonoBehaviour actors on the client). Everything else about the actor rides elsewhere: its id and
+        /// its owner are IN the root key (IdentityResolver.RootRef), every other member is a covered value
+        /// arriving one packet behind the create.</summary>
+        internal static byte[] EncodeActorCreate(object actor)
+        {
+            var t = actor.GetType();
+            var setDef = ActorSpawnDef(actor);
+            if (setDef == null)
+                // Law 1: the one thing this frame cannot carry gets a line. A scene-PLACED actor has no
+                // ComponentSetDef at all (ActorComponent.cs:323 records null when !IsSpawned) — load binds
+                // it by SceneObjectId instead, which a client cannot do for an object its scene lacks.
+                WarnOnce("EncodeActorCreate: " + t.Name + " has no ComponentSet.SetDef (scene-placed actor?) — " +
+                         "the create frame ships NULL and the client will decline it");
+            return WriteActorCreateFrame(t.FullName, setDef);
+        }
+
+        /// <summary>The actor frame's WRITER, split out from the live read above so the stage-1 harness can
+        /// drive encoder→decoder for real (RailCheck L31) without a live Unity actor — the arm a static
+        /// predicate over <see cref="LeafKindOf"/> structurally cannot supply, exactly as L30 is to L29.</summary>
+        internal static byte[] WriteActorCreateFrame(string typeName, ComponentSetDef setDef)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms)) // default = UTF8, matching EncodeDescendCreate's writer
+            {
+                w.Write(typeName);
+                w.Write((byte)1);
+                EncodeLeaf(w, typeof(ComponentSetDef), setDef);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>The `ComponentSetDef` the game spawns this actor from — the live read behind
+        /// <see cref="EncodeActorCreate"/>, kept next to it so the host encode and RailCheck L31 ask the
+        /// same question. Null for a scene-placed actor (see the warning above).</summary>
+        internal static ComponentSetDef ActorSpawnDef(object actor) =>
+            (actor as UnityEngine.Component)?.GetComponent<ComponentSet>()?.SetDef;
+
+        /// <summary>Decode side of <see cref="EncodeActorCreate"/>: the spawn def, or null when the frame
+        /// carried none / did not resolve on this peer. Every null says so once — a frame that silently
+        /// decoded to null is how an actor would be spawned from a wrong def, or not at all.</summary>
+        internal static ComponentSetDef DecodeActorCreateDef(byte[] payload, GeoLevelController geo)
+        {
+            if (payload == null || payload.Length == 0) return null;
+            try
+            {
+                using (var ms = new MemoryStream(payload))
+                using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeActorCreate's writer
+                {
+                    var typeName = r.ReadString();
+                    int n = ms.Position < ms.Length ? r.ReadByte() : -1;
+                    if (n != 1)
+                    {
+                        WarnOnce("DecodeActorCreateDef: " + typeName + " frame declares " + n +
+                                 " create-param slot(s), expected 1 — not an EncodeActorCreate frame; spawn declined");
+                        return null;
+                    }
+                    var v = DecodeLeaf(r, typeof(ComponentSetDef), geo);
+                    if (v == Unresolved)
+                    {
+                        WarnOnce("DecodeActorCreateDef: " + typeName + " spawn def did not resolve on this peer " +
+                                 "(mod parity?) — spawn declined");
+                        return null;
+                    }
+                    return v as ComponentSetDef;
+                }
+            }
+            catch (Exception ex)
+            {
+                WarnOnce("DecodeActorCreateDef: create frame unreadable (" + ex.GetType().Name + ") — spawn declined");
+                return null;
+            }
+        }
+
+        /// <summary>Leading type name of an <see cref="EncodeDescendCreate"/> or
+        /// <see cref="EncodeActorCreate"/> frame — the client resolves and validates it before constructing
+        /// anything. ONE reader for both, because both write the same leading string.</summary>
         internal static string DescendCreateTypeName(byte[] payload)
         {
             if (payload == null || payload.Length == 0) return null;

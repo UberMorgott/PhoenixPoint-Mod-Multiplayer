@@ -82,6 +82,7 @@ namespace RailCheck
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(RootOwnershipLaw());
             laws.AddRange(StructuralDescendLaw(game, types));
+            laws.AddRange(StructuralActorLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1845,6 +1846,156 @@ namespace RailCheck
                     }
                 }
             }
+        }
+
+        /// <summary>L31 — the structural ACTOR shape: a ROOT whose entity is a MonoBehaviour-bound
+        /// <c>UnityEngine.Object</c>. Third of the three structural shapes to get a law (L29 = the Descend
+        /// field, L28 = root ownership), and the one where the wrong payload is CATASTROPHIC rather than
+        /// merely lossy: the game's own spawners run inside the deserializer
+        /// (<c>[SerializeCustomCreate] ActorComponent.CreateActor</c>, decompile ActorComponent.cs:336-377,
+        /// inherited by GeoVehicle.cs:26 → GeoActor.cs:15), so decoding a native graph blob of a GeoVehicle
+        /// would CREATE a duplicate actor on the client — and every actor its members reach — instead of
+        /// mirroring one (law 3 "never replace a MonoBehaviour-bound instance"). That is the apply-side twin
+        /// of <c>L3 unity-object-blobbed</c>, and it is a mistake available in ONE character: adding "V#" to
+        /// <c>StructuralPrefixes</c> without the payload arm.
+        ///
+        /// Arms, each a distinct failure:
+        ///   • <b>actor-root-blobbed</b> — the host's payload CHOICE, driven through the very function
+        ///     <c>EmitStructural</c> switches on (<c>DiffEngine.PayloadFor</c>), never re-derived here. A
+        ///     predicate over types would stay green if the emit arm were reverted; this goes red. Table
+        ///     driven over all three shapes at once, so a change that fixes the actor arm by breaking the
+        ///     Descend or blob arm cannot pass either.
+        ///   • <b>actor-root-undeclared</b> — every actor-typed root kind must be either structurally enabled
+        ///     or a DECLARED opt-out carrying its reason. This is the arm that keeps "which roots can appear
+        ///     or vanish at runtime" a reviewable table instead of an accident: an actor root that CAN vanish
+        ///     and is neither enabled nor declared is precisely the swallow this batch closed for "V#" (one
+        ///     "not enabled" line at create, then every value delta under it dies at "entity not found"
+        ///     forever, with nothing ever retrying).
+        ///   • <b>actor-optout-stale</b> — an opt-out row for a prefix that is not an actor root kind, or that
+        ///     IS enabled, guards nothing. Same shape as L28's stale-root-reach-declaration: a declaration is
+        ///     a claim, so it decays and must be swept.
+        ///   • <b>actor-param-not-defref</b> — the frame carries its ONE param, the spawn
+        ///     <c>ComponentSetDef</c>, through the ordinary leaf codec. That only stays a REFERENCE while
+        ///     <c>LeafKindOf</c> answers DefRef; if it ever answered Composite the frame would start walking
+        ///     a def graph onto the wire, i.e. lose the very property that makes an actor create safe.
+        ///   • <b>actor-create-frame-typename / -shape</b> — the frame driven for real. The type name must
+        ///     survive through <c>DescendCreateTypeName</c> (the ONE reader both create frames share, which is
+        ///     why breaking it breaks two shapes at once), and the bytes the writer emits must be exactly what
+        ///     the reader's slot-count check demands: <c>[typeName][1][one leaf]</c>, consumed to the last
+        ///     byte.
+        ///   • <b>actor-root-uncovered</b> — L30's question for this shape: an enabled actor root the value
+        ///     rail covers NOTHING of would be spawned holding CLR defaults, a phantom aircraft, silently.
+        ///
+        /// Honest gap, same class as L13's DefRef note: a real def cannot be asserted to RESOLVE here.
+        /// <c>DecodeLeaf</c>'s DefRef arm needs a live <c>DefRepository</c> (RailMeta.cs:1207) and the host
+        /// read needs a live <c>ComponentSet</c> component, so the frame arms drive a NULL def — they prove
+        /// the frame's shape and its decline paths, not that a GeoVehicle's def survives a round trip.</summary>
+        private static IEnumerable<string> StructuralActorLaw()
+        {
+            // The host's payload choice, driven through DiffEngine.PayloadFor — all three shapes in one
+            // table so no arm can be "fixed" by breaking another.
+            foreach (var probe in new (string Key, Type Type, DiffEngine.CreatePayload Want)[]
+            {
+                ("V#3@abcd", typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), DiffEngine.CreatePayload.ActorFrame),
+                ("S#12", typeof(PhoenixPoint.Geoscape.Entities.GeoSite), DiffEngine.CreatePayload.ActorFrame),
+                ("U#7", typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter), DiffEngine.CreatePayload.GraphBlob),
+                ("S#12.SerializationData.PhoenixBaseData.Layout._facilities#5",
+                 typeof(PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility), DiffEngine.CreatePayload.GraphBlob),
+                ("S#12.SerializationData.ActiveMission",
+                 typeof(PhoenixPoint.Geoscape.Entities.GeoMission), DiffEngine.CreatePayload.DescendFrame),
+                // An ACTOR reached through a Descend FIELD is still an actor: GeoStealAircraftMission
+                // carries _stealAircraft (GeoVehicle), so shape order matters, not just type.
+                ("S#12.SerializationData.ActiveMission._stealAircraft",
+                 typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), DiffEngine.CreatePayload.ActorFrame),
+            })
+            {
+                var got = DiffEngine.PayloadFor(probe.Key, probe.Type);
+                if (got != probe.Want)
+                    yield return "L31 actor-root-blobbed: DiffEngine.PayloadFor('" + probe.Key + "', " +
+                                 probe.Type.Name + ") picks " + got + ", not " + probe.Want + " — this is the " +
+                                 "function EmitStructural switches on, so a MonoBehaviour actor landing on " +
+                                 "GraphBlob means the client DECODES a blob and re-CREATES that actor plus every " +
+                                 "actor its members reach, instead of mirroring one (law 3, L3's apply-side twin)";
+            }
+
+            var kinds = IdentityResolver.RootKinds;
+            var prefixes = DiffEngine.StructuralRootPrefixes;
+            var optOuts = DiffEngine.StructuralRootOptOuts;
+
+            foreach (var r in kinds)
+            {
+                if (!DiffEngine.IsActorPayloadType(r.Type)) continue;
+                bool enabled = prefixes.Any(p => r.Key.StartsWith(p, StringComparison.Ordinal));
+                bool declared = optOuts.Any(o => string.Equals(o.Prefix, r.Key, StringComparison.Ordinal));
+                if (enabled && declared)
+                    yield return "L31 actor-optout-stale: root '" + r.Key + "' (" + r.Type.Name + ") is BOTH " +
+                                 "structurally enabled and listed in DiffEngine.StructuralRootOptOuts — the " +
+                                 "opt-out row guards nothing and its stated reason is now false";
+                else if (!enabled && !declared)
+                    yield return "L31 actor-root-undeclared: root '" + r.Key + "' (" + r.Type.Name + ") is a " +
+                                 "UnityEngine.Object actor root that is neither structurally enabled nor a " +
+                                 "declared opt-out in DiffEngine.StructuralRootOptOuts — if it can appear or " +
+                                 "vanish at runtime the client gets ONE 'not enabled' line and then every value " +
+                                 "delta under it dies at 'entity not found' forever, with nothing retrying";
+                if (!enabled) continue;
+                var rt = RailType.Get(r.Type);
+                var dto = RailMeta.FindBridge(r.Type);
+                var bridged = dto == null ? null : RailType.GetBridged(r.Type, dto);
+                if ((rt?.CoveredCount ?? 0) + (bridged?.CoveredCount ?? 0) == 0)
+                    yield return "L31 actor-root-uncovered: root '" + r.Key + "' (" + r.Type.Name + ") is " +
+                                 "structurally enabled but the value rail covers NONE of its members — the " +
+                                 "create would spawn an actor the client can never fill, i.e. a default-valued " +
+                                 "phantom, silently";
+            }
+
+            // Stale rows the loop above cannot see: a prefix matching no actor root kind AT ALL.
+            foreach (var o in optOuts)
+                if (!kinds.Any(r => DiffEngine.IsActorPayloadType(r.Type) &&
+                                    string.Equals(r.Key, o.Prefix, StringComparison.Ordinal)))
+                    yield return "L31 actor-optout-stale: \"" + o.Prefix + "\" is declared in " +
+                                 "DiffEngine.StructuralRootOptOuts but no UnityEngine.Object root kind in " +
+                                 "IdentityResolver.RootKinds has that key — the row guards nothing";
+
+            // The frame's ONE param must stay a REFERENCE, not a walked graph.
+            RailMeta.LeafKindOf(typeof(Base.Core.ComponentSetDef), out var setDefKind);
+            if (setDefKind != LeafKind.DefRef)
+                yield return "L31 actor-param-not-defref: ComponentSetDef classifies as " + setDefKind +
+                             ", not DefRef — the actor create frame carries the spawn def through the ordinary " +
+                             "leaf codec, so anything but a Guid reference means the frame started EMITTING def " +
+                             "state instead of naming it, and an actor create can embed a graph again";
+
+            // The frame, driven encoder→decoder for real (null def — see the honest gap above).
+            const string vehicleType = "PhoenixPoint.Geoscape.Entities.GeoVehicle";
+            var readBack = RailMeta.DescendCreateTypeName(RailMeta.WriteActorCreateFrame(vehicleType, null));
+            if (readBack != vehicleType)
+                yield return "L31 actor-create-frame-typename: the actor frame round-tripped as '" +
+                             (readBack ?? "<null>") + "', not '" + vehicleType + "' — the client resolves the " +
+                             "concrete type from this string and validates it before spawning, so it would " +
+                             "decline every create. DescendCreateTypeName is the ONE reader both create frames " +
+                             "share, so breaking it breaks the Descend shape in the same stroke";
+
+            // The frame the WRITER produces must be exactly what the READER's slot-count check demands:
+            // [string typeName][byte 1][one leaf], consumed to the last byte. DecodeActorCreateDef rejects
+            // any n != 1, so a writer that drifts to a different arity makes every create decline — and a
+            // writer that appends a second leaf leaves trailing bytes the reader would never see. Asserted by
+            // re-reading the real frame with the same primitives rather than by feeding the decoder a bogus
+            // payload: headless there is no DefRepository, so DecodeActorCreateDef can only ever return null
+            // (DecodeLeaf's DefRef arm yields Unresolved, RailMeta.cs:1212) and a return-value assertion
+            // would be unfalsifiable decoration.
+            int slots; long left;
+            using (var ms = new MemoryStream(RailMeta.WriteActorCreateFrame(vehicleType, null)))
+            using (var r = new BinaryReader(ms))
+            {
+                r.ReadString();
+                slots = ms.Position < ms.Length ? r.ReadByte() : -1;
+                RailMeta.DecodeLeaf(r, typeof(Base.Core.ComponentSetDef), null);
+                left = ms.Length - ms.Position;
+            }
+            if (slots != 1 || left != 0)
+                yield return "L31 actor-create-frame-shape: the actor frame declares " + slots +
+                             " create-param slot(s) and leaves " + left + " trailing byte(s) — the reader " +
+                             "(DecodeActorCreateDef) rejects any count but 1, so this arity makes the client " +
+                             "decline every actor create, and trailing bytes are payload it will never read";
         }
 
         /// <summary>Types a root can reach through its own classified tables — Descend / element types /

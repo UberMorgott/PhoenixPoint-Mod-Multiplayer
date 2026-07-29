@@ -89,8 +89,75 @@ namespace Multiplayer.Network.Sync
         // prefix (the one enable table of the ONE mechanism — everything else logs a visible opt-out,
         // same contract as the coverage report). "U#" = GeoCharacter: a plain serializable class the
         // game itself registers by dict write on load (GeoLevelController.ProcessInstanceData:607-610);
-        // MonoBehaviour-bound roots (GeoSite/GeoVehicle — law 3 "never replace") stay opted out.
-        private static readonly string[] StructuralPrefixes = { "U#" };
+        // "V#" = GeoVehicle: a MonoBehaviour-bound ACTOR, so it rides the actor payload arm below and NEVER
+        // a native graph blob (law 3 "never replace a MonoBehaviour-bound instance" / RailCheck L3).
+        private static readonly string[] StructuralPrefixes = { "U#", "V#" };
+
+        /// <summary>Root kinds whose entity type is a <c>UnityEngine.Object</c> and which are DELIBERATELY
+        /// not structurally enabled, each with the grounded reason. Read by RailCheck L31, which otherwise
+        /// demands that every actor-typed root be either enabled or listed here: an actor root that can
+        /// appear or vanish at runtime and is neither is the exact silent swallow this batch closed for
+        /// "V#" (create logs one "not enabled" line, then every value delta under it dies at "entity not
+        /// found" forever). Order/format is the table itself — a row is a claim, so it carries its proof.
+        ///
+        /// "S#" (GeoSite) is the load-bearing row and it is a FACT, not a deferral: mid-campaign the site
+        /// SET never grows or shrinks. `Instantiate&lt;GeoSite&gt;` does not exist anywhere in the game;
+        /// `GeoActorSpawner.SpawnSite` (GeoActorSpawner.cs:14) has exactly ONE caller,
+        /// `GeoInitialWorldSetup.InstanciateSites:458` = campaign WORLD GENERATION, before any save and so
+        /// before any join; `AllSites` is added to / removed from in one place each (GeoMap.cs:380 / :407,
+        /// inside RegisterActor/UnregisterActor); and the allocator the RCA named,
+        /// `GeoSitesMapper.GetNextId()` (GeoSitesMapper.cs:205), has ZERO callers — `_nextSiteId` is
+        /// derived from the SCENE def list by `BuildSiteIds()` (:182-203) and `SiteId` is only ever set
+        /// from scene data (GeoInitialWorldSetup.cs:99) or restored from the save DTO (GeoSite.cs:1572).
+        /// The one runtime site mutation is `GeoActorSpawner.ChangeSiteType` (:26-68, sole caller
+        /// GeoFactionReward.cs:584): it calls OnExitPlay() then DoEnterPlay() on the SAME GameObject
+        /// SYNCHRONOUSLY and never touches SiteId, so the 0.5 s walk cannot even observe the gap.
+        /// COST, stated: a site CHANGING TYPE therefore does not mirror — but that is a different layer,
+        /// not this one. It is a twin gap (`GeoSiteInstaceData.SiteType`, docs/rail-baseline.txt: EXCLUDED
+        /// dto-twin unresolved), and it cannot be closed by a twin row either: writing `GeoSite.Type`
+        /// without ChangeSiteType's component swap leaves a client site labelled PhoenixBase with no
+        /// GeoPhoenixBase component, which is worse than today. That needs a FOURTH shape ("an existing
+        /// actor re-typed in place") and is named here rather than half-built.
+        ///
+        /// The four singleton component roots need no create/destroy by construction: each is yielded from
+        /// a fixed accessor on the level (IdentityResolver.RootKinds' `Get` rows) and lives exactly as long
+        /// as the level does.</summary>
+        /// <summary>ONE definition of "a create of this thing ships the ACTOR frame, never a native graph
+        /// blob" — read by the host payload choice in <see cref="EmitStructural"/> AND by RailCheck L31, so
+        /// the wire rule and the law cannot drift (the same single-discriminator contract as
+        /// <see cref="IsDescendPath"/>). A <c>UnityEngine.Object</c> is the whole test: a blob of one would
+        /// re-CREATE it and every actor its members reach, because the game's own spawners run inside the
+        /// deserializer (<c>[SerializeCustomCreate] ActorComponent.CreateActor</c>, decompile
+        /// ActorComponent.cs:336-377). Law 3, and RailCheck L3's apply-side twin.</summary>
+        internal static bool IsActorPayloadType(Type t) => t != null && typeof(UnityEngine.Object).IsAssignableFrom(t);
+
+        internal enum CreatePayload { ActorFrame, DescendFrame, GraphBlob }
+
+        /// <summary>The host's create-payload DECISION, as one named function rather than an inline ternary,
+        /// so RailCheck L31 can drive the real choice instead of re-deriving it. That distinction is the
+        /// difference between a law and decoration: a predicate over types stays green if the emit arm is
+        /// reverted, this does not (same reason L30 exists beside L29). Order is load-bearing — the actor
+        /// test comes FIRST, because an actor reached through a Descend field is still an actor and must
+        /// never take the blob.</summary>
+        internal static CreatePayload PayloadFor(string rootKey, Type valueType) =>
+            IsActorPayloadType(valueType) ? CreatePayload.ActorFrame
+            : IsDescendPath(rootKey) ? CreatePayload.DescendFrame
+            : CreatePayload.GraphBlob;
+
+        /// <summary>The enable table above, for RailCheck L31 — ONE table, same contract as
+        /// <see cref="StructuralDescendKinds"/>.</summary>
+        internal static string[] StructuralRootPrefixes => StructuralPrefixes;
+
+        internal static readonly (string Prefix, string Why)[] StructuralRootOptOuts =
+        {
+            ("S#", "no runtime create/destroy exists: sole spawn is GeoInitialWorldSetup.InstanciateSites:458 " +
+                   "(world generation), GeoSitesMapper.GetNextId():205 has zero callers, and ChangeSiteType:26-68 " +
+                   "reuses the same GameObject and SiteId — the site set is fixed and rides the save transfer (law 1)"),
+            ("ES", "level-lifetime singleton component (GeoLevelController.EventSystem) — cannot appear or vanish"),
+            ("MG", "level-lifetime singleton component (GeoLevelController.MissionGenerator) — cannot appear or vanish"),
+            ("MK", "level-lifetime singleton component (GeoLevelController.Marketplace) — cannot appear or vanish"),
+            ("GL", "the level controller itself — its existence IS the session"),
+        };
         // Keyed-COLLECTION elements ride the same set-diff: the walk's EntityCollection arm records
         // enabled element types under their full element path (…Layout._facilities#<FacilityId>), so
         // create/destroy falls out of the identical _prevRoots comparison. Only listed types are
@@ -1107,12 +1174,24 @@ namespace Multiplayer.Network.Sync
                         Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
                     continue;
                 }
-                // Payload per path shape (IsDescendPath): a Descend field ships its concrete type name plus
-                // its create params as LEAVES (RailMeta.EncodeDescendCreate — refs, never a graph),
-                // everything else the native graph blob.
-                var blob = IsDescendPath(kv.Key)
-                    ? RailMeta.EncodeDescendCreate(kv.Value)
-                    : Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true);
+                // Payload arm, in this order — the graph blob is the LAST resort, never the default:
+                //   • a MonoBehaviour-bound ACTOR (GeoVehicle) ships its type name + the ComponentSetDef the
+                //     game spawns it from, as a DefRef leaf (RailMeta.EncodeActorCreate). A native blob is
+                //     forbidden here, not merely avoided: decoding one would re-CREATE the actor and every
+                //     actor its members reach (law 3 "never replace a MonoBehaviour-bound instance",
+                //     RailCheck L3/L31). Asked as "is this a UnityEngine.Object", so the rule holds for any
+                //     future actor root without a second table to keep in sync.
+                //   • a Descend field ships its type name + its create params as LEAVES
+                //     (RailMeta.EncodeDescendCreate — refs, never a graph).
+                //   • everything else (plain serializable classes: GeoCharacter, GeoPhoenixFacility) the
+                //     native graph blob, which is exactly where law 6 licenses one.
+                byte[] blob;
+                switch (PayloadFor(kv.Key, kv.Value.GetType()))
+                {
+                    case CreatePayload.ActorFrame:   blob = RailMeta.EncodeActorCreate(kv.Value); break;
+                    case CreatePayload.DescendFrame: blob = RailMeta.EncodeDescendCreate(kv.Value); break;
+                    default: blob = Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true); break;
+                }
                 if (blob == null || blob.Length == 0)
                 {
                     Debug.LogError("[Multiplayer][rail] structural: payload for '" + kv.Key + "' (" +

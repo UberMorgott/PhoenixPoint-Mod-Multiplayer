@@ -226,7 +226,9 @@ namespace Multiplayer.Network.Sync
                         }
                         else if (op == 1 && existing == null)
                         {
-                            if (rootKey.StartsWith("U#", StringComparison.Ordinal))
+                            if (rootKey.StartsWith("V#", StringComparison.Ordinal))
+                                created = ApplyVehicleCreate(geo, rootKey, blob);
+                            else if (rootKey.StartsWith("U#", StringComparison.Ordinal))
                             {
                                 var unit = Multiplayer.Rail.SerializerRoundtrip.DeserializeGraph(blob, typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter), quiet: true)
                                            as PhoenixPoint.Geoscape.Entities.GeoCharacter;
@@ -242,7 +244,9 @@ namespace Multiplayer.Network.Sync
                         }
                         else if (op == 2 && existing != null)
                         {
-                            if (existing is PhoenixPoint.Geoscape.Entities.Missions.IGeoTacUnit unit)
+                            if (existing is PhoenixPoint.Geoscape.Entities.GeoVehicle vehicle)
+                                ApplyVehicleDestroy(rootKey, vehicle);
+                            else if (existing is PhoenixPoint.Geoscape.Entities.Missions.IGeoTacUnit unit)
                             {
                                 geo.DestroyTacUnit(unit); // native removal (GeoLevelController.cs:1560-1563)
                                 Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
@@ -379,6 +383,115 @@ namespace Multiplayer.Network.Sync
             touched.Add(owner);
             OpenUiRepaint.MarkDirty();
             Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
+        }
+
+        // ─── Vehicle actor wiring (structural create/destroy for the "V#<id>@<ownerGuid>" root) ───
+        // A MonoBehaviour-bound ACTOR, so the payload is a type name + the ComponentSetDef the game spawns
+        // it from (RailMeta.EncodeActorCreate) and NEVER a native graph blob: decoding a blob would
+        // re-create this actor and every actor its members reach (law 3). Everything else about the vehicle
+        // rides the value rail one packet behind the create — CurrentSite, SurfacePos/SurfaceRot (the A1
+        // mirrored twins), Stats.HitPoints, RangeRemaining, Travelling, Weapons, Modules, TacUnits, Name.
+
+        /// <summary>Split a "V#&lt;id&gt;@&lt;ownerFactionDefGuid&gt;" root key. The qualifier is not
+        /// decoration: VehicleID comes from the OWNER's counter (GeoFaction.cs:2008), so the key already
+        /// carries BOTH facts the spawn needs and neither has to ride the payload. An unqualified key (owner
+        /// unknown when it was minted — IdentityResolver.OwnerQualifier) cannot name a faction, so the
+        /// create declines rather than guessing one.</summary>
+        private static bool ParseVehicleKey(string rootKey, out int id, out string ownerGuid)
+        {
+            id = 0; ownerGuid = null;
+            int at = rootKey.IndexOf('@');
+            if (at < 0) return false;
+            ownerGuid = rootKey.Substring(at + 1);
+            return ownerGuid.Length > 0 &&
+                   int.TryParse(rootKey.Substring(2, at - 2), out id);
+        }
+
+        /// <summary>The game's OWN runtime spawn (GeoFaction.CreateVehicle:2004-2019), replayed minus the id
+        /// ALLOCATION — `:2008 VehicleID = ++_lastVehicleIndex` becomes the id read off the root key. That
+        /// is the whole allocator discipline here and it is the same reason ApplyFacilityCreate does not call
+        /// AddFacility: a client that allocates mints ids the host never issued, and a mirrored counter would
+        /// then silently rewind and re-issue live ones. (`_lastVehicleIndex` is ALSO replicated —
+        /// GeoFactionInstanceData.LastVehicleIndex rides the F# root, docs/rail-baseline.txt — but that is a
+        /// belt, not the fix.)
+        ///
+        /// Deliberately NOT replayed from that method:
+        ///   • `:2012 UseLoadout(...)` — the LOAD path does not do it either: it clears equipment and adds
+        ///     what the DTO carried (GeoVehicle.ProcessInstanceData:1089-1102), and here the rail's covered
+        ///     Weapons/Modules EntityLists are that DTO. A mirror follows the load model, not the runtime one.
+        ///   • `:2015 TeleportToSite(site)` — position IS mirrored as of gap A1 (SurfacePos/SurfaceRot twins),
+        ///     so the vehicle must land in the mirrored state, never dead-reckoned into a site.
+        ///   • `:2016 VehicleAdded?.Invoke` and `:2017 OnVehicleArrived(...)` — host outcome events (law 3).
+        /// `Stats` is NOT optional: the rail's HitPoints twin writes through `Stats.HitPoints`, so a null
+        /// Stats would NRE on the first value packet. Both native paths build it the same way
+        /// (`:2010` and ProcessInstanceData:1080).</summary>
+        private static bool ApplyVehicleCreate(GeoLevelController geo, string rootKey, byte[] blob)
+        {
+            if (!ParseVehicleKey(rootKey, out var vehicleId, out var ownerGuid))
+            { LogMissOnce("vehicle create '" + rootKey + "': key carries no id@ownerFactionGuid — skipped"); return false; }
+            if (!(IdentityResolver.Resolve(geo, "F#" + ownerGuid, null) is GeoFaction owner))
+            { LogMissOnce("vehicle create '" + rootKey + "': owner faction F#" + ownerGuid + " unresolved — skipped"); return false; }
+            var typeName = RailMeta.DescendCreateTypeName(blob);
+            var t = string.IsNullOrEmpty(typeName) ? null : AccessTools.TypeByName(typeName);
+            if (t == null || !typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle).IsAssignableFrom(t))
+            {
+                LogMissOnce("vehicle create '" + rootKey + "': payload type '" + (typeName ?? "<empty>") + "' " +
+                            (t == null ? "unresolvable" : "is not a GeoVehicle") + " — skipped");
+                return false;
+            }
+            var setDef = RailMeta.DecodeActorCreateDef(blob, geo);
+            if (setDef == null)
+            { LogMissOnce("vehicle create '" + rootKey + "': no spawn ComponentSetDef in the frame — skipped"); return false; }
+            var repo = GameUtl.GameComponent<Base.Defs.DefRepository>();
+            if (repo == null) { LogMissOnce("vehicle create '" + rootKey + "': no DefRepository — skipped"); return false; }
+
+            var v = repo.Instantiate<PhoenixPoint.Geoscape.Entities.GeoVehicle>(setDef); // GeoFaction.cs:2006
+            if (v == null)
+            { LogMissOnce("vehicle create '" + rootKey + "': DefRepository.Instantiate returned null for " + setDef.name + " — skipped"); return false; }
+            geo.Map.SetActorRootParent(v);                  // :2007
+            v.VehicleID = vehicleId;                        // :2008 WITHOUT ++_lastVehicleIndex (see above)
+            v.Owner = owner;                                // :2009 — must precede DoEnterPlay: OnEnterPlay
+                                                            //         calls Owner.RegisterVehicle (GeoVehicle.cs:401)
+            v.Stats = v.VehicleDef.BaseStats.Clone();       // :2010
+            v.RangeRemaining = v.Stats.MaximumRange;        // :2011
+            v.DoEnterPlay();                                // :2013 → OnEnterPlay → BaseMap.RegisterActor →
+                                                            //   GeoMap.RegisterVehicle:517-521 = Vehicles.Add,
+                                                            //   i.e. what makes this root key resolvable
+            v.OnLevelStart();                               // :2014 — inert on a virgin actor (GeoVehicle.cs:385
+                                                            //   needs Travelling && destinations), and the A1
+                                                            //   gate blocks client nav for rail-rooted actors
+            // Law 11 via the ONE universal repaint, exactly like the facility pair: UiEventMap has no
+            // GeoVehicle arm, so adding the actor to `touched` would be a no-op dressed up as wiring.
+            OpenUiRepaint.MarkDirty(); // the open geoscape/roster shows the new aircraft NOW
+            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + " from " + setDef.name + ")");
+            return true;
+        }
+
+        /// <summary>`GeoVehicle.Destroy()`'s body (GeoVehicle.cs:593-604) minus its gameplay-outcome event —
+        /// the same split ApplyFacilityDestroy makes for DestroyFacility. `OnVehicleDestroyed` is NOT
+        /// presentation: GeoFaction.RegisterVehicle:2059 wires it to
+        /// GeoPhoenixFaction.OnVehicleDestroyed:824-845, which subtracts every crew member's Health and
+        /// Fatigue.Stamina and can zero vehicle-type characters, and to
+        /// GeoAlienFaction.OnVehicleDestroyed:969+, which drives infested-rebuild and behemoth logic. All of
+        /// that is host-computed and already rail-covered, so re-running it on a client would double-apply
+        /// losses (law 3). `MarkedForDestruction` is skipped because it cannot be set from outside
+        /// (`{ get; private set; }`, :170) and is not needed: idempotence comes from the set-diff plus the
+        /// `existing != null` guard.
+        ///
+        /// OnExitPlay (:405-412) is what actually removes the vehicle: Navigation.CancelNavigation, then
+        /// BaseMap.UnregisterActor → GeoMap.UnregisterActor:400-403 → UnRegisterVehicles:530-533
+        /// (Vehicles.Remove + faction cache), then Owner.UnregisterVehicle. NAMED residual, not hidden: that
+        /// last call ends with `if (_automanufactureVehicles &amp;&amp; IsPlaying) UpdateManufacturing()`
+        /// (GeoFaction.cs:2095) and `_automanufactureVehicles = Def.ManufacturesVehicles` is set in
+        /// OnLevelStart (:392) on BOTH peers — so destroying an auto-manufacturing faction's aircraft can
+        /// enqueue a replacement locally. Not permanent (the queue is host-covered state the next delta
+        /// re-asserts) but it IS a client-side authoritative write, and ClientSimGate does not cover it.</summary>
+        private static void ApplyVehicleDestroy(string rootKey, PhoenixPoint.Geoscape.Entities.GeoVehicle vehicle)
+        {
+            vehicle.OnExitPlay();                                  // GeoVehicle.cs:602
+            UnityEngine.Object.Destroy(vehicle.gameObject);        // :603
+            OpenUiRepaint.MarkDirty();
+            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (vehicle " + vehicle.VehicleID + ")");
         }
 
         // ─── Facility element wiring (structural create/destroy for …Layout._facilities#<id>) ───
