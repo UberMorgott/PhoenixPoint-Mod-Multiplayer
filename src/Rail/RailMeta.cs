@@ -621,13 +621,29 @@ namespace Multiplayer.Network.Sync
             // live ones, colliding head-on with the "U#" STRUCTURAL applier that owns exactly this
             // dictionary (GenericApplier ApplyCharacterCreate / _tacUnits[unit.Id] = unit).
             { "PhoenixPoint.Geoscape.Levels.GeoLevelController.TacUnits", "the U# root registry — identity is STRUCTURAL (law 3); a value-rebuild from an EntityList blob would husk live GeoCharacters (GeoLevelController.cs:162 _tacUnits)" },
-            // ModData: RCA gap B7, dangerous on BOTH ends, never as a side effect of this batch.
-            // RECORD calls every mod's RecordGeoscapeInstanceData per walk (ModManager.cs:730-744 — TFTV
-            // allocates a JSON graph and logs a line, TFTVGeoscape.cs:224-226); APPLY is the load-shaped
-            // ProcessGeoscapeInstanceData over ALL mods at once (ModManager.cs:746-767), which TFTV
-            // Harmony-patches (TFTVCriticalStuff.cs:111-151). Needs a change-driven cadence + per-mod
-            // opt-in of its own.
-            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.ModData", "other mods' geoscape state — needs its own cadence + per-mod opt-in (record calls every mod per walk, apply is load-shaped ProcessGeoscapeInstanceData; RCA gap B7)" },
+            // ModData: RCA gap B7 — REFUSED on evidence, not deferred for later effort. Both ends of the
+            // game's own mod-save API are SAVE-TIME hooks, and neither is safe to call at walk cadence:
+            //   RECORD (ModManager.cs:730-744) is not a pure read. TFTV's implementation MUTATES campaign
+            //     state inside it: RecordUpkeep.UpdateRevenantTimer writes daysRevenantLastSeen, flips
+            //     revenantSpawned, and INCREMENTS the geoscape event variable "Revenant_Spotted"
+            //     (TFTVRevenant.cs:1786-1792) — a variable the rail itself already mirrors under the "ES"
+            //     root. It also clears behemoth targets (JustInCaseBehemothScenicRouteAndTargetClear) and
+            //     reconciles operative affinities (TFTVGeoscape.cs:238-240). At ~2 walks/s that is a
+            //     save-time hook fired ~7200x/hour, each one editing the very state we are replicating.
+            //   APPLY (ModManager.cs:746-767) is load-shaped over ALL mods at once. TFTV's override opens
+            //     with ClearInternalVariablesOnStateChangeAndLoad() and then overwrites ~60 statics from
+            //     the snapshot (TFTVGeoscape.cs:317-345) — the wholesale-ProcessInstanceData trap
+            //     (ARCHITECTURE.md:169-174) with another mod's state, unfixable from our side because the
+            //     idempotence lives in THEIR code. TFTV also patches that method and pops a modal
+            //     MessageBox when a mod's entry is missing (TFTVCriticalStuff.cs:110-142), so every extra
+            //     invocation can put a dialog on the player's screen.
+            // A per-mod opt-in cannot rescue it either: opting a mod IN still calls both of its hooks, and
+            // opting mods OUT by name is the per-subsystem hand-sync the mandate forbids. Cost of keeping
+            // the exclusion: a mod's own geoscape state (TFTV base-defence schedules, delirium, infestation,
+            // revenant timers) does not mirror at all — a client sees vanilla-shaped state where TFTV drives
+            // gameplay. The exit is a mod-side rail API (a mod registers its state as an "M#<name>" root via
+            // IdentityResolver.RegisterModRoot, which already exists), NOT the save hooks.
+            { "PhoenixPoint.Geoscape.Levels.GeoLevelController.ModData", "other mods' geoscape state — REFUSED, not deferred: the game's mod-save hooks are unsafe at walk cadence. RECORD mutates campaign state (TFTV bumps the \"Revenant_Spotted\" event variable inside it, TFTVRevenant.cs:1786-1792) and APPLY is load-shaped (TFTV clears then overwrites ~60 statics, TFTVGeoscape.cs:317-345), so repeat-apply cannot be made safe from our side. Exit = mods register their own \"M#<name>\" rail root (RCA gap B7)" },
             // ContextHelpData resolves EXACTLY by name and type (GeoLevelController.cs:318), so it would
             // ride by accident: per-peer hint/tutorial progress, i.e. presentation — mirroring the host's
             // would hijack each player's own context help.

@@ -602,7 +602,7 @@ PhoenixPoint.Geoscape.Levels.GeoLevelController  [bridge:GeoLevelInstanceData]  
   - EXCLUDED MissionSchedulerData (InstanceData): bridge-unresolved
   - EXCLUDED MissionToComplete (GeoMission): bridge-unresolved
   - EXCLUDED MistData (MistRendererInstanceData): bridge-unresolved
-  - EXCLUDED ModData (Dictionary`2): other mods' geoscape state — needs its own cadence + per-mod opt-in (record calls every mod per walk, apply is load-shaped ProcessGeoscapeInstanceData; RCA gap B7)
+  - EXCLUDED ModData (Dictionary`2): other mods' geoscape state — REFUSED, not deferred: the game's mod-save hooks are unsafe at walk cadence. RECORD mutates campaign state (TFTV bumps the "Revenant_Spotted" event variable inside it, TFTVRevenant.cs:1786-1792) and APPLY is load-shaped (TFTV clears then overwrites ~60 statics, TFTVGeoscape.cs:317-345), so repeat-apply cannot be made safe from our side. Exit = mods register their own "M#<name>" rail root (RCA gap B7)
   + Leaf NextTacUnitId (Int32) -> live _nextTacUnitId
   - EXCLUDED PhoenixpediaData (InstanceData): bridge-unresolved
   - EXCLUDED ScannerHistoryData (List`1): bridge-unresolved

@@ -67,9 +67,9 @@ Layer codes: **RD** root-declaration · **KS** key-shape · **ST** structural cr
 | B2 | **New missions never appear** on the client; and a finished mission never disappears | `GeoSite.ActiveMission` null↔`GeoMission` | ST | covered as a value: `docs/rail-baseline.txt:415` `+ Descend ActiveMission (GeoMission)`; live member `PhoenixPoint.Geoscape.Entities/GeoSite.cs:101`; host-side creator `GeoSite.SetActiveMission:776-785` → `RegisterMission:787+`; structural enable table has no Descend shape: `DiffEngine.cs:854-862` (`StructuralEnabled` only understands root prefixes and `'.'`-containing element paths) | Add the **Descend shape** to the SAME set-diff: in `VisitEntity`'s Descend arm (`DiffEngine.cs:625-627`) record `path.Field` into `_walkRoots` when the field is structurally enabled, so both `null→obj` and `obj→null` fall out of the existing `_prevRoots` comparison (`:871-908`) with zero new wire concept. Apply side: one wiring row beside `ApplyFacilityCreate` (`GenericApplier.cs:276-309`) — assign the field, then the game's own `RegisterMission` (private; `SetActiveMission` itself throws when already set, `GeoSite.cs:778-781`) | Medium. `GeoMission` has many subclasses (`GeoAlienBaseMission`, `GeoAmbushMission`, `GeoScavengingMission`, `GeoAncientSiteMission`, `GeoInfestationCleanseMission`, `GeoPhoenixBaseDefenseMission`, `GeoCustomMission`, `GeoUpdateableMission`) → the blob must round-trip a polymorphic element (RailCheck `L5`/`L6` territory; expect husk arguments per subclass in the baseline). `RegisterMission` subscribes `OnMissionActivated → GeoLevel.LaunchTacticalGame` — on a client that must stay inert until the client is the one launching | **Half**: every delta under the missing path logs `entity not found: S#12.SerializationData.ActiveMission…` once (`GenericApplier.cs:356`). The **removal** half is fully silent (B1) |
 | B3 | **Nothing from `GeoLevelController` is mirrored**: mission-scheduler aggro, sub-factions, dead soldiers, the geoscape log, Phoenixpedia, difficulty, mist, tutorial, `NextTacUnitId` | `GeoLevelInstanceData.*` (`PhoenixPoint.Geoscape/GeoLevelInstanceData.cs:21-76`) | RD **+ S3 discovery** | not a root: `IdentityResolver.cs:185-242`. AND — even if declared — `FindBridge(GeoLevelController)` returns null: the sibling probe looks for `…Levels.GeoLevelControllerInstanceData`/`…InstaceData` (`RailMeta.cs:673-674`), the real DTO is `PhoenixPoint.Geoscape.GeoLevelInstanceData` (different name AND namespace), and `GeoLevelController` declares no nested `*InstanceData` (checked) and carries no `[SerializeType]` (`PhoenixPoint.Geoscape.Levels/GeoLevelController.cs:51`) → `SerializedMembers` = 0 → `VisitEntity` bails at `DiffEngine.cs:564` with a `(type): no persistent members` incident | TWO changes, one commit: (i) `FindBridge` gains a rung between the sibling probe and the nested fallback — *the type's own parameterless `RecordInstanceData()` whose return type implements `IInstanceData`* (`GeoLevelController.RecordInstanceData():387-422` returns `GeoLevelInstanceData : IInstanceData`). Generic, uses the game's own record contract, no name list. Use `AccessTools.Method(cur, "RecordInstanceData", new Type[0])` — exact param match matters. (ii) one root row `"GL"` in `IdentityResolver.Roots`, yielded **after** `ES`/`MG`/`MK` | **Widest radius in the repo** — `FindBridge` is consulted for every visited type, so classification can move anywhere; that is exactly what `docs/rail-baseline.txt` + `L18 baseline-drift` exist to make reviewable. Plus two traps (T1, T2 below) that must be closed in the same commit | **Yes in effect**: the incident line only ever reaches `rail-coverage.txt`, and only if the root is declared — today the type is simply absent, and absence has no line |
 | B4 | New **sites** (scavenging, ambush, ancient, alien base) never appear on the client | root key `S#<id>`; allocator `GeoSitesMapper._nextSiteId` | ST + RD | `DiffEngine.cs:92`; `PhoenixPoint.Geoscape.Entities.Sites/GeoSitesMapper.cs:180`, `:198`, `:201`, `:207` | same third payload shape as A3 (`GeoSite` is MonoBehaviour-bound too: `[defGuid][GeoSiteInstaceData blob]` + native spawn + `ProcessInstanceData` on the virgin actor). `_nextSiteId` needs the same treatment as `_nextTacUnitId` (T3) | Larger than A3 — a site owns nested components (`GeoHaven`/`GeoPhoenixBase`/`GeoAlienBase`/`GeoScavengingSite`/`GeoHarvestingSite`, dispatched at `docs/rail-baseline.txt:417/:424-425/:432/:437`) | **Partly no**: `DiffEngine.cs:894-896` logs the not-enabled create once; then `entity not found: S#…` per path |
-| B5 | **Statistics** diverge (mission counts, kills, soldier stats) | `GeoLevelInstanceData.Statistics` (`GeoLevelInstanceData.cs:60`) | RD | recorded as a **clone of a GAME-component object**, not a level member: `GeoLevelController.cs:414` `(PhoenixStatistics)GameUtl.GameComponent<PhoenixStatisticsManager>().GetStatistics().Clone()`. `ResolveLive` has no live `GeoLevelController` member of that type ⇒ stays `bridge-unresolved` even after B3 (`PREDICTED`) | its own root row, exactly like `MK`/`ES`: `"ST"` → `GameUtl.GameComponent<PhoenixStatisticsManager>().GetStatistics()`. `PhoenixStatistics` is `[SerializeType(SerializeAll, Embedded = true)]` (`PhoenixPoint.Common.Core/PhoenixStatistics.cs:10`) so the direct classifier handles it with no bridge | Small. Three `Dictionary<GeoTacUnitId, SoldierStats>`-shaped members (`:13-15`) → LeafDict/EntityList classification to argue in the baseline. Low user value — do it last | **Yes** (no root ⇒ no line) |
+| B5 — **LANDED** `09c565d` (root `"ST"`, law L33) | **Statistics** diverge (mission counts, kills, soldier stats) | `GeoLevelInstanceData.Statistics` (`GeoLevelInstanceData.cs:60`) | RD | recorded as a **clone of a GAME-component object**, not a level member: `GeoLevelController.cs:414` `(PhoenixStatistics)GameUtl.GameComponent<PhoenixStatisticsManager>().GetStatistics().Clone()`. `ResolveLive` has no live `GeoLevelController` member of that type ⇒ stays `bridge-unresolved` even after B3 (**CONFIRMED** against the regenerated baseline, `09c565d`) | its own root row, exactly like `MK`/`ES`: `"ST"` → `GameUtl.GameComponent<PhoenixStatisticsManager>().GetStatistics()`. `PhoenixStatistics` is `[SerializeType(SerializeAll, Embedded = true)]` (`PhoenixPoint.Common.Core/PhoenixStatistics.cs:10`) so the direct classifier handles it with no bridge | Small, and **SETTLED**: the dict members classify `EntityList … unordered=yes apply=ICollection<T>` over `KeyValuePair<…>` elements, every new element type came back `husk=none roundtrip=ok`, and the root added **no** new exclusion (`excluded 85→85`) | **Yes** (no root ⇒ no line) — closed by the `"ST"` row |
 | B6 | **Air missions / interception** never mirror | — | boundary (L-A gate 1) | `GeoLevelInstanceData.CurrentAirMission:66` is **dead**: it is the only occurrence of the identifier outside `GeoAirMission.cs` itself and `RecordInstanceData:394-419` never assigns it. The live state lives on `InterceptionGameController`, a `MonoBehaviour` with **no `[SerializeType]` and no `*InstanceData`** (`PhoenixPoint.Geoscape.Interception/InterceptionGameController.cs:23`, `:94`) | **None available.** The game does not persist interception, so boundary-law L-A gate 1 refuses it: the value rail cannot express it by construction. Air combat is a real-time minigame in the same class as tactical — a separate project, not a rail gap. Record this as a declared non-goal | — | n/a |
-| B7 | **Other mods' geoscape state (TFTV) never mirrors** | `GeoLevelInstanceData.ModData` (`Dictionary<string, ModInstanceData>`, `GeoLevelInstanceData.cs:70`) | RD (derived root) | populated only at record time by `ModManager.RecordGeoscapeInstanceData:730-744` (`PhoenixPoint.Modding/ModManager.cs`); `ModInstanceData` = `{ TypeName, JsonData }` (`PhoenixPoint.Modding/ModInstanceData.cs`); no live `GeoLevelController` member ⇒ unresolvable by any convention even after B3. TFTV **does** use this API: `refs/TFTV-src/TFTV/TFTVGeoscape.cs:105` `class TFTVGeoscape : ModGeoscape`, `:224 RecordGeoscapeInstanceData`, `:309 ProcessGeoscapeInstanceData`; TFTV also patches the apply path (`refs/TFTV-src/TFTV/TFTVCriticalStuff.cs:111-151`) | Reuse the **synthesized-DTO-root pattern that already exists** for the clock (`IdentityResolver.cs:192-193` yields `TimeAnchor.HostDto(...)`, client resolves `TimeAnchor.ClientDto(...)` at `:342`): a `"MD"` root holding one `Dictionary<string, ModInstanceData>`; host fills it per mod, client applies via the game's own `ModManager.ProcessGeoscapeInstanceData` (public, `ModManager.cs:746-767`). Every mod, including TFTV, rides one mechanism — no per-mod code, and `IdentityResolver.RegisterModRoot` (`:166-175`) stays for OUR own state | **High risk, do last.** (a) Filling the root calls every mod's `RecordGeoscapeInstanceData` **every walk** — TFTV logs "Geoscape data will be saved" there (`TFTVGeoscape.cs:226`) ⇒ log flood + per-walk JSON serialization. Needs a low, explicit cadence (change-driven only). (b) `ProcessGeoscapeInstanceData` is a **load-shaped** apply run over ALL mods at once; repeat-applying it is the same trap as the refused wholesale `ProcessInstanceData` (`ARCHITECTURE.md:169-174`). Needs per-mod opt-in | **Yes** (no root ⇒ no line) |
+| B7 — **DECIDED 2026-07-29: DECLARED EXCLUSION, refused on evidence (§6)** | **Other mods' geoscape state (TFTV) never mirrors** | `GeoLevelInstanceData.ModData` (`Dictionary<string, ModInstanceData>`, `GeoLevelInstanceData.cs:70`) | RD (derived root) | populated only at record time by `ModManager.RecordGeoscapeInstanceData:730-744` (`PhoenixPoint.Modding/ModManager.cs`); `ModInstanceData` = `{ TypeName, JsonData }` (`PhoenixPoint.Modding/ModInstanceData.cs`); no live `GeoLevelController` member ⇒ unresolvable by any convention even after B3. TFTV **does** use this API: `refs/TFTV-src/TFTV/TFTVGeoscape.cs:105` `class TFTVGeoscape : ModGeoscape`, `:224 RecordGeoscapeInstanceData`, `:309 ProcessGeoscapeInstanceData`; TFTV also patches the apply path (`refs/TFTV-src/TFTV/TFTVCriticalStuff.cs:111-151`) | Reuse the **synthesized-DTO-root pattern that already exists** for the clock (`IdentityResolver.cs:192-193` yields `TimeAnchor.HostDto(...)`, client resolves `TimeAnchor.ClientDto(...)` at `:342`): a `"MD"` root holding one `Dictionary<string, ModInstanceData>`; host fills it per mod, client applies via the game's own `ModManager.ProcessGeoscapeInstanceData` (public, `ModManager.cs:746-767`). Every mod, including TFTV, rides one mechanism — no per-mod code, and `IdentityResolver.RegisterModRoot` (`:166-175`) stays for OUR own state | **REFUSED — see §6, which CORRECTS clause (a) below.** (a) Filling the root calls every mod's `RecordGeoscapeInstanceData` **every walk** — understated here as "log flood + per-walk JSON": TFTV's record hook also **MUTATES campaign state** (`TFTVRevenant.cs:1786-1792` increments the `"Revenant_Spotted"` event variable), so no cadence makes it a pure read. (b) `ProcessGeoscapeInstanceData` is a **load-shaped** apply run over ALL mods at once; repeat-applying it is the same trap as the refused wholesale `ProcessInstanceData` (`ARCHITECTURE.md:169-174`). Needs per-mod opt-in | **Yes** (no root ⇒ no line) |
 
 ---
 
@@ -196,9 +196,54 @@ Third structural payload shape (`[defGuid][ownerGuid][DTO blob]` + native spawn 
 - **In-game gate**: client routes an aircraft, boards a soldier, mounts a module — all three visible
   on the host and on a third peer.
 
-### Batch 7 — `"ST"` statistics root *(B5)* and `"MD"` ModData root *(B7)*, in that order
+### Batch 7 — `"ST"` statistics root *(B5)* — LANDED `09c565d`; `"MD"` ModData root *(B7)* — REFUSED
 
-Both are low user value / high cost; `MD` only with a change-driven cadence and a per-mod opt-in.
+> Law **L33** `root-covers-nothing` / `stale-empty-root-declaration`, every arm falsified. Baseline:
+> `types 82→93`, `covered 373→441`, `excluded 85→85` (unchanged — the root added no new opt-out),
+> husk sweep `31→44` types, all new element types `husk=none roundtrip=ok`. `PhoenixStatistics`
+> classifies `[direct] covered=5/5` off its own `[SerializeType(SerializeAll, Embedded)]`; no bridge.
+
+1. `IdentityResolver.RootKinds`: one row `("ST", typeof(PhoenixStatistics), geo => GameUtl
+   .GameComponent<PhoenixStatisticsManager>()?.GetStatistics())`, slotted after `"MK"` and before
+   `"GL"` (which stays last — `L28 gl-not-last`). The client resolves it through the SAME table row
+   (`ResolveRoot`), so no apply-side wiring exists to forget.
+2. `"ST"` is the first root whose instance does not hang off the level — the RCA's prediction is
+   CONFIRMED: `GeoLevelInstanceData.Statistics` is a CLONE of the manager's object
+   (`GeoLevelController.cs:414`) restored through `SetStatistics` (`:583`), so the GL bridge member has
+   no live twin and remains `bridge-unresolved` in the regenerated baseline. The live object is
+   reachable only through the game component, which is what the root row does.
+3. **Per-campaign, not per-peer** (the question this batch had to settle): everything per-session lives
+   on the MANAGER MonoBehaviour — `_achievements`, `_geoAchievementsTracker`, `_geoPlayerStatsTracker`,
+   `_tacticalLevelController`, `MinAgeAtRecruitment`, `ExplosiveWeaponTagDef` — and none of it is inside
+   `GetStatistics()`'s object, so the root cannot reach it. Every member of `PhoenixStatistics` /
+   `GeoscapeStats` / `SoldierStats` is a save-persisted campaign counter, a Def ref, a `TimeUnit` or a
+   `ResourcePack`; no UI handle, no `LocalizedTextBind`, no live entity ref (checked member by member).
+   Mirroring also SETTLES a genuine per-peer roll rather than creating one: `SoldierStats.DateOfBirth`
+   is `UnityEngine.Random.Range` on whichever peer creates the stat
+   (`PhoenixStatisticsManager.cs:680`), and `GeoscapeStats.CurrentDate` is written from the writer's own
+   clock (`:235`).
+- **Law**: `L33` — a declared root whose classification silently finds nothing is INERT (walk enters,
+  emits nothing, no line anywhere). Generalizes `L31 actor-root-uncovered` to every root, including
+  bridge-covered ones; `"MG"` becomes a DECLARED empty root with its reason and a declaration that
+  stops being true is RED.
+- **Falsified**: `("ST", typeof(BaseStatistics), …)` — the natural mistake, since that IS
+  `GetStatistics()`'s declared return type and it has no members — goes RED naming `root 'ST'
+  (BaseStatistics)`; dropping `"MG"`'s declaration goes RED naming it (same arm, stated as such);
+  declaring `"ST"` empty goes RED `stale-empty-root-declaration … now covers 5 member(s)`; a
+  declaration key that is not a root kind goes RED on the dead-key branch.
+- **L28 needed no code change**: it reads `RootKinds` directly, so the new row is swept automatically.
+  And `TypeClosure` skips `Excluded` fields, so `GL` does not reach `PhoenixStatistics` today — if a
+  future twin-alias ever resolves `GeoLevelInstanceData.Statistics` onto something live, L28 goes RED by
+  itself with `undeclared-root-reach: root 'ST' … reachable from the LATER root 'GL'`.
+- **Honest gap**: RailCheck never touches a live `GeoLevelController` (`tools/RailCheck/Program.cs:19`)
+  — this is schema, not convergence. The four new dict-pair element types round-trip
+  `live-gated (pair key …)`, i.e. their encode→decode is NOT asserted headless (a Def / `GeoTacUnitId`
+  pair key needs a live `DefRepository`), the same declared gap class as the 3 pre-existing
+  `live-gated` entries.
+- **In-game gate**: host completes a mission and loses a soldier ⇒ the client's statistics screen shows
+  the same mission count and the same memorial entry; `rail-coverage.txt` shows an `ST` root.
+
+`"MD"` (B7) is **refused**, not deferred — see §6.
 
 ---
 
@@ -309,3 +354,57 @@ risky — last batch, change-driven cadence only, per-mod opt-in.
   `FindBridge`'s nested probe and the baseline widened by the `GL` row alone (+3 types). Same check
   disarmed the hijack risk on the two roots that already exist: `GeoscapeEventSystem
   .RecordInstanceData()` (`:660`) and `GeoFaction.RecordInstanceData()` (`:354`) return **void**.
+
+
+---
+
+## 6. B7 `ModData` — DECIDED: declared exclusion, refused on evidence (2026-07-29)
+
+The exclusion `30b6155` added as a precaution is now a **decision**. T4's original verdict
+("mechanically expressible, behaviourally risky — last batch, change-driven cadence, per-mod opt-in")
+was too generous on the record side: reading TFTV's real implementation shows the game's mod-save API is
+not a read/write pair at all, but two SAVE-TIME hooks with side effects.
+
+**Deciding evidence, both ends verified in `refs/TFTV-src`:**
+
+1. **RECORD mutates the very state we replicate.** `ModManager.RecordGeoscapeInstanceData`
+   (`ModManager.cs:730-744`) calls every mod's `RecordGeoscapeInstanceData()` once per invocation.
+   TFTV's (`TFTVGeoscape.cs:224-240`) opens with `TFTVRevenant.RecordUpkeep.UpdateRevenantTimer
+   (Controller)`, which writes `daysRevenantLastSeen`, flips `revenantSpawned` and **increments the
+   geoscape event variable `"Revenant_Spotted"`** (`TFTVRevenant.cs:1786-1792`) — a variable the rail
+   already mirrors under the `ES` root. It also clears behemoth routing state
+   (`JustInCaseBehemothScenicRouteAndTargetClear`) and reconciles operative affinities. At walk cadence
+   (~2/s) that is a save hook fired ~7200x/hour, each one editing campaign state and feeding its own
+   churn back into the diff. This is not a budget question — it is a correctness one, and it kills the
+   record side outright. (The original RCA framing, "logs a line + allocates JSON", understated it.)
+2. **APPLY cannot be made repeat-safe from our side.** `ProcessGeoscapeInstanceData`
+   (`ModManager.cs:746-767`) loops ALL mods and hands each a freshly deserialized object. TFTV's
+   override (`TFTVGeoscape.cs:317-345`) begins with
+   `TFTVCommonMethods.ClearInternalVariablesOnStateChangeAndLoad()` and then overwrites ~60 static
+   fields wholesale — i.e. resetting another mod's live runtime to a snapshot, the exact trap that made
+   the wholesale `ProcessInstanceData` unacceptable (`ARCHITECTURE.md:169-174`). The idempotence would
+   have to live in THEIR code, so we cannot demonstrate it, and law "repeat-apply safety must be
+   demonstrated, not asserted" therefore refuses it. TFTV additionally patches that method and shows a
+   modal `MessageBox` when a mod's entry is missing (`TFTVCriticalStuff.cs:110-142`), so every extra
+   invocation of ours can put a dialog on the player's screen.
+3. **A per-mod opt-in does not rescue it.** Opting a mod IN still calls both of its hooks with the
+   behaviour above; opting mods OUT by name is the per-mod hand-sync the PRIME DIRECTIVE forbids.
+
+**Cost of keeping the exclusion, stated plainly:** a mod's own geoscape state does not mirror at all.
+Under TFTV that means base-defence / containment-breach schedules, infestation ownership and haven
+population, delirium and revenant timers, new-game option flags and portrait data all stay host-local —
+a client sees vanilla-shaped state where TFTV drives gameplay. That is a real hole, and it is the price
+of not calling another mod's save hooks 7200 times an hour.
+
+**The exit is a different mechanism, and it already exists.** `IdentityResolver.RegisterModRoot`
+(`src/Rail/IdentityResolver.cs:166-175`) lets a mod register its own state object as an `"M#<name>"`
+root, which then rides the ordinary walk / diff / apply with per-field granularity and no save hooks —
+the same road our own `ScrapCartState` takes. Mirroring TFTV means TFTV (or a shim mod) publishing a
+root, not us laundering their save blob.
+
+**Law**: no new arm — `L28`'s declared-exclusion sweep (`RootOwnershipLaw`, the
+`{ TacUnits, ModData, ContextHelpData, GeoscapeLog }` loop) already asserts through
+`RailMeta.OptOutReason` that `GeoLevelController.ModData` is an EXPLICIT opt-out with its reason string
+present, and goes RED (`declared-exclusion-absent` / `undeclared-exclusion`) if the row is deleted or
+degrades into an accidental `bridge-unresolved`. A second law over the same fact would be decoration;
+this batch updated the reason STRING with the evidence above instead.
