@@ -664,9 +664,11 @@ namespace Multiplayer.Network.Sync
             // def-laundering vector; both print "presentation-only" in this baseline), so a rebuilt entry
             // comes back with EventDate + HighPriority and Text = null — and LocalizedTextBind is a CLASS,
             // so GeoscapeLogEntry.GenerateMessage:23-25 NREs on it (its catch is FormatException only).
-            // That is the 7ef0a30 ResearchElement husk exactly (DiffEngine's keyless-list refusal). The
-            // husk gate does NOT catch it: HuskScan counts every GetSerializedMembers name as carried
-            // (RailMeta.cs:2020-2023), so a rail-EXCLUDED ReadWrite member is never reported as a husk.
+            // That is the 7ef0a30 ResearchElement husk exactly (DiffEngine's keyless-list refusal). The husk
+            // gate USED not to catch it — <see cref="HuskScan"/> let the serializer's member list overrule
+            // the rail's own refusal, so an EXCLUDED ReadWrite member certified as carried; the gate now
+            // names it (and RailCheck L34 keeps a witness on this exact type). This row stays regardless: it
+            // stops the Descend into the log itself, one level above the entry list.
             // Mirroring the log needs a text-key codec for LocalizedTextBind first — its own batch.
             { "PhoenixPoint.Geoscape.Levels.GeoLevelController.GeoscapeLog", "keyless List<GeoscapeLogEntry> blob whose whole content is rail-refused LocalizedTextBind — rebuilt entries carry Text=null and GenerateMessage() NREs (GeoscapeLogEntry.cs:11-13/:23-25); needs a text-key codec first" },
         };
@@ -2354,16 +2356,27 @@ namespace Multiplayer.Network.Sync
             if (ser == null) return husk; // pre-init: no metadata yet, and nothing is classified either
 
             var carried = new HashSet<string>(StringComparer.Ordinal);
+            var refused = new HashSet<string>(StringComparer.Ordinal);
             var rt = RailType.Get(t);
             if (rt != null)
                 foreach (var f in rt.Fields)
                     if (f.Class != FieldClass.Excluded || SalvagesInitOnlyLeaf(f)) carried.Add(f.Name);
+                    else refused.Add(f.Name);
             // ALL modes on purpose (not SerializedMembers, which keeps ReadWrite only): a WriteOnly member is
             // a custom-create PARAMETER, and the blob does carry those — GeoItem's ItemDef rides as a ctor arg.
+            //
+            // …but this loop must not OVERRULE the rail's own verdict above, which it silently did. A direct
+            // type's rt-table is BUILT FROM GetSerializedMembers, so every rail-EXCLUDED ReadWrite member was
+            // immediately re-added as carried and could never be reported — the husk gate could see that a
+            // member is absent, never that its CONTENT is refused. That is how GeoscapeLogEntry.Text
+            // (LocalizedTextBind, excluded "presentation-only" by L11) certified as carried while a rebuilt
+            // entry arrives with Text=null and GenerateMessage() NREs on it: a blob whose leaves the rail
+            // refuses passes the gate and lands hollow. WriteOnly create params are unaffected — they are
+            // outside SerializedMembers, so they are never in `refused`.
             try
             {
                 foreach (var mwa in ser.GetSerializedMembers(t))
-                    if (mwa.MemberInfo != null) carried.Add(mwa.MemberInfo.Name);
+                    if (mwa.MemberInfo != null && !refused.Contains(mwa.MemberInfo.Name)) carried.Add(mwa.MemberInfo.Name);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] HuskMembers(" + t.Name + ") failed: " + ex.Message); }
 

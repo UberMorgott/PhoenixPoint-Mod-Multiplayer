@@ -81,6 +81,7 @@ namespace RailCheck
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(VehicleIntentLaw());
+            laws.AddRange(HuskContentLaw(game));
             laws.AddRange(RootOwnershipLaw(types));
             laws.AddRange(RootCoverageLaw());
             laws.AddRange(StructuralDescendLaw(game, types));
@@ -1602,6 +1603,72 @@ namespace RailCheck
         private static readonly HashSet<string> _declaredRootReach = new HashSet<string>(StringComparer.Ordinal)
         {
         };
+
+        // L34 witnesses — types whose own CONTENT the rail refuses, and the member(s) HuskScan must NAME.
+        // Grammar: "<type FullName>" -> the member names, ordinal-sorted, comma-joined.
+        //
+        // These are the members that were INVISIBLE until the scan fix: HuskScan re-added every
+        // GetSerializedMembers name to `carried` after the rt-table had already refused it (a direct type's
+        // table is BUILT from that same member list), so a member the rail EXCLUDES certified as carried and
+        // the gate could never see that a blob's leaves are refused. GeoscapeLogEntry is the witness that
+        // was found BY HAND — a rebuilt entry arrives with Text=null and GenerateMessage() NREs on it.
+        //
+        // Non-rotting on purpose (same shape as _declaredRootReach): a witness that stops being observed is
+        // a violation too, so this cannot decay into a permanent allowance list. It is a belt on the SCAN's
+        // semantics only — DISCOVERY of new refused-content types is L15's recursive sweep, which is exactly
+        // what the fix restored. Keeping the two separate is deliberate: re-deriving HuskScan's skip rules
+        // here would be the "two independently-written copies disagree" bug the rail keeps paying for.
+        private static readonly Dictionary<string, string> _huskContentWitnesses =
+            new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // L11 def-laundering refusal ("presentation-only type (LocalizedTextBind)"). The rail cannot
+            // carry a LocalizedTextBind at all, so every one of these lands null in a blob-rebuilt element.
+            { "PhoenixPoint.Geoscape.Levels.GeoscapeLogEntry", "Parameters,Text" },
+            { "PhoenixPoint.Geoscape.Levels.Factions.FactionAggressionRequest", "Description,Summary" },
+            { "PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState", "Description,Title" },
+            { "PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective", "Description,Title" },
+            // "untyped/interface member" — an ICommonItem back-ref to the item that owns the data. Set only
+            // by a ctor (CommonItemData.SetOwnerItem from :53/:72, AmmoManager :26) with NO PostRead anywhere,
+            // and dereferenced immediately (CommonItemData.ItemDef => OwnerItem.ItemDef :31,
+            // AmmoManager.ParentItem.ItemDef :32/:82/:106) — so this is a REAL husk, not a self-heal, and it
+            // is baselined as an L15 violation rather than waived with an argument that is not true.
+            { "PhoenixPoint.Common.Entities.AmmoManager", "ParentItem" },
+            { "PhoenixPoint.Common.Entities.CommonItemData", "OwnerItem" },
+        };
+
+        /// <summary>L34 — a member whose own CONTENT the rail refuses must be NAMED, never counted as carried.
+        ///
+        /// The husk gate's whole job is to refuse a blob that would land hollow, and it was blind to the one
+        /// case where the hollowness is in the CONTENT rather than in the absence: <c>HuskScan</c> treated
+        /// every name the game's serializer discovers as carried, which for a direct type is every name its
+        /// rail table has — including the ones the rail EXCLUDED. So a blob whose leaves are rail-refused
+        /// classes certified as fine and arrived with nulls, which is the silent-swallow class this project
+        /// exists to kill, sitting inside the tool meant to catch it.
+        ///
+        /// Asserted from the SCAN's answer, not from a re-derivation of its rules, and in BOTH directions:
+        /// a witness the scan stops naming is a regression, and a witness that stops applying is a stale
+        /// declaration. Falsify by restoring the unconditional <c>carried.Add</c>.</summary>
+        private static IEnumerable<string> HuskContentLaw(Assembly game)
+        {
+            foreach (var kv in _huskContentWitnesses)
+            {
+                var t = game.GetType(kv.Key);
+                if (t == null)
+                {
+                    yield return "L34 husk-witness-type-absent: " + kv.Key + " is no longer a game type — the " +
+                                 "witness guards nothing and the next reader will trust it";
+                    continue;
+                }
+                var named = new SortedSet<string>(RailMeta.HuskScan(t).Select(m => m.Name), StringComparer.Ordinal);
+                foreach (var want in kv.Value.Split(','))
+                    if (!named.Contains(want))
+                        yield return "L34 husk-content-uncounted: " + kv.Key + "." + want + " is a member the rail " +
+                                     "REFUSES, so a blob rebuild of this type lands it null — but HuskScan reports it " +
+                                     "as CARRIED. The husk gate then licenses the blob and the client gets a hollow " +
+                                     "object with no log line anywhere (named husks now: " +
+                                     (named.Count == 0 ? "<none>" : string.Join(",", named)) + ")";
+            }
+        }
 
         /// <summary>L28 — root ownership: ONE instance, ONE root path.
         ///
