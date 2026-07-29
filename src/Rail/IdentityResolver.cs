@@ -203,6 +203,18 @@ namespace Multiplayer.Network.Sync
             ("ES", typeof(PhoenixPoint.Geoscape.Events.GeoscapeEventSystem), geo => geo.EventSystem),
             ("MG", typeof(GeoMissionGenerator), geo => geo.MissionGenerator),
             ("MK", typeof(Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace.GeoMarketplace), geo => geo.Marketplace),
+            // ST PhoenixStatistics — the campaign's statistics object. The ONE root whose instance does not
+            // hang off the level: GeoLevelController records a CLONE of it (GeoLevelController.cs:414) and
+            // restores it through the manager (:583 SetStatistics), so the GL bridge's Statistics member has
+            // no live twin and stays a bridge-unresolved exclusion no matter what — the live object is only
+            // reachable through the game component that owns it. Per-campaign state, not per-peer: the
+            // manager's own session fields (trackers, _tacticalLevelController, the def knobs) live on the
+            // MonoBehaviour and are NOT inside GetStatistics()'s object, and every member of PhoenixStatistics
+            // is save-persisted campaign truth (PhoenixStatistics.cs:13-21). Mirroring it also settles a
+            // genuine per-peer roll: SoldierStats.DateOfBirth is UnityEngine.Random on whoever creates the
+            // stat (PhoenixStatisticsManager.cs:680).
+            ("ST", typeof(PhoenixPoint.Common.Core.PhoenixStatistics),
+                   geo => GameUtl.GameComponent<PhoenixPoint.Common.Core.PhoenixStatisticsManager>()?.GetStatistics()),
             // The level itself: persists through GeoLevelInstanceData, reached by FindBridge's
             // record-contract rung (GeoLevelController.RecordInstanceData():387 — a DTO whose name AND
             // namespace differ from the owner's, so neither the sibling nor the nested probe sees it).
@@ -272,6 +284,8 @@ namespace Multiplayer.Network.Sync
             //   MK GeoMarketplace — rides via the existing FindBridge (GeoMarketplaceInstanceData is a
             //      top-level type matching the name pattern): MissionID + IsMissionInProgress mirror; the
             //      rest are visible bridge-unresolved exclusions.
+            //   ST PhoenixStatistics — the campaign statistics object, off the game component that owns it
+            //      (see RootKinds); classifies "direct" ([SerializeType(SerializeAll, Embedded)]) with no bridge.
             //   GL GeoLevelController — the level itself, LAST (see RootKinds).
             foreach (var r in RootKinds)
             {
@@ -386,7 +400,7 @@ namespace Multiplayer.Network.Sync
             if (root == "T") return geo.Timing;
             if (root == "TA") return TimeAnchor.ClientDto(geo.Timing); // scratch DTO; loaded in ApplyIfTouched
             // Singleton roots resolve through the SAME accessor the host walk yields them with — one table
-            // ("ES"/"MG"/"MK"/"GL"), so a new root row cannot land host-side while the client silently has
+            // ("ES"/"MG"/"MK"/"ST"/"GL"), so a new root row cannot land host-side while the client silently has
             // no way to resolve its paths (every delta under them would die as "entity not found").
             foreach (var r in RootKinds)
                 if (r.Get != null && string.Equals(r.Key, root, StringComparison.Ordinal)) return r.Get(geo);
