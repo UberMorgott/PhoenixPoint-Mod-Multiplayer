@@ -96,11 +96,19 @@ Surface `SurfaceIds.GeoRail` (0xAC), ~2 Hz host tick.
   metadata, e.g. TimeUnit/ResourceUnit)).
 - `IdentityResolver.cs` — the ONLY place that names things (law 2). ID-probe table
   SiteId/VehicleID/ResearchID/Id/Def-GUID; root registry `T | TA | F#<defGuid> | S#<siteId> |
-  U#<tacUnitId> | V#<vehicleId> | MK | ES | MG | M#<name>` (level clock + "TA" anchor + the
+  U#<tacUnitId> | V#<vehicleId>@<ownerFactionDefGuid> | MK | ES | MG | M#<name>` (level clock + "TA" anchor + the
   level's actor registries + level singletons + mod-owned roots — the entire hand-written table);
   `RegisterModRoot(key, state)` lets mod state ride the same generic engine under an `"M#<name>"`
   key on both peers (e.g. shared scrap cart "M#cart"; the bespoke 0xB2 channel was deleted).
   Engine fix: tombstone suppression no longer swallows deletes for a root that emits zero entries.
+  Per-OWNER id kinds are qualified: `GeoVehicle.VehicleID` is issued by `GeoFaction._lastVehicleIndex`
+  (GeoFaction.cs:2008/2025/2041), so the owner faction def GUID rides in the key — without it one
+  aircraft per faction survived and the rest were eaten by the walk's first-wins dedup. Site ids
+  (`GeoSitesMapper._nextSiteId`) and tac-unit ids (`GeoLevelController.CreateTacUnitId`) are
+  level-wide, so they need no qualifier. Duplicate root keys are now a walk INCIDENT
+  (`DiffEngine.WalkRoot`, harness law L17) and the coverage report prints the distinct-root-key
+  census per kind — `TakeOverVehicle` (GeoFaction.cs:2041) re-issues an id, so a captured vehicle
+  changes key and will show up there instead of vanishing quietly.
   Path grammar
   `root.Member.Member#elemKey…`; resolution symmetric on the client (same keys over its own graph).
   No stable key derivable → subtree EXCLUDED from the value rail (never index-addressed) + reported.

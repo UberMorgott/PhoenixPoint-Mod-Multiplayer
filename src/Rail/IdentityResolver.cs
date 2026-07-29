@@ -28,7 +28,7 @@ namespace Multiplayer.Network.Sync
     ///     registries). This is the entire hand-written root table; the walk below it is generic.
     /// Path grammar (law 2 path addressing): segments joined by '.', each segment = memberName or
     /// memberName#elementKey; the first segment is a root key ("T", "F#&lt;guid&gt;", "S#&lt;id&gt;",
-    /// "V#&lt;id&gt;", "U#&lt;id&gt;", "M#&lt;modRoot&gt;"). Resolution is symmetric: the client walks its own live graph with
+    /// "V#&lt;id&gt;@&lt;ownerFactionGuid&gt;", "U#&lt;id&gt;", "M#&lt;modRoot&gt;"). Resolution is symmetric: the client walks its own live graph with
     /// the same keys (<see cref="Resolve"/>).
     /// </summary>
     public static class IdentityResolver
@@ -123,12 +123,29 @@ namespace Multiplayer.Network.Sync
             {
                 case null: return null;
                 case GeoSite s: return s.SiteId < 0 ? null : "S#" + s.SiteId;
-                case GeoVehicle v: return "V#" + v.VehicleID;
+                case GeoVehicle v: return "V#" + v.VehicleID + OwnerQualifier(v.Owner);
                 case GeoCharacter c: return "U#" + (int)c.Id;
                 case GeoFaction f: return f.Def == null ? null : "F#" + f.Def.Guid;
                 default: return null;
             }
         }
+
+        /// <summary>Owner qualifier for a root whose id the game issues PER OWNER instead of level-wide.
+        /// GeoVehicle.VehicleID comes from GeoFaction._lastVehicleIndex (decompile GeoFaction.cs:2008 /
+        /// :2025 / :2041), so ids REPEAT across factions: unqualified "V#3" collapses one aircraft per
+        /// faction into a single root key and the walk's first-wins dedup then drops every one but the
+        /// first — an entity that simply does not exist for the rail (player aircraft crew/equipment
+        /// never shipped). The qualifier is the OWNER FACTION DEF GUID: the save carries it
+        /// (GeoVehicleInstanceData.Owner is a PPFactionDef) and it is the same string the faction root
+        /// already uses ("F#&lt;guid&gt;"), so host and client derive it identically — unlike a runtime
+        /// index or a reference hash. The other three root kinds are issued LEVEL-WIDE
+        /// (GeoSitesMapper._nextSiteId:198-201, GeoLevelController.CreateTacUnitId:1521-1526) or are the
+        /// def guid itself (faction), so nothing else needs qualifying today; a new per-owner id kind
+        /// gets it by adding its owner here, not by teaching the walk about a type.
+        /// Owner unknown (mid-load) → no qualifier rather than no key: a keyless entity is invisible,
+        /// while an unqualified one stays visible and a genuine clash now raises a walk incident
+        /// (DiffEngine.WalkRoot).</summary>
+        private static string OwnerQualifier(GeoFaction owner) => owner?.Def == null ? "" : "@" + owner.Def.Guid;
 
         // ─── Roots — the geoscape entry points (the ONE hand-written table) ───
 
@@ -195,8 +212,13 @@ namespace Multiplayer.Network.Sync
 
             if (map != null)
             {
-                foreach (var v in map.Vehicles.Where(v => v != null).OrderBy(v => v.VehicleID))
-                    yield return new KeyValuePair<string, object>("V#" + v.VehicleID, v);
+                // Keyed through RootRef (ONE formatter — a second copy of "V#"+id here is exactly how the
+                // owner qualifier could go missing on the walk while cross-tree refs carry it), ordered by
+                // the finished key so the walk order stays canonical when two factions share an id.
+                foreach (var kv in map.Vehicles.Where(v => v != null)
+                                      .Select(v => new KeyValuePair<string, object>(RootRef(v), v))
+                                      .OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                    yield return kv;
             }
 
             // Level-scope singleton components (decompile GeoLevelController.cs:105/132/144) — walked so
@@ -328,7 +350,18 @@ namespace Multiplayer.Network.Sync
             {
                 case "F": return geo.Factions.FirstOrDefault(f => f?.Def != null && f.Def.Guid == id);
                 case "S": return int.TryParse(id, out var sid) ? geo.Map?.AllSites.FirstOrDefault(s => s != null && s.SiteId == sid) : null;
-                case "V": return int.TryParse(id, out var vid) ? geo.Map?.Vehicles.FirstOrDefault(v => v != null && v.VehicleID == vid) : null;
+                case "V":
+                {
+                    // "<id>@<ownerFactionGuid>" (RootRef): the id alone is only faction-unique. An
+                    // unqualified key (owner unknown when it was minted) still matches on id alone.
+                    int at = id.IndexOf('@');
+                    string ownerGuid = at < 0 ? null : id.Substring(at + 1);
+                    if (at >= 0) id = id.Substring(0, at);
+                    return int.TryParse(id, out var vid)
+                        ? geo.Map?.Vehicles.FirstOrDefault(v => v != null && v.VehicleID == vid &&
+                              (ownerGuid == null || (v.Owner?.Def != null && v.Owner.Def.Guid == ownerGuid)))
+                        : null;
+                }
                 case "U":
                     if (!int.TryParse(id, out var uid)) return null;
                     if (TacUnitsField?.GetValue(geo) is IDictionary tacUnits)
