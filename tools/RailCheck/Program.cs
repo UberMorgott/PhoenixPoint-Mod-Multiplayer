@@ -2319,6 +2319,30 @@ namespace RailCheck
                                  "EquipStorageGate's targets — the client's own AircraftItemStorage write-back is ungated " +
                                  "and diverges permanently (the loadout gesture's other half)";
             }
+
+            // The AUTO-MANUFACTURE gate row. L23 checks that a DECLARED target resolves; it cannot know a
+            // required gate is MISSING, and this one is only reachable through a structural V# destroy —
+            // an in-game path nobody stumbles into by hand. So assert the row exists, by the method it must
+            // cover rather than by the class that covers it.
+            const string autoManufacture = "UpdateManufacturing";
+            if (HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Geoscape.Levels.GeoFaction), autoManufacture) == null)
+                yield return "L32 automanufacture-gate-unbound: GeoFaction." + autoManufacture + " does not resolve — the " +
+                             "funnel the gate row covers has drifted and the gate now patches nothing";
+            else if (!DeclaredTypes(typeof(IntentRail).Assembly).Any(t => t
+                         .GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                         .OfType<HarmonyLib.HarmonyPatch>()
+                         .Any(a => a.info != null && a.info.declaringType == typeof(PhoenixPoint.Geoscape.Levels.GeoFaction) &&
+                                   a.info.methodName == autoManufacture)))
+                yield return "L32 automanufacture-gate-missing: nothing patches GeoFaction." + autoManufacture +
+                             " — _automanufactureVehicles is set on BOTH peers (GeoFaction.cs:392), so a client applying a " +
+                             "V# structural destroy enqueues a replacement aircraft locally (:2095-2098), an authoritative " +
+                             "client-side write the diff rail cannot correct";
+        }
+
+        private static Type[] DeclaredTypes(Assembly asm)
+        {
+            try { return asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { return ex.Types.Where(t => t != null).ToArray(); }
         }
 
         private static IEnumerable<KeyValuePair<string, VehicleSync.Facts>> StaleVehicleCases(byte op, VehicleSync.Facts legal)

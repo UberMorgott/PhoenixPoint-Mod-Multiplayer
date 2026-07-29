@@ -273,4 +273,43 @@ namespace Multiplayer.Network.Sync
             return false;
         }
     }
+
+    /// <summary>
+    /// SEVENTH seam, same law, at the AUTO-MANUFACTURE funnel: <c>GeoFaction.UpdateManufacturing</c>
+    /// (GeoFaction.cs:2106) is the ONE writer — both callers route through it, <c>RegisterVehicle</c>
+    /// (:2069-2072) and <c>UnregisterVehicle</c> (:2095-2098). One gate in the funnel instead of a guard
+    /// per caller, as with <see cref="FacilityPowerGate"/>.
+    ///
+    /// It is reachable on a client and it WRITES: <c>_automanufactureVehicles</c> is set from
+    /// <c>Def.ManufacturesVehicles</c> in <c>OnLevelStart</c> (:392) on BOTH peers, so a client applying
+    /// a <c>"V#"</c> structural destroy (c289fea) runs the faction's own
+    /// <c>Manufacture.ManufactureItem</c>/<c>Cancel</c> loop (:2112-2134) and enqueues a replacement
+    /// aircraft locally. The queue is host-computed state that rides the 0xAD order channel and the value
+    /// rail, so the client has no business deriving it.
+    ///
+    /// CLIENT: never, apply or no apply — the same arm shape <see cref="EquipStorageGate"/> uses, and for
+    /// the same reason: there is no rail path that legitimately reaches this funnel on a client (the
+    /// appliers write the queue, they never recompute it), so an OPEN apply arm would only re-admit the
+    /// exact write the structural applier triggers. Host and solo stay fully native. Void method —
+    /// nothing dereferences a blocked return.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoFaction), "UpdateManufacturing")]
+    internal static class AutomanufactureGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool Prefix(GeoFaction __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+
+            // Never silent (the dominant bug class): name the faction whose replacement order was refused.
+            // Log-once per faction — the funnel fires per vehicle registered or unregistered.
+            string who = __instance?.Def == null ? "?" : __instance.Def.name;
+            if (_logged.Add(who))
+                Debug.Log("[MP][diag] AutomanufactureGate BLOCK " + who +
+                          " — the client never derives a manufacturing queue; the host's queue arrives via the rail");
+            return false;
+        }
+    }
 }
