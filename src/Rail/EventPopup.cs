@@ -703,4 +703,50 @@ namespace Multiplayer.Network.Sync
         private static void Postfix(SiteBaseChoicesController __instance, GeoscapeEvent eventData) =>
             EventPopup.FreezeChoiceButtons(__instance, eventData);
     }
+
+    /// <summary>
+    /// The token table dereferences the context UNGUARDED. Every haven replacer is a bare
+    /// <c>context.Site....</c> with no null check (decompile GeoscapeEventContext.cs:20-40,
+    /// <c>[HavenName]</c> = <c>context.Site.SiteName.Localize()</c>), and <c>[AircraftName]</c> does the
+    /// same to <c>context.Vehicle</c>. A synthesized window's <c>Site</c> is LEGITIMATELY null — a
+    /// historical record's site no longer carries the encounter, and a site-less event never had one
+    /// (<see cref="EventPopup.Raise"/> logs exactly that, EventPopup.cs:472). So any description holding
+    /// <c>[HavenName]</c> throws NRE inside <c>ReplaceEventTokens</c> (:224-239).
+    ///
+    /// That throw has the worst shape available. It lands inside <c>UIStateGeoscapeEvent.EnterState</c> —
+    /// AFTER <see cref="EventPopup.Raise"/>'s try/catch has already returned and logged the raise as a
+    /// SUCCESS — and it leaves the window HALF-BUILT: <c>UIModuleSiteEncounters</c>:217 has set the
+    /// title, but :308's description assignment and :321's <c>SetChoices</c> never run, so the
+    /// description Text and EVERY choice button keep the placeholder the designers BAKED into the scene
+    /// and the prefab ("Fasdasdsadasg…" in level6, "Really long choice description btw…" in
+    /// UIMainButton_HPriority_Encounters). A localized title over dev placeholder text and four dead
+    /// buttons is what a player saw, and nothing in any log said it broke.
+    ///
+    /// Swallowing to the ORIGINAL text is the game's OWN tolerance path, not a new behaviour: :229-234
+    /// substitutes only when a replacer produced a non-empty string, so an unresolvable token is
+    /// designed to stay visible as its raw <c>[Token]</c>. Real description and real choices render.
+    /// One finalizer on the single funnel every replacer and every caller routes through — it covers
+    /// EventSync.cs:94's context and any future synthesized one, instead of a null-check per call site.
+    /// Presentation seam (law 4c). On a host no replacer throws, so this never fires there.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeEventContext), "ReplaceEventTokens")]
+    internal static class EventTokenDerefGuard
+    {
+        private static bool _warned;
+
+        private static Exception Finalizer(Exception __exception, string originalText, ref string __result)
+        {
+            if (__exception == null) return null;
+            __result = originalText ?? "";
+            if (!_warned)
+            {
+                _warned = true;
+                Debug.Log("[MP][events] token deref threw " + __exception.GetType().Name +
+                          " — this window's context has no Site/Vehicle for a token in its text; the raw " +
+                          "[Token] stays visible and the window renders, instead of aborting half-built " +
+                          "and showing the scene's baked placeholder text");
+            }
+            return null;
+        }
+    }
 }

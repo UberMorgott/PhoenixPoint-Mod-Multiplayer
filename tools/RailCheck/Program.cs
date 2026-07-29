@@ -83,6 +83,7 @@ namespace RailCheck
             laws.AddRange(BacklogLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
+            laws.AddRange(EventTokenDerefLaw());
             laws.AddRange(VehicleIntentLaw());
             laws.AddRange(HuskContentLaw(game));
             laws.AddRange(RootOwnershipLaw(types));
@@ -2885,6 +2886,94 @@ namespace RailCheck
                                  "(UIModuleSiteEncounters.cs:571-573, UIModuleTheMarketplace.cs:215), so the arbiter " +
                                  "alone cannot stop a client from spending";
             }
+        }
+
+        /// <summary>L37 — the UNGUARDED-DEREF class: a window we SYNTHESIZE renders through a native helper
+        /// that dereferences our context with no null check, so the throw lands inside the game's own state
+        /// machine and leaves a HALF-BUILT window whose unwritten Text widgets still show the placeholder
+        /// text the designers BAKED into the scene and the prefab. It looks rendered, and no log line says
+        /// otherwise — the dominant silent-swallow shape wearing a disguise.
+        ///
+        /// Measured instance: the token table is five bare <c>context.Site…</c> / <c>context.Vehicle…</c>
+        /// lambdas (decompile GeoscapeEventContext.cs:20-40) while <see cref="EventPopup"/>'s raise
+        /// legitimately passes a NULL Site (EventPopup.cs:472 — a historical record's site no longer carries
+        /// the encounter). A <c>[HavenName]</c> description therefore NRE'd inside <c>ReplaceEventTokens</c>
+        /// (:224-239): UIModuleSiteEncounters:217 had already set the title, but :308's description write and
+        /// :321's <c>SetChoices</c> never ran, so a correctly localized title sat over "Fasdasdsadasg…"
+        /// (baked in level6) and four "Really long choice description btw…" buttons (baked in
+        /// UIMainButton_HPriority_Encounters) — while our own line logged <c>raised … mode=outcome</c> as a
+        /// success.
+        ///
+        /// Asserted: (a) the table still EXISTS and is non-empty — if the game moves or empties it, the
+        /// reasoning is stale and this law would otherwise fall asleep GREEN; (b) every replacer still takes
+        /// the context, i.e. still has the shape that can be handed a null one; (c)
+        /// <c>ReplaceEventTokens(string)</c> still resolves; (d) a Harmony FINALIZER OF OURS covers it,
+        /// DISCOVERED from our own assembly the way L36 discovers prefixes — never a table asserting so.
+        ///
+        /// LIMITATION (upgrade path, not a waiver): (a)+(b) establish that the replacers RECEIVE a nullable
+        /// context; they do not prove by IL that each deref is unguarded. That proof is the live stack trace
+        /// cited above. Tightening it wants an IL field-read walk of the cctor's lambda bodies.</summary>
+        // ponytail: signature + coverage assertion; IL deref proof if a replacer ever grows a real null check.
+        private static IEnumerable<string> EventTokenDerefLaw()
+        {
+            var ctx = typeof(GeoscapeEventContext);
+            var tableField = ctx.GetField("_tokenReplacers", AllMembers);
+            if (tableField == null)
+            {
+                yield return "L37 token-table-gone: GeoscapeEventContext._tokenReplacers no longer exists — the " +
+                             "deref set this law reasons about moved, so the law is asleep and every synthesized " +
+                             "window's token path is unchecked";
+                yield break;
+            }
+            var table = tableField.GetValue(null) as System.Collections.IDictionary;
+            if (table == null || table.Count == 0)
+            {
+                yield return "L37 token-table-empty: GeoscapeEventContext._tokenReplacers read as " +
+                             (table == null ? "a non-dictionary" : "0 entries") + " — nothing left to guard means " +
+                             "this law can no longer fail, which is exactly how it would go stale unnoticed";
+                yield break;
+            }
+            foreach (System.Collections.DictionaryEntry e in table)
+            {
+                var ps = (e.Value as Delegate)?.Method.GetParameters();
+                if (ps == null || ps.Length != 1 || ps[0].ParameterType != ctx)
+                    yield return "L37 token-replacer-reshaped: the replacer for '" + e.Key + "' no longer takes a " +
+                                 "single GeoscapeEventContext — it can no longer be reasoned about as 'handed our " +
+                                 "possibly-null context', so the guard below may be aimed at the wrong method";
+            }
+
+            var target = HarmonyLib.AccessTools.Method(ctx, "ReplaceEventTokens", new[] { typeof(string) });
+            if (target == null)
+            {
+                yield return "L37 token-funnel-gone: GeoscapeEventContext.ReplaceEventTokens(string) does not " +
+                             "resolve — the single funnel every replacer routes through was renamed or " +
+                             "re-signatured, so our finalizer is bound to nothing";
+                yield break;
+            }
+
+            var asm = typeof(IntentRail).Assembly;
+            Type[] declared;
+            try { declared = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+
+            foreach (var t in declared)
+            {
+                if (t.GetMethod("Finalizer", AllMembers) == null) continue;
+                foreach (var a in t.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false).Cast<HarmonyLib.HarmonyPatch>())
+                {
+                    var info = a.info;
+                    if (info?.declaringType != ctx || info.methodName != "ReplaceEventTokens") continue;
+                    MethodBase bound = null;
+                    try { bound = HarmonyLib.AccessTools.Method(info.declaringType, info.methodName, info.argumentTypes); }
+                    catch { }
+                    if (bound != null && bound.MetadataToken == target.MetadataToken) yield break;   // covered
+                }
+            }
+            yield return "L37 token-deref-unswallowed: GeoscapeEventContext.ReplaceEventTokens carries no Harmony " +
+                         "FINALIZER of ours — an unresolvable [Token] in a synthesized window's text throws NRE " +
+                         "inside UIStateGeoscapeEvent.EnterState, PAST EventPopup.Raise's try/catch, and the " +
+                         "half-built window then shows the placeholder text baked into level6 and " +
+                         "UIMainButton_HPriority_Encounters while our log still reports the raise as a success";
         }
 
         /// <summary>L32 — the AIRCRAFT intent family (RCA gap A2). Three properties, all headless:
