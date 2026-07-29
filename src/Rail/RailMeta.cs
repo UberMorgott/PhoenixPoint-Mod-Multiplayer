@@ -48,7 +48,8 @@ namespace Multiplayer.Network.Sync
     public enum LeafKind : byte
     {
         Null = 0, Bool = 1, Int64 = 2, UInt64 = 3, Single = 4, Double = 5, String = 6, Enum = 7,
-        TimeSpanTicks = 8, Vector3 = 9, Quaternion = 10, DefRef = 11, EntityRef = 12, Composite = 13
+        TimeSpanTicks = 8, Vector3 = 9, Quaternion = 10, DefRef = 11, EntityRef = 12, Composite = 13,
+        DateTimeTicks = 14
     }
 
     public sealed class RailField
@@ -1015,6 +1016,16 @@ namespace Multiplayer.Network.Sync
             // the game fell out as "no persistent members" — research/travel/manufacture ETAs, site timers.
             // Ticks are the entire value, so the existing TimeSpanTicks codec already expresses it exactly.
             if (t == typeof(TimeSpan) || t == typeof(TimeUnit)) { kind = LeafKind.TimeSpanTicks; return true; }
+            // DateTime rides ticks for the SAME reason TimeSpan does, and must be asked BEFORE the
+            // Composite gate below: its only state is a private `_dateData` ulong that the classifier
+            // does not reach, so the gate found "no Leaf field left" and every DateTime in the game fell
+            // out as "no persistent members (DateTime)". The visible casualty was Base.Utils.UnityDateTime
+            // — a class whose ONE serialized member is a DateTime (decompile UnityDateTime.cs:13-14), so it
+            // classified covered=0/1: a walk-into with nothing to carry. That is what made
+            // GeoMission.GlobalTime unmirrorable (RailCheck L29 nullable-unenabled) — enabling its
+            // structural create without this would have built an empty UnityDateTime whose value never
+            // arrives, i.e. a phantom 01/01/0001 mission clock. Ticks are the entire value.
+            if (t == typeof(DateTime)) { kind = LeafKind.DateTimeTicks; return true; }
             if (t == typeof(Vector3)) { kind = LeafKind.Vector3; return true; }
             if (t == typeof(Quaternion)) { kind = LeafKind.Quaternion; return true; }
             if (typeof(BaseDef).IsAssignableFrom(t)) { kind = LeafKind.DefRef; return true; }
@@ -1106,6 +1117,7 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.TimeSpanTicks: w.Write((v is TimeUnit tu ? tu.TimeSpan : (TimeSpan)v).Ticks); break;
                 case LeafKind.Vector3: { var x = (Vector3)v; w.Write(x.x); w.Write(x.y); w.Write(x.z); break; }
                 case LeafKind.Quaternion: { var q = (Quaternion)v; w.Write(q.x); w.Write(q.y); w.Write(q.z); w.Write(q.w); break; }
+                case LeafKind.DateTimeTicks: w.Write(((DateTime)v).Ticks); break;
                 case LeafKind.DefRef: w.Write(((BaseDef)v).Guid ?? ""); break;
                 case LeafKind.Composite:
                 {
@@ -1186,6 +1198,7 @@ namespace Multiplayer.Network.Sync
                     var ts = new TimeSpan(r.ReadInt64());
                     return declared == typeof(TimeUnit) ? (object)TimeUnit.FromTimeSpan(ts) : ts;
                 }
+                case LeafKind.DateTimeTicks: return new DateTime(r.ReadInt64());
                 case LeafKind.Vector3: return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.Quaternion: return new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.DefRef:
@@ -1366,21 +1379,159 @@ namespace Multiplayer.Network.Sync
 
         private static readonly string[] _noCreateParams = new string[0];
 
-        /// <summary>The `[SerializeCustomCreate]` parameter members of <paramref name="t"/> — empty when
-        /// the type has no custom create. These are WriteOnly members: the blob codec ships them as ctor
-        /// ARGUMENTS (GeoItem's ItemDef), but a structural payload that carries only a TYPE NAME
-        /// (<c>DiffEngine.IsDescendPath</c>) cannot, and the value rail never will either — WriteOnly is
-        /// outside <c>SerializedMembers</c>. So for a structural Descend create these are exactly the
-        /// members that arrive NULL. ONE table (<see cref="CreateInfoOf"/>) behind both the applier's log
-        /// line and RailCheck L29, so the runtime warning and the static law cannot drift apart.</summary>
-        internal static string[] CreateParamNames(Type t)
+        private static Type MemberTypeOf(MemberInfo mi) =>
+            mi is FieldInfo fi ? fi.FieldType : (mi as PropertyInfo)?.PropertyType;
+
+        /// <summary>The `[SerializeCustomCreate]` param members of <paramref name="t"/> that the structural
+        /// create frame CANNOT carry, as "name (Type)" — empty when it can carry them all (the normal case).
+        ///
+        /// Create params are WriteOnly members, so the value rail will never fill them
+        /// (<c>SerializedMembers</c> is ReadWrite-only) — the create packet is the only chance. It takes
+        /// that chance by encoding each one with the ordinary leaf codec
+        /// (<see cref="EncodeDescendCreate"/>), which is exactly why the honest limit is now the LEAF
+        /// codec's reach and no longer "a type-name payload carries nothing": a param is carriable iff
+        /// <see cref="LeafKindOf"/> knows its declared type. That covers every param the rail has met —
+        /// the three missions' `_enemyFaction` is a `PPFactionDef`, i.e. a `BaseDef`, i.e. a DefRef Guid
+        /// (decompile GeoAmbushMission.cs:15, GeoScavengingMission.cs:14,
+        /// GeoPhoenixBaseDefenseMission.cs:17) — and an entity-typed param would ride as an EntityRef
+        /// stable id, never an embedded graph.
+        ///
+        /// What stays uncarriable is a param typed as a plain composite CLASS with no stable id: there is
+        /// nothing to name it by. ONE predicate (<see cref="CreateInfoOf"/> + <see cref="LeafKindOf"/>)
+        /// behind the host's encode warning, the applier's log line and RailCheck L29, so the three cannot
+        /// drift apart.</summary>
+        internal static string[] UncarriableCreateParams(Type t)
         {
             var ser = GameSerializer;
             var ci = ser == null ? null : CreateInfoOf(ser, t);
             if (ci == null || ci.Params.Length == 0) return _noCreateParams;
-            var names = new string[ci.Params.Length];
-            for (int i = 0; i < names.Length; i++) names[i] = ci.Params[i]?.Name ?? "?";
-            return names;
+            List<string> bad = null;
+            foreach (var mi in ci.Params)
+            {
+                var mt = mi == null ? null : MemberTypeOf(mi);
+                if (mt != null && LeafKindOf(mt, out _)) continue;
+                (bad = bad ?? new List<string>()).Add((mi?.Name ?? "?") + " (" + (mt?.Name ?? "?") + ")");
+            }
+            return bad == null ? _noCreateParams : bad.ToArray();
+        }
+
+        /// <summary>The structural CREATE payload for a Descend field (<c>DiffEngine.IsDescendPath</c>):
+        /// <c>[string typeName][byte n][leaf x n]</c>, where the n values are the live instance's
+        /// `[SerializeCustomCreate]` param members read through the SAME <see cref="CreateInfoOf"/> table
+        /// the client decodes against.
+        ///
+        /// A type NAME rather than a native graph blob, deliberately and still: a mission's serialized
+        /// members include `Site` (GeoSite) and `_stealAircraft` (GeoVehicle), both MonoBehaviour-bound
+        /// actors with their own spawners, so decoding a blob would CREATE duplicate actors on the client
+        /// (law 3). The params ride as leaves for the same reason — <see cref="EncodeLeaf"/> structurally
+        /// CANNOT emit an object graph: its only recursive arm is Composite over a value-type's own leaf
+        /// fields, a DefRef is a Guid string and an EntityRef is a stable game id
+        /// (<c>IdentityResolver.RootRef</c>). So "carried as a reference, never as a graph" is a property
+        /// of the mechanism here, not a rule a future caller has to remember.</summary>
+        internal static byte[] EncodeDescendCreate(object instance)
+        {
+            var t = instance.GetType();
+            var ser = GameSerializer;
+            var ci = ser == null ? null : CreateInfoOf(ser, t);
+            var ps = ci == null ? null : ci.Params;
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms)) // default = UTF8, length-prefixed strings
+            {
+                w.Write(t.FullName);
+                w.Write((byte)(ps == null ? 0 : ps.Length));
+                for (int i = 0; ps != null && i < ps.Length; i++)
+                {
+                    var mt = ps[i] == null ? null : MemberTypeOf(ps[i]);
+                    if (mt == null || !LeafKindOf(mt, out _))
+                    {
+                        // Law 1: the one thing this frame cannot carry is NAMED, never silently skipped.
+                        // Still writes a slot, so the frame stays self-describing and the reader stays aligned.
+                        WarnOnce("EncodeDescendCreate: " + t.Name + " create param '" + (ps[i]?.Name ?? ("#" + i)) +
+                                 "' (" + (mt?.Name ?? "?") + ") is not leaf-encodable — shipped NULL");
+                        w.Write((byte)LeafKind.Null);
+                        continue;
+                    }
+                    EncodeLeaf(w, mt, GetMemberValue(ps[i], instance));
+                }
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>Leading type name of an <see cref="EncodeDescendCreate"/> frame — the client resolves
+        /// and validates it against the carrier field's declared type before constructing anything.</summary>
+        internal static string DescendCreateTypeName(byte[] payload)
+        {
+            if (payload == null || payload.Length == 0) return null;
+            try
+            {
+                using (var ms = new MemoryStream(payload))
+                using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeDescendCreate's writer
+                    return r.ReadString();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>True when <paramref name="t"/> is built through a `[SerializeCustomCreate]` static that
+        /// takes params — i.e. when the create frame has something to carry and RailCheck L30 must see it
+        /// carried.</summary>
+        internal static bool HasCreateParams(Type t)
+        {
+            var ser = GameSerializer;
+            var ci = ser == null ? null : CreateInfoOf(ser, t);
+            return ci != null && ci.Params.Length > 0;
+        }
+
+        /// <summary>The create args carried by an <see cref="EncodeDescendCreate"/> frame, positional and
+        /// sized by <paramref name="t"/>'s own create table. Null means "carried nothing usable" and the
+        /// caller falls back to nulls — every such path says so once, because a frame that silently
+        /// decoded to nulls is precisely how `_enemyFaction` used to arrive empty.
+        ///
+        /// The slot count is CHECKED against the create table rather than trusted: a frame that did not
+        /// come from <see cref="EncodeDescendCreate"/> (a reverted payload shape, a peer built from other
+        /// sources) would otherwise read a bogus length prefix and hand the game's create method garbage.
+        /// An unresolvable ref decodes to the <see cref="Unresolved"/> sentinel, which must NOT reach that
+        /// method either — it becomes null, named.</summary>
+        internal static object[] DecodeCreateArgs(byte[] payload, Type t, GeoLevelController geo)
+        {
+            var ser = GameSerializer;
+            var ci = ser == null ? null : CreateInfoOf(ser, t);
+            if (ci == null || payload == null || payload.Length == 0) return null;
+            var args = new object[ci.Params.Length];
+            try
+            {
+                using (var ms = new MemoryStream(payload))
+                using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeDescendCreate's writer
+                {
+                    r.ReadString(); // type name — already resolved by the caller
+                    int n = ms.Position < ms.Length ? r.ReadByte() : -1;
+                    if (n != ci.Params.Length)
+                    {
+                        WarnOnce("DecodeCreateArgs: " + t.Name + " frame declares " + n + " create-param slot(s) but " +
+                                 "the type takes " + ci.Params.Length + " — not an EncodeDescendCreate frame; params passed NULL");
+                        return null;
+                    }
+                    for (int i = 0; i < n; i++)
+                    {
+                        var mi = ci.Params[i];
+                        var mt = mi == null ? null : MemberTypeOf(mi);
+                        var v = DecodeLeaf(r, mt ?? typeof(object), geo);
+                        if (v == Unresolved)
+                        {
+                            WarnOnce("DecodeCreateArgs: " + t.Name + " create param '" + (mi?.Name ?? ("#" + i)) +
+                                     "' did not resolve on this peer — passed NULL");
+                            v = null;
+                        }
+                        args[i] = v;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WarnOnce("DecodeCreateArgs: " + t.Name + " create frame unreadable (" + ex.GetType().Name +
+                         ") — params passed NULL");
+                return null;
+            }
+            return args;
         }
 
         /// <summary>Construct an instance the way the game's own LOAD does — the identical two rungs in
@@ -1389,15 +1540,19 @@ namespace Multiplayer.Network.Sync
         /// fallback. The first rung is load-bearing rather than a nicety: most `GeoMission` subclasses
         /// have NO parameterless ctor at all, and their custom create IS their construction path
         /// (decompile GeoHavenDefenseMission.cs:156-160 → `new GeoHavenDefenseMission(null, null, null)`).
-        /// Create params are passed null — <see cref="CreateParamNames"/> is what that costs. Throws
+        /// <paramref name="createArgs"/> = what <see cref="DecodeCreateArgs"/> carried, positionally;
+        /// null (RailCheck's constructibility probe) still passes nulls, which is what the create methods
+        /// already tolerate — `Init` is a bare assignment (GeoAmbushMission.cs:34-45). Throws
         /// (MissingMethodException) when neither rung applies; the caller logs and declines.</summary>
-        internal static object ConstructLikeLoad(Type t)
+        internal static object ConstructLikeLoad(Type t, object[] createArgs = null)
         {
             var ser = GameSerializer;
             var ci = ser == null ? null : CreateInfoOf(ser, t);
-            return ci != null
-                ? ci.Method.Invoke(new object[ci.Params.Length + 1]) // [0] = SerializedObjectData
-                : Activator.CreateInstance(t, true);
+            if (ci == null) return Activator.CreateInstance(t, true);
+            var args = new object[ci.Params.Length + 1]; // [0] = SerializedObjectData
+            for (int i = 0; createArgs != null && i < ci.Params.Length && i < createArgs.Length; i++)
+                args[i + 1] = createArgs[i];
+            return ci.Method.Invoke(args);
         }
 
         internal static object GetMemberValue(MemberInfo mi, object o) =>
@@ -2154,6 +2309,29 @@ namespace Multiplayer.Network.Sync
         /// fields, which is exactly how the game's own serializer fills them (see
         /// <see cref="RailField.IsWritable"/>). Arrays return null quietly — the caller assigns those
         /// wholesale. Anything else that cannot be attached is a LOUD error, never a silent drop.</summary>
+        /// <summary>The concrete behind a collection INTERFACE member — what LOAD itself puts there, and
+        /// what the BCL defaults to. A member declared as an interface used to be unmaterializable
+        /// outright, so the decoder dropped every entry it produced for one (L20):
+        /// `GeoHavenDefenseMissionInstanceData.AttackingSites` is `IList&lt;GeoSite&gt;`
+        /// (decompile GeoHavenDefenseMissionInstanceData.cs:20) and the applier could already ADD into it
+        /// (`apply=ICollection&lt;T&gt;`) — it just had nothing to add INTO. `List&lt;T&gt;` is not a guess:
+        /// the game's own save path assigns `_attackingSites.ToList()` (GeoHavenDefenseMission.cs:170) and
+        /// its load path reads it back with `.ToList()` (:187). Null for anything else (non-generic
+        /// interfaces, abstract classes) so the caller's refusal + error line stays intact.</summary>
+        private static Type ConcreteCollection(Type it)
+        {
+            if (!it.IsGenericType) return null;
+            var g = it.GetGenericTypeDefinition();
+            var a = it.GetGenericArguments();
+            if (g == typeof(IList<>) || g == typeof(ICollection<>) || g == typeof(IEnumerable<>) ||
+                g == typeof(IReadOnlyList<>) || g == typeof(IReadOnlyCollection<>))
+                return typeof(List<>).MakeGenericType(a);
+            if (g == typeof(ISet<>)) return typeof(HashSet<>).MakeGenericType(a);
+            if (g == typeof(IDictionary<,>) || g == typeof(IReadOnlyDictionary<,>))
+                return typeof(Dictionary<,>).MakeGenericType(a);
+            return null;
+        }
+
         internal static object MaterializeContainer(object owner, RailField field)
         {
             if (owner == null) return null;
@@ -2161,6 +2339,7 @@ namespace Multiplayer.Network.Sync
             if (cur != null) return cur;
             var vt = field.ValueType;
             if (vt.IsArray) return null; // whole-array assignment is the caller's strategy
+            if (vt.IsInterface) vt = ConcreteCollection(vt) ?? vt;
             if (!field.IsWritable() || vt.IsAbstract || vt.IsInterface)
             {
                 Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +

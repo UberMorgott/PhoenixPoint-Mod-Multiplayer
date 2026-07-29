@@ -789,6 +789,10 @@ namespace RailCheck
                 (typeof(PhoenixPoint.Geoscape.Entities.Research.ResearchState), PhoenixPoint.Geoscape.Entities.Research.ResearchState.Unlocked),
                 (typeof(TimeSpan), TimeSpan.FromTicks(1234567)),
                 (typeof(Base.Core.TimeUnit), Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(1234567))),
+                // DateTime is the kind that makes Base.Utils.UnityDateTime carry anything at all (its ONE
+                // serialized member) — without it UnityDateTime classified covered=0/1 and GeoMission
+                // .GlobalTime could not be mirrored. Ticks, exactly like TimeSpan above.
+                (typeof(DateTime), new DateTime(2026, 7, 29, 13, 12, 13, DateTimeKind.Utc)),
                 (typeof(Vector3), new Vector3(1f, -2f, 3.5f)), (typeof(Quaternion), new Quaternion(0f, .5f, 0f, .5f)),
                 (typeof(string), null),
             })
@@ -1678,18 +1682,39 @@ namespace RailCheck
         ///   • <b>create-unconstructible</b> — the client builds the object the way LOAD does
         ///     (<c>RailMeta.ConstructLikeLoad</c>). Most GeoMission subclasses have NO parameterless ctor,
         ///     so if their <c>[SerializeCustomCreate]</c> ever goes away the mission can never appear.
-        ///   • <b>create-param-uncarried</b> — the honest limit of a type-name payload. A custom create's
-        ///     params are WriteOnly members: the blob codec ships them as ctor args, but this payload
-        ///     cannot, and the value rail never will either (WriteOnly is outside SerializedMembers). So
-        ///     they arrive NULL. Named statically here and logged once at apply time from the SAME table
-        ///     (<c>RailMeta.CreateParamNames</c>), so the two cannot drift.
+        ///   • <b>create-param-uncarriable</b> — the honest limit of the create frame, now that the frame
+        ///     CARRIES params (<c>RailMeta.EncodeDescendCreate</c>: type name + one leaf per param). A
+        ///     custom create's params are WriteOnly members, so the value rail will never fill them
+        ///     (SerializedMembers is ReadWrite-only) and the create packet is the only chance — it takes
+        ///     that chance through the ordinary leaf codec, so the residual is exactly the LEAF codec's
+        ///     reach: a param is carriable iff <c>RailMeta.LeafKindOf</c> knows its declared type. Scalars,
+        ///     DefRef Guids and EntityRef stable ids all ride; a plain composite class with no stable id
+        ///     cannot, because there is nothing to name it by. Named statically here and logged once at
+        ///     apply time from the SAME predicate (<c>RailMeta.UncarriableCreateParams</c>), so the two
+        ///     cannot drift.
         ///   • <b>nullable-unenabled</b> — recursive completeness. Enabling a family fixes ITS create, not
         ///     the create of a nullable Descend INSIDE it, which is the identical swallow one level down.
         ///     Asked the way the codec asks it: build a fresh instance and look.
         ///
+        /// L30 rides this same sweep (same <c>Concretions</c> + <c>ConstructLikeLoad</c> work, so it is one
+        /// pass, not two) but is a different question: L29 asks whether the object can be CREATED, L30 asks
+        /// whether creating it MEANS anything.
+        ///   • <b>descend-enabled-uncovered</b> — an enabled concretion the value rail covers NOTHING of.
+        ///     The create then ships an object holding CLR defaults and no line anywhere says the values
+        ///     are missing: a phantom. Enabling <c>Base.Utils.UnityDateTime</c> while its only member was
+        ///     still excluded as "no persistent members (DateTime)" would have shipped a 01/01/0001 mission
+        ///     clock exactly this way — which is why <c>LeafKind.DateTimeTicks</c> had to land first.
+        ///   • <b>descend-create-frame-*</b> — the create frame driven encoder→decoder for real. This is
+        ///     the arm L29's create-param predicate structurally cannot supply: that predicate is static
+        ///     over <c>LeafKindOf</c>, so it stays GREEN if the payload reverts to a bare type name while
+        ///     every create param silently goes back to arriving NULL.
+        ///
         /// Scope note, deliberately not hidden: the nullable-unenabled sweep runs over the enabled
         /// families' own tables, not over the whole closure. Every other nullable Descend in the rail is
-        /// the same latent class and is NOT swept here.</summary>
+        /// the same latent class and is NOT swept here. The frame arms round-trip through a HEADLESS
+        /// decode: a param's slot is asserted present and readable, but a DefRef/EntityRef param cannot be
+        /// asserted to RESOLVE without a live DefRepository/GeoLevelController — the same documented gap
+        /// class as L13's DefRef note.</summary>
         private static IEnumerable<string> StructuralDescendLaw(Assembly game, List<Type> types)
         {
             foreach (var probe in new[]
@@ -1756,14 +1781,52 @@ namespace RailCheck
                         yield return "L29 descend-create-unconstructible: " + ct.FullName + " cannot be built the " +
                                      "way LOAD builds it (custom create, else parameterless ctor) — " +
                                      (err ?? "the create returned null") + ". A client can never make this one appear";
-                    var cp = RailMeta.CreateParamNames(ct);
+                    var cp = RailMeta.UncarriableCreateParams(ct);
                     if (cp.Length > 0)
-                        yield return "L29 descend-create-param-uncarried: " + ct.FullName + " needs custom-create " +
-                                     "params (" + string.Join(",", cp) + ") — WriteOnly members, which neither the " +
-                                     "type-name payload nor the value rail (SerializedMembers is ReadWrite-only) " +
-                                     "carries, so they arrive NULL on every client-created instance";
+                        yield return "L29 descend-create-param-uncarriable: " + ct.FullName + " has custom-create " +
+                                     "params (" + string.Join(",", cp) + ") whose declared type the leaf codec " +
+                                     "cannot express (not a scalar, DefRef or EntityRef), so the create frame " +
+                                     "ships NULL for them and the value rail never fills them either " +
+                                     "(WriteOnly is outside SerializedMembers)";
+                    // ─── L30 — enabling a family is only real if the client can FILL what it builds ───
+                    // Rides this sweep rather than its own (same Concretions/ConstructLikeLoad work), but it
+                    // is a different violation class: L29 asks whether the object can be CREATED, L30 asks
+                    // whether creating it means anything.
+                    string frameName = null; object[] frameArgs = null; string frameErr = null;
+                    if (made != null)
+                    {
+                        try
+                        {
+                            var frame = RailMeta.EncodeDescendCreate(made);
+                            frameName = RailMeta.DescendCreateTypeName(frame);
+                            frameArgs = RailMeta.DecodeCreateArgs(frame, ct, null);
+                        }
+                        catch (Exception ex) { frameErr = ex.GetType().Name + ": " + ex.Message; }
+                        if (frameErr != null)
+                            yield return "L30 descend-create-frame-threw: " + ct.FullName + " create frame " +
+                                         "encode→decode threw " + frameErr + " — the client would decline every create";
+                        else if (frameName != ct.FullName)
+                            yield return "L30 descend-create-frame-typename: " + ct.FullName + " round-tripped as '" +
+                                         (frameName ?? "<null>") + "' — the client resolves the concrete type from " +
+                                         "this string and validates it against the carrier field, so it would decline";
+                        else if (RailMeta.HasCreateParams(ct) && frameArgs == null)
+                            yield return "L30 descend-create-params-not-carried: " + ct.FullName + " takes " +
+                                         "custom-create params but the frame carried no slot for them, so they arrive " +
+                                         "NULL on every client-created instance. This is the arm L29's static " +
+                                         "create-param predicate CANNOT see: it stays green on a payload that " +
+                                         "reverted to a bare type name, which is exactly how _enemyFaction arrived empty";
+                    }
                     var crt = made == null ? null : RailType.Get(ct);
                     if (crt == null) continue;
+                    // A create the value rail can never fill is a PHANTOM: the object appears on the client
+                    // holding CLR defaults, and no log line anywhere says the values are missing. Enabling
+                    // Base.Utils.UnityDateTime while its only member was still excluded as "no persistent
+                    // members (DateTime)" would have shipped a 01/01/0001 mission clock exactly this way.
+                    if (crt.CoveredCount == 0)
+                        yield return "L30 descend-enabled-uncovered: " + ct.FullName + " is structurally enabled " +
+                                     "but the value rail covers NONE of its " + crt.Fields.Count + " member(s) — the " +
+                                     "create would ship an object the client can never fill, i.e. a default-valued " +
+                                     "phantom, silently";
                     foreach (var f in crt.Fields)
                     {
                         if (f.Class != FieldClass.Descend || f.HopFi != null) continue;

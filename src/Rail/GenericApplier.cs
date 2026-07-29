@@ -325,7 +325,7 @@ namespace Multiplayer.Network.Sync
         {
             if (!ResolveDescendTarget(geo, rootKey, out var owner, out var field))
             { LogMissOnce("descend owner/field unresolved at " + rootKey + " — create skipped"); return false; }
-            var typeName = blob == null || blob.Length == 0 ? null : Encoding.UTF8.GetString(blob);
+            var typeName = RailMeta.DescendCreateTypeName(blob);
             var t = string.IsNullOrEmpty(typeName) ? null : AccessTools.TypeByName(typeName);
             if (t == null || !field.ValueType.IsAssignableFrom(t))
             {
@@ -334,17 +334,18 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
             object made;
-            try { made = RailMeta.ConstructLikeLoad(t); }
+            try { made = RailMeta.ConstructLikeLoad(t, RailMeta.DecodeCreateArgs(blob, t, geo)); }
             catch (Exception ex)
             { LogMissOnce("descend create at " + rootKey + ": " + t.Name + " construction threw " + ex.GetType().Name + " — skipped"); return false; }
             if (made == null) { LogMissOnce("descend create at " + rootKey + ": " + t.Name + " could not be constructed — skipped"); return false; }
-            // Law 1: the ONE thing this payload shape cannot carry gets a line, not silence. A custom
-            // create's params are WriteOnly members — outside SerializedMembers, so the value rail will
-            // never fill them either (RailCheck L29 names the same types statically).
-            var cp = RailMeta.CreateParamNames(t);
+            // Law 1: what the frame could NOT carry gets a line, not silence. Create params are WriteOnly
+            // members, so the value rail will never fill them either — the create packet was the only
+            // chance and for these it missed. Same predicate as RailCheck L29 (RailMeta.CreateInfoOf +
+            // LeafKindOf), so the runtime line and the static law cannot drift.
+            var cp = RailMeta.UncarriableCreateParams(t);
             if (cp.Length > 0)
-                LogMissOnce("descend create at " + rootKey + ": " + t.Name + " has custom-create params (" +
-                            string.Join(",", cp) + ") that a type-name payload cannot carry — they arrive NULL");
+                LogMissOnce("descend create at " + rootKey + ": " + t.Name + " create params (" +
+                            string.Join(",", cp) + ") are not leaf-encodable — they arrive NULL");
 
             field.SetValue(owner, made);
             if (owner is PhoenixPoint.Geoscape.Entities.GeoSite site &&

@@ -121,9 +121,31 @@ namespace Multiplayer.Network.Sync
         // (decompile GeoMission.cs:44), every classified member covered by the value rail
         // (docs/rail-baseline.txt), client wiring = the game's OWN load path
         // (GeoSite.ProcessInstanceData:1621-1631 — see GenericApplier.ApplyDescendCreate).
+        //
+        // The rows below the first are the SAME shape one level down: a nullable Descend INSIDE an already
+        // enabled family is the identical swallow, so enabling it is a row here and nothing else (RailCheck
+        // L29 nullable-unenabled sweeps for exactly this). Both are safe to CONSTRUCT on a client because
+        // neither carries identity another object owns — verified, not assumed:
+        //   • UnityDateTime (GeoMission.GlobalTime) — assigned through the implicit DateTime→UnityDateTime
+        //     operator, which allocates a fresh instance every time (UnityDateTime.cs:33-38, used at
+        //     GeoMission.cs:237), so it is never aliased. Its one member needed LeafKind.DateTimeTicks
+        //     first, or the create would have shipped a phantom 01/01/0001 clock (see LeafKindOf).
+        //   • GeoSquad (GeoMission._squad) — plain [SerializeType] class, parameterless ctor, and every
+        //     construction site in the game is a fresh `new GeoSquad(...)` built for that one mission
+        //     (GeoSite.cs:1170, GeoscapeView.cs:1045, UIStateRosterDeployment.cs:324). Its `Units` ride as
+        //     EntityRefs, so the client's copy points at the client's OWN GeoCharacters.
+        // DELIBERATELY ABSENT — GeoHavenZone (GeoStealAircraftMission._zone): that field ALIASES the
+        // haven's own zone (`_zone = Haven.Zones.FirstOrDefault()`, GeoStealAircraftMission.cs:80), so
+        // constructing one would hand the client's mission a phantom zone instead of the haven's, and
+        // Def/ZoneCount/Health are readonly (GeoHavenZone.cs:15,18,22) so they would never be filled.
+        // Carrying it as a REFERENCE is the right answer and needs GeoHavenZone to have a stable key,
+        // which it has not — IdentityResolver.KeyOf cannot address it. That is a KEYING gap, not a
+        // structural-payload one, so L29 keeps naming it rather than this table pretending to cover it.
         private static readonly Type[] StructuralDescendKindTable =
         {
             typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
+            typeof(Base.Utils.UnityDateTime),
+            typeof(PhoenixPoint.Geoscape.Entities.GeoSquad),
         };
         private static readonly HashSet<Type> StructuralDescendTypes = new HashSet<Type>(StructuralDescendKindTable);
 
@@ -1085,10 +1107,11 @@ namespace Multiplayer.Network.Sync
                         Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
                     continue;
                 }
-                // Payload per path shape (IsDescendPath): a Descend field ships its concrete type name,
+                // Payload per path shape (IsDescendPath): a Descend field ships its concrete type name plus
+                // its create params as LEAVES (RailMeta.EncodeDescendCreate — refs, never a graph),
                 // everything else the native graph blob.
                 var blob = IsDescendPath(kv.Key)
-                    ? Encoding.UTF8.GetBytes(kv.Value.GetType().FullName)
+                    ? RailMeta.EncodeDescendCreate(kv.Value)
                     : Multiplayer.Rail.SerializerRoundtrip.SerializeGraph(new[] { kv.Value }, quiet: true);
                 if (blob == null || blob.Length == 0)
                 {
