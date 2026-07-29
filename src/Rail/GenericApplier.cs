@@ -35,6 +35,9 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<string> _loggedMisses = new HashSet<string>(StringComparer.Ordinal);
         private static uint _lastSeq;
         private static float _nextResyncReqAt;
+        private const float CrcInterval = 1f; // one root subtree per second (see ClientCrcTick)
+        private static float _crcNextAt;
+        private static int _crcRoot;          // rotation cursor over IdentityResolver.Roots
 
         public static void Reset()
         {
@@ -78,6 +81,19 @@ namespace Multiplayer.Network.Sync
                     if (engine != null && engine.IsHost && engine.Session != null
                         && engine.Session.Clients.ContainsKey(senderPeerId))
                         DiffEngine.RequestFullResend();
+                    return true;
+                }
+                if (payload[0] == DiffEngine.MsgCrcReport)
+                {
+                    // Same membership gate: a report can cost the host a scoped re-emit (drift backstop).
+                    if (engine != null && engine.IsHost && engine.Session != null
+                        && engine.Session.Clients.ContainsKey(senderPeerId))
+                        using (var ms = new MemoryStream(payload))
+                        using (var r = new BinaryReader(ms, Encoding.UTF8))
+                        {
+                            r.ReadByte(); // MsgCrcReport
+                            DiffEngine.HandleCrcReport(senderPeerId, r.ReadString(), r.ReadUInt32(), r.ReadUInt32());
+                        }
                     return true;
                 }
                 if (engine == null || engine.IsHost) return true; // host never applies its own surface
@@ -643,6 +659,44 @@ namespace Multiplayer.Network.Sync
         {
             if (_loggedMisses.Count < 500 && _loggedMisses.Add(msg))
                 Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + msg);
+        }
+
+        /// <summary>Law-7 drift backstop, client half — the ONE thing in the rail that ever compares host and
+        /// client state. Once a second, CRC exactly ONE root subtree of our own mirror with the SAME canonical
+        /// walk the host emits from (<see cref="DiffEngine.RootCrc"/>) and report it with the seq we have
+        /// applied, so the host can tell divergence from lag. Rotating one root per second: a full sweep costs
+        /// one host walk spread over ~N seconds instead of a graph hash per tick (the host walk cost is what
+        /// caused the rhythmic freezes) — a backstop's job is to notice within a minute, not within a frame.
+        /// Why it must exist: the host diff compares host-NOW to host-BEFORE, so nothing the host DELETES ever
+        /// reaches us — a vanished path emits no entry and no tombstone. Only a subtree compare can see it.</summary>
+        public static void ClientCrcTick(NetworkEngine engine)
+        {
+            if (engine == null || engine.IsHost || !engine.IsActiveSession) return;
+            if (Time.realtimeSinceStartup < _crcNextAt) return;
+            _crcNextAt = Time.realtimeSinceStartup + CrcInterval;
+            var geo = GeoLevel();
+            if (geo == null) return;
+            string key = null; object obj = null;
+            int i = 0;
+            foreach (var kv in IdentityResolver.Roots(geo, hostWalk: false))
+                if (i++ == _crcRoot) { key = kv.Key; obj = kv.Value; break; }
+            if (key == null) { _crcRoot = 0; return; } // swept every root — restart next tick
+            _crcRoot++;
+            try
+            {
+                uint crc = DiffEngine.RootCrc(key, obj);
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                {
+                    w.Write(DiffEngine.MsgCrcReport);
+                    w.Write(key);
+                    w.Write(crc);
+                    w.Write(_lastSeq);
+                    var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest, ms.ToArray());
+                    engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
+                }
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] CRC report for '" + key + "' failed: " + ex.Message); }
         }
 
         /// <summary>ONE throttled gate onto the law-7 resync path, whatever noticed the divergence (seq gap,

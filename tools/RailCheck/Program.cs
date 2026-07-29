@@ -76,6 +76,7 @@ namespace RailCheck
             laws.AddRange(ValueRecordLaw());
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
+            laws.AddRange(CrcBackstopLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1473,6 +1474,76 @@ namespace RailCheck
         /// whose red lines are ~99% legal is a law that gets baselined and stops being read (the harness's
         /// own "a law that cries wolf is a law that gets ignored"). The in-game gate finds those; this
         /// sweep guarantees the seams we DID write are alive.</summary>
+        /// <summary>L25 — the law-7 drift backstop. Two halves, both statically checkable:
+        /// (a) it must hash through THE canonical walk, not a copy of it. A second "CRC walk" would drift
+        ///     from the very rail it polices, and the drift would be invisible (both sides would agree with
+        ///     each other and disagree with the wire), so the IL of RootCrc must reach VisitEntity and the
+        ///     one shared hash, and nothing else in DiffEngine may hash rail entries.
+        /// (b) it must DETECT the class it exists for: a subtree entry that VANISHED. That is the whole B1/A4
+        ///     bug — a removed path emits no entry and no tombstone (only dict subkeys are tombstoned), so a
+        ///     hash blind to a missing entry would make the backstop decorative. Value change and reorder ride
+        ///     along, plus the per-peer exclusion (corridors) actually excluding, and the message byte not
+        ///     colliding with the three that already share surface 0xAC.
+        /// Honest gap (this harness never has a live GeoLevelController): that the two peers' WALKS produce the
+        /// same entries is in-game only — asserted here only as "same code path".</summary>
+        private static IEnumerable<string> CrcBackstopLaw()
+        {
+            var asm = typeof(DiffEngine).Assembly;
+            var rootCrc = typeof(DiffEngine).GetMethod("RootCrc", AllMembers);
+            var hash = typeof(DiffEngine).GetMethod("CrcOfEntries", AllMembers);
+            var walk = typeof(DiffEngine).GetMethod("VisitEntity", AllMembers);
+            if (rootCrc == null || hash == null || walk == null)
+            {
+                yield return "L25 crc-backstop-absent: DiffEngine.RootCrc/CrcOfEntries/VisitEntity no longer " +
+                             "resolve — the drift backstop is gone and divergence is invisible again";
+                yield break;
+            }
+            var callees = Callees(rootCrc, asm).Select(m => m.Name).ToList();
+            if (!callees.Contains(walk.Name))
+                yield return "L25 crc-walk-forked: DiffEngine.RootCrc does not call the canonical VisitEntity — a " +
+                             "parallel CRC walk drifts from the rail it is supposed to police";
+            if (!callees.Contains(hash.Name))
+                yield return "L25 crc-hash-bypassed: DiffEngine.RootCrc does not call CrcOfEntries — the shipped " +
+                             "hash is then not the one this law checks";
+            foreach (var m in typeof(DiffEngine).GetMethods(AllMembers))
+                if (m.Name != hash.Name && Callees(m, asm).Any(c => c.DeclaringType == typeof(Crc32)))
+                    yield return "L25 crc-second-hash: DiffEngine." + m.Name + " hashes outside CrcOfEntries — two " +
+                                 "hashes of the same subtree cannot both be the canonical one";
+
+            // (b) the hash's detection duties, on synthetic entries (the walk needs a live level; the HASH does not).
+            var full = new List<DiffEngine.Entry>
+            {
+                Ent("S#7", 0, "", 1), Ent("S#7.SerializationData.ActiveMission", 3, "", 2), Ent("S#7.Storage", 5, "k", 3),
+            };
+            uint crcFull = DiffEngine.CrcOfEntries(full, null);
+            if (DiffEngine.CrcOfEntries(new List<DiffEngine.Entry>(full), null) != crcFull)
+                yield return "L25 crc-unstable: the same entry list hashes differently twice — no compare can ever settle";
+            var removed = new List<DiffEngine.Entry> { full[0], full[2] }; // the Descend subtree entry vanished
+            if (DiffEngine.CrcOfEntries(removed, null) == crcFull)
+                yield return "L25 crc-removal-blind: a subtree entry that VANISHED does not change the CRC — the removal " +
+                             "class the backstop exists for (completed mission, scrapped item, dead subtree) stays invisible";
+            var changed = new List<DiffEngine.Entry> { full[0], Ent("S#7.SerializationData.ActiveMission", 3, "", 9), full[2] };
+            if (DiffEngine.CrcOfEntries(changed, null) == crcFull)
+                yield return "L25 crc-value-blind: a changed entry value does not change the CRC";
+            var reordered = new List<DiffEngine.Entry> { full[2], full[1], full[0] };
+            if (DiffEngine.CrcOfEntries(reordered, null) == crcFull)
+                yield return "L25 crc-order-blind: walk order is canonical state (law 6) but does not change the CRC";
+            // Per-peer subtrees (base corridors) must be excluded, else every base site hashes unequal forever.
+            var withLocal = new List<DiffEngine.Entry>(full) { Ent("S#7.Layout._facilities#42.Id", 1, "", 7) };
+            if (DiffEngine.CrcOfEntries(withLocal, new[] { "S#7.Layout._facilities#42" }) != crcFull)
+                yield return "L25 crc-peerlocal-hashed: a declared PER-PEER subtree still rides the CRC — the two peers' " +
+                             "own corridor ids would report permanent false divergence";
+
+            var msgBytes = new[] { DiffEngine.MsgDelta, DiffEngine.MsgResyncRequest, DiffEngine.MsgStructural, DiffEngine.MsgCrcReport };
+            if (msgBytes.Distinct().Count() != msgBytes.Length)
+                yield return "L25 msg-byte-collision: the CRC report shares its leading byte with another 0xAC message " +
+                             "kind — it would be parsed as that one, silently";
+        }
+
+        private static DiffEngine.Entry Ent(string path, ushort fieldIdx, string subKey, byte value) =>
+            new DiffEngine.Entry { Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = new[] { value },
+                                   Key = path + "" + fieldIdx + "" + subKey };
+
         private static IEnumerable<string> HandleSweepLaw()
         {
             var asm = typeof(IntentRail).Assembly;

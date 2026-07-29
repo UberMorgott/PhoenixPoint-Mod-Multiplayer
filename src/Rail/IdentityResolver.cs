@@ -181,15 +181,20 @@ namespace Multiplayer.Network.Sync
         internal static IDictionary TacUnitsDict(GeoLevelController geo) => TacUnitsField?.GetValue(geo) as IDictionary;
 
         /// <summary>Deterministic (key, object) root pairs: level clock + factions + sites + tac units +
-        /// vehicles + the level-scope singleton components (event system / mission generator / marketplace).</summary>
-        public static IEnumerable<KeyValuePair<string, object>> Roots(GeoLevelController geo)
+        /// vehicles + the level-scope singleton components (event system / mission generator / marketplace).
+        /// <paramref name="hostWalk"/> false = the client's own read of the SAME table (the law-7 CRC
+        /// backstop walks its mirror with it): synthesized per-peer DTO roots are skipped, see "TA".</summary>
+        public static IEnumerable<KeyValuePair<string, object>> Roots(GeoLevelController geo, bool hostWalk = true)
         {
             if (geo == null) yield break;
             if (geo.Timing != null) yield return new KeyValuePair<string, object>("T", geo.Timing);
             // The clock VALUE cannot ride the live Timing (Now changes every walk, law 6). "TA" carries the
             // host's latched anchor as the game's own TimingInstanceData; the client derives the rest. See
             // TimeAnchor — including why Timing.StartTime is opted out of the "T" root.
-            var anchor = TimeAnchor.HostDto(geo.Timing);
+            // HOST-ONLY by construction: the anchor is SYNTHESIZED per peer (the host latches it, the client
+            // re-derives its own from the mirrored clock — ResolveRoot's "TA" arm), so it has no comparable
+            // byte image; and HostDto() LATCHES, a host-side side effect a client must never run.
+            var anchor = hostWalk ? TimeAnchor.HostDto(geo.Timing) : null;
             if (anchor != null) yield return new KeyValuePair<string, object>("TA", anchor);
 
             foreach (var f in geo.Factions.Where(f => f?.Def != null).OrderBy(f => f.Def.Guid, StringComparer.Ordinal))

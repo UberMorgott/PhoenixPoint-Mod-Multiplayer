@@ -46,6 +46,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.HostTick(_engine);
             DiffEngine.HostTick(_engine);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
+            GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // Law 11 UNIVERSAL: flush one open-screen re-enter per frame if anything marked dirty —
             // client mirror batches AND host post-intent reseeds (EquipSync/PersonnelSync) both land here.
             OpenUiRepaint.FlushIfDirty();

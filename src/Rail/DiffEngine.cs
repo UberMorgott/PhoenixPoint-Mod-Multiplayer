@@ -38,6 +38,7 @@ namespace Multiplayer.Network.Sync
         public const byte MsgDelta = 1;
         public const byte MsgResyncRequest = 2;
         public const byte MsgStructural = 3; // root create/destroy (law 3): native-Serializer blob payloads (law 6)
+        public const byte MsgCrcReport = 4;  // client→host subtree CRC (law 7 drift backstop, see HandleCrcReport)
 
         private const float TickInterval = 0.5f;   // ≤2 Hz
         private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
@@ -110,6 +111,18 @@ namespace Multiplayer.Network.Sync
         private static bool _rootsSeeded;
         private static readonly HashSet<string> _structuralSkipsLogged = new HashSet<string>(StringComparer.Ordinal);
 
+        // ─── Law-7 drift backstop (see RootCrc / HandleCrcReport) ──────────
+        // Per-root seq of the last delta the host EMITTED under it: the quiescence gate of the CRC
+        // compare. Without it every busy root reports "diverged" on every report (the client's hash is
+        // always one round-trip old) and re-emits forever — the rhythmic walk cost this rail already paid.
+        private static readonly Dictionary<string, uint> _rootTouchedSeq = new Dictionary<string, uint>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> _crcHeals = new Dictionary<string, int>(StringComparer.Ordinal); // "<peer>|<root>" → re-emits spent
+        private static bool _crcWalk;   // inside RootCrc: the walk must ship NOTHING and touch no tick state
+        // Subtree paths the rail declares PER-PEER (base corridors — derived, locally-issued ids). Recorded
+        // by the walk at its own opt-out site; excluded from the CRC because both peers legitimately hold
+        // different ones, so hashing them would report permanent false divergence.
+        private static readonly HashSet<string> _peerLocalPaths = new HashSet<string>(StringComparer.Ordinal);
+
         private static List<KeyValuePair<string, object>> _cycleRoots;
         private static int _cycleNext;
         private static int _cycleFrames;
@@ -124,6 +137,7 @@ namespace Multiplayer.Network.Sync
             ResetForReloadBoundary();
             Seq.Reset();
             _kindIds.Clear(); _kinds.Clear();
+            _rootTouchedSeq.Clear(); // the seq stream restarts, so recorded touch-seqs would over-gate
             _reportWritten = false;
         }
 
@@ -139,6 +153,7 @@ namespace Multiplayer.Network.Sync
             _baselined = false;
             _forceFull = false;
             _forcePrefixes.Clear();
+            _crcHeals.Clear(); // the clients' state was wholesale replaced by the save transfer — re-arm the heal
             ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
             TimeAnchor.Reset();         // post-load the clock jumped: re-latch rather than re-publish the old anchor
             DefOwnership.Invalidate();  // a loaded save can mint runtime defs — rebuild the ownership set
@@ -171,22 +186,122 @@ namespace Multiplayer.Network.Sync
             FlushNow();
         }
 
-        private static bool MatchesForcePrefix(string path)
+        /// <summary>Whole-segment path-prefix match ("U#3" never matches "U#30") — shared by the forced
+        /// re-emit scope and the CRC's per-peer exclusion.</summary>
+        private static bool PrefixMatch(IEnumerable<string> prefixes, string path)
         {
-            for (int i = 0; i < _forcePrefixes.Count; i++)
-            {
-                var p = _forcePrefixes[i];
+            foreach (var p in prefixes)
                 if (path.Length >= p.Length && string.CompareOrdinal(path, 0, p, 0, p.Length) == 0 &&
                     (path.Length == p.Length || path[p.Length] == '.'))
                     return true;
-            }
             return false;
         }
+
+        private static bool MatchesForcePrefix(string path) => PrefixMatch(_forcePrefixes, path);
 
         private static GeoLevelController GeoLevel()
         {
             var level = GameUtl.CurrentLevel();
             return level == null ? null : level.GetComponent<GeoLevelController>();
+        }
+
+        // ─── Law-7 drift backstop: per-root subtree CRC ─────────────────────
+        // THE only host↔client reconciliation in the rail. Everything else compares host-NOW against
+        // host-BEFORE (DiffAndEmit), so state the host DELETES is invisible by construction: a vanished
+        // path emits no entry and no tombstone (only dict SUBKEYS are tombstoned), and the baseline walk
+        // emits nothing at all. Result today: a completed mission, a scrapped item or a dead entity's
+        // subtree lives on the client forever with NO log line anywhere. This makes it loud.
+
+        /// <summary>CRC32 of ONE root's subtree, hashed from the entries of the SAME canonical walk that
+        /// produces the wire (<see cref="VisitEntity"/> — a second "CRC walk" would drift from the rail it
+        /// is meant to police, so there is none; the walk's scratch is already parameterized, only its three
+        /// tick-state side effects need the <c>_crcWalk</c> guard). Run by BOTH peers, so it must be
+        /// symmetric: fresh scratch each call, because a standalone root walk sees cross-root aliases that
+        /// the periodic cycle's SHARED visited set would have credited to whichever root came first.</summary>
+        internal static uint RootCrc(string rootKey, object rootObj)
+        {
+            if (rootObj == null || (rootObj is UnityEngine.Object uo && uo == null)) return 0u;
+            var ordered = new List<Entry>();
+            _peerLocalPaths.Clear();
+            _crcWalk = true;
+            try
+            {
+                VisitEntity(rootKey, rootObj, new HashSet<object>(ReferenceEqualityComparer.Instance), ordered,
+                            new Dictionary<string, Entry>(StringComparer.Ordinal), 0);
+            }
+            finally { _crcWalk = false; }
+            return CrcOfEntries(ordered, _peerLocalPaths);
+        }
+
+        /// <summary>The hash itself, split out so the harness can assert what it must detect (L25): entries
+        /// in walk order (canonical by law 6), each as its own SnapKey + length-delimited value bytes, so a
+        /// REMOVED entry, a changed value and a reorder all change the CRC.</summary>
+        internal static uint CrcOfEntries(List<Entry> ordered, ICollection<string> peerLocalPaths)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                foreach (var e in ordered)
+                {
+                    if (peerLocalPaths != null && peerLocalPaths.Count > 0 && PrefixMatch(peerLocalPaths, e.Path)) continue;
+                    w.Write(e.Key ?? "");
+                    w.Write((ushort)(e.Value?.Length ?? 0));
+                    if (e.Value != null) w.Write(e.Value);
+                }
+                return Multiplayer.Util.Crc32.Compute(ms.ToArray());
+            }
+        }
+
+        /// <summary>Host half: a client reported the CRC of ONE of its root subtrees, taken at the seq it had
+        /// applied. QUIESCENCE gate first — if the host emitted anything under that root after the client's
+        /// seq, the client is merely behind and a mismatch means nothing (comparing anyway would flag every
+        /// busy root and re-emit it forever). On a quiescent root a mismatch IS divergence: nothing on the
+        /// host will ever emit a change for it, so the client stays wrong until something re-states the
+        /// truth — which is exactly <see cref="ForceReemit"/> (values + dict censuses). ONE heal attempt per
+        /// episode: if the next quiescent report still differs, re-emitting provably cannot fix it (a removed
+        /// path or a structural entity the rail does not mirror — there is nothing left to re-state), so say
+        /// so and stop. A matching report clears the counter and re-arms the heal.</summary>
+        internal static void HandleCrcReport(ulong peerId, string rootKey, uint clientCrc, uint clientSeq)
+        {
+            if (string.IsNullOrEmpty(rootKey)) return;
+            var geo = GeoLevel();
+            if (geo == null) return;
+            string tag = peerId + "|" + rootKey;
+            var mine = IdentityResolver.Resolve(geo, rootKey, null);
+            if (mine == null)
+            {
+                // The root is gone on the host but still live on the client: a destroy the structural layer
+                // does not mirror (StructuralPrefixes). No value re-emit can delete it — only naming it helps.
+                if (_structuralSkipsLogged.Add("crc-orphan:" + tag))
+                    Debug.LogError("[Multiplayer][rail] CRC backstop: peer " + peerId + " still holds root '" + rootKey +
+                                   "' which the host no longer has — destroy not mirrored, that client is diverged");
+                return;
+            }
+            if (_rootTouchedSeq.TryGetValue(rootKey, out var touched) && touched > clientSeq) return; // behind, not diverged
+            uint hostCrc = RootCrc(rootKey, mine);
+            if (hostCrc == clientCrc) { _crcHeals.Remove(tag); return; }
+            _crcHeals.TryGetValue(tag, out var heals);
+            _crcHeals[tag] = heals + 1;
+            if (heals == 0)
+            {
+                Debug.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' DIVERGED on peer " + peerId +
+                               " (host " + hostCrc.ToString("X8") + " != client " + clientCrc.ToString("X8") +
+                               " at quiescent seq " + clientSeq + ") — forcing a re-emit of the subtree");
+                ForceReemit(rootKey);
+            }
+            else if (heals == 1)
+                Debug.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' STILL diverged on peer " + peerId +
+                               " after a forced re-emit — the client holds state the host cannot re-state (a removed " +
+                               "path, or a structural entity the rail does not mirror). No further re-emits for this root.");
+        }
+
+        /// <summary>Record which root an emitted entry belongs to, at the seq it rode — the quiescence gate's
+        /// only input. Root key = the path up to the first segment separator (root keys never contain '.').</summary>
+        private static void TouchRoot(string path, uint seq)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            int dot = path.IndexOf('.');
+            _rootTouchedSeq[dot < 0 ? path : path.Substring(0, dot)] = seq;
         }
 
         // ─── Host tick: walk → diff → emit ─────────────────────────────────
@@ -372,6 +487,7 @@ namespace Multiplayer.Network.Sync
             _visited.Clear();
             _snapshotBack.Clear();
             _walkRoots.Clear();
+            _peerLocalPaths.Clear();
         }
 
         /// <summary>Cycle start: SNAPSHOT the root list — the only live-graph enumeration that would
@@ -703,10 +819,14 @@ namespace Multiplayer.Network.Sync
                                 // derives its own from real-facility placement.
                                 if (e is PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility pf && pf.IsCorridor)
                                 {
+                                    // The one PER-PEER declaration in the rail: also excluded from the law-7
+                                    // subtree CRC, or every base site would hash unequal forever (each peer
+                                    // holds its own corridor ids, so its own element paths).
+                                    _peerLocalPaths.Add(childPath);
                                     if (_structuralSkipsLogged.Add("corridor-optout"))
                                         Debug.Log("[Multiplayer][rail] structural: corridors opted out (derived, per-peer ids — logged once)");
                                 }
-                                else
+                                else if (!_crcWalk)
                                     _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
                             }
                             VisitEntity(childPath, e, visited, ordered, snap, depth + 1);
@@ -741,7 +861,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>True when this walk position is inside a forced re-emit scope (full resend, or a
         /// <see cref="ForceReemit"/> prefix) — the only ticks that ship dict censuses.</summary>
         private static bool ForcedNow(string path) =>
-            _forceFull || (_forcePrefixes.Count > 0 && MatchesForcePrefix(path));
+            !_crcWalk && (_forceFull || (_forcePrefixes.Count > 0 && MatchesForcePrefix(path)));
 
         /// <summary>Resync-only dict CENSUS: the field's full present-key set, appended to this tick's
         /// emit but NEVER to the snapshot (normal ticks stay wire-identical). Closes the delete half of
@@ -774,7 +894,7 @@ namespace Multiplayer.Network.Sync
             var e = new Entry { KindId = kindId, Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = enc, Key = key };
             // TEMP diag (reassign retest): every CHANGED TacUnits list leaving the host (an unchanged
             // encode returns the previous tick's array by reference). Pull after the in-game retest.
-            if (f.Name == "TacUnits" && val is IList tacDiag &&
+            if (!_crcWalk && f.Name == "TacUnits" && val is IList tacDiag &&
                 (!_snapshot.TryGetValue(key, out var tacPrev) || !ReferenceEquals(tacPrev.Value, enc)))
             {
                 var ids = new StringBuilder();
@@ -915,7 +1035,9 @@ namespace Multiplayer.Network.Sync
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
                 {
                     w.Write(MsgStructural);
-                    w.Write(Seq.Next(SurfaceIds.GeoRail));
+                    uint seq = Seq.Next(SurfaceIds.GeoRail);
+                    w.Write(seq);
+                    TouchRoot(rootKey, seq); // a create/destroy makes the root non-quiescent too
                     w.Write(op);          // 1 = create, 2 = destroy
                     w.Write(rootKey);
                     w.Write(blob?.Length ?? 0);
@@ -942,7 +1064,8 @@ namespace Multiplayer.Network.Sync
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
                 {
                     w.Write(MsgDelta);
-                    w.Write(Seq.Next(SurfaceIds.GeoRail));
+                    uint seq = Seq.Next(SurfaceIds.GeoRail);
+                    w.Write(seq);
 
                     // New kind defs referenced from this packet onward.
                     var defs = new List<byte>();
@@ -975,6 +1098,7 @@ namespace Multiplayer.Network.Sync
                         w.Write(e.SubKey);
                         w.Write((ushort)e.Value.Length);
                         w.Write(e.Value);
+                        TouchRoot(e.Path, seq); // quiescence input for the CRC backstop
                         n++;
                     }
                     var end = ms.Position;
