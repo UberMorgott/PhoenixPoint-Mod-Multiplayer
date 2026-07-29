@@ -33,18 +33,18 @@ namespace Multiplayer.Network.Sync
     /// The seams (each = ONE native funnel, verified by call-site sweep over the decompile):
     ///   • <c>ChangeCharacterStat</c> (UIModuleCharacterProgression.cs:875) — the one stat-click
     ///     funnel (all six buttons route through ChangeStrengthStat/ChangeWillStat/ChangeSpeedStat
-    ///     :848/:857/:866). Client: the native body stays alive as pure VIEW staging (presentation
-    ///     carve-out of the law — instant numbers, native affordability/floor gates), the accepted
-    ///     gesture ships as op=1; the model is untouched until the host's delta mirrors back, and the
-    ///     repaint reseeds the stage FROM the mirrored model (no echo-skip, no floor keeper — the
-    ///     minus-button undo is a host round-trip by accepted trade-off 2026-07-26). Host: the click
-    ///     is flushed to the model per gesture via the NATIVE <c>CommitStatChanges</c> (law 11 —
-    ///     see <see cref="HostStatClickCommitPatch"/>), which keeps the stage clean so the native
-    ///     screen-exit commit is an idempotent no-op.
+    ///     :848/:857/:866). The native body stays alive on BOTH peers as pure VIEW staging
+    ///     (presentation carve-out of the law — instant numbers, native affordability/undo gates).
+    ///     Client ships the accepted gesture as op=1 and waits for the mirror; HOST lands the same
+    ///     gesture directly in <see cref="ApplyStats"/> (law 11 — clients see it the same frame).
+    ///     ONE path, and neither peer's click touches the panel's _starting* undo baseline.
     ///   • <c>CommitStatChanges</c> (:367) — natively the stage→model flush (stat deltas + ABSOLUTE
     ///     SP pools :375/:378). Client: blocked (<see cref="CommitStatsClientBlockPatch"/> — the law;
     ///     per-click intents already carried everything, and the absolute pool write from a stale
-    ///     stage is the foreign-spend revert this family kept re-fixing). Host/solo: fully native.
+    ///     stage is the foreign-spend revert this family kept re-fixing). Host in a session: the
+    ///     delta half is neutralized by aligning the baseline to the stage (the model already has
+    ///     every click), the absolute half runs native — this is the ONE point where the visit
+    ///     baseline is dropped, exactly as native drops it. Solo: fully native.
     ///   • <c>BuyAbility</c> (:389) / <c>ChoseSecondSpecialization</c> (:813) — purchase funnels;
     ///     client blocks + ships op=2/3, host replays the native model calls (LearnAbility/AddAbility/
     ///     AddSecondaryClass) with the SP economy re-derived from HOST numbers (<see cref="Charge"/>).
@@ -144,25 +144,30 @@ namespace Multiplayer.Network.Sync
         // ─── Harmony seams (law 4a, intent-capture only — this file owns no other patch) ──
 
         /// <summary>
-        /// Per-CLICK stat seam (law 11 + the client-posture law). The native body always runs — it is
-        /// pure VIEW staging (updates the panel's _current* copies, no model write): instant numbers,
-        /// native floor gate at the last-reseed value (:907), affordability greying (:892-903). This
-        /// postfix acts only on the CLIENT, only on an ACCEPTED gesture (__result ±1; 0 = native
-        /// refused = zero traffic): ship op=1 with a single-stat ±1 delta. The model stays untouched
-        /// until the host's delta mirrors back; the repaint then reseeds the whole panel from the
-        /// mirrored model (UiNativeRepaint → SelectCharacterProgression → RefreshStats), which also
-        /// resets the stage floor — after the echo the minus button greys, so undo is exactly one host
-        /// round-trip wide (accepted trade-off 2026-07-26; the old floor-keeper/echo-skip pair was the
-        /// local-undo crutch this replaces). Host clicks are handled by
-        /// <see cref="HostStatClickCommitPatch"/>; a reject converges via the "U#" re-emit + nudge.
+        /// Per-CLICK stat seam (law 11 + the client-posture law) — the ONE seam for BOTH peers. The
+        /// native body always runs first: it is pure VIEW staging (updates the panel's _current*
+        /// copies, no model write) = instant numbers, native undo floor at the visit baseline (:907),
+        /// affordability greying (:892-903). This postfix acts only on an ACCEPTED gesture
+        /// (__result ±1; 0 = native refused = zero traffic and no model write):
+        ///   • CLIENT ships op=1 with a single-stat ±1 delta; the model moves when the host's delta
+        ///     mirrors back.
+        ///   • HOST lands the SAME gesture in <see cref="ApplyStats"/> — the exact method a client's
+        ///     intent reaches — then flushes so clients see it this frame (N3).
+        /// NEITHER peer touches the panel's _starting* baseline any more (the native
+        /// <c>CommitStatChanges</c> ends with _starting* := _current*, :370/:372/:374 — running it per
+        /// click is what made the minus button grey out on the clicking peer and killed undo). The
+        /// baseline now lives for the whole visit and survives rail repaints through the declarative
+        /// <c>UiNativeRepaint.StageBaselines</c> checkpoint. A reject converges via the "U#" re-emit.
         /// </summary>
         [HarmonyPatch(typeof(UIModuleCharacterProgression), "ChangeCharacterStat")]
         internal static class StatClickPatch
         {
             private static void Postfix(UIModuleCharacterProgression __instance, CharacterBaseAttribute baseStat, int __result)
             {
-                if (__result == 0) return;
-                if (IntentRail.ShouldRunNative()) return; // solo/host/apply-scope: the shared law, no local copy
+                if (__result == 0) return;               // native refused the click
+                if (SyncApplyScope.Active) return;       // law 8: a reseed-driven call is not a gesture
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return; // solo: the native flush owns the model
                 if (!BindOk()) return;
                 try
                 {
@@ -171,66 +176,55 @@ namespace Multiplayer.Network.Sync
                     int dStr = baseStat == CharacterBaseAttribute.Strength ? __result : 0;
                     int dWill = baseStat == CharacterBaseAttribute.Will ? __result : 0;
                     int dSpeed = baseStat == CharacterBaseAttribute.Speed ? __result : 0;
-                    IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
-                        "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
-                        w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
+                    if (!engine.IsHost)
+                    {
+                        IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
+                            "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
+                            w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
+                        return;
+                    }
+                    // peer 0 = the host itself: a reject has no client to nudge, and its "U#" re-emit
+                    // still reconverges everyone else. Only reachable if a remote delta landed between
+                    // this panel's last reseed and the click — then the host's own stage is the stale
+                    // one, so ask for the repaint that reseeds it.
+                    if (ApplyStats(0, character, dStr, dWill, dSpeed)) DiffEngine.FlushOnHostGesture();
+                    else OpenUiRepaint.MarkDirty();
                 }
                 catch (Exception ex) { Debug.LogError("[MP][personnel] stat click seam failed: " + ex); }
             }
         }
 
         /// <summary>
-        /// HOST per-click flush (law 11): after the wrapper folded the accepted gesture into the stage
-        /// (ChangeStrengthStat/ChangeWillStat/ChangeSpeedStat :848-873 — stage += ChangeCharacterStat's
-        /// ±1, panel repainted), run the NATIVE <c>CommitStatChanges</c> (:367-387): exact staged stat
-        /// delta via ModifyBaseStat, pool absolutes (== model, the stage was clean before this click),
-        /// mutagen wallet delta, baseline tail (_starting* := _current*). Per-click commit keeps the
-        /// stage permanently clean, so the native screen-exit/soldier-switch/post-buy commits become
-        /// idempotent no-ops — no commit neutralization, no tail replication, no stale-stage revert
-        /// window parked open for minutes. A refused click (stage unchanged) commits nothing new.
-        /// ponytail: a remote spend landing in the SAME frame as a host click (before the MarkDirty
-        /// reseed runs in SyncEngine.Tick) can still flush one stale pool absolute — a one-frame race
-        /// vs the old design's whole-visit one; tighten only if the in-game gate ever shows it.
-        /// </summary>
-        [HarmonyPatch]
-        internal static class HostStatClickCommitPatch
-        {
-            private static IEnumerable<MethodBase> TargetMethods()
-            {
-                yield return AccessTools.Method(typeof(UIModuleCharacterProgression), "ChangeStrengthStat");
-                yield return AccessTools.Method(typeof(UIModuleCharacterProgression), "ChangeWillStat");
-                yield return AccessTools.Method(typeof(UIModuleCharacterProgression), "ChangeSpeedStat");
-            }
-
-            private static void Postfix(UIModuleCharacterProgression __instance)
-            {
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-                if (SyncApplyScope.Active) return;
-                try
-                {
-                    __instance.CommitStatChanges();   // the native flush, per gesture
-                    DiffEngine.FlushOnHostGesture();  // clients see the host click this frame (N3)
-                }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] host stat-click commit failed: " + ex); }
-            }
-        }
-
-        /// <summary>
-        /// THE LAW at the stage→model flush: on a client the native commit (stat deltas + ABSOLUTE SP
-        /// pool writes :375/:378) is a model write and is BLOCKED — the per-click seams already shipped
-        /// every gesture as its own intent, so there is nothing left to convert; letting it run could
-        /// only double-apply or revert a foreign spend from a stale stage. Host and solo run it
-        /// natively (the host's per-click commits leave the exit flush an idempotent no-op).
+        /// THE LAW at the stage→model flush (the MODEL chokepoint — one prefix covers every caller:
+        /// screen exit UIStateEditSoldier.cs:232, soldier switch :363, post-buy :715, and the two
+        /// internal calls from BuyAbility:405 / ChoseSecondSpecialization:822).
+        ///   • CLIENT: the whole commit (stat deltas + ABSOLUTE SP pool writes :375/:378) is a model
+        ///     write and is BLOCKED — the per-click seam already shipped every gesture as its own
+        ///     intent; letting it run could only double-apply or revert a foreign spend from a stale
+        ///     stage.
+        ///   • HOST in a session: the model already carries every staged click (<see cref="ApplyStats"/>
+        ///     per gesture), while the panel's baseline is deliberately still the VISIT floor so undo
+        ///     stays possible — so the native delta half `_current* - _starting*` would apply the whole
+        ///     visit a SECOND time. Align the baseline to the stage first: the delta half becomes a
+        ///     no-op and the ABSOLUTE half stays native, which is what a native ability purchase pays
+        ///     with (ConsumeAbilityCost debits the stage pools, :405 flushes them). This is the ONLY
+        ///     place the baseline is dropped, and it is exactly where native drops it too.
+        ///   • Solo: fully native, nothing aligned.
         /// Composes with EquipFlushGate's prefix on this same method, which blocks the flush inside a
-        /// mirror apply + during session teardown on EITHER peer (the flush-legitimacy law — kept:
-        /// the fallback re-enter path calls CommitStatChanges from ExitState under SyncApplyScope,
-        /// where ShouldRunNative deliberately answers "native").
+        /// mirror apply + during session teardown on EITHER peer (the flush-legitimacy law) — hence
+        /// the scope check here: a repaint-internal commit must not eat the baseline either.
         /// </summary>
         [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.CommitStatChanges))]
         internal static class CommitStatsClientBlockPatch
         {
-            private static bool Prefix() => IntentRail.ShouldRunNative();
+            private static bool Prefix(UIModuleCharacterProgression __instance)
+            {
+                if (!IntentRail.ShouldRunNative()) return false; // client: blocked
+                if (SyncApplyScope.Active) return true;          // repaint-internal: EquipFlushGate blocks it
+                var engine = NetworkEngine.Instance;
+                if (engine != null && engine.IsActiveSession) UiNativeRepaint.AlignStageBaseline(__instance);
+                return true;
+            }
         }
 
         /// <summary>Intent capture for an ability/perk purchase. The bought slot is addressed by its TRACK
@@ -926,8 +920,8 @@ namespace Multiplayer.Network.Sync
         /// A DECREASE is the undo round-trip: refund per step = GetBaseStatCost of the value being
         /// stepped down FROM — the native decrement's own math (:909), the exact mirror of the
         /// increment's cost, so +1 then −1 is SP-neutral to the last point. The gesturing peer's native
-        /// stage floors decrements at its last-reseed value (:907); with per-click commit + full
-        /// reseed-on-echo that floor is one host round-trip wide (accepted trade-off 2026-07-26).
+        /// stage floors decrements at the VISIT baseline (:907), which survives rail repaints through
+        /// UiNativeRepaint.StageBaselines — so the whole visit stays undoable on both peers.
         /// Host-side the floors are NATIVE only: CanModifyBaseStat's [0, sheet max] plus base ≥ 0
         /// (keeps the ModifyBaseStat clamp from out-running a refund's cost walk). The session
         /// purchase ledgers died with the co-management refit — the cost math is exactly symmetric, so
