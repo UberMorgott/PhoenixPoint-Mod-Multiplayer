@@ -82,6 +82,7 @@ namespace Multiplayer.Network.Sync
         {
             _appliedBefore.Clear();
             _appliedAfter.Clear();
+            _sent.Clear();
         }
 
         private static GeoLevelController GeoLevel()
@@ -112,10 +113,18 @@ namespace Multiplayer.Network.Sync
                 if (IsAugmentStaging()) return true;
                 try
                 {
+                    var canon = Slots(__instance);
                     var body = ChangedBody(freeReload,
-                        new[] { ToSlots(armour), ToSlots(equipment), ToSlots(inventory) }, Slots(__instance));
+                        new[] { ToSlots(armour), ToSlots(equipment), ToSlots(inventory) }, canon);
                     if (body == null) return false; // this flush changes nothing — block silently, zero traffic
                     int charId = (int)__instance.Id;
+                    if (AlreadySent(charId, body, EncodeBody(false, canon)))
+                    {
+                        if (MpDiag.On)
+                            Debug.Log("[MP][equip] duplicate flush suppressed char=U#" + charId +
+                                      " bytes=" + body.Length + " — same body, model unmoved, host echo still in flight");
+                        return false;
+                    }
                     IntentRail.Send(SurfaceIds.GeoEquipIntent, OpSetItems,
                         "loadout char=U#" + charId + " bytes=" + body.Length + " freeReload=" + freeReload,
                         w => { w.Write(charId); w.Write(body); });
@@ -129,6 +138,28 @@ namespace Multiplayer.Network.Sync
                 }
                 return false;
             }
+        }
+
+        // ─── CLIENT state: the intent already in flight per character (the repeat guard) ───
+        private struct Sent { internal byte[] Body, Canon; }
+
+        private static readonly Dictionary<int, Sent> _sent = new Dictionary<int, Sent>();
+
+        /// <summary>THE REPEAT GUARD. Blocking the client's native write leaves the canon UNTOUCHED, so the
+        /// equip screen's next content flush — it re-flushes on every UI event, 6-7 frames in a row after one
+        /// drag (log 2026-07-29: nonce=1..7, bytes=510, frames 21503-21509) — recomputes the same difference
+        /// and would ship the same intent again. IntentDedup cannot see it: its (peer, surface, nonce) key is
+        /// the transport's redelivery guard, and these ARE distinct intents by that key.
+        /// Suppress only while NOTHING has moved: same body AND same canon it was computed against. The host
+        /// echo (or a reject reconverge) mutates the model, which retires the memo by itself — so the same
+        /// gesture repeated after the echo ships again, with no event wiring, no per-screen knowledge and
+        /// nothing to reset by hand. First sight of a (body, canon) pair records it and returns false = send.</summary>
+        internal static bool AlreadySent(int charId, byte[] body, byte[] canon)
+        {
+            if (_sent.TryGetValue(charId, out var s) &&
+                RailMeta.BytesEqual(s.Body, body) && RailMeta.BytesEqual(s.Canon, canon)) return true;
+            _sent[charId] = new Sent { Body = body, Canon = canon };
+            return false;
         }
 
         /// <summary>The family's ONE native-passthrough arm (the IntentRail law allows arms on top of the base
