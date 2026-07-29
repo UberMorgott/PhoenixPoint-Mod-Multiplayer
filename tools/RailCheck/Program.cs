@@ -73,6 +73,7 @@ namespace RailCheck
             var laws = new List<string>();
             var sb = new StringBuilder(Snapshot(types, polymorphicCodec, laws));
             laws.AddRange(RoundTrip());
+            laws.AddRange(ExitWriteBackLaw(types));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1122,6 +1123,27 @@ namespace RailCheck
             if (EquipSync.ChangedBody(true, new[] { Slots(("a", 1, 0), ("b", 1, 5)), cur[1], cur[2] }, cur) == null)
                 yield return "L19 freereload-swallowed: a free reload over an identical loadout produced no intent — preset loads would never reload on any peer";
 
+            // L19's REPEAT half. Blocking the client's native write leaves the canon untouched, so the equip
+            // screen's next content flush recomputes the SAME body — one drag shipped 7 identical intents
+            // (nonce=1..7 bytes=510, log 2026-07-29). IntentDedup cannot help: by its (peer, surface, nonce)
+            // key those ARE distinct intents. EquipSync.AlreadySent is the memo that stops them, and it must
+            // retire itself the moment the model moves, or the gesture could never be repeated.
+            var canonA = EquipSync.EncodeBody(false, cur);
+            var bodyA = EquipSync.ChangedBody(false, new[] { Slots(("a", 1, 0)), null, null }, cur);
+            if (EquipSync.AlreadySent(7, bodyA, canonA))
+                yield return "L19 repeat-first-blocked: the FIRST send of a gesture was suppressed — the intent never leaves the client";
+            // The screen's NEXT flush RE-ENCODES: equal content, different arrays. Passing the same instances
+            // twice would let a reference compare pass for a byte compare, so the repeat is built from scratch.
+            if (!EquipSync.AlreadySent(7, EquipSync.ChangedBody(false, new[] { Slots(("a", 1, 0)), null, null }, cur),
+                                          EquipSync.EncodeBody(false, cur)))
+                yield return "L19 repeat-unblocked: the same body over an unmoved canon shipped twice — one drag emits an intent per screen flush";
+            // Host echo (or a reject reconverge) moves the model: the memo must retire with it.
+            var canonB = EquipSync.EncodeBody(false, new[] { Slots(("a", 1, 0)), cur[1], cur[2] });
+            if (EquipSync.AlreadySent(7, bodyA, canonB))
+                yield return "L19 repeat-stuck: the memo outlived the model change — after the echo the same gesture could never be made again";
+            if (EquipSync.AlreadySent(8, bodyA, canonA))
+                yield return "L19 repeat-cross-character: one character's memo suppressed another character's intent";
+
             // ─── L20's RUNNABLE half — entries must survive into a container the ctor never built ────
             // The static half (Snapshot) only asks whether such a field COULD be materialized; this asks
             // whether the decode path actually does it. Both halves exist because the failure was silent
@@ -1189,7 +1211,7 @@ namespace RailCheck
                 foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
                     foreach (var callee in Callees(m, asm))
                     {
-                        if (!callers.TryGetValue(callee, out var l)) callers[callee] = l = new List<MethodBase>();
+                        if (!callers.TryGetValue(callee.MetadataToken, out var l)) callers[callee.MetadataToken] = l = new List<MethodBase>();
                         l.Add(m);
                     }
 
@@ -1236,6 +1258,112 @@ namespace RailCheck
             return targets.Count > 0 && targets.All(t => t.FullName.Contains(".View."));
         }
 
+        /// <summary>L21 — a screen whose <c>ExitState</c> WRITES BACK into the live model must be declared in
+        /// <c>UiNativeRepaint.Table</c>. OpenUiRepaint's fallback for an undeclared screen is Exit+Enter, and
+        /// Exit runs ExitState: a teardown that flushes its widget lists into the model (the leak this law was
+        /// written for — UIStateVehicleRoster.cs:128-131 → GeoVehicle.ReplaceEquipments and
+        /// AircraftItemStorage.RemoveItems/AddItems) therefore UNDOES the very delta the repaint was triggered
+        /// by, inside the apply scope, with no echo to put it back. A declared screen gets its own
+        /// read-direction rebuild instead and Exit never runs.
+        ///
+        /// "Writes back" is decided from METADATA + IL, never from method names: walk out of ExitState through
+        /// PRESENTATION methods only (the game's own split — presentation lives under <c>*.View.*</c> / Base.UI,
+        /// the same discriminator <see cref="PatchesPresentationOnly"/> uses) and report the first edge that
+        /// leaves presentation into a VOID INSTANCE method of a type the rail replicates (the closure this
+        /// harness classified). Void = command, non-void = query: that is what separates ReplaceEquipments /
+        /// RemoveItems from GetAircraftInfo / Except / CreateUIData, with no name matching anywhere.
+        ///
+        /// LIMITATION (the honest approximation): a void command is PRESUMED to write — nothing here proves a
+        /// store happens, only that the teardown can COMMAND replicated state; and edges are direct call /
+        /// callvirt only, so a write reached through a field-held delegate is invisible (a delegate LOAD is
+        /// deliberately not an edge: `Event -= Handler` in a teardown references gesture handlers it never
+        /// runs). Both directions are chosen so a red line is always worth reading: the fix for a
+        /// false positive is to declare the screen, which is what a repainted screen wants anyway. The call
+        /// NAMED is simply the first one the walk reaches, so it can be a mutation of a freshly built element
+        /// (GeoVehicleEquipment.DamageHitPoints, built inside UpdateVehicleEquipments) rather than the flush
+        /// that lands in the model (GeoVehicle.ReplaceEquipments): the finding is the SCREEN, not the call.</summary>
+        private static IEnumerable<string> ExitWriteBackLaw(List<Type> types)
+        {
+            var covered = new HashSet<Type>(types);
+            var game = typeof(PhoenixPoint.Geoscape.View.GeoscapeViewState).Assembly;
+            Type[] declared;
+            try { declared = game.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+
+            int analyzed = 0;
+            foreach (var screen in declared
+                         .Where(t => !t.IsAbstract && typeof(PhoenixPoint.Geoscape.View.GeoscapeViewState).IsAssignableFrom(t))
+                         .OrderBy(t => t.FullName, StringComparer.Ordinal))
+            {
+                var exit = screen.GetMethod("ExitState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (exit == null || exit.GetMethodBody() == null) continue;
+                analyzed++;
+                var command = FirstModelCommand(exit, game, covered);
+                if (command == null || UiNativeRepaint.Table.ContainsKey(screen)) continue;
+                yield return "L21 exit-writeback-unrepainted: " + screen.Name + ".ExitState reaches " + command +
+                             " (a void command on rail-covered " + command.Split('.')[0] + ") but the screen is not in " +
+                             "UiNativeRepaint.Table — its repaint falls back to Exit+Enter, which runs that write-back " +
+                             "and rolls the just-applied delta straight back out of the model";
+            }
+            if (analyzed == 0)
+                yield return "L21 vacuous: no GeoscapeViewState with an ExitState body was analyzed — the walk resolved nothing and this law is asleep";
+
+            // Same law, static half: a table entry whose reflection handle went null is a DEAD entry — the
+            // screen declines, falls back to Exit+Enter and the leak is back with nothing red. Sweeps every
+            // MemberInfo handle UiNativeRepaint holds, so no entry can add an unchecked one.
+            foreach (var f in typeof(UiNativeRepaint).GetFields(BindingFlags.NonPublic | BindingFlags.Static)
+                                                     .Where(f => typeof(MemberInfo).IsAssignableFrom(f.FieldType))
+                                                     .OrderBy(f => f.Name, StringComparer.Ordinal))
+                if (f.GetValue(null) == null)
+                    yield return "L21 repaint-handle-unbound: UiNativeRepaint." + f.Name + " resolved to null — that " +
+                                 "table entry is dead, its screen silently falls back to Exit+Enter";
+        }
+
+        /// <summary>BFS from a screen teardown through presentation code; returns "Type.Method" of the first
+        /// void instance command it can reach on a rail-covered type, else null. Constructors are not
+        /// commands — a fresh instance is not the live model.</summary>
+        private static string FirstModelCommand(MethodBase root, Assembly game, HashSet<Type> covered)
+        {
+            var seen = new HashSet<int> { root.MetadataToken };
+            var queue = new Queue<MethodBase>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+                foreach (var callee in Callees(queue.Dequeue(), game, directCallsOnly: true))
+                {
+                    var owner = callee.DeclaringType;
+                    if (owner?.FullName == null || !seen.Add(callee.MetadataToken)) continue;
+                    if (IsPresentation(owner)) { queue.Enqueue(callee); continue; }
+                    if (!callee.IsConstructor && !callee.IsStatic && !IsAccessor(callee) && covered.Contains(owner) &&
+                        (callee as MethodInfo)?.ReturnType == typeof(void))
+                        return owner.Name + "." + callee.Name;
+                }
+            return null;
+        }
+
+        /// <summary>Property or event ACCESSOR, resolved through the declaring type's PropertyInfo/EventInfo
+        /// tables (metadata, not a name prefix). Two things drop out of the law with it, both measured, not
+        /// assumed: event add/remove — `Faction.ScannerCapacityChanged -= Handler` is subscription bookkeeping
+        /// on a covered type, not state (it flagged 9 screens); and property SETTERS — the one real case,
+        /// UIStateDiplomacy, captures `_wasPaused` in EnterState:26 and writes it back at ExitState:39, so an
+        /// Exit+Enter cycle provably ends where it started. LIMITATION: a screen that commits a genuine edit
+        /// through a property setter in its teardown is therefore invisible to this law.</summary>
+        private static bool IsAccessor(MethodBase m)
+        {
+            if (!m.IsSpecialName || m.DeclaringType == null) return false;
+            foreach (var p in m.DeclaringType.GetProperties(AllMembers))
+                if (Same(p.GetGetMethod(true), m) || Same(p.GetSetMethod(true), m)) return true;
+            foreach (var e in m.DeclaringType.GetEvents(AllMembers))
+                if (Same(e.GetAddMethod(true), m) || Same(e.GetRemoveMethod(true), m)) return true;
+            return false;
+        }
+
+        private static bool Same(MethodBase a, MethodBase b) =>
+            a != null && b != null && a.MetadataToken == b.MetadataToken && a.Module == b.Module;
+
+        private static bool IsPresentation(Type t) =>
+            t.FullName.IndexOf(".View.", StringComparison.Ordinal) >= 0 ||
+            t.FullName.StartsWith("Base.UI", StringComparison.Ordinal);
+
         private static readonly Dictionary<short, OpCode> OpCodeByValue = BuildOpCodes();
 
         private static Dictionary<short, OpCode> BuildOpCodes()
@@ -1250,7 +1378,7 @@ namespace RailCheck
         /// operand-size table — a naive byte scan for the call opcodes would match operand bytes and invent
         /// edges, and a law that cries wolf is a law that gets ignored. Anything unparseable ABANDONS the
         /// method rather than guessing (under-reporting is survivable here; a false red is not).</summary>
-        private static IEnumerable<int> Callees(MethodBase m, Assembly asm)
+        private static IEnumerable<MethodBase> Callees(MethodBase m, Assembly asm, bool directCallsOnly = false)
         {
             byte[] il = null;
             try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
@@ -1269,11 +1397,14 @@ namespace RailCheck
                 if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
                 int size = OperandSize(op.OperandType, il, i);
                 if (size < 0 || i + size > il.Length) yield break;
-                if (op.OperandType == OperandType.InlineMethod)
+                // directCallsOnly = call/callvirt only: a delegate LOAD (ldftn, e.g. `x.Event -= Handler`)
+                // references a method without ever running it, which L21 must not read as an edge.
+                if (op.OperandType == OperandType.InlineMethod &&
+                    (!directCallsOnly || op == OpCodes.Call || op == OpCodes.Callvirt))
                 {
                     MethodBase callee = null;
                     try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
-                    if (callee != null && callee.Module.Assembly == asm) yield return callee.MetadataToken;
+                    if (callee != null && callee.Module.Assembly == asm) yield return callee;
                 }
                 i += size;
             }
