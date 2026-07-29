@@ -2677,6 +2677,60 @@ namespace RailCheck
             if (EventPopup.ParseCursor("") != 0 || EventPopup.ParseCursor(null) != 0)
                 yield return "L26 cursor-round-trip: an ABSENT stored cursor does not read back as 0 — a peer's first " +
                              "join would take a garbage cursor instead of falling back to the record seed";
+
+            // ── FLOOD arms (regression 2026-07-29: both clients buried under 97 outcome windows at join,
+            // "cursor seeded to 0 from 0 record(s)" then "backlog n=97 cursor=0"). Deleting the old silent
+            // re-seed in 8d5dbf0 also deleted the only thing bounding the FIRST join, so the inverse of the
+            // silent-swallow class shipped: a flood. The bound is EventPopup.FirstSightCursor — a peer's
+            // first sight of a campaign owes it nothing from before that moment.
+            var history = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal);
+            for (int i = 1; i <= 5; i++)
+            {
+                var r = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_hist" + i, Ticks(1000 + i * 10));
+                r.SelectChoice(0);
+                r.Complete(Ticks(1000 + i * 10 + 1));
+                history[r.EventId] = r;
+            }
+            long firstSight = EventPopup.FirstSightCursor(history);
+            var owedAtJoin = EventPopup.Backlog(history, firstSight);
+            if (owedAtJoin.Count != 0)
+                yield return "L26 first-sight-admits-pre-join-history: a first sight of a campaign carrying " +
+                             history.Count + " resolved record(s) already owes this peer " + owedAtJoin.Count +
+                             " window(s) at cursor " + firstSight + " — every joining client is buried under the " +
+                             "campaign's entire event history before it can play (measured: 97 windows)";
+            // The fix must not over-correct into the swallow it replaced: an OPEN decision is not history, so a
+            // host window still unanswered at join has to survive the very same first-sight cursor.
+            var joinWithOpen = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(history, StringComparer.Ordinal);
+            var openAtJoin = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_openAtJoin", Ticks(1005));
+            joinWithOpen[openAtJoin.EventId] = openAtJoin;
+            var owedWithOpen = EventPopup.Backlog(joinWithOpen, EventPopup.FirstSightCursor(joinWithOpen));
+            if (owedWithOpen.Count != 1 || owedWithOpen[0].EventId != "EV_openAtJoin")
+                yield return "L26 first-sight-eats-open-decision: first-sight seeding over a history plus ONE " +
+                             "unanswered record owes " + owedWithOpen.Count + " window(s) — the flood guard has " +
+                             "swallowed the host's open window, which the save transfer does not carry either";
+            // An EMPTY mirror is the flood's actual trigger, and it is a TIMING fact, not a state fact: the
+            // transferred save reaches OnReachedPlaying with _records still empty and the whole set lands
+            // ~0.6 s later as one wholesale dict apply (RailMeta.cs:2750). So the value taken there is 0, and 0
+            // is precisely "owe the entire campaign" — which is why SeedCursor must DEFER on an empty mirror
+            // instead of latching. This arm pins the premise that makes the deferral necessary.
+            var emptyMirror = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal);
+            if (EventPopup.FirstSightCursor(emptyMirror) != 0)
+                yield return "L26 first-sight-empty-mirror: an empty record mirror yields a NON-ZERO first-sight " +
+                             "cursor — it would retire records the rail has not delivered yet, unseen and unlogged";
+            if (EventPopup.Backlog(history, EventPopup.FirstSightCursor(emptyMirror)).Count != history.Count)
+                yield return "L26 first-sight-empty-mirror: seeding from an empty mirror no longer admits the whole " +
+                             "history — if that ever stops being true the SeedCursor deferral is dead code and the " +
+                             "next reader will delete it, re-arming the flood";
+            // RE-RAISE: a window the player clicked through never comes back. Same `> cursor` comparison the
+            // backlog-not-idempotent arm above exercises (shared code path, NOT an independent falsification) —
+            // asserted here over the FULL history at its first-sight cursor, because that is the shape the 1 Hz
+            // pump actually runs against, and a re-raise there is an unclosable window stack rather than a double.
+            long atFirstSight = EventPopup.FirstSightCursor(joinWithOpen);
+            openAtJoin.SelectChoice(0);
+            openAtJoin.Complete(Ticks(1006));
+            if (EventPopup.Backlog(joinWithOpen, atFirstSight).Count != 0)
+                yield return "L26 raised-record-re-raises: a record answered at the first-sight cursor still rides " +
+                             "the backlog — the pump re-raises it every tick, forever, and pause does not stop it";
         }
 
         private static Base.Core.TimeUnit Ticks(long t) => Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(t));

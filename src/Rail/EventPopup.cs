@@ -49,6 +49,7 @@ namespace Multiplayer.Network.Sync
     {
         private static long _cursor;                 // newest LastTriggerAt ticks this peer clicked through
         private static bool _cursorSeeded;
+        private static bool _loggedEmptyMirror;      // the "seed deferred" line is logged once, not per 1 Hz pass
         private static readonly HashSet<string> _inFlight = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loggedSkips = new HashSet<string>(StringComparer.Ordinal);
         private static float _nextPumpAt;
@@ -80,6 +81,7 @@ namespace Multiplayer.Network.Sync
             _inFlight.Clear();
             _loggedSkips.Clear();
             _cursorSeeded = false;
+            _loggedEmptyMirror = false;
         }
 
         /// <summary>Display mode for one record, read off the record's OWN state — never off a
@@ -167,25 +169,42 @@ namespace Multiplayer.Network.Sync
         ///     reload must not replay what the player already clicked through, and must not swallow what they
         ///     had not read yet. CLAMPED to the newest record present, which is what makes the storage key
         ///     safe without a campaign id (see <see cref="CursorKey"/>): a value carried over from another
-        ///     campaign can then retire at most the resolved records — exactly the fallback below — and never
-        ///     more, because a still-<c>Triggered</c> record rides the backlog regardless of the cursor.
-        ///   • otherwise the record seed: the transferred save carries the whole campaign's resolved history,
-        ///     which is NOT this player's unseen backlog, so max over the RESOLVED records — an unanswered
-        ///     event still rides.
+        ///     campaign can then retire at most the whole visible history — exactly the fallback below — and
+        ///     never more, because a still-<c>Triggered</c> record rides the backlog regardless of the cursor.
+        ///   • otherwise the record seed = the NEWEST record present. "Missed" means raised while this peer
+        ///     was in the session; the campaign's pre-join past is not this peer's backlog. Taking the newest
+        ///     rather than the newest RESOLVED loses nothing — an open decision rides <see cref="Backlog"/> on
+        ///     its <c>Triggered</c> state, not on the cursor (:112).
+        ///
+        /// THE FLOOD GUARD, and the guard that replaces the silent re-seed deleted in 8d5dbf0: never seed
+        /// from an EMPTY mirror. An empty record set is not an empty campaign, it is "the rail has not
+        /// delivered the records yet" — the transferred save's geoscape reaches OnReachedPlaying with
+        /// <c>_records</c> still empty and the whole set lands ~0.6 s later as ONE wholesale dict apply
+        /// (Clear + re-add, RailMeta.cs:2750). Seeding in that window pins the cursor at 0, and 0 means
+        /// "every historical record is past the cursor", i.e. the entire campaign's event history raises as
+        /// this peer's backlog on its first join (measured: 97 outcome windows on both clients).
+        /// Deferring is safe and needs no other arm: <see cref="Backlog"/> over an empty set is empty.
+        /// ponytail: an empty set is treated as not-yet-delivered, so a join into a campaign with ZERO event
+        /// records also skips the first batch that lands. Harmless in practice (a campaign carries its intro
+        /// events from turn one) — revisit only if a rail "mirror is live" signal ever exists to key on.
+        ///
         /// Logged either way, with which branch ran — a boundary that drops work silently is the bug class
         /// this file exists to kill.</summary>
         private static void SeedCursor(IDictionary<string, GeoscapeEventRecord> records)
         {
             if (_cursorSeeded) return;
-            _cursorSeeded = true;
-            long resolved = 0, newest = 0;
-            foreach (var rec in records.Values)
+            if (records.Count == 0)
             {
-                if (rec == null) continue;
-                long t = rec.LastTriggerAt.TimeSpan.Ticks;
-                if (t > newest) newest = t;
-                if (rec.State != GeoscapeEventRecordState.Triggered && t > resolved) resolved = t;
+                if (!_loggedEmptyMirror)
+                {
+                    _loggedEmptyMirror = true;
+                    Debug.Log("[MP][events] cursor seed DEFERRED — the record mirror is still empty, so the rail has " +
+                              "not delivered this campaign's history yet; seeding now would replay all of it");
+                }
+                return;
             }
+            _cursorSeeded = true;
+            long newest = FirstSightCursor(records);
             long saved = LoadCursor();
             if (saved > 0)
             {
@@ -196,10 +215,28 @@ namespace Multiplayer.Network.Sync
             }
             else
             {
-                _cursor = resolved;
+                _cursor = newest;
                 Debug.Log("[MP][events] cursor seeded to " + _cursor + " from " + records.Count +
-                          " record(s) — first join on this peer, resolved history before that point is not replayed");
+                          " record(s) — first sight of this campaign on this peer, so none of that history is " +
+                          "this peer's backlog");
             }
+        }
+
+        /// <summary>The FIRST-SIGHT cursor for a record set: the newest <c>LastTriggerAt</c> in it, 0 for an
+        /// empty set. Nothing at or before this point is this peer's backlog — "missed" means raised while
+        /// this peer was in the session, not the campaign's pre-join past. Pure and PlayerPrefs-free so
+        /// RailCheck L26 can assert the flood law headless.</summary>
+        internal static long FirstSightCursor(IDictionary<string, GeoscapeEventRecord> records)
+        {
+            long newest = 0;
+            if (records == null) return newest;
+            foreach (var rec in records.Values)
+            {
+                if (rec == null) continue;
+                long t = rec.LastTriggerAt.TimeSpan.Ticks;
+                if (t > newest) newest = t;
+            }
+            return newest;
         }
 
         /// <summary>Cursor codec. Invariant BOTH ways, deliberately: the value is a TimeUnit tick count that
