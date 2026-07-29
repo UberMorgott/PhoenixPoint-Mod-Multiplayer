@@ -75,6 +75,7 @@ namespace RailCheck
             laws.AddRange(RoundTrip());
             laws.AddRange(ValueRecordLaw());
             laws.AddRange(ExitWriteBackLaw(types));
+            laws.AddRange(HandleSweepLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1391,6 +1392,78 @@ namespace RailCheck
                 if (f.GetValue(null) == null)
                     yield return "L21 repaint-handle-unbound: UiNativeRepaint." + f.Name + " resolved to null — that " +
                                  "table entry is dead, its screen silently falls back to Exit+Enter";
+        }
+
+        /// <summary>L23 — L21's UiNativeRepaint handle sweep, generalized to the WHOLE rail: every static
+        /// reflection handle the sync layer holds must RESOLVE. <c>AccessTools.Method</c> returns null on an
+        /// exact-signature miss (a base-typed parameter is not a derived one) and every user of the handle
+        /// then silently does nothing — the patch never binds, the native derive never runs, the seam is
+        /// dead with nothing red. That is the failure mode this repo has already paid for, and it is
+        /// statically checkable in full: read the field, look for null.
+        ///
+        /// Deliberately NOT attempted (the class this law does not cover): "a native mutating funnel with
+        /// no capture-or-block seam". Statically it would need the set of funnels — every void method in
+        /// the game assembly that stores to a rail-covered field — and nearly all of them are legally
+        /// unpatched, because the client's sim is gated upstream at LevelHourlyUpdateCrt instead. A law
+        /// whose red lines are ~99% legal is a law that gets baselined and stops being read (the harness's
+        /// own "a law that cries wolf is a law that gets ignored"). The in-game gate finds those; this
+        /// sweep guarantees the seams we DID write are alive.</summary>
+        private static IEnumerable<string> HandleSweepLaw()
+        {
+            var asm = typeof(IntentRail).Assembly;
+            Type[] declared;
+            try { declared = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+
+            int swept = 0;
+            foreach (var t in declared.Where(t => t.Namespace == typeof(IntentRail).Namespace)
+                                      .OrderBy(t => t.FullName, StringComparer.Ordinal))
+                foreach (var f in t.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+                                   .Where(f => typeof(MemberInfo).IsAssignableFrom(f.FieldType))
+                                   .OrderBy(f => f.Name, StringComparer.Ordinal))
+                {
+                    object v = null; string err = null;
+                    try { v = f.GetValue(null); } catch (Exception ex) { err = (ex.InnerException ?? ex).GetType().Name; }
+                    if (err != null)
+                    { yield return "L23 handle-cctor-threw: " + t.Name + "." + f.Name + " — static init threw " + err; continue; }
+                    swept++;
+                    if (v == null)
+                        yield return "L23 handle-unbound: " + t.Name + "." + f.Name + " resolved to null — the seam it " +
+                                     "feeds (patch target, native derive or repaint) is dead and fails silently";
+                }
+            if (swept == 0)
+                yield return "L23 vacuous: no static reflection handle was read — the sweep is asleep";
+
+            // Same law, the OTHER handle kind: a class-level [HarmonyPatch(type, "name")] whose target does
+            // not resolve. This one is worse than a null MethodInfo — Harmony THROWS at PatchAll, and
+            // MultiplayerMain.cs:40-42 catches it into a single LogWarning, so ONE typo'd private-method
+            // name silently kills every patch after it in the same PatchAll. Only attribute-declared
+            // targets are readable statically (a TargetMethods() body is not); MethodType.Normal only.
+            int checkedTargets = 0;
+            foreach (var t in declared.OrderBy(t => t.FullName, StringComparer.Ordinal))
+            {
+                Type owner = null; string method = null; Type[] argTypes = null; bool normal = true, any = false;
+                try
+                {
+                    foreach (HarmonyLib.HarmonyPatch a in t.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false))
+                    {
+                        any = true;
+                        owner = owner ?? a.info?.declaringType;
+                        method = method ?? a.info?.methodName;
+                        argTypes = argTypes ?? a.info?.argumentTypes;
+                        if (a.info?.methodType != null && a.info.methodType != HarmonyLib.MethodType.Normal) normal = false;
+                    }
+                }
+                catch { continue; } // unloadable attribute type (cross-mod target absent here) — not our null
+                if (!any || !normal || owner == null || method == null) continue;
+                checkedTargets++;
+                if (HarmonyLib.AccessTools.Method(owner, method, argTypes) == null)
+                    yield return "L23 patch-target-unresolved: " + t.Name + " patches " + owner.Name + "." + method +
+                                 " which does not resolve — PatchAll throws and MultiplayerMain swallows it into a " +
+                                 "warning, killing every later patch in the same PatchAll";
+            }
+            if (checkedTargets == 0)
+                yield return "L23 vacuous: no attribute-declared Harmony target was resolved — the target check is asleep";
         }
 
         /// <summary>BFS from a screen teardown through presentation code; returns "Type.Method" of the first
