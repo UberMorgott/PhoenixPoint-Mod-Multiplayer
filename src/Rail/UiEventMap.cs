@@ -277,11 +277,11 @@ namespace Multiplayer.Network.Sync
                 // First two table citizens = the former special-case branches (9b35194 manufacturing
                 // opt-out, research per-kind path); their rebuild knowledge stays in the family files.
                 [typeof(UIStateManufacturing)] = (s, v) => { ManufactureSync.RepaintManufacturingUi(); return true; },
-                // Event dialog = a static modal (def text + choice buttons, nothing model-bound to
-                // repaint) — and the fallback re-enter would run its ExitState guard, which locally
-                // COMPLETES a still-Triggered event (UIStateGeoscapeEvent.cs:61-65) = client-side
-                // resolution of a host-authoritative choice. Declared repainted, deliberately.
-                [typeof(UIStateGeoscapeEvent)] = (s, v) => true,
+                // Event dialog: refresh the stale Record ref + re-drive the module's own SetChoices, which
+                // re-reads per-button affordability AND re-applies the first-answer-wins freeze. The
+                // fallback re-enter is doubly forbidden here — its ExitState answers a still-Triggered
+                // event with Choices.Last() (UIStateGeoscapeEvent.cs:61-65). RailCheck L21 asserts this key.
+                [typeof(UIStateGeoscapeEvent)] = (s, v) => EventPopup.RepaintDialog(s, v),
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {

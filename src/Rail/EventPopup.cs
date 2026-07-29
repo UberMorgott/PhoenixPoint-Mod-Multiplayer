@@ -5,6 +5,7 @@ using PhoenixPoint.Geoscape.Core;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewControllers.SiteEncounters;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -36,7 +37,11 @@ namespace Multiplayer.Network.Sync
     /// Client choice resolution stays FORBIDDEN (host-authoritative), but the click is no longer
     /// swallowed: <see cref="EventChoiceClientLock"/> BLOCKS it and relays it as a 0xB4 answer intent
     /// (<see cref="EventSync"/>), whose host-side arbiter freezes the first answer for everyone.
-    /// Esc is still held while the record is unresolved.
+    /// Esc is still held while the record is unresolved — on BOTH peers.
+    ///
+    /// A frozen answer is also what the losers SEE: <see cref="EventChoiceFreeze"/> greys every losing
+    /// button and marks the winner on every render of the dialog, and <see cref="RepaintDialog"/> flips an
+    /// already-open picker in place instead of closing and re-raising it.
     /// </summary>
     internal static class EventPopup
     {
@@ -55,6 +60,8 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests"); // GeoscapeViewSwitchQuery.cs:15
         private static readonly System.Reflection.FieldInfo CurrentRequestField =
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_currentStateSwitchRequest"); // :17
+        private static readonly System.Reflection.FieldInfo ChoiceButtonsField =
+            AccessTools.Field(typeof(SiteBaseChoicesController), "Choices");                 // protected, SiteBaseChoicesController.cs:23
         // GeoscapeEvent.IsCompleted / .ChoiceReward are { get; private set; } (GeoscapeEvent.cs:32, :36).
         private static readonly System.Reflection.MethodInfo SetIsCompleted =
             AccessTools.PropertySetter(typeof(GeoscapeEvent), "IsCompleted");
@@ -133,7 +140,6 @@ namespace Multiplayer.Network.Sync
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q)) return;
 
             SeedCursor(records);
-            FlipResolvedOpenWindow(view, records);
             RetireClosed(view, records);
 
             var backlog = Backlog(records, _cursor);
@@ -188,29 +194,111 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>The host resolved the choice while this peer's PICKER was open. Refresh the
-        /// dialog's stale Record ref (the blob apply rebuilt the record instance) so the ExitState
-        /// guard (UIStateGeoscapeEvent.cs:61-65, which locally completes a still-Triggered event) reads
-        /// the resolved state and stays silent, then close: the next pass re-raises the SAME record in
-        /// outcome mode, because the id leaves the in-flight set WITHOUT advancing the cursor — the
-        /// outcome has not been seen yet. B3 replaces this close+reopen with an in-place re-render.</summary>
-        private static void FlipResolvedOpenWindow(GeoscapeView view, IDictionary<string, GeoscapeEventRecord> records)
+        /// <summary>Law 11 repaint of the OPEN event dialog — the <c>UiNativeRepaint.Table</c> entry for
+        /// <c>UIStateGeoscapeEvent</c>, READ-direction. Two jobs:
+        ///   • refresh the dialog's stale <c>Record</c> ref: a blob apply rebuilds the record INSTANCE, and
+        ///     <c>UIStateGeoscapeEvent.ExitState</c>:61-65 reads <c>Event.Record.State</c> to decide whether to
+        ///     complete the event LOCALLY, so a stale <c>Triggered</c> ref there is a client-side resolution of
+        ///     a host-authoritative choice;
+        ///   • re-drive the module's own <c>SetChoices</c>, which re-reads each button's affordability from the
+        ///     model (<c>SiteBaseChoicesController.SetChoice</c>:60 → <c>choice.PassRequirements(faction,
+        ///     context)</c> = the wallet) and, through <see cref="EventChoiceFreeze"/>, re-applies the freeze
+        ///     when the record was resolved under an open PICKER — the "you see the outcome and cannot
+        ///     re-pick" half of the feature. This REPLACED a forced close+reopen of the window.
+        /// Deliberately NOT <c>ShowEncounter</c> (the screen's full re-init): it re-posts
+        /// <c>OpenEncounterSoundEvent</c> (UIModuleSiteEncounters.cs:195-198) and resets
+        /// <c>_encounterTextIndex</c> to 0 (:220), so on a peer where deltas land continuously it would
+        /// machine-gun the encounter sound and make a multi-page description impossible to page through. Same
+        /// rule as the <c>UIModuleBaseLayout.Init</c> exclusion in the table: the narrow native refresh.
+        /// Returning true even when there was nothing to refresh is the OTHER half of this entry — the
+        /// fallback Exit+Enter (OpenUiRepaint.cs:189-206) must never run for this screen, because Exit runs
+        /// that ExitState write-back. RailCheck L21 asserts the table key is present.</summary>
+        internal static bool RepaintDialog(GeoscapeViewState state, GeoscapeView view)
         {
-            if (!(view.CurrentViewState is UIStateGeoscapeEvent st)) return;
-            var ev = st.Event;
-            if (string.IsNullOrEmpty(ev?.EventID) || ev.IsCompleted) return;   // synthetic page, or already an outcome window
-            if (!records.TryGetValue(ev.EventID, out var rec) || rec == null) return;
-            if (rec.State == GeoscapeEventRecordState.Triggered) return;        // still an open decision
-            try
+            var ev = (state as UIStateGeoscapeEvent)?.Event;
+            var module = view?.GeoscapeModules?.SiteEncountersModule;
+            if (ev == null || module == null || module.Context == null) return true;
+            if (!string.IsNullOrEmpty(ev.EventID))
             {
-                ev.Record = rec;
-                _inFlight.Remove(ev.EventID);
-                view.FinishQueriedState();
-                Debug.Log("[MP][events] '" + ev.EventID + "' resolved by the host while open (→ " + rec.State +
-                          ") — reopening in outcome mode");
+                var rec = LiveRecord(ev.EventID, ev.Record);
+                if (rec != null) ev.Record = rec;
             }
-            catch (Exception ex)
-            { Debug.LogError("[MP][events] flip of open '" + ev.EventID + "' failed: " + ex.Message); }
+            var ctrl = module.ChoicesButtonController;
+            if (ctrl != null && ShowingRealChoices(ctrl, ev))
+                ctrl.SetChoices(module.Context.ViewerFaction, module.ChoiceButtonsContainer, module.ChoiceButtonPrefab, ev);
+            return true;
+        }
+
+        /// <summary>Is the dialog showing the REAL event's choice buttons, or one of the module's own
+        /// synthetic pages? A paging page (<c>SetPagingEncounter</c>:309-321) and the outcome/closing page
+        /// (<c>SetClosingEncounter</c>:326-355) are each built inline over a throwaway
+        /// <c>GeoscapeEvent</c> with <c>EventID == ""</c> whose text is already a frozen string and whose
+        /// single OK button must stay live — re-running <c>SetChoices</c> with the REAL event there would
+        /// replace that button with the picker. The module keeps no flag for which of the three it shows, so
+        /// the question is asked of the BUTTONS: <c>SiteBaseChoiceButton.Choice</c> holds the very
+        /// <c>GeoEventChoice</c> instance it was set from (SiteBaseChoiceButton.cs:43-47) and the def's list is
+        /// the only source of those instances, so reference identity answers it.</summary>
+        private static bool ShowingRealChoices(SiteBaseChoicesController ctrl, GeoscapeEvent ev)
+        {
+            var choices = ev.EventData?.Choices;
+            if (choices == null) return false;
+            foreach (var btn in ActiveButtons(ctrl))
+                for (int i = 0; i < choices.Count; i++)
+                    if (ReferenceEquals(btn.Choice, choices[i])) return true;
+            return false;
+        }
+
+        private static IEnumerable<SiteBaseChoiceButton> ActiveButtons(SiteBaseChoicesController ctrl)
+        {
+            if (!(ChoiceButtonsField?.GetValue(ctrl) is List<SiteBaseChoiceButton> list)) yield break;
+            foreach (var btn in list)
+                if (btn != null && btn.Button != null && btn.gameObject.activeSelf) yield return btn;
+        }
+
+        /// <summary>"The first choice is frozen for everyone" as the player SEES it: on a dialog whose record
+        /// is already resolved, every losing button goes non-interactable and the winner is shown SELECTED.
+        /// Native widget API only — <c>PhoenixGeneralButton.SetInteractable(false)</c> clears
+        /// <c>BaseButton.interactable</c> + <c>IsEnabled</c>, which <c>OnPointerClick</c>:327 requires, and
+        /// <c>ResetButtonAnimations</c>:180-183 paints the greyed state. The winner keeps
+        /// <c>interactable</c> and gets <c>IsSelected</c>: with the widget's OWN default
+        /// <c>IsNonInteractableWhenSelected</c> (true, PhoenixGeneralButton.cs:37) that is click-dead by the
+        /// same :327 test while painting the selected/pressed look (:184-189) — "this is what was chosen",
+        /// rather than a live-looking button whose click <see cref="EventChoiceClientLock"/> would silently
+        /// drop. (The note's draft forced that flag false to keep the winner clickable; the click cannot be
+        /// honoured, so a dead-looking-live button would be the lie.)
+        /// <c>IsSelected</c> is written on EVERY active button, not only the winner: the buttons are POOLED
+        /// and reused for the next window (<c>AddChoicesButtons</c>:67-75 builds the list once), so a winner
+        /// flag left behind would deaden that slot in the next picker — including the OK button of a closing
+        /// page, whose click is the only way out.</summary>
+        internal static void FreezeChoiceButtons(SiteBaseChoicesController ctrl, GeoscapeEvent displayed)
+        {
+            if (!InSession) return; // solo: stock behaviour, and nothing outside a session ever sets IsSelected
+            bool frozen = IsFrozen(displayed, out var winner);
+            foreach (var btn in ActiveButtons(ctrl))
+            {
+                bool isWinner = frozen && winner != null && ReferenceEquals(btn.Choice, winner);
+                btn.Button.IsSelected = isWinner;
+                if (frozen && !isWinner) btn.Button.SetInteractable(false);
+                else btn.Button.ResetButtonAnimations();
+            }
+        }
+
+        /// <summary>Is this dialog's answer already decided, and by which choice? The ledger is the
+        /// REPLICATED record, never the instance: <c>GeoscapeEvent.IsCompleted</c> is per-INSTANCE
+        /// (GeoscapeEvent.cs:36) and a synthesised instance over a resolved record reports false. An empty
+        /// <c>EventID</c> is one of the module's own synthetic pages — nothing to freeze. A resolved record
+        /// with <c>SelectedChoice</c> outside the def's range (native's -1 "no choice",
+        /// UIModuleSiteEncounters.cs:562-566) freezes every button and leaves no winner.</summary>
+        private static bool IsFrozen(GeoscapeEvent ev, out GeoEventChoice winner)
+        {
+            winner = null;
+            if (string.IsNullOrEmpty(ev?.EventID)) return false;
+            var rec = LiveRecord(ev.EventID, ev.Record);
+            if (rec == null || rec.State == GeoscapeEventRecordState.Triggered) return false;
+            var choices = ev.EventData?.Choices;
+            int i = rec.SelectedChoice;
+            if (choices != null && i >= 0 && i < choices.Count) winner = choices[i];
+            return true;
         }
 
         /// <summary>Is a window for this event id anywhere in the native pipeline — waiting in the
@@ -313,6 +401,18 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>An MP session is live, either side. The choice FREEZE and the Esc guard are peer-symmetric
+        /// multiplayer presentation rules — a host holding a dialog another peer already answered is the same
+        /// case as a client — while outside a session neither may touch the native dialog at all.</summary>
+        internal static bool InSession
+        {
+            get
+            {
+                var e = NetworkEngine.Instance;
+                return e != null && e.IsActiveSession;
+            }
+        }
+
         private static GeoLevelController GeoLevel()
         {
             try { return Base.Core.GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>(); }
@@ -382,8 +482,8 @@ namespace Multiplayer.Network.Sync
             if (ev.IsCompleted && choice != null && choice.Outcome == null && choice.Requirments == null) return true;
             if (frozen)
             {
-                // Not an error — two peers clicking within one RTT is the normal case. The outcome is
-                // already on its way; FlipResolvedOpenWindow turns this picker into it.
+                // Not an error — two peers clicking within one RTT is the normal case. Reaching this at all
+                // is the one-frame overlap: EventChoiceFreeze has normally already killed these buttons.
                 Debug.Log("[MP][events] click on '" + ev.EventID + "' dropped — already answered (record=" +
                           (rec == null ? "none" : rec.State.ToString()) + "), the first choice is frozen");
                 return false;
@@ -405,23 +505,43 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// Esc/back on the client's mirrored dialog: while the record is UNRESOLVED the modal must stay open
-    /// (the native OnCancel → FinishQueriedState → ExitState guard would locally complete a Triggered
-    /// event, UIStateGeoscapeEvent.cs:61-65). Once the host resolved it, allow the native close — after
-    /// refreshing the dialog's stale Record ref so that same guard stays silent.
+    /// Esc/back on a mirrored event dialog, PEER-SYMMETRIC (the name is history — this covers the host too):
+    /// while the record is UNRESOLVED the modal must stay open, because the native
+    /// OnCancel → FinishQueriedState → ExitState guard answers a still-Triggered event with
+    /// <c>Choices.Last()</c> (UIStateGeoscapeEvent.cs:61-65). On a client that is a client-side resolution of
+    /// a host-authoritative choice; on the HOST it is worse — it really does resolve, for everyone, with a
+    /// choice nobody picked, behind <see cref="EventCompleteArbiter"/>'s back, on the mere press of Esc.
+    /// Native intent agrees: that branch logs an ERROR ("UI is in invalid state"). Once the record IS
+    /// resolved the native close is allowed through — after refreshing the dialog's stale Record ref so that
+    /// same guard reads the resolved state and stays silent. Off outside a session (stock behaviour).
     /// </summary>
     [HarmonyPatch(typeof(UIStateGeoscapeEvent), "OnCancel")]
     internal static class EventCancelClientLock
     {
         private static bool Prefix(UIStateGeoscapeEvent __instance)
         {
-            if (!EventPopup.IsClient) return true;
+            if (!EventPopup.InSession) return true;
             var ev = __instance.Event;
             if (string.IsNullOrEmpty(ev?.EventID)) return true;
             var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
-            if (rec != null && rec.State == GeoscapeEventRecordState.Triggered) return false; // unresolved — the host closes it
+            if (rec != null && rec.State == GeoscapeEventRecordState.Triggered) return false; // unresolved — answering is the only way out
             if (rec != null) ev.Record = rec;
             return true;
         }
+    }
+
+    /// <summary>
+    /// Presentation seam (law 4c) for "the first answer is frozen for everyone". EVERY path that (re)builds
+    /// the encounter's choice buttons goes through <c>SiteBaseChoicesController.SetChoices</c> — the picker
+    /// (<c>UIModuleSiteEncounters.SetEncounter</c>:287), the paging page (:321) and
+    /// <see cref="EventPopup.RepaintDialog"/> — so applying the freeze HERE covers the window opening in
+    /// outcome mode straight out of the backlog, a picker resolving under the player mid-look, and a history
+    /// window opened long after the fact, with one code path instead of one per entry point.
+    /// </summary>
+    [HarmonyPatch(typeof(SiteBaseChoicesController), "SetChoices")]
+    internal static class EventChoiceFreeze
+    {
+        private static void Postfix(SiteBaseChoicesController __instance, GeoscapeEvent eventData) =>
+            EventPopup.FreezeChoiceButtons(__instance, eventData);
     }
 }

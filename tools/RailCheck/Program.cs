@@ -1453,6 +1453,32 @@ namespace RailCheck
             if (analyzed == 0)
                 yield return "L21 vacuous: no GeoscapeViewState with an ExitState body was analyzed — the walk resolved nothing and this law is asleep";
 
+            // Same law, the VALUE-RETURNING teardown write-back. The walk above is blind to
+            // UIStateGeoscapeEvent.ExitState:61-65 -> GeoscapeEvent.CompleteEvent on BOTH of its gates at
+            // once: CompleteEvent returns GeoFactionReward (non-void = query, the test that keeps this law
+            // from crying wolf), and GeoscapeEvent is deliberately NOT in the rail's classified closure --
+            // it is a session-local instance over the REPLICATED GeoscapeEventRecord
+            // (docs/rail-baseline.txt:240), even though it holds that record as a serialized member and its
+            // CompleteEvent resolves the ledger + grants the whole reward (GeoscapeEvent.cs:86-118).
+            // Widening either gate generically is not available: dropping void promotes every query to a
+            // command, and "declares a covered-typed member" promotes GeoLevelController to a model type --
+            // both flood, and a flooding law gets baselined and stops being read. So this arm resolves that
+            // ONE edge from IL and asserts the conclusion the law reaches everywhere else: the screen must be
+            // in UiNativeRepaint.Table. It reports itself asleep if the edge ever disappears.
+            var eventScreen = typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoscapeEvent);
+            var eventExit = eventScreen.GetMethod("ExitState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var completeEvent = typeof(GeoscapeEvent).GetMethod("CompleteEvent", AllMembers);
+            if (eventExit == null || completeEvent == null ||
+                !Callees(eventExit, game, directCallsOnly: true).Any(c => Same(c, completeEvent)))
+                yield return "L21 vacuous: UIStateGeoscapeEvent.ExitState no longer reaches GeoscapeEvent.CompleteEvent " +
+                             "— the value-returning teardown edge this arm was written for is gone and the arm is asleep";
+            else if (!UiNativeRepaint.Table.ContainsKey(eventScreen))
+                yield return "L21 exit-writeback-unrepainted: UIStateGeoscapeEvent.ExitState reaches GeoscapeEvent.CompleteEvent " +
+                             "(a value-returning command that resolves the replicated GeoscapeEventRecord and applies the " +
+                             "reward) but the screen is not in UiNativeRepaint.Table — its repaint falls back to Exit+Enter, " +
+                             "which auto-answers a still-Triggered event with Choices.Last() on whichever peer happens to " +
+                             "have the dialog open";
+
             // Same law, static half: a table entry whose reflection handle went null is a DEAD entry — the
             // screen declines, falls back to Exit+Enter and the leak is back with nothing red. Sweeps every
             // MemberInfo handle UiNativeRepaint holds, so no entry can add an unchecked one.
