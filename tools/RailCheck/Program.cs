@@ -1255,6 +1255,45 @@ namespace RailCheck
                                      " — the decoder dropped entries into a null container in silence (the recruit-hire freeze shape)";
                 }
             }
+
+            // ─── L24 — a host-side replay may not INVENT a shared-resource split ───────────────────
+            // A spend that drains the soldier's own SP pool takes the rest off the SHARED faction pool
+            // (ChangeCharacterStat:891-905), and the native UNDO pays each point back to the pool it
+            // came from, using the panel's per-VISIT baseline `_startingFactionPoints` as the boundary
+            // (:915-931). A host replaying a peer's gesture owns no such baseline, so the split has to
+            // RIDE the gesture. The day it does not, charge-then-undo quietly moves points ACROSS the
+            // two pools with the total still conserved: no exception, no log line, nothing red — the
+            // pools just drift apart every time somebody undoes a stat (RCA 2026-07-29). Two halves:
+            //   (a) the split must be an exact inverse of Charge for every spill shape;
+            //   (b) the baseline it is derived FROM must survive a repaint, or the gesture ships a
+            //       split that was already wrong at the source.
+            foreach (var (personal, shared, cost) in new[] { (20, 77, 56), (0, 41, 12), (56, 41, 27), (5, 0, 5), (97, 3, 97) })
+            {
+                int spill = cost > personal ? cost - personal : 0;         // Charge:1198-1203 == native :891-905
+                int backToShared = PersonnelSync.SharedShare(cost, spill); // what the gesture carried
+                int p = (personal - cost) + spill + (cost - backToShared);
+                int s = (shared - spill) + backToShared;
+                if (p != personal || s != shared)
+                    yield return "L24 refund-provenance: charging " + cost + " SP against pools " + personal + "/" + shared +
+                                 " and undoing it left them at " + p + "/" + s +
+                                 " — the host invented the refund split instead of applying the gesture's";
+            }
+            if (PersonnelSync.SharedShare(10, 99) != 10 || PersonnelSync.SharedShare(10, -5) != 0)
+                yield return "L24 refund-unclamped: a shipped split outside [0, amount] was applied verbatim — a peer could move the pool boundary at will";
+            UiNativeRepaint.StageBaselines.TryGetValue(
+                typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleCharacterProgression), out var progPairs);
+            var poolPair = (progPairs ?? new UiNativeRepaint.StagePair[0]).FirstOrDefault(x => x.Baseline?.Name == "_startingFactionPoints");
+            if (poolPair == null)
+                yield return "L24 split-baseline-undeclared: _startingFactionPoints is not in UiNativeRepaint.StageBaselines — " +
+                             "every rail repaint reseeds it to the live pool, so native's split reads 'the shared pool was never " +
+                             "touched' and the whole refund lands on the soldier's own pool";
+            else if (!poolPair.Ceiling)
+                yield return "L24 split-baseline-polarity: the shared-pool baseline is declared as a FLOOR — the restore clamps it " +
+                             "DOWN to the live pool, and native's cap (:928-931) then writes that lower number back INTO the pool: " +
+                             "SP destroyed, not just mis-split";
+            if (UiNativeRepaint.ClampBaseline(41, 12, ceiling: true) != 41)
+                yield return "L24 ceiling-clamp: a pool baseline was not restored ABOVE the reseeded value — this visit's spill is " +
+                             "forgotten and the refund can no longer find its way back to the shared pool";
         }
 
         private static List<EquipSync.SlotRef> Slots(params (string guid, int count, int charges)[] items)

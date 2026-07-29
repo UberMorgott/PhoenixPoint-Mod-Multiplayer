@@ -64,7 +64,10 @@ namespace Multiplayer.Network.Sync
     ///
     /// WHAT THE WIRE DELIBERATELY DOES NOT CARRY: any balance. A client's own numbers would make it
     /// authoritative over a shared resource (law 3) — the host re-derives every cost and pool from its
-    /// own state (<see cref="Charge"/>/<see cref="Refund"/>).
+    /// own state (<see cref="Charge"/>). The ONE exception is PROVENANCE, not balance: a refund's
+    /// personal-vs-shared SPLIT is a function of the panel's per-visit baseline, which exists on no
+    /// other peer, so the gesture ships it as a delta clamped to the refund it owns
+    /// (<see cref="Refund"/>) — the host still derives the AMOUNT.
     /// </summary>
     public static class PersonnelSync
     {
@@ -84,8 +87,10 @@ namespace Multiplayer.Network.Sync
         // ─── Reflection: UIModuleCharacterProgression's private view-model — READ-ONLY here ──
         // _character = the soldier the panel is bound to; _bought* = the staged ability purchase the
         // capture ships. The stage itself (_current*/_starting*) is native presentation the law leaves
-        // alone — nothing in this file reads or writes it anymore.
+        // alone — the one exception is _currentFactionPoints, READ (never written) around the native
+        // click to learn which pool the native split just chose (see StatClickPatch).
         private static readonly FieldInfo FCharacter = AccessTools.Field(typeof(UIModuleCharacterProgression), "_character");
+        private static readonly FieldInfo FFactionPool = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentFactionPoints");
         private static readonly FieldInfo FBoughtSlot = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySlot");
         private static readonly FieldInfo FBoughtAbility = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbility");
         private static readonly FieldInfo FBoughtSource = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySource");
@@ -101,7 +106,7 @@ namespace Multiplayer.Network.Sync
             {
                 _bindChecked = true;
                 if (FCharacter == null || FBoughtSlot == null || FBoughtAbility == null ||
-                    FBoughtSource == null || FBoughtLevel == null)
+                    FBoughtSource == null || FBoughtLevel == null || FFactionPool == null)
                     Debug.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
                                    "stat/ability intents CANNOT be captured; client edits will not sync.");
                 else
@@ -109,7 +114,7 @@ namespace Multiplayer.Network.Sync
             }
             // All-or-nothing: a partial bind must read as NOT bound.
             return FCharacter != null && FBoughtSlot != null && FBoughtAbility != null &&
-                   FBoughtSource != null && FBoughtLevel != null;
+                   FBoughtSource != null && FBoughtLevel != null && FFactionPool != null;
         }
 
         /// <summary>Arm the 0xAF surface on the generic intent engine: transport + dedup + reject
@@ -162,7 +167,13 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(UIModuleCharacterProgression), "ChangeCharacterStat")]
         internal static class StatClickPatch
         {
-            private static void Postfix(UIModuleCharacterProgression __instance, CharacterBaseAttribute baseStat, int __result)
+            /// <summary>The SHARED SP pool as the panel stages it, BEFORE the native body runs — the only
+            /// way to learn what the native split decided (it is a function of `_startingFactionPoints`,
+            /// the visit baseline, which exists nowhere but this panel).</summary>
+            private static void Prefix(UIModuleCharacterProgression __instance, ref int __state)
+                => __state = FFactionPool == null ? 0 : (int)FFactionPool.GetValue(__instance);
+
+            private static void Postfix(UIModuleCharacterProgression __instance, CharacterBaseAttribute baseStat, int __result, int __state)
             {
                 if (__result == 0) return;               // native refused the click
                 if (SyncApplyScope.Active) return;       // law 8: a reseed-driven call is not a gesture
@@ -176,18 +187,26 @@ namespace Multiplayer.Network.Sync
                     int dStr = baseStat == CharacterBaseAttribute.Strength ? __result : 0;
                     int dWill = baseStat == CharacterBaseAttribute.Will ? __result : 0;
                     int dSpeed = baseStat == CharacterBaseAttribute.Speed ? __result : 0;
+                    // PROVENANCE of the pool movement, as a DELTA (never an absolute — an absolute from a
+                    // stale stage is the foreign-spend revert this family kept re-fixing). >0 only on a
+                    // refund: native pays a decrement back into the SHARED pool first, up to the visit
+                    // baseline (ChangeCharacterStat:915-931). A spend needs nothing shipped — Charge
+                    // re-derives native's personal-first order from the host's own pools.
+                    int toShared = (int)FFactionPool.GetValue(__instance) - __state;
+                    if (toShared < 0) toShared = 0;
                     if (!engine.IsHost)
                     {
                         IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpSpendStats,
-                            "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill + " dSpeed=" + dSpeed,
-                            w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); });
+                            "stats U#" + (int)character.Id + " dStr=" + dStr + " dWill=" + dWill +
+                            " dSpeed=" + dSpeed + " toShared=" + toShared,
+                            w => { w.Write((int)character.Id); w.Write(dStr); w.Write(dWill); w.Write(dSpeed); w.Write(toShared); });
                         return;
                     }
                     // peer 0 = the host itself: a reject has no client to nudge, and its "U#" re-emit
                     // still reconverges everyone else. Only reachable if a remote delta landed between
                     // this panel's last reseed and the click — then the host's own stage is the stale
                     // one, so ask for the repaint that reseeds it.
-                    if (ApplyStats(0, character, dStr, dWill, dSpeed)) DiffEngine.FlushOnHostGesture();
+                    if (ApplyStats(0, character, dStr, dWill, dSpeed, toShared)) DiffEngine.FlushOnHostGesture();
                     else OpenUiRepaint.MarkDirty();
                 }
                 catch (Exception ex) { Debug.LogError("[MP][personnel] stat click seam failed: " + ex); }
@@ -747,7 +766,7 @@ namespace Multiplayer.Network.Sync
                 switch (op)
                 {
                     case OpSpendStats:
-                        ok = ApplyStats(senderPeerId, character, r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
+                        ok = ApplyStats(senderPeerId, character, r.ReadInt32(), r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
                         break;
                     case OpBuyAbility:
                         ok = ApplyBuyAbility(senderPeerId, character, (AbilityTrackSource)r.ReadInt32(),
@@ -926,9 +945,10 @@ namespace Multiplayer.Network.Sync
         /// (keeps the ModifyBaseStat clamp from out-running a refund's cost walk). The session
         /// purchase ledgers died with the co-management refit — the cost math is exactly symmetric, so
         /// no refund can mint SP; what a decrement CAN do is convert base stats into SP at fair price,
-        /// which native only prevents per-visit and co-op does not police. Refunds land on the
-        /// personal pool (<see cref="Refund"/>).</summary>
-        private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed)
+        /// which native only prevents per-visit and co-op does not police. A refund keeps the POOL
+        /// provenance the gesture carried (<paramref name="refundToShared"/> → <see cref="Refund"/>) —
+        /// the host cannot re-derive it, that split is a function of the panel's visit baseline.</summary>
+        private static bool ApplyStats(ulong peer, GeoCharacter character, int addStr, int addWill, int addSpeed, int refundToShared)
         {
             var progression = character.Progression;
             var stats = new[] { CharacterBaseAttribute.Strength, CharacterBaseAttribute.Will, CharacterBaseAttribute.Speed };
@@ -962,7 +982,7 @@ namespace Multiplayer.Network.Sync
             if (!any) return false; // no-op intent (client view was already behind)
             if (total > 0 && !Charge(character, total))
             { Reject(peer, (int)character.Id, "cannot afford " + total + " SP"); return false; }
-            if (total < 0) Refund(character, -total);
+            if (total < 0) Refund(character, -total, refundToShared);
             for (int i = 0; i < 3; i++)
                 if (delta[i] != 0) progression.ModifyBaseStat(stats[i], delta[i]);
             return true;
@@ -1002,12 +1022,15 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Inverse of <see cref="Charge"/> for the undo round-trip — mutoids get mutagens back
-        /// in the wallet; humans get the PERSONAL pool. ponytail: native refunds faction-first capped by
-        /// the visit's faction spill (ChangeCharacterStat:915-931) — that memory died with the session
-        /// ledgers, so a wire undo of a faction-spilled charge lands personal: total conserved, no mint,
-        /// worst case faction SP converts into one soldier's. Re-ledger the spill if it ever matters.</summary>
-        private static void Refund(GeoCharacter character, int amount)
+        /// <summary>Inverse of <see cref="Charge"/> for the undo round-trip — mutoids get mutagens back in
+        /// the wallet (ONE pool, no split); humans get the split the gesturing peer's native stage already
+        /// computed. <paramref name="toShared"/> IS that provenance: native pays a decrement back into the
+        /// FACTION pool up to the visit baseline `_startingFactionPoints` and only the remainder into the
+        /// soldier's own pool (ChangeCharacterStat:915-931), and a host-side replay owns no such baseline —
+        /// re-deriving it here is what silently walked the two pools apart. Clamped to [0, amount], so a
+        /// stale or hostile value can only re-split the refund it already owns: the total is conserved
+        /// either way and nothing is minted, which is why this needs no reject path.</summary>
+        private static void Refund(GeoCharacter character, int amount, int toShared)
         {
             if (amount <= 0) return;
             if (character.IsMutoid)
@@ -1015,8 +1038,19 @@ namespace Multiplayer.Network.Sync
                 character.Faction?.Wallet?.Give(new ResourceUnit(ResourceType.Mutagen, amount), OperationReason.Refund);
                 return;
             }
-            character.Progression.SkillPoints += amount;
+            var phoenix = character.Faction as GeoPhoenixFaction;
+            int shared = phoenix == null ? 0 : SharedShare(amount, toShared);
+            if (shared > 0) phoenix.Skillpoints += shared;
+            character.Progression.SkillPoints += amount - shared;
+            // The line whose absence made this silent: the split was chosen with nothing on record.
+            Debug.Log("[MP][personnel] stat refund U#" + (int)character.Id + " " + amount +
+                      "SP → shared=" + shared + " personal=" + (amount - shared));
         }
+
+        /// <summary>How much of a refund goes back to the SHARED pool. Pure and internal so the L24 law
+        /// can assert the charge→undo round-trip without a live character.</summary>
+        internal static int SharedShare(int amount, int toShared)
+            => amount <= 0 || toShared <= 0 ? 0 : (toShared > amount ? amount : toShared);
 
         /// <summary>Replay of <c>BuyAbility</c>:391-417 at model level.</summary>
         private static bool ApplyBuyAbility(ulong peer, GeoCharacter character, AbilityTrackSource source,

@@ -374,15 +374,30 @@ namespace Multiplayer.Network.Sync
         {
             internal FieldInfo Baseline;
             internal FieldInfo Stage;
+            /// <summary>Which side of the model value this baseline must stay on. A STAT baseline is a
+            /// FLOOR — the visit only spends it UP, so baseline ≤ model. A POOL baseline is a CEILING —
+            /// the visit only spends it DOWN, so baseline ≥ model. Same rule, opposite direction.</summary>
+            internal bool Ceiling;
         }
 
         /// <summary>Baseline owner TYPE → its staged values. Internal for the RailCheck bind law.</summary>
         internal static readonly Dictionary<Type, StagePair[]> StageBaselines = new Dictionary<Type, StagePair[]>
         {
             [typeof(UIModuleCharacterProgression)] = Pairs(typeof(UIModuleCharacterProgression),
-                "_startingStrengthStat", "_currentStrengthStat",
-                "_startingWillStat",     "_currentWillStat",
-                "_startingSpeedStat",    "_currentSpeedStat"),
+                floors: new[]
+                {
+                    "_startingStrengthStat", "_currentStrengthStat",
+                    "_startingWillStat",     "_currentWillStat",
+                    "_startingSpeedStat",    "_currentSpeedStat",
+                },
+                // The SHARED SP pool's baseline is not an undo floor — it is what the native refund
+                // SPLIT reads: ChangeCharacterStat:915-931 pays a decrement back into the FACTION pool
+                // up to `_startingFactionPoints` and only the remainder into the soldier's own pool. A
+                // repaint that reseeds it to the live model makes that read say "the shared pool was
+                // never touched", so the whole refund lands personal — on every peer, with nothing red.
+                // OUT on purpose: `_startingMutagens` (mutoids have ONE pool, no split to lose) and
+                // `_startingSkillPoints` (no native decision reads it).
+                ceilings: new[] { "_startingFactionPoints", "_currentFactionPoints" }),
         };
 
         /// <summary>Screen → the object its baseline lives on (the module, not the view state).</summary>
@@ -394,28 +409,38 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Bind at declaration time: a renamed/retyped field is a LOUD dead entry, never a
         /// silent one (the int type is also what lets the snapshot skip defensive casts).</summary>
-        private static StagePair[] Pairs(Type owner, params string[] names)
+        private static StagePair[] Pairs(Type owner, string[] floors, string[] ceilings)
         {
-            var pairs = new List<StagePair>(names.Length / 2);
+            var pairs = new List<StagePair>((floors.Length + ceilings.Length) / 2);
+            Bind(owner, floors, ceiling: false, pairs);
+            Bind(owner, ceilings, ceiling: true, pairs);
+            return pairs.ToArray();
+        }
+
+        private static void Bind(Type owner, string[] names, bool ceiling, List<StagePair> pairs)
+        {
             for (int i = 0; i + 1 < names.Length; i += 2)
             {
                 var b = AccessTools.Field(owner, names[i]);
                 var s = AccessTools.Field(owner, names[i + 1]);
                 if (b != null && s != null && b.FieldType == typeof(int) && s.FieldType == typeof(int))
-                    pairs.Add(new StagePair { Baseline = b, Stage = s });
+                    pairs.Add(new StagePair { Baseline = b, Stage = s, Ceiling = ceiling });
                 else
                     Debug.LogError("[Multiplayer][rail] stage-baseline bind FAILED on " + owner.Name + "." +
                                    names[i] + " — that screen's undo floor is unprotected against repaints");
             }
-            return pairs.ToArray();
         }
 
         /// <summary>The one non-mechanical rule of the restore. NEVER put the floor above what the
         /// reseed just read from the model: <c>saved &lt;= fresh</c> is the normal case (this visit's
         /// own spends) and keeps the undo window open, while <c>saved &gt; fresh</c> means the points
         /// are gone — a foreign refund, a respec or a host reject — and re-claiming them would let
-        /// this peer refund what it no longer owns.</summary>
-        internal static int ClampBaseline(int saved, int fresh) => saved < fresh ? saved : fresh;
+        /// this peer refund what it no longer owns. A CEILING baseline (a spent-down pool) is the same
+        /// rule mirrored: never put it BELOW the live value, or native's own cap
+        /// (ChangeCharacterStat:928-931 writes `_currentFactionPoints = _startingFactionPoints`) would
+        /// push that lower number back into the pool and destroy points instead of mis-splitting them.</summary>
+        internal static int ClampBaseline(int saved, int fresh, bool ceiling = false) =>
+            ceiling ? (saved > fresh ? saved : fresh) : (saved < fresh ? saved : fresh);
 
         /// <summary>Baseline of the open screen, captured BEFORE a repaint and restored after. A screen
         /// with no declaration captures nothing and restores nothing.</summary>
@@ -449,7 +474,7 @@ namespace Multiplayer.Network.Sync
                 for (int i = 0; i < _pairs.Length; i++)
                 {
                     var f = _pairs[i].Baseline;
-                    f.SetValue(_owner, ClampBaseline(_saved[i], (int)f.GetValue(_owner)));
+                    f.SetValue(_owner, ClampBaseline(_saved[i], (int)f.GetValue(_owner), _pairs[i].Ceiling));
                 }
             }
         }
