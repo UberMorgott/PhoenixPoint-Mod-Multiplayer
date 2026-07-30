@@ -71,11 +71,16 @@ namespace Multiplayer.Network.Sync
         internal FieldInfo Fi;
         internal PropertyInfo Pi;
         // Twin coercions (bridge/twin tables only — a direct-source member always matches its own type):
-        internal MemberInfo HopFi;   // alias chain "Hop.Member": entity → hop object (class) → Fi/Pi.
+        internal MemberInfo[] HopFi; // alias chain "A.B.Member": entity → hop object → … → Fi/Pi.
                                      // FIELD or PROPERTY: the game exposes carriers through auto-properties
                                      // (GeoActor.Surface, decompile GeoVehicle.cs:89) — a field-only hop left
                                      // GeoVehicle.SurfacePos/SurfaceRot "dto-twin unresolved", i.e. a client
                                      // aircraft that never moved. Read-only here (writes land on Fi/Pi).
+                                     // N hops, not one: the game's own Record/Process mapping reaches TWO
+                                     // deep on the range carriers — GeoHaven.cs:1518/1369 and
+                                     // GeoPhoenixBase.cs:1108/969 both read and write `X.Range.Range` — and a
+                                     // single-hop resolver left every one of them "dto-twin unresolved"
+                                     // (mist-repeller + site-scanner radius never mirrored at all).
         internal FieldInfo WrapFi;   // live member is a one-field wrapper struct around ValueType
                                      // (EarthUnits.Value ← float): unwrap on read, re-wrap on write
         internal bool FactionRef;    // live member is GeoFaction, ValueType its def — unwrap to the def
@@ -90,7 +95,9 @@ namespace Multiplayer.Network.Sync
         /// same value — cost only. Twin coercions (hop/unwrap) run only on fields that carry them.</summary>
         public object GetValue(object o)
         {
-            if (HopFi != null && (o = RailMeta.GetMemberValue(HopFi, o)) == null) return null;
+            if (HopFi != null)
+                foreach (var h in HopFi)
+                    if ((o = RailMeta.GetMemberValue(h, o)) == null) return null;
             var v = (_get ?? (_get = RailMeta.BuildGetter(this)))(o);
             if (v == null) return null;
             if (WrapFi != null) return WrapFi.GetValue(v);
@@ -100,7 +107,11 @@ namespace Multiplayer.Network.Sync
 
         public void SetValue(object o, object v)
         {
-            if (HopFi != null && (o = RailMeta.GetMemberValue(HopFi, o)) == null) return; // hop not initialised — nothing to write into
+            // Any hop null = the carrier was never constructed (GeoHaven.MistRepeller is created lazily and
+            // ONLY when the save carried a non-zero range, GeoHaven.cs:1362-1370) — nothing to write into.
+            if (HopFi != null)
+                foreach (var h in HopFi)
+                    if ((o = RailMeta.GetMemberValue(h, o)) == null) return;
             if (WrapFi != null && v != null)
             {
                 var boxed = Activator.CreateInstance(RailMeta.MemberType((MemberInfo)Fi ?? Pi));
@@ -180,7 +191,7 @@ namespace Multiplayer.Network.Sync
             var ser = RailMeta.GameSerializer;
             if (ser == null) return null; // pre-init — do NOT cache the miss
             rt = new RailType { Type = live, Source = "twin:" + dto.Name, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo[] hop)>();
             foreach (var dtoMi in RailMeta.SerializedMembers(ser, dto))
             {
                 var valType = RailMeta.MemberType(dtoMi);
@@ -201,7 +212,7 @@ namespace Multiplayer.Network.Sync
         private static RailType Build(Type t, Serializer ser)
         {
             var rt = new RailType { Type = t, Fields = new List<RailField>(), _byName = new Dictionary<string, RailField>(StringComparer.Ordinal) };
-            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop)>();
+            var raw = new List<(string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo[] hop)>();
 
             var direct = RailMeta.SerializedMembers(ser, t);
             if (direct.Count > 0)
@@ -293,7 +304,7 @@ namespace Multiplayer.Network.Sync
             !RailMeta.LeafKindOf(t, out _) && !RailMeta.IsLeafCollection(t) &&
             RailMeta.HuskMembers(t).Count > 0 ? t : null;
 
-        private static RailField BuildField(Type owner, string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo hop = null)
+        private static RailField BuildField(Type owner, string name, Type valType, MemberInfo live, string alias, string fail, MemberInfo[] hop = null)
         {
             var f = new RailField { Name = name, ValueType = valType, LiveAlias = alias, Fi = live as FieldInfo, Pi = RailMeta.DeclaredView(live as PropertyInfo), HopFi = hop };
             // DECLARED opt-out FIRST, ahead of the unresolved bail. An opt-out on a member no convention
@@ -576,6 +587,14 @@ namespace Multiplayer.Network.Sync
             "(GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the " +
             "arrival OUTCOME stays host-only (VehicleArrivalGate)";
 
+        private const string ExpansionHandleOptOut =
+            "scheduler handle, not state — the DTO records an IUpdateable.NextUpdate whose writer is " +
+            "Timing.Start and whose live handle field is private with no counterpart of this name. What it " +
+            "schedules is a MONOTONE ACCUMULATOR clamped to a def-fixed maximum, and the accumulated VALUE " +
+            "now mirrors through a twin alias, which is the half that matters. Mirroring the client's own " +
+            "next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value " +
+            "will not. Same class as the exploration handle above";
+
         private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
@@ -618,6 +637,39 @@ namespace Multiplayer.Network.Sync
             // one reviewed fact rather than a stop on one side and an anonymous gap on the other.
             { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.NextSiteExplorationUpdate", ExplorationHandleOptOut },
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.NextSiteExplorationUpdate", ExplorationHandleOptOut },
+
+            // Same class as ExplorationHandleOptOut, three more instances of it. Each DTO member records an
+            // `IUpdateable.NextUpdate` — a SCHEDULER HANDLE, not state. Its live writer is Timing.Start, the
+            // handle field is private with no live counterpart of that name, and what it schedules is a
+            // MONOTONE ACCUMULATOR whose VALUE now mirrors through the alias rows above, which is the part
+            // that matters: alien-base expansion drives Range.Range (mirrored: BaseExpansion), the scavenging
+            // refresh drives site enemies (host-authored), the faction-vehicle wait drives _lastVisitedSited
+            // (mirrored). Mirroring the client's next-wakeup time on top of its own live schedule would fight
+            // its scheduler; correcting the accumulated VALUE will not.
+            { "PhoenixPoint.Geoscape.Entities.GeoAlienBase.NextBaseExpansionUpdate", ExpansionHandleOptOut },
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite.NextEnemyRefreshUpdate", ExpansionHandleOptOut },
+            { "PhoenixPoint.Geoscape.Entities.VehicleFactionController.WaitingUpdateTime", ExpansionHandleOptOut },
+
+            // DECLARED GAPS — stated, not fixed. Each needs a COERCION rung the twin machinery does not
+            // have, and inventing one for a single member is the per-subsystem crutch the mandate forbids.
+            //   AssignedResearchId: DTO `string` against live `AssignedResearch` (ResearchDef,
+            //     GeoHaven.cs:140). The game does the id⇄def lookup by hand at record/process time
+            //     (GeoHaven.cs:1526). Cost: a client shows no haven-assigned research topic.
+            //   ScavengingSiteType: DTO `int` against live `_scavengingType` (enum GeoScavengingSiteType,
+            //     GeoScavengingSite.cs:119/126) — an explicit (int)/(enum) cast on both sides.
+            //     Cost: a client's scavenging sites keep their save-loaded type; the host never changes it
+            //     after creation, so this is inert until it isn't.
+            //   Exit for both: one generic coercion rung beside WrapperField/FactionRef (def⇄id and
+            //     enum⇄underlying), which would also close any future member of the same two shapes.
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.AssignedResearchId", "DECLARED GAP — needs a def⇄string-id coercion rung (live AssignedResearch is a ResearchDef, GeoHaven.cs:140/1526); no such rung exists and one member does not justify inventing it" },
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite.ScavengingSiteType", "DECLARED GAP — needs an enum⇄underlying-int coercion rung (live _scavengingType is GeoScavengingSiteType, GeoScavengingSite.cs:119/126); host never mutates it post-creation" },
+            // v<4 save-migration leftover (PreviousNames "Recruit"), NOT written by RecordInstanceData at all
+            // (GeoHaven.cs:1509-1527) — the live recruit rides as NewRecruit -> AvailableRecruit. Same class
+            // as GeoscapeEventSystem.OldTriggeredEncounters: keep the unique-type fallback from landing it on
+            // some other GeoCharacter member the day one appears.
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven._oldRecruit", "v<4 migration leftover — RecordInstanceData never writes it (GeoHaven.cs:1509-1527); the live recruit rides as NewRecruit -> AvailableRecruit" },
+            // Serializer schema version, not game state (GeoPhoenixBase.InstanceData is [SerializeType(Version = 3)]).
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.Version", "serializer schema version, not state — the DTO's [SerializeType(Version=3)] stamp" },
 
             // The three POSE carriers of a navigating actor. Keyed on the two owners whose tables carry them
             // (the twin table's owner is the LIVE type — GeoVehicle, which the base walk extends to
@@ -894,6 +946,37 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.RemoveEventsAfterTimers", "_removeEventsAfterTimerExpires" }, // GeoscapeEventSystem.RecordInstanceData:669 — DTO name is not the storage name and no convention reaches it
+
+            // ─── Haven / base / alien-base status (the "capture + faction behaviour" twins) ───
+            // Every row below is the game's OWN Record/Process mapping, read off the decompile. They were
+            // all "dto-twin unresolved": the DTO name is not the storage name, or the carrier sits one/two
+            // hops down a component. Nothing here is a subsystem crutch — resolution, classification and
+            // application still ride the one generic path.
+            //
+            // The two-hop rows are what the N-hop chain above exists for. `X.Range.Range` is the game's own
+            // read AND write on both sides (GeoHaven.cs:1518 record / :1369 process; GeoPhoenixBase.cs:1108
+            // record / :969 process), and GeoRangeComponent.Range is a real setter with a change-guard that
+            // fires OnRangeChanged and rescales the range indicator (GeoRangeComponent.cs:29-46) — so a
+            // mirrored radius repaints the globe natively, no UI seam needed.
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.MistRepellerRange", "MistRepeller.Range.Range" },  // GeoHaven.cs:1518 / :1369 (MistRepeller is lazily null — SetValue's hop guard covers it)
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.AlertLevelCooldown", "AlertCooldownDaysLeft" },    // GeoHaven.cs:1520 — the haven ALERT countdown (:904 decrements it)
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.OfferedResources", "StockedResources" },           // GeoHaven.cs:1519 — the trade stock the haven screen shows
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.RecruitChecked", "QuerySpawnNewRecruit" },         // GeoHaven.cs:1515
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.MistRepellerRange", "MistRepeller.Range.Range" }, // GeoPhoenixBase.cs:1108 / :969
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.SiteScannerRange", "SiteScanner.Range.Range" },   // GeoPhoenixBase.cs:1111 — the scan radius that reveals sites
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.ScannerEnabled", "SiteScanner.ScannerEnabled" },  // GeoPhoenixBase.cs:1113 (one hop — it only ever needed the row)
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.AttackProtectionHours", "BaseAssaultProtectionHours" }, // GeoPhoenixBase.cs:1115 — base DEFENCE status; CanBeAssaulted:93 derives from it, :340 decrements
+            // Alien base = the mist SOURCE. `Range.Range` IS the base's expansion radius (FullyExpanded:94
+            // derives from it) and the game writes it straight back on load (GeoAlienBase.cs:533).
+            { "PhoenixPoint.Geoscape.Entities.GeoAlienBase.BaseExpansion", "Range.Range" },               // GeoAlienBase.cs:520 / :533
+            { "PhoenixPoint.Geoscape.Entities.GeoAlienBase.BaseRevealChecks", "_baseAttacksCounter" },    // GeoAlienBase.cs:524
+            // Get-only view over a private counter (GeoAlienBase.cs:102 `HavenAttackCounter => _havenAttackCounter`),
+            // so the same-name rung resolved it and excluded it "read-only". Same move as ActorComponent.Rot:
+            // point the alias at the writable member behind the read-only view.
+            { "PhoenixPoint.Geoscape.Entities.GeoAlienBase.HavenAttackCounter", "_havenAttackCounter" },  // GeoAlienBase.cs:523
+            // NPC faction aircraft behaviour — the whole twin was resolved=0/3.
+            { "PhoenixPoint.Geoscape.Entities.VehicleFactionController.LastVisitedSite", "_lastVisitedSited" }, // VehicleFactionController.cs:268 / :276 (the game's own field name carries the typo)
+            { "PhoenixPoint.Geoscape.Entities.VehicleFactionController.WaitForSiteMission", "_waitSiteMission" }, // VehicleFactionController.cs:269
         };
 
         /// <summary>Resolve a bridge member name onto the live type: explicit twin alias first (the game's
@@ -902,7 +985,7 @@ namespace Multiplayer.Network.Sync
         /// game exposes storage through read-only or shape-changed properties: _weapons/_modules/_addons),
         /// then the UNIQUE live member of the identical class type (catches renames like
         /// ManufactureQueue → Manufacture).</summary>
-        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out MemberInfo hop)
+        internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out MemberInfo[] hop)
         {
             alias = null;
             hop = null;
@@ -951,25 +1034,26 @@ namespace Multiplayer.Network.Sync
         /// (GeoActor.Surface — decompile GeoVehicle.cs:89), and a field-only hop silently resolved to
         /// nothing there ("dto-twin unresolved") instead of failing visibly.
         /// ponytail: single hop only; extend to a chain when a real mapping needs one.</summary>
-        private static MemberInfo ResolveAliasChain(Type live, string target, Type valType, out MemberInfo hop)
+        private static MemberInfo ResolveAliasChain(Type live, string target, Type valType, out MemberInfo[] hop)
         {
             hop = null;
-            int dot = target.IndexOf('.');
-            if (dot < 0)
+            var seg = target.Split('.');
+            var hops = new MemberInfo[seg.Length - 1];
+            var cur = live;
+            for (int i = 0; i < seg.Length - 1; i++)
             {
-                var m = (MemberInfo)HarmonyLib.AccessTools.Field(live, target) ?? HarmonyLib.AccessTools.Property(live, target);
-                return m != null && TwinTypeCompatible(MemberType(m), valType) ? m : null;
+                var h = (MemberInfo)HarmonyLib.AccessTools.Field(cur, seg[i]) ?? HarmonyLib.AccessTools.Property(cur, seg[i]);
+                if (h == null) return null;
+                var ht = MemberType(h);
+                // Writes land THROUGH the hop by reference, so a value-typed hop would write into a copy.
+                if (ht.IsValueType) return null;
+                hops[i] = h;
+                cur = ht;
             }
-            var hopName = target.Substring(0, dot);
-            hop = (MemberInfo)HarmonyLib.AccessTools.Field(live, hopName) ?? HarmonyLib.AccessTools.Property(live, hopName);
-            if (hop == null) return null;
-            var hopType = MemberType(hop);
-            if (hopType.IsValueType) { hop = null; return null; }
-            var leaf = target.Substring(dot + 1);
-            var mm = (MemberInfo)HarmonyLib.AccessTools.Field(hopType, leaf) ?? HarmonyLib.AccessTools.Property(hopType, leaf);
-            if (mm != null && TwinTypeCompatible(MemberType(mm), valType)) return mm;
-            hop = null;
-            return null;
+            var leaf = (MemberInfo)HarmonyLib.AccessTools.Field(cur, seg[seg.Length - 1]) ?? HarmonyLib.AccessTools.Property(cur, seg[seg.Length - 1]);
+            if (leaf == null || !TwinTypeCompatible(MemberType(leaf), valType)) return null;
+            hop = hops.Length > 0 ? hops : null;
+            return leaf;
         }
 
         /// <summary>Can a live member of type <paramref name="liveT"/> mirror a DTO value of type

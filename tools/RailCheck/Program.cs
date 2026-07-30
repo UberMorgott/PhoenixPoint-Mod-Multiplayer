@@ -110,6 +110,8 @@ namespace RailCheck
             laws.AddRange(AugmentClickParityLaw());
             laws.AddRange(DerivedExplorationLaw());
             laws.AddRange(HostSelfRepaintLaw());
+            laws.AddRange(DerivedObjectivesLaw(game));
+            laws.AddRange(SiteStatusTwinLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1439,7 +1441,7 @@ namespace RailCheck
             var fOwnerS = twinS?.FieldByName("OwnerFactionDef");
             if (fRange == null || fRange.Class != FieldClass.Leaf || fRange.WrapFi == null)
                 yield return "L14 twin-coercion: GeoVehicle.RangeRemaining lost its EarthUnits wrapper — live apply would throw";
-            if (fHp == null || fHp.Class != FieldClass.Leaf || fHp.HopFi?.Name != "Stats" || fHp.Fi?.Name != "HitPoints")
+            if (fHp == null || fHp.Class != FieldClass.Leaf || (fHp.HopFi?.Length != 1 || fHp.HopFi[0].Name != "Stats") || fHp.Fi?.Name != "HitPoints")
                 yield return "L14 twin-coercion: GeoVehicle.HitPoints no longer routes through Stats.HitPoints";
             if (fName == null || fName.Class != FieldClass.Leaf || fName.Fi?.Name != "_vehicleName")
                 yield return "L14 twin-coercion: GeoVehicle.Name no longer lands in _vehicleName (the Name property substitutes a localized default)";
@@ -1471,10 +1473,10 @@ namespace RailCheck
                                  ") — a mirrored pose makes the client step at the rail's walk cadence (L43)";
                 else
                 {
-                    MemberInfo surfLive = null, hop = null;
+                    MemberInfo surfLive = null; MemberInfo[] hop = null;
                     try { surfLive = RailMeta.ResolveLive(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), dtoName, valType, out _, out hop); }
                     catch { }
-                    if (!(hop is PropertyInfo) || hop.Name != "Surface" || surfLive == null || surfLive.Name != leafName)
+                    if (hop?.Length != 1 || !(hop[0] is PropertyInfo) || hop[0].Name != "Surface" || surfLive == null || surfLive.Name != leafName)
                         yield return "L14 twin-coercion: GeoVehicle." + dtoName + " no longer resolves through the Surface " +
                                      "property onto Transform." + leafName + " — the opt-out is now masking a real twin " +
                                      "gap, so removing it would restore nothing";
@@ -1485,11 +1487,11 @@ namespace RailCheck
             var synPropHop = new RailField
             {
                 Name = "HitPoints", ValueType = typeof(int), Class = FieldClass.Leaf, Leaf = LeafKind.Int64,
-                HopFi = typeof(HopHolder).GetProperty("StatsProp"),
+                HopFi = new MemberInfo[] { typeof(HopHolder).GetProperty("StatsProp") },
                 Fi = typeof(PhoenixPoint.Geoscape.Core.GeoVehicleStats).GetField("HitPoints")
             };
             synPropHop.SetValue(propHop, 41);
-            if (!(synPropHop.HopFi is PropertyInfo) || propHop.Stats.HitPoints != 41 ||
+            if (!(synPropHop.HopFi[0] is PropertyInfo) || propHop.Stats.HitPoints != 41 ||
                 !(synPropHop.GetValue(propHop) is int ph) || ph != 41)
                 yield return "L14 hop-mechanics: a PROPERTY hop does not set/get round-trip — GeoVehicle.SurfacePos/SurfaceRot cannot ride";
             // Wrapper mechanics: SetValue must box+wrap the naked float, GetValue must unwrap it.
@@ -1508,7 +1510,7 @@ namespace RailCheck
             var synHop = new RailField
             {
                 Name = "HitPoints", ValueType = typeof(int), Class = FieldClass.Leaf, Leaf = LeafKind.Int64,
-                HopFi = typeof(HopHolder).GetField("Stats"),
+                HopFi = new MemberInfo[] { typeof(HopHolder).GetField("Stats") },
                 Fi = typeof(PhoenixPoint.Geoscape.Core.GeoVehicleStats).GetField("HitPoints")
             };
             synHop.SetValue(hopHolder, 33);
@@ -5472,6 +5474,167 @@ namespace RailCheck
             // (get-only class-typed property) while the real Surface.position wiring is asserted on the
             // live GeoVehicle metadata above.
             public PhoenixPoint.Geoscape.Core.GeoVehicleStats StatsProp => Stats;
+        }
+
+        /// <summary>L55 — THE FACTION OBJECTIVES LIST IS DERIVED; IT MUST NOT RIDE. The left-hand geoscape
+        /// objectives panel desyncs, and the tempting fix is to mirror the list. That is the wrong fix twice
+        /// over.
+        ///
+        /// (a) It CANNOT ride. <c>GeoFactionObjective</c> is ABSTRACT (GeoFactionObjective.cs:13) and the blob
+        /// codec is declared-type-only (<c>polymorphic-codec: no</c>), so every concrete element would ABORT
+        /// AT ENCODE — an exclusion by exception, not by classification (boundary-law L-E), i.e. exactly the
+        /// silent-swallow class this harness exists to outlaw. Today it is held out LOUDLY instead, by the
+        /// husk gate on <c>_level</c>. That gate is the only thing standing between us and the silent abort,
+        /// and <c>_level</c> is textbook self-healing (:29 <c>_level ?? (_level = GameUtl.CurrentLevel()…)</c>),
+        /// so a future "tidy-up" waiver — the same row shape <c>GeoUnitDescriptor.__level</c> already has —
+        /// would look obviously correct and would swap the loud exclusion for the silent one. This arm is the
+        /// tripwire on that specific edit.
+        ///
+        /// (b) It NEED NOT ride. Every concrete <c>IsCompleted()</c> RECOMPUTES from live state that already
+        /// mirrors — BuildFacility reads <c>_faction.Bases…Layout.Facilities</c> state (:41), Diplomatic reads
+        /// <c>DiplomacyState.PointOfInterest</c> (:50), FindPhoenixBase reads <c>_base.GetVisited</c> (:38),
+        /// ActiveSites/DiscoverSites read their site sets (:40 / :28). Mirror the roots, and the panel renders
+        /// itself. Falsify by waiving the husk, or by letting the abstract element type through.</summary>
+        private static IEnumerable<string> DerivedObjectivesLaw(Assembly game)
+        {
+            var objective = game.GetType("PhoenixPoint.Geoscape.Levels.Objectives.GeoFactionObjective");
+            var factions = new[]
+            {
+                "PhoenixPoint.Geoscape.Levels.GeoFaction",
+                "PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction",
+                "PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction",
+            }.Select(n => game.GetType(n)).ToList();
+
+            if (objective == null || factions.Any(f => f == null))
+            {
+                yield return "L55 types-unreachable: GeoFactionObjective or one of the three GeoFaction types does not " +
+                             "resolve — the objectives arms cannot be checked at all";
+                yield break;
+            }
+
+            // Positive control #1 — the premise of arm (a). If the codec ever becomes polymorphic, the
+            // "it aborts at encode" reasoning dies and this whole law must be re-argued rather than kept green.
+            if (!objective.IsAbstract)
+                yield return "L55 no-longer-abstract: GeoFactionObjective is not abstract any more — the encode-abort " +
+                             "argument behind the husk gate is void; re-derive whether the list may ride";
+
+            // Positive control #2 — the husk gate must actually still SEE a husk here. If _level stopped being
+            // a husk member (waived, or renamed), the exclusion below could be coming from somewhere else and
+            // every arm would be passing for the wrong reason.
+            var husk = RailMeta.HuskMembers(objective);
+            if (!husk.Any(h => h.StartsWith("_level:", StringComparison.Ordinal)))
+                yield return "L55 husk-gate-disarmed: GeoFactionObjective._level is no longer an unwaived husk member " +
+                             "(husk = [" + string.Join(",", husk) + "]) — the loud exclusion that keeps the abstract " +
+                             "element out of the encoder has been removed; the next step is a SILENT encode abort";
+
+            // The real arm: on every faction table, Objectives must be classified Excluded. Not "absent" —
+            // present and refused, so the refusal is visible in the baseline.
+            int seen = 0;
+            foreach (var f in factions)
+            {
+                var rt = RailType.Get(f);
+                var fld = rt?.FieldByName("Objectives");
+                if (fld == null) continue;      // counted by the vacuity guard below, not silently tolerated
+                seen++;
+                if (fld.Class != FieldClass.Excluded)
+                    yield return "L55 objectives-now-ride: " + f.Name + ".Objectives is classified " + fld.Class +
+                                 ", not Excluded — an abstract element type is being handed to a declared-type-only " +
+                                 "codec (silent encode abort), and the panel is derived anyway (IsCompleted() " +
+                                 "recomputes from mirrored roots)";
+            }
+            // Positive control #3 — non-vacuity. Zero rows examined = three green arms proving nothing.
+            if (seen != factions.Count)
+                yield return "L55 vacuous: only " + seen + "/" + factions.Count + " faction tables expose an " +
+                             "'Objectives' member — the arms above examined nothing on the rest";
+        }
+
+        /// <summary>L56 — THE HAVEN / BASE / ALIEN-BASE STATUS TWINS MUST STAY RESOLVED. Capture status, haven
+        /// alert, base assault protection, scanner reach and both mist radii are the state the derived
+        /// objectives panel (L55) and the globe read back. All of them live on DTO members whose live carrier
+        /// the name conventions cannot reach — the DTO name is not the storage name, or the carrier sits one
+        /// or TWO hops down a component (<c>MistRepeller.Range.Range</c>, <c>SiteScanner.Range.Range</c>, the
+        /// mapping the game itself performs at GeoHaven.cs:1518/1369 and GeoPhoenixBase.cs:1108/969).
+        ///
+        /// Each row below therefore rides ONLY because of an explicit alias, and an alias that stops resolving
+        /// fails SILENTLY: <c>ResolveLive</c> breaks out to "dto-twin unresolved" and the member simply stops
+        /// mirroring — no exception, no log. That is the failure this law converts into a red build. Falsify
+        /// by deleting any alias row, by shortening the hop chain back to one hop, or by pointing an alias at
+        /// a read-only view instead of the writable member behind it.</summary>
+        private static IEnumerable<string> SiteStatusTwinLaw()
+        {
+            // (live type, DTO type, DTO member, expected live leaf, expected hop chain)
+            var rows = new (Type Live, Type Dto, string Member, string Leaf, string[] Hops)[]
+            {
+                (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
+                    "MistRepellerRange", "Range", new[] { "MistRepeller", "Range" }),
+                (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
+                    "AlertLevelCooldown", "AlertCooldownDaysLeft", null),
+                (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
+                    "OfferedResources", "StockedResources", null),
+                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
+                    "MistRepellerRange", "Range", new[] { "MistRepeller", "Range" }),
+                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
+                    "SiteScannerRange", "Range", new[] { "SiteScanner", "Range" }),
+                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
+                    "ScannerEnabled", "ScannerEnabled", new[] { "SiteScanner" }),
+                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
+                    "AttackProtectionHours", "BaseAssaultProtectionHours", null),
+                (typeof(PhoenixPoint.Geoscape.Entities.GeoAlienBase), typeof(PhoenixPoint.Geoscape.Entities.GeoAlienBase.InstanceData),
+                    "BaseExpansion", "Range", new[] { "Range" }),
+                (typeof(PhoenixPoint.Geoscape.Entities.GeoAlienBase), typeof(PhoenixPoint.Geoscape.Entities.GeoAlienBase.InstanceData),
+                    "HavenAttackCounter", "_havenAttackCounter", null),
+            };
+
+            int checkedRows = 0, hopRows = 0;
+            foreach (var r in rows)
+            {
+                var f = RailType.GetBridged(r.Live, r.Dto)?.FieldByName(r.Member);
+                if (f == null)
+                {
+                    yield return "L56 twin-row-gone: " + r.Live.Name + "." + r.Member + " is not in the twin table at all";
+                    continue;
+                }
+                checkedRows++;
+                if (f.Class == FieldClass.Excluded)
+                {
+                    yield return "L56 status-stopped-riding: " + r.Live.Name + "." + r.Member + " is Excluded (" +
+                                 f.Exclude + ") — capture/alert/scanner/mist status silently stops mirroring";
+                    continue;
+                }
+                var leaf = ((MemberInfo)f.Fi ?? f.Pi)?.Name;
+                if (leaf != r.Leaf)
+                    yield return "L56 alias-moved: " + r.Live.Name + "." + r.Member + " resolves onto '" + leaf +
+                                 "', expected '" + r.Leaf + "'";
+                var hops = f.HopFi?.Select(h => h.Name).ToArray();
+                if (r.Hops == null)
+                {
+                    if (hops != null)
+                        yield return "L56 unexpected-hop: " + r.Live.Name + "." + r.Member + " grew a hop chain [" +
+                                     string.Join(".", hops) + "] — it should resolve directly";
+                }
+                else
+                {
+                    hopRows++;
+                    if (hops == null || !hops.SequenceEqual(r.Hops))
+                        yield return "L56 hop-chain-broken: " + r.Live.Name + "." + r.Member + " hops [" +
+                                     (hops == null ? "none" : string.Join(".", hops)) + "], expected [" +
+                                     string.Join(".", r.Hops) + "] — the N-hop resolver has regressed";
+                }
+                // A resolved-but-unwritable alias is the ActorComponent.Rot trap: it reads fine and the apply
+                // is a no-op, so the value looks mirrored on the host and never lands on the client.
+                if (!f.IsWritable())
+                    yield return "L56 alias-not-writable: " + r.Live.Name + "." + r.Member + " resolves onto a " +
+                                 "read-only member — the apply silently does nothing";
+            }
+
+            // Positive control: the whole law is vacuous if GetBridged answers nothing (pre-init serializer),
+            // and the TWO-hop rows are the only proof the N-hop resolver is exercised at all.
+            if (checkedRows != rows.Length)
+                yield return "L56 vacuous: only " + checkedRows + "/" + rows.Length + " twin rows were classified — " +
+                             "the arms above examined an empty table";
+            if (hopRows == 0)
+                yield return "L56 no-hop-coverage: not one hop-chain row was checked — a single-hop regression " +
+                             "would pass this law green";
         }
 
         private sealed class ListHolder
