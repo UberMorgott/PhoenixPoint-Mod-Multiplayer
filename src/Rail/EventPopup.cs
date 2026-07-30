@@ -70,6 +70,11 @@ namespace Multiplayer.Network.Sync
             AccessTools.PropertySetter(typeof(GeoscapeEvent), "IsCompleted");
         private static readonly System.Reflection.MethodInfo SetChoiceReward =
             AccessTools.PropertySetter(typeof(GeoscapeEvent), "ChoiceReward");
+        // The module's OWN outcome page (UIModuleSiteEncounters.cs:324, private) — reused rather than
+        // redrawn, so the replay a peer sees is the same native page the answering peer got.
+        private static readonly System.Reflection.MethodInfo SetClosingEncounter =
+            AccessTools.Method(typeof(UIModuleSiteEncounters), "SetClosingEncounter",
+                               new[] { typeof(GeoscapeEvent), typeof(GeoEventChoice), typeof(bool) });
 
         /// <summary>FULL session teardown only (SyncEngine.DetachAllChannels) — the raise seq is a host
         /// monotonic stream and a client last-writer guard, so it must NOT be touched at a mid-session
@@ -94,11 +99,22 @@ namespace Multiplayer.Network.Sync
             public string VehicleRef;
             public string Title;
             public string Narrative;
+            /// <summary>The host's own DISPLAY priority for this window, read back off the queue entry the
+            /// native raise just inserted. Windows are shown one at a time out of a PRIORITY-ORDERED queue —
+            /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2044 gives an event-triggered raise 10 and everything
+            /// else 0, then :2049/:2057 bump a completed window that supersedes a queued one to 15, and
+            /// <c>GeoscapeViewSwitchQuery.QueryStateSwitch</c>:77-82 inserts before the first LOWER-priority
+            /// entry while <c>GetNextQueriedStateSwitch</c>:111 pops [0]. Mirroring the raise without it
+            /// queued every window at 0 on the client, so the moment two windows were pending the peers were
+            /// looking at DIFFERENT events. Ties need nothing extra: equal priorities append in insert order
+            /// on both sides, and the client's inserts are the host's own order (the raise <c>seq</c> is
+            /// strictly increasing and <see cref="SurfaceSeq"/> drops anything out of order).</summary>
+            public int Priority;
         }
 
-        /// <summary>[seq:u32][eventId][siteRef][vehicleRef][title][narrative]. Pure both ways so RailCheck
-        /// L39 can round-trip it headless — a wire that drops a field silently is a window rendered against
-        /// the wrong context, which is the exact failure this family replaced.</summary>
+        /// <summary>[seq:u32][eventId][siteRef][vehicleRef][title][narrative][priority:i32]. Pure both ways so
+        /// RailCheck L39/L46 can round-trip it headless — a wire that drops a field silently is a window
+        /// rendered against the wrong context or shown in the wrong order, and both are invisible in a log.</summary>
         internal static byte[] Encode(uint seq, Raise p)
         {
             using (var ms = new MemoryStream())
@@ -110,6 +126,7 @@ namespace Multiplayer.Network.Sync
                 w.Write(p.VehicleRef ?? "");
                 w.Write(p.Title ?? "");
                 w.Write(p.Narrative ?? "");
+                w.Write(p.Priority);
                 return ms.ToArray();
             }
         }
@@ -127,6 +144,7 @@ namespace Multiplayer.Network.Sync
                     VehicleRef = r.ReadString(),
                     Title = r.ReadString(),
                     Narrative = r.ReadString(),
+                    Priority = r.ReadInt32(),
                 };
             }
         }
@@ -137,7 +155,7 @@ namespace Multiplayer.Network.Sync
         /// live event's OWN context — the only place site + vehicle exist — and the two strings the native
         /// header/body render, then ships them. Never throws into game code: a raise this fails on is a
         /// window the client does not get, and it says so.</summary>
-        internal static void HostBroadcast(GeoscapeEvent ev)
+        internal static void HostBroadcast(GeoscapeView view, GeoscapeEvent ev)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
@@ -169,12 +187,13 @@ namespace Multiplayer.Network.Sync
                     VehicleRef = IdentityResolver.RootRef(ev.Context?.Vehicle) ?? "",
                     Title = LiveTitle(data),
                     Narrative = LiveNarrative(data, ev.Context),
+                    Priority = QueuedPriority(view, ev),
                 };
                 uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " site=" +
-                          (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
+                Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
+                          " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
                           (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
                           " narrLen=" + p.Narrative.Length);
             }
@@ -183,6 +202,23 @@ namespace Multiplayer.Network.Sync
                 Debug.LogError("[MP][events] HOST raise broadcast FAILED for '" + ev.EventID + "' — no peer will see " +
                                "this window: " + ex);
             }
+        }
+
+        /// <summary>The DISPLAY priority the host's own queue just recorded for this window — READ BACK from
+        /// the request the native raise inserted a moment ago, never re-derived. Native's rule is not a pure
+        /// function of the event (:2049/:2057 bump to 15 only if a NOT-yet-completed window for the same
+        /// state type is already queued), so a second implementation of it would drift from the real queue
+        /// the first time either side changed.</summary>
+        private static int QueuedPriority(GeoscapeView view, GeoscapeEvent ev)
+        {
+            if (view != null && SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q &&
+                RequestsField?.GetValue(q) is IEnumerable<GeoscapeViewStateSwitchRequest> pending)
+                foreach (var r in pending)
+                    if (r != null && ReferenceEquals(EventOf(r.State), ev)) return r.Priority;
+            Debug.LogWarning("[MP][events] could not read the queued DISPLAY priority for '" + ev?.EventID +
+                             "' — mirroring it at 0, so this window may sort differently on the client than " +
+                             "on the host and the peers can end up looking at different events");
+            return 0;
         }
 
         /// <summary>The title exactly as the native header renders it (UIModuleSiteEncounters
@@ -367,9 +403,10 @@ namespace Multiplayer.Network.Sync
             int raiseTrigger = RaiseTriggerCount(rec.State, rec.TriggerCount);
             Bound.Add(geoEvent, new RaiseBinding { Seq = seq, TriggerCount = raiseTrigger });
 
-            q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent))
+            // The host's OWN priority, so this peer's queue orders the window exactly as the host's did.
+            q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent), p.Priority)
             { PauseGame = false }); // pause mirrors from the host via the TimeAnchor
-            Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " site=" +
+            Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
                       " record=" + rec.State + "#" + rec.TriggerCount +
@@ -497,13 +534,18 @@ namespace Multiplayer.Network.Sync
             }
             var ctrl = module.ChoicesButtonController;
             if (ctrl == null || !ShowingRealChoices(ctrl, ev)) return true;
-            if (InSession && IsFrozen(ev, out _))
+            if (InSession && IsFrozen(ev, out var winner) &&
+                DismissOnResolution(winner != null, winner?.Outcome != null))
             {
-                Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved, " +
-                          "so this peer lost the race and every button on it is already dead");
+                Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
+                          "with no choice this peer can click through (winner=" +
+                          (winner == null ? "none" : "no Outcome") + "), so every button on it is dead");
                 view.FinishQueriedState();
                 return true;
             }
+            // Otherwise REPAINT, decided or not: SetChoices re-reads affordability and its EventChoiceFreeze
+            // postfix repaints the replay (winner selected + still clickable, losers greyed). The player's
+            // click on the winner then walks to the native result page instead of the window vanishing.
             ctrl.SetChoices(module.Context.ViewerFaction, module.ChoiceButtonsContainer, module.ChoiceButtonPrefab, ev);
             return true;
         }
@@ -555,12 +597,59 @@ namespace Multiplayer.Network.Sync
             bool frozen = IsFrozen(displayed, out var winner);
             foreach (var btn in ActiveButtons(ctrl))
             {
-                bool isWinner = frozen && winner != null && ReferenceEquals(btn.Choice, winner);
-                btn.Button.IsSelected = isWinner;
-                if (frozen && !isWinner) btn.Button.SetInteractable(false);
+                var paint = PaintChoice(frozen, winner != null && ReferenceEquals(btn.Choice, winner));
+                btn.Button.IsSelected = paint.Selected;
+                btn.Button.IsNonInteractableWhenSelected = paint.DeadWhenSelected;
+                // DECIDED: we own interactability outright (winner live, losers dead). OPEN: the native
+                // SetChoice we are a postfix on has just re-read affordability from the wallet
+                // (SiteBaseChoicesController.cs:60 → choice.PassRequirements) and that answer must stand.
+                if (frozen) btn.Button.SetInteractable(paint.Interactable);
                 else btn.Button.ResetButtonAnimations();
             }
         }
+
+        /// <summary>PURE (RailCheck L45): what ONE picker button must become, given whether the answer is
+        /// decided and whether this button holds the winning choice. Three native widget writes:
+        /// <c>IsSelected</c> (the "this is what was chosen" look), <c>SetInteractable</c>
+        /// (PhoenixGeneralButton.cs:283 — clears <c>BaseButton.interactable</c> + <c>IsEnabled</c>, which
+        /// <c>OnPointerClick</c>:327 requires) and <c>IsNonInteractableWhenSelected</c> (:37, default true).
+        ///
+        /// That last field is THE replay mechanism, and dropping it is what turned a cosmetic freeze into a
+        /// hang: :327 early-returns on <c>(IsSelected &amp;&amp; IsNonInteractableWhenSelected)</c>, so a
+        /// winner marked selected under the widget's own default is CLICK-DEAD and the window's only exit is
+        /// Esc. Cleared, the highlighted winner stays clickable and the player's click walks the native path
+        /// to the result page — <c>OnChoiceSelected</c> → <c>SelectChoice</c>:598 short-circuits on
+        /// <c>IsCompleted</c> → <c>SetClosingEncounter(winner)</c> — which is what the other peers should see
+        /// instead of the window vanishing.
+        ///
+        /// Every field is written on EVERY active button, never only the winner: the buttons are POOLED and
+        /// reused by the next window (<c>AddChoicesButtons</c>:67-75 builds the list once), so a flag left
+        /// behind deadens that slot in the next picker — including the OK button of a closing page.</summary>
+        internal struct ChoicePaint
+        {
+            public bool Selected;            // PhoenixGeneralButton.IsSelected
+            public bool Interactable;        // PhoenixGeneralButton.SetInteractable(bool)
+            public bool DeadWhenSelected;    // PhoenixGeneralButton.IsNonInteractableWhenSelected
+        }
+
+        internal static ChoicePaint PaintChoice(bool decided, bool isWinner) => new ChoicePaint
+        {
+            Selected = decided && isWinner,
+            Interactable = !decided || isWinner,
+            DeadWhenSelected = !(decided && isWinner),
+        };
+
+        /// <summary>PURE (RailCheck L45): once a picker is decided, may the repaint CLOSE it? Only when it
+        /// has no clickable way out. A decided picker WITH a winning choice that carries an Outcome is a
+        /// REPLAY — winner highlighted and live, losers greyed, one click to the result page — and hard-
+        /// dismissing that is the client-side face of the bug (the window vanishes ~0.2 s after opening with
+        /// no user input, and the peers end up on different events). With no winner (native's -1 "no choice",
+        /// UIModuleSiteEncounters.cs:562-566) or a winner with no <c>Outcome</c>, there is no page to show —
+        /// <c>SetClosingEncounter</c>:333 dereferences <c>closingChoice.Outcome.OutcomeText</c> unguarded —
+        /// and leaving the window up would strand the player behind dead buttons with Esc as the only
+        /// exit.</summary>
+        internal static bool DismissOnResolution(bool hasWinner, bool winnerHasOutcome) =>
+            !hasWinner || !winnerHasOutcome;
 
         /// <summary>Is this dialog's answer already decided, and by which choice? The ledger is the
         /// REPLICATED record, never the instance: <c>GeoscapeEvent.IsCompleted</c> is per-INSTANCE
@@ -575,7 +664,8 @@ namespace Multiplayer.Network.Sync
             winner = null;
             if (string.IsNullOrEmpty(ev?.EventID)) return false;
             var rec = LiveRecord(ev.EventID, ev.Record);
-            if (rec == null || !IsResolvedForRaise(rec.State, rec.TriggerCount, RaiseTriggerOf(ev))) return false;
+            if (rec == null || !IsResolvedForRaise(rec.State, rec.TriggerCount, RaiseTriggerOf(ev),
+                                                   PreAnsweredAtTrigger(ev.EventData))) return false;
             var choices = ev.EventData?.Choices;
             int i = rec.SelectedChoice;
             if (choices != null && i >= 0 && i < choices.Count) winner = choices[i];
@@ -606,14 +696,50 @@ namespace Multiplayer.Network.Sync
         internal static int RaiseTriggerCount(GeoscapeEventRecordState state, int triggerCount) =>
             state == GeoscapeEventRecordState.Triggered ? triggerCount : triggerCount + 1;
 
-        /// <summary>PURE (RailCheck L39): does this record resolution answer the raise the open window shows?
+        /// <summary>PURE (RailCheck L39/L44): does this record resolution answer the raise the open window
+        /// shows — and is it a resolution somebody MADE, rather than one the window was born with?
+        ///
         /// <paramref name="raiseTriggerCount"/> is 0 for a window with no binding (native/host/restored), and
         /// every real count is ≥1, so those keep the stock "resolved means resolved" answer. A resolution
         /// OLDER than the raise must be ignored, not applied: acting on it greys a picker the player is
         /// legitimately looking at and, one ES delta later, CLOSES it
-        /// (<see cref="RepaintDialog"/> → <c>FinishQueriedState</c>).</summary>
-        internal static bool IsResolvedForRaise(GeoscapeEventRecordState state, int triggerCount, int raiseTriggerCount) =>
-            state != GeoscapeEventRecordState.Triggered && triggerCount >= raiseTriggerCount;
+        /// (<see cref="RepaintDialog"/> → <c>FinishQueriedState</c>).
+        ///
+        /// <paramref name="preAnsweredAtTrigger"/> is the OTHER half, and it is what makes this a TRANSITION
+        /// test rather than a state test. The game answers a single-choice event ITSELF, at trigger time,
+        /// before the window is even queued (<c>GeoscapeEventSystem.OnEventTriggered</c>:651-655 —
+        /// <c>if (@event.HasSingleChoice &amp;&amp; !IsEventTheMarketplace) CompleteEvent(Choices.FirstOrDefault())</c>,
+        /// then <c>GeoscapeEventRaised?.Invoke</c>). Such a record is <c>Completed</c> on EVERY peer the
+        /// instant the window opens, with no user input anywhere — so reading it as "somebody else won the
+        /// race" freezes and then dismisses a window nobody answered. That was one root cause with two
+        /// faces: the HOST's own native picker went click-dead (the winner's <c>IsSelected</c> +
+        /// <c>PhoenixGeneralButton.IsNonInteractableWhenSelected</c>:37 kill <c>OnPointerClick</c>:327, and
+        /// the host applies no deltas so nothing ever unsticks it), while every CLIENT had the same window
+        /// auto-dismissed ~0.2 s after opening — leaving the peers on DIFFERENT events.</summary>
+        internal static bool IsResolvedForRaise(GeoscapeEventRecordState state, int triggerCount,
+                                                int raiseTriggerCount, bool preAnsweredAtTrigger) =>
+            !preAnsweredAtTrigger && state != GeoscapeEventRecordState.Triggered && triggerCount >= raiseTriggerCount;
+
+        /// <summary>PURE (RailCheck L44): the game's OWN trigger-time auto-answer condition, mirrored
+        /// exactly — <c>GeoscapeEventSystem.cs:651</c> over <c>GeoscapeEventData.HasSingleChoice</c>
+        /// (<c>Choices.Count &lt;= 1</c>, GeoscapeEventData.cs:65). Def-derived, therefore identical on
+        /// every peer by law 10 (mod parity blocks the join otherwise) — which is why it is asked of the
+        /// DEF and not stored on the raise binding: a window RESTORED from a save never passes a raise seam
+        /// at all, and would come back frozen again.</summary>
+        internal static bool PreAnsweredAtTrigger(int choiceCount, bool isMarketplace) =>
+            choiceCount <= 1 && !isMarketplace;
+
+        internal static bool PreAnsweredAtTrigger(GeoscapeEventData data)
+        {
+            if (data == null) return false;
+            try
+            {
+                var es = GeoLevel()?.EventSystem;
+                return PreAnsweredAtTrigger(data.Choices == null ? 0 : data.Choices.Count,
+                                            es != null && es.IsEventTheMarketplace(data));
+            }
+            catch { return false; }
+        }
 
         /// <summary>The live <c>GeoscapeEvent</c> this peer's own view holds for an id — on screen, popped
         /// and mid-switch, or still queued — else null. The HOST answer handler wants it because that
@@ -655,6 +781,69 @@ namespace Multiplayer.Network.Sync
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
             SetChoiceReward?.Invoke(ev, new object[] { new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() } });
+        }
+
+        /// <summary>Is this dialog's outcome someone ELSE's to have decided — so that a click on it must
+        /// charge nothing, resolve nothing and send no intent? Two ways in, one answer:
+        ///   • the game answered it ITSELF at trigger (<see cref="PreAnsweredAtTrigger"/>) and this peer is
+        ///     not the one that ran it. On the host the auto-complete really ran on THIS instance, so
+        ///     <c>IsCompleted</c> is true and the click takes the fully native path (vanilla: the wallet
+        ///     charge and any mission launch are the host's to make). On a client the mirrored
+        ///     instance never ran it — relaying the click as a 0xB4 answer would be rejected by the host's
+        ///     own validator ("already answered"), and letting it run natively would take the choice's cost
+        ///     out of the CLIENT's wallet (UIModuleSiteEncounters.cs:571-573, two calls before any funnel a
+        ///     guard could sit on), which is law 3 divergence;
+        ///   • another peer answered THIS raise (<see cref="IsFrozen"/>) — the ordinary lost race, on either
+        ///     peer.
+        /// The winner is the record's <c>SelectedChoice</c>; for the pre-answered case whose record delta has
+        /// not landed yet it is <c>Choices[0]</c>, which is what the game itself completed with
+        /// (<c>CompleteEvent(Choices?.FirstOrDefault())</c>, GeoscapeEventSystem.cs:655).</summary>
+        internal static bool ResolutionIsNotOurs(GeoscapeEvent ev, out GeoEventChoice winner)
+        {
+            winner = null;
+            if (!InSession || string.IsNullOrEmpty(ev?.EventID)) return false;
+            // The ONE case that stays fully native: the game answered THIS instance at trigger on a peer that
+            // owns resolutions. IsCompleted alone is not that test — a host that LOST the race has its own
+            // live dialog instance completed by the relayed answer (EventSync.HandleAnswer resolves through
+            // EventPopup.LiveInstance), and letting that click run native would charge the losing host a
+            // second time on top of the charge HandleAnswer already made.
+            if (IntentRail.ShouldRunNative() && ev.IsCompleted && PreAnsweredAtTrigger(ev.EventData)) return false;
+            if (IsFrozen(ev, out winner)) return true;                          // somebody else answered this raise
+            if (!PreAnsweredAtTrigger(ev.EventData)) return false;              // still open: the click decides it
+            var choices = ev.EventData?.Choices;
+            winner = choices != null && choices.Count > 0 ? choices[0] : null;
+            return true;
+        }
+
+        /// <summary>Show the native OUTCOME page for a resolution this peer did not make, in place of the
+        /// click that would have made one. Nothing is charged (the native charge at
+        /// UIModuleSiteEncounters.cs:571-573 is skipped entirely with the handler) and nothing is resolved —
+        /// <see cref="MarkResolvedInstance"/> gives the instance the empty reward stub that
+        /// <c>SetClosingEncounter</c>:357 and <c>SelectChoice</c>:604 dereference unguarded, and
+        /// <c>HasRewards()</c>==false keeps <c>ShowReward</c>:363 from claiming rewards this peer never got.
+        /// Returns false when there is no page to show, and says so — the caller closes the window instead of
+        /// leaving a dead picker up.</summary>
+        internal static bool ReplayResolution(UIModuleSiteEncounters module, GeoscapeEvent ev, GeoEventChoice winner)
+        {
+            if (module == null || ev == null || DismissOnResolution(winner != null, winner?.Outcome != null)) return false;
+            if (SetClosingEncounter == null)
+            {
+                Debug.LogError("[MP][events] cannot replay '" + ev.EventID + "' — UIModuleSiteEncounters" +
+                               ".SetClosingEncounter(GeoscapeEvent, GeoEventChoice, bool) did not resolve, so the " +
+                               "winning choice has no result page and the window can only be closed");
+                return false;
+            }
+            try
+            {
+                MarkResolvedInstance(ev);
+                SetClosingEncounter.Invoke(module, new object[] { ev, winner, false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][events] replay of '" + ev.EventID + "' threw while building the result page: " + ex);
+                return false;
+            }
         }
 
         /// <summary>An MP session is live, either side. The choice FREEZE, the close and the Esc guard are
@@ -708,8 +897,8 @@ namespace Multiplayer.Network.Sync
     {
         private static void Postfix(GeoscapeView __instance, GeoscapeEvent geoEvent)
         {
-            if (__instance != null && __instance.SuppressEvents) return;
-            EventPopup.HostBroadcast(geoEvent);
+            if (__instance == null || __instance.SuppressEvents) return;
+            EventPopup.HostBroadcast(__instance, geoEvent);
         }
     }
 
@@ -738,44 +927,33 @@ namespace Multiplayer.Network.Sync
             if (PagingField != null && (bool)(PagingField.GetValue(__instance) ?? false)) return true;
             var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
             if (string.IsNullOrEmpty(ev?.EventID)) return true; // not a mirrored host event
-            var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
-            // The SAME "is this answered?" question the freeze and the dismiss ask, raise-binding and all —
-            // a click must not be dropped as stale on a picker those two have just decided is live.
-            bool frozen = rec == null || EventPopup.IsFrozen(ev, out _);
-
-            if (IntentRail.ShouldRunNative())
-            {
-                // HOST / solo / inside an apply. Refuse only a click that would CHARGE or RESOLVE on a
-                // record that is no longer open. A choice carrying neither Outcome nor Requirments is the
-                // closing page's OK button (SetClosingEncounter:346-351 builds it with Text only): it
-                // charges nothing (:571 needs Requirments) and it is the ONLY way out of a re-enabled
-                // event's page, where the record is already Reset while the instance still reports
-                // IsCompleted==false (GeoscapeEvent.cs:112-116 skips the flag on a Reset record).
-                if (frozen && !ev.IsCompleted && choice != null && (choice.Outcome != null || choice.Requirments != null))
-                {
-                    Debug.Log("[MP][events] stale click on '" + ev.EventID + "' ignored — already answered (record=" +
-                              (rec == null ? "none" : rec.State.ToString()) + ", choice " +
-                              (rec == null ? -1 : rec.SelectedChoice) + ")");
-                    return false;
-                }
-                return true;
-            }
+            if (!EventPopup.InSession) return true;             // solo: stock behaviour end to end
 
             // The OK/Continue button of a CLOSING page carries neither Outcome nor Requirments
             // (SetClosingEncounter:346-351 builds it with Text only), yet _geoEvent still points at the
-            // REAL event there — SetEncounter never reassigns it (:265-303). Without this arm the only
-            // button on a mirrored OUTCOME window is dead and Esc is the only way out. It resolves
-            // nothing: no Wallet.Take (:571-573 needs Requirments) and CompleteEvent is skipped on an
-            // instance already marked completed (:562-567 and :580 → SelectChoice:600).
+            // REAL event there — SetEncounter never reassigns it (:265-303). FIRST, because a replayed
+            // result page is reached through an already-resolved event and its own OK button must not be
+            // read as another click on the decided picker. It resolves nothing: no Wallet.Take (:571-573
+            // needs Requirments) and CompleteEvent is skipped on an instance already marked completed
+            // (:562-567 and :580 → SelectChoice:600).
             if (ev.IsCompleted && choice != null && choice.Outcome == null && choice.Requirments == null) return true;
-            if (frozen)
+
+            // Decided elsewhere (the game at trigger, or the peer that won the race): show the RESULT PAGE
+            // rather than eat the click. Peer-symmetric — a losing HOST must not pay for a choice it did not
+            // get either, and that charge happens two calls before any funnel EventCompleteArbiter guards.
+            if (EventPopup.ResolutionIsNotOurs(ev, out var winner))
             {
-                // Not an error — two peers clicking within one RTT is the normal case. Reaching this at all
-                // is the one-frame overlap: EventChoiceFreeze has normally already killed these buttons.
-                Debug.Log("[MP][events] click on '" + ev.EventID + "' dropped — already answered (record=" +
-                          (rec == null ? "none" : rec.State.ToString()) + "), the first choice is frozen");
+                var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
+                Debug.Log("[MP][events] click on '" + ev.EventID + "' REPLAYED — the answer is not this peer's " +
+                          "(record=" + (rec == null ? "none" : rec.State.ToString()) + ", choice " +
+                          (rec == null ? -1 : rec.SelectedChoice) + "); showing the winning choice's result page");
+                if (EventPopup.ReplayResolution(__instance, ev, winner)) return false;
+                __instance.Context?.View?.FinishQueriedState();   // nothing to show — don't strand the player
                 return false;
             }
+
+            if (IntentRail.ShouldRunNative()) return true;   // HOST / solo / inside an apply: the click decides it
+
             // The wire carries the INDEX into the def's Choices, which is what CompleteEvent works in
             // (GeoscapeEvent.cs:97); -1 is native's "no choice" resolution (:562-566).
             int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);

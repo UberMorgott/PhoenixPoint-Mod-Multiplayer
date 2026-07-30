@@ -83,6 +83,9 @@ namespace RailCheck
             laws.AddRange(FragmentLaw());
             laws.AddRange(ReadOnlyFacadeLaw());
             laws.AddRange(EventRaiseLaw());
+            laws.AddRange(PreAnsweredEventLaw());
+            laws.AddRange(ReplayVisualsLaw());
+            laws.AddRange(DisplayOrderLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
@@ -3048,19 +3051,19 @@ namespace RailCheck
                 yield return "L39 raise-binding-overshoots: a window raised over an already-OPEN (Triggered) record was " +
                              "bound to the NEXT trigger — its own answer would then never count, so the picker never " +
                              "freezes and never closes and both peers can resolve it";
-            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 3, 4))
+            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 3, 4, false))
                 yield return "L39 stale-resolution-dismisses: a record Completed at trigger #3 was applied to the window " +
                              "raised for trigger #4 — that is the re-trigger race (the record's 0xAC delta lands " +
                              "0.25-0.75 s after the 0xB6 raise, separate surfaces), and RepaintDialog answers a " +
                              "resolution with view.FinishQueriedState(): the window the player is looking at vanishes";
-            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 4, 4))
+            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 4, 4, false))
                 yield return "L39 live-resolution-ignored: the answer to the very raise the window shows (#4) was treated " +
                              "as stale — the picker another peer just answered stays open with every button dead and Esc " +
                              "as its only exit, which is the state the dismiss exists to prevent";
-            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Triggered, 4, 4))
+            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Triggered, 4, 4, false))
                 yield return "L39 open-record-frozen: a still-OPEN (Triggered) record was reported resolved — every " +
                              "picker in the game would open greyed and close on the next delta";
-            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 9, 0))
+            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 9, 0, false))
                 yield return "L39 unbound-window-unfrozen: a window with NO raise binding (the host's own, or one restored " +
                              "from a save) stopped honouring its resolved record — the freeze and the dismiss are " +
                              "peer-symmetric by law, so that turns them off on the host";
@@ -3077,6 +3080,219 @@ namespace RailCheck
                 yield return "L39 surface-id-partition: the raise surface 0x" + SurfaceIds.GeoEventRaise.ToString("X2") +
                              " sits outside the geoscape partition 0xA0-0xBF, where the tactical fast-path is " +
                              "consulted FIRST and would consume it";
+        }
+
+        /// <summary>L44 — a window the GAME answered itself must never be read as a lost race. The game
+        /// auto-completes a single-choice event at TRIGGER time, before the window is queued
+        /// (GeoscapeEventSystem.cs:651-655), so its record is Completed on every peer the instant the window
+        /// opens, with no user input anywhere. Read as "somebody else won", that froze the HOST's own picker
+        /// click-dead and auto-dismissed the CLIENTS' copy ~0.2 s after opening — one root cause, two faces,
+        /// and the peers left on different events. Headless because the whole thing is a race no manual test
+        /// reproduces on demand, and its only symptom is a window that will not close.</summary>
+        private static IEnumerable<string> PreAnsweredEventLaw()
+        {
+            // ── the game's own predicate, mirrored ────────────────────────
+            foreach (var n in new[] { 0, 1 })
+                if (!EventPopup.PreAnsweredAtTrigger(n, false))
+                    yield return "L44 pre-answer-unrecognised: an event with " + n + " choice(s) was not recognised as " +
+                                 "one the game answers ITSELF at trigger — GeoscapeEventData.HasSingleChoice is " +
+                                 "Choices.Count <= 1 (GeoscapeEventData.cs:65) and GeoscapeEventSystem.cs:651 completes " +
+                                 "exactly those before raising them, so its already-Completed record is read as another " +
+                                 "peer's answer: the host's own picker freezes click-dead and every client's copy is " +
+                                 "dismissed under the player";
+            if (EventPopup.PreAnsweredAtTrigger(2, false))
+                yield return "L44 open-picker-treated-as-pre-answered: a REAL 2-choice picker was classified as " +
+                             "pre-answered at trigger — the freeze and the dismiss then never fire for it, so both " +
+                             "peers can answer the same event and the reward lands twice";
+            if (EventPopup.PreAnsweredAtTrigger(1, true))
+                yield return "L44 marketplace-treated-as-pre-answered: a marketplace event was classified as " +
+                             "pre-answered — GeoscapeEventSystem.cs:651 excludes it explicitly (IsEventTheMarketplace), " +
+                             "because the shop is an N-purchase window whose record stays open across every purchase";
+
+            // ── THE gate: both directions, so neither arm can pass vacuously ─
+            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 1, 1, true))
+                yield return "L44 pre-completed-window-frozen: the record the game completed AT TRIGGER was applied to " +
+                             "the very window that trigger opened — that is the whole bug: FreezeChoiceButtons marks the " +
+                             "winner IsSelected, PhoenixGeneralButton.OnPointerClick:327 refuses a selected button, and " +
+                             "since the host applies no deltas nothing ever unsticks it (host W2); on a client " +
+                             "RepaintDialog answers the same record with FinishQueriedState and the window vanishes (W1)";
+            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 1, 1, false))
+                yield return "L44 live-resolution-ignored: a resolution that DID arrive after the raise stopped counting " +
+                             "— the gate now answers no to everything, so no picker is ever frozen and two peers can " +
+                             "answer the same event";
+
+            // Non-vacuity: one gate, one shape. A surviving 3-argument overload would let a call site ask the
+            // old question and freeze a window the game answered itself, with this law still green.
+            var gates = typeof(EventPopup).GetMethods(AllMembers).Where(m => m.Name == "IsResolvedForRaise").ToList();
+            if (gates.Count != 1 || gates[0].GetParameters().Length != 4)
+                yield return "L44 freeze-gate-bypassable: EventPopup.IsResolvedForRaise exists in " + gates.Count +
+                             " shape(s) with " + (gates.Count == 0 ? 0 : gates[0].GetParameters().Length) + " parameter(s)" +
+                             " — the pre-answered arm is only law if EVERY caller must pass it, and an overload without " +
+                             "it silently restores the old behaviour on whichever seam still calls it";
+
+            // Non-vacuity: the predicate must still be moored to the game metadata it mirrors. If
+            // HasSingleChoice moved, the arms above are asserting a rule about nothing.
+            if (typeof(PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData).GetProperty("HasSingleChoice") == null)
+                yield return "L44 pre-answer-predicate-unmoored: GeoscapeEventData no longer exposes HasSingleChoice — " +
+                             "the trigger-time auto-answer this law mirrors (GeoscapeEventSystem.cs:651) has moved, so " +
+                             "the predicate is guessing and every arm above passes against a rule the game dropped";
+        }
+
+        /// <summary>L45 — when a resolution DOES legitimately arrive after the raise, the other peers must
+        /// SEE it replayed, not have the window yanked. Winner highlighted and still clickable, losers greyed,
+        /// one click to the native result page. The single field v2 dropped —
+        /// <c>PhoenixGeneralButton.IsNonInteractableWhenSelected</c>:37 — is what makes the difference between
+        /// a replay and a hang, because :327 early-returns on <c>IsSelected &amp;&amp; IsNonInteractableWhenSelected</c>.</summary>
+        private static IEnumerable<string> ReplayVisualsLaw()
+        {
+            var open = EventPopup.PaintChoice(decided: false, isWinner: false);
+            if (open.Selected || !open.Interactable || !open.DeadWhenSelected)
+                yield return "L45 pooled-button-poisoned: an UNDECIDED picker's button came back selected=" +
+                             open.Selected + " interactable=" + open.Interactable + " deadWhenSelected=" +
+                             open.DeadWhenSelected + " — the choice buttons are POOLED and reused by the next window " +
+                             "(AddChoicesButtons:67-75 builds the list once), so a flag left behind deadens that slot " +
+                             "in the NEXT picker, including the OK button of a closing page, whose click is the only " +
+                             "way out of it";
+
+            var win = EventPopup.PaintChoice(decided: true, isWinner: true);
+            if (!win.Selected)
+                yield return "L45 winner-not-highlighted: the winning choice was not marked IsSelected — the other " +
+                             "peers cannot see WHICH choice was taken, which is the whole point of replaying it";
+            if (!win.Interactable)
+                yield return "L45 winner-not-clickable: the winning choice was left non-interactable — " +
+                             "OnPointerClick:327 also requires IsEnabled, so the player has no way to reach the result " +
+                             "page and Esc is the only exit";
+            if (win.DeadWhenSelected)
+                yield return "L45 winner-click-dead: the winning choice kept IsNonInteractableWhenSelected — " +
+                             "PhoenixGeneralButton.OnPointerClick:327 early-returns on (IsSelected && " +
+                             "IsNonInteractableWhenSelected), so a HIGHLIGHTED winner is click-dead: the window can " +
+                             "never be closed by clicking it (host W2), and the omission is what makes a merely " +
+                             "cosmetic freeze fatal";
+
+            var lose = EventPopup.PaintChoice(decided: true, isWinner: false);
+            if (lose.Selected || lose.Interactable)
+                yield return "L45 loser-still-live: a LOSING choice came back selected=" + lose.Selected +
+                             " interactable=" + lose.Interactable + " — a second peer can then answer an event that is " +
+                             "already resolved, and the losing peer pays its cost (UIModuleSiteEncounters.cs:571-573 " +
+                             "charges before any funnel a guard can sit on)";
+
+            // ── the dismiss arm: only when there is genuinely nothing to click ──
+            if (EventPopup.DismissOnResolution(hasWinner: true, winnerHasOutcome: true))
+                yield return "L45 replay-hard-dismissed: a decided picker WITH a clickable winning choice was closed by " +
+                             "view.FinishQueriedState() instead of repainted as a replay — that is the client-side face " +
+                             "of the bug: the window vanishes with no user input, the peer skips the event the host is " +
+                             "still looking at, and from there on the two are on different events";
+            if (!EventPopup.DismissOnResolution(hasWinner: false, winnerHasOutcome: false))
+                yield return "L45 dead-picker-stranded: a decided picker with NO winner (native's -1 'no choice', " +
+                             "UIModuleSiteEncounters.cs:562-566) was kept open — every button on it is dead and Esc is " +
+                             "the only exit, which is exactly what the dismiss exists to prevent";
+            if (!EventPopup.DismissOnResolution(hasWinner: true, winnerHasOutcome: false))
+                yield return "L45 outcome-page-nre: a winning choice with a NULL Outcome was routed to the replay page — " +
+                             "SetClosingEncounter:333 dereferences closingChoice.Outcome.OutcomeText unguarded, so the " +
+                             "throw lands inside the click handler and the window is left half-repainted";
+
+            // Non-vacuity: every field above is a REAL native widget member. If one is gone, the paint is a
+            // rule about writes that no longer land, and the law would stay green while the picker stayed dead.
+            var pgb = typeof(PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton);
+            foreach (var f in new[] { "IsSelected", "IsNonInteractableWhenSelected" })
+                if (pgb.GetField(f)?.FieldType != typeof(bool))
+                    yield return "L45 paint-unmoored: PhoenixGeneralButton." + f + " is not a bool field on the shipped " +
+                                 "widget any more — the replay writes it by name, so the arms above assert a rule about " +
+                                 "a write that no longer reaches the button";
+            if (pgb.GetMethod("SetInteractable", new[] { typeof(bool) }) == null)
+                yield return "L45 paint-unmoored: PhoenixGeneralButton.SetInteractable(bool) is gone — the greying half " +
+                             "of the replay has no way to run";
+            if (typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleSiteEncounters).GetMethod(
+                    "SetClosingEncounter", AllMembers, null,
+                    new[] { typeof(GeoscapeEvent), typeof(GeoEventChoice), typeof(bool) }, null) == null)
+                yield return "L45 replay-page-unreachable: UIModuleSiteEncounters.SetClosingEncounter(GeoscapeEvent, " +
+                             "GeoEventChoice, bool) did not resolve — the replayed click has no native result page to " +
+                             "land on, so the only remaining behaviour is the blunt dismiss this law forbids";
+        }
+
+        /// <summary>L46 — every peer must show the queued windows in the HOST's order. Windows are displayed
+        /// one at a time out of a priority-ordered queue (GeoscapeViewSwitchQuery.QueryStateSwitch:77-82
+        /// inserts before the first lower-priority entry, GetNextQueriedStateSwitch:111 pops [0]) and
+        /// GeoscapeView.cs:2044/:2049/:2057 assigns 0, 10 or 15 — so a mirror that queues everything at 0
+        /// puts the peers on different events the moment two windows are pending, with nothing in any log
+        /// saying so.</summary>
+        private static IEnumerable<string> DisplayOrderLaw()
+        {
+            // ── it survives the wire ──────────────────────────────────────
+            foreach (var prio in new[] { 0, 10, 15 })   // :2044 default / TriggeredByEvent / :2049 supersede
+            {
+                var wire = EventPopup.Decode(EventPopup.Encode(7u, new EventPopup.Raise
+                { EventId = "EV_prio", Priority = prio }), out uint prioSeq);
+                if (wire.Priority != prio || prioSeq != 7u)
+                    yield return "L46 display-order-dropped: a raise queued at priority " + prio + " came back as " +
+                                 wire.Priority + " (seq " + prioSeq + ") — the client then inserts it at the wrong " +
+                                 "place in GeoscapeViewSwitchQuery's list and shows a different window than the host";
+            }
+
+            // ── and BOTH ends actually touch it ───────────────────────────
+            // The round-trip above is green for a field nobody fills and nobody reads, which is precisely the
+            // failure mode: the wire would carry a faithful 0 for every window. Existence is compile-checked;
+            // USE is not, so it is asserted on the IL of the two seams. Both are private — named, because a
+            // rename that dodges this law is a rename that has to walk past it.
+            var seams = new[]
+            {
+                // FILLS it in (stfld, not ldfld: the host also logs the value, and a log line must not be
+                // able to satisfy a law about what goes on the wire)
+                new { Seam = "HostBroadcast", Op = OpCodes.Stfld, Verb = "never FILLS IN",
+                      Cost = "the host ships a constant 0 as its queue position for every window" },
+                // READS it back out to queue with
+                new { Seam = "RaiseMirrored", Op = OpCodes.Ldfld, Verb = "never READS",
+                      Cost = "the client throws the host's queue position away and queues every mirrored window " +
+                             "at GeoscapeViewStateSwitchRequest's 0 default" },
+            };
+            foreach (var s in seams)
+            {
+                var m = typeof(EventPopup).GetMethod(s.Seam, AllMembers);
+                if (m == null)
+                    yield return "L46 display-order-seam-gone: EventPopup." + s.Seam + " no longer exists, so the law " +
+                                 "cannot see whether the host's queue position is still captured and honoured — the " +
+                                 "round-trip arms above stay green either way";
+                else if (!FieldRefs(m, s.Op).Any(f => f.DeclaringType == typeof(EventPopup.Raise) && f.Name == "Priority"))
+                    yield return "L46 display-order-ignored: EventPopup." + s.Seam + " " + s.Verb + " Raise.Priority — " +
+                                 s.Cost + ", so the peers show queued windows in DIFFERENT orders the moment two are " +
+                                 "pending (GeoscapeView.cs:2044 gives an event-triggered raise 10 and :2049/:2057 bump " +
+                                 "a superseding one to 15) and nothing in any log says so";
+            }
+        }
+
+        /// <summary>Fields an IL body touches (InlineField operands), optionally narrowed to given opcodes —
+        /// the same guarded walk <see cref="Callees"/> does for calls, abandoning the method the same way
+        /// rather than guessing. Exists because "the type has the field" is compile-checked and therefore
+        /// worthless as a law, while "this seam actually fills it in / reads it back" is checked by nothing
+        /// else; the opcode filter is what stops a mere log line from satisfying a law about the wire.</summary>
+        private static IEnumerable<FieldInfo> FieldRefs(MethodBase m, params OpCode[] only)
+        {
+            byte[] il = null;
+            try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) yield break;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType
+                ? m.DeclaringType.GetGenericArguments() : null;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) yield break;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) yield break;
+                if (op.OperandType == OperandType.InlineField &&
+                    (only.Length == 0 || only.Any(o => o.Value == op.Value)))
+                {
+                    FieldInfo f = null;
+                    try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, null); } catch { }
+                    if (f != null) yield return f;
+                }
+                i += size;
+            }
         }
 
         /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for
