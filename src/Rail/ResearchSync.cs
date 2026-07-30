@@ -66,8 +66,6 @@ namespace Multiplayer.Network.Sync
         // ─── Reflection (private members only; everything else is typed) ──
         private static readonly System.Reflection.FieldInfo OnResearchStartedField =
             AccessTools.Field(typeof(Research), "OnResearchStarted");
-        private static readonly System.Reflection.FieldInfo TrackerNeedsRefreshField =
-            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
         private static readonly System.Reflection.MethodInfo SetupQueueMethod =
             AccessTools.Method(typeof(UIModuleResearch), "SetupQueue");
         // SetupQueue rebuilds ONLY the queue panel (right side). The AVAILABLE list (left) is a separate
@@ -271,7 +269,11 @@ namespace Multiplayer.Network.Sync
         /// <summary>Law 11 repaint entry for the generic rail (UiEventMap): research values changed.</summary>
         internal static void RepaintResearchUi()
         {
-            if (!RebuildOpenResearchScreen()) NudgeAgendaTracker();
+            // Screen shut → the top-right agenda tracker is the only thing painting the current research,
+            // and it belongs to no view state: OpenUiRepaint owns that refresh for EVERY kind now
+            // (research, manufacturing, aircraft actions, facility builds), so there is no research-specific
+            // nudge here any more — and none of them waits for the paused game clock either.
+            if (!RebuildOpenResearchScreen()) OpenUiRepaint.RefreshPersistentHud();
         }
 
         // Law 11 (RCA 2026-07-16): UIModuleResearch is a pull-model snapshot — SetupQueue() runs only
@@ -306,20 +308,6 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        // The agenda tracker (top-right research row) has NO started-event subscription — natively it
-        // rebuilds on view-state Init and repolls once per second (UpdateModuleDataCrt). Setting its
-        // _needsRefresh makes that native 1 s loop rebuild the rows, so the new research row appears
-        // without a view-state change. ponytail: 1 s worst-case latency via the native poll; a bespoke
-        // instant-rebuild call is the upgrade path if the gate finds it too slow.
-        private static void NudgeAgendaTracker()
-        {
-            try
-            {
-                var tracker = UnityEngine.Object.FindObjectOfType<UIModuleFactionAgendaTracker>();
-                if (tracker != null) TrackerNeedsRefreshField?.SetValue(tracker, true);
-            }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: tracker nudge failed: " + ex.Message); }
-        }
 
         // ─── Harmony seams (the ONLY patches this subsystem owns, law 4) ───
 

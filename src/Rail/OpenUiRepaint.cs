@@ -5,6 +5,7 @@ using Base.UI;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
@@ -51,6 +52,54 @@ namespace Multiplayer.Network.Sync
 
         private static readonly FieldInfo StatesStackField =
             AccessTools.Field(typeof(GeoscapeView), "_statesStack");
+
+        // UIModuleFactionAgendaTracker: private no-arg UpdateData() (:179 — the body UpdateModuleDataCrt:125
+        // calls) and the flag that makes it do a FULL rebuild (:186-190 -> InitialSetup:144).
+        private static readonly MethodInfo TrackerUpdateData =
+            AccessTools.Method(typeof(UIModuleFactionAgendaTracker), "UpdateData", Type.EmptyTypes);
+        private static readonly FieldInfo TrackerNeedsRefresh =
+            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
+
+        /// <summary>
+        /// The half of law 11 that belongs to NO view state: the persistent geoscape HUD. The top-right
+        /// agenda tracker (<c>UIModuleFactionAgendaTracker</c>) paints "Research: …", the current
+        /// manufacturing item, every aircraft ACTION in progress (exploration included,
+        /// <c>InitialSetup</c>:162-168 via <c>VehicleActionsViewService.GetCurrentActionTime</c>) and every
+        /// facility being built — all rail-mirrored — yet it is not a <c>GeoscapeViewState</c>, so no entry
+        /// in <see cref="UiNativeRepaint.Table"/> can ever reach it and <see cref="Repaint"/> alone left it
+        /// stale on every peer that did not perform the gesture.
+        ///
+        /// Its native refresh cannot be borrowed as-is: <c>Init</c>:100 starts <c>UpdateModuleDataCrt</c> on
+        /// the GAME clock (<c>_context.Level.Timing.Start</c>), so setting <c>_needsRefresh</c> and waiting
+        /// — what this used to do, from ResearchSync — only repaints once the geoscape is UNPAUSED, and on
+        /// the host nothing set the flag at all. So drive the module's own <c>UpdateData()</c> directly,
+        /// with the flag on: that is precisely what the native poll does, one tick early.
+        ///
+        /// Called from the ONE universal repaint, so every mark — a client's rail batch, the host applying a
+        /// remote intent (IntentRail.HandleInbound), a reject reconverge — refreshes it, for every kind,
+        /// with no per-subsystem nudge anywhere.
+        /// </summary>
+        internal static void RefreshPersistentHud()
+        {
+            if (TrackerUpdateData == null || TrackerNeedsRefresh == null) return;
+            try
+            {
+                var tracker = UnityEngine.Object.FindObjectOfType<UIModuleFactionAgendaTracker>();
+                if (tracker == null) return; // no geoscape HUD up (base/tactical/menu) — nothing to repaint
+                // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
+                using (SyncApplyScope.Enter())
+                {
+                    TrackerNeedsRefresh.SetValue(tracker, true);
+                    TrackerUpdateData.Invoke(tracker, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("PersistentHud"))
+                    Debug.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
+                                     "stay stale until the next screen change (logged once): " + ex);
+            }
+        }
 
         private static GeoLevelController GeoLevel()
         {
@@ -178,6 +227,9 @@ namespace Multiplayer.Network.Sync
         {
             int marks = _marksSinceFlush;
             _marksSinceFlush = 0;
+            // FIRST, and outside the open-screen question entirely: the persistent HUD belongs to no view
+            // state, so it must not be skipped by the `current == null` bail below.
+            RefreshPersistentHud();
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;

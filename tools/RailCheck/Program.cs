@@ -109,6 +109,7 @@ namespace RailCheck
             laws.AddRange(AugmentRepaintGuardLaw());
             laws.AddRange(AugmentClickParityLaw());
             laws.AddRange(DerivedExplorationLaw());
+            laws.AddRange(HostSelfRepaintLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -4617,6 +4618,126 @@ namespace RailCheck
                     yield return "L53 derivation-gated: GeoVehicle." + n + " carries a prefix of ours — that is the " +
                                  "DERIVATION, not the outcome; gating it is exactly what left the client with no " +
                                  "progress to show (L43 arm 2, same mistake one subsystem over)";
+            }
+        }
+
+        /// <summary>L54 — THE HOST MUST REPAINT ITS OWN APPLIED STATE, AND THE PERSISTENT HUD IS PART OF THE
+        /// SCREEN. Two halves of one defect: a client changed the active research, the host mutated its own
+        /// graph on the intent — and the host's top-right tracker kept the OLD text until the player walked
+        /// into the research screen and back.
+        ///
+        /// The tracker (<c>UIModuleFactionAgendaTracker</c>) paints current research, current manufacturing,
+        /// every aircraft ACTION in progress and every facility being built — all rail state — yet it is NOT a
+        /// <c>GeoscapeViewState</c>, so no <c>UiNativeRepaint.Table</c> entry can reach it, and its own
+        /// refresh loop is a GAME-CLOCK coroutine (<c>Init</c>:100 <c>Timing.Start</c>) that does not run
+        /// while the geoscape is paused. Setting <c>_needsRefresh</c> and waiting therefore repaints "once
+        /// somebody unpauses", which is what the second client did and the host never did at all.
+        ///
+        /// Arms: the host's ONE intent dispatch must mark its own UI dirty; the ONE universal repaint must
+        /// reach the persistent HUD; the client's research path must reach the SAME primitive (no
+        /// subsystem-private nudge); the module's own rebuild must still hang off <c>_needsRefresh</c>, and
+        /// its refresh must still be clock-driven rather than a per-frame <c>Update</c> — the two facts that
+        /// make driving it ourselves necessary and sufficient. Falsify by deleting the host mark, by pulling
+        /// RefreshPersistentHud out of the repaint, or by re-privatising the nudge into ResearchSync.</summary>
+        private static IEnumerable<string> HostSelfRepaintLaw()
+        {
+            var ours = typeof(IntentRail).Assembly;
+            var game = typeof(Base.Core.Timing).Assembly;
+            var repaint = typeof(OpenUiRepaint);
+            var tracker = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleFactionAgendaTracker);
+
+            var markDirty = HarmonyLib.AccessTools.Method(repaint, "MarkDirty", Type.EmptyTypes);
+            var refreshHud = HarmonyLib.AccessTools.Method(repaint, "RefreshPersistentHud");
+            var dispatch = HarmonyLib.AccessTools.Method(typeof(IntentRail), "HandleInbound");
+            var universal = HarmonyLib.AccessTools.Method(repaint, "RepaintOpenGeoscapeScreen");
+            var researchRepaint = HarmonyLib.AccessTools.Method(typeof(ResearchSync), "RepaintResearchUi");
+
+            if (markDirty == null || refreshHud == null || dispatch == null || universal == null || researchRepaint == null)
+            {
+                yield return "L54 seams-unreachable: one of OpenUiRepaint.MarkDirty()/RefreshPersistentHud/" +
+                             "RepaintOpenGeoscapeScreen, IntentRail.HandleInbound or ResearchSync.RepaintResearchUi " +
+                             "does not resolve — the reactivity chain cannot be checked at all";
+                yield break;
+            }
+            // Positive control: if the IL scan reads nothing out of our own assembly, every arm below is vacuous.
+            if (Callees(dispatch, ours).Count() == 0)
+                yield return "L54 il-unreadable: IntentRail.HandleInbound yields no callees in our own assembly — the " +
+                             "scan is asleep and the arms below would all pass green on an empty method";
+
+            // ORDER, not presence: HandleInbound marks dirty TWICE — once in the client reject-nudge branch
+            // it returns from early, once in the HOST branch after dispatching. Asking merely "does it call
+            // MarkDirty" is green with the host mark deleted (verified: the client's mark alone satisfies it).
+            // So anchor on DiffEngine.FlushNow, which only the host branch reaches, and demand a mark AFTER it.
+            var flushNow = HarmonyLib.AccessTools.Method(typeof(DiffEngine), "FlushNow");
+            var seq = CalleeSequence(dispatch);
+            int flushAt = flushNow == null ? -1 : seq.FindIndex(c => c.MetadataToken == flushNow.MetadataToken);
+            if (flushNow == null || flushAt < 0)
+                yield return "L54 dispatch-anchor-lost: IntentRail.HandleInbound no longer calls DiffEngine.FlushNow — " +
+                             "the host branch either stopped shipping the intent's own deltas this frame or was " +
+                             "restructured, and the host-repaint arm below has nothing to anchor on";
+            else if (seq.FindIndex(flushAt + 1, c => c.MetadataToken == markDirty.MetadataToken) < 0)
+                yield return "L54 host-blind: IntentRail.HandleInbound dispatches a client's intent and never marks its " +
+                             "OWN open UI dirty afterwards — the host mutates its graph and repaints NOTHING of its " +
+                             "own, so its screen keeps the pre-intent text until the player leaves and comes back " +
+                             "(the clients repaint from the delta, which is why only the host looks stuck)";
+            if (!Callees(universal, ours).Any(c => c.MetadataToken == refreshHud.MetadataToken))
+                yield return "L54 hud-unreached: OpenUiRepaint.RepaintOpenGeoscapeScreen never calls " +
+                             "RefreshPersistentHud — the universal repaint covers the open VIEW STATE only, and the " +
+                             "top-right tracker belongs to no view state, so nothing repaints it on any peer";
+            if (!Callees(researchRepaint, ours).Any(c => c.MetadataToken == refreshHud.MetadataToken))
+                yield return "L54 nudge-reprivatised: ResearchSync.RepaintResearchUi no longer routes to " +
+                             "OpenUiRepaint.RefreshPersistentHud — a subsystem-private tracker nudge is back, so the " +
+                             "fix stops applying to manufacturing, aircraft actions and facility builds";
+
+            // The tracker must NOT be reachable as a screen — that is WHY the universal path has to own it.
+            if (typeof(GeoscapeViewState).IsAssignableFrom(tracker) || UiNativeRepaint.Table.ContainsKey(tracker))
+                yield return "L54 hud-is-a-screen: UIModuleFactionAgendaTracker is now a view state / a " +
+                             "UiNativeRepaint.Table key — the persistent-HUD special case is obsolete and the two " +
+                             "repaint paths would both drive it";
+
+            // The two facts that make driving UpdateData() ourselves necessary AND sufficient.
+            var updateData = HarmonyLib.AccessTools.Method(tracker, "UpdateData", Type.EmptyTypes);
+            var initialSetup = HarmonyLib.AccessTools.Method(tracker, "InitialSetup");
+            var init = HarmonyLib.AccessTools.Method(tracker, "Init");
+            var needsRefresh = HarmonyLib.AccessTools.Field(tracker, "_needsRefresh");
+            var timingStart = game.GetType("Base.Core.Timing")?.GetMethods(AllMembers)
+                                  .FirstOrDefault(m => m.Name == "Start");
+            if (updateData == null || initialSetup == null || init == null || needsRefresh == null)
+                yield return "L54 tracker-members-gone: UIModuleFactionAgendaTracker's UpdateData()/InitialSetup/Init/" +
+                             "_needsRefresh no longer resolve — RefreshPersistentHud drives nothing and says nothing";
+            else
+            {
+                // Read the PRODUCTION handle, not a fresh lookup: the overload trap is real —
+                // UpdateData(UIFactionDataTrackerElement) exists next to UpdateData(), and grabbing it would
+                // tick ONE row instead of rebuilding the module.
+                var prodUpdate = repaint.GetField("TrackerUpdateData", AllMembers)?.GetValue(null) as MethodBase;
+                if (prodUpdate != null && prodUpdate.GetParameters().Length != 0)
+                    yield return "L54 overload-grabbed: OpenUiRepaint.TrackerUpdateData is not the no-argument " +
+                                 "UpdateData — UpdateData(UIFactionDataTrackerElement) is a per-ROW tick, not the " +
+                                 "module rebuild, so the refresh would repaint one element and drop the rest";
+                if (!Callees(updateData, game).Any(c => c.MetadataToken == initialSetup.MetadataToken))
+                    yield return "L54 flag-does-nothing: UpdateData() no longer calls InitialSetup — setting " +
+                                 "_needsRefresh stopped meaning 'rebuild the rows', so the refresh runs and the stale " +
+                                 "research/manufacturing/aircraft rows stay exactly as they were";
+                if (timingStart == null || !Callees(init, game).Any(c => c.Name == "Start" &&
+                                                                        c.DeclaringType == typeof(Base.Core.Timing)))
+                    yield return "L54 hud-self-refreshes: UIModuleFactionAgendaTracker.Init no longer starts its poll " +
+                                 "on the game Timing — if the module now refreshes off the frame loop it repaints while " +
+                                 "paused by itself and this whole seam is dead weight to delete";
+                if (HarmonyLib.AccessTools.Method(tracker, "Update") != null)
+                    yield return "L54 hud-has-update: UIModuleFactionAgendaTracker declares a MonoBehaviour Update — it " +
+                                 "repaints per frame on its own now, so driving UpdateData() from the rail is redundant";
+            }
+
+            // The production handles RefreshPersistentHud actually caches.
+            foreach (var n in new[] { "TrackerUpdateData", "TrackerNeedsRefresh" })
+            {
+                var slot = repaint.GetField(n, AllMembers);
+                object bound = null;
+                try { bound = slot?.GetValue(null); } catch { }
+                if (slot == null || bound == null)
+                    yield return "L54 hud-handle-dead: OpenUiRepaint." + n + " is " + (slot == null ? "gone" : "NULL") +
+                                 " — RefreshPersistentHud returns immediately and the tracker stays stale on every peer";
             }
         }
 
