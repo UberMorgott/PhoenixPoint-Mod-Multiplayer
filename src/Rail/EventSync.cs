@@ -29,7 +29,8 @@ namespace Multiplayer.Network.Sync
     /// so there is nothing to reset. Two peers answering within one RTT is the NORMAL case, not an
     /// error: the second is REJECTED (never thrown) and reconverged by IntentRail.Reject's scoped
     /// re-emit of <c>ES.EncounterRecords#&lt;eventId&gt;</c> + the reject nudge, after which that peer's
-    /// open picker flips to outcome mode (EventPopup.FlipResolvedOpenWindow).
+    /// open picker is closed by the repaint (<see cref="EventPopup.RepaintDialog"/>) — the record delta IS
+    /// the dismiss signal, so this family ships no dismiss message.
     ///
     /// Why the record and not the instance: <c>GeoscapeEvent.IsCompleted</c> is PER-INSTANCE
     /// (GeoscapeEvent.cs:36) and this handler may have to SYNTHESISE an instance (the host's own view

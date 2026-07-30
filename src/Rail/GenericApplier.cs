@@ -52,7 +52,9 @@ namespace Multiplayer.Network.Sync
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
             _loggedMisses.Clear();
-            EventPopup.Reset(); // record latch re-seeds silently from the transferred save's records
+            // (No EventPopup reset here anymore: event windows are live 0xB6 raises, so there is no
+            // record-derived latch to re-seed. Its raise-seq stream is a host monotonic counter and MUST
+            // survive a reload boundary — rca-3 contract — so it resets only at full teardown.)
             // The transferred save just replaced this client's clock — re-seed the anchor scratch from it,
             // or the next partial anchor would layer onto pre-reload values.
             TimeAnchor.Reset();

@@ -1,5 +1,19 @@
 # Event-window engine — v2 design
 
+> **SUPERSEDED 2026-07-30 — kept as the record of why the record-derived model was tried and how it
+> failed. Do NOT implement from it.** The "queued history derived from the mirrored records" premise
+> below is structurally impossible: `GeoscapeEventRecord` persists only
+> id/timestamps/state/`_selectedChoice`/`_triggerCount`, so it can never rebuild the
+> `GeoscapeEventContext` that every `[HavenName]`/`[AircraftName]` replacer dereferences unguarded —
+> measured 54 of 94 replayed raises had `site=null` and rendered raw tokens over baked dev
+> placeholder text, and the persisted per-peer cursor replayed each joiner's whole campaign history
+> (97 windows). Replaced by the v1 model expressed on the v2 rail: the HOST ships a **presentation
+> payload** per raise (surface `GeoEventRaise` 0xB6 — eventId + site/vehicle root refs + host-resolved
+> title/narrative) captured at `GeoscapeView.OnGeoscapeEventRaised`, the client rebuilds a REAL
+> context from it and pushes the native `UIStateGeoscapeEvent`, and there is **no history and no
+> backlog**: a peer that was not in the session when an event fired never sees that window. Live
+> source of truth = `src/Rail/EventPopup.cs` + RailCheck **L39**.
+
 > Read-only design pass, 2026-07-29, Multiplayer2 @ ~`fc8bc04`. Every `file:line` verified
 > unless marked `UNVERIFIED`. Grounding: v2 `src/`, decompile
 > `E:\DEV\PhoenixPoint\decompiled\AssemblyCSharp\Assembly-CSharp\src\`, v1 quarry

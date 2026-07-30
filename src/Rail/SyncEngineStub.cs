@@ -33,6 +33,7 @@ namespace Multiplayer.Network.Sync
             // (0xAA research retired 2026-07-26 — research rides 0xAC + 0xAB only.)
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -50,9 +51,10 @@ namespace Multiplayer.Network.Sync
             DiffEngine.HostTick(_engine);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
-            EventPopup.ClientTick(_engine);        // client-only inside: event-window backlog, ~1 Hz (a joiner's
-                                                  // records arrive with the SAVE, so a delta-driven pump alone
-                                                  // never fires for them)
+            // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
+            // mirrored records — a peer that was not in the session when it fired never sees it. The 1 Hz
+            // record-scan pump that used to live here is what buried every joiner under the campaign's whole
+            // event history; deleted 2026-07-30 with the derivation it drove.)
             // Law 11 UNIVERSAL: flush one open-screen re-enter per frame if anything marked dirty —
             // client mirror batches AND host post-intent reseeds (EquipSync/PersonnelSync) both land here.
             OpenUiRepaint.FlushIfDirty();
@@ -68,6 +70,7 @@ namespace Multiplayer.Network.Sync
             TimeSync.Reset();
             DiffEngine.Reset();
             GenericApplier.Reset();
+            EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
             // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset
             // list, and TearDown (which SessionEnd drives) is what calls it.

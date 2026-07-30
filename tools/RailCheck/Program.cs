@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -80,7 +80,7 @@ namespace RailCheck
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
-            laws.AddRange(BacklogLaw());
+            laws.AddRange(EventRaiseLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
@@ -2612,140 +2612,113 @@ namespace RailCheck
             new DiffEngine.Entry { Path = path, FieldIdx = fieldIdx, SubKey = subKey, Value = new[] { value },
                                    Key = path + "" + fieldIdx + "" + subKey };
 
-        /// <summary>L26 — the event-window BACKLOG derivation, headless. <c>EventPopup.Backlog</c> and
-        /// <c>EventPopup.Mode</c> are pure functions over <c>GeoscapeEventRecord</c>, which has a public
-        /// ctor and public Trigger/SelectChoice/Complete/Reset and touches no Unity and no level — so the
-        /// one thing the rail cannot state as metadata ("which windows does a peer still owe the player,
-        /// in what order") is assertable right here. Every arm is one of the silent swallows this engine
-        /// replaced: the seed that ate a joiner's whole backlog with no log line, a picker offered for a
-        /// record somebody already resolved (= a double grant on click), a cursor that retires nothing
-        /// or too much, a Reset record replayed forever, and dictionary-order output (law 6).</summary>
-        private static IEnumerable<string> BacklogLaw()
+        /// <summary>L39 — the geoscape EVENT-WINDOW RAISE family (surface 0xB6), which REPLACED the
+        /// record-derived backlog this slot used to hold (L26, deleted 2026-07-30 together with the engine
+        /// it asserted). TWO silent failures put it here, and both are falsified below.
+        ///
+        /// (a) A window raised against a context the peer cannot rebuild. <c>GeoscapeEventRecord</c> persists
+        /// id/timestamps/state/_selectedChoice/_triggerCount and NOTHING else, so a record-derived window had
+        /// nothing to build a <c>GeoscapeEventContext</c> from — measured: 54 of 94 replayed raises had
+        /// <c>Site==null</c>. Every token replacer dereferences <c>context.Site</c>/<c>.Vehicle</c> unguarded
+        /// (that is L37's subject), and the NRE lands inside <c>UIStateGeoscapeEvent.EnterState</c> AFTER the
+        /// raise has already logged SUCCESS, leaving a correctly localized title over the scene's baked dev
+        /// placeholder text and four live-looking dead buttons — clicking through reached an active START
+        /// MISSION. <see cref="EventPopup.ContextRefusal"/> is the decision that must refuse such a raise
+        /// OUTRIGHT rather than render it, and it is pure precisely so it can be falsified right here.
+        ///
+        /// (b) A pre-join event replayed. The bound was a per-peer PlayerPrefs cursor with a one-sided clamp,
+        /// so any peer that had ever persisted one bypassed the first-sight floor and re-raised the campaign's
+        /// entire history (measured: a 94-record backlog, 97 windows, on BOTH clients at join). The fix is not
+        /// a better cursor — it is that a window is a LIVE host→client message with no history behind it at
+        /// all. That is a STRUCTURAL property, so it is asserted structurally: no API may exist that turns the
+        /// mirrored record set into windows. A future reader who re-adds one re-arms the flood, and this is
+        /// the line that stops them.
+        ///
+        /// Plus the wire itself (a dropped payload field is failure (a) one layer down: the window is built
+        /// against the WRONG context), the deploy-prompt exclusion (a host-local arrival decision mirrored as
+        /// a second window the other peer can never close), and the surface id's own uniqueness.</summary>
+        private static IEnumerable<string> EventRaiseLaw()
         {
-            var open = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_open", Ticks(100));
-            var done = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_done", Ticks(200));
-            done.SelectChoice(1);
-            done.Complete(Ticks(210));
-            // Insertion order is the REVERSE of the required output order, so a dict walk cannot pass by luck.
-            var records = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal)
-                { { done.EventId, done }, { open.EventId, open } };
+            // ── (a) context validity ──────────────────────────────────────
+            if (EventPopup.ContextRefusal("", false, "", false) != null)
+                yield return "L39 siteless-event-refused: a payload carrying NO site and NO vehicle was REFUSED — a " +
+                             "site-less event legitimately has neither and the host rendered it that way too, so " +
+                             "every such window would be dropped instead of mirrored";
+            if (EventPopup.ContextRefusal("S#5", true, "V#2@abc", true) != null)
+                yield return "L39 resolved-context-refused: a payload whose site AND vehicle both resolve was " +
+                             "REFUSED — no client could ever be shown anything";
+            if (string.IsNullOrEmpty(EventPopup.ContextRefusal("S#5", false, "", true)))
+                yield return "L39 contextless-window-raised: a payload naming site S#5, which does NOT resolve on " +
+                             "this peer, was accepted (or refused with a BLANK reason) — the rebuilt context would " +
+                             "carry Site==null, every [HavenName]/[HavenLeader] token would deref null inside " +
+                             "EnterState, and the window would render half-built over the scene's placeholder text " +
+                             "with nothing in any log saying it broke";
+            if (string.IsNullOrEmpty(EventPopup.ContextRefusal("", true, "V#2@abc", false)))
+                yield return "L39 contextless-window-raised: a payload naming aircraft V#2@abc, which does NOT " +
+                             "resolve on this peer, was accepted (or refused with a BLANK reason) — an " +
+                             "[AircraftName] token would deref a null Vehicle inside EnterState, same half-built " +
+                             "window, same silence";
 
-            var backlog = EventPopup.Backlog(records, 0);
-            if (backlog.Count != 2)
-                yield return "L26 backlog-swallowed-on-seed: cursor 0 over 1 Triggered + 1 Completed record yields " +
-                             backlog.Count + " window(s), not 2 — a peer's accumulated history is eaten with no log line";
-            else if (backlog[0].EventId != "EV_open" || backlog[1].EventId != "EV_done")
-                yield return "L26 backlog-nondeterministic: order came back as " + backlog[0].EventId + "," +
-                             backlog[1].EventId + " — that is dictionary order, not (LastTriggerAt, EventId) ascending";
+            // ── (b) no replay: the record→window derivation must not come back ──
+            foreach (var gone in new[] { "Backlog", "Mode", "FirstSightCursor", "SeedCursor", "ClientTick", "Sync",
+                                         "LoadCursor", "StoreCursor", "FormatCursor", "ParseCursor", "CursorKey",
+                                         "RetireClosed" })
+                if (typeof(EventPopup).GetMember(gone, AllMembers).Length != 0)
+                    yield return "L39 backlog-derivation-returned: EventPopup." + gone + " exists again — a window is " +
+                                 "a LIVE host→client raise with no history behind it, so any function that derives " +
+                                 "windows from the mirrored records re-arms the pre-join flood (97 windows on every " +
+                                 "joining client) against records that cannot rebuild a context anyway";
 
-            if (EventPopup.Mode(PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Triggered) != "picker")
-                yield return "L26 picker-lost: a Triggered record no longer maps to 'picker' — an OPEN decision would " +
-                             "be shown as read-only history and nobody could answer it";
-            foreach (var s in new[] { PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.SelectedChoice,
-                                      PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Completed,
-                                      PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.MigratedCompleted })
-                if (EventPopup.Mode(s) != "outcome")
-                    yield return "L26 picker-for-resolved: state " + s + " maps to '" + EventPopup.Mode(s) + "', not " +
-                                 "'outcome' — the peer is offered a choice that is already frozen, and taking it " +
-                                 "re-grants the reward (GeoscapeEvent.IsCompleted is per-instance)";
-            if (EventPopup.Mode(PhoenixPoint.Geoscape.Events.GeoscapeEventRecordState.Reset) != null)
-                yield return "L26 reset-replayed: a Reset record is displayable — ReEneableEvent (GeoscapeEvent.cs:103-106) " +
-                             "puts the event back in the pool, so that window would re-raise forever";
-
-            var resolvedOnly = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal)
-                { { done.EventId, done } };
-            long at = done.LastTriggerAt.TimeSpan.Ticks;
-            if (EventPopup.Backlog(resolvedOnly, at).Count != 0)
-                yield return "L26 backlog-not-idempotent: a record at the cursor still rides — the same window re-raises " +
-                             "on every pump for the rest of the session";
-            if (EventPopup.Backlog(resolvedOnly, at - 1).Count != 1)
-                yield return "L26 cursor-overshoots: a record NEWER than the cursor was retired — a window the player " +
-                             "never saw is gone for good";
-            // An UNRESOLVED record is never retired by the cursor: the host's currently-OPEN window is the one
-            // thing the save transfer does not carry (GeoscapeViewSwitchQuery.GetRestorableData:28 walks only
-            // the pending list), so the derivation is all that can bring it back.
-            if (EventPopup.Backlog(records, long.MaxValue).Count != 1)
-                yield return "L26 open-decision-retired: a still-Triggered record dropped out of the backlog at a maxed " +
-                             "cursor — a host window open at join time would then reach the joiner never";
-
-            // The cursor is per-peer LOCAL progress and it is the only thing standing between a reload and a
-            // popup storm, so it outlives the process as a STRING (PlayerPrefs) — which makes its CODEC the
-            // whole contract. A locale-sensitive write or read hands back 0 = "replay this peer's entire
-            // event history", with nothing logged as wrong: the silent-swallow class again, one layer down.
-            // Both halves are asserted here because both are pure; the PlayerPrefs I/O around them cannot be
-            // (a method that merely references an ECall extern fails to JIT headless, ClientIdentity.cs:82-88).
-            foreach (var ticks in new[] { 0L, 1L, at, long.MaxValue })
+            // ── the wire ──────────────────────────────────────────────────
+            var p = new EventPopup.Raise
             {
-                var text = EventPopup.FormatCursor(ticks);
-                long back = EventPopup.ParseCursor(text);
-                if (back != ticks)
-                    yield return "L26 cursor-round-trip: " + ticks + " persists as '" + text + "' and reads back as " +
-                                 back + " — after a reload this peer either replays every window it already " +
-                                 "clicked through or is owed none of them, and the only symptom is doubles";
-            }
-            if (EventPopup.Backlog(resolvedOnly, EventPopup.ParseCursor(EventPopup.FormatCursor(at))).Count != 0)
-                yield return "L26 cursor-round-trip: a RESTORED cursor does not retire the record the live cursor " +
-                             "retired — the window the player just closed comes back on every reload";
-            if (EventPopup.ParseCursor("") != 0 || EventPopup.ParseCursor(null) != 0)
-                yield return "L26 cursor-round-trip: an ABSENT stored cursor does not read back as 0 — a peer's first " +
-                             "join would take a garbage cursor instead of falling back to the record seed";
+                EventId = "EV_test",
+                SiteRef = "S#7",
+                VehicleRef = "V#3@abc",
+                Title = "Haven under attack",
+                Narrative = "[HavenName] calls for help",
+            };
+            var back = EventPopup.Decode(EventPopup.Encode(42u, p), out uint seq);
+            if (seq != 42u)
+                yield return "L39 raise-round-trip: seq came back as " + seq + ", not 42 — the idempotence guard reads " +
+                             "a wrong number and either drops live windows or lets one re-delivery open a second one";
+            if (back.EventId != p.EventId || back.SiteRef != p.SiteRef || back.VehicleRef != p.VehicleRef ||
+                back.Title != p.Title || back.Narrative != p.Narrative)
+                yield return "L39 raise-round-trip: the payload came back as (" + back.EventId + "," + back.SiteRef +
+                             "," + back.VehicleRef + "," + back.Title + "," + back.Narrative + ") — a dropped or " +
+                             "shifted field means the client builds the window against the WRONG context";
+            var siteless = EventPopup.Decode(EventPopup.Encode(1u, new EventPopup.Raise { EventId = "EV_siteless" }), out _);
+            if (siteless.SiteRef != "" || siteless.VehicleRef != "" || siteless.Title != "" || siteless.Narrative != "")
+                yield return "L39 raise-round-trip: a site-less payload's null fields did not come back as EMPTY " +
+                             "strings — ContextRefusal keys on IsNullOrEmpty, so garbage there would refuse every " +
+                             "site-less window in the game";
 
-            // ── FLOOD arms (regression 2026-07-29: both clients buried under 97 outcome windows at join,
-            // "cursor seeded to 0 from 0 record(s)" then "backlog n=97 cursor=0"). Deleting the old silent
-            // re-seed in 8d5dbf0 also deleted the only thing bounding the FIRST join, so the inverse of the
-            // silent-swallow class shipped: a flood. The bound is EventPopup.FirstSightCursor — a peer's
-            // first sight of a campaign owes it nothing from before that moment.
-            var history = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal);
-            for (int i = 1; i <= 5; i++)
-            {
-                var r = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_hist" + i, Ticks(1000 + i * 10));
-                r.SelectChoice(0);
-                r.Complete(Ticks(1000 + i * 10 + 1));
-                history[r.EventId] = r;
-            }
-            long firstSight = EventPopup.FirstSightCursor(history);
-            var owedAtJoin = EventPopup.Backlog(history, firstSight);
-            if (owedAtJoin.Count != 0)
-                yield return "L26 first-sight-admits-pre-join-history: a first sight of a campaign carrying " +
-                             history.Count + " resolved record(s) already owes this peer " + owedAtJoin.Count +
-                             " window(s) at cursor " + firstSight + " — every joining client is buried under the " +
-                             "campaign's entire event history before it can play (measured: 97 windows)";
-            // The fix must not over-correct into the swallow it replaced: an OPEN decision is not history, so a
-            // host window still unanswered at join has to survive the very same first-sight cursor.
-            var joinWithOpen = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(history, StringComparer.Ordinal);
-            var openAtJoin = new PhoenixPoint.Geoscape.Events.GeoscapeEventRecord("EV_openAtJoin", Ticks(1005));
-            joinWithOpen[openAtJoin.EventId] = openAtJoin;
-            var owedWithOpen = EventPopup.Backlog(joinWithOpen, EventPopup.FirstSightCursor(joinWithOpen));
-            if (owedWithOpen.Count != 1 || owedWithOpen[0].EventId != "EV_openAtJoin")
-                yield return "L26 first-sight-eats-open-decision: first-sight seeding over a history plus ONE " +
-                             "unanswered record owes " + owedWithOpen.Count + " window(s) — the flood guard has " +
-                             "swallowed the host's open window, which the save transfer does not carry either";
-            // An EMPTY mirror is the flood's actual trigger, and it is a TIMING fact, not a state fact: the
-            // transferred save reaches OnReachedPlaying with _records still empty and the whole set lands
-            // ~0.6 s later as one wholesale dict apply (RailMeta.cs:2750). So the value taken there is 0, and 0
-            // is precisely "owe the entire campaign" — which is why SeedCursor must DEFER on an empty mirror
-            // instead of latching. This arm pins the premise that makes the deferral necessary.
-            var emptyMirror = new Dictionary<string, PhoenixPoint.Geoscape.Events.GeoscapeEventRecord>(StringComparer.Ordinal);
-            if (EventPopup.FirstSightCursor(emptyMirror) != 0)
-                yield return "L26 first-sight-empty-mirror: an empty record mirror yields a NON-ZERO first-sight " +
-                             "cursor — it would retire records the rail has not delivered yet, unseen and unlogged";
-            if (EventPopup.Backlog(history, EventPopup.FirstSightCursor(emptyMirror)).Count != history.Count)
-                yield return "L26 first-sight-empty-mirror: seeding from an empty mirror no longer admits the whole " +
-                             "history — if that ever stops being true the SeedCursor deferral is dead code and the " +
-                             "next reader will delete it, re-arming the flood";
-            // RE-RAISE: a window the player clicked through never comes back. Same `> cursor` comparison the
-            // backlog-not-idempotent arm above exercises (shared code path, NOT an independent falsification) —
-            // asserted here over the FULL history at its first-sight cursor, because that is the shape the 1 Hz
-            // pump actually runs against, and a re-raise there is an unclosable window stack rather than a double.
-            long atFirstSight = EventPopup.FirstSightCursor(joinWithOpen);
-            openAtJoin.SelectChoice(0);
-            openAtJoin.Complete(Ticks(1006));
-            if (EventPopup.Backlog(joinWithOpen, atFirstSight).Count != 0)
-                yield return "L26 raised-record-re-raises: a record answered at the first-sight cursor still rides " +
-                             "the backlog — the pump re-raises it every tick, forever, and pause does not stop it";
+            // ── the deploy-prompt exclusion ───────────────────────────────
+            if (!EventPopup.IsPureDeployPrompt(new[] { true, false }, new[] { true, true }))
+                yield return "L39 deploy-prompt-mirrored: 'Deploy / Leave' (one mission choice + one bare decline) is " +
+                             "not classified as a pure deploy prompt — the host's LOCAL arrival decision mirrors as a " +
+                             "second window on the other peer, which its host-side cancel never closes";
+            if (EventPopup.IsPureDeployPrompt(new[] { true, false }, new[] { true, false }))
+                yield return "L39 story-event-suppressed: a mission choice MIXED with a real rewarded alternative was " +
+                             "classified as a pure deploy prompt — that whole story event is then never mirrored " +
+                             "(v1 9e80b24 regression, and the client simply never learns the window existed)";
+            if (EventPopup.IsPureDeployPrompt(new[] { false, false }, new[] { true, true }))
+                yield return "L39 story-event-suppressed: an event with NO mission choice at all was classified as a " +
+                             "deploy prompt — ordinary narrative windows would stop mirroring";
+
+            // ── the surface id ────────────────────────────────────────────
+            int declaring = typeof(SurfaceIds).GetFields(BindingFlags.Public | BindingFlags.Static)
+                                              .Count(f => f.FieldType == typeof(byte) &&
+                                                          (byte)f.GetValue(null) == SurfaceIds.GeoEventRaise);
+            if (declaring != 1)
+                yield return "L39 surface-id-collision: 0x" + SurfaceIds.GeoEventRaise.ToString("X2") + " is declared " +
+                             "by " + declaring + " constants — two senders on one id mis-route silently on the peer";
+            int raiseId = SurfaceIds.GeoEventRaise;   // via a local: a const compare folds and the arm reads as dead code
+            if (raiseId < 0xA0 || raiseId > 0xBF)
+                yield return "L39 surface-id-partition: the raise surface 0x" + SurfaceIds.GeoEventRaise.ToString("X2") +
+                             " sits outside the geoscape partition 0xA0-0xBF, where the tactical fast-path is " +
+                             "consulted FIRST and would consume it";
         }
-
-        private static Base.Core.TimeUnit Ticks(long t) => Base.Core.TimeUnit.FromTimeSpan(TimeSpan.FromTicks(t));
 
         /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for
         /// everyone" true. <see cref="EventSync.Validate"/> is deliberately pure (record STATE + index +
@@ -2980,8 +2953,8 @@ namespace RailCheck
                 }
             }
             yield return "L37 token-deref-unswallowed: GeoscapeEventContext.ReplaceEventTokens carries no Harmony " +
-                         "FINALIZER of ours — an unresolvable [Token] in a synthesized window's text throws NRE " +
-                         "inside UIStateGeoscapeEvent.EnterState, PAST EventPopup.Raise's try/catch, and the " +
+                         "FINALIZER of ours — an unresolvable [Token] in a mirrored window's text throws NRE " +
+                         "inside UIStateGeoscapeEvent.EnterState, PAST the raise path's own try/catch, and the " +
                          "half-built window then shows the placeholder text baked into level6 and " +
                          "UIMainButton_HPriority_Encounters while our log still reports the raise as a success";
         }

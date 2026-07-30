@@ -123,13 +123,12 @@ namespace Multiplayer.Network.Sync
                                 if (fac.PxBase != null) fac.PxBase.UpdateStats();
                             OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
-                        case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem es:
-                            // Mirrored event records changed → re-derive the client's event-window
-                            // backlog from them (EventPopup.Backlog; SyncEngine.Tick pumps the same
-                            // method ~1 Hz for the records that arrive with a SAVE instead of a delta).
-                            // MarkDirty stays: site encounter labels etc. ride the universal repaint
-                            // like any other kind.
-                            EventPopup.Sync(es, geo);
+                        case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem _:
+                            // A record delta NEVER raises a window (windows are live 0xB6 raises) — but it
+                            // IS the answer/dismiss signal: the repaint refreshes an open dialog's stale
+                            // Record ref and closes a picker somebody else already answered
+                            // (EventPopup.RepaintDialog, the UiNativeRepaint entry for UIStateGeoscapeEvent).
+                            // Site encounter labels etc. ride the same universal repaint like any other kind.
                             OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
                         case ItemStorage storage:

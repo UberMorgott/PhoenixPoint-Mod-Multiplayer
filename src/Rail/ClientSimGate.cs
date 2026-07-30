@@ -246,8 +246,8 @@ namespace Multiplayer.Network.Sync
     /// can roll a DIFFERENT random encounter than the host did. That mints an authoritative record on
     /// a projector client (law 3) which the diff rail can never correct — the diff is host-now vs
     /// host-before, so a record only the client has is never mentioned. Blocked, every record on a
-    /// client arrives as a delta, which is exactly what <see cref="EventPopup.Backlog"/> derives its
-    /// window queue from.
+    /// client arrives as a delta, and every WINDOW arrives as a 0xB6 raise
+    /// (<see cref="EventPopup.HandleInbound"/>) — the client raises nothing of its own.
     ///
     /// <c>SuppressEvents</c> cannot serve here: it is a rail-MIRRORED leaf
     /// (docs/rail-baseline.txt:254) carrying the host's <c>false</c>, so a local write is overwritten

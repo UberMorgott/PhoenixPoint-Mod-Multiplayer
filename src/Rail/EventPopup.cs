@@ -1,10 +1,15 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Runtime.CompilerServices;
+using System.IO;
+using System.Text;
+using Base.UI;
 using HarmonyLib;
+using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Geoscape.Core;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Events;
+using PhoenixPoint.Geoscape.Events.Eventus;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewControllers.SiteEncounters;
@@ -15,48 +20,43 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Law 11 presentation for the GeoscapeEventSystem kind ("ES"): geoscape EVENT WINDOWS on the
-    /// client, as a QUEUED HISTORY derived purely from mirrored STATE. The rail ships
-    /// <c>_records</c> (the EncounterRecords twin, RailMeta.cs:726); every window this peer still owes
-    /// the player is a pure function of those records and ONE local number:
-    ///   • <c>_cursor</c> = the newest <c>LastTriggerAt</c> this player has actually clicked through.
-    ///   • <see cref="Backlog"/> = records past the cursor, plus every still-<c>Triggered</c> record
-    ///     (an open decision is not history), oldest first.
-    ///   • <see cref="Mode"/> = picker or outcome, read off <c>GeoscapeEventRecord.State</c>.
-    /// This REPLACED a transition latch, which could not work: the whole quest/narrative class is
-    /// already <c>Completed</c> when it reaches a client (the host auto-completes
-    /// <c>HasSingleChoice</c> at trigger, GeoscapeEventSystem.cs:651-656), so there is no
-    /// →Triggered transition to observe; and any observation gap (tactical mission, reload, join,
-    /// disconnect) loses transitions while never losing records. The latch also SILENTLY re-seeded
-    /// itself at every reload boundary, which is what ate a joining client's entire backlog.
+    /// Law 11 presentation for geoscape EVENT WINDOWS on the client: the host ships ONE PRESENTATION
+    /// PAYLOAD per raise (surface <see cref="SurfaceIds.GeoEventRaise"/> 0xB6) and the client rebuilds the
+    /// REAL native window from it. There is no history, no cursor and no backlog — a window is a live
+    /// host→client message, so a peer that was not in the session when an event fired simply never sees it.
     ///
-    /// Raising reuses the game's own queue and dialog — no custom UI: <c>GeoscapeViewSwitchQuery</c>
-    /// (priority-ordered insert :75-84, popped one at a time :58-73, and restored across save/load
-    /// :39-56) gives click-through-one-at-a-time and reload persistence for free, exactly as
-    /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2034-2066 does it, with <c>PauseGame=false</c>
-    /// (pause is host-authoritative and arrives via the TimeAnchor).
+    /// THIS REPLACED a record-derived queue (deleted 2026-07-30), which was structurally impossible.
+    /// <c>GeoscapeEventRecord</c> persists EventId/timestamps/state/_selectedChoice/_triggerCount and
+    /// NOTHING else (GeoscapeEventRecord.cs:9-36): no site, no vehicle, no context. The native
+    /// <c>GeoscapeEventContext</c> — which every <c>[HavenName]</c>/<c>[HavenLeader]</c>/<c>[AircraftName]</c>
+    /// token dereferences UNGUARDED (GeoscapeEventContext.cs:20-40) — is built fresh per raise and is not in
+    /// the save graph, so a record can never reconstitute one. Rebuilding windows from records therefore
+    /// produced context-LESS windows: measured 54 of 94 replayed raises had <c>site=null</c>, each rendering
+    /// the raw <c>[HavenName]</c> token over the scene's baked dev placeholder text, with a live
+    /// "START MISSION" button underneath. The replay itself was the second half of the bug: the persisted
+    /// per-peer cursor made every joining peer re-raise the campaign's entire event history.
     ///
-    /// Client choice resolution stays FORBIDDEN (host-authoritative), but the click is no longer
-    /// swallowed: <see cref="EventChoiceClientLock"/> BLOCKS it and relays it as a 0xB4 answer intent
-    /// (<see cref="EventSync"/>), whose host-side arbiter freezes the first answer for everyone.
-    /// Esc is still held while the record is unresolved — on BOTH peers.
+    /// The payload carries what the RECORD cannot: the site + vehicle the host's own context held (as rail
+    /// root refs, law 2 — <c>IdentityResolver.RootRef</c>/<c>Resolve</c>, the same addressing the value rail
+    /// uses) plus the two strings the host actually resolved. The client resolves those refs against its own
+    /// live graph, builds a REAL <c>GeoscapeEventContext</c>, and — if it cannot (<see cref="ContextRefusal"/>)
+    /// — raises NOTHING and says so. A half-built window is worse than no window.
     ///
-    /// A frozen answer is also what the losers SEE: <see cref="EventChoiceFreeze"/> greys every losing
-    /// button and marks the winner on every render of the dialog, and <see cref="RepaintDialog"/> flips an
-    /// already-open picker in place instead of closing and re-raising it.
+    /// Raising reuses the game's own queue and dialog — no custom UI: <c>GeoscapeViewSwitchQuery</c> gives
+    /// click-through-one-at-a-time and reload persistence for free, exactly as
+    /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2034-2066 does it, with <c>PauseGame=false</c> (pause is
+    /// host-authoritative and arrives via the TimeAnchor).
+    ///
+    /// Client choice resolution stays FORBIDDEN (host-authoritative): <see cref="EventChoiceClientLock"/>
+    /// BLOCKS the click and relays it as a 0xB4 answer intent (<see cref="EventSync"/>), whose host-side
+    /// validator freezes the first answer for everyone; <see cref="EventCompleteArbiter"/> is the model-funnel
+    /// backstop. The answer comes back as the record's own 0xAC leaves, and THAT delta is the dismiss signal:
+    /// <see cref="RepaintDialog"/> closes an open picker whose record has been resolved by someone else.
     /// </summary>
     internal static class EventPopup
     {
-        private static long _cursor;                 // newest LastTriggerAt ticks this peer clicked through
-        private static bool _cursorSeeded;
-        private static bool _loggedEmptyMirror;      // the "seed deferred" line is logged once, not per 1 Hz pass
-        private static readonly HashSet<string> _inFlight = new HashSet<string>(StringComparer.Ordinal);
-        private static readonly HashSet<string> _loggedSkips = new HashSet<string>(StringComparer.Ordinal);
-        private static float _nextPumpAt;
-        private const float PumpInterval = 1f;
+        private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
-        private static readonly System.Reflection.FieldInfo RecordsField =
-            AccessTools.Field(typeof(GeoscapeEventSystem), "_records");                 // GeoscapeEventSystem.cs:92
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
             AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");                  // GeoscapeView.cs:138 (game typo)
         private static readonly System.Reflection.FieldInfo RequestsField =
@@ -71,265 +71,358 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Reflection.MethodInfo SetChoiceReward =
             AccessTools.PropertySetter(typeof(GeoscapeEvent), "ChoiceReward");
 
-        /// <summary>Reload/session boundary: forget the in-flight raise set and re-derive the cursor against
-        /// the records the new save actually carries. The cursor is NOT dropped here — it is this peer's
-        /// private progress through the history and it outlives the process (<see cref="StoreCursor"/>).
-        /// Zeroing it was what made an unread OUTCOME window vanish on every reload: the re-seed then fell
-        /// back to "max over all RESOLVED records", i.e. exactly the windows the player had not read yet.</summary>
-        public static void Reset()
+        /// <summary>FULL session teardown only (SyncEngine.DetachAllChannels) — the raise seq is a host
+        /// monotonic stream and a client last-writer guard, so it must NOT be touched at a mid-session
+        /// reload boundary (rca-3 contract: a host counter that restarts mid-session makes every following
+        /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
+        public static void Reset() => Seq.Reset();
+
+        // ─── THE PAYLOAD (host→all, surface 0xB6) ──────────────────────────
+
+        /// <summary>One raise, as the wire carries it. Refs are rail ROOT REFS (law 2 hybrid addressing —
+        /// "S#&lt;siteId&gt;" / "V#&lt;id&gt;@&lt;ownerFactionGuid&gt;"), "" when the host's own context had
+        /// none. Texts are what the HOST resolved; the client prefers its OWN def whenever that def resolves
+        /// to anything (see <see cref="StampWireTexts"/>), so these matter only for a def whose text exists
+        /// solely as a host-side RUNTIME mutation (TFTV VoidOmen_{0..19}: empty loc keys +
+        /// LocalizedTextBind(text, doNotLocalize:true) written at roll time, TFTVODIandVoidOmenRoll.cs:638-639).</summary>
+        internal struct Raise
         {
-            _inFlight.Clear();
-            _loggedSkips.Clear();
-            _cursorSeeded = false;
-            _loggedEmptyMirror = false;
+            public string EventId;
+            public string SiteRef;
+            public string VehicleRef;
+            public string Title;
+            public string Narrative;
         }
 
-        /// <summary>Display mode for one record, read off the record's OWN state — never off a
-        /// transition. Null = not displayable. Pure; RailCheck L26 calls it directly.</summary>
-        internal static string Mode(GeoscapeEventRecordState state)
+        /// <summary>[seq:u32][eventId][siteRef][vehicleRef][title][narrative]. Pure both ways so RailCheck
+        /// L39 can round-trip it headless — a wire that drops a field silently is a window rendered against
+        /// the wrong context, which is the exact failure this family replaced.</summary>
+        internal static byte[] Encode(uint seq, Raise p)
         {
-            switch (state)
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
-                case GeoscapeEventRecordState.Triggered: return "picker";
-                case GeoscapeEventRecordState.SelectedChoice:
-                case GeoscapeEventRecordState.Completed:
-                case GeoscapeEventRecordState.MigratedCompleted: return "outcome";
-                default: return null; // Reset — ReEneableEvent (GeoscapeEvent.cs:103-106) put it back in the pool
+                w.Write(seq);
+                w.Write(p.EventId ?? "");
+                w.Write(p.SiteRef ?? "");
+                w.Write(p.VehicleRef ?? "");
+                w.Write(p.Title ?? "");
+                w.Write(p.Narrative ?? "");
+                return ms.ToArray();
             }
         }
 
-        /// <summary>THE derivation: every window this peer has not clicked through yet, oldest first.
-        /// Ordered by (LastTriggerAt, EventId) ascending — deterministic, never dictionary order
-        /// (law 6). A still-<c>Triggered</c> record rides regardless of the cursor: it is an OPEN
-        /// decision, and the cursor only records what was clicked through — the host's currently-open
-        /// window is also the one thing the save transfer does NOT carry
-        /// (GeoscapeViewSwitchQuery.GetRestorableData:28 walks only the pending list). Pure — no seed,
-        /// no latch, no I/O; RailCheck L26 calls it directly.</summary>
-        internal static List<GeoscapeEventRecord> Backlog(IDictionary<string, GeoscapeEventRecord> records, long cursor)
+        internal static Raise Decode(byte[] payload, out uint seq)
         {
-            var list = new List<GeoscapeEventRecord>();
-            if (records == null) return list;
-            foreach (var rec in records.Values)
-                if (rec != null && Mode(rec.State) != null &&
-                    (rec.LastTriggerAt.TimeSpan.Ticks > cursor || rec.State == GeoscapeEventRecordState.Triggered))
-                    list.Add(rec);
-            list.Sort(ByTriggerThenId);
-            return list;
+            using (var ms = new MemoryStream(payload))
+            using (var r = new BinaryReader(ms, Encoding.UTF8))
+            {
+                seq = r.ReadUInt32();
+                return new Raise
+                {
+                    EventId = r.ReadString(),
+                    SiteRef = r.ReadString(),
+                    VehicleRef = r.ReadString(),
+                    Title = r.ReadString(),
+                    Narrative = r.ReadString(),
+                };
+            }
         }
 
-        private static int ByTriggerThenId(GeoscapeEventRecord a, GeoscapeEventRecord b)
+        // ─── HOST: capture at the native raise seam ────────────────────────
+
+        /// <summary>Host-side broadcast of ONE window, called from the postfix on the native seam. Reads the
+        /// live event's OWN context — the only place site + vehicle exist — and the two strings the native
+        /// header/body render, then ships them. Never throws into game code: a raise this fails on is a
+        /// window the client does not get, and it says so.</summary>
+        internal static void HostBroadcast(GeoscapeEvent ev)
         {
-            int c = a.LastTriggerAt.TimeSpan.Ticks.CompareTo(b.LastTriggerAt.TimeSpan.Ticks);
-            return c != 0 ? c : string.CompareOrdinal(a.EventId, b.EventId);
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            if (SyncApplyScope.Active) return;         // law 8: an apply that reaches the view never re-broadcasts
+            var data = ev?.EventData;
+            if (data == null || string.IsNullOrEmpty(ev.EventID)) return;
+            try
+            {
+                var geo = GeoLevel();
+                // The marketplace window is a purely LOCAL gesture on either peer (MarketplaceAbility
+                // .ActivateInternal:43 → GeoscapeView.ToMarketplace:734-738 calls the view DIRECTLY) and its
+                // offer list is not replicated (docs/rail-baseline.txt:14) — mirroring it would open a shop
+                // over rows the other peer does not have. MarketplaceChoiceClientLock owns the client side.
+                if (geo?.EventSystem != null && geo.EventSystem.IsEventTheMarketplace(data)) return;
+                // v1's IsMissionDeployEvent, same reason: a PURE "Deploy / Leave" arrival prompt is a
+                // host-LOCAL pre-decision window. The mission itself reaches the other peer through the
+                // tactical deploy channel (law 5), so mirroring the prompt only produces a second window
+                // whose Leave the host already took (in-game leak: PROG_AN2_MISS).
+                if (IsMissionDeployEvent(data))
+                {
+                    Debug.Log("[MP][events] HOST raise of '" + ev.EventID + "' NOT mirrored — pure mission-deploy " +
+                              "prompt (host-local arrival decision; the mission rides the tactical deploy channel)");
+                    return;
+                }
+                var p = new Raise
+                {
+                    EventId = ev.EventID,
+                    SiteRef = IdentityResolver.RootRef(ev.Context?.Site) ?? "",
+                    VehicleRef = IdentityResolver.RootRef(ev.Context?.Vehicle) ?? "",
+                    Title = LiveTitle(data),
+                    Narrative = LiveNarrative(data, ev.Context),
+                };
+                uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
+                Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " site=" +
+                          (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
+                          (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
+                          " narrLen=" + p.Narrative.Length);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][events] HOST raise broadcast FAILED for '" + ev.EventID + "' — no peer will see " +
+                               "this window: " + ex);
+            }
         }
 
-        /// <summary>Second pump site, ~1 Hz from SyncEngine.Tick. A late joiner's records arrive WITH
-        /// THE SAVE, not as a delta, so a delta-driven pump alone would never fire for its backlog;
-        /// this also self-heals a pass that ran before <c>GeoscapeView</c> existed. Cost = one scan of
-        /// ≤ |event defs| entries. ponytail: 1 Hz scan, make it change-driven only if it profiles.</summary>
-        public static void ClientTick(NetworkEngine engine)
+        /// <summary>The title exactly as the native header renders it (UIModuleSiteEncounters
+        /// .ShowEncounter:199 — <c>EventData.Title?.Localize()</c>).</summary>
+        private static string LiveTitle(GeoscapeEventData data)
         {
-            if (engine == null || engine.IsHost || !engine.IsActiveSession) return;
-            if (Time.realtimeSinceStartup < _nextPumpAt) return;
-            _nextPumpAt = Time.realtimeSinceStartup + PumpInterval;
+            try { return data.Title?.Localize() ?? ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>The narrative exactly as the native body resolves it for the last page
+        /// (<c>Description.Last().GetText(context)</c>, UIModuleSiteEncounters:335). Tokens are NOT baked —
+        /// the client render runs <c>ReplaceEventTokens</c> itself against its OWN rebuilt context, so a
+        /// haven name is the one the client's site carries, not a string frozen on the host.</summary>
+        private static string LiveNarrative(GeoscapeEventData data, GeoscapeEventContext context)
+        {
+            try
+            {
+                var desc = data.Description;
+                if (desc == null || desc.Count == 0) return "";
+                return desc[desc.Count - 1]?.GetText(context) ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>PURE classifier (RailCheck L39): a mission-deploy prompt is one where at least one choice
+        /// LAUNCHES a mission and every other choice is a bare decline. Mixed story events — a mission choice
+        /// alongside real rewarded alternatives — are NOT deploy prompts and do mirror (v1 9e80b24 regression).
+        /// Fail OPEN (false) on anything unreadable: never suppress a legitimate window.</summary>
+        internal static bool IsPureDeployPrompt(bool[] startsMission, bool[] declineOnly)
+        {
+            if (startsMission == null || declineOnly == null || startsMission.Length != declineOnly.Length) return false;
+            bool anyMission = false;
+            for (int i = 0; i < startsMission.Length; i++)
+            {
+                if (startsMission[i]) { anyMission = true; continue; }
+                if (!declineOnly[i]) return false;   // a non-mission choice with a real payload ⇒ story event
+            }
+            return anyMission;
+        }
+
+        internal static bool IsMissionDeployEvent(GeoscapeEventData data)
+        {
+            var choices = data?.Choices;
+            if (choices == null || choices.Count == 0) return false;
+            var startsMission = new bool[choices.Count];
+            var declineOnly = new bool[choices.Count];
+            for (int i = 0; i < choices.Count; i++)
+            {
+                startsMission[i] = StartsMission(choices[i]);
+                declineOnly[i] = startsMission[i] || !HasOutcomePayload(choices[i]);
+            }
+            return IsPureDeployPrompt(startsMission, declineOnly);
+        }
+
+        /// <summary>Does this choice launch a tactical mission? Unity default-constructs an EMPTY
+        /// <c>OutcomeStartMission</c>, so non-null is not the signal — <c>MissionTypeDef</c> is
+        /// (GeoEventChoiceOutcome:315 → RewardStartCustomMission).</summary>
+        private static bool StartsMission(GeoEventChoice choice) => choice?.Outcome?.StartMission?.MissionTypeDef != null;
+
+        /// <summary>Does this choice carry a REAL outcome beyond declining? Walked GENERICALLY over the
+        /// outcome's public fields rather than against a hand-listed set: <c>GeoEventChoiceOutcome</c> has
+        /// ~25 payload fields and DLCs add more, and a list that silently goes stale would start classifying
+        /// story events as deploy prompts and suppressing them. Unity default-constructs empty lists/packs/
+        /// texts, so non-null alone means nothing — payload is a non-empty string / non-zero int / true bool /
+        /// any-element IEnumerable / live UnityEngine.Object / a set MissionTypeDef. Unknown non-null object
+        /// field ⇒ payload (fail toward mirroring).</summary>
+        private static bool HasOutcomePayload(GeoEventChoice choice)
+        {
+            var outcome = choice?.Outcome;
+            if (outcome == null) return false;      // the game keys a bare decline as the null outcome
+            try
+            {
+                if (!string.IsNullOrEmpty(outcome.OutcomeText?.General?.LocalizationKey)) return true;
+                foreach (var f in outcome.GetType().GetFields(System.Reflection.BindingFlags.Public |
+                                                              System.Reflection.BindingFlags.Instance))
+                {
+                    if (f.Name == "OutcomeText") continue;                 // handled above (empty-key aware)
+                    var v = f.GetValue(outcome);
+                    if (v == null) continue;
+                    if (v is OutcomeStartMission sm) { if (sm.MissionTypeDef != null) return true; }
+                    else if (v is bool b) { if (b) return true; }
+                    else if (v is int n) { if (n != 0) return true; }
+                    else if (v is string s) { if (!string.IsNullOrEmpty(s)) return true; }
+                    else if (v is UnityEngine.Object uo) { if (uo != null) return true; }
+                    else if (v is IEnumerable e) { foreach (var _ in e) return true; }
+                    else return true;
+                }
+                return false;
+            }
+            catch { return true; }                  // unreadable ⇒ story choice ⇒ the event mirrors
+        }
+
+        // ─── CLIENT: rebuild the REAL context and push the NATIVE window ───
+
+        /// <summary>THE validity decision, pure so RailCheck L39 can falsify it headless: may this payload
+        /// become a window on this peer? Null = yes. A ref the host SHIPPED but this peer cannot resolve is
+        /// the killer — the rebuilt context would carry <c>Site</c>/<c>Vehicle</c> null while the def's text
+        /// still holds <c>[HavenName]</c>/<c>[AircraftName]</c>, every replacer dereferences those unguarded
+        /// (GeoscapeEventContext.cs:20-40), and the throw lands INSIDE <c>UIStateGeoscapeEvent.EnterState</c>,
+        /// leaving the window half-built over the scene's baked placeholder text with live buttons. An EMPTY
+        /// ref is not a failure: a site-less event legitimately has no site and the host rendered it that way
+        /// too, so the mirror matches.</summary>
+        internal static string ContextRefusal(string siteRef, bool siteResolved, string vehicleRef, bool vehicleResolved)
+        {
+            if (!string.IsNullOrEmpty(siteRef) && !siteResolved)
+                return "the host raised it at site " + siteRef + ", which does not resolve on this peer — the " +
+                       "rebuilt context would have Site==null and every [HavenName]/[HavenLeader] token would " +
+                       "deref null inside EnterState, leaving a half-built window over placeholder text";
+            if (!string.IsNullOrEmpty(vehicleRef) && !vehicleResolved)
+                return "the host raised it for aircraft " + vehicleRef + ", which does not resolve on this peer — " +
+                       "the rebuilt context would have Vehicle==null and an [AircraftName] token would deref null " +
+                       "inside EnterState, leaving a half-built window over placeholder text";
+            return null;
+        }
+
+        /// <summary>Returns true when the surface was consumed. Client-only: the host never applies its own
+        /// raise (it already showed the window natively).</summary>
+        public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        {
+            if (surfaceId != SurfaceIds.GeoEventRaise) return false;
+            if (engine == null || engine.IsHost) return true;
+            try
+            {
+                var p = Decode(payload, out uint seq);
+                // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
+                // what makes this surface idempotent (law 7), and it is marked only after the window is up.
+                if (!Seq.ShouldApply(SurfaceIds.GeoEventRaise, seq)) return true;
+                if (RaiseMirrored(p)) Seq.Mark(SurfaceIds.GeoEventRaise, seq);
+            }
+            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup inbound failed: " + ex); }
+            return true;
+        }
+
+        /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, stamp
+        /// the wire texts only where this peer's own def has nothing, and push the NATIVE view state through
+        /// the game's own switch query — the same call the host's <c>OnGeoscapeEventRaised</c> makes.
+        /// Returns false when nothing was raised (and always says why).</summary>
+        private static bool RaiseMirrored(Raise p)
+        {
             var geo = GeoLevel();
-            if (geo?.EventSystem != null) Sync(geo.EventSystem, geo);
-        }
-
-        /// <summary>Client-only (host windows are raised natively). Derives the backlog from the live
-        /// records and pushes whatever the native pipeline is not already holding.</summary>
-        public static void Sync(GeoscapeEventSystem es, GeoLevelController geo)
-        {
-            if (!IsClient) return;
-            if (!(RecordsField?.GetValue(es) is IDictionary<string, GeoscapeEventRecord> records)) return;
             var view = geo?.View;
-            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q)) return;
-
-            SeedCursor(records);
-            RetireClosed(view, records);
-
-            var backlog = Backlog(records, _cursor);
-            bool announced = false;
-            foreach (var rec in backlog)
+            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q))
             {
-                if (_inFlight.Contains(rec.EventId) || _loggedSkips.Contains(rec.EventId)) continue;
-                if (IsQueuedNatively(view, rec.EventId)) { _inFlight.Add(rec.EventId); continue; }
-                if (!announced)
-                {
-                    announced = true; // one line per pass that actually raises — the pump itself stays silent
-                    Debug.Log("[MP][events] backlog n=" + backlog.Count + " cursor=" + _cursor +
-                              " next='" + rec.EventId + "' mode=" + Mode(rec.State));
-                }
-                Raise(es, geo, q, rec);
+                // Not "later": this peer has no geoscape to put a window in (tactical mission, mid-load), and
+                // there is no history to replay it from. Dropped, loudly — a v1 client behaved the same way.
+                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer has no live " +
+                                 "GeoscapeView to show it in, and windows are not replayed after the fact");
+                return false;
             }
+
+            var es = geo.EventSystem;
+            var data = es?.GetEventByID(p.EventId, canFail: true)?.GeoscapeEventData;
+            if (data == null)
+            {
+                Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — no such event def on this peer " +
+                               "(mod parity break: law 10 should have blocked the join)");
+                return false;
+            }
+
+            var site = IdentityResolver.Resolve(geo, p.SiteRef, null) as GeoSite;
+            var vehicle = IdentityResolver.Resolve(geo, p.VehicleRef, null) as GeoVehicle;
+            string refusal = ContextRefusal(p.SiteRef, site != null, p.VehicleRef, vehicle != null);
+            if (refusal != null)
+            {
+                Debug.LogError("[MP][events] raise of '" + p.EventId + "' REFUSED — " + refusal);
+                return false;
+            }
+
+            StampWireTexts(data, p.Title, p.Narrative);
+            var context = vehicle != null
+                ? new GeoscapeEventContext(site, geo.ViewerFaction, vehicle)
+                : new GeoscapeEventContext(site, geo.ViewerFaction);
+            // The record rides the 0xAC value rail and normally lands AFTER this raise (separate surfaces;
+            // the diff flushes on its own cycle). A dialog with a null Record is an NRE waiting in
+            // UIStateGeoscapeEvent.ExitState:61 (it reads Event.Record.State on every close), so an OPEN
+            // placeholder stands in until the real one arrives — RepaintDialog swaps the live record in on the
+            // first ES delta. It is presentation only: it is never inserted into GeoscapeEventSystem._records,
+            // so the client mints no authoritative state (law 3).
+            var rec = es.GetEventRecord(p.EventId) ?? new GeoscapeEventRecord(p.EventId, geo.Timing.Now);
+            var geoEvent = new GeoscapeEvent(data, context) { Record = rec };
+
+            q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent))
+            { PauseGame = false }); // pause mirrors from the host via the TimeAnchor
+            Debug.Log("[MP][events] raised '" + p.EventId + "' site=" + (site == null ? "none" : site.SiteId.ToString()) +
+                      " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
+                      " record=" + rec.State + (es.GetEventRecord(p.EventId) == null ? " (placeholder)" : ""));
+            return true;
         }
 
-        /// <summary>First pass after a reload/join. Two sources, in this order:
-        ///   • the PERSISTED cursor, when this peer has one — that is the whole point of persisting it: a
-        ///     reload must not replay what the player already clicked through, and must not swallow what they
-        ///     had not read yet. CLAMPED to the newest record present, which is what makes the storage key
-        ///     safe without a campaign id (see <see cref="CursorKey"/>): a value carried over from another
-        ///     campaign can then retire at most the whole visible history — exactly the fallback below — and
-        ///     never more, because a still-<c>Triggered</c> record rides the backlog regardless of the cursor.
-        ///   • otherwise the record seed = the NEWEST record present. "Missed" means raised while this peer
-        ///     was in the session; the campaign's pre-join past is not this peer's backlog. Taking the newest
-        ///     rather than the newest RESOLVED loses nothing — an open decision rides <see cref="Backlog"/> on
-        ///     its <c>Triggered</c> state, not on the cursor (:112).
-        ///
-        /// THE FLOOD GUARD, and the guard that replaces the silent re-seed deleted in 8d5dbf0: never seed
-        /// from an EMPTY mirror. An empty record set is not an empty campaign, it is "the rail has not
-        /// delivered the records yet" — the transferred save's geoscape reaches OnReachedPlaying with
-        /// <c>_records</c> still empty and the whole set lands ~0.6 s later as ONE wholesale dict apply
-        /// (Clear + re-add, RailMeta.cs:2750). Seeding in that window pins the cursor at 0, and 0 means
-        /// "every historical record is past the cursor", i.e. the entire campaign's event history raises as
-        /// this peer's backlog on its first join (measured: 97 outcome windows on both clients).
-        /// Deferring is safe and needs no other arm: <see cref="Backlog"/> over an empty set is empty.
-        /// ponytail: an empty set is treated as not-yet-delivered, so a join into a campaign with ZERO event
-        /// records also skips the first batch that lands. Harmless in practice (a campaign carries its intro
-        /// events from turn one) — revisit only if a rail "mirror is live" signal ever exists to key on.
-        ///
-        /// Logged either way, with which branch ran — a boundary that drops work silently is the bug class
-        /// this file exists to kill.</summary>
-        private static void SeedCursor(IDictionary<string, GeoscapeEventRecord> records)
+        /// <summary>Stamp the host-resolved text onto this peer's def as a LITERAL bind — but ONLY where the
+        /// peer's own def resolves to nothing. Mod parity (law 10) makes the defs identical, so the local
+        /// resolution is normally the right one AND it is in the PLAYER'S language; overwriting it with the
+        /// host's would ship one peer the other's locale and permanently mutate a shared def. The case that
+        /// is left is the one the wire exists for: a def whose text only ever existed as a host-side RUNTIME
+        /// mutation (TFTV VoidOmen writes LocalizedTextBind(text, doNotLocalize:true) at roll time), whose
+        /// keys are empty here and would render a BLANK window.</summary>
+        private static void StampWireTexts(GeoscapeEventData data, string title, string narrative)
         {
-            if (_cursorSeeded) return;
-            if (records.Count == 0)
+            try
             {
-                if (!_loggedEmptyMirror)
-                {
-                    _loggedEmptyMirror = true;
-                    Debug.Log("[MP][events] cursor seed DEFERRED — the record mirror is still empty, so the rail has " +
-                              "not delivered this campaign's history yet; seeding now would replay all of it");
-                }
-                return;
+                if (!string.IsNullOrEmpty(title) && string.IsNullOrEmpty(data.Title?.Localize()))
+                    data.Title = new LocalizedTextBind(title, doNotLocalize: true);
+                var desc = data.Description;
+                if (string.IsNullOrEmpty(narrative) || desc == null || desc.Count == 0) return;
+                // The LAST variation is the entry the host resolved; earlier pages of a multi-page def stay
+                // local so paging still renders this peer's own text.
+                var last = desc[desc.Count - 1];
+                if (last != null && string.IsNullOrEmpty(last.General?.Localize()))
+                    last.General = new LocalizedTextBind(narrative, doNotLocalize: true);
             }
-            _cursorSeeded = true;
-            long newest = FirstSightCursor(records);
-            long saved = LoadCursor();
-            if (saved > 0)
-            {
-                _cursor = saved < newest ? saved : newest;
-                Debug.Log("[MP][events] cursor restored to " + _cursor + " (persisted " + saved + ", newest record " +
-                          newest + ") from " + records.Count + " record(s) — a window this peer never read is " +
-                          "still owed to it");
-            }
-            else
-            {
-                _cursor = newest;
-                Debug.Log("[MP][events] cursor seeded to " + _cursor + " from " + records.Count +
-                          " record(s) — first sight of this campaign on this peer, so none of that history is " +
-                          "this peer's backlog");
-            }
-        }
-
-        /// <summary>The FIRST-SIGHT cursor for a record set: the newest <c>LastTriggerAt</c> in it, 0 for an
-        /// empty set. Nothing at or before this point is this peer's backlog — "missed" means raised while
-        /// this peer was in the session, not the campaign's pre-join past. Pure and PlayerPrefs-free so
-        /// RailCheck L26 can assert the flood law headless.</summary>
-        internal static long FirstSightCursor(IDictionary<string, GeoscapeEventRecord> records)
-        {
-            long newest = 0;
-            if (records == null) return newest;
-            foreach (var rec in records.Values)
-            {
-                if (rec == null) continue;
-                long t = rec.LastTriggerAt.TimeSpan.Ticks;
-                if (t > newest) newest = t;
-            }
-            return newest;
-        }
-
-        /// <summary>Cursor codec. Invariant BOTH ways, deliberately: the value is a TimeUnit tick count that
-        /// crosses a process boundary as a STRING, and a peer whose locale formats or parses integers with
-        /// group separators would read back 0 = "replay this peer's entire event history" with nothing logged
-        /// as wrong. Pure and PlayerPrefs-free so RailCheck L26 can round-trip it headless — a method that
-        /// merely REFERENCES a PlayerPrefs ECall fails to JIT there (ClientIdentity.cs:82-88).</summary>
-        internal static string FormatCursor(long ticks) => ticks.ToString(CultureInfo.InvariantCulture);
-
-        internal static long ParseCursor(string stored) =>
-            long.TryParse(stored, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticks) ? ticks : 0;
-
-        /// <summary>PER-PEER, not per-machine: two instances on ONE machine (the local co-op test rig,
-        /// D:\PP-Instance2) share the PlayerPrefs store, so a single key would let player 1's progress
-        /// swallow player 2's backlog. <c>ClientIdentity.PlayerGuid</c> is already per-instance (its own
-        /// identity-N.json, plus the MULTIPLAYER_IDENTITY override), so it is the key.
-        /// NOT per-campaign: this game exposes no campaign id (no GUID, no seed; Timing.StartTime is the same
-        /// def constant for every campaign), so two parallel campaigns DO share one entry. That is made
-        /// harmless in <see cref="SeedCursor"/> rather than papered over: clamping the loaded value to the
-        /// newest live record degrades a foreign cursor to precisely the record-seed behaviour, which is what
-        /// a first join does anyway. ponytail: if a campaign id ever appears, append it here.</summary>
-        private static string CursorKey() => "Multiplayer_EventCursor_" + ClientIdentity.PlayerGuid;
-
-        /// <summary>Wrapped like ClientIdentity's own prefs access: PlayerPrefs.* are InternalCall externs
-        /// that throw at JIT time in a headless host, BEFORE any try/catch in the referencing method runs —
-        /// hence the NoInlining isolation, and hence a caller-side catch. A prefs failure must never break the
-        /// pump: worst case the backlog replays after a reload, which is where this started.</summary>
-        private static long LoadCursor()
-        {
-            try { return ParseCursor(ReadCursorPref()); }
             catch (Exception ex)
             {
-                Debug.LogWarning("[MP][events] cursor load failed (" + ex.Message + ") — falling back to the record seed");
-                return 0;
+                Debug.LogWarning("[MP][events] wire-text stamp failed (" + ex.Message + ") — the window renders " +
+                                 "this peer's own def text");
             }
         }
 
-        private static void StoreCursor(long ticks)
-        {
-            try { WriteCursorPref(FormatCursor(ticks)); }
-            catch (Exception ex)
-            {
-                Debug.LogWarning("[MP][events] cursor save failed (" + ex.Message + ") — this peer's backlog will " +
-                                 "replay from the record seed after a reload");
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static string ReadCursorPref() => PlayerPrefs.GetString(CursorKey(), "");
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void WriteCursorPref(string value)
-        {
-            PlayerPrefs.SetString(CursorKey(), value);
-            PlayerPrefs.Save();
-        }
-
-        /// <summary>A window we pushed is gone from the whole native pipeline ⇒ the player clicked
-        /// through it. That is the ONLY thing that advances the cursor, so a crash or quit re-shows it —
-        /// and the ONLY thing that writes it out, once per pass rather than once per id.</summary>
-        private static void RetireClosed(GeoscapeView view, IDictionary<string, GeoscapeEventRecord> records)
-        {
-            if (_inFlight.Count == 0) return;
-            List<string> closed = null;
-            foreach (var id in _inFlight)
-                if (!IsQueuedNatively(view, id)) (closed ?? (closed = new List<string>())).Add(id);
-            if (closed == null) return;
-            foreach (var id in closed)
-            {
-                _inFlight.Remove(id);
-                long t = records.TryGetValue(id, out var rec) && rec != null ? rec.LastTriggerAt.TimeSpan.Ticks : _cursor;
-                if (t > _cursor) _cursor = t;
-                Debug.Log("[MP][events] cursor advanced to " + _cursor + " after closing '" + id + "'");
-            }
-            StoreCursor(_cursor);
-        }
+        // ─── Presentation: repaint / freeze / close of an OPEN dialog ──────
 
         /// <summary>Law 11 repaint of the OPEN event dialog — the <c>UiNativeRepaint.Table</c> entry for
-        /// <c>UIStateGeoscapeEvent</c>, READ-direction. Two jobs:
+        /// <c>UIStateGeoscapeEvent</c>, READ-direction. Three jobs:
         ///   • refresh the dialog's stale <c>Record</c> ref: a blob apply rebuilds the record INSTANCE, and
         ///     <c>UIStateGeoscapeEvent.ExitState</c>:61-65 reads <c>Event.Record.State</c> to decide whether to
         ///     complete the event LOCALLY, so a stale <c>Triggered</c> ref there is a client-side resolution of
-        ///     a host-authoritative choice;
-        ///   • re-drive the module's own <c>SetChoices</c>, which re-reads each button's affordability from the
-        ///     model (<c>SiteBaseChoicesController.SetChoice</c>:60 → <c>choice.PassRequirements(faction,
-        ///     context)</c> = the wallet) and, through <see cref="EventChoiceFreeze"/>, re-applies the freeze
-        ///     when the record was resolved under an open PICKER — the "you see the outcome and cannot
-        ///     re-pick" half of the feature. This REPLACED a forced close+reopen of the window.
+        ///     a host-authoritative choice. This is also what swaps out the placeholder record a mirrored raise
+        ///     opened with (<see cref="RaiseMirrored"/>);
+        ///   • CLOSE a picker somebody else already answered — THE dismiss. The record delta IS the dismiss
+        ///     signal, so this family ships no dismiss message of its own: once the record is resolved the
+        ///     picker's buttons are all dead (the losers greyed by <see cref="EventChoiceFreeze"/>, the winner
+        ///     click-dead by IsSelected), and leaving that on screen strands the player behind a window whose
+        ///     only exit is Esc. Guarded by <see cref="ShowingRealChoices"/> so it never closes an OUTCOME page:
+        ///     the winner's own result page is built over a SYNTHETIC event (EventID "") whose OK button is the
+        ///     way out. The close is safe because the Record ref was refreshed one line above — ExitState's
+        ///     force-complete guard reads the RESOLVED state and stays silent;
+        ///   • otherwise re-drive the module's own <c>SetChoices</c>, which re-reads each button's
+        ///     affordability from the model (<c>SiteBaseChoicesController.SetChoice</c>:60 →
+        ///     <c>choice.PassRequirements(faction, context)</c> = the wallet).
         /// Deliberately NOT <c>ShowEncounter</c> (the screen's full re-init): it re-posts
         /// <c>OpenEncounterSoundEvent</c> (UIModuleSiteEncounters.cs:195-198) and resets
         /// <c>_encounterTextIndex</c> to 0 (:220), so on a peer where deltas land continuously it would
-        /// machine-gun the encounter sound and make a multi-page description impossible to page through. Same
-        /// rule as the <c>UIModuleBaseLayout.Init</c> exclusion in the table: the narrow native refresh.
+        /// machine-gun the encounter sound and make a multi-page description impossible to page through.
         /// Returning true even when there was nothing to refresh is the OTHER half of this entry — the
         /// fallback Exit+Enter (OpenUiRepaint.cs:189-206) must never run for this screen, because Exit runs
         /// that ExitState write-back. RailCheck L21 asserts the table key is present.</summary>
@@ -344,8 +437,15 @@ namespace Multiplayer.Network.Sync
                 if (rec != null) ev.Record = rec;
             }
             var ctrl = module.ChoicesButtonController;
-            if (ctrl != null && ShowingRealChoices(ctrl, ev))
-                ctrl.SetChoices(module.Context.ViewerFaction, module.ChoiceButtonsContainer, module.ChoiceButtonPrefab, ev);
+            if (ctrl == null || !ShowingRealChoices(ctrl, ev)) return true;
+            if (InSession && IsFrozen(ev, out _))
+            {
+                Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved, " +
+                          "so this peer lost the race and every button on it is already dead");
+                view.FinishQueriedState();
+                return true;
+            }
+            ctrl.SetChoices(module.Context.ViewerFaction, module.ChoiceButtonsContainer, module.ChoiceButtonPrefab, ev);
             return true;
         }
 
@@ -354,10 +454,11 @@ namespace Multiplayer.Network.Sync
         /// (<c>SetClosingEncounter</c>:326-355) are each built inline over a throwaway
         /// <c>GeoscapeEvent</c> with <c>EventID == ""</c> whose text is already a frozen string and whose
         /// single OK button must stay live — re-running <c>SetChoices</c> with the REAL event there would
-        /// replace that button with the picker. The module keeps no flag for which of the three it shows, so
-        /// the question is asked of the BUTTONS: <c>SiteBaseChoiceButton.Choice</c> holds the very
-        /// <c>GeoEventChoice</c> instance it was set from (SiteBaseChoiceButton.cs:43-47) and the def's list is
-        /// the only source of those instances, so reference identity answers it.</summary>
+        /// replace that button with the picker, and CLOSING there would eat the player's result page. The
+        /// module keeps no flag for which of the three it shows, so the question is asked of the BUTTONS:
+        /// <c>SiteBaseChoiceButton.Choice</c> holds the very <c>GeoEventChoice</c> instance it was set from
+        /// (SiteBaseChoiceButton.cs:43-47) and the def's list is the only source of those instances, so
+        /// reference identity answers it.</summary>
         private static bool ShowingRealChoices(SiteBaseChoicesController ctrl, GeoscapeEvent ev)
         {
             var choices = ev.EventData?.Choices;
@@ -377,15 +478,14 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>"The first choice is frozen for everyone" as the player SEES it: on a dialog whose record
         /// is already resolved, every losing button goes non-interactable and the winner is shown SELECTED.
-        /// Native widget API only — <c>PhoenixGeneralButton.SetInteractable(false)</c> clears
-        /// <c>BaseButton.interactable</c> + <c>IsEnabled</c>, which <c>OnPointerClick</c>:327 requires, and
-        /// <c>ResetButtonAnimations</c>:180-183 paints the greyed state. The winner keeps
-        /// <c>interactable</c> and gets <c>IsSelected</c>: with the widget's OWN default
-        /// <c>IsNonInteractableWhenSelected</c> (true, PhoenixGeneralButton.cs:37) that is click-dead by the
-        /// same :327 test while painting the selected/pressed look (:184-189) — "this is what was chosen",
-        /// rather than a live-looking button whose click <see cref="EventChoiceClientLock"/> would silently
-        /// drop. (The note's draft forced that flag false to keep the winner clickable; the click cannot be
-        /// honoured, so a dead-looking-live button would be the lie.)
+        /// This is the ONE-FRAME belt in front of <see cref="RepaintDialog"/>'s close — a picker can be built
+        /// over an already-resolved record (the answer landed while the raise was in flight), and the
+        /// repaint that closes it is a frame away. Native widget API only:
+        /// <c>PhoenixGeneralButton.SetInteractable(false)</c> clears <c>BaseButton.interactable</c> +
+        /// <c>IsEnabled</c>, which <c>OnPointerClick</c>:327 requires, and <c>ResetButtonAnimations</c>:180-183
+        /// paints the greyed state. The winner keeps <c>interactable</c> and gets <c>IsSelected</c>: with the
+        /// widget's OWN default <c>IsNonInteractableWhenSelected</c> (true, PhoenixGeneralButton.cs:37) that is
+        /// click-dead by the same :327 test while painting the selected look — "this is what was chosen".
         /// <c>IsSelected</c> is written on EVERY active button, not only the winner: the buttons are POOLED
         /// and reused for the next window (<c>AddChoicesButtons</c>:67-75 builds the list once), so a winner
         /// flag left behind would deaden that slot in the next picker — including the OK button of a closing
@@ -405,7 +505,7 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Is this dialog's answer already decided, and by which choice? The ledger is the
         /// REPLICATED record, never the instance: <c>GeoscapeEvent.IsCompleted</c> is per-INSTANCE
-        /// (GeoscapeEvent.cs:36) and a synthesised instance over a resolved record reports false. An empty
+        /// (GeoscapeEvent.cs:36) and a mirrored instance over a resolved record reports false. An empty
         /// <c>EventID</c> is one of the module's own synthetic pages — nothing to freeze. A resolved record
         /// with <c>SelectedChoice</c> outside the def's range (native's -1 "no choice",
         /// UIModuleSiteEncounters.cs:562-566) freezes every button and leaves no winner.</summary>
@@ -421,17 +521,9 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        /// <summary>Is a window for this event id anywhere in the native pipeline — waiting in the
-        /// switch queue, popped and mid-switch, or on screen? A transferred save restores the HOST's
-        /// pending queue (GeoscapeView.cs:349 → GeoscapeViewSwitchQuery.RestoreData:39-56), so without
-        /// this a joiner sees each of those windows TWICE. Silent on a hit: "we already have that
-        /// window" is the steady state, and the raise that put it there was logged once.</summary>
-        private static bool IsQueuedNatively(GeoscapeView view, string eventId) => LiveInstance(view, eventId) != null;
-
         /// <summary>The live <c>GeoscapeEvent</c> this peer's own view holds for an id — on screen, popped
         /// and mid-switch, or still queued — else null. The HOST answer handler wants it because that
-        /// instance carries the real <c>Context</c> (site + vehicle) the reward is applied against; the
-        /// client pump wants only whether it exists.</summary>
+        /// instance carries the real <c>Context</c> (site + vehicle) the reward is applied against.</summary>
         internal static GeoscapeEvent LiveInstance(GeoscapeView view, string eventId)
         {
             if (view == null || string.IsNullOrEmpty(eventId)) return null;
@@ -454,76 +546,27 @@ namespace Multiplayer.Network.Sync
 
         private static GeoscapeEvent EventOf(object state) => (state as UIStateGeoscapeEvent)?.Event;
 
-        private static void Raise(GeoscapeEventSystem es, GeoLevelController geo, GeoscapeViewSwitchQuery q, GeoscapeEventRecord rec)
-        {
-            string eventId = rec.EventId;
-            string mode = Mode(rec.State);
-            try
-            {
-                var data = es.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
-                if (data == null) { Skip(eventId, "no def on this peer"); return; }
-                if (es.IsEventTheMarketplace(data))
-                { Skip(eventId, "marketplace event — UIStateMarketplaceGeoscapeEvent not wired yet"); return; }
-                // Same synthetic-context shape the game uses for its own re-entry (GeoscapeView.
-                // ToMarketplace:735-738); the site is legitimately null for site-less events and for a
-                // completed exploration event whose site was destroyed (GeoscapeEvent.cs:108-111) —
-                // logged, because GeoscapeEventContext's token table dereferences Site unguarded
-                // (GeoscapeEventContext.cs:22-39, :224-239) and that would throw inside EnterState.
-                var site = es.FindEventLocation(eventId);
-                var geoEvent = new GeoscapeEvent(data, new GeoscapeEventContext(site, geo.ViewerFaction)) { Record = rec };
-                if (mode == "outcome") MarkResolvedInstance(geoEvent);
-                q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent))
-                { PauseGame = false }); // pause mirrors from the host via the TimeAnchor
-                _inFlight.Add(eventId);
-                Debug.Log("[MP][events] raised '" + eventId + "' state=" + rec.State + " triggerCount=" + rec.TriggerCount +
-                          " mode=" + mode + " site=" + (site == null ? "null" : site.SiteId.ToString()));
-            }
-            catch (Exception ex) { Skip(eventId, "raise threw " + ex.GetType().Name + ": " + ex.Message); }
-        }
-
-        /// <summary>One line per event id, then that id is not retried — a 1 Hz pump must never log
-        /// per pass, and every reason here is a permanent property of the id (no def, marketplace) or a
-        /// throw the next pass would only repeat.</summary>
-        private static void Skip(string eventId, string reason)
-        {
-            if (_loggedSkips.Add(eventId))
-                Debug.Log("[MP][events] skipped '" + eventId + "' — " + reason);
-        }
-
-        /// <summary>An OUTCOME window must not resolve anything. <c>ShowEncounter</c> takes the
-        /// single-choice branch for a narrative/quest event (UIModuleSiteEncounters.cs:239-241) →
+        /// <summary>Mark a mirrored instance resolved without resolving anything. <c>ShowEncounter</c> takes
+        /// the single-choice branch for a narrative/quest event (UIModuleSiteEncounters.cs:239-241) →
         /// <c>SetSingleChoiceEncounter</c>:251 → <c>SelectChoice</c>:598 →
         /// <c>if (!ev.IsCompleted) ev.CompleteEvent(...)</c>, and <c>GeoscapeEvent.IsCompleted</c> is
-        /// per-INSTANCE (GeoscapeEvent.cs:36) — a fresh instance over an already-Completed record says
+        /// per-INSTANCE (GeoscapeEvent.cs:36) — a mirrored instance over an already-Completed record says
         /// "not completed" and would re-grant the ENTIRE reward client-side. Marking the instance
         /// completed skips that branch; the empty reward stub keeps <c>SelectChoice</c>:604 and
         /// <c>SetClosingEncounter</c>:357 from NRE-ing on a null <c>ChoiceReward</c>, while
         /// <c>HasRewards()</c>==false (GeoFactionRewardApplyResult.cs:69) makes <c>ShowReward</c>:363
-        /// return at once, so the native page renders outcome TEXT only.
-        /// PICKER windows need none of this: a <c>Triggered</c> record always has ≥2 choices, because
-        /// the host auto-completes <c>HasSingleChoice</c> (<c>Choices.Count &lt;= 1</c>,
-        /// GeoscapeEventData.cs:65) at trigger (GeoscapeEventSystem.cs:651-656), so
-        /// <c>ShowEncounter</c> takes the <c>SetEncounter</c> branch and calls nothing that resolves.
-        /// Second consumer: <see cref="EventCompleteArbiter"/> refusing a resolution needs the very same
-        /// pair of writes — a non-null reward to hand back and an instance that will not try again.</summary>
+        /// return at once, so the native page renders outcome TEXT only. Consumer:
+        /// <see cref="EventCompleteArbiter"/> refusing a resolution needs exactly that pair of writes.</summary>
         internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
             SetChoiceReward?.Invoke(ev, new object[] { new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() } });
         }
 
-        internal static bool IsClient
-        {
-            get
-            {
-                var e = NetworkEngine.Instance;
-                return e != null && e.IsActiveSession && !e.IsHost;
-            }
-        }
-
-        /// <summary>An MP session is live, either side. The choice FREEZE and the Esc guard are peer-symmetric
-        /// multiplayer presentation rules — a host holding a dialog another peer already answered is the same
-        /// case as a client — while outside a session neither may touch the native dialog at all.</summary>
+        /// <summary>An MP session is live, either side. The choice FREEZE, the close and the Esc guard are
+        /// peer-symmetric multiplayer presentation rules — a host holding a dialog another peer already
+        /// answered is the same case as a client — while outside a session neither may touch the native
+        /// dialog at all.</summary>
         internal static bool InSession
         {
             get
@@ -544,6 +587,35 @@ namespace Multiplayer.Network.Sync
         {
             try { return GeoLevel()?.EventSystem?.GetEventRecord(eventId) ?? fallback; }
             catch { return fallback; }
+        }
+    }
+
+    /// <summary>
+    /// HOST capture seam (law 4a) for the window itself: <c>GeoscapeView.OnGeoscapeEventRaised</c>
+    /// (GeoscapeView.cs:2034) is the ONE place the game turns a raised event into a queued dialog, and it is
+    /// the last point at which the live <c>GeoscapeEventContext</c> — site, vehicle, and the def texts as
+    /// this host resolved them — still exists. Everything downstream is a record, and a record cannot
+    /// rebuild a context (see <see cref="EventPopup"/>).
+    ///
+    /// A POSTFIX, so the host's own window is queued exactly as it always was and the mirror is a pure
+    /// addition. <c>SuppressEvents</c> is honoured explicitly because a postfix runs even when the native
+    /// body took the early return at :2036 — mirroring a window the host itself refused to show would be a
+    /// window only the client gets.
+    ///
+    /// The client arm is EMPTY on purpose: a client's own event raises are already blocked upstream at the
+    /// model funnel (<c>ClientSimGate.GeoscapeEventRaiseGate</c> on
+    /// <c>GeoscapeEventSystem.OnGeoscapeEvent</c>), and the mirrored raise pushes the view state through
+    /// <c>GeoscapeViewSwitchQuery</c> DIRECTLY, so it never re-enters this method and cannot echo (law 8).
+    /// The remaining caller — <c>GeoscapeView.ToMarketplace</c>:737 — is a legitimate local gesture on
+    /// either peer, and <see cref="EventPopup.HostBroadcast"/> declines to mirror marketplace windows.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeView), "OnGeoscapeEventRaised", new[] { typeof(GeoscapeEvent) })]
+    internal static class EventRaiseBroadcast
+    {
+        private static void Postfix(GeoscapeView __instance, GeoscapeEvent geoEvent)
+        {
+            if (__instance != null && __instance.SuppressEvents) return;
+            EventPopup.HostBroadcast(geoEvent);
         }
     }
 
@@ -639,8 +711,8 @@ namespace Multiplayer.Network.Sync
     /// It really is reachable on a client, and with NO RECORD at all: MarketplaceAbility
     /// .ActivateInternal:43 → <c>GeoscapeView.ToMarketplace</c>:734-738 builds a fresh
     /// <c>GeoscapeEvent</c> (Record == null) and calls the view's <c>OnGeoscapeEventRaised</c>:2034
-    /// DIRECTLY, bypassing <c>GeoscapeEventSystem</c> — so <see cref="GeoscapeEventRaiseGate"/> does not
-    /// cover it, <see cref="Raise"/>:465 deliberately never raises marketplace windows on a client, and
+    /// DIRECTLY, bypassing <c>GeoscapeEventSystem</c> — so <c>GeoscapeEventRaiseGate</c> does not
+    /// cover it, <see cref="EventPopup.HostBroadcast"/> deliberately never mirrors a marketplace window, and
     /// <c>GeoscapeView.SuppressEvents</c> is written by nothing but a console toggle
     /// (GeoscapeView.cs:2205). A client purchase would apply <c>ChoiceReward</c> locally and spend from
     /// the replicated wallet: PERMANENT divergence, because the diff is host-now vs host-before and never
@@ -693,9 +765,9 @@ namespace Multiplayer.Network.Sync
     /// Presentation seam (law 4c) for "the first answer is frozen for everyone". EVERY path that (re)builds
     /// the encounter's choice buttons goes through <c>SiteBaseChoicesController.SetChoices</c> — the picker
     /// (<c>UIModuleSiteEncounters.SetEncounter</c>:287), the paging page (:321) and
-    /// <see cref="EventPopup.RepaintDialog"/> — so applying the freeze HERE covers the window opening in
-    /// outcome mode straight out of the backlog, a picker resolving under the player mid-look, and a history
-    /// window opened long after the fact, with one code path instead of one per entry point.
+    /// <see cref="EventPopup.RepaintDialog"/> — so applying the freeze HERE covers a picker built over an
+    /// already-answered record (the answer landed while the raise was in flight) and a picker resolving under
+    /// the player mid-look, with one code path instead of one per entry point.
     /// </summary>
     [HarmonyPatch(typeof(SiteBaseChoicesController), "SetChoices")]
     internal static class EventChoiceFreeze
@@ -705,47 +777,42 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// The token table dereferences the context UNGUARDED. Every haven replacer is a bare
-    /// <c>context.Site....</c> with no null check (decompile GeoscapeEventContext.cs:20-40,
-    /// <c>[HavenName]</c> = <c>context.Site.SiteName.Localize()</c>), and <c>[AircraftName]</c> does the
-    /// same to <c>context.Vehicle</c>. A synthesized window's <c>Site</c> is LEGITIMATELY null — a
-    /// historical record's site no longer carries the encounter, and a site-less event never had one
-    /// (<see cref="EventPopup.Raise"/> logs exactly that, EventPopup.cs:472). So any description holding
-    /// <c>[HavenName]</c> throws NRE inside <c>ReplaceEventTokens</c> (:224-239).
+    /// DIAGNOSTIC ONLY. The token table dereferences the context UNGUARDED — every haven replacer is a bare
+    /// <c>context.Site....</c> with no null check (GeoscapeEventContext.cs:20-40, <c>[HavenName]</c> =
+    /// <c>context.Site.SiteName.Localize()</c>), and <c>[AircraftName]</c> does the same to
+    /// <c>context.Vehicle</c> — and the throw lands inside <c>UIStateGeoscapeEvent.EnterState</c>, AFTER the
+    /// raise has already been logged as a SUCCESS, leaving the window HALF-BUILT: the title is set
+    /// (UIModuleSiteEncounters:217) but the description (:308) and <c>SetChoices</c> (:321) never run, so the
+    /// body and EVERY choice button keep the placeholder the designers BAKED into the scene and the prefab
+    /// ("Fasdasdsadasg…", "Really long choice description btw…"). A localized title over dev placeholder text
+    /// and four dead buttons is what a player saw, and nothing in any log said it broke.
     ///
-    /// That throw has the worst shape available. It lands inside <c>UIStateGeoscapeEvent.EnterState</c> —
-    /// AFTER <see cref="EventPopup.Raise"/>'s try/catch has already returned and logged the raise as a
-    /// SUCCESS — and it leaves the window HALF-BUILT: <c>UIModuleSiteEncounters</c>:217 has set the
-    /// title, but :308's description assignment and :321's <c>SetChoices</c> never run, so the
-    /// description Text and EVERY choice button keep the placeholder the designers BAKED into the scene
-    /// and the prefab ("Fasdasdsadasg…" in level6, "Really long choice description btw…" in
-    /// UIMainButton_HPriority_Encounters). A localized title over dev placeholder text and four dead
-    /// buttons is what a player saw, and nothing in any log said it broke.
+    /// The FIX for that is upstream, not here: a mirrored window is built from a REAL context and
+    /// <see cref="EventPopup.ContextRefusal"/> raises NOTHING when the shipped site/vehicle does not resolve,
+    /// so a context-LESS window no longer reaches the render at all. What remains reachable is the case the
+    /// HOST hits too: a def holding a token its own context legitimately cannot fill. Swallowing to the
+    /// ORIGINAL text is the game's OWN tolerance path for that (:229-234 substitutes only when a replacer
+    /// produced a non-empty string, so an unresolvable token is designed to stay visible as its raw
+    /// <c>[Token]</c>), and the real description and real choices render.
     ///
-    /// Swallowing to the ORIGINAL text is the game's OWN tolerance path, not a new behaviour: :229-234
-    /// substitutes only when a replacer produced a non-empty string, so an unresolvable token is
-    /// designed to stay visible as its raw <c>[Token]</c>. Real description and real choices render.
-    /// One finalizer on the single funnel every replacer and every caller routes through — it covers
-    /// EventSync.cs:94's context and any future synthesized one, instead of a null-check per call site.
-    /// Presentation seam (law 4c). On a host no replacer throws, so this never fires there.
+    /// It is NOT silent: every distinct text that trips it is logged as an ERROR once. If this ever fires on
+    /// a MIRRORED window it means the refusal above let a bad context through, which is a bug in this file.
     /// </summary>
     [HarmonyPatch(typeof(GeoscapeEventContext), "ReplaceEventTokens")]
     internal static class EventTokenDerefGuard
     {
-        private static bool _warned;
+        private static readonly HashSet<string> _seen = new HashSet<string>(StringComparer.Ordinal);
 
         private static Exception Finalizer(Exception __exception, string originalText, ref string __result)
         {
             if (__exception == null) return null;
             __result = originalText ?? "";
-            if (!_warned)
-            {
-                _warned = true;
-                Debug.Log("[MP][events] token deref threw " + __exception.GetType().Name +
-                          " — this window's context has no Site/Vehicle for a token in its text; the raw " +
-                          "[Token] stays visible and the window renders, instead of aborting half-built " +
-                          "and showing the scene's baked placeholder text");
-            }
+            if (_seen.Add(originalText ?? ""))
+                Debug.LogError("[MP][events] token deref threw " + __exception.GetType().Name + " while resolving \"" +
+                               (originalText ?? "") + "\" — this window's context has no Site/Vehicle for a token in " +
+                               "its text. The raw [Token] stays visible and the window renders instead of aborting " +
+                               "half-built; on a MIRRORED window this must never happen (EventPopup.ContextRefusal " +
+                               "refuses to raise one), so seeing it there is a bug in the raise payload.");
             return null;
         }
     }
