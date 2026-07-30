@@ -845,10 +845,14 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<GeoVehicle> _reseed = new HashSet<GeoVehicle>();
         private static readonly Dictionary<string, GeoSite[]> _seededRoute = new Dictionary<string, GeoSite[]>(StringComparer.Ordinal);
 
-        /// <summary>The ORDER leaves — a mirrored INPUT to native navigation, as opposed to its derived
-        /// output. Named, not type-dispatched: the rule is about which values constitute an order.</summary>
+        /// <summary>The ORDER leaves — a mirrored INPUT to a native derivation, as opposed to its derived
+        /// output. Named, not type-dispatched: the rule is about which values constitute an order.
+        /// <c>StartExplorationTime</c> joins the three navigation names for the SECOND derivation on this
+        /// actor (see <see cref="ReseedExploration"/>); it is the aircraft's other order, and like them it
+        /// moves only when the host actually issues one — never per tick.</summary>
         private static bool IsOrderLeaf(string name) =>
-            name == "DestinationSites" || name == "Travelling" || name == "CurrentSite";
+            name == "DestinationSites" || name == "Travelling" || name == "CurrentSite" ||
+            name == "StartExplorationTime";
 
         private static void MarkOrderChange(object entity, string fieldName)
         {
@@ -863,8 +867,76 @@ namespace Multiplayer.Network.Sync
                 try { ReseedNavigation(v); }
                 catch (Exception ex)
                 { LogMissOnce("nav re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
+                try { ReseedExploration(v); }
+                catch (Exception ex)
+                { LogMissOnce("exploration re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
             }
             _reseed.Clear();
+        }
+
+        // GeoVehicle.cs:73 / :448 / :460 — the private store and the two private halves the game's OWN
+        // save-restore calls (ProcessInstanceData:1123-1126). Nothing is re-implemented here.
+        private static readonly FieldInfo ExplorationStartField =
+            AccessTools.Field(typeof(GeoVehicle), "StartedExplorationAt");
+        private static readonly MethodInfo ExploreCurrentSiteMethod =
+            AccessTools.Method(typeof(GeoVehicle), "ExploreCurrentSite", new[] { typeof(TimeUnit), typeof(TimeUnit) });
+        private static readonly MethodInfo EndExploreCurrentSiteMethod =
+            AccessTools.Method(typeof(GeoVehicle), "EndExploreCurrentSite");
+
+        /// <summary>
+        /// The exploration twin of <see cref="ReseedNavigation"/>, and for the identical reason: site
+        /// exploration PROGRESS is CLOSED-FORM, not accumulated state.
+        /// <c>GeoActorProgressionVisualController.Progression</c> is
+        /// <c>(Timing.Now - Start).TotalMinutes / (End - Start).TotalMinutes</c> recomputed from scratch in
+        /// <c>Update()</c> EVERY FRAME (GeoActorProgressionVisualController.cs:25-35, :53-56) — the same
+        /// shape as <c>NavigateRoutine</c>'s <c>Ratio01</c>. Both of its inputs are mirrored or def-fixed:
+        /// <c>Start</c> is the <c>StartExplorationTime</c> leaf (docs/rail-baseline.txt) and
+        /// <c>End = Start + CurrentSite.ExplorationTime</c>, which is exactly the sum
+        /// <c>StartExploringCurrentSite</c>:424 makes out of <c>GeoSite.ExplorationTime</c> —
+        /// <c>TimeUnit.FromHours(geoSiteDef.ExplorationTimeHours)</c> (GeoSite.cs:490), def-fixed, no RNG,
+        /// on a clock the client already tracks. So NOTHING about the fill needs to ride the wire: the
+        /// client runs the game's own timer and its own <c>Update()</c> draws the bar smoothly, instead of
+        /// a client that showed nothing at all until the host's counter completed.
+        ///
+        /// STATE-BASED, not edge-based, which is why it needs no memo and cannot restart anything: it asks
+        /// what the mirrored order SAYS and only acts when the live handle disagrees. An unrelated order
+        /// leaf (a flight consuming a waypoint) therefore costs one comparison, and a host that ended an
+        /// exploration early — <c>StartTravel</c>:524/:538, <c>TeleportToSite</c>:506 — is obeyed the
+        /// moment its <c>Travelling</c>/<c>CurrentSite</c> delta lands, without a cancellation flag on the
+        /// wire.
+        ///
+        /// The OUTCOME stays host-only exactly like arrival does: the client's own timer will fire
+        /// <c>SiteExplorationCompleted</c>:474, whose <c>SiteExplored</c> invoke reaches
+        /// <c>GeoFaction.OnVehicleSiteExplored</c> (SetInspected + UpdateVehicleSite) — gated by
+        /// <c>SiteExploredOutcomeGate</c>. Its other half, <c>EndExploreCurrentSite</c>, is presentation
+        /// (destroy the visuals, drop the handle) and runs.
+        /// </summary>
+        private static void ReseedExploration(GeoVehicle v)
+        {
+            if (v == null || ExplorationStartField == null ||
+                ExploreCurrentSiteMethod == null || EndExploreCurrentSiteMethod == null) return;
+            var timing = v.GeoLevel == null ? null : v.GeoLevel.Timing;
+            if (timing == null) return;
+            var site = v.CurrentSite;
+            var start = (TimeUnit)ExplorationStartField.GetValue(v);
+            var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
+            bool should = site != null && !v.Travelling && start > TimeUnit.Zero &&
+                          site.ExplorationTime != TimeUnit.Zero && timing.Now < end;
+            if (should == v.IsExploringSite) return; // the live handle already matches the mirrored order
+
+            var root = IdentityResolver.RootRef(v) ?? "V#?";
+            if (should)
+            {
+                ExploreCurrentSiteMethod.Invoke(v, new object[] { start, end }); // ProcessInstanceData:1126
+                Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → started " + start +
+                          ", ends " + end + " (progress derived locally, outcome stays host-only)");
+            }
+            else
+            {
+                EndExploreCurrentSiteMethod.Invoke(v, null);
+                Debug.Log("[Multiplayer][rail] exploration re-seed " + root +
+                          " → cleared (the mirrored order no longer says exploring)");
+            }
         }
 
         /// <summary>Replay the game's OWN two re-derivations, chosen by the mirrored order:

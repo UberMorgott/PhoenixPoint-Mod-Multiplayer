@@ -245,6 +245,50 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
+    /// NINTH seam, same law, at the SITE-EXPLORATION OUTCOME: <c>GeoFaction.OnVehicleSiteExplored</c>
+    /// (GeoFaction.cs:1919), the ONE subscriber of <c>GeoVehicle.SiteExplored</c> that mutates anything
+    /// (wired :2058, dropped :2088; the only other subscriber is UIStateVehicleSelected.cs:706, pure UI).
+    /// No type overrides it, so this single prefix covers the class.
+    ///
+    /// The exact twin of <see cref="VehicleArrivalGate"/>, and it exists for the same reason: the client now
+    /// RUNS the exploration itself. Progress is closed-form off mirrored inputs
+    /// (<c>GeoActorProgressionVisualController.Progression</c> recomputes
+    /// <c>(Timing.Now - Start)/(End - Start)</c> in <c>Update()</c> every frame, :25-35/:53-56), so
+    /// <c>GenericApplier.ReseedExploration</c> hands the game's own <c>ExploreCurrentSite</c>:448 the
+    /// mirrored ORDER and the client's fill runs smoothly instead of appearing only when the host's counter
+    /// completed. That local timer must not also produce the RESULT: when it expires,
+    /// <c>SiteExplorationCompleted</c>:474 invokes <c>SiteExplored</c>, and this method's body
+    /// (<c>SetInspected(this, true)</c> + <c>UpdateVehicleSite</c>) is authoritative state the diff can never
+    /// correct — the diff is host-now vs host-before. The host's own SetInspected arrives as a delta.
+    /// Skipping the body whole rather than picking lines, exactly as the arrival gate does.
+    ///
+    /// Phrased on the RAIL's own knowledge, not a type list: only an actor the rail actually mirrors is
+    /// gated (<c>IdentityResolver.RootRef</c> != null). Deliberately NO <c>SyncApplyScope</c> exemption —
+    /// the re-seed only STARTS a timer that fires this later on the game loop, so an open apply arm would
+    /// admit the outcome on precisely the path that re-seeds. Void method; nothing dereferences the skip.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoFaction), "OnVehicleSiteExplored")]
+    internal static class SiteExploredOutcomeGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool Prefix(GeoVehicle vehicle)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            var root = IdentityResolver.RootRef(vehicle);
+            if (root == null) return true; // not rail-mirrored — its exploration result is nobody else's truth
+
+            // Never silent (the dominant bug class): say whose exploration outcome was refused and why.
+            // Log-once per root — exploration is a per-site event, not a per-frame one.
+            if (_logged.Add(root))
+                Debug.Log("[MP][diag] SiteExploredOutcomeGate BLOCK " + root + " — the exploration RESULT is host-only; " +
+                          "the client derived the progress bar itself and takes the site's inspected state from the rail");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// SIXTH seam, same law, at the GEOSCAPE EVENT funnel: <c>GeoscapeEventSystem.OnGeoscapeEvent</c>
     /// (GeoscapeEventSystem.cs:606) is the ONE place a geoscape event is ever raised. Both routes land
     /// here — the eventus handler registration (:542 / unregister :547) and the direct

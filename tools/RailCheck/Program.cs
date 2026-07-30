@@ -108,6 +108,7 @@ namespace RailCheck
             laws.AddRange(SlicedWalkLaw());
             laws.AddRange(AugmentRepaintGuardLaw());
             laws.AddRange(AugmentClickParityLaw());
+            laws.AddRange(DerivedExplorationLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -4450,6 +4451,172 @@ namespace RailCheck
                                        "every waypoint the host trims and the aircraft stalls 5s per leg"
                                      : "treated as the SAME route, so the client keeps flying the old order and the " +
                                        "host's redirect is never obeyed");
+            }
+        }
+
+        /// <summary>L53 — SITE-EXPLORATION PROGRESS IS DERIVED, NOT MIRRORED. The exact shape L43 found in
+        /// the aircraft pose, one subsystem over: the fill the player watches is CLOSED-FORM.
+        /// <c>GeoActorProgressionVisualController.Progression</c> is
+        /// <c>(Timing.Now - Start).TotalMinutes / (End - Start).TotalMinutes</c>, recomputed from scratch in
+        /// <c>Update()</c> every frame (:25-35, :53-56), and both inputs are already on the client —
+        /// <c>Start</c> is the <c>StartExplorationTime</c> leaf and <c>End = Start + ExplorationTime</c>, a
+        /// def-fixed <c>TimeUnit.FromHours(def.ExplorationTimeHours)</c> (GeoSite.cs:490) with no RNG. So the
+        /// client re-seeds the game's own <c>ExploreCurrentSite</c>:448 (replaying what
+        /// <c>ProcessInstanceData</c>:1126 does from a save) and draws the bar itself; before that it saw
+        /// NOTHING until the host's counter completed.
+        ///
+        /// Five arms, because the derivation is only correct as a whole:
+        ///   1. STILL CLOSED-FORM. Proven from IL, not from a comment: the getter must re-read
+        ///      <c>Timing.Now</c>, and <c>Update</c> → <c>RefreshVisuals</c> → the getter must still be the
+        ///      chain. A game update that LATCHES the ratio at <c>SetProgression</c> invalidates the whole
+        ///      route, and this is the only arm that would notice.
+        ///   2. THE ORDER RIDES, THE HANDLE DOES NOT. <c>StartExplorationTime</c>/<c>CurrentSite</c> covered;
+        ///      <c>NextSiteExplorationUpdate</c> excluded BY THE DECLARED opt-out (never merely absent), so a
+        ///      real coverage gap cannot hide behind the decision — L14/L41's inversion, same reason.
+        ///   3. THE RE-SEED'S HANDLES BIND. The three private members it drives are read off the PRODUCTION
+        ///      statics, so a renamed member is red here instead of a silently dead re-seed. Positive control:
+        ///      a deliberately wrong <c>ExploreCurrentSite</c> signature must resolve to NULL, or "non-null"
+        ///      proves nothing about the resolver.
+        ///   4. RE-SEED ON ORDER CHANGE ONLY, the real <c>IsOrderLeaf</c> driven headlessly.
+        ///   5. OUTCOME GATED, DERIVATION NOT. <c>GeoFaction.OnVehicleSiteExplored</c> (SetInspected +
+        ///      UpdateVehicleSite) must carry a prefix of ours reading <c>IsHost</c>; <c>ExploreCurrentSite</c>
+        ///      and <c>EndExploreCurrentSite</c> must carry NONE — gating the derivation is the mistake that
+        ///      made the client project instead of run (L43's arm 2, learned the hard way).
+        /// Falsify by mirroring the handle, by dropping the start-time leaf or its order-leaf row, by removing
+        /// the outcome gate, or by adding a prefix to either half of the derivation.</summary>
+        private static IEnumerable<string> DerivedExplorationLaw()
+        {
+            var vis = typeof(PhoenixPoint.Geoscape.View.GeoActorProgressionVisualController);
+            var game = typeof(Base.Core.Timing).Assembly;
+
+            // ── arm 1: the ratio is still recomputed, not latched ──
+            var progression = HarmonyLib.AccessTools.PropertyGetter(vis, "Progression");
+            var update = HarmonyLib.AccessTools.Method(vis, "Update");
+            var refresh = HarmonyLib.AccessTools.Method(vis, "RefreshVisuals");
+            var nowGetter = HarmonyLib.AccessTools.PropertyGetter(typeof(Base.Core.Timing), "Now");
+            if (progression == null || update == null || refresh == null || nowGetter == null)
+                yield return "L53 closed-form-unverifiable: GeoActorProgressionVisualController.Progression/Update/" +
+                             "RefreshVisuals or Timing.Now does not resolve — the premise the whole derivation rests " +
+                             "on cannot be checked, so nothing below means anything";
+            else
+            {
+                var progCallees = Callees(progression, game).ToList();
+                if (progCallees.Count == 0)
+                    yield return "L53 il-unreadable: the Progression getter yields no callees — the IL scan is asleep " +
+                                 "and every closed-form arm below would pass vacuously";
+                else if (!progCallees.Any(c => c.MetadataToken == nowGetter.MetadataToken))
+                    yield return "L53 progress-latched: GeoActorProgressionVisualController.Progression no longer reads " +
+                                 "Timing.Now — the fill is a STORED value now, not a function of the clock, so a client " +
+                                 "re-seeded from (start,end) would paint a frozen bar; mirror the value instead";
+                if (!Callees(update, game).Any(c => c.MetadataToken == refresh.MetadataToken))
+                    yield return "L53 not-per-frame: GeoActorProgressionVisualController.Update no longer drives " +
+                                 "RefreshVisuals — the derived ratio would be computed once at SetProgression and never " +
+                                 "again, so the client's bar would not advance";
+                if (!Callees(refresh, game).Any(c => c.MetadataToken == progression.MetadataToken))
+                    yield return "L53 not-re-derived: RefreshVisuals no longer reads Progression — whatever it writes to " +
+                                 "the material is not the clock-derived ratio any more";
+            }
+
+            // ── arm 2: the ORDER rides covered, the scheduler HANDLE stays out ──
+            var vehicle = typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle);
+            var twin = RailType.GetBridged(vehicle, typeof(PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData));
+            foreach (var name in new[] { "StartExplorationTime", "CurrentSite" })
+            {
+                var f = twin?.FieldByName(name);
+                if (f == null || f.Class == FieldClass.Excluded)
+                    yield return "L53 order-not-mirrored: GeoVehicle." + name + " does not ride covered (" +
+                                 (f == null ? "no such member" : f.Exclude) + ") — it is an INPUT the client's own " +
+                                 "exploration timer is seeded from, so without it the bar can never start (or starts " +
+                                 "at the wrong time)";
+            }
+            var handle = twin?.FieldByName("NextSiteExplorationUpdate");
+            var handleOptOut = RailMeta.OptOutReason(vehicle, "NextSiteExplorationUpdate");
+            if (handleOptOut == null || handle == null || handle.Class != FieldClass.Excluded ||
+                handle.Exclude != handleOptOut)
+                yield return "L53 handle-not-declared-out: GeoVehicle.NextSiteExplorationUpdate is not excluded by the " +
+                             "DECLARED exploration opt-out (" + (handleOptOut == null ? "none declared"
+                                 : handle == null ? "no such member" : handle.Class + " / " + handle.Exclude) +
+                             ") — either a scheduler handle is being shipped as state, or the row vanished and a real " +
+                             "coverage gap is hiding behind the decision";
+
+            // ── arm 3: the re-seed's PRODUCTION handles bind ──
+            var applier = typeof(GenericApplier);
+            var handleNames = new[]
+            {
+                "ExplorationStartField", "ExploreCurrentSiteMethod", "EndExploreCurrentSiteMethod",
+            };
+            foreach (var n in handleNames)
+            {
+                var slot = applier.GetField(n, AllMembers);
+                object bound = null;
+                try { bound = slot?.GetValue(null); } catch { }
+                if (slot == null || bound == null)
+                    yield return "L53 reseed-handle-dead: GenericApplier." + n + " is " +
+                                 (slot == null ? "gone" : "NULL") + " — the exploration re-seed cannot drive the " +
+                                 "game's own ExploreCurrentSite/EndExploreCurrentSite, so a client shows no progress " +
+                                 "at all and nothing in the log says why";
+            }
+            // Positive control for the three above: AccessTools must DISCRIMINATE, or "non-null" is noise.
+            if (HarmonyLib.AccessTools.Method(vehicle, "ExploreCurrentSite",
+                                              new[] { typeof(Base.Core.TimeUnit) }) != null)
+                yield return "L53 resolver-indiscriminate: AccessTools resolved ExploreCurrentSite with ONE TimeUnit " +
+                             "parameter, a signature the game does not declare — so the arm above proving the real " +
+                             "two-parameter handle binds proves nothing";
+
+            // ── arm 4: the re-seed fires on an ORDER change, never per tick ──
+            var isOrderLeaf = HarmonyLib.AccessTools.Method(applier, "IsOrderLeaf");
+            if (isOrderLeaf == null)
+                yield return "L53 order-rule-unreachable: GenericApplier.IsOrderLeaf does not resolve — whether the " +
+                             "exploration re-seed is edge-driven cannot be checked headlessly";
+            else
+            {
+                if (!(bool)isOrderLeaf.Invoke(null, new object[] { "StartExplorationTime" }))
+                    yield return "L53 start-not-an-order: 'StartExplorationTime' is not counted as an order leaf — the " +
+                                 "host issuing an exploration reaches the client as a value nobody acts on, so the " +
+                                 "client's own timer never starts and the bar appears only when the host finishes";
+                foreach (var n in new[] { "RangeRemaining", "HitPoints", "SurfacePos" })
+                    if ((bool)isOrderLeaf.Invoke(null, new object[] { n }))
+                        yield return "L53 reseed-per-tick: '" + n + "' counts as an order leaf, but it moves " +
+                                     "continuously — every delta would re-evaluate the re-seed at tick rate";
+            }
+
+            // ── arm 5: the OUTCOME is gated, the DERIVATION is not ──
+            var covered = OurPrefixTargets();
+            var outcome = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Geoscape.Levels.GeoFaction),
+                                                        "OnVehicleSiteExplored");
+            if (outcome == null)
+                yield return "L53 outcome-unresolved: GeoFaction.OnVehicleSiteExplored does not resolve — the gate's " +
+                             "HarmonyPatch attribute names a method that no longer exists, PatchAll warns, and " +
+                             "MultiplayerMain swallows it, killing every later patch in the same pass (L23)";
+            else if (!covered.Contains(outcome.MetadataToken))
+                yield return "L53 outcome-ungated: GeoFaction.OnVehicleSiteExplored carries no prefix of ours — a client " +
+                             "running its own exploration timer also produces the RESULT (SetInspected + " +
+                             "UpdateVehicleSite) on a projector, and the diff is host-now vs host-before, so that write " +
+                             "is never corrected";
+            else
+            {
+                var gate = DeclaredTypes(typeof(IntentRail).Assembly)
+                    .FirstOrDefault(t => t.Name == "SiteExploredOutcomeGate" && t.GetMethod("Prefix", AllMembers) != null);
+                var prefix = gate?.GetMethod("Prefix", AllMembers);
+                var isHost = HarmonyLib.AccessTools.PropertyGetter(typeof(Multiplayer.Network.NetworkEngine), "IsHost");
+                if (prefix == null)
+                    yield return "L53 gate-type-missing: no SiteExploredOutcomeGate with a Prefix binds " +
+                                 "GeoFaction.OnVehicleSiteExplored — its host arm cannot be checked";
+                else if (isHost == null)
+                    yield return "L53 ishost-unresolved: NetworkEngine.IsHost does not resolve, so the harness cannot " +
+                                 "prove the exploration-outcome gate lets the HOST through";
+                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isHost.MetadataToken))
+                    yield return "L53 host-gated: SiteExploredOutcomeGate.Prefix never reads NetworkEngine.IsHost — the " +
+                                 "HOST would obey its own client gate, so NO site in the session is ever marked " +
+                                 "inspected and every exploration silently produces nothing";
+            }
+            foreach (var n in new[] { "ExploreCurrentSite", "EndExploreCurrentSite" })
+            {
+                var m = HarmonyLib.AccessTools.Method(vehicle, n);
+                if (m != null && covered.Contains(m.MetadataToken))
+                    yield return "L53 derivation-gated: GeoVehicle." + n + " carries a prefix of ours — that is the " +
+                                 "DERIVATION, not the outcome; gating it is exactly what left the client with no " +
+                                 "progress to show (L43 arm 2, same mistake one subsystem over)";
             }
         }
 

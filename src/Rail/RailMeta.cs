@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -549,7 +549,17 @@ namespace Multiplayer.Network.Sync
         private const string ExplorationHandleOptOut =
             "scheduler handle, not state — IUpdateable.NextUpdate is get-only over a readonly struct and its " +
             "writer is Timing.Start (GeoVehicle.cs:451), i.e. the client's own exploration timer (law 4b); " +
-            "the exploration START time mirrors as the StartExplorationTime leaf";
+            "the exploration START time mirrors as the StartExplorationTime leaf. Nothing is lost by dropping " +
+            "it, because the PROGRESS it schedules is CLOSED-FORM, exactly like the pose below: " +
+            "GeoActorProgressionVisualController.Progression = (Timing.Now - Start).TotalMinutes / " +
+            "(End - Start).TotalMinutes, recomputed from scratch in Update() every frame " +
+            "(GeoActorProgressionVisualController.cs:25-35, :53-56), and BOTH its inputs are already here — " +
+            "Start is the StartExplorationTime leaf and End = Start + CurrentSite.ExplorationTime, the very sum " +
+            "StartExploringCurrentSite:424 makes out of a def-fixed TimeUnit.FromHours(def.ExplorationTimeHours) " +
+            "(GeoSite.cs:490, no RNG), on a clock the client already tracks. So the client re-seeds the game's " +
+            "OWN ExploreCurrentSite:448 from the mirrored order (GenericApplier.ReseedExploration, replaying " +
+            "ProcessInstanceData:1126) and draws the fill itself, while the OUTCOME stays host-only " +
+            "(SiteExploredOutcomeGate on GeoFaction.OnVehicleSiteExplored)";
 
         private const string DerivedPoseOptOut =
             "derived pose, recomputed continuously by the client's own native routine from mirrored inputs — " +
